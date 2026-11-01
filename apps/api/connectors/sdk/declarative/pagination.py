@@ -379,6 +379,20 @@ def paginate(
                         page_preview,
                         stream,
                     )
+        if paginator.type in {"offset", "page"}:
+            # Index paginators compute next_token from position alone, so it
+            # is set even on the final page. A yielded page is the SDK's
+            # continuation contract — a non-empty token on the last page makes
+            # the engine resume forever on a repeated tail response.
+            last_page_implied = (
+                (paginator.stop_path and page_is_last is True)
+                or (not paginator.stop_path and len(records) < request_page_size)
+            )
+            if last_page_implied or (
+                record_limit is not None
+                and records_seen + len(records) >= record_limit
+            ):
+                next_token = None
         page = Page(
             records=records,
             headers=page_preview.headers,

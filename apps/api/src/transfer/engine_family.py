@@ -45,6 +45,17 @@ _SPELLINGS: Final[dict[str, str]] = {
 
 
 def _resolved_driver(raw: str) -> str:
+    import sys as _sys
+
+    caps_mod = _sys.modules.get("src.transfer.connector_capabilities")
+    if caps_mod is not None and not hasattr(caps_mod, "resolve_driver_type"):
+        # connector_capabilities is mid-import on this stack: its own
+        # module-level helpers reached back through engine_family. Resolving
+        # now would re-enter the import forever (observed as a segfault on
+        # the sqlite temporal path). Answer "unknown driver" — callers fall
+        # back to the raw kind, the same result an unresolved driver gives —
+        # so the import chain unwinds and the outer call resolves normally.
+        return ""
     from src.transfer.connector_capabilities import (
         _DRIVER_CAPS,
         _FILE_CAPS,

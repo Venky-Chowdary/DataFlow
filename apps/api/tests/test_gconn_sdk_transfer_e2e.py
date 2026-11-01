@@ -77,6 +77,67 @@ def _records(kind: str, start: int, count: int) -> list[dict]:
                     "updated_at": "2026-01-01T00:00:00Z",
                 }
             )
+        elif kind == "gitlab":
+            records.append(
+                {
+                    "id": value,
+                    "iid": value,
+                    "project_id": 1,
+                    "title": f"GitLab issue {value}",
+                    "state": "opened",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            )
+        elif kind == "mailchimp":
+            records.append(
+                {
+                    "id": f"list-{value:05d}",
+                    "name": f"Mailchimp list {value}",
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "stats": {"member_count": value},
+                }
+            )
+        elif kind == "asana":
+            records.append(
+                {
+                    "id": f"{value:05d}",
+                    "gid": str(value),
+                    "name": f"Asana workspace {value}",
+                    "resource_type": "workspace",
+                    "is_organization": False,
+                }
+            )
+        elif kind == "airtable":
+            records.append(
+                {
+                    "id": f"rec{value:05d}",
+                    "createdTime": "2026-01-01T00:00:00.000Z",
+                    "fields": {"Name": f"Airtable row {value}"},
+                }
+            )
+        elif kind == "freshdesk":
+            records.append(
+                {
+                    "id": value,
+                    "subject": f"Freshdesk ticket {value}",
+                    "status": 2,
+                    "priority": 1,
+                    "requester_id": value,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            )
+        elif kind == "notion":
+            records.append(
+                {
+                    "id": f"page-{value:05d}",
+                    "object": "page",
+                    "created_time": "2026-01-01T00:00:00.000Z",
+                    "last_edited_time": "2026-01-01T00:00:00.000Z",
+                    "archived": False,
+                }
+            )
         else:
             records.append(
                 {
@@ -118,6 +179,33 @@ def _endpoint(kind: str, base_url: str, destination: Path) -> EndpointConfig:
             "api_key": _SECRET,
         }
         stream = "tickets"
+    elif kind == "gitlab":
+        extra = {"base_url": base_url, "api_key": _SECRET}
+        stream = "issues"
+    elif kind == "mailchimp":
+        extra = {"base_url": base_url, "dc": "us10", "api_key": _SECRET}
+        stream = "lists"
+    elif kind == "asana":
+        extra = {
+            "base_url": base_url,
+            "api_key": _SECRET,
+            "workspace": "fixture-workspace",
+        }
+        stream = "workspaces"
+    elif kind == "airtable":
+        extra = {
+            "base_url": base_url,
+            "api_key": _SECRET,
+            "base_id": "fixture-base",
+            "table_id": "fixture-table",
+        }
+        stream = "records"
+    elif kind == "freshdesk":
+        extra = {"base_url": base_url, "domain": "acme", "api_key": _SECRET}
+        stream = "tickets"
+    elif kind == "notion":
+        extra = {"base_url": base_url, "api_key": _SECRET}
+        stream = "pages"
     else:
         extra = {"base_url": base_url, "access_token": _SECRET}
         stream = "contacts"
@@ -201,6 +289,58 @@ def _configure_route(
             }
         )
         last = FixtureResponse(body={"tickets": pages[2], "next_page": None})
+    elif kind == "gitlab":
+        route = "/issues"
+        first = FixtureResponse(
+            body=pages[0],
+            headers={
+                "Link": f"<{fixture.base_url}{route}?page=2>; rel=\"next\""
+            },
+        )
+        second = FixtureResponse(
+            body=pages[1],
+            headers={
+                "Link": f"<{fixture.base_url}{route}?page=3>; rel=\"next\""
+            },
+        )
+        last = FixtureResponse(body=pages[2])
+    elif kind == "mailchimp":
+        route = "/lists"
+        first = FixtureResponse(body={"lists": pages[0]})
+        second = FixtureResponse(body={"lists": pages[1]})
+        last = FixtureResponse(body={"lists": pages[2]})
+    elif kind == "asana":
+        route = "/workspaces"
+        first = FixtureResponse(
+            body={"data": pages[0], "next_page": {"offset": "asana-off-2"}}
+        )
+        second = FixtureResponse(
+            body={"data": pages[1], "next_page": {"offset": "asana-off-3"}}
+        )
+        last = FixtureResponse(body={"data": pages[2], "next_page": None})
+    elif kind == "airtable":
+        route = "/v0/fixture-base/fixture-table"
+        first = FixtureResponse(
+            body={"records": pages[0], "offset": "airtable-off-2"}
+        )
+        second = FixtureResponse(
+            body={"records": pages[1], "offset": "airtable-off-3"}
+        )
+        last = FixtureResponse(body={"records": pages[2]})
+    elif kind == "freshdesk":
+        route = "/tickets"
+        first = FixtureResponse(body=pages[0])
+        second = FixtureResponse(body=pages[1])
+        last = FixtureResponse(body=pages[2])
+    elif kind == "notion":
+        route = "/search"
+        first = FixtureResponse(
+            body={"results": pages[0], "next_cursor": "notion-cur-2"}
+        )
+        second = FixtureResponse(
+            body={"results": pages[1], "next_cursor": "notion-cur-3"}
+        )
+        last = FixtureResponse(body={"results": pages[2], "next_cursor": None})
     else:
         route = "/contacts"
         first = FixtureResponse(
@@ -225,7 +365,8 @@ def _configure_route(
         )
     else:
         responses = [first, second, last]
-    fixture.add_route(route, responses=responses)
+    method = "POST" if kind == "notion" else "GET"
+    fixture.add_route(route, responses=responses, method=method)
     return route
 
 
@@ -247,6 +388,12 @@ def _seed_nonempty_destination(
         "intercom": "/contacts",
         "slack": "/users.list",
         "zendesk": "/tickets",
+        "gitlab": "/issues",
+        "mailchimp": "/lists",
+        "asana": "/workspaces",
+        "airtable": "/v0/fixture-base/fixture-table",
+        "freshdesk": "/tickets",
+        "notion": "/search",
     }[kind]
     if kind == "github":
         body = record
@@ -256,9 +403,22 @@ def _seed_nonempty_destination(
         body = {"members": record, "response_metadata": {}}
     elif kind == "zendesk":
         body = {"tickets": record, "next_page": None}
+    elif kind == "gitlab":
+        body = record
+    elif kind == "mailchimp":
+        body = {"lists": record}
+    elif kind == "asana":
+        body = {"data": record, "next_page": None}
+    elif kind == "airtable":
+        body = {"records": record}
+    elif kind == "freshdesk":
+        body = record
+    elif kind == "notion":
+        body = {"results": record, "next_cursor": None}
     else:
         body = {"data": record, "pages": {}}
-    fixture.add_route(route, responses=[FixtureResponse(body=body)])
+    method = "POST" if kind == "notion" else "GET"
+    fixture.add_route(route, responses=[FixtureResponse(body=body)], method=method)
     seeded = UniversalTransferEngine().execute_tracked(
         request, f"seed-{uuid.uuid4().hex[:12]}"
     )
@@ -292,7 +452,21 @@ def _sample_row(path: Path, table: str, row_id: int | str) -> str:
     return json.dumps(row, default=str)
 
 
-@pytest.mark.parametrize("kind", ["github", "jira", "slack", "zendesk"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "github",
+        "jira",
+        "slack",
+        "zendesk",
+        "gitlab",
+        "mailchimp",
+        "asana",
+        "airtable",
+        "freshdesk",
+        "notion",
+    ],
+)
 def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
     kind: str,
     tmp_path: Path,
@@ -307,9 +481,17 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
     monkeypatch.setenv("RETRY_MAX_DELAY_SECONDS", "0")
     monkeypatch.setenv("RETRY_JITTER", "false")
 
-    stream = {"intercom": "contacts", "slack": "users", "zendesk": "tickets"}.get(
-        kind, "issues"
-    )
+    stream = {
+        "intercom": "contacts",
+        "slack": "users",
+        "zendesk": "tickets",
+        "gitlab": "issues",
+        "mailchimp": "lists",
+        "asana": "workspaces",
+        "airtable": "records",
+        "freshdesk": "tickets",
+        "notion": "pages",
+    }.get(kind, "issues")
     pages = [
         _records(kind, 1, 100),
         _records(kind, 101, 100),
@@ -379,6 +561,21 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
             assert "cursor=" not in first_retry_request
         elif kind == "zendesk":
             assert "?page=" not in first_retry_request
+        elif kind == "gitlab":
+            # Full reread restarts at the bare collection URL — the page
+            # token only ever appears as a ``&page=N`` suffix (``per_page``
+            # is a first-page param).
+            assert "&page=" not in first_retry_request
+        elif kind == "mailchimp":
+            assert "offset=200" not in first_retry_request
+            assert "offset=100" not in first_retry_request
+        elif kind in {"asana", "airtable"}:
+            assert "offset=" not in first_retry_request
+        elif kind == "freshdesk":
+            assert "page=2" not in first_retry_request
+            assert "page=3" not in first_retry_request
+        elif kind == "notion":
+            assert b"notion-cur" not in retry_requests[0].body
         else:
             assert "starting_after" not in first_retry_request
         rows = _table_rows(destination_path, stream)
@@ -387,20 +584,42 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
         if kind == "slack":
             assert rows[0][0] == "U00001"
             assert rows[-1][0] == "U00250"
+        elif kind == "mailchimp":
+            assert rows[0][0] == "list-00001"
+            assert rows[-1][0] == "list-00250"
+        elif kind == "airtable":
+            assert rows[0][0] == "rec00001"
+            assert rows[-1][0] == "rec00250"
+        elif kind == "notion":
+            assert rows[0][0] == "page-00001"
+            assert rows[-1][0] == "page-00250"
         else:
             assert int(rows[0][0]) == 1
             assert int(rows[-1][0]) == 250
-        sample = _sample_row(
-            destination_path,
-            stream,
-            1 if kind in {"github", "zendesk"} else ("U00001" if kind == "slack" else "1"),
-        )
+        sample_id = {
+            "github": 1,
+            "zendesk": 1,
+            "gitlab": 1,
+            "freshdesk": 1,
+            "slack": "U00001",
+            "mailchimp": "list-00001",
+            "airtable": "rec00001",
+            "notion": "page-00001",
+            "asana": "00001",
+        }.get(kind, "1")
+        sample = _sample_row(destination_path, stream, sample_id)
         expected_sample = {
             "github": "GitHub issue 1",
             "jira": "Jira issue 1",
             "intercom": "Intercom contact 1",
             "slack": "Slack User 1",
             "zendesk": "Zendesk ticket 1",
+            "gitlab": "GitLab issue 1",
+            "mailchimp": "Mailchimp list 1",
+            "asana": "Asana workspace 1",
+            "airtable": "Airtable row 1",
+            "freshdesk": "Freshdesk ticket 1",
+            "notion": "page-00001",
         }[kind]
         assert expected_sample in sample
 
