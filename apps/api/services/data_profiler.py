@@ -509,6 +509,27 @@ def _inference_would_invent_fixed_point(declared: str, inferred: str) -> bool:
         return False
 
 
+def _inference_would_drop_zone(declared: str, inferred: str) -> bool:
+    """A zone-aware declaration must not be re-typed zoneless by its samples.
+
+    An instant renders without an offset (a MySQL ``DATETIME`` read under a
+    declared ``source_timezone``, a PostgreSQL ``timestamptz`` printed in the
+    session zone), so its samples always profile as a zoneless ``TIMESTAMP``.
+    Letting that win on a non-authoritative source (a query or procedure
+    extract) typed the destination column ``TIMESTAMP`` while the mapping kept
+    the declared ``TIMESTAMPTZ`` source, and preflight then blocked its own
+    plan as a lossy ``TIMESTAMPTZ -> TIMESTAMP`` collapse that table mode, with
+    the same declaration, never saw (QA round 12).
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    if not declared or not inferred:
+        return False
+    return datetime_timezone_polarity(declared) in {"tz", "ltz"} and (
+        datetime_timezone_polarity(inferred) == "ntz"
+    )
+
+
 def merge_profiler_schema(
     existing: dict[str, str],
     profiled: dict[str, str],
@@ -571,6 +592,8 @@ def merge_profiler_schema(
         if _inference_would_demote_to_text(declared, str(inferred)):
             continue
         if _inference_would_invent_fixed_point(declared, str(inferred)):
+            continue
+        if _inference_would_drop_zone(declared, str(inferred)):
             continue
         if _inference_would_narrow_numeric_domain(declared, str(inferred)):
             continue
