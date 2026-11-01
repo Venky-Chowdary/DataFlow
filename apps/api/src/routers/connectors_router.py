@@ -2726,6 +2726,11 @@ async def transfer_data(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Universal file transfer — delegates to UniversalTransferEngine."""
+    from services.transfer_policy_values import form_policy_value
+
+    # QA r12 bugs 6/7: an unknown word is a 422, not a queued job.
+    schema_policy = form_policy_value("schema_policy", schema_policy) or "manual_review"
+    validation_mode = form_policy_value("validation_mode", validation_mode) or "strict"
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine

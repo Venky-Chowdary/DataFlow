@@ -29,6 +29,11 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from services.rbac import require_admin_for_endpoints
 from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
+from services.transfer_policy_values import (
+    PolicyFieldsModel,
+    canonicalize_policy_fields,
+    form_policy_value,
+)
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
@@ -265,7 +270,7 @@ class AnalyzeRequest(BaseModel):
     source_schema: dict[str, str] = Field(default_factory=dict)
 
 
-class ExecuteTransferRequest(BaseModel):
+class ExecuteTransferRequest(PolicyFieldsModel):
     """JSON body for SDK / GitOps transfers (db→db, no multipart file)."""
     source: EndpointDTO
     destination: EndpointDTO
@@ -350,7 +355,7 @@ class ExecuteTransferRequest(BaseModel):
     approved_set_hash: str = ""
 
 
-class MapColumnsRequest(BaseModel):
+class MapColumnsRequest(PolicyFieldsModel):
     source_columns: list[str]
     source_schema: dict[str, str] = Field(default_factory=dict)
     target_columns: list[str] = Field(default_factory=list)
@@ -620,8 +625,17 @@ class CreatePlanRequest(BaseModel):
     sample_rows: list[dict] = Field(default_factory=list)
     policies: dict = Field(default_factory=dict)
 
+    @field_validator("policies")
+    @classmethod
+    def _policy_values_are_known(cls, value):
+        # The Studio /run form inherits these when its own field is blank, so
+        # an unknown word here would reach Execute unchecked (QA r12 bugs 6/7).
+        if not isinstance(value, dict):
+            return value
+        return canonicalize_policy_fields(value, drop_blank=False)
 
-class PlanMapRequest(BaseModel):
+
+class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
@@ -638,6 +652,15 @@ class UpdatePlanRequest(BaseModel):
     row_count_estimate: Optional[int] = None
     sample_rows: Optional[list[dict]] = None
     policies: Optional[dict] = None
+
+    @field_validator("policies")
+    @classmethod
+    def _policy_values_are_known(cls, value):
+        # The Studio /run form inherits these when its own field is blank, so
+        # an unknown word here would reach Execute unchecked (QA r12 bugs 6/7).
+        if not isinstance(value, dict):
+            return value
+        return canonicalize_policy_fields(value, drop_blank=False)
 
 
 class SyncMappingsRequest(BaseModel):
@@ -1293,6 +1316,9 @@ async def run_universal_transfer(
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
+    # Same 422 as the JSON routes; blank still means "inherit the plan".
+    validation_mode = form_policy_value("validation_mode", validation_mode)
+    schema_policy = form_policy_value("schema_policy", schema_policy)
     try:
         assert_delivery_guarantee_allowed(delivery_guarantee)
     except DeliveryGuaranteeError as exc:

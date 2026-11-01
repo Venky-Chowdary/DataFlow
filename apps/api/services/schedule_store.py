@@ -23,6 +23,9 @@ from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
 from services.platform_config import data_dir
+# One canonical schema-policy set (QA r12 bug 7), block_all included; this
+# module used to keep its own shorter copy. Re-exported as SCHEMA_POLICIES.
+from services.schema_drift import SCHEMA_POLICIES  # noqa: F401
 from services.value_serializer import (
     bson_safe_document,
     json_default,
@@ -58,13 +61,6 @@ SYNC_MODES = {
     "scd2",
     "mirror",
     "reverse_etl",
-}
-SCHEMA_POLICIES = {
-    "manual_review",
-    "propagate_columns",
-    "propagate_all",
-    "pause_on_change",
-    "type_locked",
 }
 
 
@@ -1415,6 +1411,11 @@ def create_schedule(
     ``warnings`` collects what the caller must be told but that does not refuse
     the save (draft saved disabled; source table unverifiable).
     """
+    from services.transfer_policy_values import canonicalize_policy_fields
+
+    # QA r12 bugs 6/7: refuse an unknown validation_mode / schema_policy at the
+    # store every route shares (REST, MCP create_schedule, GitOps apply).
+    data = canonicalize_policy_fields(data)
     _assert_schedule_connectors_allowed(data, require_taps=bool(data.get("enabled", True)))
     payload = dict(data)
     from services.duplicate_policy import validate_schedule_file_policy
@@ -1633,6 +1634,9 @@ def update_schedule(
     source catalog first (QA SC5) — outside the lock, so a slow source cannot
     stall every other schedule write.
     """
+    from services.transfer_policy_values import canonicalize_policy_fields
+
+    data = canonicalize_policy_fields(data)
     current = get_schedule(schedule_id)
     if current is not None:
         merged = {**current.to_dict(), **data}

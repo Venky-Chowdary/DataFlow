@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from services.transfer_policy_values import PolicyFieldsModel
+
 from services.acknowledgment_contract import (
     AcknowledgmentRefused,
     audit_acknowledgments,
@@ -96,7 +98,7 @@ class MappingItem(BaseModel):
     control_total: bool | None = None
 
 
-class PreflightRequest(BaseModel):
+class PreflightRequest(PolicyFieldsModel):
     columns: list[str]
     column_types: dict[str, str] = Field(default_factory=dict)
     row_count: int = 0
@@ -786,7 +788,7 @@ async def get_preflight_run(run_id: str):
     return record
 
 
-class ExplainRequest(BaseModel):
+class ExplainRequest(PolicyFieldsModel):
     """A preflight result to explain (as returned by POST /preflight/run).
 
     Prefer ``run_id`` plus a slimed payload. The full Validate result is not
@@ -830,7 +832,7 @@ async def explain_preflight(body: ExplainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class SchemaDriftRequest(BaseModel):
+class SchemaDriftRequest(PolicyFieldsModel):
     old_schema: dict[str, Any] = Field(default_factory=dict)
     new_schema: dict[str, Any] = Field(default_factory=dict)
     dest_db: str = ""
