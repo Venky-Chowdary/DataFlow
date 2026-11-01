@@ -169,9 +169,37 @@ async def profile_source(body: _ProfileBody) -> dict[str, Any]:
     }
 
 
+def _preview_budget_seconds() -> float:
+    """Server-side time bound for one preview (D14)."""
+    import os
+
+    try:
+        return max(1.0, float(os.environ.get("DATAFLOW_SHAPE_PREVIEW_BUDGET_S", "20")))
+    except ValueError:
+        return 20.0
+
+
 @router.post("/preview")
 async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
-    """Apply a recipe to the sampled rows and report exactly what it did."""
+    """Apply a recipe to the sampled rows and report exactly what it did.
+
+    QA r12 D14: a preview once ran past Cloudflare's 100 s origin limit (524).
+    It now runs off the event loop under a server-side budget: rows stop
+    being shaped when the budget runs out and the answer says so
+    (``truncated``), and the live scd2 destination diff is abandoned with a
+    note rather than held open.
+    """
+    import asyncio
+    import time
+
+    budget = _preview_budget_seconds()
+    deadline = time.monotonic() + budget
+    return await asyncio.to_thread(_preview_sync, body, deadline, budget)
+
+
+def _preview_sync(body: _PreviewBody, deadline: float, budget: float) -> dict[str, Any]:
+    import time
+
     rows = _bounded(body.sample_rows)
     columns = body.source_columns or _columns_of(rows)
     blocked = _blocked_set_preview(body, rows)
@@ -187,7 +215,11 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     shaped: list[dict[str, Any]] = []
     refusals: list[dict[str, Any]] = []
     refused_rows = 0
+    evaluated = 0
     for row in rows:
+        if time.monotonic() > deadline:
+            break
+        evaluated += 1
         try:
             shaped.extend(runner.records([row]))
         except ShapeRowError as exc:
@@ -203,7 +235,16 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     # aggregate, sort, rank) emit now, same as the transfer's drain.
     shaped.extend(runner.drain())
     if refusal is not None:
-        preview_note = _join_notes(preview_note, _refusal_note(refusal, refused_rows, len(rows)))
+        preview_note = _join_notes(preview_note, _refusal_note(refusal, refused_rows, evaluated))
+    truncated = evaluated < len(rows)
+    if truncated:
+        preview_note = _join_notes(
+            preview_note,
+            f"Preview truncated: {evaluated} of {len(rows)} sampled rows were shaped "
+            f"before the {budget:g}s preview time limit. The rows shown are complete; "
+            "Validate still checks the whole population before Execute.",
+        )
+        rows = rows[:evaluated]
 
     out_columns = list(engine.output_columns) or list(recipe.output_columns) or _columns_of(shaped or rows)
     profiles = (
@@ -222,7 +263,17 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     identity = _identity(recipe, output_columns=out_columns)
     if program_hash:
         identity["recipe_hash"] = program_hash
-    scd2_preview = _scd2_step_preview(body, recipe, shaped or rows, out_columns)
+    scd2_preview = _scd2_step_preview(body, recipe, shaped or rows, out_columns) if (
+        recipe.scd2_step is None or not body.destination
+    ) else _bounded_call(
+        deadline,
+        lambda: _scd2_step_preview(body, recipe, shaped or rows, out_columns),
+        timeout_answer={
+            "ok": False,
+            "note": "the live destination did not answer within the preview "
+            "time limit; Validate runs the full SCD2 diff",
+        },
+    )
     dedupe_preview = _dedupe_step_preview(recipe, engine, shaped)
     return {
         "recipe": identity,
@@ -244,7 +295,34 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         "scd2_preview": scd2_preview,
         "dedupe_preview": dedupe_preview,
         "preview_note": preview_note,
+        "truncated": truncated,
+        "evaluated_rows": evaluated,
+        "time_budget_seconds": budget,
     }
+
+
+def _bounded_call(deadline: float, fn: Any, *, timeout_answer: Any) -> Any:
+    """Run ``fn`` until the preview deadline; past it, answer ``timeout_answer``.
+
+    Only a call that leaves this process (the scd2 diff reads the live
+    destination) needs this; the thread is abandoned, never joined past the
+    deadline.
+    """
+    import threading
+    import time
+
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = fn()
+        except Exception as exc:  # noqa: BLE001 — preview reports, never throws
+            box["value"] = {"ok": False, "error": str(exc)}
+
+    worker = threading.Thread(target=_run, name="shape-preview-call", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    return box["value"] if "value" in box else timeout_answer
 
 
 # ---------------------------------------------------------------------------

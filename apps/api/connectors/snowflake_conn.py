@@ -340,6 +340,72 @@ def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
     )
 
 
+class SnowflakeWarehouseError(RuntimeError):
+    """The configured warehouse cannot be used by this login (QA r12 D1)."""
+
+
+def snowflake_object_unusable_message(kind: str, name: str) -> str:
+    """``Warehouse X does not exist or is not authorized`` — one wording."""
+    grant = {
+        "Schema": "the role has USAGE on it and its database",
+        "Role": "the role is granted to this user",
+    }.get(kind, "the role has USAGE on it")
+    return (
+        f"{kind} {name} does not exist or is not authorized for this login. "
+        f"Check the connector's {kind.lower()} name and that {grant}."
+    )
+
+
+_NAMED_OBJECT_RE = re.compile(
+    r"\b(warehouse|database|schema|role)\s+'([^']+)'[^.]*?"
+    r"(?:does not exist|not authorized|not granted|not accessible)",
+    re.IGNORECASE,
+)
+
+
+def _named_snowflake_object_message(raw: str) -> str | None:
+    """Name the warehouse/database/schema/role Snowflake refused (D1).
+
+    ``Database 'X' does not exist or not authorized`` became "Snowflake
+    database or schema was not found" — the name the operator must fix was
+    dropped. A message that already names it passes through.
+    """
+    text = (raw or "").strip()
+    if re.match(
+        r"^(Warehouse|Database|Schema|Role) \S.* does not exist or is not authorized",
+        text,
+    ):
+        return text
+    m = _NAMED_OBJECT_RE.search(text)
+    if not m:
+        return None
+    return snowflake_object_unusable_message(m.group(1).capitalize(), m.group(2))
+
+
+def use_snowflake_warehouse(cur: Any, warehouse: str, quoted: str = "") -> None:
+    """``USE WAREHOUSE``, naming the warehouse when Snowflake refuses it (D1).
+
+    Snowflake answers a missing or ungranted warehouse with the anonymous
+    ``002043 Object does not exist, or operation cannot be performed`` — the
+    operator then read "Destination or resource not found".
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    try:
+        cur.execute(f"USE WAREHOUSE {quoted or quote_sql_identifier(warehouse)}")
+    except Exception as exc:
+        low = str(exc).lower()
+        if (
+            _snowflake_object_missing(exc)
+            or "not authorized" in low
+            or "operation cannot be performed" in low
+        ):
+            raise SnowflakeWarehouseError(
+                snowflake_object_unusable_message("Warehouse", warehouse)
+            ) from exc
+        raise
+
+
 def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | None:
     """Honest operator copy — do not call an invalid role a bad password."""
     stripped = (raw or "").strip()
@@ -406,6 +472,9 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
             "Snowflake key-pair authentication failed. Check the username, account "
             "host, and that the public key is assigned (ALTER USER … SET RSA_PUBLIC_KEY)."
         )
+    named = _named_snowflake_object_message(stripped)
+    if named:
+        return named
     if re.search(
         r"role .+ (does not exist|not granted|not authorized)|unknown role|"
         r"invalid role|251006|390201|specified in the connect string",
@@ -417,8 +486,8 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
         )
     if re.search(r"warehouse .+ (does not exist|not authorized)|invalid warehouse|000606", text):
         return (
-            "Snowflake warehouse is invalid or not granted. Check the warehouse name "
-            "and USAGE privilege."
+            "Snowflake warehouse is invalid or not granted (no active warehouse in "
+            "the session). Check the connector's warehouse name and USAGE privilege."
         )
     if re.search(
         r"database .+ (does not exist|not authorized)|schema .+ (does not exist|not authorized)",
@@ -589,6 +658,38 @@ def snowflake_select_list(
         logical = quote_sql_identifier(str(name))
         items.append(ref if ref == logical else f"{ref} AS {logical}")
     return ", ".join(items)
+
+
+def snowflake_sa_projection(
+    sa_conn: Any, schema: str, table: str, names: list[str]
+) -> tuple[str, Any]:
+    """Select list and column-ref resolver for a SQLAlchemy Snowflake read.
+
+    The transform proof quoted the logical ``"id"`` over the writer's folded
+    ``ID`` — ``000904 invalid identifier`` made every shaped Snowflake run
+    "unverifiable" (QA r12 D8). It now resolves through the writer's own
+    :func:`snowflake_column_ref`, probing the stored names once on the same
+    connection.
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    sch = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+    physical: dict[str, str] = {}
+    try:
+        cur = sa_conn.connection.cursor()
+        try:
+            resolved = resolve_or_fold_snowflake_table(cur, sch, table)
+            physical = snowflake_physical_name_map(cur, sch, resolved) or {}
+        finally:
+            cur.close()
+    except Exception as exc:
+        # Unprobed: fold the way unquoted SQL (and the writer's create-new
+        # DDL) does, never the raw logical spelling.
+        logger.debug("snowflake projection probe failed: %s", exc, exc_info=exc)
+    return (
+        snowflake_select_list(list(names), physical),
+        lambda name: snowflake_column_ref(name, physical),
+    )
 
 
 _SF_COLUMN_PROJECTIONS: tuple[str, ...] = (

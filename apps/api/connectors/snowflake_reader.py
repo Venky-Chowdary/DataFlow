@@ -57,7 +57,9 @@ def _use_warehouse(cur, warehouse: str) -> None:
 
     # Warehouse names are usually uppercase; fold all-lower defaults safely.
     wh = snowflake_fold_identifier(wh) if wh == wh.lower() or wh == wh.upper() else wh
-    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+    from connectors.snowflake_conn import use_snowflake_warehouse
+
+    use_snowflake_warehouse(cur, wh, quote_sql_identifier(wh))
 
 
 def _snowflake_schema(schema: str | None) -> str:

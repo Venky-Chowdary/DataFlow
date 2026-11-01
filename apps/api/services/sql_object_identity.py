@@ -43,7 +43,8 @@ class ObjectIdentity:
 def _pick(candidates: list[str], wanted: str) -> str | None:
     """Exact spelling first, then a unique case-insensitive match."""
     if wanted in candidates:
-        return wanted
+        # The catalog's own object: it may carry the dialect's quote flag.
+        return candidates[candidates.index(wanted)]
     matches = [c for c in candidates if c.lower() == wanted.lower()]
     if len(matches) == 1:
         return matches[0]
@@ -170,17 +171,35 @@ def resolve_object_identity(
             reflected = list(insp.get_columns(stored_table, schema=stored_schema))
         except Exception:
             reflected = []
-        stored_cols = [str(c.get("name")) for c in reflected]
+        stored_cols = [c.get("name") for c in reflected if c.get("name") is not None]
         for want in columns:
             hit = _pick(stored_cols, str(want or ""))
             if hit:
                 col_map[str(want)] = hit
         col_types = {
-            str(c.get("name")): c.get("type")
+            c.get("name"): c.get("type")
             for c in reflected
             if str(c.get("name")) in col_map.values() and c.get("type") is not None
         }
 
+    if _dialect_name(engine) == "snowflake":
+        # SQLAlchemy's Snowflake inspector reports a stored ``ID`` as ``id``;
+        # callers force-quote these names, so a probe sent ``"public"."t"`` /
+        # ``"id"`` — objects Snowflake does not have (QA r12 D8 family).
+        stored_schema = _snowflake_stored(engine, stored_schema)
+        stored_table = _snowflake_stored(engine, stored_table)
+        col_types = {_snowflake_stored(engine, k): v for k, v in col_types.items()}
+        col_map = {k: _snowflake_stored(engine, v) for k, v in col_map.items()}
     return ObjectIdentity(
         stored_schema, stored_table, True, columns=col_map, column_types=col_types
     )
+
+
+def _snowflake_stored(engine: Any, name: Any) -> Any:
+    """The catalog spelling of a name the Snowflake inspector normalized."""
+    if name is None or getattr(name, "quote", None) is True:
+        return None if name is None else str(name)
+    try:
+        return str(engine.dialect.denormalize_name(str(name)))
+    except Exception:
+        return str(name)

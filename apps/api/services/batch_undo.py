@@ -111,6 +111,8 @@ def undo_failed_batch_if_dest_was_empty(
         return str(dest_summary.get("partial_batch_undo_note") or "")
     try:
         decision, note = _decide(destination, dest_summary, sync_mode)
+        if decision == "clear" and dest_summary.get("transform_proof_failed"):
+            return _keep_after_transform_proof_failure(destination, dest_summary)
         if decision == "clear":
             note = _clear(destination, dest_summary)
             decision = "cleared" if dest_summary.get("partial_batch_removed") else "retained"
@@ -199,6 +201,40 @@ def _decide(
             "list would not be a rollback.",
         )
     return ("clear", "")
+
+
+def _keep_after_transform_proof_failure(
+    destination: Any, dest_summary: dict[str, Any]
+) -> str:
+    """Keep what a run wrote when only its transform proof failed (QA r12 D9).
+
+    A failed proof is a verdict about the rows, not a write that broke
+    half-way: the load is complete and the operator needs it to see which
+    cells differ from the recipe. Dropping the table the run created left
+    nothing to inspect. Same rule as a failed validation: keep the table and
+    report; the job still fails and is not verified.
+    """
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+    from services.dialect_profiles import schema_from_cfg
+
+    cfg = resolve_connector_config(destination)
+    db_type = count_dialect(str(cfg.get("type") or getattr(destination, "format", "") or ""))
+    table = str(
+        dest_summary.get("table") or resolve_dest_table(db_type, destination, "dt_import") or ""
+    ).strip()
+    schema = str(schema_from_cfg(db_type, cfg) or "")
+    where = f"{schema}.{table}" if schema and table else (table or "the destination")
+    created = dest_summary.get("dest_table_existed_before") is False
+    note = (
+        f"Data kept at {where} for inspection: "
+        + ("the table this run created was not dropped" if created
+           else "the rows this run wrote were not deleted")
+        + ". They failed the transform proof and are not verified — re-run "
+        "to replace them, or drop the table if it is not wanted."
+    )
+    dest_summary["partial_batch_undo"] = "retained_for_inspection"
+    dest_summary["partial_batch_undo_note"] = note
+    return note
 
 
 def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:

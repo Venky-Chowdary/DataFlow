@@ -428,10 +428,18 @@ def recipe_output_schema(
     from services.shape_type_propagation import propagated_derive_types
 
     propagated = propagated_derive_types(recipe, prior)
+    text_casts = _text_cast_columns(recipe)
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
             out[column] = prior[column]
+            continue
+        if column in text_casts:
+            # cast_column -> text declares the carrier. Re-inferring '5' / '7'
+            # made it INTEGER again and every destination kept the numeric
+            # column the recipe cast away (QA r12 D7: Snowflake NUMBER,
+            # PostgreSQL bigint, Mongo int).
+            out[column] = _text_carrier(prior.get(text_casts[column], ""))
             continue
         # A pure rename carries its column's declared type across, untouched.
         origin = rename_source.get(column, "")
@@ -444,6 +452,33 @@ def recipe_output_schema(
             declared = _capped_decimal(declared, ceiling)
         out[column] = declared
     return out
+
+
+def _text_cast_columns(recipe: ShapeRecipe) -> dict[str, str]:
+    """Output columns whose last writer is ``cast_column -> text``.
+
+    Maps each to the source column it came from (a later rename carries the
+    declared text type across). Any other step writing the column after the
+    cast hands it back to inference.
+    """
+    cast: dict[str, str] = {}
+    for step in recipe.enabled_steps:
+        if step.op == "cast_column" and step.column:
+            if str(step.options.get("to_type") or "").casefold() == "text":
+                cast[step.column] = cast.get(step.column, step.column)
+            else:
+                cast.pop(step.column, None)
+            continue
+        if step.op == "rename_column":
+            to = str(step.options.get("to") or "")
+            origin = cast.pop(step.column, None)
+            cast.pop(to, None)
+            if origin is not None and to:
+                cast[to] = origin
+            continue
+        for name in step.writes:
+            cast.pop(name, None)
+    return cast
 
 
 def _text_carrier(prior: str) -> str:
