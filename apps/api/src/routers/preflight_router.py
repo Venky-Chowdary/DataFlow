@@ -542,6 +542,9 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             sample_rows=preflight_sample_rows,
             estimated_bytes=body.estimated_bytes,
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
+            # Execute passes the request's mode here too (engine.py); without it
+            # every Validate judged as strict and disagreed with Execute (QA r12).
+            validation_mode=body.validation_mode,
             destination_column_types=dest_column_types,
             destination_live_column_types=destination_live_column_types,
             destination_column_nullability=dest_meta.get("column_nullability") or {},
