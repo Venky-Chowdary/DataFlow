@@ -1849,6 +1849,12 @@ export const CONNECTOR_CATALOG = [
   { id: "woocommerce", label: "WooCommerce", port: 443, sourceOnly: true },
   { id: "bigcommerce", label: "BigCommerce", port: 443, sourceOnly: true },
   { id: "brevo", label: "Brevo (Sendinblue)", port: 443, sourceOnly: true },
+  { id: "freshservice", label: "Freshservice", port: 443, sourceOnly: true },
+  { id: "close", label: "Close", port: 443, sourceOnly: true },
+  { id: "todoist", label: "Todoist", port: 443, sourceOnly: true },
+  { id: "typeform", label: "Typeform", port: 443, sourceOnly: true },
+  { id: "notion", label: "Notion", port: 443, sourceOnly: true },
+  { id: "zoho_crm", label: "Zoho CRM", port: 443, sourceOnly: true },
   { id: "rest_api", label: "REST / OpenAPI", port: 443 },
   { id: "graphql", label: "GraphQL", port: 443 },
 ] as const;

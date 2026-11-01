@@ -628,6 +628,84 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
       { label: "Manage API keys", url: "https://help.brevo.com/hc/en-us/articles/209467485" },
     ],
   },
+  freshservice: {
+    title: "Set up Freshservice",
+    steps: [
+      "Freshservice → profile icon → Profile Settings → copy your API key (right sidebar).",
+      "Helpdesk domain: the subdomain only — acme for acme.freshservice.com.",
+      "The key authenticates as you — it sees every ticket your account can see; use an agent account scoped to the data you want to move.",
+      "Test proves /api/v2/tickets answers — 401 is the key, 404 is the domain.",
+    ],
+    links: [
+      { label: "Freshservice API docs", url: "https://api.freshservice.com/" },
+      { label: "API key & authentication", url: "https://api.freshservice.com/#authentication" },
+    ],
+  },
+  close: {
+    title: "Set up Close",
+    steps: [
+      "Close → Settings → API Keys → Generate New API Key.",
+      "The key identifies the whole organization — treat it like a password.",
+      "Reads cover leads, opportunities and tasks — the API sends the key as the basic-auth username with a blank password.",
+      "Test proves /api/v1/lead/ answers — 401 is the key.",
+    ],
+    links: [
+      { label: "Close API docs", url: "https://developer.close.com/" },
+      { label: "Authentication", url: "https://developer.close.com/resources/authentication/" },
+    ],
+  },
+  todoist: {
+    title: "Set up Todoist",
+    steps: [
+      "Todoist → Settings → Integrations → Developer → copy your API token.",
+      "Or mint a fine-grained OAuth token in the app console if you prefer scoped access.",
+      "REST v2 has no incremental filter — streams re-read in full each run.",
+      "Test proves /rest/v2/tasks answers — 401/403 is the token.",
+    ],
+    links: [
+      { label: "Todoist REST API v2", url: "https://developer.todoist.com/rest/v2/" },
+      { label: "Get your API token", url: "https://todoist.com/help/articles/find-your-api-token-Jpzx9IIlB" },
+    ],
+  },
+  typeform: {
+    title: "Set up Typeform",
+    steps: [
+      "Typeform → Account → Personal tokens → Generate a new token (tfp_…) with Read scope.",
+      "Responses need the Form ID — the letters in your form's URL: typeform.com/to/abcDEF12 or forms/abcDEF12.",
+      "Responses run incremental on submitted_at; the forms list re-reads in full.",
+      "Test proves /forms answers — 401 is the token, 404 is the form ID.",
+    ],
+    links: [
+      { label: "Typeform API docs", url: "https://developer.typeform.com/" },
+      { label: "Create a personal access token", url: "https://www.typeform.com/developers/get-started/personal-access-token/" },
+    ],
+  },
+  notion: {
+    title: "Set up Notion",
+    steps: [
+      "notion.so/my-integrations → New integration → copy the Internal Integration Secret (secret_…).",
+      "Critical: Notion only returns what the integration can see — open each page/database → ••• → Connections → add your integration, or reads come back empty.",
+      "Database rows need the Database ID — the 32-char hex in the database URL.",
+      "Test proves POST /search answers — 401 is the token; an empty result means the workspace hasn't shared the object.",
+    ],
+    links: [
+      { label: "Notion API reference", url: "https://developers.notion.com/reference" },
+      { label: "Create an integration & share pages", url: "https://developers.notion.com/docs/getting-started" },
+    ],
+  },
+  zoho_crm: {
+    title: "Set up Zoho CRM",
+    steps: [
+      "Zoho API Console (api-console.zoho.com) → Add Client → Self Client → generate a code for scope ZohoCRM.modules.ALL, then exchange it for a refresh token.",
+      "Keep the Client ID, Client Secret and refresh token from that exchange.",
+      "Datacenter matters: accounts.zoho.com is US — EU/IN/JP tenants need their regional accounts host (e.g. accounts.zoho.eu).",
+      "Test proves /crm/v2/Leads answers — 401 means the refresh token or datacenter is wrong.",
+    ],
+    links: [
+      { label: "Zoho CRM API v2", url: "https://www.zoho.com/crm/developer/docs/api/v2/" },
+      { label: "OAuth 2.0 overview", url: "https://www.zoho.com/crm/developer/docs/api/v2/oauth-overview.html" },
+    ],
+  },
   singer_tap: {
     title: "Set up a Singer tap",
     steps: [

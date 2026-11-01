@@ -884,6 +884,78 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         (values) => required(values, "api_key", "API key"),
       ),
     );
+  } else if (resolved === "freshservice") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Freshservice API key",
+        [
+          text("domain", "Helpdesk domain", { placeholder: "acme (acme.freshservice.com)" }),
+          password("api_key", "API key"),
+        ],
+        (values) =>
+          required(values, "domain", "Helpdesk domain")
+          || required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "close") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Close API key",
+        [password("api_key", "API key")],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "todoist") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Todoist API token",
+        [password("api_key", "API token")],
+        (values) => required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "typeform") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Typeform personal access token",
+        [
+          password("api_key", "Personal access token", { placeholder: "tfp_…" }),
+          text("form_id", "Form ID (for responses)", { placeholder: "abcDEF12" }),
+        ],
+        (values) => required(values, "api_key", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "notion") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Notion integration token",
+        [
+          password("api_key", "Internal integration secret", { placeholder: "secret_…" }),
+          text("database_id", "Database ID (for database rows)", { placeholder: "32-char id" }),
+        ],
+        (values) => required(values, "api_key", "Integration secret"),
+      ),
+    );
+  } else if (resolved === "zoho_crm") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Zoho CRM OAuth2",
+        [
+          text("client_id", "Client ID"),
+          password("client_secret", "Client secret"),
+          password("refresh_token", "Refresh token"),
+        ],
+        (values) =>
+          required(values, "client_id", "Client ID")
+          || required(values, "client_secret", "Client secret")
+          || required(values, "refresh_token", "Refresh token"),
+      ),
+    );
   }
 
   // Build auth modes for each connector
@@ -1074,7 +1146,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (resolved === "github") return "pat";
   if (resolved === "servicenow") return "user_pass";
   if (resolved === "woocommerce") return "user_pass";
-  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo"].includes(resolved)) return "api_key";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";

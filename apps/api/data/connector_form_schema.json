@@ -407,6 +407,33 @@
       "Test proves the HTTP interface answers — a refused connection is the bind/firewall, not auth."
     ]
   },
+  "close": {
+    "label": "Close",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Close API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Close → Settings → API Keys → Generate New API Key.",
+      "The key identifies the whole organization — treat it like a password.",
+      "Reads cover leads, opportunities and tasks — the API sends the key as the basic-auth username with a blank password.",
+      "Test proves /api/v1/lead/ answers — 401 is the key."
+    ]
+  },
   "couchbase": {
     "label": "Couchbase",
     "default_auth_mode": "user_pass",
@@ -1261,6 +1288,41 @@
       "Domain is your helpdesk subdomain — acme in acme.freshdesk.com.",
       "The key inherits the agent's permissions — use an agent that can read tickets/contacts.",
       "Test proves /tickets answers — 401 is the key or domain."
+    ]
+  },
+  "freshservice": {
+    "label": "Freshservice",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Freshservice API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "domain",
+            "label": "Helpdesk domain",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "acme (acme.freshservice.com)"
+          },
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Freshservice → profile icon → Profile Settings → copy your API key (right sidebar).",
+      "Helpdesk domain: the subdomain only — acme for acme.freshservice.com.",
+      "The key authenticates as you — it sees every ticket your account can see; use an agent account scoped to the data you want to move.",
+      "Test proves /api/v2/tickets answers — 401 is the key, 404 is the domain."
     ]
   },
   "gcs": {
@@ -2187,6 +2249,42 @@
       "Use the neo4j user or a user with read access on the source database.",
       "Aura requires TLS — keep encryption on.",
       "Test proves the Bolt handshake answers — unauthorized is credentials, timeout is routing."
+    ]
+  },
+  "notion": {
+    "label": "Notion",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Notion integration token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Internal integration secret",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "secret_…"
+          },
+          {
+            "key": "database_id",
+            "label": "Database ID (for database rows)",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "32-char id"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "notion.so/my-integrations → New integration → copy the Internal Integration Secret (secret_…).",
+      "Critical: Notion only returns what the integration can see — open each page/database → ••• → Connections → add your integration, or reads come back empty.",
+      "Database rows need the Database ID — the 32-char hex in the database URL.",
+      "Test proves POST /search answers — 401 is the token; an empty result means the workspace hasn't shared the object."
     ]
   },
   "oracle": {
@@ -3819,6 +3917,33 @@
     "common_fields": [],
     "setup_steps": []
   },
+  "todoist": {
+    "label": "Todoist",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Todoist API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Todoist → Settings → Integrations → Developer → copy your API token.",
+      "Or mint a fine-grained OAuth token in the app console if you prefer scoped access.",
+      "REST v2 has no incremental filter — streams re-read in full each run.",
+      "Test proves /rest/v2/tasks answers — 401/403 is the token."
+    ]
+  },
   "trino": {
     "label": "Trino / Presto",
     "default_auth_mode": "user_pass",
@@ -3938,6 +4063,42 @@
       "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
       "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
       "Test proves the file opens and parses — a missing path is not Connected."
+    ]
+  },
+  "typeform": {
+    "label": "Typeform",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Typeform personal access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "tfp_…"
+          },
+          {
+            "key": "form_id",
+            "label": "Form ID (for responses)",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "abcDEF12"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Typeform → Account → Personal tokens → Generate a new token (tfp_…) with Read scope.",
+      "Responses need the Form ID — the letters in your form's URL: typeform.com/to/abcDEF12 or forms/abcDEF12.",
+      "Responses run incremental on submitted_at; the forms list re-reads in full.",
+      "Test proves /forms answers — 401 is the token, 404 is the form ID."
     ]
   },
   "vertica": {
@@ -4203,6 +4364,47 @@
       "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
       "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
       "Test proves the file opens and parses — a missing path is not Connected."
+    ]
+  },
+  "zoho_crm": {
+    "label": "Zoho CRM",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Zoho CRM OAuth2",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "client_secret",
+            "label": "Client secret",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "refresh_token",
+            "label": "Refresh token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Zoho API Console (api-console.zoho.com) → Add Client → Self Client → generate a code for scope ZohoCRM.modules.ALL, then exchange it for a refresh token.",
+      "Keep the Client ID, Client Secret and refresh token from that exchange.",
+      "Datacenter matters: accounts.zoho.com is US — EU/IN/JP tenants need their regional accounts host (e.g. accounts.zoho.eu).",
+      "Test proves /crm/v2/Leads answers — 401 means the refresh token or datacenter is wrong."
     ]
   }
 }

@@ -98,11 +98,29 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
             "store_hash",
             config.get("store") or config.get("store_id") or "",
         )
+    elif driver == "freshservice":
+        config.setdefault(
+            "username",
+            config.get("api_key") or config.get("token") or "",
+        )
+        config.setdefault("password", "X")
+        config.setdefault("domain", config.get("host") or "")
+    elif driver == "close":
+        config.setdefault(
+            "username",
+            config.get("api_key") or config.get("token") or "",
+        )
+        config.setdefault("password", "X")
+    elif driver in {"todoist", "typeform", "notion"}:
+        config.setdefault(
+            "api_key",
+            config.get("access_token") or config.get("token") or "",
+        )
     if not config.get("base_url"):
         # Templated manifests ({instance}/{domain}/{dc}/{store_hash}) take their
         # host piece from the named field above — feeding ``host`` into base_url
         # would bypass the template and drop the scheme.
-        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk", "woocommerce", "bigcommerce"}:
+        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk", "freshservice", "woocommerce", "bigcommerce"}:
             config["base_url"] = config.get("url") or config.get("host") or ""
         else:
             config["base_url"] = config.get("url") or ""

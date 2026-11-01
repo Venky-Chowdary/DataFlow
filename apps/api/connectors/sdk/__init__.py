@@ -867,6 +867,54 @@ def _load_builtin_connectors() -> None:
             "connectors.sdk.brevo",
             type(exc).__name__,
         )
+    try:
+        from connectors.sdk import freshservice  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.freshservice",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import close  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.close",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import todoist  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.todoist",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import typeform  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.typeform",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import notion  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.notion",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import zoho_crm  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.zoho_crm",
+            type(exc).__name__,
+        )
 
 
 _load_builtin_connectors()

@@ -4474,6 +4474,27 @@
       "category": "saas",
       "status": "planned",
       "description": "Email marketing and CRM — contacts, lists and campaigns via the Brevo v3 API (api-key header)."
+    },
+    {
+      "id": "freshservice",
+      "name": "Freshservice",
+      "category": "saas",
+      "status": "planned",
+      "description": "ITSM/helpdesk — tickets, requesters and groups via the Freshservice v2 API (API key basic auth)."
+    },
+    {
+      "id": "close",
+      "name": "Close",
+      "category": "saas",
+      "status": "planned",
+      "description": "Sales CRM — leads, opportunities and tasks via the Close v1 API (API key basic auth, offset pagination)."
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "category": "saas",
+      "status": "planned",
+      "description": "Task management — tasks, projects and sections via the Todoist REST v2 API (bearer token, cursor pagination)."
     }
   ]
 }
