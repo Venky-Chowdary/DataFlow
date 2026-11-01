@@ -11,6 +11,11 @@ on:
     - cron: "0 7 * * *"
   workflow_dispatch:
 
+# One full-suite run at a time — a newer dispatch supersedes the previous one.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

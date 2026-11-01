@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, "feature/**"]
 
+# A new push on the same ref supersedes the runs still queued/in flight —
+# keep the latest run, cancel the rest.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Lean evidence pack — no databases. Regenerates claim→metric catalog and
   # fails when marketing floors exceed measured fixture proofs.
