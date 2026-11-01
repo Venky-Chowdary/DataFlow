@@ -8,6 +8,8 @@ import {
 import { TrustSection } from "../components/landing/TrustSection";
 import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
 import { ProductShot } from "../components/marketing/ProductShot";
+import { VideoPlayer, videoThumb } from "../components/marketing/VideoPlayer";
+import { FEATURED_VIDEO_ID, MARKETING_VIDEOS } from "../lib/videoCatalog";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
@@ -738,6 +740,47 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       </section>
 
       <ProofEvidenceSection onNavigate={onNavigate} />
+
+      {/* Video demos — real runs on the production engine */}
+      <section className="lp-home-videos" id="demos" aria-label="Video demos">
+        <div className="lp-home-videos-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Watch it work</p>
+            <h2>Real runs, real proof — on video</h2>
+            <p>
+              Quarantine, replay, schema-drift review and native CDC on the production engine.
+              Every video ends the way every transfer should: verified.
+            </p>
+          </Reveal>
+          <div className="lp-home-videos-feature">
+            <VideoPlayer
+              videoId={FEATURED_VIDEO_ID}
+              title={MARKETING_VIDEOS.find((v) => v.id === FEATURED_VIDEO_ID)?.title ?? "Datawrap demo"}
+            />
+          </div>
+          <div className="lp-home-videos-row">
+            {MARKETING_VIDEOS.filter((v) => v.id !== FEATURED_VIDEO_ID)
+              .slice(0, 3)
+              .map((video) => (
+                <button
+                  key={video.id}
+                  type="button"
+                  className="lp-home-videos-card"
+                  onClick={() => onNavigate("demos")}
+                >
+                  <img src={videoThumb(video.id, "hq")} alt="" loading="lazy" />
+                  <span className="lp-home-videos-card-title">{video.title}</span>
+                </button>
+              ))}
+          </div>
+          <div className="lp-home-arch-cta">
+            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("demos")}>
+              Browse all demos
+            </button>
+          </div>
+        </div>
+      </section>
+
       <TrustSection />
 
       {/* 10) Final CTA — Airbyte-style close */}

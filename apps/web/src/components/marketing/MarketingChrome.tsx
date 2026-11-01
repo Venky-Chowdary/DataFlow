@@ -220,6 +220,10 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                     <strong>Documentation</strong>
                     <span>Screenshots, steps, and operations runbooks</span>
                   </a>
+                  <a href={link("demos")} onClick={(e) => { e.preventDefault(); go("demos"); }}>
+                    <strong>Video demos</strong>
+                    <span>Watch real transfers prove themselves</span>
+                  </a>
                   <a href={link("help-getting-started")} onClick={(e) => { e.preventDefault(); go("help-getting-started"); }}>
                     <strong>Getting started</strong>
                     <span>Connect → map → preflight → verify</span>

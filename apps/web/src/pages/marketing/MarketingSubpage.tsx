@@ -28,6 +28,7 @@ import {
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
 import { ContactSalesPage } from "./ContactSalesPage";
+import { DemosPage } from "./DemosPage";
 import {
   DataPilotPage,
   JobTheaterPage,
@@ -119,6 +120,8 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
       return <McpServerPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "integrations":
       return <IntegrationsPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
+    case "demos":
+      return <DemosPage onNavigate={onNavigate} />;
     case "solution-migrations":
       return <MigrationsSolutionPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "solution-warehouse":

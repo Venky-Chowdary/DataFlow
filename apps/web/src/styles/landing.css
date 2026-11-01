@@ -13413,3 +13413,315 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   overflow-wrap: normal;
   word-break: keep-all;
 }
+
+/* ---- Video demos (@DatawrapCompany) — privacy-first click-to-play ---- */
+
+.lp-video-frame,
+.lp-video-facade {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--lp-line);
+  border-radius: 16px;
+  overflow: hidden;
+  background: #050b14;
+}
+
+.lp-video-frame iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.lp-video-facade {
+  padding: 0;
+  cursor: pointer;
+}
+
+.lp-video-facade img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.lp-video-facade::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(5, 11, 20, 0) 45%, rgba(5, 11, 20, 0.55) 100%);
+}
+
+.lp-video-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 68px;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(13, 148, 136, 0.95);
+  box-shadow: 0 12px 32px rgba(5, 11, 20, 0.45);
+  transition: transform 0.15s ease, background 0.15s ease;
+  z-index: 1;
+}
+
+.lp-video-facade:hover .lp-video-play,
+.lp-video-facade:focus-visible .lp-video-play {
+  transform: scale(1.06);
+  background: var(--lp-accent);
+}
+
+.lp-video-facade:focus-visible {
+  outline: 3px solid var(--lp-accent);
+  outline-offset: 3px;
+}
+
+.lp-video-play--sm {
+  width: 44px;
+  height: 44px;
+}
+
+/* ---- Home: watch-it-work band ---- */
+
+.lp-home-videos {
+  padding: 56px 0;
+  background: linear-gradient(180deg, var(--lp-soft) 0%, var(--lp-bg) 100%);
+}
+
+.lp-home-videos-inner {
+  width: var(--lp-shell);
+  margin-inline: auto;
+}
+
+.lp-home-videos-feature {
+  max-width: 880px;
+  margin: 24px auto 20px;
+}
+
+.lp-home-videos-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  max-width: 880px;
+  margin: 0 auto 20px;
+}
+
+.lp-home-videos-card {
+  position: relative;
+  display: block;
+  padding: 0;
+  border: 1px solid var(--lp-line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--lp-panel);
+  text-align: left;
+  cursor: pointer;
+}
+
+.lp-home-videos-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.lp-home-videos-card-title {
+  display: block;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lp-ink);
+  line-height: 1.35;
+}
+
+.lp-home-videos-card:hover {
+  border-color: var(--lp-accent);
+}
+
+@media (max-width: 720px) {
+  .lp-home-videos-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- Demos page ---- */
+
+.lp-demos-hero {
+  background:
+    radial-gradient(900px 420px at 18% -10%, rgba(20, 184, 166, 0.28), transparent 55%),
+    radial-gradient(700px 360px at 88% 20%, rgba(13, 148, 136, 0.16), transparent 50%),
+    linear-gradient(180deg, #0c1b2e 0%, #07111f 70%, #050b14 100%);
+  color: #fff;
+  padding: 36px 0 32px;
+}
+
+.lp-demos-hero h1 {
+  margin: 0 0 10px;
+  font-family: var(--lp-font-display);
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem));
+}
+
+.lp-demos-hero .lp-sales-hero-lead {
+  color: rgba(255, 255, 255, 0.78);
+  max-width: 640px;
+  margin: 0;
+}
+
+.lp-demos-player {
+  padding: 32px 0 8px;
+}
+
+.lp-demos-player .lp-video-frame,
+.lp-demos-player .lp-video-facade {
+  max-width: 920px;
+  margin-inline: auto;
+  box-shadow: 0 24px 64px rgba(5, 11, 20, 0.25);
+}
+
+.lp-demos-current {
+  max-width: 920px;
+  margin: 18px auto 0;
+}
+
+.lp-demos-current h2 {
+  margin: 8px 0 6px;
+  font-size: 1.25rem;
+  font-family: var(--lp-font-display);
+}
+
+.lp-demos-current p {
+  margin: 0;
+  color: var(--lp-muted);
+}
+
+.lp-demos-tag {
+  display: inline-flex;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--df-teal-600, #0d9488);
+  background: color-mix(in srgb, var(--lp-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lp-accent) 30%, transparent);
+}
+
+.lp-demos-grid-section {
+  padding: 24px 0 56px;
+}
+
+.lp-demos-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 20px;
+}
+
+.lp-demos-filter {
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--lp-line);
+  background: var(--lp-panel);
+  color: var(--lp-muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lp-demos-filter.is-active {
+  background: var(--lp-accent);
+  border-color: var(--lp-accent);
+  color: #fff;
+}
+
+.lp-demos-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.lp-demos-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--lp-line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--lp-panel);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.lp-demos-card:hover,
+.lp-demos-card:focus-visible {
+  border-color: var(--lp-accent);
+  box-shadow: 0 10px 30px rgba(5, 11, 20, 0.12);
+}
+
+.lp-demos-card.is-current {
+  border-color: var(--lp-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lp-accent) 35%, transparent);
+}
+
+.lp-demos-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  background: #050b14;
+}
+
+.lp-demos-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.lp-demos-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px 16px;
+}
+
+.lp-demos-card-body strong {
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--lp-ink);
+}
+
+.lp-demos-card-body > span:last-child {
+  font-size: 13px;
+  color: var(--lp-muted);
+  line-height: 1.45;
+}
+
+.lp-demos-foot {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 28px;
+}
+
+@media (max-width: 960px) {
+  .lp-demos-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-demos-grid {
+    grid-template-columns: 1fr;
+  }
+}

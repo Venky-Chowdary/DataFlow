@@ -27,6 +27,7 @@ export type PublicRoute =
   | "product-pipelines"
   | "product-query"
   | "integrations"
+  | "demos"
   | "solution-migrations"
   | "solution-warehouse"
   | "solution-sync"
@@ -50,6 +51,10 @@ const BASE_HASH_TO_ROUTE: Record<string, Exclude<PublicRoute, HelpDocId>> = {
   integrations: "integrations",
   connectors: "integrations",
   catalog: "integrations",
+  demos: "demos",
+  videos: "demos",
+  demo: "demos",
+  watch: "demos",
   "product/transfer": "product-transfer",
   "product/pilot": "product-pilot",
   "product/mcp": "product-mcp",
@@ -78,6 +83,7 @@ const BASE_ROUTE_TO_HASH: Record<Exclude<PublicRoute, HelpDocId>, string> = {
   "product-pipelines": "#/product/pipelines",
   "product-query": "#/product/query",
   integrations: "#/integrations",
+  demos: "#/demos",
   "solution-migrations": "#/solutions/migrations",
   "solution-warehouse": "#/solutions/warehouse",
   "solution-sync": "#/solutions/sync",
@@ -188,6 +194,13 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     description: `${TRANSFER_READY_DRIVERS} transfer-ready drivers: PostgreSQL, SQL Server, Oracle, MySQL, MongoDB, Snowflake, BigQuery, S3, Kafka, pgvector, and more.`,
     keywords: "Datawrap connectors, PostgreSQL MySQL SQL Server Oracle MongoDB Snowflake BigQuery S3 Iceberg Kafka pgvector",
     canonicalPath: "#/integrations",
+  },
+  demos: {
+    title: "Video demos",
+    description:
+      "Watch real Datawrap transfers prove themselves: quarantine and replay, schema drift review, native CDC, files and stored procedures, and the checksum match at the end.",
+    keywords: "Datawrap demo, data migration video, ETL demo, CDC demo, quarantine replay proof",
+    canonicalPath: "#/demos",
   },
   "solution-migrations": {
     title: "Migrations",
