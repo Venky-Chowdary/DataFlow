@@ -501,16 +501,25 @@ def build_sync_contract_gate(
     source_col_set = {
         str(c).strip().lower() for c in (source_columns or []) if str(c).strip()
     }
+    # SDK manifest cursors are record paths (``version.when``), not columns —
+    # the manifest already declares them, so column-membership would refuse
+    # the vendor's own field. The manifest is the schema authority here.
+    try:
+        from connectors.sdk import get_sdk_connector
+
+        _manifest_source = get_sdk_connector(source_name) is not None
+    except Exception:  # noqa: BLE001
+        _manifest_source = False
     unknown_cursor: list[str] = []
     unknown_pk: list[str] = []
-    if source_col_set:
+    if source_col_set and not _manifest_source:
         for c in contracts:
             stream = c.get("name") or c.get("stream") or "stream"
             if requires_cursor:
                 cursor = contract_cursor_field(c)
                 if cursor and cursor.lower() not in source_col_set:
                     unknown_cursor.append(f"{stream}.{cursor}")
-    if source_col_set and requires_primary_key:
+    if source_col_set and requires_primary_key and not _manifest_source:
         for stream, ident in catalog_identity:
             for name in ident:
                 if name.lower() not in source_col_set:
