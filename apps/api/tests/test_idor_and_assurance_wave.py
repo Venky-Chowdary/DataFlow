@@ -96,6 +96,35 @@ def test_cdc_mapping_review_flag_and_ack(tmp_path, monkeypatch):
     assert rev.open_review_for_source("pg:localhost:5432/db", "public.orders") is None
 
 
+def test_cdc_mapping_review_workspace_isolation(tmp_path, monkeypatch):
+    """A drift review must not list or acknowledge across workspaces."""
+    from services import cdc_mapping_review as rev
+    from services.workspace_filter import WorkspaceFilter, bound_workspace_filter
+
+    path = tmp_path / "reviews.jsonl"
+    monkeypatch.setattr(rev, "STORE_PATH", path)
+    monkeypatch.setenv("CDC_MAPPING_REVIEW_STORE", str(path))
+
+    signal = rev.flag_mapping_review(
+        source_key="pg:localhost:5432/db",
+        table="public.orders",
+        reason="cdc_schema_drift",
+        workspace_id="ws-a",
+    )
+    assert signal["workspace_id"] == "ws-a"
+
+    other = WorkspaceFilter(frozenset({"ws-b"}), False)
+    with bound_workspace_filter(other):
+        assert rev.list_reviews(source_key="pg:localhost:5432/db", status="open") == []
+        assert rev.acknowledge_review(signal["id"]) is None
+
+    own = WorkspaceFilter(frozenset({"ws-a"}), False)
+    with bound_workspace_filter(own):
+        assert len(rev.list_reviews(source_key="pg:localhost:5432/db", status="open")) == 1
+        ack = rev.acknowledge_review(signal["id"])
+        assert ack and ack["status"] == "acknowledged"
+
+
 
 def test_evaluate_resume_safety_refuses_empty_and_stale(monkeypatch):
     from datetime import datetime, timedelta, timezone

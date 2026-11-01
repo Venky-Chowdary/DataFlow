@@ -1350,6 +1350,7 @@ class PostgreSqlChangeStreamCdc:
                 schema_version=int(entry.get("version") or 0) or None,
                 ddl=str(entry.get("ddl") or ""),
                 column_names=[c for c in cols if c],
+                workspace_id=str(self.cfg.get("workspace_id") or ""),
             )
         except Exception:
             _logger.exception("Failed to flag CDC mapping review after schema drift")

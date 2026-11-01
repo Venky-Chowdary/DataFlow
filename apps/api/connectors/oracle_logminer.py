@@ -2135,6 +2135,7 @@ class OracleLogMinerCdc:
                             f"{ambiguity}] {str(ddl or '')}"
                         ),
                         column_names=[],
+                        workspace_id=str(self.cfg.get("workspace_id") or ""),
                     )
                 except Exception as exc:
                     raise_ddl_error("mapping-review write", exc)
@@ -2204,6 +2205,7 @@ class OracleLogMinerCdc:
                         str(column.get("name") or "")
                         for column in snapshot["columns"]
                     ],
+                    workspace_id=str(self.cfg.get("workspace_id") or ""),
                 )
             except Exception as exc:
                 raise_ddl_error("mapping-review write", exc)

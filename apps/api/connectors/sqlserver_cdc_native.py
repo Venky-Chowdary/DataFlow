@@ -857,6 +857,7 @@ class SqlServerNativeCdc:
                     schema_version=int(entry.get("version") or 0) or None,
                     ddl=str(entry.get("ddl") or ""),
                     column_names=[str(c.get("name") or "") for c in cols if c.get("name")],
+                    workspace_id=str(self.cfg.get("workspace_id") or ""),
                 )
             except Exception as exc:
                 logger.warning(
