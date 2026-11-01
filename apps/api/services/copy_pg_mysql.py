@@ -51,9 +51,14 @@ from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
 from services.copy_range_proof import range_keys_match
 from services.copy_sql_pairs import (
+    integer_pk_cuts,
+    key_ranges_from_cuts,
+    mysql_pk_range_clause,
     mysql_ident as _mysql_ident,
     mysql_write_conn as _mysql_connect,
     pg_write_conn as _pg_connect,
+    pk_range_predicate,
+    plan_pk_range_partitions,
 )  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -173,23 +178,6 @@ def ctid_predicate(lo_page: int, hi_page: int | None) -> str:
     )
 
 
-def key_ranges_from_cuts(cuts: list[Any]) -> list[tuple[Any | None, Any | None]]:
-    """Equal-height ranges from interior cuts: ``[None, c0), [c0, c1), … [cN, None)``."""
-    uniq: list[Any] = []
-    for cut in cuts:
-        if cut is None:
-            continue
-        if not uniq or uniq[-1] != cut:
-            uniq.append(cut)
-    if not uniq:
-        return [(None, None)]
-    ranges: list[tuple[Any | None, Any | None]] = [(None, uniq[0])]
-    for i in range(len(uniq) - 1):
-        ranges.append((uniq[i], uniq[i + 1]))
-    ranges.append((uniq[-1], None))
-    return ranges
-
-
 def mapped_single_pk(
     source_pk_columns: list[str],
     pairs: list[tuple[str, str]],
@@ -238,25 +226,6 @@ def pg_mysql_copy_partitions(source_count: int, workers: int) -> int:
     return min(w, _MAX_PARTITIONS)
 
 
-def integer_pk_cuts(lo: int, hi: int, workers: int) -> list[int]:
-    """Interior cuts on a closed integer interval ``[lo, hi]`` (Spark JDBC style)."""
-    n = max(int(workers or 1), 1)
-    if n <= 1:
-        return []
-    width = int(hi) - int(lo) + 1
-    if width <= 1:
-        return []
-    n = min(n, width)
-    cuts: list[int] = []
-    for i in range(1, n):
-        cut = int(lo) + (i * width) // n
-        if cut <= int(lo) or cut > int(hi):
-            continue
-        if not cuts or cut != cuts[-1]:
-            cuts.append(cut)
-    return cuts
-
-
 def fetch_integer_pk_cuts(
     cur: Any, source_ref: str, pk_ident: str, workers: int
 ) -> list[int]:
@@ -278,35 +247,6 @@ def _pg_quoted_literal(cur: Any, value: Any) -> str:
     if isinstance(quoted, bytes):
         return quoted.decode()
     return str(quoted)
-
-
-def pk_range_predicate(ident: str, lo: Any, hi: Any, *, null_shard: bool = False) -> str:
-    if null_shard:
-        return f"{ident} IS NULL"
-    parts: list[str] = []
-    if lo is not None:
-        parts.append(f"{ident} >= {lo}")
-    if hi is not None:
-        parts.append(f"{ident} < {hi}")
-    return " AND ".join(parts)
-
-
-def mysql_pk_range_clause(
-    ident: str, lo: Any, hi: Any, *, null_shard: bool = False
-) -> tuple[str, list[Any]]:
-    if null_shard:
-        return f"{ident} IS NULL", []
-    parts: list[str] = []
-    params: list[Any] = []
-    if lo is not None:
-        parts.append(f"{ident} >= %s")
-        params.append(lo)
-    if hi is not None:
-        parts.append(f"{ident} < %s")
-        params.append(hi)
-    if not parts:
-        return "1=1", []
-    return " AND ".join(parts), params
 
 
 def _mysql_range_count(
@@ -759,7 +699,7 @@ def copy_postgres_to_mysql(
                 shard_mode = "pk"
                 preserve_dest_on_failure = True
                 if n_parts <= 1:
-                    key_ranges: list[tuple[Any | None, Any | None]] = [(None, None)]
+                    cuts: list[Any] = []
                 else:
                     pk_declared = live_l.get(src_pk.lower()) or ""
                     if _pg_base(pk_declared) in _INTEGER_PK_BASES:
@@ -770,49 +710,21 @@ def copy_postgres_to_mysql(
                         cuts = fetch_pk_interior_cuts(
                             src_cur, source_ref, src_ident, n_parts
                         )
-                    key_ranges = key_ranges_from_cuts(cuts)
-                src_cur.execute(
-                    f"SELECT COUNT(*) FROM {source_ref} WHERE {src_ident} IS NULL"  # nosec B608
-                )
-                nulls = int(src_cur.fetchone()[0])
-                unbounded = (
-                    len(key_ranges) == 1 and key_ranges[0] == (None, None)
-                )
-                plan: list[tuple[str, Any, Any, bool]] = []
-                if nulls and not unbounded:
-                    plan.append((f"{src_ident} IS NULL", None, None, True))
-                for lo, hi in key_ranges:
+
+                def _pg_pred(lo: Any, hi: Any) -> str:
                     lo_sql = (
                         _pg_quoted_literal(src_cur, lo) if lo is not None else None
                     )
                     hi_sql = (
                         _pg_quoted_literal(src_cur, hi) if hi is not None else None
                     )
-                    pred = pk_range_predicate(src_ident, lo_sql, hi_sql)
-                    plan.append((pred, lo, hi, False))
-                for pred, lo, hi, is_null in plan:
-                    if pred:
-                        src_cur.execute(
-                            f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}"  # nosec B608
-                        )
-                    else:
-                        src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
-                    expected = int(src_cur.fetchone()[0])
-                    partitions.append({
-                        "lo": lo,
-                        "hi": hi,
-                        "null_shard": is_null,
-                        "source_count": expected,
-                        "dest_pk": dest_pk,
-                        "predicate": pred,
-                        "action": "load",
-                    })
-                accounted = sum(int(p["source_count"]) for p in partitions)
-                if accounted != source_count:
-                    raise ValueError(
-                        "PK range source COUNTs "
-                        f"{accounted} != snapshot {source_count}"
-                    )
+                    return pk_range_predicate(src_ident, lo_sql, hi_sql)
+
+                partitions = plan_pk_range_partitions(
+                    src_cur, source_ref, src_ident, cuts, source_count, _pg_pred
+                )
+                for part in partitions:
+                    part["dest_pk"] = dest_pk
                 dest_ident = _mysql_ident(dest_pk)
                 if dest_occupied:
                     copy_split = "pk"
