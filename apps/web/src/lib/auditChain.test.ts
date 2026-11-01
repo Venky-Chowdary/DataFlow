@@ -7,7 +7,12 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { chainNotChecked, chainVerdictTitle, chainVerdictToast } from "./auditChain.js";
+import {
+  chainNotChecked,
+  chainVerdictTitle,
+  chainVerdictToast,
+  chainVerifiedWithExceptions,
+} from "./auditChain.js";
 
 describe("chainVerdictTitle", () => {
   it("names an intact platform walk", () => {
@@ -99,5 +104,26 @@ describe("nothing walked is never a verdict (A1, round 11)", () => {
       findings: [], scope: "workspace",
     });
     assert.equal(title, "This workspace's chain is intact — 5 records re-walked (newest 5 of 12)");
+  });
+});
+
+describe("records signed with a lost key (QA r12 #3)", () => {
+  const report = {
+    verified: false,
+    status: "verified_with_exceptions",
+    checked: 1983,
+    findings: [{ kind: "key_mismatch", event_id: "e1" }],
+    unverifiable_key_lost: { count: 326, by_key_id: { ak_ca4273e3aaaaaaaa: 326 } },
+    scope: "workspace" as const,
+  };
+
+  it("is neither tampering nor verified, and names the count and the key", () => {
+    assert.equal(chainVerifiedWithExceptions(report), true);
+    assert.equal(chainNotChecked(report), false);
+    const title = chainVerdictTitle(report);
+    assert.match(title, /No tampering found — 1657 of 1983 records verified/);
+    assert.match(title, /326 record\(s\) signed with key ak_ca4273e3aaaaaaaa/);
+    assert.doesNotMatch(title, /failed|intact/i);
+    assert.match(chainVerdictToast(report), /No tampering found; 326 record/);
   });
 });

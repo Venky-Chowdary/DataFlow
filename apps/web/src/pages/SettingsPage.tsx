@@ -22,7 +22,12 @@ import { type PlatformLock, platformLock, UNLOCKED } from "../lib/platformSettin
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
-import { chainNotChecked, chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
+import {
+  chainNotChecked,
+  chainVerdictTitle,
+  chainVerdictToast,
+  chainVerifiedWithExceptions,
+} from "../lib/auditChain";
 import { auditActorLabel } from "../lib/auditActor";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
@@ -642,10 +647,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       const report = await verifyAuditChain();
       setChainReport(report);
       const notChecked = chainNotChecked(report);
+      const exceptions = chainVerifiedWithExceptions(report);
       toast({
-        title: notChecked ? "Nothing verified" : report.verified ? "Chain verified" : "Chain verification failed",
+        title: notChecked
+          ? "Nothing verified"
+          : exceptions
+            ? "Verified with exceptions"
+            : report.verified ? "Chain verified" : "Chain verification failed",
         message: chainVerdictToast(report),
-        tone: notChecked ? "warning" : report.verified ? "success" : "error",
+        tone: notChecked || exceptions ? "warning" : report.verified ? "success" : "error",
       });
     } catch (err) {
       setChainReport(null);
@@ -1528,7 +1538,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-body">
                   {chainReport && (
                     <div
-                      className={`df2-chain-verdict ${chainNotChecked(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
+                      className={`df2-chain-verdict ${chainNotChecked(chainReport) || chainVerifiedWithExceptions(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
                       role="status"
                     >
                       <strong>{chainVerdictTitle(chainReport)}</strong>

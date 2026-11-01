@@ -48,7 +48,7 @@ def _load_file(path: Path) -> dict[str, Any]:
     if not isinstance(data, (dict, list)):
         raise SystemExit(f"{path}: manifest must be a mapping or list")
     if isinstance(data, list):
-        return {"apiVersion": "dataflow.space/v1", "kind": "DataFlowManifest", "resources": data}
+        return {"apiVersion": "datawrap.io/v1", "kind": "DatawrapManifest", "resources": data}
     return data
 
 

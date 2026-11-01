@@ -166,13 +166,14 @@ def test_sc5_create_and_enable_probe_the_source_table(live):
     try:
         src = live.pg_connector()
         res = live.admin.post("/api/v1/schedules/", json=_body(src, missing))
-        assert res.status_code == 400, res.text
-        assert missing in res.text and "does not exist" in res.text, res.text
+        # QA r12 #5: 422 like the empty-mapping refusal (round 11 answered 400).
+        assert res.status_code == 422, res.text
+        assert missing in res.text and "not found" in res.text, res.text
         assert live.db["pipeline_schedules"].count_documents({}) == 0
 
         for blank in ("", "   "):
             res = live.admin.post("/api/v1/schedules/", json=_body(src, blank, dest_table="r11_blank_out"))
-            assert res.status_code == 400, (repr(blank), res.text)
+            assert res.status_code == 422, (repr(blank), res.text)
             assert "source table" in res.text.lower()
 
         for present in (table, unicode_table, mixed, f"public.{table}", f"  {table}  "):
@@ -196,10 +197,11 @@ def test_sc5_create_and_enable_probe_the_source_table(live):
         h.execute("postgresql", f'ALTER TABLE "{table}" RENAME TO "{table}_gone"')
         try:
             res = live.admin.patch(f"/api/v1/schedules/{paused['id']}", json={"enabled": True})
-            assert res.status_code == 400, res.text
+            assert res.status_code == 422, res.text
             assert table in res.text
             res = live.admin.patch(f"/api/v1/schedules/{paused['id']}", json={"source_table": missing})
-            assert res.status_code == 200, res.text  # still paused: nothing runs it yet
+            # QA r12 #5: a paused draft on a missing table is refused too.
+            assert res.status_code == 422, res.text
         finally:
             h.execute("postgresql", f'ALTER TABLE "{table}_gone" RENAME TO "{table}"')
     finally:

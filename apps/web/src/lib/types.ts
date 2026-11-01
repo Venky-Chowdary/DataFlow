@@ -1,11 +1,12 @@
 /** Normalize API origin so login and all routes hit `/api/v1/...`. */
 function resolveApiBase(): string {
+  // `window.DATAWRAP_API_BASE` is written into index.html by the web
+  // container at start (deploy/start-nginx.sh, always the same-origin
+  // `/api/v1` its nginx proxies). The legacy DATAFLOW_* spellings of the
+  // upstream variable are read there, server-side, so none ships in the bundle.
   const w =
-    typeof window !== "undefined"
-      ? (window as { DATAWRAP_API_BASE?: string; DATAFLOW_API_BASE?: string })
-      : undefined;
-  // Prefer Datawrap; keep DATAFLOW_* for Railway cutover until vars are renamed.
-  const fromWindow = w?.DATAWRAP_API_BASE || w?.DATAFLOW_API_BASE;
+    typeof window !== "undefined" ? (window as { DATAWRAP_API_BASE?: string }) : undefined;
+  const fromWindow = w?.DATAWRAP_API_BASE;
   // `import.meta.env` is a Vite inject. Under node:test there is no Vite
   // transform, so reading `.env` throws. Fall back cleanly instead of
   // crashing every pure helper that happens to import this module.
@@ -14,6 +15,9 @@ function resolveApiBase(): string {
     (import.meta as { env?: { VITE_API_BASE?: string } }).env
       ? (import.meta as { env?: { VITE_API_BASE?: string } }).env!.VITE_API_BASE
       : undefined;
+  // Unset means same origin: the browser calls `/api/v1` and the web
+  // container's nginx proxies it to the API (Vite's dev server does the same).
+  // There is no fallback host — a wrong one would fail silently.
   const raw = fromWindow || viteEnv || "/api/v1";
   // Strip quotes/whitespace (Railway paste / "white" blank env values).
   let trimmed = String(raw).trim().replace(/^['"]|['"]$/g, "").replace(/\/+$/, "");

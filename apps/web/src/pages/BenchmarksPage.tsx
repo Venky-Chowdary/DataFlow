@@ -456,7 +456,7 @@ export function BenchmarksPage() {
                             {ledger.integrity_comparison.map((row) => (
                               <tr key={row.dimension}>
                                 <td><strong>{row.dimension}</strong></td>
-                                <td>{row.dataflow}</td>
+                                <td>{row.datawrap}</td>
                                 <td>{row.industry_elt}</td>
                                 <td><code>{row.proof}</code></td>
                               </tr>

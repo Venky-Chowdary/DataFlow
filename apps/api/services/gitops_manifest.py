@@ -11,6 +11,12 @@ from __future__ import annotations
 from typing import Any
 
 from services.workspace_filter import WorkspaceFilter
+from services.brand import (
+    GITOPS_API_VERSION,
+    GITOPS_GENERATOR,
+    GITOPS_MANIFEST_KIND,
+    LEGACY_GITOPS_MANIFEST_KINDS,
+)
 
 
 class WorkspaceScopeError(ValueError):
@@ -142,7 +148,7 @@ def contract_artifact(contract: Any) -> dict[str, Any]:
     """Single-file ``dataflow-contract.yaml`` shape (kind + metadata + spec)."""
     spec = contract_spec(contract)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "DataContract",
         "metadata": {
             "name": spec.get("name") or spec.get("id"),
@@ -156,7 +162,7 @@ def contract_artifact(contract: Any) -> dict[str, Any]:
 def schedule_artifact(sched: Any) -> dict[str, Any]:
     spec = schedule_spec(sched)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "PipelineSchedule",
         "metadata": {"name": spec.get("name"), "id": spec.get("id")},
         "spec": spec,
@@ -185,7 +191,7 @@ def mapping_bundle_artifact(contract: Any) -> dict[str, Any]:
     """``dataflow-mapping-bundle.yaml`` — import always lands as DRAFT contract."""
     spec = mapping_bundle_spec(contract)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "MappingBundle",
         "metadata": {
             "name": spec.get("name") or spec.get("id"),
@@ -254,9 +260,9 @@ def build_dataflow_manifest(
                 resources.append(mapping_bundle_artifact(contract))
 
     return {
-        "apiVersion": "dataflow.space/v1",
-        "kind": "DatawrapManifest",
-        "metadata": {"generator": "dataflow-gitops-export"},
+        "apiVersion": GITOPS_API_VERSION,
+        "kind": GITOPS_MANIFEST_KIND,
+        "metadata": {"generator": GITOPS_GENERATOR},
         "resources": resources,
     }
 
@@ -267,7 +273,7 @@ def _normalize_resources(payload: dict[str, Any] | list[Any]) -> list[dict[str, 
     if not isinstance(payload, dict):
         return []
     kind = str(payload.get("kind") or "")
-    if kind == "DatawrapManifest":
+    if kind == GITOPS_MANIFEST_KIND or kind in LEGACY_GITOPS_MANIFEST_KINDS:
         raw = payload.get("resources") or []
         return [r for r in raw if isinstance(r, dict)]
     if kind in {"PipelineSchedule", "DataContract", "MappingBundle"}:

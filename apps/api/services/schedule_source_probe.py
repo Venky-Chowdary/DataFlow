@@ -5,8 +5,12 @@ and the operator learnt it only when the first unattended run failed. The
 catalog answers the question in one metadata round trip, so the save asks it:
 
 * ``present`` — save as asked;
-* ``missing`` — refuse an armed (enabled) schedule with the table named; a
-  paused draft is saved with a warning, since nothing runs it yet;
+* ``missing`` — refuse the save with 422 and the table named, the status and
+  ``{"error": {"code", "message"}}`` shape of the empty-mapping refusal
+  (QA r12 #5). A paused draft is refused too: QA expects a create naming a
+  table that does not exist to fail, and a draft on it can only be enabled
+  into a failure. (Round 11 answered 400 for an armed schedule and saved a
+  paused one with a warning.)
 * ``unknown`` — the source could not be reached or has no metadata probe in
   time: save, and say plainly that nothing was verified (the run still checks);
 * ``skipped`` — the source is not a table (a CALL/SELECT read, a file, an
@@ -24,7 +28,13 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from services.api_errors import ApiError
+
 logger = logging.getLogger(__name__)
+
+#: Error codes, alongside ``EMPTY_MAPPING_CONTRACT`` for a schedule without mappings.
+SOURCE_TABLE_NOT_FOUND = "SOURCE_TABLE_NOT_FOUND"
+SOURCE_TABLE_REQUIRED = "SOURCE_TABLE_REQUIRED"
 
 #: Wall-clock bound on the save-time probe. An unreachable host must not hold
 #: the create request for a driver's full connect timeout; past this the
@@ -40,6 +50,14 @@ PRESENT = "present"
 MISSING = "missing"
 UNKNOWN = "unknown"
 SKIPPED = "skipped"
+
+
+class ScheduleSourceMissing(ApiError, ValueError):
+    """The schedule names a source table that does not exist (HTTP 422).
+
+    A ``ValueError`` as well, so callers that turn store refusals into their
+    own error (GitOps apply, chat confirm) keep doing so.
+    """
 
 
 @dataclass(frozen=True)
@@ -165,7 +183,7 @@ def probe_schedule_source(data: Mapping[str, Any]) -> SourceProbe:
             table=shown,
             connector=label,
             detail=(
-                f"Source table '{shown}' does not exist on connector '{label}'. "
+                f"Source table '{shown}' not found on connector '{label}'. "
                 "Create it, or choose an existing table — a schedule on a missing "
                 "table can only fail."
             ),
@@ -188,12 +206,20 @@ def assert_schedule_source(
     armed: bool,
     warnings: list[str] | None,
 ) -> None:
-    """Refuse an armed schedule on a missing table; record everything else."""
+    """Refuse a schedule on a missing table (422); record an unverifiable one.
+
+    ``armed`` no longer decides the refusal (QA r12 #5) and is kept for the
+    callers' signature; an unreachable source is never refused.
+    """
+    del armed
     probe = probe_schedule_source(data)
     if probe.status == MISSING:
-        if armed:
-            raise ValueError(probe.detail)
-        if warnings is not None:
-            warnings.append(probe.detail + " Enabling this schedule is refused until it does.")
-    elif probe.status == UNKNOWN and warnings is not None:
+        code = SOURCE_TABLE_NOT_FOUND if probe.table.strip() else SOURCE_TABLE_REQUIRED
+        raise ScheduleSourceMissing(
+            422,
+            code,
+            probe.detail,
+            extra={"source_table": probe.table, "connector": probe.connector},
+        )
+    if probe.status == UNKNOWN and warnings is not None:
         warnings.append(probe.detail)

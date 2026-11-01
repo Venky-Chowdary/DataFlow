@@ -9,8 +9,13 @@
 export type ChainVerdictReport = {
   /** null: nothing was walked (no records, or the store could not be read). */
   verified: boolean | null;
-  /** verified | findings | nothing_checked | store_unavailable (older APIs omit it). */
+  /**
+   * verified | verified_with_exceptions | findings | nothing_checked |
+   * store_unavailable (older APIs omit it).
+   */
   status?: string;
+  /** Records whose signing key this deployment no longer holds (QA r12 #3). */
+  unverifiable_key_lost?: { count: number; by_key_id: Record<string, number>; owner_action?: string };
   checked: number;
   /** The newest `checked` of `records_in_scope` were walked; older ones were not. */
   truncated_by_limit?: boolean;
@@ -32,6 +37,22 @@ export function chainNotChecked(report: ChainVerdictReport): boolean {
   return report.verified === null || report.status === "nothing_checked" || report.status === "store_unavailable";
 }
 
+/**
+ * Every record that could be checked holds up; some could not be checked
+ * because the key that signed them is gone. Not tampering, and not "verified".
+ */
+export function chainVerifiedWithExceptions(report: ChainVerdictReport): boolean {
+  return report.status === "verified_with_exceptions";
+}
+
+function lostKeyNote(report: ChainVerdictReport): string {
+  const lost = report.unverifiable_key_lost;
+  const n = lost?.count ?? 0;
+  const ids = Object.keys(lost?.by_key_id ?? {});
+  const keys = ids.length === 1 ? `key ${ids[0]}` : `${ids.length} keys`;
+  return `${n} record(s) signed with ${keys} this deployment no longer holds could not be checked`;
+}
+
 function windowNote(report: ChainVerdictReport): string {
   if (!report.truncated_by_limit || report.records_in_scope == null) return "";
   return ` (newest ${report.checked} of ${report.records_in_scope})`;
@@ -41,6 +62,10 @@ export function chainVerdictTitle(report: ChainVerdictReport): string {
   const workspace = report.scope === "workspace";
   if (report.status === "store_unavailable") return "Chain not checked — the audit store could not be read";
   if (chainNotChecked(report)) return "Nothing to verify — no audit records were checked";
+  if (chainVerifiedWithExceptions(report)) {
+    const ok = report.checked - (report.unverifiable_key_lost?.count ?? 0);
+    return `No tampering found — ${ok} of ${report.checked} records verified; ${lostKeyNote(report)}${windowNote(report)}`;
+  }
   if (report.verified) {
     const lead = workspace ? "This workspace's chain is intact" : "Chain intact";
     return `${lead} — ${report.checked} records re-walked${windowNote(report)}${reanchoredNote(report)}`;
@@ -57,6 +82,7 @@ export function chainVerdictTitle(report: ChainVerdictReport): string {
 export function chainVerdictToast(report: ChainVerdictReport): string {
   if (report.status === "store_unavailable") return "The audit store could not be read; nothing was verified. Try again.";
   if (chainNotChecked(report)) return "No audit records were found to check, so nothing was verified.";
+  if (chainVerifiedWithExceptions(report)) return `No tampering found; ${lostKeyNote(report)}.`;
   if (report.verified) {
     return `${report.checked} records re-walked — none altered or missing.`;
   }
