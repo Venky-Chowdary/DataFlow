@@ -70,6 +70,17 @@ SCHEMA_POLICY_HONESTY: dict[str, str] = {
 }
 
 
+#: The canonical schema-change policies: one per honesty caption above. Every
+#: entry point validates against this set (services/transfer_policy_values.py).
+SCHEMA_POLICIES = frozenset(SCHEMA_POLICY_HONESTY)
+
+#: Documented legacy spellings. They map to a canonical id and are accepted.
+SCHEMA_POLICY_ALIASES: dict[str, str] = {
+    "block": "block_all",
+    "approve": "manual_review",
+}
+
+
 def normalize_schema_policy(policy: str | None) -> str:
     """Canonical policy id.
 
@@ -81,11 +92,7 @@ def normalize_schema_policy(policy: str | None) -> str:
     key = (policy or "").strip().lower()
     if not key:
         return "propagate_columns"
-    if key == "block":
-        return "block_all"
-    if key == "approve":
-        return "manual_review"
-    return key
+    return SCHEMA_POLICY_ALIASES.get(key, key)
 
 
 def schema_policy_honesty_line(policy: str) -> str:

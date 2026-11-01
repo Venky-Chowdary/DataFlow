@@ -115,35 +115,43 @@ def _list_proof_files(limit: int = 40) -> list[dict[str, Any]]:
 
 
 def _competitive_integrity() -> list[dict[str, Any]]:
-    """Honest comparison dimensions — evidence-backed, not connector-count theater."""
+    """Honest comparison dimensions — evidence-backed, not connector-count theater.
+
+    ``datawrap`` is the product's column; ``dataflow`` repeats it for API
+    clients written before the rename (the web app reads ``datawrap``).
+    """
+    return [{**row, "dataflow": row["datawrap"]} for row in _integrity_rows()]
+
+
+def _integrity_rows() -> list[dict[str, Any]]:
     return [
         {
             "dimension": "Silent data loss",
-            "dataflow": "Forbidden — bad cells quarantine or fail-closed; never dropped without a record",
+            "datawrap": "Forbidden — bad cells quarantine or fail-closed; never dropped without a record",
             "industry_elt": "Many ELT syncs can succeed while rows are truncated or type-failed depending on destination",
             "proof": "quarantine_panel + rejected_details on WriteResult",
         },
         {
             "dimension": "Preflight gates",
-            "dataflow": "8 hard gates + policy gates before write (schema, mapping, dry-run, DDL, capacity, recon)",
+            "datawrap": "8 hard gates + policy gates before write (schema, mapping, dry-run, DDL, capacity, recon)",
             "industry_elt": "Schema discovery + sync; limited typed dry-run integrity before commit",
             "proof": "preflight_proof_bundle + Validate Studio",
         },
         {
             "dimension": "Post-write reconciliation",
-            "dataflow": "Gate-8 checksum / key-set reconcile with fail-closed strict mode",
+            "datawrap": "Gate-8 checksum / key-set reconcile with fail-closed strict mode",
             "industry_elt": "Row counts / destination metrics; not content-addressed fingerprints by default",
             "proof": "services.reconciliation + Job Theater",
         },
         {
             "dimension": "Catalog honesty",
-            "dataflow": "Certified / source-only / planned tiers — aliases do not inflate unique drivers",
+            "datawrap": "Certified / source-only / planned tiers — aliases do not inflate unique drivers",
             "industry_elt": "Large connector catalogs with varying production depth per source",
             "proof": "certification_tier + test_catalog_honesty",
         },
         {
             "dimension": "Type fidelity fixture",
-            "dataflow": "Unicode, nulls, decimals, JSON, bool forms proven CSV→SQLite (and SKU matrix)",
+            "datawrap": "Unicode, nulls, decimals, JSON, bool forms proven CSV→SQLite (and SKU matrix)",
             "industry_elt": "Per-connector integration tests; not a single customer-visible fidelity ledger",
             "proof": "proof_ledger.run_fidelity_proof → data/proofs/",
         },

@@ -130,6 +130,78 @@ def undo_failed_batch_if_dest_was_empty(
         return note
 
 
+def keep_failed_validation_for_inspection(
+    *,
+    destination: Any,
+    dest_summary: dict[str, Any],
+    sync_mode: str,
+) -> str:
+    """Keep what a failed-validation overwrite wrote, and say where it is.
+
+    QA round 12: a MySQL -> PostgreSQL copy that failed strict validation
+    dropped the table it had just created, so the operator lost every row the
+    run had landed and had nothing to inspect when the report could not name
+    a differing cell. A validation failure is a verdict about the rows, not a
+    write that broke half-way: the rows are complete and must stay where the
+    operator can query them. The job still fails and is not verified.
+
+    Only a full-refresh overwrite is kept: re-running it replaces the whole
+    table, so keeping the unverified rows cannot leak into a later run. An
+    append keeps the existing undo — its watermark and the next run's delta
+    assume the failed batch is gone. Returns ``""`` when the regular undo
+    should decide. ``DATAFLOW_DROP_ON_VALIDATION_FAILURE=1`` restores the
+    previous drop-and-clear behaviour.
+    """
+    if dest_summary.get("partial_batch_undo"):
+        return ""
+    from services.brand_env import getenv_brand
+    from services.sync_cursor import is_overwrite_sync
+
+    if (getenv_brand("DROP_ON_VALIDATION_FAILURE", "0") or "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return ""
+    if not is_overwrite_sync(sync_mode or dest_summary.get("sync_mode")):
+        return ""
+    if getattr(destination, "kind", "") != "database" or _object_store_family(destination):
+        return ""
+    decision, _ = _decide(destination, dest_summary, sync_mode)
+    if decision != "clear":
+        # Occupied or unmeasured destinations are already left in place.
+        return ""
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+    from services.dialect_profiles import schema_from_cfg
+
+    cfg = resolve_connector_config(destination)
+    db_type = count_dialect(str(cfg.get("type") or getattr(destination, "format", "") or ""))
+    table = str(
+        dest_summary.get("table")
+        or resolve_dest_table(db_type, destination, "dt_import")
+        or ""
+    ).strip()
+    if not table:
+        return ""
+    schema = str(schema_from_cfg(db_type, cfg) or "")
+    where = f"{schema}.{table}" if schema else table
+    try:
+        rows = precount_table(db_type, cfg, table)
+    except Exception:  # noqa: BLE001 — the note must not hide the failure
+        rows = None
+    dest_summary["partial_batch_undo"] = "retained_for_inspection"
+    dest_summary["validation_failed_data_kept"] = {"table": where, "rows": rows}
+    held = f" ({rows:,} row(s))" if isinstance(rows, int) else ""
+    created = dest_summary.get("dest_table_existed_before") is False
+    note = (
+        f"Data kept at {where}{held} for inspection: "
+        + ("the table this run created was not dropped" if created
+           else "the rows this run wrote were not deleted")
+        + ". They failed validation and are not verified — re-run the "
+        "overwrite to replace them, or drop the table if it is not wanted."
+    )
+    dest_summary["partial_batch_undo_note"] = note
+    return note
+
+
 def _decide(
     destination: Any,
     dest_summary: dict[str, Any],

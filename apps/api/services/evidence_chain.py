@@ -204,10 +204,12 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         login secret this deployment no longer lists, or (``cause`` =
         ``legacy_datetime_roundtrip``) it predates canonical hashing and holds a
         value the store rewrote.
-    ``key_mismatch``
+    ``key_mismatch`` (category ``unverifiable_key_lost``)
         The record names a signing key (``key_id``) this deployment does not
-        hold, so its HMAC cannot be checked. Not evidence of tampering; the
-        record is unverified until that key is listed again (D221).
+        hold — not configured, not retired, not in the persisted keyring — so
+        its HMAC cannot be checked. Not evidence of tampering, and not
+        verified either: the record stays unverifiable until that key is
+        supplied again (D221, QA r12 #3).
     ``broken_link``
         ``prev_hash`` does not name the previous record, nor any earlier one: a
         record between them was deleted, or the records were reordered.
@@ -217,9 +219,10 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         or a replayed segment. The chain is no longer a single line of history,
         but no record was removed.
 
-    Each finding has a ``category`` (``tampering``, ``fork``, ``key_mismatch``,
-    ``legacy_hash_input``) and the report totals them in ``categories``, so a
-    fork or a key rotation is never counted as tampering.
+    Each finding has a ``category`` (``tampering``, ``fork``,
+    ``unverifiable_key_lost``, ``legacy_hash_input``) and the report totals
+    them in ``categories``, so a fork or a lost key is never counted as
+    tampering.
     ``unexplained_prefix``
         The oldest record points at a predecessor that is not in the store and
         no signed retention checkpoint accounts for it.
@@ -231,7 +234,10 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     the store by workspace (``services.audit_chain_window``). The report names
     the ``store``, the ``records_in_scope`` and whether the limit left older
     ones out (``truncated_by_limit``). ``status`` is ``verified``,
-    ``findings``, ``nothing_checked`` (no record in scope — ``verified`` is
+    ``verified_with_exceptions`` (every record that could be checked holds up,
+    and the only findings are records signed under a lost key: ``verified`` is
+    false, ``tampering_detected`` is false, and ``unverifiable_key_lost`` gives
+    the count per key id), ``findings``, ``nothing_checked (no record in scope — ``verified`` is
     null: nothing walked is never verified) or ``store_unavailable`` (the
     store could not be read; reported, never answered from another store).
     """
@@ -288,6 +294,13 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     categories = {name: 0 for name in CATEGORIES}
     for f in found:
         categories[f["category"]] += 1
+    lost = _lost_key_summary(found, events)
+    if not found:
+        status = "verified"
+    elif categories["unverifiable_key_lost"] == len(found):
+        status = "verified_with_exceptions"
+    else:
+        status = "findings"
     from services.audit_chain_keys import describe
 
     honesty = (
@@ -297,6 +310,13 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         "records were never discarded together with their checkpoint. Only an "
         "external WORM / timestamp anchor narrows that."
     )
+    if lost["count"]:
+        honesty += (
+            f" {lost['count']} record(s) name a signing key this deployment no longer "
+            "holds, so they could not be checked; they are counted under "
+            "unverifiable_key_lost, not as tampering, and the chain is not reported "
+            "as verified over them."
+        )
     if window.truncated_by_limit:
         honesty += (
             f" This walk covers the newest {len(events)} of {window.total} record(s); "
@@ -308,8 +328,9 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         {
             **walk,
             "verified": not found,
-            "status": "verified" if not found else "findings",
+            "status": status,
             "categories": categories,
+            "unverifiable_key_lost": lost,
             "tampering_detected": categories["tampering"] > 0,
             "signing": describe(),
             "legacy_records": _legacy_summary(events, positions, found),
@@ -351,6 +372,7 @@ def _unverified_report(window: Any, walk: dict[str, Any]) -> dict[str, Any]:
         "chain_head": None,
         "findings": [],
         "categories": {name: 0 for name in CATEGORIES},
+        "unverifiable_key_lost": {"count": 0, "by_key_id": {}},
         "tampering_detected": False,
         "reanchored": [],
         "honesty": honesty,
@@ -407,10 +429,11 @@ def _walk(
                         index=index,
                         event_id=event_id,
                         detail=(
-                            f"Signed under key {key_id}, which this deployment does "
-                            "not hold, so its HMAC cannot be checked. This is a key "
-                            "configuration gap, not evidence of tampering: add that "
-                            "key to this deployment's retired audit keys to verify it."
+                            f"Signed under key {key_id}, which this deployment no "
+                            "longer holds, so its HMAC cannot be checked. This is a "
+                            "lost signing key, not evidence of tampering; the record "
+                            "verifies again once a platform operator supplies that "
+                            "key as a retired audit key."
                         ),
                     )
                 )
@@ -529,17 +552,44 @@ def _position(event: dict[str, Any]) -> int:
 
 
 #: Report categories. Only ``tampering`` means content or history was changed.
-CATEGORIES = ("tampering", "fork", "key_mismatch", "legacy_hash_input")
+CATEGORIES = ("tampering", "fork", "unverifiable_key_lost", "legacy_hash_input")
 
 
 def finding_category(kind: str, cause: str) -> str:
     if kind == "fork":
         return "fork"
     if kind == "key_mismatch":
-        return "key_mismatch"
+        return "unverifiable_key_lost"
     if kind == "event_hash_mismatch" and cause == "legacy_datetime_roundtrip":
         return "legacy_hash_input"
     return "tampering"
+
+
+def _lost_key_summary(
+    findings: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Records that could not be checked because their signing key is gone.
+
+    Ids only, never key material, and no server variable names: workspace
+    admins read this in Settings.
+    """
+    by_key: dict[str, int] = {}
+    for f in findings:
+        if f.get("category") != "unverifiable_key_lost":
+            continue
+        kid = str(events[f["index"]].get("key_id") or "")
+        f["key_id"] = kid
+        by_key[kid] = by_key.get(kid, 0) + 1
+    out: dict[str, Any] = {"count": sum(by_key.values()), "by_key_id": by_key}
+    if by_key:
+        out["owner_action"] = (
+            "These records were signed under a key this deployment no longer holds, "
+            "so nothing can say whether they changed. If a copy of that key exists "
+            "(an earlier data volume or audit key file), a platform operator can add "
+            "it as a retired audit key and these records will verify again. If it "
+            "is gone, they stay unverifiable; they are not counted as tampering."
+        )
+    return out
 
 
 def _legacy_summary(

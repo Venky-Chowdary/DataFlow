@@ -284,9 +284,10 @@ def test_x35_pg_copy_out_of_range_time_typed_finding_and_drop():
     )
 
 
-def test_x36_pg_dest_tamper_drops_created_table(monkeypatch):
-    """Tampered destination on MySQL -> PG: fail closed AND drop the table
-    this run created — the same contract the DuckDB path already meets."""
+def test_x36_pg_dest_tamper_keeps_created_table_for_inspection(monkeypatch):
+    """Tampered destination on MySQL -> PG: fail closed, and keep the table
+    this run created so the operator can inspect it (QA round 12 — a failed
+    validation used to drop it, losing every landed row)."""
     import src.transfer.reconcile_step as rs
 
     dest_table = "x36_out"
@@ -316,9 +317,11 @@ def test_x36_pg_dest_tamper_drops_created_table(monkeypatch):
         _request(table, {"format": "postgresql", **PG}, dest_table), "0" * 24
     )
     assert not res.success, "dest tamper must fail the proof"
-    assert not _pg_table_exists(dest_table), (
-        "the table this run created must be dropped on reconcile failure"
+    assert _pg_table_exists(dest_table), (
+        "the table this run created must be kept after a failed validation"
     )
+    assert f"Data kept at public.{dest_table}" in _blob(res), _blob(res)
+    _pg_drop_table(dest_table)
     recon = res.reconciliation or {}
     assert "postgres-to-postgres" not in str(
         recon.get("culprit_keys_unavailable_reason") or ""

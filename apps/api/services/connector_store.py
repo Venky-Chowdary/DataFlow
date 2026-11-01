@@ -164,13 +164,31 @@ SSL_MODES = ("", "prefer", "require")
 _TLS_MODE_TYPES = frozenset({"postgresql", "redshift"})
 
 
+def _has_tls_mode(conn_type: str) -> bool:
+    """PostgreSQL-wire tiles, by the driver they resolve to.
+
+    QA r12 bug 8: the check used the raw tile id, so ``amazon_aurora_postgresql``
+    (and every other PostgreSQL catalog twin) stored ``ssl=True`` — TLS
+    *required* for this family — when the operator never asked for TLS, while
+    the plain PostgreSQL tile on the same endpoint negotiated.
+    """
+    key = (conn_type or "").strip().lower()
+    if key in _TLS_MODE_TYPES:
+        return True
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type
+    except ImportError:  # pragma: no cover
+        from transfer.connector_capabilities import resolve_driver_type
+    return resolve_driver_type(key) in _TLS_MODE_TYPES
+
+
 def default_ssl(conn_type: str) -> bool:
     """The ``ssl`` value for a caller that never said anything about TLS.
 
     Engines with an explicit TLS mode (PostgreSQL family) negotiate: only a user's
     choice may make TLS mandatory. Every other engine keeps its historical True.
     """
-    return (conn_type or "").strip().lower() not in _TLS_MODE_TYPES
+    return not _has_tls_mode(conn_type)
 
 
 def stamp_ssl_mode(doc: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
@@ -189,7 +207,7 @@ def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
     """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document."""
     mode = data.get("ssl_mode")
     mode = mode if mode in SSL_MODES else ""
-    if conn_type in _TLS_MODE_TYPES:
+    if _has_tls_mode(conn_type):
         return mode == "require", mode
     return bool(data.get("ssl", True)), mode
 

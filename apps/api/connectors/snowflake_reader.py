@@ -432,11 +432,17 @@ def read_table_cursor_batch(
                             (cur_val, limit),
                         )
                     else:
+                        # Expanded seek, same predicate as ``(c, pk) > (x, y)``.
+                        # The row-value form needs both sides typed alike; the
+                        # bookmark binds as text, and an engine that will not
+                        # cast a text tuple onto (TIMESTAMP, NUMBER) failed the
+                        # second page of every incremental run that dropped its
+                        # re-read tie group (QA r12 Snowflake D4).
                         cur.execute(
                             f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                            f"WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
+                            f"WHERE ({cursor_q} > %s OR ({cursor_q} = %s AND {pk_q} > %s)) "
                             f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
-                            (cur_val, pk_val, limit),
+                            (cur_val, cur_val, pk_val, limit),
                         )
                 else:
                     bare, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)

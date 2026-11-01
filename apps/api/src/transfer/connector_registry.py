@@ -302,6 +302,13 @@ _OPERATOR_COPY_PREFIXES = (
     "cannot reach the railway",
     "railway private hostname",
     "connection timed out",
+    "tls mismatch",
+    "dns lookup failed",
+    "connection refused (",
+    "connection refused:",
+    "network unreachable (",
+    "network unreachable:",
+    "handshake timed out",
     "connection failed:",
     "connection failed on railway",
     "tls certificate",
@@ -421,6 +428,14 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
             "and not ports 3306/5432."
         )
 
+    # Which side requires TLS (QA r12 bug 8): the generic "SSL/TLS error" below
+    # did not say whether to turn SSL on or off.
+    from .network_error_copy import network_failure_copy, tls_requirement_copy
+
+    tls_required = tls_requirement_copy(text, raw_s)
+    if tls_required:
+        return _with_cause(tls_required, raw_s)
+
     # TLS mismatch — must be classified before auth and timeout. A server that
     # does not speak TLS aborts the handshake, and the driver surfaces that as
     # "EOF occurred in violation of protocol" plus a socket timeout. Reporting
@@ -533,9 +548,12 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
             )
         return _with_cause("Authentication failed. Check username, password, and permissions.", raw_s)
 
-    # DNS / host unknown
-    if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known|failed to resolve|resolve hostname", text):
-        if "internal" in text:
+    # DNS / refused / unreachable / handshake timeout / timeout — each named from
+    # the driver's own text, with that text kept as the cause. One slogan
+    # ("Cannot reach the host on the specified port") used to cover a refused
+    # port, an unroutable network and a down host (QA r12 bug 8).
+    def _dns_hint(dns_text: str) -> str:
+        if "internal" in dns_text:
             return (
                 "Host not found — this looks like a private/internal address. "
                 "Use the provider public proxy host and port (for Railway: *.proxy.rlwy.net)."
@@ -547,20 +565,18 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
                 "not a credentials failure.",
                 raw_s,
             )
-        return "Host not found. Check the host/address and that it is reachable from the network."
+        return ""
 
-    # Connection refused / unreachable
-    if re.search(r"connection refused|errno 111|network is unreachable|cannot assign|no route|host is down|conn refused", text):
-        return "Cannot reach the host on the specified port. Check the host, port, and firewall/security group."
-
-    # Timeouts
-    if re.search(r"timed out|timeout|sockettimeout|connecttimeout|operation timed out", text):
-        if "internal" in text or "railway" in text:
+    network = network_failure_copy(
+        text, raw_s, driver=resolve_driver_type(driver) if driver else "", dns_hint=_dns_hint
+    )
+    if network:
+        if network.startswith("Connection timed out") and ("internal" in text or "railway" in text):
             return (
                 "Connection timed out. If you used a *.railway.internal host, switch to the "
                 "public proxy host and port from Railway. Otherwise check network/firewall."
             )
-        return "Connection timed out. Check the host/port, network, and that the service is running."
+        return network if network.startswith("Host not found") else _with_cause(network, raw_s)
 
     # SSL / TLS
     if re.search(r"ssl|tls|certificate|verify|cert|handshake", text):
@@ -647,10 +663,6 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
     if driver in ("redshift", "mariadb"):
         if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
             return "Authentication failed. Check username, password, database, and that the user can log in from this host."
-        if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known", text):
-            return "Host not found. Check the host/address and that it is reachable from the network."
-        if re.search(r"connection refused|errno 111|network is unreachable|cannot assign|no route|host is down|conn refused", text):
-            return "Cannot reach the host on the specified port. Check the host, port, and firewall/security group."
 
     # Azure Blob / ADLS
     if driver == "adls":
@@ -725,9 +737,13 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
             from services.egress_guard import EgressRefused, pinned_egress
 
             with pinned_egress(workspace_id=str(cfg.get("workspace_id") or "")):
-                result = _run_probe_impl(db_type, cfg)
-                if not result[0]:
-                    result = _name_protocol_mismatch(db_type, cfg, result)
+                early = _other_wire_on_its_default_port(db_type, cfg)
+                if early:
+                    result = (False, early)
+                else:
+                    result = _run_probe_impl(db_type, cfg)
+                    if not result[0]:
+                        result = _name_protocol_mismatch(db_type, cfg, result)
         except EgressRefused as exc:
             op.failed(category="probe_failed")
             return False, str(exc)
@@ -739,6 +755,33 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         else:
             op.failed(category="probe_failed")
         return result
+
+
+def _other_wire_on_its_default_port(db_type: str, cfg: dict[str, Any]) -> str:
+    """A MySQL-family Test aimed at 5432 asks the port what it speaks first.
+
+    QA r12 bug 8: an ``amazon_aurora`` (Aurora MySQL) connector given a
+    PostgreSQL endpoint's host and 5432 waited out the 45 s handshake read
+    before the mismatch was named. MySQL greets on connect, so pymysql sat
+    waiting on a server that never speaks first. Only this suspicious pairing
+    is sniffed up front; every other probe keeps sniffing only after a failure.
+    """
+    if cfg.get("connection_string"):
+        return ""
+    from src.transfer.engine_family import MYSQL, engine_family
+
+    kind = str(cfg.get("type") or db_type)
+    if engine_family(kind) != MYSQL:
+        return ""
+    try:
+        port = int(cfg.get("port") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if port != 5432:
+        return ""
+    from services.wire_protocol_sniff import protocol_mismatch_message
+
+    return protocol_mismatch_message(kind, str(cfg.get("host") or ""), port)
 
 
 def _name_protocol_mismatch(

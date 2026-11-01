@@ -104,6 +104,7 @@
   "GET /api/v1/schedules/": "schedule.read",
   "GET /api/v1/schedules/approvals/open": "schedule.read",
   "GET /api/v1/schedules/export/dataflow": "schedule.read",
+  "GET /api/v1/schedules/export/manifest": "schedule.read",
   "GET /api/v1/schedules/intervals": "schedule.read",
   "GET /api/v1/schedules/{schedule_id}": "schedule.read",
   "GET /api/v1/schedules/{schedule_id}/approval": "schedule.read",

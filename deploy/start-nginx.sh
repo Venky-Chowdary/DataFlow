@@ -4,22 +4,25 @@ set -e
 PORT=${PORT:-80}
 export PORT
 
-DEFAULT_API="https://dataflow-api-production-722b.up.railway.app/api/v1"
-
-# Prefer DATAWRAP_*; fall back to DATAFLOW_* / VITE_API_BASE during cutover.
-RAW_API_BASE=${DATAWRAP_API_BASE:-${DATAFLOW_API_BASE:-${VITE_API_BASE:-$DEFAULT_API}}}
+# The API this container proxies /api/ to. Runtime configuration only: read
+# DATAWRAP_API_BASE first, then the legacy DATAFLOW_API_BASE and VITE_API_BASE
+# spellings (services/brand_env does the same on the API). There is no default
+# host: proxying to a guessed one fails silently, so an unset value stops the
+# container with the reason, and the platform keeps the previous deploy.
+RAW_API_BASE=${DATAWRAP_API_BASE:-${DATAFLOW_API_BASE:-${VITE_API_BASE:-}}}
 RAW_API_BASE=$(printf '%s' "$RAW_API_BASE" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-if [ -z "$RAW_API_BASE" ]; then
-  RAW_API_BASE="$DEFAULT_API"
-fi
+case "$RAW_API_BASE" in
+  ""|/*|api/v1)
+    echo "[FATAL] Datawrap web: the API address is not configured." >&2
+    echo "[FATAL] Set DATAWRAP_API_BASE on this service to the API's URL, e.g." >&2
+    echo "[FATAL]   DATAWRAP_API_BASE=https://<your-api-host>/api/v1" >&2
+    echo "[FATAL] (got: '${RAW_API_BASE}'; a same-origin path cannot be proxied to itself)." >&2
+    exit 1
+    ;;
+esac
 
 # Normalize to an absolute https?://host/api/v1 for the upstream proxy.
 UPSTREAM_API="$RAW_API_BASE"
-case "$UPSTREAM_API" in
-  /api/v1|api/v1)
-    UPSTREAM_API="$DEFAULT_API"
-    ;;
-esac
 case "$UPSTREAM_API" in
   http://*|https://*) ;;
   *)
@@ -62,8 +65,7 @@ envsubst '$PORT $API_PROXY_PASS $API_PROXY_HOST $API_ORIGIN' < "$TEMPLATE" > /et
 INDEX=/usr/share/nginx/html/index.html
 if [ -f "$INDEX" ]; then
   sed -i '/window\.DATAWRAP_API_BASE/d' "$INDEX"
-  sed -i '/window\.DATAFLOW_API_BASE/d' "$INDEX"
-  sed -i "s|</head>|<script>window.DATAWRAP_API_BASE=\"${BROWSER_API_BASE}\";window.DATAFLOW_API_BASE=\"${BROWSER_API_BASE}\"</script></head>|" "$INDEX"
+  sed -i "s|</head>|<script>window.DATAWRAP_API_BASE=\"${BROWSER_API_BASE}\"</script></head>|" "$INDEX"
 fi
 
 echo "Datawrap web: browser API_BASE=${BROWSER_API_BASE} proxy→${API_PROXY_PASS} (from ${UPSTREAM_API})"

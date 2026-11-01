@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from services.transfer_policy_values import PolicyFieldsModel
+
 from services.acknowledgment_contract import (
     AcknowledgmentRefused,
     audit_acknowledgments,
@@ -96,7 +98,7 @@ class MappingItem(BaseModel):
     control_total: bool | None = None
 
 
-class PreflightRequest(BaseModel):
+class PreflightRequest(PolicyFieldsModel):
     columns: list[str]
     column_types: dict[str, str] = Field(default_factory=dict)
     row_count: int = 0
@@ -540,6 +542,9 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             sample_rows=preflight_sample_rows,
             estimated_bytes=body.estimated_bytes,
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
+            # Execute passes the request's mode here too (engine.py); without it
+            # every Validate judged as strict and disagreed with Execute (QA r12).
+            validation_mode=body.validation_mode,
             destination_column_types=dest_column_types,
             destination_live_column_types=destination_live_column_types,
             destination_column_nullability=dest_meta.get("column_nullability") or {},
@@ -786,7 +791,7 @@ async def get_preflight_run(run_id: str):
     return record
 
 
-class ExplainRequest(BaseModel):
+class ExplainRequest(PolicyFieldsModel):
     """A preflight result to explain (as returned by POST /preflight/run).
 
     Prefer ``run_id`` plus a slimed payload. The full Validate result is not
@@ -830,7 +835,7 @@ async def explain_preflight(body: ExplainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class SchemaDriftRequest(BaseModel):
+class SchemaDriftRequest(PolicyFieldsModel):
     old_schema: dict[str, Any] = Field(default_factory=dict)
     new_schema: dict[str, Any] = Field(default_factory=dict)
     dest_db: str = ""

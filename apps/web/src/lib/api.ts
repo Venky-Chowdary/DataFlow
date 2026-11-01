@@ -2290,7 +2290,7 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
 }
 
 export async function exportDatawrapManifest(): Promise<Blob> {
-  const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
+  const res = await apiFetch(`${API_BASE}/schedules/export/manifest?format=yaml`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export datawrap.yaml"));
   return res.blob();
 }
@@ -4819,7 +4819,7 @@ export type ProofLedger = {
   }[];
   integrity_comparison: {
     dimension: string;
-    dataflow: string;
+    datawrap: string;
     industry_elt: string;
     proof: string;
   }[];

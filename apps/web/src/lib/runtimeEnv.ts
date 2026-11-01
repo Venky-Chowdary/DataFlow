@@ -10,17 +10,12 @@ export function isLocalHost(): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
 }
 
-/** Railway / custom prod hosts — never show local npm run instructions. */
+/** Deployed hosts (any production build) — never show local npm run instructions. */
 export function isDeployedHost(): boolean {
   if (typeof window === "undefined") return Boolean(import.meta.env.PROD);
   const host = window.location.hostname;
   if (isLocalHost()) return false;
-  return (
-    host.endsWith(".railway.app")
-    || host.endsWith(".up.railway.app")
-    || host.endsWith(".datawrap.io")
-    || Boolean(import.meta.env.PROD)
-  );
+  return host.endsWith(".datawrap.io") || Boolean(import.meta.env.PROD);
 }
 
 export function apiEnvLabel(online: boolean): string {

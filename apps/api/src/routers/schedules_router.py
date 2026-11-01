@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.transfer_policy_values import PolicyFieldsModel
 from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.brand import PRODUCT_SLUG
@@ -60,16 +61,9 @@ SyncMode = Literal[
     "reverse_etl",
 ]
 IntervalPreset = Literal["hourly", "daily", "weekly"]
-SchemaPolicy = Literal[
-    "manual_review",
-    "propagate_columns",
-    "propagate_all",
-    "pause_on_change",
-    "type_locked",
-]
 
 
-class ScheduleCreate(BaseModel):
+class ScheduleCreate(PolicyFieldsModel):
     name: str = Field(..., min_length=1, max_length=120)
     source_connector_id: str
     source_table: str
@@ -80,7 +74,7 @@ class ScheduleCreate(BaseModel):
     timezone: str = "UTC"
     sync_mode: SyncMode = "full_refresh_overwrite"
     validation_mode: str = "strict"
-    schema_policy: SchemaPolicy = "manual_review"
+    schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
     write_via_staging: bool = False
     priority_column: str = ""
@@ -143,7 +137,7 @@ class ScheduleCreate(BaseModel):
         )
 
 
-class ScheduleUpdate(BaseModel):
+class ScheduleUpdate(PolicyFieldsModel):
     name: Optional[str] = None
     source_connector_id: Optional[str] = None
     source_table: Optional[str] = None
@@ -156,7 +150,7 @@ class ScheduleUpdate(BaseModel):
     timezone: Optional[str] = None
     sync_mode: Optional[SyncMode] = None
     validation_mode: Optional[str] = None
-    schema_policy: Optional[SchemaPolicy] = None
+    schema_policy: Optional[str] = None
     backfill_new_fields: Optional[bool] = None
     write_via_staging: Optional[bool] = None
     priority_column: Optional[str] = None
@@ -296,6 +290,13 @@ class ScheduleResponse(BaseModel):
     #: Why the store saved this schedule differently from the request (e.g.
     #: "Created disabled: ..."); empty once it no longer applies.
     enabled_note: str = ""
+    #: One word for whether this schedule will fire: ``paused`` (disabled),
+    #: ``running``, ``scheduled`` (next_run_at is set) or ``stalled`` (enabled
+    #: but nothing will fire until a human acts). ``stalled_reason`` says why
+    #: and what clears it — enabled=true with next_run_at=null was the only
+    #: signal before (QA r12 Mongo D9).
+    state: str = ""
+    stalled_reason: str = ""
     #: What this write must tell the caller without refusing it (draft saved
     #: disabled, source table unverifiable). Empty on reads.
     warnings: list[str] = Field(default_factory=list)
@@ -315,6 +316,9 @@ class ScheduleResponse(BaseModel):
         from services.schedule_store import visible_next_run_at
 
         data["next_run_at"] = visible_next_run_at(s)
+        from services.schedule_store import schedule_run_state
+
+        data["state"], data["stalled_reason"] = schedule_run_state(s)
         data["warnings"] = list(warnings or [])
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
@@ -390,6 +394,8 @@ class ScheduleSummaryResponse(BaseModel):
     approval_finding: str = ""
     approvable: bool = False
     authorized: bool = False
+    state: str = ""
+    stalled_reason: str = ""
     # Due but not started: how late, and exactly what holds the one-writer
     # claim (schedule + job). "Next run in the past" alone was a dead end.
     overdue_seconds: int = 0
@@ -444,13 +450,18 @@ async def schedule_intervals():
     }
 
 
-@router.get("/export/dataflow")
+@router.get("/export/manifest")
+@router.get("/export/dataflow")  # pre-rename path, kept for API and CLI clients
 def export_dataflow_manifest(
     request: Request,
     format: Literal["yaml", "json"] = "yaml",
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Export schedules (+ contracts) visible in this workspace as dataflow.yaml."""
+    """Export schedules (+ contracts) visible in this workspace as a GitOps manifest.
+
+    ``/export/manifest`` is the path the web app calls (QA r12 #4b: no old
+    brand in the bundle); ``/export/dataflow`` answers the same for older clients.
+    """
     from services.gitops_manifest import build_dataflow_manifest
     from services.team_store import require_workspace_isolation
 

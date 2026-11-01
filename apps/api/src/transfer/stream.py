@@ -31,6 +31,7 @@ from connectors.writer_common import (  # noqa: E402
     transform_error_policy_for_validation_mode,
 )
 from services.keyset_pagination import header_column_index  # noqa: E402
+from services.column_digest import stamp_source as stamp_source_columns  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -2983,6 +2984,7 @@ def _stream_database_transfer_impl(
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
+        stamp_source_columns(run.tally.dest_summary, write_pass_fp, final_checksum)
         run.cfg.phase_profile.add(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=write_pass_fp.total
         )
@@ -3281,6 +3283,7 @@ def _stream_database_transfer_impl(
                     alignment.get("identity_hash_aligned")
                 )
             final_checksum = fp_accumulator.digest()
+            stamp_source_columns(run.tally.dest_summary, fp_accumulator, final_checksum)
             run.tally.dest_summary["checksum_mode"] = "source_reread"
             run.tally.dest_summary["source_independently_reread"] = True
             note = (
@@ -3309,6 +3312,7 @@ def _stream_database_transfer_impl(
             )
     else:
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
+        stamp_source_columns(run.tally.dest_summary, write_pass_fp, final_checksum)
         run.tally.dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"
         run.tally.dest_summary["source_independently_reread"] = False
         run.tally.dest_summary["identity_hash_aligned"] = False

@@ -1,5 +1,9 @@
-"""X-41 LIVE: engine-copy rollback honesty — a table this run created must
-be dropped and the message must say so.
+"""X-41 LIVE: engine-copy rollback honesty — the undo must classify the
+pre-run state correctly and the message must say what happened to the table.
+
+QA round 12 changed the contract for a failed *validation* on an overwrite:
+the table this run created is kept for inspection (it used to be dropped),
+and the message says where the data is.
 
 Live evidence (loop probes on 6669447d): on the in-engine copy route
 ("Row count verified by engine copy") — PG→MSSQL, PG→MySQL, PG→SQLite —
@@ -243,6 +247,26 @@ def _dest_exists(engine: str, cfg: dict[str, Any], table: str) -> bool:
         conn.close()
 
 
+def _drop_dest(engine: str, cfg: dict[str, Any], table: str) -> None:
+    """The kept-for-inspection table must not leak into the next case."""
+    if engine in {"sqlite", "duckdb"}:
+        return  # per-test tmp_path file
+    if engine == "mysql":
+        conn = _mysql_conn(cfg)
+        try:
+            conn.cursor().execute(f"DROP TABLE IF EXISTS `{table}`")
+            conn.commit()
+        finally:
+            conn.close()
+        return
+    conn = _mssql_conn(cfg)
+    try:
+        conn.cursor().execute(f"DROP TABLE IF EXISTS dbo.[{table}]")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _tamper_dest(engine: str, cfg: dict[str, Any], table: str, branch: str) -> None:
     """Inject the post-write fault the verify step must catch."""
     if engine == "sqlite":
@@ -330,11 +354,12 @@ def _endpoint(engine: str, cfg: dict[str, Any], table: str) -> EndpointConfig:
     ],
 )
 @pytest.mark.parametrize("branch", ["checksum", "sample"])
-def test_x41_engine_copy_created_table_dropped_on_failed_verify(
+def test_x41_engine_copy_created_table_kept_on_failed_verify(
     src_engine: str, dest_engine: str, branch: str, monkeypatch, tmp_path
 ):
-    """A tampered engine-copy run must fail, drop the table it created,
-    say so, and report records_transferred=0 — the row-path (duckdb)
+    """A tampered engine-copy run must fail and keep the table it created
+    for inspection (QA round 12: a failed validation no longer drops it),
+    say where, and report the rows it holds — the row-path (duckdb)
     control asserts the identical contract."""
     if src_engine == "postgresql":
         src_cfg = _cfg("DATAFLOW_TEST_PG", 5432)
@@ -361,6 +386,7 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
             pytest.skip("set DATAFLOW_TEST_MSSQL_* (reachable)")
         dest_cfg = c
 
+    _drop_dest(dest_engine, dest_cfg, dest_table)
     src_table = f"x41src_{src_engine}"
     if src_engine == "postgresql":
         _seed_pg_source(src_cfg, src_table)
@@ -396,22 +422,23 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
     assert result.success is False, (
         f"tampered run ({branch}) should fail verify, got success: {result}"
     )
-    # X-41: the table this run created must be gone, and the message must
-    # say created-and-dropped — never "was empty before … left behind".
-    assert not _dest_exists(dest_engine, dest_cfg, dest_table), (
-        f"{dest_engine}: table {dest_table} created by this run was left behind"
+    # X-41 / QA round 12: the table this run created is kept for inspection
+    # and the message says where — never "dropped", never "was empty before".
+    assert _dest_exists(dest_engine, dest_cfg, dest_table), (
+        f"{dest_engine}: table {dest_table} created by this run was dropped"
     )
+    _drop_dest(dest_engine, dest_cfg, dest_table)
     text = f"{getattr(result, 'message', '')} {getattr(result, 'error', '')}"
-    assert "no such table before this run" in text.lower() or (
-        "this run created was dropped" in text.lower()
-        or "table this run created" in text.lower()
-    ), f"expected created-and-dropped wording, got: {text[:300]}"
+    assert "data kept at" in text.lower() and dest_table in text, (
+        f"expected kept-for-inspection wording, got: {text[:300]}"
+    )
+    assert "was dropped" not in text.lower(), text[:300]
     assert "was empty before" not in text.lower(), (
         f"rollback misread a run-created table as pre-existing-empty: {text[:300]}"
     )
     assert getattr(result, "records_transferred", None) is not None and int(
         result.records_transferred
-    ) == 0, (
-        "a failed, rolled-back job must not report the attempted write as "
-        f"transferred rows: {getattr(result, 'records_transferred', None)!r}"
+    ) > 0, (
+        "a failed job whose rows were kept reports the rows the table holds: "
+        f"{getattr(result, 'records_transferred', None)!r}"
     )

@@ -136,14 +136,9 @@ def test_mcp_manifest_names_datawrap():
 #: Web tokens that are code, not text a person reads.
 WEB_ALLOWED = [
     re.compile(r"@dataflow/design-system"),  # npm workspace package name
-    re.compile(r"lp-compare-(brand|cell)--dataflow"),  # CSS class
-    re.compile(r"\bdataflow(Rps|_ratio)\b|\bc\.dataflow_ratio\b|\brow\.dataflow\b|\bf\.dataflow\b"),  # data keys
-    # Data keys of the landing comparison table and the benchmark API payload.
-    re.compile(r"\{\s*label:\s*\"[^\"]*\",\s*dataflow:"),
-    re.compile(r"^\s*dataflow:\s*string;"),
-    re.compile(r"dataflow-jsonld"),  # DOM id of the JSON-LD script tag
-    re.compile(r"/schedules/export/dataflow"),  # API route path (kept for clients)
-    re.compile(r"DATAFLOW_API_BASE\?: string"),  # legacy window var type
+    re.compile(r"\bdataflow(Rps|_ratio)\b|\bc\.dataflow_ratio\b"),  # data keys
+    # QA r12 #4b: the comparison/benchmark keys, the JSON-LD id, the export
+    # path and the legacy window variable no longer ship; they are not allowed.
     # BigQuery default dataset: a persistent object in the customer's project.
     # The API still writes there when no dataset is given (services.brand).
     re.compile(r"bigquery:\s*\"dataflow\""),

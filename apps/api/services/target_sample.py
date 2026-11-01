@@ -84,6 +84,9 @@ def numeric_sample_key_variants(key: Any) -> set[Any]:
     return out
 
 
+from services.mongo_key_variants import mongo_instant_key_variants  # noqa: E402
+
+
 def mongo_query_key_variants(key: Any) -> set[Any]:
     """Mongo ``$in`` variants: write-path numbers plus ObjectId hex.
 
@@ -91,6 +94,7 @@ def mongo_query_key_variants(key: Any) -> set[Any]:
     locale money and did not refuse Auto grouping.
     """
     out = set(numeric_sample_key_variants(key))
+    out.update(mongo_instant_key_variants(key))
     try:
         from bson import ObjectId
 

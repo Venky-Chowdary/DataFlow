@@ -99,8 +99,6 @@ const JSON_LD_ID = "datawrap-jsonld";
 
 function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, description: string) {
   const existing = document.getElementById(JSON_LD_ID);
-  // Remove legacy id from pre-rebrand sessions.
-  document.getElementById("dataflow-jsonld")?.remove();
   if (meta.robots?.includes("noindex")) {
     existing?.remove();
     return;

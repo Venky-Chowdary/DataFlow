@@ -3115,6 +3115,12 @@ class UniversalTransferEngine:
             else:
                 columns, schema, total_rows, sample_rows = peeked
                 initial_batch = None
+            if request.stream_contracts and columns:
+                from services.sync_cursor import bind_contract_columns_to_source
+
+                request.stream_contracts = bind_contract_columns_to_source(
+                    request.stream_contracts, list(columns)
+                )
             if request.limit > 0 and total_rows is not None:
                 total_rows = min(total_rows, request.limit)
             if kafka_nothing_past_committed(request, total_rows):

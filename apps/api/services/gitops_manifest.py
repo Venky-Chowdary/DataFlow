@@ -11,6 +11,12 @@ from __future__ import annotations
 from typing import Any
 
 from services.workspace_filter import WorkspaceFilter
+from services.brand import (
+    GITOPS_API_VERSION,
+    GITOPS_GENERATOR,
+    GITOPS_MANIFEST_KIND,
+    LEGACY_GITOPS_MANIFEST_KINDS,
+)
 
 
 class WorkspaceScopeError(ValueError):
@@ -151,7 +157,7 @@ def contract_artifact(contract: Any) -> dict[str, Any]:
     """Single-file ``dataflow-contract.yaml`` shape (kind + metadata + spec)."""
     spec = contract_spec(contract)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "DataContract",
         "metadata": {
             "name": spec.get("name") or spec.get("id"),
@@ -165,7 +171,7 @@ def contract_artifact(contract: Any) -> dict[str, Any]:
 def schedule_artifact(sched: Any) -> dict[str, Any]:
     spec = schedule_spec(sched)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "PipelineSchedule",
         "metadata": {"name": spec.get("name"), "id": spec.get("id")},
         "spec": spec,
@@ -194,7 +200,7 @@ def mapping_bundle_artifact(contract: Any) -> dict[str, Any]:
     """``dataflow-mapping-bundle.yaml`` — import always lands as DRAFT contract."""
     spec = mapping_bundle_spec(contract)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "MappingBundle",
         "metadata": {
             "name": spec.get("name") or spec.get("id"),
@@ -263,9 +269,9 @@ def build_dataflow_manifest(
                 resources.append(mapping_bundle_artifact(contract))
 
     return {
-        "apiVersion": "dataflow.space/v1",
-        "kind": MANIFEST_KIND,
-        "metadata": {"generator": "dataflow-gitops-export"},
+        "apiVersion": GITOPS_API_VERSION,
+        "kind": GITOPS_MANIFEST_KIND,
+        "metadata": {"generator": GITOPS_GENERATOR},
         "resources": resources,
     }
 
@@ -276,7 +282,7 @@ def _normalize_resources(payload: dict[str, Any] | list[Any]) -> list[dict[str, 
     if not isinstance(payload, dict):
         return []
     kind = str(payload.get("kind") or "")
-    if kind in MANIFEST_KINDS:
+    if kind == GITOPS_MANIFEST_KIND or kind in LEGACY_GITOPS_MANIFEST_KINDS:
         raw = payload.get("resources") or []
         return [r for r in raw if isinstance(r, dict)]
     if kind in RESOURCE_KINDS:
@@ -322,6 +328,27 @@ def _coerce_payload(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]
     return payload
 
 
+def _assert_policy_values(resources: list[dict[str, Any]]) -> None:
+    """Refuse the whole manifest on an unknown validation_mode / schema_policy.
+
+    QA r12 bugs 6/7. Checked before anything is created, so CD never half-applies
+    a manifest, and ``plan`` reports what ``apply`` would refuse. The route
+    turns the ``ValueError`` into a 422.
+    """
+    from services.transfer_policy_values import PolicyValueError, canonicalize_policy_fields
+
+    for resource in resources:
+        kind, ident = _resource_identity(resource)
+        if kind != "PipelineSchedule":
+            continue
+        spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
+        try:
+            canonicalize_policy_fields(spec)
+        except PolicyValueError as exc:
+            label = str(spec.get("name") or spec.get("id") or ident or "").strip()
+            raise ValueError(f"PipelineSchedule {label!r}: {exc}") from exc
+
+
 def plan_manifest(
     payload: dict[str, Any] | list[Any] | str,
     *,
@@ -338,6 +365,7 @@ def plan_manifest(
         from src.services.contract_store import get_contract_store
 
     resources = _normalize_resources(payload)
+    _assert_policy_values(resources)
     actions: list[dict[str, Any]] = []
     scope = (workspace_id or "").strip()
     visible_schedules = [
@@ -506,6 +534,7 @@ def apply_manifest(
         from src.services.data_contract import ContractStatus, DataContract
 
     resources = _normalize_resources(payload)
+    _assert_policy_values(resources)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
 

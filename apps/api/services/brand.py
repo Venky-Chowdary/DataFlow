@@ -41,6 +41,15 @@ LEGACY_PRODUCT_NAME = "DataFlow"
 #: (downloads, the MCP server name). Not used for objects in customer systems.
 PRODUCT_SLUG = "datawrap"
 
+#: GitOps manifests (QA r12 #4a). What an export writes: Datawrap names only.
+GITOPS_API_VERSION = "datawrap.io/v1"
+GITOPS_GENERATOR = f"{PRODUCT_SLUG}-gitops-export"
+GITOPS_MANIFEST_KIND = "DatawrapManifest"
+#: What an import still reads: manifests exported, or written by the CLI,
+#: before the rename. Accepted exactly like the current names; never written.
+LEGACY_GITOPS_API_VERSIONS = ("dataflow.space/v1",)
+LEGACY_GITOPS_MANIFEST_KINDS = ("DataFlowManifest",)
+
 #: ``DATAWRAP_BRAND_OBJECT_NAMES`` (``DATAFLOW_BRAND_OBJECT_NAMES`` also read).
 OBJECT_NAMES_FLAG = "BRAND_OBJECT_NAMES"
 

@@ -2606,7 +2606,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   align-items: center;
 }
 
-.lp-compare-brand--dataflow { color: #0d9488; }
+.lp-compare-brand--datawrap { color: #0d9488; }
 
 .lp-compare-yes {
   display: inline-flex;
@@ -2619,7 +2619,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-compare-no { color: #a3a3a3; }
 .lp-compare-partial { color: #b45309; font-weight: 600; }
 
-.lp-compare-cell--dataflow { background: #f0fdfa; }
+.lp-compare-cell--datawrap { background: #f0fdfa; }
 
 .lp-compare-disclaimer {
   margin: 12px 0 0;

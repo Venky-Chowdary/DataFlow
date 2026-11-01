@@ -368,8 +368,9 @@ def test_chain_has_its_own_key_and_login_rotation_breaks_nothing(admin, chain, m
     assert report["categories"]["tampering"] == 0
     under_retired = coll.count_documents({"key_id": key_id_for(AUDIT_KEY.encode())})
     assert under_retired >= 2
-    assert report["categories"]["key_mismatch"] == under_retired
+    assert report["categories"]["unverifiable_key_lost"] == under_retired
     assert {f["kind"] for f in report["findings"]} == {"key_mismatch"}
+    assert report["status"] == "verified_with_exceptions"
 
 
 def test_unset_audit_key_never_signs_with_the_login_secret(chain, monkeypatch):
@@ -428,14 +429,14 @@ def test_verify_reports_forks_and_key_mismatches_apart_from_tampering(admin, cha
     assert report["verified"] is False
     cats = report["categories"]
     assert cats["tampering"] == 1, report["findings"]
-    assert cats["key_mismatch"] == 1
+    assert cats["unverifiable_key_lost"] == 1
     assert cats["fork"] >= 1
     assert report["tampering_detected"] is True
     by_kind = {}
     for f in report["findings"]:
         by_kind.setdefault(f["category"], set()).add(f["event_id"])
     assert by_kind["tampering"] == {tampered["id"]}
-    assert by_kind["key_mismatch"] == {foreign["id"]}
+    assert by_kind["unverifiable_key_lost"] == {foreign["id"]}
     assert seeded[2]["id"] in by_kind["fork"]
     # The historic fork must not be reported as a deletion (broken_link).
     assert not [f for f in report["findings"] if f["kind"] == "broken_link"]
