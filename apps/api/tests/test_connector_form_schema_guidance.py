@@ -100,7 +100,8 @@ def test_snowflake_setup_notes_come_from_the_ui_guide() -> None:
     notes = titles["Snowflake connection setup notes"]
     assert "account identifier" in notes.lower()
     assert "250001" in notes
-    assert "PostgreSQL connection setup notes" not in titles, "generic guide must not masquerade as engine notes"
+    pg_notes = titles.get("PostgreSQL connection setup notes", "")
+    assert "5432" in pg_notes, "engine notes must be PostgreSQL-specific, not the generic fallback"
 
 
 def test_describe_fields_orders_required_optional_toggles() -> None:

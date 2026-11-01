@@ -472,6 +472,84 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
     ],
     links: [{ label: "SQLAlchemy dialect URLs", url: "https://docs.sqlalchemy.org/en/20/core/engines.html" }],
   },
+  gitlab: {
+    title: "Set up GitLab",
+    steps: [
+      "GitLab → User Settings → Personal access tokens → create one with read_api scope.",
+      "Self-managed GitLab: enter your instance URL (https://gitlab.your-company.com/api/v4); gitlab.com works by default.",
+      "The token reads projects, issues, and merge requests across the groups it can see — use a bot/service account for full visibility.",
+      "Test proves /projects answers — 401 is the token, 404 is the base URL.",
+    ],
+    links: [
+      { label: "GitLab personal access tokens", url: "https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html" },
+      { label: "GitLab REST API", url: "https://docs.gitlab.com/ee/api/rest/" },
+    ],
+  },
+  mailchimp: {
+    title: "Set up Mailchimp",
+    steps: [
+      "Mailchimp → Account → Extras → API keys → Create A Key.",
+      "The data center is the key's suffix (key-us21 → dc us21) — it is derived automatically if you only paste the key.",
+      "Any username works for Mailchimp basic auth — the key is the credential.",
+      "Test proves /lists answers — 401 is the key, not the data center.",
+    ],
+    links: [
+      { label: "Mailchimp Marketing API", url: "https://mailchimp.com/developer/marketing/api/" },
+      { label: "About API keys", url: "https://mailchimp.com/help/about-api-keys/" },
+    ],
+  },
+  pipedrive: {
+    title: "Set up Pipedrive",
+    steps: [
+      "Pipedrive → Settings → Personal preferences → API → copy your personal API token.",
+      "Domain is your company subdomain — acme in acme.pipedrive.com.",
+      "Company API tokens (admin-issued) also work and see shared data.",
+      "Test proves /deals answers — 401 is the token.",
+    ],
+    links: [
+      { label: "Pipedrive API reference", url: "https://developers.pipedrive.com/docs/api/v1" },
+      { label: "Find your API token", url: "https://support.pipedrive.com/en/article/how-to-find-the-api-token" },
+    ],
+  },
+  klaviyo: {
+    title: "Set up Klaviyo",
+    steps: [
+      "Klaviyo → Settings → API keys → Create Private API Key with read access to the objects you sync.",
+      "Private keys start with pk_ — public site keys cannot read the API.",
+      "The revision header is pinned to 2024-10-15; no extra config needed.",
+      "Test proves /lists answers — 401 is the private key.",
+    ],
+    links: [
+      { label: "Klaviyo API overview", url: "https://developers.klaviyo.com/en/reference/api-overview" },
+      { label: "Create a private API key", url: "https://help.klaviyo.com/hc/en-us/articles/7423954176283" },
+    ],
+  },
+  servicenow: {
+    title: "Set up ServiceNow",
+    steps: [
+      "Instance is your subdomain — dev123 in dev123.service-now.com.",
+      "Use a service account with the rest_api_explorer or table-level read roles (itil for incidents, approver_user for change).",
+      "OAuth is also supported by ServiceNow — basic auth here needs an integration user, not SSO.",
+      "Test proves the Table API answers — 401 is credentials, ACL-denied reads return an empty result.",
+    ],
+    links: [
+      { label: "ServiceNow Table API", url: "https://www.servicenow.com/docs/bundle/zurich-api-reference/page/integrate/inbound-rest/concept/c_TableAPI.html" },
+      { label: "REST API roles", url: "https://www.servicenow.com/docs/bundle/zurich-api-reference/page/integrate/inbound-rest/concept/c_RESTAPI.html" },
+    ],
+  },
+  freshdesk: {
+    title: "Set up Freshdesk",
+    steps: [
+      "Freshdesk → Profile settings → View API key — the key is the credential (password stays X).",
+      "Domain is your helpdesk subdomain — acme in acme.freshdesk.com.",
+      "The key inherits the agent's permissions — use an agent that can read tickets/contacts.",
+      "Test proves /tickets answers — 401 is the key or domain.",
+    ],
+    links: [
+      { label: "Freshdesk API reference", url: "https://developers.freshdesk.com/api/" },
+      { label: "Where is my API key", url: "https://support.freshdesk.com/en/support/solutions/articles/215517" },
+    ],
+  },
   singer_tap: {
     title: "Set up a Singer tap",
     steps: [

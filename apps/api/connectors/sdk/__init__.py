@@ -771,6 +771,54 @@ def _load_builtin_connectors() -> None:
             "connectors.sdk.intercom",
             type(exc).__name__,
         )
+    try:
+        from connectors.sdk import gitlab  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.gitlab",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import mailchimp  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.mailchimp",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import pipedrive  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.pipedrive",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import klaviyo  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.klaviyo",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import servicenow  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.servicenow",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import freshdesk  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.freshdesk",
+            type(exc).__name__,
+        )
 
 
 _load_builtin_connectors()

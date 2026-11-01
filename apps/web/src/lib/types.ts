@@ -1837,6 +1837,12 @@ export const CONNECTOR_CATALOG = [
   { id: "github", label: "GitHub", port: 443, sourceOnly: true },
   { id: "jira", label: "Jira Cloud", port: 443, sourceOnly: true },
   { id: "intercom", label: "Intercom", port: 443, sourceOnly: true },
+  { id: "gitlab", label: "GitLab", port: 443, sourceOnly: true },
+  { id: "mailchimp", label: "Mailchimp", port: 443, sourceOnly: true },
+  { id: "pipedrive", label: "Pipedrive", port: 443, sourceOnly: true },
+  { id: "klaviyo", label: "Klaviyo", port: 443, sourceOnly: true },
+  { id: "servicenow", label: "ServiceNow", port: 443, sourceOnly: true },
+  { id: "freshdesk", label: "Freshdesk", port: 443, sourceOnly: true },
   { id: "rest_api", label: "REST / OpenAPI", port: 443 },
   { id: "graphql", label: "GraphQL", port: 443 },
 ] as const;

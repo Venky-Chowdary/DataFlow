@@ -1096,6 +1096,41 @@
       "Test proves the file opens and parses — a missing path is not Connected."
     ]
   },
+  "freshdesk": {
+    "label": "Freshdesk",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Freshdesk API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "domain",
+            "label": "Helpdesk domain",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "acme (acme.freshdesk.com)"
+          },
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Freshdesk → Profile settings → View API key — the key is the credential (password stays X).",
+      "Domain is your helpdesk subdomain — acme in acme.freshdesk.com.",
+      "The key inherits the agent's permissions — use an agent that can read tickets/contacts.",
+      "Test proves /tickets answers — 401 is the key or domain."
+    ]
+  },
   "gcs": {
     "label": "Google Cloud Storage",
     "default_auth_mode": "service_account",
@@ -1172,6 +1207,41 @@
       "Scope it to the repositories you sync with contents:read and metadata:read.",
       "Enter the token and the owner/repo or organization to read.",
       "Test proves the token answers — 401 is a bad token, 404 means the repo is not in scope."
+    ]
+  },
+  "gitlab": {
+    "label": "GitLab",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "GitLab personal access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "base_url",
+            "label": "GitLab base URL",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "https://gitlab.com/api/v4 (default)"
+          },
+          {
+            "key": "api_key",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "GitLab → User Settings → Personal access tokens → create one with read_api scope.",
+      "Self-managed GitLab: enter your instance URL (https://gitlab.your-company.com/api/v4); gitlab.com works by default.",
+      "The token reads projects, issues, and merge requests across the groups it can see — use a bot/service account for full visibility.",
+      "Test proves /projects answers — 401 is the token, 404 is the base URL."
     ]
   },
   "html": {
@@ -1549,6 +1619,69 @@
       "Auth: PLAIN/SCRAM username+password (Confluent API key + secret), or TLS certs for mTLS clusters.",
       "The principal needs Read/Describe on source topics or Write/Create on destination topics.",
       "Test proves a metadata call answers — SASL authentication failed is the key, timeout is the listener/VPC."
+    ]
+  },
+  "klaviyo": {
+    "label": "Klaviyo",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Klaviyo private API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Private API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "pk_…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Klaviyo → Settings → API keys → Create Private API Key with read access to the objects you sync.",
+      "Private keys start with pk_ — public site keys cannot read the API.",
+      "The revision header is pinned to 2024-10-15; no extra config needed.",
+      "Test proves /lists answers — 401 is the private key."
+    ]
+  },
+  "mailchimp": {
+    "label": "Mailchimp",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Mailchimp API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "dc",
+            "label": "Data center",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "us21 (derived from the key if blank)"
+          },
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Mailchimp → Account → Extras → API keys → Create A Key.",
+      "The data center is the key's suffix (key-us21 → dc us21) — it is derived automatically if you only paste the key.",
+      "Any username works for Mailchimp basic auth — the key is the credential.",
+      "Test proves /lists answers — 401 is the key, not the data center."
     ]
   },
   "milvus": {
@@ -2219,6 +2352,41 @@
     "common_fields": [],
     "setup_steps": []
   },
+  "pipedrive": {
+    "label": "Pipedrive",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Pipedrive API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "domain",
+            "label": "Company domain",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "acme (acme.pipedrive.com)"
+          },
+          {
+            "key": "api_key",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Pipedrive → Settings → Personal preferences → API → copy your personal API token.",
+      "Domain is your company subdomain — acme in acme.pipedrive.com.",
+      "Company API tokens (admin-issued) also work and see shared data.",
+      "Test proves /deals answers — 401 is the token."
+    ]
+  },
   "postgresql": {
     "label": "PostgreSQL",
     "default_auth_mode": "user_pass",
@@ -2724,6 +2892,48 @@
       "Or create a Connected App (Setup → App Manager → New Connected App) with OAuth scopes api and refresh_token for client-credentials login.",
       "Enter the instance URL — https://yourorg.salesforce.com (or .sandbox for sandboxes).",
       "Test proves OAuth login works — LOGIN_MUST_USE_SECURITY_TOKEN means append the token to the password."
+    ]
+  },
+  "servicenow": {
+    "label": "ServiceNow",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "ServiceNow integration user",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "instance",
+            "label": "Instance",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "dev123 (dev123.service-now.com)"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Instance is your subdomain — dev123 in dev123.service-now.com.",
+      "Use a service account with the rest_api_explorer or table-level read roles (itil for incidents, approver_user for change).",
+      "OAuth is also supported by ServiceNow — basic auth here needs an integration user, not SSO.",
+      "Test proves the Table API answers — 401 is credentials, ACL-denied reads return an empty result."
     ]
   },
   "sftp": {

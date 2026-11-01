@@ -48,8 +48,49 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
             "access_token",
             config.get("pat") or config.get("api_key") or config.get("token") or "",
         )
+    elif driver == "gitlab":
+        config.setdefault(
+            "api_key",
+            config.get("pat") or config.get("token") or "",
+        )
+    elif driver == "mailchimp":
+        if not config.get("dc"):
+            # Mailchimp DC is the API-key suffix (key-us21); derive it when
+            # operators only paste the key.
+            key = str(config.get("api_key") or config.get("password") or "")
+            config["dc"] = key.rsplit("-", 1)[-1] if "-" in key else ""
+        config.setdefault("username", "datawrap")
+        config.setdefault("password", config.get("api_key") or "")
+    elif driver == "pipedrive":
+        config.setdefault(
+            "api_key",
+            config.get("api_token") or config.get("token") or "",
+        )
+        config.setdefault("domain", config.get("company_domain") or config.get("host") or "")
+    elif driver == "klaviyo":
+        config.setdefault(
+            "api_key",
+            config.get("private_key") or config.get("token") or "",
+        )
+    elif driver == "servicenow":
+        config.setdefault("username", config.get("user") or "")
+        config.setdefault("password", config.get("api_key") or config.get("password") or "")
+        config.setdefault("instance", config.get("host") or "")
+    elif driver == "freshdesk":
+        config.setdefault(
+            "username",
+            config.get("api_key") or config.get("token") or "",
+        )
+        config.setdefault("password", "X")
+        config.setdefault("domain", config.get("host") or "")
     if not config.get("base_url"):
-        config["base_url"] = config.get("url") or config.get("host") or ""
+        # Templated manifests ({instance}/{domain}/{dc}) take their host piece
+        # from the named field above — feeding ``host`` into base_url would
+        # bypass the template and drop the scheme.
+        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk"}:
+            config["base_url"] = config.get("url") or config.get("host") or ""
+        else:
+            config["base_url"] = config.get("url") or ""
     return config
 
 

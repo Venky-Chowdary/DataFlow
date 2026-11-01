@@ -722,6 +722,89 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         (values) => required(values, "access_token", "Access token"),
       ),
     );
+  } else if (resolved === "gitlab") {
+    authModes.push(
+      auth(
+        "api_key",
+        "GitLab personal access token",
+        [
+          text("base_url", "GitLab base URL", {
+            optional: true,
+            placeholder: "https://gitlab.com/api/v4 (default)",
+          }),
+          password("api_key", "Personal access token"),
+        ],
+        (values) => required(values, "api_key", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "mailchimp") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Mailchimp API key",
+        [
+          text("dc", "Data center", {
+            optional: true,
+            placeholder: "us21 (derived from the key if blank)",
+          }),
+          password("api_key", "API key"),
+        ],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "pipedrive") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Pipedrive API token",
+        [
+          text("domain", "Company domain", { placeholder: "acme (acme.pipedrive.com)" }),
+          password("api_key", "API token"),
+        ],
+        (values) =>
+          required(values, "domain", "Company domain")
+          || required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "klaviyo") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Klaviyo private API key",
+        [password("api_key", "Private API key", { placeholder: "pk_…" })],
+        (values) => required(values, "api_key", "Private API key"),
+      ),
+    );
+  } else if (resolved === "servicenow") {
+    authModes.push(
+      auth(
+        "user_pass",
+        "ServiceNow integration user",
+        [
+          text("instance", "Instance", { placeholder: "dev123 (dev123.service-now.com)" }),
+          text("username", "Username"),
+          password("password", "Password"),
+        ],
+        (values) =>
+          required(values, "instance", "Instance")
+          || required(values, "username", "Username")
+          || required(values, "password", "Password"),
+      ),
+    );
+  } else if (resolved === "freshdesk") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Freshdesk API key",
+        [
+          text("domain", "Helpdesk domain", { placeholder: "acme (acme.freshdesk.com)" }),
+          password("api_key", "API key"),
+        ],
+        (values) =>
+          required(values, "domain", "Helpdesk domain")
+          || required(values, "api_key", "API key"),
+      ),
+    );
   }
 
   // Build auth modes for each connector
@@ -910,7 +993,8 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
   if (resolved === "github") return "pat";
-  if (["jira", "intercom"].includes(resolved)) return "api_key";
+  if (resolved === "servicenow") return "user_pass";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
