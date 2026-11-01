@@ -58,8 +58,8 @@ class PaginatorSpec:
             raise ValueError("offset paginator requires offset_param")
         if self.type == "page" and not self.page_param:
             raise ValueError("page paginator requires page_param")
-        if self.stop_path and self.type != "offset":
-            raise ValueError("stop_path applies only to offset pagination")
+        if self.stop_path and self.type not in {"offset", "next_url"}:
+            raise ValueError("stop_path applies only to offset or next_url pagination")
         if self.type == "next_url" and not self.next_url_path:
             raise ValueError("next_url paginator requires next_url_path")
         if self.next_url_path and self.type != "next_url":
@@ -393,6 +393,15 @@ def paginate(
                 and records_seen + len(records) >= record_limit
             ):
                 next_token = None
+        if (
+            paginator.type == "next_url"
+            and paginator.stop_path
+            and page_is_last is True
+        ):
+            # Response-declared terminal page (e.g. Zendesk incremental
+            # end_of_stream): stop before following a self-repeating next
+            # URL that would otherwise count as a pagination error.
+            next_url = ""
         page = Page(
             records=records,
             headers=page_preview.headers,

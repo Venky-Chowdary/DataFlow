@@ -1,73 +1,94 @@
 {
-  "name": "zendesk",
-  "base_url": "https://{domain}.zendesk.com/api/v2",
-  "auth": {
-    "type": "basic"
-  },
-  "defaults": {
+ "name": "zendesk",
+ "base_url": "https://{domain}.zendesk.com/api/v2",
+ "auth": {
+  "type": "basic"
+ },
+ "defaults": {
+  "page_size": 100,
+  "max_pages": 10000
+ },
+ "streams": [
+  {
+   "name": "tickets",
+   "method": "GET",
+   "path": "incremental/tickets",
+   "records_path": "tickets",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next_page",
     "page_size": 100,
-    "max_pages": 10000
+    "page_size_param": "per_page",
+    "stop_path": "end_of_stream"
+   },
+   "cursor": {
+    "field": "generated_timestamp",
+    "request_param": "start_time",
+    "format": "epoch_s",
+    "initial": "0"
+   }
   },
-  "streams": [
-    {
-      "name": "tickets",
-      "method": "GET",
-      "path": "tickets",
-      "records_path": "tickets",
-      "primary_key": [
-        "id"
-      ],
-      "paginator": {
-        "type": "next_url",
-        "next_url_path": "next_page",
-        "page_size": 100,
-        "page_size_param": "per_page"
-      }
-    },
-    {
-      "name": "users",
-      "method": "GET",
-      "path": "users",
-      "records_path": "users",
-      "primary_key": [
-        "id"
-      ],
-      "paginator": {
-        "type": "next_url",
-        "next_url_path": "next_page",
-        "page_size": 100,
-        "page_size_param": "per_page"
-      }
-    },
-    {
-      "name": "organizations",
-      "method": "GET",
-      "path": "organizations",
-      "records_path": "organizations",
-      "primary_key": [
-        "id"
-      ],
-      "paginator": {
-        "type": "next_url",
-        "next_url_path": "next_page",
-        "page_size": 100,
-        "page_size_param": "per_page"
-      }
-    },
-    {
-      "name": "ticket_comments",
-      "method": "GET",
-      "path": "tickets/{ticket_id}/comments",
-      "records_path": "comments",
-      "primary_key": [
-        "id"
-      ],
-      "paginator": {
-        "type": "next_url",
-        "next_url_path": "next_page",
-        "page_size": 100,
-        "page_size_param": "per_page"
-      }
-    }
-  ]
+  {
+   "name": "users",
+   "method": "GET",
+   "path": "incremental/users",
+   "records_path": "users",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next_page",
+    "page_size": 100,
+    "page_size_param": "per_page",
+    "stop_path": "end_of_stream"
+   },
+   "cursor": {
+    "field": "generated_timestamp",
+    "request_param": "start_time",
+    "format": "epoch_s",
+    "initial": "0"
+   }
+  },
+  {
+   "name": "organizations",
+   "method": "GET",
+   "path": "incremental/organizations",
+   "records_path": "organizations",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next_page",
+    "page_size": 100,
+    "page_size_param": "per_page",
+    "stop_path": "end_of_stream"
+   },
+   "cursor": {
+    "field": "generated_timestamp",
+    "request_param": "start_time",
+    "format": "epoch_s",
+    "initial": "0"
+   }
+  },
+  {
+   "name": "ticket_comments",
+   "method": "GET",
+   "path": "tickets/{ticket_id}/comments",
+   "records_path": "comments",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next_page",
+    "page_size": 100,
+    "page_size_param": "per_page"
+   }
+  }
+ ]
 }

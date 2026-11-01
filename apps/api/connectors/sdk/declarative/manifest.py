@@ -63,6 +63,9 @@ class CursorSpec:
     lookback_s: float = 0.0
     request_template: str = ""
     request_location: Literal["query", "body"] = "query"
+    # Sent on the first run when no cursor state exists yet (e.g. Zendesk
+    # incremental export requires start_time; "0" = full export from epoch).
+    initial: str = ""
 
 
 @dataclass(frozen=True)
@@ -330,9 +333,9 @@ def _parse_paginator(
             f"{path}.cursor_location: expected query or body",
             path=f"{path}.cursor_location",
         )
-    if obj.get("stop_path") and obj.get("type", "none") != "offset":
+    if obj.get("stop_path") and obj.get("type", "none") not in {"offset", "next_url"}:
         raise ManifestError(
-            f"{path}.stop_path: supported only for offset pagination",
+            f"{path}.stop_path: supported only for offset or next_url pagination",
             path=f"{path}.stop_path",
         )
     if "initial_token" in obj and obj["initial_token"] is not None and not isinstance(
@@ -486,6 +489,7 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                     "lookback_s",
                     "request_template",
                     "request_location",
+                    "initial",
                 },
                 cursor_path,
             )
@@ -526,6 +530,12 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                     f"{cursor_path}.request_location: body cursors require a POST request_body_template",
                     path=f"{cursor_path}.request_location",
                 )
+            initial = cursor_raw.get("initial", "")
+            if not isinstance(initial, str):
+                raise ManifestError(
+                    f"{cursor_path}.initial: expected a string",
+                    path=cursor_path,
+                )
             cursor = CursorSpec(
                 field=cursor_raw["field"],
                 request_param=cursor_raw["request_param"],
@@ -533,6 +543,7 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                 lookback_s=lookback,
                 request_template=request_template,
                 request_location=request_location,
+                initial=initial,
             )
         paginator = _parse_paginator(
             stream.get("paginator", {"type": "none"}),

@@ -75,6 +75,7 @@ def _records(kind: str, start: int, count: int) -> list[dict]:
                     "subject": f"Zendesk ticket {value}",
                     "status": "open",
                     "updated_at": "2026-01-01T00:00:00Z",
+                    "generated_timestamp": 1700000000 + value,
                 }
             )
         elif kind == "gitlab":
@@ -275,20 +276,30 @@ def _configure_route(
             body={"members": pages[2], "response_metadata": {}}
         )
     elif kind == "zendesk":
-        route = "/tickets"
+        route = "/incremental/tickets"
         first = FixtureResponse(
             body={
                 "tickets": pages[0],
-                "next_page": f"{fixture.base_url}/tickets?page=2",
+                "end_of_stream": False,
+                "next_page": f"{fixture.base_url}/incremental/tickets?page=2",
             }
         )
         second = FixtureResponse(
             body={
                 "tickets": pages[1],
-                "next_page": f"{fixture.base_url}/tickets?page=3",
+                "end_of_stream": False,
+                "next_page": f"{fixture.base_url}/incremental/tickets?page=3",
             }
         )
-        last = FixtureResponse(body={"tickets": pages[2], "next_page": None})
+        # Zendesk keeps emitting a self-repeating next_page even on the
+        # terminal page — end_of_stream is the real stop signal.
+        last = FixtureResponse(
+            body={
+                "tickets": pages[2],
+                "end_of_stream": True,
+                "next_page": f"{fixture.base_url}/incremental/tickets?page=3",
+            }
+        )
     elif kind == "gitlab":
         route = "/issues"
         first = FixtureResponse(
@@ -387,7 +398,7 @@ def _seed_nonempty_destination(
         "jira": "/rest/api/3/search/jql",
         "intercom": "/contacts",
         "slack": "/users.list",
-        "zendesk": "/tickets",
+        "zendesk": "/incremental/tickets",
         "gitlab": "/issues",
         "mailchimp": "/lists",
         "asana": "/workspaces",
@@ -402,7 +413,7 @@ def _seed_nonempty_destination(
     elif kind == "slack":
         body = {"members": record, "response_metadata": {}}
     elif kind == "zendesk":
-        body = {"tickets": record, "next_page": None}
+        body = {"tickets": record, "end_of_stream": True, "next_page": None}
     elif kind == "gitlab":
         body = record
     elif kind == "mailchimp":

@@ -404,6 +404,10 @@ class DeclarativeSource(BaseConnector):
                 cursor_format=stream_spec.cursor.format,
                 lookback_s=stream_spec.cursor.lookback_s,
             )
+            if cursor_value is None and stream_spec.cursor.initial:
+                # First run on APIs that require a cursor argument to
+                # enumerate at all (e.g. Zendesk incremental start_time).
+                cursor_value = stream_spec.cursor.initial
             if cursor_value is not None:
                 request_path = f"streams[{stream_index}].cursor.request_template"
                 request_value = (

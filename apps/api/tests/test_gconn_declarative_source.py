@@ -246,3 +246,65 @@ def test_run_sync_checkpoints_page_one_before_page_two_fault_and_resumes() -> No
         query = parse_qs(urlsplit(fixture.request_log[0].target).query)
         assert query["after"] == ["page-2"]
         assert {row["id"] for row in written} == {1, 2, 3, 4}
+
+
+def test_cursor_initial_sent_on_first_run_and_cursor_on_resume() -> None:
+    """APIs that require a cursor argument to enumerate (Zendesk incremental
+    start_time) get the manifest's initial value on the first run and the
+    stored cursor on resume."""
+    manifest = {
+        "name": "fixture",
+        "base_url": "{BASE}",
+        "auth": {"type": "none"},
+        "streams": [
+            {
+                "name": "tickets",
+                "path": "incremental/tickets",
+                "records_path": "tickets",
+                "primary_key": ["id"],
+                "cursor": {
+                    "field": "generated_timestamp",
+                    "request_param": "start_time",
+                    "format": "epoch_s",
+                    "initial": "0",
+                },
+                "paginator": {
+                    "type": "next_url",
+                    "next_url_path": "next_page",
+                    "stop_path": "end_of_stream",
+                },
+            }
+        ],
+    }
+    with FixtureServer() as fixture:
+        manifest["base_url"] = fixture.base_url
+        fixture.add_route(
+            "/incremental/tickets",
+            FixtureResponse(
+                body={
+                    "tickets": [{"id": 1, "generated_timestamp": 1700000100}],
+                    "end_of_stream": True,
+                    "next_page": None,
+                }
+            ),
+        )
+        source = DeclarativeSource({"manifest": manifest, "credentials": {}})
+        batches = list(source.read("tickets", limit=10))
+
+        first_target = fixture.request_log[0].target
+        assert parse_qs(urlsplit(first_target).query)["start_time"] == ["0"]
+        assert str(batches[0].state["cursor"]) == "1700000100"
+
+        fixture.add_route(
+            "/incremental/tickets",
+            FixtureResponse(
+                body={
+                    "tickets": [{"id": 2, "generated_timestamp": 1700000200}],
+                    "end_of_stream": True,
+                    "next_page": None,
+                }
+            ),
+        )
+        list(source.read("tickets", state=batches[0].state, limit=10))
+        resume_target = fixture.request_log[-1].target
+        assert parse_qs(urlsplit(resume_target).query)["start_time"] == ["1700000100"]

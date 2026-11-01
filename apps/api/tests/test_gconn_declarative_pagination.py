@@ -390,3 +390,72 @@ def test_link_header_repeated_url_and_invalid_records_path_fail_closed() -> None
                 records_path="records",
                 paginator=PaginatorSpec(type="none"),
             ))
+
+
+def test_next_url_stop_path_halts_on_terminal_flag_despite_next_page() -> None:
+    """Zendesk-style incremental export: the terminal page still emits a
+    self-repeating next_page — stop_path (end_of_stream) is the stop signal,
+    not a repeated-URL error."""
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/incremental",
+            responses=[
+                FixtureResponse(
+                    body={
+                        "records": _records(1, 2),
+                        "end_of_stream": False,
+                        "next_page": f"{fixture.base_url}/incremental?page=2",
+                    }
+                ),
+                FixtureResponse(
+                    body={
+                        "records": _records(3, 2),
+                        "end_of_stream": True,
+                        "next_page": f"{fixture.base_url}/incremental?page=2",
+                    }
+                ),
+            ],
+        )
+
+        pages = list(
+            paginate(
+                _requester(),
+                f"{fixture.base_url}/incremental",
+                records_path="records",
+                paginator=PaginatorSpec(
+                    type="next_url",
+                    next_url_path="next_page",
+                    stop_path="end_of_stream",
+                ),
+            )
+        )
+
+        assert [p.records for p in pages] == [_records(1, 2), _records(3, 2)]
+        assert pages[1].next_url == ""
+        assert len(fixture.request_log) == 2
+
+
+def test_next_url_stop_path_requires_boolean_flag() -> None:
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/incremental",
+            FixtureResponse(body={"records": _records(1, 1), "end_of_stream": "yes"}),
+        )
+        with pytest.raises(PaginationError, match="stop_path"):
+            list(
+                paginate(
+                    _requester(),
+                    f"{fixture.base_url}/incremental",
+                    records_path="records",
+                    paginator=PaginatorSpec(
+                        type="next_url",
+                        next_url_path="next_page",
+                        stop_path="end_of_stream",
+                    ),
+                )
+            )
+
+
+def test_stop_path_still_rejected_for_cursor_paginator() -> None:
+    with pytest.raises(ValueError, match="offset or next_url"):
+        PaginatorSpec(type="cursor", cursor_path="next", stop_path="done")
