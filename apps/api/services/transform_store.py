@@ -333,15 +333,25 @@ class MongoTransformProjectStore(TransformProjectStore):
         return saved
 
     def delete(self, project_id: str) -> bool:
-        removed = self._file.delete(project_id)
+        """Remove from BOTH stores; a surviving copy ghosts the list.
+
+        The durable store goes first: a Mongo failure raises instead of
+        deleting only the file mirror — otherwise ``list()`` merges the
+        orphaned doc back in and the project keeps showing after a
+        "successful" delete.
+        """
         db = self._db()
+        mongo_deleted = False
         if db is not None:
             try:
                 result = db[self.COLLECTION].delete_one({"id": project_id})
-                removed = removed or bool(getattr(result, "deleted_count", 0))
+                mongo_deleted = bool(getattr(result, "deleted_count", 0))
             except Exception as exc:
-                logger.warning("transform project delete from Mongo failed: %s", exc)
-        return removed
+                raise RuntimeError(
+                    f"Transform project {project_id} could not be deleted from "
+                    "the primary store; no copy was removed"
+                ) from exc
+        return self._file.delete(project_id) or mongo_deleted
 
 
 _store: TransformProjectStore | None = None

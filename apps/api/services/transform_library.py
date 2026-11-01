@@ -347,18 +347,28 @@ class MongoTransformLibraryStore(TransformLibraryStore):
         return saved
 
     def delete(self, recipe_id: str) -> bool:
-        deleted = self._file.delete(recipe_id)
+        """Remove the recipe from BOTH stores; a surviving copy ghosts the list.
+
+        The durable store goes first: when the Mongo delete fails we raise
+        instead of removing only the file mirror — otherwise ``list()`` merges
+        the orphaned Mongo doc back in and the recipe keeps showing in the
+        Library after a "successful" delete.  A recipe that exists in only one
+        store still reports success when that copy is removed.
+        """
         db = self._db()
+        mongo_deleted = False
         if db is not None:
             try:
-                db[self.COLLECTION].delete_one({"id": recipe_id})
-            except Exception as exc:
-                logger.warning(
-                    "transform recipe %s deleted from file but not Mongo: %s",
-                    recipe_id,
-                    exc,
+                mongo_deleted = (
+                    db[self.COLLECTION].delete_one({"id": recipe_id}).deleted_count
+                    > 0
                 )
-        return deleted
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Transform recipe {recipe_id} could not be deleted from the "
+                    "primary store; no copy was removed"
+                ) from exc
+        return self._file.delete(recipe_id) or mongo_deleted
 
 
 _store: TransformLibraryStore | None = None
