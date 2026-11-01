@@ -197,6 +197,8 @@ def copy_sqlite_to_postgres(
             declared = live_l.get(col.lower())
             if declared is None:
                 raise FastPathUnavailable(f"source column {col!r} absent")
+            if declared.strip():
+                require_safe_type_stamp(declared, context=f"sqlite source column {col!r}")
             if not sqlite_pg_type_is_copy_safe(declared):
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not PostgreSQL COPY-safe"
