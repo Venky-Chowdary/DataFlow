@@ -17,7 +17,7 @@ from services.transform_library import (
     MongoTransformLibraryStore,
 )
 from services.transform_recipe import RecipeStep, TransformRecipe
-from services.transform_store import MongoTransformProjectStore
+from services.transform_store import MongoTransformProjectStore, TransformProject
 
 
 class _FakeCollection:
@@ -116,9 +116,7 @@ def test_library_delete_mongo_only_record_still_succeeds(tmp_path, monkeypatch):
     assert recipe.id not in coll.docs
 
 
-def _project() -> "TransformProject":
-    from services.transform_store import TransformProject
-
+def _project() -> TransformProject:
     return TransformProject(name="p1", destination_connector_id="c1")
 
 
