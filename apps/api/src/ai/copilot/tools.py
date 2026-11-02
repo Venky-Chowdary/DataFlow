@@ -1801,6 +1801,16 @@ def _canonical_policy_arguments(name: str, bound: dict[str, Any]) -> tuple[dict[
         return {}, f"{name} refused: {exc}"
 
 
+def _masked_key_id(value: str) -> str:
+    """``AKIAIOSFODNN7EXAMPLE`` -> ``AKIA…LE``; too short to mask -> ``•••``."""
+    value = value.strip()
+    if not value:
+        return ""
+    if len(value) < 12:
+        return "•••"
+    return f"{value[:4]}…{value[-2:]}"
+
+
 def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
     """Host, port, and URL password the saved connector will really use.
 
@@ -2415,8 +2425,9 @@ class DataPilotTools:
             "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
             "azure_data_lake", "azure_data_lake_storage",
         }:
-            # S3 stores the access key id in username. The preview must not echo it.
-            preview_user = ""
+            # S3 stores the access key id in username. The preview must not
+            # echo it, and a blank reads as "nothing saved" (D240).
+            preview_user = _masked_key_id(str(preview_user))
         safe_preview = {
             "name": draft["name"],
             "type": draft["type"],
