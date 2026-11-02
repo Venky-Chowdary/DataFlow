@@ -269,6 +269,27 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "workspace_id": workspace_b,
         },
     )
+    from services import transfer_journal
+
+    monkeypatch.setenv("DATAFLOW_JOURNAL_DIR", str(resource_matrix / "journals"))
+    journal_id = "bjournal.1"
+    journal_dir = (
+        transfer_journal.journal_root()
+        / transfer_journal._workspace_dir(workspace_b)
+        / journal_id
+    )
+    journal_dir.mkdir(parents=True)
+    (journal_dir / transfer_journal.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "journal_id": journal_id,
+                "workspace_id": workspace_b,
+                "job_id": "B_JOURNAL_SENTINEL",
+                "streams": [{"name": "B_JOURNAL_SENTINEL"}],
+            }
+        ),
+        encoding="utf-8",
+    )
     mongo = _MongoFixture(workspace_b)
     connectors_module = importlib.import_module("src.routers.connectors_router")
     monkeypatch.setattr(connectors_module, "get_mongodb_service", lambda: mongo)
@@ -308,6 +329,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             values = {"contract_id": contract.id}
         elif "{grant_id}" in template:
             values = {"grant_id": grant.id}
+        elif template.startswith("/api/v1/journals/{journal_id}"):
+            values = {"journal_id": journal_id}
         elif template == "/api/v1/workspace/benchmark/runs/{run_id}":
             values = {"run_id": bench_run_id}
         elif template == "/api/v1/workspace/workspaces/{workspace_id}":
@@ -369,10 +392,12 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "B_JOB_SENTINEL",
             "B_MEMBER_SENTINEL",
             "B_BENCH_SENTINEL",
+            "B_JOURNAL_SENTINEL",
         ):
             assert sentinel not in response.text, f"{method} {template} leaked {sentinel}"
         covered += 1
 
+    assert journal_dir.is_dir(), "a cross-workspace journal DELETE removed workspace B's journal"
     assert covered > 0
     print(
         f"resource routes: {len(rows)} discovered; {covered} exercised; "

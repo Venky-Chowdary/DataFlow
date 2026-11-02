@@ -41,7 +41,7 @@ def test_github_manifest_has_documented_stream_contracts() -> None:
     assert descriptor is not None
     assert descriptor.docs.startswith("https://docs.github.com/")
     assert (
-        "certified as SDK source on synthetic fixtures; not yet wired into the transfer engine"
+        "wired into the transfer engine; certified on synthetic fixtures (beta evidence)"
         in descriptor.description
     )
 

@@ -39,7 +39,7 @@ def test_event_carries_flag_and_not_enforced(events):
             "actor": "system",
             "level": "warn",
             "workspace_id": "ws",
-            "details": {"why": "because", "enforced": False, "flag": "DATAFLOW_SOME_FLAG"},
+            "details": {"why": "because", "enforced": False, "flag": "some_flag"},
         }
     ]
 

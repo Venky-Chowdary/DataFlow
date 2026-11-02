@@ -54,6 +54,18 @@ KEY_ADDRESSED_DESTS = frozenset({
 # that is ``sync_requires_unique_identity``, which still covers MongoDB.
 _DERIVED_KEY_DESTS = KEY_ADDRESSED_DESTS - {"mongodb"}
 
+
+def _identity_dest_kind(dest_kind: str | None) -> str:
+    """Canonical kind for identity rules; a vector sink stays itself.
+
+    ``normalize_dest_kind`` folds ``pgvector`` into the PostgreSQL family, which
+    would drop the vector upsert's key-addressed rule.
+    """
+    raw = (dest_kind or "").strip().lower()
+    if raw in KEY_ADDRESSED_DESTS:
+        return raw
+    return normalize_dest_kind(dest_kind) if dest_kind else ""
+
 # Sync modes that must enforce identity uniqueness on the Validate sample for
 # SQL / document stores. Key-addressed sinks always require uniqueness.
 _UNIQUE_IDENTITY_SYNC_MODES = frozenset({
@@ -149,7 +161,7 @@ def sync_requires_unique_identity(
     Key-addressed destinations (Redis, DynamoDB, ES, vector upserts) always
     return True: every write is keyed, so append still collides on duplicates.
     """
-    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    kind = _identity_dest_kind(dest_kind)
     if kind in KEY_ADDRESSED_DESTS:
         return True
     return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
@@ -171,7 +183,7 @@ def dest_is_key_addressed(
     rows exactly like a SQL table and its cardinality must be closed by
     COUNT(*) delta, not a key census over some other mapped column.
     """
-    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    kind = _identity_dest_kind(dest_kind)
     if kind == "mongodb":
         return any((c or "").strip() == "_id" for c in (key_columns or ()))
     return kind in KEY_ADDRESSED_DESTS
@@ -199,7 +211,7 @@ def missing_identity_blocks(
     its own key can, for insert-only modes — the row still lands exactly once.
     Upsert-class modes need a key everywhere: there is nothing to match on.
     """
-    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    kind = _identity_dest_kind(dest_kind)
     if kind in _DERIVED_KEY_DESTS:
         return True
     return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES

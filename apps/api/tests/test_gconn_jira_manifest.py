@@ -47,7 +47,7 @@ def test_jira_manifest_declares_basic_auth_cursor_and_project_pagination() -> No
     assert descriptor is not None
     assert descriptor.docs.startswith("https://developer.atlassian.com/")
     assert (
-        "certified as SDK source on synthetic fixtures; not yet wired into the transfer engine"
+        "wired into the transfer engine; certified on synthetic fixtures (beta evidence)"
         in descriptor.description
     )
 

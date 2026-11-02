@@ -44,7 +44,7 @@ def test_intercom_manifest_declares_versioned_auth_and_sync_contracts() -> None:
     assert "full_refresh" in descriptor.sync_modes
     assert "incremental" in descriptor.sync_modes
     assert (
-        "certified as SDK source on synthetic fixtures; not yet wired into the transfer engine"
+        "wired into the transfer engine; certified on synthetic fixtures (beta evidence)"
         in descriptor.description
     )
 

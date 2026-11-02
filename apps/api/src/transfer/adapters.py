@@ -586,7 +586,12 @@ def resolve_connector_config(
     # that caused Validate to AUTH against the wrong endpoint while Connectors Test
     # still passed via the URI.
     if not (cfg.get("connection_string") or "").strip():
-        cfg["host"] = cfg["host"] or "localhost"
+        # HTTP SDK sources take their endpoint from the manifest; a stamped
+        # loopback host would replace it and fail as a non-URL base_url.
+        from connectors.sdk import get_sdk_connector
+
+        sdk_source = get_sdk_connector(str(cfg.get("type") or fmt or "").lower().strip())
+        cfg["host"] = cfg["host"] or ("" if sdk_source is not None else "localhost")
     else:
         cfg["host"] = cfg.get("host") or ""
     cfg["port"] = stored_listen_port(

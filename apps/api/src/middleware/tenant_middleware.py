@@ -49,6 +49,7 @@ _PUBLIC_PREFIXES = (
     "/api/v1/public/email-events",
     "/api/v1/contact-sales",
     "/api/v1/catalog",
+    "/api/v1/status",
     "/auth/signup",
     "/auth/verify-email",
     "/auth/resend",
