@@ -1021,10 +1021,14 @@ conn.commit()
     // Centre the tile: one parked at the palette's bottom edge sits under the
     // sticky footer, so hover() scrolls the page first and the box "moves".
     await flatten.evaluate((node) => node.scrollIntoView({ block: "center" }));
-    // The palette fills in as the catalog and suggestions arrive; a tile row
-    // landing above shifts it by one row (49px). Measure once it holds still.
+    // The palette fills in as the catalog and suggestions arrive; a tile row or
+    // the "Suggested" chip landing above shifts it by one row (49px). On a slow
+    // runner that lands after a short still window, so let the requests behind
+    // it finish, then measure once it holds still.
+    await page.waitForLoadState("networkidle");
+    await flatten.evaluate((node) => node.scrollIntoView({ block: "center" }));
     let before = await flatten.boundingBox();
-    for (let still = 0, tries = 0; still < 3 && tries < 60; tries += 1) {
+    for (let still = 0, tries = 0; still < 6 && tries < 80; tries += 1) {
       await page.waitForTimeout(150);
       const next = await flatten.boundingBox();
       still = next && before && Math.abs(next.y - before.y) < 0.5 ? still + 1 : 0;
