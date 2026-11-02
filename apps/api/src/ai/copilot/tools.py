@@ -2625,15 +2625,34 @@ class DataPilotTools:
         ]
         remediations: list[dict[str, str]] = []
         status = str(job.get("status") or "").lower()
+        from services.preflight_cursor_gate import (
+            CONTINUITY_FAILURE_REASONS,
+            operator_failure_text,
+        )
+
+        error_details = job.get("error_details")
+        failure_reason = str(
+            (error_details.get("reason") if isinstance(error_details, dict) else "") or ""
+        )
+        continuity_failure = failure_reason in CONTINUITY_FAILURE_REASONS
         if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
             # "Fix bad data" only remediates row-level value failures — a
             # dropped destination table, schema drift, REST pagination gaps
             # or transport faults send operators to a screen that cannot
             # help them. Filter by failure class (C23 / D81 / D82).
-            if self._offers_bad_data_fix(job, quarantine, stored_rejected):
-                remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
-            remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
-            remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
+            if continuity_failure:
+                # A reset or changed destination is recovered on the Run step
+                # (Rebuild with full refresh / Accept as baseline), not by
+                # remapping or by quarantine.
+                remediations.append({
+                    "kind": "rerun_preflight",
+                    "label": "Open in Transfer Studio — Run offers Rebuild with full refresh",
+                })
+            else:
+                if self._offers_bad_data_fix(job, quarantine, stored_rejected):
+                    remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
+                remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
+                remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         req = job.get("transfer_request") or {}
         source_ep = req.get("source") or {}
         dest_ep = req.get("destination") or {}
@@ -2672,7 +2691,7 @@ class DataPilotTools:
                 "progress_pct": job.get("progress_pct"),
                 "reconcile_pct": job.get("reconcile_pct"),
                 "message": job.get("message"),
-                "error": job.get("error"),
+                "error": operator_failure_text(job.get("error"), failure_reason),
                 "created_at": job_timestamp_iso(job.get("created_at")),
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),

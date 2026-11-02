@@ -9,6 +9,7 @@ reasoning about the whole table.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -316,6 +317,25 @@ def evaluate_stream_cursor_semantics(
 
 
 CLEAR_CURSOR_ENDPOINT = "POST /api/v1/ops/cdc-cursors/clear"
+
+#: Failure reasons whose operator recovery is the Studio Rebuild / Accept control.
+CONTINUITY_FAILURE_REASONS = frozenset(
+    {"cursor_destination_reset", "destination_continuity_mismatch"}
+)
+
+_RECOVERY_PROSE = re.compile(r"\s+To recover:|\s+Clear the cursor \(")
+
+
+def operator_failure_text(error: str | None, reason: str | None) -> str | None:
+    """A continuity failure's message without the MCP/REST recovery sentence.
+
+    The engine message names API calls for MCP/REST callers; an operator
+    recovers with the Run step's Rebuild / Accept controls instead. Other
+    failures keep their full message — it is the only diagnosis there is.
+    """
+    if not error or str(reason or "") not in CONTINUITY_FAILURE_REASONS:
+        return error
+    return _RECOVERY_PROSE.split(error, maxsplit=1)[0]
 
 
 def clear_cursor_remedy(cursor_key: str = "") -> str:
