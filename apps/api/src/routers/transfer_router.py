@@ -387,8 +387,11 @@ class MapColumnsRequest(PolicyFieldsModel):
 
 
 @router.get("/capabilities")
-async def transfer_capabilities():
-    """All live source → destination combinations + honest platform manifest."""
+def transfer_capabilities():
+    """All live source → destination combinations + honest platform manifest.
+
+    Sync on purpose: the catalog walk is CPU-bound, so FastAPI runs it in the
+    threadpool instead of stalling every other request on the event loop."""
     from ..transfer.connector_capabilities import manifest_summary
     from ..transfer.registry import get_capabilities
 

@@ -83,6 +83,12 @@ def test_catalog_summary_survives_broken_module_spec(monkeypatch):
             raise ModuleNotFoundError(f"No module named {name!r}")
         return original(name, *args, **kwargs)
 
+    from src.transfer.connector_capabilities import _module_is_installed
+
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
-    data = _catalog.catalog_summary()
+    _module_is_installed.cache_clear()
+    try:
+        data = _catalog.catalog_summary()
+    finally:
+        _module_is_installed.cache_clear()
     assert data["total"] >= 600

@@ -738,7 +738,12 @@ _DRIVER_COMPANION_MODULES: dict[str, str] = {
 }
 
 
+@lru_cache(maxsize=512)
 def _module_is_installed(name: str | None) -> bool:
+    """Cached per process: the catalog asks ~10k times per capabilities read,
+    and an uncached ``find_spec`` walk of ``sys.path`` blocked the event loop
+    for seconds on CI runners. ``_module_is_installed.cache_clear()`` after
+    installing a driver at runtime."""
     if name is None:
         return True
     if not name or not isinstance(name, str):
