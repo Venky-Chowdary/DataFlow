@@ -149,13 +149,23 @@ def _pg_apply_sparse_upsert(
     )
 
 
+_PG_TEMPORAL_WITH_PRECISION = {
+    "TIMESTAMP": "TIMESTAMP",
+    "TIMESTAMP WITHOUT TIME ZONE": "TIMESTAMP",
+    "TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ",
+    "TIME WITHOUT TIME ZONE": "TIME",
+    "TIME WITH TIME ZONE": "TIMETZ",
+}
+
+
 def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[str, str]:
     """Live PostgreSQL/Redshift column DDL for physical bind overlay."""
     try:
         cursor.execute(
             """
             SELECT column_name, data_type, udt_name,
-                   character_maximum_length, numeric_precision, numeric_scale
+                   character_maximum_length, numeric_precision, numeric_scale,
+                   datetime_precision
             FROM information_schema.columns
             WHERE table_schema = %s AND table_name = %s
             """,
@@ -186,7 +196,9 @@ def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[st
             "HSTORE": "HSTORE",
             "LTREE": "LTREE",
         }
-        for name, data_type, udt_name, char_len, precision, scale in cursor.fetchall():
+        for row in cursor.fetchall():
+            name, data_type, udt_name, char_len, precision, scale = row[:6]
+            fsp = row[6] if len(row) > 6 else None
             udt = str(udt_name or "").upper()
             data = str(data_type or "").upper()
             # Array udts are ``_INT4`` / ``_TEXT`` — never invent scalar INT4 over
@@ -214,7 +226,14 @@ def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[st
                 "TIME WITHOUT TIME ZONE",
                 "TIME WITH TIME ZONE",
             }:
-                ddl = data
+                # The column's own precision: a bare spelling is re-read as a
+                # BSON millisecond date when the source is a document store,
+                # which quarantined every microsecond row into TIMESTAMPTZ(6).
+                ddl = _PG_TEMPORAL_WITH_PRECISION.get(data, data)
+                if ddl != data and fsp is not None:
+                    ddl = f"{ddl}({int(fsp)})"
+                else:
+                    ddl = data
             elif data in {"NUMERIC", "DECIMAL"} and precision is not None:
                 ddl = f"NUMERIC({int(precision)},{int(scale or 0)})"
             else:
