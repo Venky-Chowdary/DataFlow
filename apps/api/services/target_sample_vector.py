@@ -9,10 +9,26 @@ cell on a vector destination instead of trusting the writer's own count.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from services.keyed_read import execute_keyed_read
+from services.value_serializer import json_loads_exact
+
+
+def load_pgvector_metadata(raw: Any) -> dict[str, Any]:
+    """Flatten vector dest metadata. Numbers match ``json_loads_exact``.
+
+    Invalid or non-object metadata becomes ``{}`` — never invent keys.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json_loads_exact(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def read_pgvector_target_sample(
@@ -76,14 +92,7 @@ def read_pgvector_target_sample(
             out_rows = []
             for raw in cur.fetchall():
                 rec = dict(zip(names, raw))
-                meta = rec.get("metadata") or {}
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except Exception:
-                        meta = {}
-                if not isinstance(meta, dict):
-                    meta = {}
+                meta = load_pgvector_metadata(rec.get("metadata"))
                 row = {
                     "id": rec.get("id"),
                     "content": rec.get("content"),

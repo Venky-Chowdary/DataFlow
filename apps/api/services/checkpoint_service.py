@@ -70,6 +70,7 @@ class Checkpoint:
     es_search_after: list | None = None
     redis_scan_state: Any = None
     kafka_cursor: dict | None = None
+    qdrant_offset: Any = None
     # Last destination checksum for cross-check on resume
     checksum: str = ""
     # Write mode and conflict columns used for idempotent writes
@@ -94,6 +95,33 @@ class Checkpoint:
     #: How many rejection details were dropped once the sample cap was reached,
     #: so the UI can say "showing N of M" instead of implying the list is whole.
     rejected_details_truncated: int = 0
+    #: Pre-write destination COUNT from the first batch. Resume must restore
+    #: this — a mid-run COUNT is not a "before" and would invent a false delta.
+    target_rows_before: int | None = None
+    #: Cumulative count of rows removed on the read by a declared source filter
+    #: or an approved shaping recipe. They belong to the source population the
+    #: run counted and are deliberately absent from the destination, so resume
+    #: must restore them or a correct filtered/shaped load fails conservation.
+    rows_removed_on_read: int = 0
+    #: The declared source filter's share of ``rows_removed_on_read``. Proof
+    #: names the two removals apart, so resume has to restore the split too.
+    rows_source_filtered: int = 0
+    #: Rows the incremental cursor bound excluded after the read, for a source
+    #: that cannot push the bound down. They are outside this run's read scope,
+    #: so resume must restore them or the population double-counts the pages a
+    #: previous pass already bounded.
+    rows_cursor_bounded: int = 0
+    #: Route watermark the job's first pass started from ("" = none, None =
+    #: not recorded). A resume digests the job's window from it and a failed
+    #: resume rolls the route watermark back to it (D134).
+    incremental_seed: str | None = None
+    #: CDC stream this cursor belongs to. Empty on a legacy single-stream
+    #: checkpoint. A sequential multi-table resume must not apply the cursor
+    #: to every selected table.
+    cdc_stream: str = ""
+    #: True when ``cursor_value`` is the shared log position for the route,
+    #: not one table's query cursor.
+    cdc_shared_reader: bool = False
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -142,6 +170,7 @@ class Checkpoint:
                 else self.redis_scan_state
             ),
             "kafka_cursor": self.kafka_cursor,
+            "qdrant_offset": self.qdrant_offset,
             "checksum": self.checksum,
             "write_mode": self.write_mode,
             "conflict_columns": self.conflict_columns,
@@ -152,19 +181,142 @@ class Checkpoint:
             "updated_at": self.updated_at,
             "rejected_rows": self.rejected_rows,
             "coerced_null_rows": self.coerced_null_rows,
+            "rows_removed_on_read": self.rows_removed_on_read,
+            "rows_source_filtered": self.rows_source_filtered,
+            "rows_cursor_bounded": self.rows_cursor_bounded,
+            "incremental_seed": self.incremental_seed,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
+            "target_rows_before": self.target_rows_before,
+            "cdc_stream": self.cdc_stream,
+            "cdc_shared_reader": self.cdc_shared_reader,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
         if not data:
             return cls()
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        # CDC writes ``watermark``. That key is not a column on this record,
+        # so a resume used to drop the log position and snapshot again.
+        if fields.get("cursor_value") is None and data.get("watermark") is not None:
+            fields["cursor_value"] = data.get("watermark")
+        # The job blob names the stream as ``stream``. This record keeps it
+        # so a later table does not seek with another table's cursor.
+        if not fields.get("cdc_stream"):
+            named = data.get("cdc_stream") or data.get("stream") or data.get("stream_name")
+            if isinstance(named, str) and named.strip():
+                fields["cdc_stream"] = named.strip()
+        if data.get("cdc_shared_reader") and not fields.get("cdc_shared_reader"):
+            fields["cdc_shared_reader"] = True
+        return cls(**fields)
+
+
+class _MappingSidecar:
+    """Dict-backed ``job_checkpoints`` for tests and the in-memory store."""
+
+    def __init__(self, store: dict[str, Any]) -> None:
+        self.store = store
+
+    def replace_one(self, filt: dict[str, Any], doc: dict[str, Any], upsert: bool = False) -> Any:
+        key = str(filt.get("job_id") or "")
+        if not key:
+            return None
+        if key not in self.store and not upsert:
+            return None
+        self.store[key] = dict(doc)
+        return doc
+
+    def find_one(self, filt: dict[str, Any]) -> dict[str, Any] | None:
+        found = self.store.get(str(filt.get("job_id") or ""))
+        return dict(found) if isinstance(found, dict) else None
+
+
+def _checkpoint_collection(mongo: Any) -> Any | None:
+    """Sidecar collection, or None when this store cannot hold one.
+
+    The in-memory job service returns a plain dict from ``get_database``.
+    That is not a collection. A rejecting test double with no ``checkpoints``
+    dict also returns None, so a failed job update still fail-closes.
+    """
+    custom = getattr(mongo, "checkpoints", None)
+    if isinstance(custom, dict):
+        return _MappingSidecar(custom)
+    getter = getattr(mongo, "get_database", None)
+    if not callable(getter):
+        return None
+    try:
+        db = getter()
+    except Exception:  # noqa: BLE001 — sidecar is optional; job update remains
+        logger.debug("checkpoint sidecar database unavailable", exc_info=True)
+        return None
+    if db is None or isinstance(db, dict):
+        return None
+    try:
+        coll = db["job_checkpoints"]
+    except Exception:  # noqa: BLE001 — sidecar is optional; job update remains
+        logger.debug("checkpoint sidecar collection unavailable", exc_info=True)
+        return None
+    if not hasattr(coll, "find_one"):
+        return None
+    return coll
+
+
+def _persist_resume_token(mongo: Any, job_id: str, token: dict[str, Any]) -> bool:
+    """Write the small resume document. False when no sidecar can accept it."""
+    job_id = str(job_id or "").strip()
+    if not job_id:
+        return False
+    coll = _checkpoint_collection(mongo)
+    if coll is None:
+        return False
+    doc = {
+        "job_id": job_id,
+        "checkpoint": token,
+        "updated_at": _now(),
+    }
+    try:
+        if hasattr(coll, "replace_one"):
+            coll.replace_one({"job_id": job_id}, doc, upsert=True)
+        else:
+            coll.update_one({"job_id": job_id}, {"$set": doc}, upsert=True)
+        return True
+    except Exception:  # noqa: BLE001 — a failed sidecar must not abort the job update
+        logger.exception("Resume token write failed for job %s", job_id)
+        return False
+
+
+def _read_resume_token(mongo: Any, job_id: str) -> dict[str, Any] | None:
+    coll = _checkpoint_collection(mongo)
+    if coll is None:
+        return None
+    try:
+        doc = coll.find_one({"job_id": str(job_id or "")})
+    except Exception:  # noqa: BLE001 — fall back to the job document copy
+        logger.exception("Resume token read failed for job %s", job_id)
+        return None
+    if not isinstance(doc, dict):
+        return None
+    token = doc.get("checkpoint")
+    return dict(token) if isinstance(token, dict) else None
+
+
+def durable_resume_token(checkpoint: Checkpoint | dict[str, Any]) -> dict[str, Any]:
+    """Resume slice safe to store beside the job document."""
+    data = checkpoint.to_dict() if isinstance(checkpoint, Checkpoint) else dict(checkpoint or {})
+    from services.job_document_budget import _resume_tokens_only
+
+    return _resume_tokens_only(data)
 
 
 class CheckpointService:
-    """Store and retrieve checkpoints from the MongoDB job record."""
+    """Store and retrieve checkpoints.
+
+    The resume token is written to ``job_checkpoints`` first. The job document
+    still receives the checkpoint for the live theater, but a rejected job
+    update no longer erases the only resume point. Fail closed only when both
+    writes fail.
+    """
 
     def __init__(self, mongo=None) -> None:
         self.mongo = mongo
@@ -197,30 +349,62 @@ class CheckpointService:
     def save(self, checkpoint: Checkpoint) -> bool:
         """Persist the checkpoint without overwriting the job status.
 
-        ``update_job_status`` returns ``False`` rather than raising when the job
-        store is unreachable. Callers **must** treat ``False`` / ``has_failed_saves``
-        as a hard failure (prefer ``require_save``). Returning bool lets unit
-        tests assert the failure counter without catching exceptions.
+        The sidecar resume token is the durable point. ``update_job_status``
+        returns ``False`` rather than raising when the job document is
+        unreachable or over MongoDB's size limit. That rejection used to abort
+        a 120k-row load and keep rewriting the same oversized document on every
+        heartbeat. Callers **must** treat ``False`` / ``has_failed_saves`` as a
+        hard failure (prefer ``require_save``) only when the sidecar also failed.
         """
         mongo = self._mongo()
-        ok = mongo.update_job_status(
-            checkpoint.job_id,
-            checkpoint.status,
-            checkpoint=checkpoint.to_dict(),
-            updated_at=datetime.now(timezone.utc),
-        )
-        if not ok:
-            self.failed_saves += 1
-            if self.failed_saves == 1:
-                logger.error(
-                    "Checkpoint write failed for job %s (chunk %s, %s rows). "
-                    "%s The job store rejected or could not accept the checkpoint.",
+        from services.cancel_check import attempt_superseded
+        from services.error_handling import TransferCancelled
+
+        if attempt_superseded(mongo, checkpoint.job_id):
+            # A newer attempt owns this job: never overwrite its checkpoint.
+            raise TransferCancelled(
+                "Transfer superseded by a newer attempt of this job",
+                rows_written=int(getattr(checkpoint, "rows_processed", 0) or 0),
+                superseded=True,
+            )
+        token = durable_resume_token(checkpoint)
+        sidecar_ok = _persist_resume_token(mongo, checkpoint.job_id, token)
+        job_ok = False
+        try:
+            job_ok = bool(
+                mongo.update_job_status(
+                    checkpoint.job_id,
+                    checkpoint.status,
+                    checkpoint=checkpoint.to_dict(),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+        except Exception:  # noqa: BLE001 — sidecar may already hold the resume token
+            logger.exception(
+                "Job document checkpoint update raised for %s", checkpoint.job_id
+            )
+            job_ok = False
+        if sidecar_ok or job_ok:
+            if sidecar_ok and not job_ok:
+                logger.warning(
+                    "Job document rejected the checkpoint for job %s (chunk %s, %s rows). "
+                    "Resume token is durable in job_checkpoints.",
                     checkpoint.job_id,
                     getattr(checkpoint, "chunk_index", "?"),
                     getattr(checkpoint, "rows_processed", "?"),
-                    CHECKPOINT_PERSISTENCE_FAILED,
                 )
-        return ok
+            return True
+        self.failed_saves += 1
+        if self.failed_saves == 1:
+            logger.error(
+                "Checkpoint write failed for job %s (chunk %s, %s rows). "
+                "%s The job store rejected or could not accept the checkpoint.",
+                checkpoint.job_id,
+                getattr(checkpoint, "chunk_index", "?"),
+                getattr(checkpoint, "rows_processed", "?"),
+                CHECKPOINT_PERSISTENCE_FAILED,
+            )
+        return False
 
     def require_save(self, checkpoint: Checkpoint) -> None:
         """Persist the checkpoint or raise ``CheckpointPersistenceError``.
@@ -229,18 +413,41 @@ class CheckpointService:
         the job instead of continuing with resume risk.
         """
         if not self.save(checkpoint):
+            # D168: a cancelled job's document is terminal and refuses the
+            # write. That refusal is the cancel arriving, not a store fault -
+            # report it as the cancel it is (the committed prefix stays).
+            from services.cancel_check import job_cancel_requested
+            from services.error_handling import TransferCancelled
+
+            if job_cancel_requested(self._mongo(), checkpoint.job_id):
+                raise TransferCancelled(
+                    "Transfer cancelled by user",
+                    rows_written=int(getattr(checkpoint, "rows_processed", 0) or 0),
+                )
             raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:
-        """Load the most recent checkpoint for a job."""
+        """Load the most recent checkpoint for a job.
+
+        The sidecar wins over the copy embedded in the job document. A resume
+        after a rejected job update still sees the token that was accepted.
+        """
         mongo = self._mongo()
-        job = mongo.get_job(job_id)
-        if not job:
+        sidecar = _read_resume_token(mongo, job_id)
+        embedded: dict[str, Any] | None = None
+        try:
+            job = mongo.get_job(job_id) or {}
+            raw = job.get("checkpoint") if isinstance(job, dict) else None
+            if isinstance(raw, dict):
+                embedded = raw
+        except Exception:  # noqa: BLE001 — sidecar still answers resume
+            logger.debug("embedded checkpoint unreadable for %s", job_id, exc_info=True)
+        if not sidecar and not embedded:
             return None
-        cp = job.get("checkpoint")
-        if not cp:
-            return None
-        return Checkpoint.from_dict(cp)
+        merged = dict(embedded or {})
+        if sidecar:
+            merged.update(sidecar)
+        return Checkpoint.from_dict(merged)
 
     def mark_failed(self, job_id: str, error: str, checkpoint: Checkpoint | None = None) -> bool:
         """Mark a job failed with a final checkpoint so retry can resume."""
@@ -257,6 +464,38 @@ class CheckpointService:
 
 
 
+def _cancelled_before_any_commit(job: dict, checkpoint: Any) -> bool:
+    """A cancelled incremental run that provably committed nothing (QA ACC-05).
+
+    The persisted sync cursor only advances on a committed run, so restarting
+    from it re-reads exactly the cancelled delta. Unknown committed counts,
+    non-incremental modes, and any recorded checkpoint progress do not qualify.
+    """
+    if str(job.get("status") or "").strip().lower() != "cancelled":
+        return False
+    request = job.get("transfer_request") or {}
+    sync_mode = (request.get("sync_mode") if isinstance(request, dict) else "") or job.get(
+        "sync_mode"
+    )
+    from services.execution_engine_contract import committed_rows_of
+    from services.sync_cursor import requires_incremental
+
+    if not requires_incremental(str(sync_mode or "")):
+        return False
+    rows, known = committed_rows_of(job)
+    if not known or rows:
+        return False
+    if checkpoint is None:
+        return True
+    cp = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint.from_dict(checkpoint)
+    return not (
+        int(cp.chunk_index or 0)
+        or int(cp.rows_processed or 0)
+        or cp.cursor_value is not None
+        or int(cp.offset or 0)
+    )
+
+
 def evaluate_resume_safety(
     checkpoint: "Checkpoint | dict | None",
     *,
@@ -268,7 +507,9 @@ def evaluate_resume_safety(
     Returns ok / age_hours / reasons / warnings. Refuses when there is no
     durable progress token, the checkpoint is older than
     DATAFLOW_RESUME_MAX_AGE_HOURS (when set >0), or write_mode drifted vs
-    the saved transfer request. Delivery remains at-least-once.
+    the saved transfer request. A CDC cursor-gap job is a sanctioned restart
+    (``gap_restart``) even without a checkpoint — the durable cursor is the
+    problem. Delivery remains at-least-once.
     """
     import os
 
@@ -283,6 +524,35 @@ def evaluate_resume_safety(
             "at-least-once upsert, not exactly-once."
         ),
     }
+    job = job or {}
+    from services.cdc_cursor_gap import job_has_cursor_gap
+
+    if job_has_cursor_gap(job):
+        out["ok"] = True
+        out["gap_restart"] = True
+        out["warnings"].append(
+            "CDC cursor-gap recovery restarts the run — not a checkpoint continuation. "
+            "when_needed snapshots current source keys then streams from the new tip. "
+            "Purged-window events are gone. Not migration_proven."
+        )
+        out["honesty"] = (
+            "Gap recovery is at-least-once upsert of the current source population, "
+            "not continuous CDC across the lost window."
+        )
+        return out
+    if _cancelled_before_any_commit(job, checkpoint):
+        out["ok"] = True
+        out["restart_from_watermark"] = True
+        out["warnings"].append(
+            "This incremental run was cancelled before any row committed. Resume "
+            "restarts it from the last committed watermark and re-reads that delta."
+        )
+        logger.info(
+            "Resume allowed for cancelled zero-row incremental job %s — restart "
+            "from the last committed watermark",
+            job.get("job_id") or job.get("_id") or "",
+        )
+        return out
     if checkpoint is None:
         out["reasons"].append(
             "No durable checkpoint - use Retry from start or re-run from Transfer Studio."
@@ -306,6 +576,7 @@ def evaluate_resume_safety(
         or int(cp.file_offset or 0) > 0
         or bool(cp.dynamodb_cursor)
         or bool(cp.kafka_cursor)
+        or cp.qdrant_offset is not None
         or cp.es_search_after is not None
     )
     if not has_progress:

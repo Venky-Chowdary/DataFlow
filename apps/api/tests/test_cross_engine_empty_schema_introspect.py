@@ -77,7 +77,13 @@ def test_pg_cross_schema_recovery():
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
 
 
-def test_mysql_cross_database_recovery():
+def test_mysql_does_not_scan_other_databases():
+    """QA round 11 (Ensembl): no host-wide information_schema fallback.
+
+    A MySQL connector names its database. Scanning every schema of the server
+    for a lookalike table hung Validate on hosts with thousands of schemas and
+    could bind another database's table, so a miss stays a miss.
+    """
     cur = MagicMock()
     cur.fetchall.side_effect = [
         [],
@@ -97,9 +103,10 @@ def test_mysql_cross_database_recovery():
             host="h", port=3306, database="wrong_db", username="u", password="p",
             schema="", connection_string="", ssl=True, table="jobs",
         )
-    assert result["ok"] is True
-    assert result["schema"] == "app_prod"
-    assert [c["name"] for c in result["columns"]] == ["id", "title"]
+    assert result["schema"] == "wrong_db"
+    assert result["columns"] == []
+    executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
+    assert "table_schema NOT IN" not in executed
 
 
 def test_snowflake_cross_schema_recovery():
@@ -258,3 +265,117 @@ def test_bigquery_cross_dataset_recovery():
     assert result["ok"] is True
     assert result["schema"] == "analytics"
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
+
+
+def test_bigquery_introspect_passes_emulator_host_port():
+    """goccy has no connection_string on some SKU templates — host/port must reach get_client."""
+    captured: dict[str, object] = {}
+
+    def fake_get_client(**kwargs):
+        captured.update(kwargs)
+        client = MagicMock()
+        client.list_tables.return_value = []
+        client.get_table.side_effect = Exception("Not found: Table")
+        return client
+
+    with patch("connectors.bigquery_conn.get_client", side_effect=fake_get_client):
+        result = _introspect_bigquery(
+            database="dataflow-test",
+            schema="dataflow",
+            table="payments_brand_new",
+            host="127.0.0.1",
+            port=9050,
+            strict_namespace=True,
+        )
+    assert captured.get("host") == "127.0.0.1"
+    assert int(captured.get("port") or 0) == 9050
+    assert result["ok"] is True
+    assert result["columns"] == []
+
+
+def test_oracle_single_table_probe_skips_owner_catalog_list():
+    """Dest-exists must not SELECT every owner table — that hung Oracle XE."""
+    executed: list[str] = []
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    def execute(stmt, params=None):
+        sql = str(stmt).upper().replace("\n", " ")
+        executed.append(sql)
+        if "FROM ALL_TAB_COL" in sql:
+            return FakeResult([
+                ("ID", "NUMBER", 10, 0, "N", None, None, "NO", "NO", None, None),
+            ])
+        if "FROM ALL_TABLES" in sql:
+            raise AssertionError(f"owner catalog listed on single-table probe: {sql}")
+        return FakeResult([])
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute
+    conn_cm = MagicMock()
+    conn_cm.__enter__.return_value = conn
+    conn_cm.__exit__.return_value = False
+    engine = MagicMock()
+    engine.connect.return_value = conn_cm
+
+    with patch("connectors.generic_sql._engine", return_value=engine), patch(
+        "services.sql_object_identity.resolve_object_identity",
+        return_value=SimpleNamespace(exists=True, table="JOBS", schema="APP"),
+    ):
+        result = _introspect_oracle(
+            host="h", port=1521, database="ORCL", username="app", password="p",
+            schema="APP", connection_string="", table="JOBS",
+            strict_namespace=True,
+        )
+    assert result["ok"] is True
+    assert [c["name"] for c in result["columns"]] == ["ID"]
+    assert not any(
+        "SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER" in sql
+        or "SELECT TABLE_NAME FROM USER_TABLES" in sql
+        for sql in executed
+    )
+
+
+def test_sqlserver_single_table_probe_skips_schema_catalog_list():
+    executed: list[str] = []
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    def execute(stmt, params=None):
+        sql = str(stmt).upper().replace("\n", " ")
+        executed.append(sql)
+        if "INFORMATION_SCHEMA.COLUMNS" in sql:
+            return FakeResult([
+                ("id", "int", 10, 0, None, None, None, "NO", None),
+            ])
+        if "INFORMATION_SCHEMA.TABLES" in sql:
+            raise AssertionError("schema catalog listed on single-table probe")
+        return FakeResult([])
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute
+    conn_cm = MagicMock()
+    conn_cm.__enter__.return_value = conn
+    conn_cm.__exit__.return_value = False
+    engine = MagicMock()
+    engine.connect.return_value = conn_cm
+
+    with patch("connectors.generic_sql._engine", return_value=engine):
+        result = _introspect_sqlserver(
+            host="h", port=1433, database="dataflow", username="sa", password="p",
+            schema="dbo", connection_string="", table="jobs",
+            strict_namespace=True,
+        )
+    assert result["ok"] is True
+    assert [c["name"] for c in result["columns"]] == ["id"]
+    assert not any("INFORMATION_SCHEMA.TABLES" in sql for sql in executed)

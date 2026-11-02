@@ -28,11 +28,11 @@ def test_population_probe_fail_closed_without_connector():
     assert report["findings"][0]["code"] == "population_orphan_probe_unavailable"
 
 
-def test_population_probe_composite_incomplete_never_proven():
+def test_population_probe_composite_zero_orphans_proven():
     with patch(
         "services.population_orphan_probe._sql_population_orphan_scan",
         return_value={"orphan_count": 0, "examples": []},
-    ):
+    ) as scan:
         report = probe_population_fk_orphans(
             child_table="orders",
             mappings=[],
@@ -46,6 +46,29 @@ def test_population_probe_composite_incomplete_never_proven():
             source_config={"type": "postgresql", "host": "localhost", "database": "t"},
             validation_mode="strict",
         )
+    assert scan.called
+    assert scan.call_args.kwargs["child_columns"] == ["a", "b"]
+    assert scan.call_args.kwargs["parent_columns"] == ["x", "y"]
+    assert report["ran"] is True
+    assert report["complete"] is True
+    assert report["population_proof"] is True
+    assert report["findings"] == []
+
+
+def test_population_probe_composite_arity_mismatch_never_proven():
+    report = probe_population_fk_orphans(
+        child_table="orders",
+        mappings=[],
+        foreign_keys=[
+            {
+                "columns": ["a", "b"],
+                "referenced_table": "parents",
+                "referenced_columns": ["id"],
+            }
+        ],
+        source_config={"type": "postgresql", "host": "localhost", "database": "t"},
+        validation_mode="strict",
+    )
     assert report["ran"] is True
     assert report["complete"] is False
     assert report["population_proof"] is False

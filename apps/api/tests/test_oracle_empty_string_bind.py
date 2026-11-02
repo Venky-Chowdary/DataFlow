@@ -209,15 +209,15 @@ def test_overlay_promotes_clickhouse_nullable_int64_datetime64():
     assert getattr(aware, "tzinfo", None) is not None
 
 
-def test_run_sparse_cdc_upsert_quarantines_empty_pk():
+def test_run_sparse_cdc_upsert_quarantines_null_pk():
     from connectors.writer_common import run_sparse_cdc_upsert
-    from services.value_serializer import DF_MISSING_SENTINEL
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
     details: list[dict] = []
     written, skipped, checksum = run_sparse_cdc_upsert(
         target_cols=["id", "note"],
         conflict_columns=["id"],
-        sparse_rows=[("", "bad"), ("2", "ok")],
+        sparse_rows=[(SQL_NULL_SENTINEL, "bad"), ("2", "ok")],
         fetch_existing_row=lambda pk: ("2", "old") if pk == ["2"] else None,
         update_non_pk=lambda non_pk, pk: 1,
         insert_present=lambda present: None,
@@ -444,10 +444,26 @@ def test_partition_dense_upsert_rows_quarantines_empty_pk():
         ["id"],
         rejected_details=details,
         policy="quarantine",
+        empty_is_null=True,
     )
     assert out == [{"id": "2", "n": 2}]
     assert details
     assert any("null/empty conflict key" in str(d.get("reason") or "") for d in details)
+
+
+def test_partition_dense_upsert_rows_keeps_empty_pk_where_empty_is_a_value():
+    """D53: only Oracle-style destinations (``''`` stored as NULL) quarantine it."""
+    from connectors.writer_common import partition_dense_upsert_rows
+
+    details: list[dict] = []
+    out = partition_dense_upsert_rows(
+        [{"id": "", "n": 1}, {"id": "2", "n": 2}],
+        ["id"],
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert out == [{"id": "", "n": 1}, {"id": "2", "n": 2}]
+    assert not details
 
 
 def test_pg_write_mapped_rows_bind_helper_not_unbound_local():
@@ -608,17 +624,34 @@ def test_generic_sql_float_refuses_empty():
         _to_sa_value("  ", "FLOAT64", sa.Float(), "duckdb", "duckdb")
 
 
-def test_oracle_dense_upsert_empty_promotes_to_sparse_sentinel():
-    """Dense Oracle upsert must not SET col=NULL for '' — route via DF_MISSING."""
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+def test_oracle_dense_upsert_empty_binds_null_with_the_row():
+    """D210 (owner decision 4): '' in an Oracle upsert is written as NULL.
 
-    # Mirror the promote logic used in generic_sql write path.
-    row = (1, "", "keep")
-    promoted = tuple(
-        DF_MISSING_SENTINEL if (isinstance(v, str) and v == "") else v for v in row
+    It used to be promoted to a sparse "omit" that left the cell out of the
+    MERGE SET, so the old value stayed. The bundle now keeps the row dense and
+    the text cell binds as NULL alongside the rest of the row.
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _generic_bind_tuple_rows
+
+    rows, dicts, _nums = _generic_bind_tuple_rows(
+        [(1, "", "keep")],
+        [1],
+        target_cols=["id", "note", "tag"],
+        dest_types={"id": "integer", "note": "VARCHAR2(60)", "tag": "VARCHAR2(60)"},
+        sa_col_types={"id": sa.Integer(), "note": sa.String(60), "tag": sa.String(60)},
+        dialect_name="oracle",
+        db_type="oracle",
+        rejected_details=[],
+        policy="write_quarantine",
+        mappings=[],
     )
-    assert is_missing_sentinel(promoted[1])
-    assert promoted[0] == 1 and promoted[2] == "keep"
+    assert rows == [(1, "", "keep")]
+    assert dicts[0]["note"] is None and dicts[0]["tag"] == "keep"
+    import connectors.generic_sql as gs
+
+    assert not hasattr(gs, "_generic_promote_oracle_empties")
 
 
 def test_overlay_promotes_specialty_inet_from_map_varchar():
@@ -725,6 +758,9 @@ def test_cdc_row_key_rejects_sql_null_sentinel():
     assert not is_present_cdc_row_key("")
     assert not is_present_cdc_row_key(None)
     assert not is_present_cdc_row_key(SQL_NULL_SENTINEL)
+    assert not is_present_cdc_row_key("__df_ddb_null__")
+    assert is_present_cdc_row_key(0)
+    assert is_present_cdc_row_key(False)
 
 
 def test_questdb_ddl_stamps_decimal_as_double():

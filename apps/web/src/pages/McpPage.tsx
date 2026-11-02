@@ -2,64 +2,64 @@ import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
+import { Button } from "../components/ui/Button";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
-import { API_BASE } from "../lib/types";
 import { fetchMcpLogs, fetchMcpStatus } from "../lib/api";
+import {
+  claudeMcpSnippet,
+  cursorMcpSnippet,
+  customGptMcpSnippet,
+  mcpHttpUrl,
+  mcpLogStatusLabel,
+  mcpLogTone,
+  remoteMcpSnippet,
+  vscodeMcpSnippet,
+} from "../lib/mcpClientConfig";
+import { API_BASE } from "../lib/types";
 
-const INTEGRATIONS = [
-  {
-    id: "cursor",
-    label: "Cursor",
-    icon: "sparkle",
-    desc: "Add MCP server in Cursor Settings → MCP",
-    snippet: `{
-  "mcpServers": {
-    "dataflow": {
-      "url": "${API_BASE.replace(/\/api\/v1$/, "")}/api/v1/mcp"
-    }
-  }
-}`,
-  },
-  {
-    id: "claude",
-    label: "Claude Desktop",
-    icon: "zap",
-    desc: "Paste into claude_desktop_config.json",
-    snippet: `{
-  "mcpServers": {
-    "dataflow": {
-      "command": "npx",
-      "args": ["-y", "@dataflow/mcp-bridge"],
-      "env": { "DATAFLOW_API": "${API_BASE}" }
-    }
-  }
-}`,
-  },
-  {
-    id: "vscode",
-    label: "VS Code",
-    icon: "connectors",
-    desc: "MCP extension with HTTP transport",
-    snippet: `// .vscode/mcp.json
-{
-  "servers": {
-    "dataflow": { "type": "http", "url": "${API_BASE}/mcp" }
-  }
-}`,
-  },
-  {
-    id: "chatgpt",
-    label: "Custom GPT",
-    icon: "activity",
-    desc: "OpenAPI action pointing at the MCP endpoint",
-    snippet: `POST ${API_BASE.replace(/\/api\/v1$/, "")}/api/v1/mcp/tools/call
-Authorization: Bearer <api-key>`,
-  },
-];
+function mcpIntegrations(url: string) {
+  return [
+    {
+      id: "cursor",
+      label: "Cursor",
+      icon: "sparkle",
+      desc: "Settings → MCP. The URL is absolute. The workspace API key is the Bearer header.",
+      snippet: cursorMcpSnippet(url),
+    },
+    {
+      id: "claude",
+      label: "Claude Desktop",
+      icon: "zap",
+      desc: "Remote HTTP MCP. Same endpoint and key as Cursor.",
+      snippet: claudeMcpSnippet(url),
+    },
+    {
+      id: "vscode",
+      label: "VS Code",
+      icon: "connectors",
+      desc: "MCP extension, HTTP transport, same endpoint.",
+      snippet: vscodeMcpSnippet(url),
+    },
+    {
+      id: "chatgpt",
+      label: "Custom GPT",
+      icon: "activity",
+      desc: "Action pointing at tools/call. Staging returns an ack_id; confirm_action finishes it.",
+      snippet: customGptMcpSnippet(url),
+    },
+    {
+      id: "remote",
+      label: "Grok and other remote clients",
+      icon: "connectors",
+      desc: "Any client that speaks MCP Streamable HTTP. Same endpoint and key.",
+      snippet: remoteMcpSnippet(url),
+    },
+  ];
+}
 
 type McpLog = {
   id: string;
@@ -67,7 +67,10 @@ type McpLog = {
   ts: number;
   tool: string;
   client: string;
+  actor: string | null;
   status: "ok" | "error";
+  errorKind: string | null;
+  errorType: string | null;
   ms: number;
 };
 
@@ -80,7 +83,9 @@ export function McpPage() {
   const [expandedId, setExpandedId] = useState<string | null>("cursor");
   const [logFilter, setLogFilter] = useState<"all" | "ok" | "error">("all");
 
-  const mcpBase = `${API_BASE.replace(/\/api\/v1$/, "")}/api/v1/mcp`;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const mcpBase = mcpHttpUrl(API_BASE, origin);
+  const integrations = mcpIntegrations(mcpBase);
 
   useEffect(() => {
     setLoading(true);
@@ -95,7 +100,10 @@ export function McpPage() {
               ts: new Date(r.time).getTime(),
               tool: r.tool,
               client: r.client,
+              actor: r.actor ?? null,
               status: r.status === "ok" ? "ok" : "error",
+              errorKind: r.error_kind ?? null,
+              errorType: r.error_type ?? null,
               ms: r.ms,
             })),
           ),
@@ -142,19 +150,23 @@ export function McpPage() {
               </code>
               <span className="df2-mcp-endpoint-meta">
                 {online
-                  ? "Paste this URL into your agent client — tools load automatically from the server."
+                  ? "Paste this absolute URL into the client. Add the workspace API key as Authorization: Bearer. create_connector, start_transfer, and create_schedule return an ack_id; confirm_action finishes the change."
                   : "Endpoint not responding. Start the API, then retry setup."}
+              </span>
+              <span className="df2-mcp-endpoint-meta" data-testid="mcp-access-guide">
+                Access follows the key's role and scopes. Viewer: read-only tools. Operator: run and
+                cancel jobs, no new connectors or plans. Editor: every tool except delete_connector.
+                Admin: every tool. Create a key with only the scopes the client needs under Settings → API keys.
               </span>
             </div>
             <div className="df2-mcp-endpoint-actions">
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
+              <Button
+                variant="primary"
                 onClick={() => copyText(mcpBase, "MCP server URL")}
+                leadingIcon={<DtIcon name="check" size={14} />}
               >
-                <DtIcon name="check" size={14} />
                 {copied === "MCP server URL" ? "Copied MCP URL" : "Copy MCP URL"}
-              </button>
+              </Button>
             </div>
           </section>
 
@@ -165,7 +177,7 @@ export function McpPage() {
               </div>
               <div className="df2-mcp-panel-body">
                 <div className="df2-mcp-integration-list">
-                  {INTEGRATIONS.map((item) => (
+                  {integrations.map((item) => (
                     <div key={item.id} className="df2-mcp-integration-row">
                       <div className="df2-cell-main">
                         <div className="df2-cell-icon">
@@ -188,14 +200,14 @@ export function McpPage() {
                 </div>
                 {expandedId && (
                   <div className="df2-mcp-snippet">
-                    {INTEGRATIONS.find((i) => i.id === expandedId)?.snippet}
+                    {integrations.find((i) => i.id === expandedId)?.snippet}
                     <div className="df2-mcp-snippet-actions">
                       <button
                         type="button"
                         className="df2-btn df2-btn-sm df2-btn-primary"
                         onClick={() =>
                           copyText(
-                            INTEGRATIONS.find((i) => i.id === expandedId)!.snippet,
+                            integrations.find((i) => i.id === expandedId)!.snippet,
                             "Setup snippet",
                           )
                         }
@@ -235,7 +247,7 @@ export function McpPage() {
                       <tr>
                         <th>Time</th>
                         <th>Tool</th>
-                        <th>Client</th>
+                        <th>Client / caller</th>
                         <th>Status</th>
                         <th>Latency</th>
                       </tr>
@@ -267,14 +279,23 @@ export function McpPage() {
                             <td>
                               <code>{log.tool}</code>
                             </td>
-                            <td>{log.client}</td>
+                            <td>
+                              {log.client}
+                              {log.actor && log.actor !== log.client ? (
+                                <span className="df2-mcp-log-actor" title={log.actor}>
+                                  {log.actor}
+                                </span>
+                              ) : null}
+                            </td>
                             <td>
                               <span
-                                className={`df2-mcp-log-status df2-mcp-log-status--${
-                                  log.status === "ok" ? "ok" : "err"
-                                }`}
+                                className={`df2-mcp-log-status df2-mcp-log-status--${mcpLogTone(
+                                  log.status,
+                                  log.errorKind,
+                                )}`}
+                                title={log.errorType ?? undefined}
                               >
-                                {log.status === "ok" ? "200" : "500"}
+                                {mcpLogStatusLabel(log.status, log.errorKind)}
                               </span>
                             </td>
                             <td>{log.ms} ms</td>

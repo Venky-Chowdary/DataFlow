@@ -12,9 +12,15 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.column_case import column_type_or_none, lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.mapping_constraints import write_mappings
 from services.validation_coverage import stamp_validation_coverage
-from services.value_serializer import cell_to_string, project_row_cells
+from services.value_serializer import (
+    is_reader_null_cell,
+    project_row_cells,
+    wire_cell_text,
+)
 
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
@@ -54,16 +60,29 @@ def _rows_from_samples(
     ]
 
 
+def _lenient_object_store_copy(source_db_type: str, dest_kind: str) -> bool:
+    """True when both ends create keys by PUT, so cell DDL is not the contract."""
+    try:
+        from preflight.constants import object_store_put_creates_key
+    except ImportError:
+        return False
+    return object_store_put_creates_key(source_db_type) and object_store_put_creates_key(
+        dest_kind
+    )
+
+
 def _check_coercion_safety(
     mappings: list[dict],
     source_types: dict[str, str],
     target_types: dict[str, str],
     *,
     dest_kind: str = "",
+    source_db_type: str = "",
     schema_policy: str = "manual_review",
     validation_mode: str = "strict",
     rows: list[dict[str, Any]] | None = None,
     dest_table_exists: bool | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> dict[str, Any]:
     from services.coercion_probe import samples_coerce_mapping
     from services.type_coercion_validator import (
@@ -71,6 +90,9 @@ def _check_coercion_safety(
         validate_mapping_coercions,
     )
 
+    from services.timezone_policy import declared_source_column_types
+
+    source_types = declared_source_column_types(source_types, mappings)
     floor = float(_mode_config(validation_mode)["confidence"])
     issues = validate_mapping_coercions(
         mappings,
@@ -81,7 +103,28 @@ def _check_coercion_safety(
         validation_mode=validation_mode,
         dest_db_type=dest_kind or "",
         dest_table_exists=dest_table_exists,
+        proven_width_narrowings=proven_width_narrowings,
+        # The measured cells decide questions a declared type cannot (a
+        # nanosecond column whose rows hold microseconds loses nothing).
+        sample_rows=rows,
     )
+    mode = (validation_mode or "strict").strip().lower()
+    if mode == "lenient" and _lenient_object_store_copy(source_db_type, dest_kind):
+        # An object copy stores bytes. Inferred cell types are not a DDL
+        # contract, and a lenient S3→S3 run must not stop on them (R8-003).
+        return {
+            "check": "coercion_safety",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [
+                i.get("message") or i.get("reason") or ""
+                for i in issues
+                if i.get("severity") in {"warn", "block"}
+            ][:10],
+            "object_store_copy": True,
+        }
+
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
         # Schemaless stores values as-is — skip ordinary type-coercion blockers.
@@ -138,20 +181,26 @@ def _check_coercion_safety(
             is_lossy_coercion,
             is_precision_collapse_coercion,
         )
+        from services.column_case import column_population
         from services.type_system import resolve_mapping_target_type
 
-        src_t = str(source_types.get(src) or "")
+        src_t = str(column_type_or_none(source_types, src) or source_types.get(src) or "")
         tgt_t = resolve_mapping_target_type(
             mapping or {"target": issue.get("target")},
             target_types=target_types,
             source_type=src_t,
             dest_db_type=dest_kind,
         )
+        population = column_population(sample_rows, src)
         if mapping and is_precision_collapse_coercion(
             src_t,
             tgt_t,
             dest_db=dest_kind,
             dest_table_exists=dest_table_exists,
+            population=population,
+            source=str(mapping.get("source") or src),
+            target=str(mapping.get("target") or ""),
+            proven=proven_width_narrowings,
         ):
             hardened.append(issue)
             continue
@@ -166,6 +215,10 @@ def _check_coercion_safety(
                 tgt_t,
                 dest_db=dest_kind,
                 dest_table_exists=dest_table_exists,
+                population=population,
+                source=str(mapping.get("source") or src),
+                target=str(mapping.get("target") or ""),
+                proven=proven_width_narrowings,
             )
             and not risk_cleared
         ):
@@ -207,12 +260,25 @@ def _check_transform_dry_run(
     *,
     dest_kind: str = "",
     target_types: dict[str, str] | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
+    file_row_quarantine: bool = False,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
-    headers = source_columns or list(rows[0].keys())
-    sample_rows = [project_row_cells(row, headers) for row in rows[:200]]
+    if source_columns:
+        headers = source_columns
+    else:
+        from connectors.header_union import union_attribute_keys
+
+        # Sparse documents omit keys: row 0 alone is not the header (D150).
+        headers = union_attribute_keys(*(list(r) for r in rows if isinstance(r, dict)))
+    sample_rows = [
+        project_row_cells(row, headers, preserve_sql_null=database_extract)
+        for row in rows[:200]
+    ]
     from services.transform_engine import dry_run_sample
 
     # Ensure each mapping carries target_type so name heuristics (e.g. "date" in
@@ -230,6 +296,10 @@ def _check_transform_dry_run(
         sample_rows=sample_rows,
         mappings=enriched,
         column_types=source_types,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+        database_extract=database_extract,
+        file_row_quarantine=file_row_quarantine,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -293,36 +363,117 @@ def _check_transform_dry_run(
     return result
 
 
+def _column_has_numeric_value(rows: list[dict[str, Any]], column: str) -> bool:
+    """True when at least one sample cell on ``column`` is a real number."""
+    from services.transform_engine import decimal_wire_value
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if decimal_wire_value(lookup_row_value(row, column, None)) is not None:
+            return True
+    return False
+
+
+def _demote_mixed_file_numeric_expectations(
+    exp: dict[str, Any],
+    rows: list[dict[str, Any]],
+    mappings: list[dict],
+) -> dict[str, Any]:
+    """A minority non-numeric cell in a file is a quarantine, not a failed load.
+
+    ``expect_column_values_between`` hard-blocks an ``amt`` column when one
+    sample cell does not parse. The file writer quarantines that row and loads
+    the rest, so Validate must not lock Execute. An all-bad column, and any
+    mapping that already carries a Risk Contract, stay blocking.
+    """
+    blocking = list(exp.get("blocking_failures") or [])
+    if not blocking:
+        return exp
+    quarantine_columns: set[str] = set()
+    for mapping in mappings:
+        raw = mapping.get("risk_contract") or mapping.get("riskContract")
+        if isinstance(raw, dict):
+            continue
+        source = str(mapping.get("source") or "")
+        target = str(mapping.get("target") or "")
+        if _column_has_numeric_value(rows, source) or (
+            target and _column_has_numeric_value(rows, target)
+        ):
+            if source:
+                quarantine_columns.add(source)
+            if target:
+                quarantine_columns.add(target)
+    kept: list[dict[str, Any]] = []
+    demoted: list[dict[str, Any]] = []
+    for failure in blocking:
+        column = str(failure.get("column") or "")
+        if (
+            failure.get("expectation") == "expect_column_values_between"
+            and column in quarantine_columns
+        ):
+            demoted.append(failure)
+        else:
+            kept.append(failure)
+    if not demoted:
+        return exp
+    out = dict(exp)
+    out["blocking_failures"] = kept
+    out["warnings"] = list(exp.get("warnings") or []) + demoted
+    out["blocks_transfer"] = len(kept) > 0
+    out["passed"] = len(kept) == 0
+    return out
+
+
 def _check_financial_precision(
     mappings: list[dict],
     source_types: dict[str, str],
     rows: list[dict[str, Any]],
+    *,
+    file_row_quarantine: bool = False,
 ) -> dict[str, Any]:
     """Detect values that could silently lose magnitude (e.g. comma/currency parsing failures)."""
+    from services.migration_risk_contract import mapping_has_clearing_risk_contract
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
     issues: list[str] = []
+    contracted: list[str] = []
+    file_notes: list[str] = []
     for m in mappings:
         src = m.get("source", "")
         tgt = m.get("target", "")
         if not _FINANCIAL_NAME_PATTERNS.search(src) and not _FINANCIAL_NAME_PATTERNS.search(tgt):
             continue
-        src_type = source_types.get(src, "VARCHAR")
+        # A signed continue-policy Migration Risk Contract on this column names
+        # the write-time disposition for a value the destination will reject, so
+        # the rejection is a contracted holdout, not a Validate block. A
+        # magnitude shift is a silent misparse with no rejection, so it stays
+        # blocking whatever the contract says.
+        holdouts_contracted = mapping_has_clearing_risk_contract(m)
+        src_type = column_type_or_none(source_types, src) or source_types.get(src, "VARCHAR")
         transform = m.get("transform") or infer_transform_for_mapping(
             src, tgt, src_type, m.get("target_type"),
         )
         if transform not in {"decimal", "integer", "currency", "percentage"}:
             continue
-        values = [cell_to_string(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
+        values = [
+            wire_cell_text(lookup_row_value(row, src, "")).strip()
+            for row in rows
+            if lookup_row_value(row, src, None) not in (None, "")
+        ]
+        unparseable: list[str] = []
+        parsed_ok = 0
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
+                if raw in {"0", "0.0", "0.00"}:
+                    parsed_ok += 1
                 continue
             # Schemaless missing and SQL NULL sentinels are not financial values.
             if raw in {"__DF_MISSING__", "__df_sql_null__"}:
                 continue
             converted, err = apply_transform(raw, transform)
             if err:
-                issues.append(f"{src}: unparseable financial value {raw!r}")
+                unparseable.append(f"{src}: unparseable financial value {raw!r}")
                 continue
             # Null/missing sentinel coerced to None is a valid absence, not a parse failure.
             if converted is None:
@@ -330,7 +481,7 @@ def _check_financial_precision(
             try:
                 original_parsed, original_err = apply_transform(raw, "decimal")
                 if original_err:
-                    issues.append(f"{src}: unparseable financial value {raw!r}")
+                    unparseable.append(f"{src}: unparseable financial value {raw!r}")
                     continue
                 if original_parsed is None:
                     continue
@@ -346,13 +497,60 @@ def _check_financial_precision(
                         )
             except (InvalidOperation, ZeroDivisionError):
                 pass
+            parsed_ok += 1
+        contract_present = isinstance(
+            m.get("risk_contract") or m.get("riskContract"), dict
+        )
+        # No contract + a file + at least one good amount: quarantine the bad
+        # cells. A present contract (FAIL_JOB, tampered) stays fail-closed.
+        # Magnitude shifts above stay in ``issues`` either way.
+        if holdouts_contracted:
+            contracted.extend(unparseable)
+        elif file_row_quarantine and parsed_ok > 0 and not contract_present:
+            file_notes.extend(unparseable)
+        else:
+            issues.extend(unparseable)
     blocks = len(issues) > 0
-    return {
+    report: dict[str, Any] = {
         "check": "financial_precision",
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issues[:15],
     }
+    holdout_lines = contracted + file_notes
+    if holdout_lines:
+        report["contracted_holdouts"] = holdout_lines[:15]
+        report["contracted_holdout_count"] = len(holdout_lines)
+        report["warnings"] = [
+            f"Contracted holdout (continue-policy): {c}" for c in contracted[:5]
+        ] + [f"File row quarantine: {c}" for c in file_notes[:5]]
+    return report
+
+
+def _route_stores_blank_key_as_null(
+    mapping: dict[str, Any],
+    *,
+    source_type: str,
+    empty_cells_as_null: bool,
+    database_extract: bool,
+) -> bool:
+    """True when this route writes a ``''`` key cell as SQL NULL (D53).
+
+    The same rules the writer applies (``services.blank_cell_contract``): a
+    file blank becomes NULL in a non-text target, and a database carrier that
+    cannot store ``''`` (numeric, temporal, uuid, ...) reached the wire as a
+    flattened NULL. A text key keeps ``''`` as its value.
+    """
+    from services.blank_cell_contract import (
+        _target_is_text,
+        source_carrier_cannot_store_empty,
+    )
+
+    if empty_cells_as_null and not _target_is_text(mapping):
+        return True
+    return bool(
+        database_extract and source_type and source_carrier_cannot_store_empty(source_type)
+    )
 
 
 def _check_required_nulls(
@@ -363,8 +561,19 @@ def _check_required_nulls(
     dest_kind: str = "",
     primary_key: str | None = None,
     validation_mode: str = "strict",
+    source_types: dict[str, str] | None = None,
+    empty_cells_as_null: bool = False,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     """Enforce nullability on the resolved identity key and exact canonical keys only.
+
+    A key is missing when it is SQL NULL, or when it is ``''`` and *this route*
+    stores that ``''`` as NULL (D53): a destination that folds ``''`` to NULL
+    (Oracle VARCHAR2), a file blank landing in a non-text column (the blank-cell
+    contract writes it as NULL), or a database carrier that cannot hold ``''``.
+    Anywhere else ``''`` is a key value and the write lands it as one — counting
+    it here refused keys the destination stores, while a key the write would
+    turn into NULL passed Validate and died on NOT NULL at Execute.
 
     Optional FK / OAuth fields (``googleId`` → ``google_id``, ``providerId``,
     ``user_id``, …) are often sparse on Mongo/NoSQL sources. Treating every
@@ -375,6 +584,14 @@ def _check_required_nulls(
     issues: list[str] = []
     schemaless = dest_kind in SCHEMALESS_DESTS
     _ = (validation_mode or "strict").strip().lower()
+    from services.reconciliation import destination_empty_string_is_null
+
+    empty_is_null = destination_empty_string_is_null(dest_kind)
+
+    # A column the operator declared Omit is never written, so no destination
+    # nullability contract applies to it. Judging it would block Validate on a
+    # value the run will not carry (Mongo's implicit `_id` omitted by hand).
+    mappings = write_mappings(mappings)
 
     # Resolve the source column that maps to the primary key target.
     pk_source = ""
@@ -404,13 +621,50 @@ def _check_required_nulls(
         if not is_pk and not is_reserved_key:
             continue
 
-        values = [row.get(src) for row in rows]
+        values = [lookup_row_value(row, src, None) for row in rows]
         if not values:
             continue
-        empty = sum(1 for v in values if cell_to_string(v) == "")
+        # A NULL cell serialises to the wire sentinel, not "" — count it (and
+        # the reader's NULL/Missing spellings) as empty, or a key column that
+        # is entirely NULL sails through as populated. An empty string is a
+        # key value, not a missing one (D53): it counts only where the
+        # destination itself stores '' as NULL (Oracle VARCHAR2).
+        blank_is_null = empty_is_null or _route_stores_blank_key_as_null(
+            m,
+            source_type=str((source_types or {}).get(src) or ""),
+            empty_cells_as_null=empty_cells_as_null,
+            database_extract=database_extract,
+        )
+        empty = sum(
+            1
+            for v in values
+            if is_reader_null_cell(v)
+            or (blank_is_null and wire_cell_text(v) == "")
+        )
         rate = empty / len(values)
         if rate > null_rate_max:
-            issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
+            blank = (
+                sum(
+                    1
+                    for v in values
+                    if not is_reader_null_cell(v) and wire_cell_text(v) == ""
+                )
+                if blank_is_null
+                else 0
+            )
+            where = (
+                f"{dest_kind or 'the destination'} stores '' as NULL"
+                if empty_is_null
+                else "this route writes '' into that column as NULL"
+            )
+            why = (
+                f"; {blank} of them are '' and {where}, so they cannot identify a row"
+                if blank
+                else ""
+            )
+            issues.append(
+                f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field){why}"
+            )
     blocks = len(issues) > 0
     return {
         "check": "required_nulls",
@@ -539,8 +793,9 @@ def _sample_unique_constraint_dupes(
         skip = False
         for dest_col, src, ddl, casefold, null_sentinel in col_specs:
             # Preserve trailing spaces for NO PAD engines — cell_to_string only.
-            raw_cell = row.get(src, row.get(dest_col, ""))
-            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            # An absent cell is Missing (no key), never the '' key value (D53).
+            raw_cell = row.get(src, row.get(dest_col))
+            raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key_part = unique_equality_key(
                 None if raw_cell is None else raw,
                 ddl,
@@ -567,19 +822,36 @@ def _sample_unique_constraint_dupes(
     return [f"{label}: duplicate key values ({sample})"]
 
 
+def _key_table_kind(uk: dict[str, Any] | None) -> str:
+    """Table kind stamped on one catalog key, or empty when it was not measured."""
+    if not isinstance(uk, dict) or "table_kind" not in uk:
+        return ""
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    return normalize_snowflake_table_kind(uk.get("table_kind"))
+
+
 def _destination_constraints_advisory(
     dest_kind: str,
     destination_unique_keys: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """True when dest PK/UNIQUE are optimizer/metadata-only (BQ / Redshift / SF NOT ENFORCED)."""
-    kind = normalize_dest_kind(dest_kind or "")
-    if kind in {"bigquery", "redshift"}:
-        return True
-    # Snowflake hybrid may mix; only advisory when every covering key says so.
-    keys = list(destination_unique_keys or [])
-    if keys and all(uk.get("enforced") is False for uk in keys):
-        return True
-    return False
+    """True when dest PK/UNIQUE are optimizer metadata, not a write rule.
+
+    Redshift, BigQuery, Databricks, and Snowflake standard tables share
+    :func:`services.foreign_key_metadata.uniqueness_proof_gap`. A Snowflake
+    key becomes a write rule only when its measured table kind is hybrid
+    and ``enforced`` is true. A stamped ``enforced`` flag without that kind
+    stays advisory. A key dict that says ``enforced`` false on any other
+    engine is the same answer.
+    """
+    from services.foreign_key_metadata import uniqueness_proof_gap
+
+    keys = [uk for uk in (destination_unique_keys or []) if isinstance(uk, dict)]
+    if not keys:
+        return uniqueness_proof_gap(dest_kind) == "unenforced"
+    return all(
+        not _unique_constraint_enforced(uk, dest_kind=dest_kind) for uk in keys
+    )
 
 
 def _unique_constraint_enforced(
@@ -587,11 +859,26 @@ def _unique_constraint_enforced(
     *,
     dest_kind: str = "",
 ) -> bool:
+    from services.foreign_key_metadata import _dialect_key, uniqueness_proof_gap
+
+    kind = _key_table_kind(uk)
+    if uk is not None and uk.get("index_ready") is False:
+        # PostgreSQL indisready is false. Inserts ignore the index.
+        return False
+    if uk is not None and uk.get("disabled") is True:
+        # SQL Server DISABLE. The index does not reject a new duplicate.
+        return False
+    if uniqueness_proof_gap(dest_kind, table_kind=kind) == "unenforced":
+        return False
+    if _dialect_key(dest_kind) == "snowflake":
+        # Hybrid tables enforce the key. The constraint row still has to say so.
+        return uk is not None and uk.get("enforced") is True
     if uk is not None and uk.get("enforced") is False:
         return False
     if uk is not None and uk.get("enforced") is True:
         return True
-    return not _destination_constraints_advisory(dest_kind, [uk] if uk else None)
+    # An enforcing engine with no separate bit treats the constraint as the check.
+    return True
 
 
 def _advisory_unique_key_warnings(
@@ -614,6 +901,21 @@ def _advisory_unique_key_warnings(
         uk for uk in keys if not _unique_constraint_enforced(uk, dest_kind=dest_kind)
     ]
     kind = normalize_dest_kind(dest_kind or "") or "destination"
+    if any(
+        uk.get("index_valid") is False and uk.get("index_ready") is not False
+        for uk in keys
+    ):
+        warnings.append(
+            f"{kind} unique index is invalid (pg_index.indisvalid is false). "
+            "New duplicates are still rejected while the index is ready for "
+            "inserts. Existing rows were not checked."
+        )
+    if any(uk.get("ignore_dup_key") is True for uk in keys):
+        warnings.append(
+            f"{kind} unique index has IGNORE_DUP_KEY. A duplicate insert "
+            "is dropped with a warning instead of failing the statement. "
+            "Validate still quarantines a duplicate it can see."
+        )
     if not advisory and not _destination_constraints_advisory(dest_kind, keys):
         return warnings
     if advisory:
@@ -627,6 +929,31 @@ def _advisory_unique_key_warnings(
             f"metadata): {', '.join(labels)} — Validate will not invent write "
             "blockers; prove uniqueness with pipeline tests before trusting merges."
         )
+        if any(uk.get("rely") is True for uk in advisory):
+            warnings.append(
+                f"{kind} RELY is an optimizer hint. It does not prove the "
+                "loaded rows are unique."
+            )
+        if any(uk.get("disabled") is True for uk in advisory):
+            from services.foreign_key_metadata import _dialect_key
+
+            if _dialect_key(dest_kind) == "oracle":
+                warnings.append(
+                    f"{kind} primary key or unique constraint has STATUS "
+                    "DISABLED. It does not reject a new duplicate and does "
+                    "not prove the loaded rows are unique."
+                )
+            else:
+                warnings.append(
+                    f"{kind} unique index is disabled. It does not reject a "
+                    "new duplicate and does not prove the loaded rows are unique."
+                )
+        if any(uk.get("index_ready") is False for uk in advisory):
+            warnings.append(
+                f"{kind} unique index is not ready for inserts "
+                "(pg_index.indisready is false). It does not reject a new "
+                "duplicate and does not prove the loaded rows are unique."
+            )
     elif _destination_constraints_advisory(dest_kind, keys):
         warnings.append(
             f"{kind} PRIMARY KEY / UNIQUE constraints are informational "
@@ -778,6 +1105,105 @@ def _check_destination_unique_constraints(
     return issues
 
 
+def _inferred_identity_dup_warnings(
+    rows: list[dict[str, Any]], identity_cols: list[str], pk_label: str
+) -> list[str]:
+    """Non-blocking note for duplicates of a heuristically inferred identity."""
+    counts: dict[tuple[str, ...], int] = {}
+    for row in rows:
+        tup = tuple(wire_cell_text(row.get(c)) for c in identity_cols)
+        if all(v == "" for v in tup):
+            continue
+        counts[tup] = counts.get(tup, 0) + 1
+    dupes = [(",".join(t), n) for t, n in counts.items() if n > 1]
+    if not dupes:
+        return []
+    sample = ", ".join(f"{v}×{n}" for v, n in dupes[:3])
+    return [
+        f"{pk_label}: duplicate values of an inferred identity ({sample}) — the "
+        "overwrite recreates a table without a declared key, so rows load as-is. "
+        "Declare a primary key to enforce uniqueness."
+    ]
+
+
+def _stream_contracts_declare_identity(stream_contracts: list[dict] | None) -> bool:
+    for contract in stream_contracts or []:
+        if not isinstance(contract, dict):
+            continue
+        for field in ("primary_key", "primary_keys", "upsert_key", "cursor_primary_key"):
+            if contract.get(field):
+                return True
+    return False
+
+
+def _business_identity_columns(identity_cols: list[str], sync: str) -> list[str]:
+    """Drop SCD2 engine-owned history columns from a source identity key.
+
+    An SCD2 destination key is ``(business_key, valid_from)``; the source carries
+    one row per business key and never the history columns, so including them
+    would make every probe tuple incomplete (false green) or compare history
+    versions as duplicates (false block).
+    """
+    if sync != "scd2" or not identity_cols:
+        return identity_cols
+    from services.scd2_engine import SCD2_COLUMNS
+
+    history = {c.lower() for c in SCD2_COLUMNS}
+    business = [c for c in identity_cols if c.lower() not in history]
+    return business or identity_cols
+
+
+def _rows_by_file(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    tagged = any(isinstance(row, dict) and "_df_file" in row for row in rows)
+    if not tagged:
+        return [list(rows)]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        tag = str(row.get("_df_file") or "") if isinstance(row, dict) else ""
+        if tag not in groups:
+            order.append(tag)
+            groups[tag] = []
+        groups[tag].append(row)
+    return [groups[tag] for tag in order]
+
+
+def _file_scope_key(row: dict[str, Any], key: str) -> str:
+    if isinstance(row, dict) and "_df_file" in row:
+        return str(row.get("_df_file") or "") + "\x1e" + str(key)
+    return str(key)
+
+
+def _in_file_collapse_message(
+    pk: str,
+    extra: int,
+    example: str,
+    *,
+    sample: bool = False,
+    unique: int | None = None,
+    scanned: int | None = None,
+) -> str:
+    """Operator text for an in-file upsert collapse.
+
+    A finished scan names the population. A partial scan says the number is
+    from the rows that were read. Neither path invents a count it did not make.
+    """
+    if sample:
+        counted = f"{extra} extra row(s) in the scanned sample"
+    else:
+        counted = f"{extra} extra row(s)"
+    shown = f"({example}) " if example else ""
+    scope = ""
+    if not sample and unique is not None and scanned is not None:
+        scope = f"({unique} unique, {scanned} scanned) "
+    return (
+        f"In-file duplicate keys on {pk}: "
+        f"{counted} collapsed to one per key "
+        f"{shown}{scope}"
+        "(last wins). Counted once. Not quarantined and not skipped."
+    )
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -785,6 +1211,7 @@ def _check_duplicate_keys(
     *,
     dest_kind: str = "",
     primary_key: str | None = None,
+    primary_key_columns: list[str] | None = None,
     source_duplicate_findings: list[dict[str, Any]] | None = None,
     sync_mode: str = "",
     destination_pk_columns: list[str] | None = None,
@@ -793,13 +1220,20 @@ def _check_duplicate_keys(
     source_duplicate_probe_status: str = "",
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
+    identity_declared: bool | None = None,
+    in_file_dedupe: str = "",
+    duplicate_policy: str = "",
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
     - Schemaless destinations (Mongo/Redis/Dynamo) and sync modes that require a
       unique identity (upsert/CDC/mirror/SCD2) always enforce duplicates.
-    - Overwrite modes enforce duplicates because the destination table is recreated
-      and the mapped identity key is likely to become the primary key.
+    - Overwrite modes block on duplicates of a *declared* identity (operator /
+      contract / composite key, or a destination key the recreate enforces). A
+      heuristically inferred key only warns — a heap may legally repeat it.
+      ``identity_declared=None`` means only a destination key counts as declared.
+    - SCD2 dedupes on the business key; engine-owned history columns
+      (valid_from/valid_to/is_current/row_hash) are never part of source identity.
     - Append-like modes only enforce duplicates when the destination primary key or
       a UNIQUE index is known to include the mapped target column.
     - Destination CI/AI collations / CITEXT / ``UNIQUE (lower(col))`` equate
@@ -817,6 +1251,99 @@ def _check_duplicate_keys(
         sync = normalize_sync_mode(sync_mode)
     except Exception:
         sync = (sync_mode or "").strip().lower()
+    # ACC-03 — full identity columns (composite-aware). A (region,id) contract
+    # must dedupe on the tuple, never on `id` alone: components legitimately
+    # repeat across composite keys, and checking one member false-blocks every
+    # composite-key upsert.
+    identity_cols = [
+        str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()
+    ]
+    if not identity_cols and primary_key:
+        identity_cols = [primary_key]
+    identity_cols = _business_identity_columns(identity_cols, sync)
+    destination_pk_columns = _business_identity_columns(
+        [str(c) for c in (destination_pk_columns or []) if c], sync
+    )
+    composite_identity = len(identity_cols) > 1
+    pk_label = " + ".join(identity_cols) if identity_cols else (primary_key or "")
+    target_cols = [
+        (_target_for_source(c, mappings) or c) for c in identity_cols
+    ]
+    from services.primary_key import operator_collapses_in_file_duplicates
+
+    keep_last = str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
+    collapses_in_file = operator_collapses_in_file_duplicates(sync, in_file_dedupe)
+    collapsed_extra = 0
+    collapse_example = ""
+    probe_collapsed_extra = 0
+    probe_example = ""
+    population_extra: int | None = None
+    population_unique: int | None = None
+    population_scanned: int | None = None
+    sample_only = False
+    sample_extra: int | None = None
+    if collapses_in_file:
+        # Explicit keep-last clears the source probe: the operator chose it.
+        # Upsert collapses in-file copies the payload scan found. A SQL
+        # source-table probe that found real duplicate keys still blocks,
+        # and so does an explicit block policy (collapses_in_file is false).
+        if keep_last:
+            source_duplicate_findings = []
+        elif identity_cols:
+            kept_findings: list[dict[str, Any]] = []
+            for finding in source_duplicate_findings or []:
+                if isinstance(finding, dict) and finding.get("in_file"):
+                    if (
+                        finding.get("population_complete") is True
+                        and finding.get("population_extra") is not None
+                    ):
+                        population_extra = int(finding["population_extra"])
+                        if finding.get("population_unique") is not None:
+                            population_unique = int(finding["population_unique"])
+                        if finding.get("population_scanned") is not None:
+                            population_scanned = int(finding["population_scanned"])
+                    elif finding.get("sample_only"):
+                        sample_only = True
+                        if finding.get("sample_extra") is not None:
+                            sample_extra = int(finding["sample_extra"])
+                    count = int(finding.get("count") or 0)
+                    if count > 1:
+                        probe_collapsed_extra += count - 1
+                        if not probe_example:
+                            probe_example = str(finding.get("value") or "")
+                    continue
+                kept_findings.append(finding)
+            source_duplicate_findings = kept_findings
+        if identity_cols:
+            from services.duplicate_policy import collapse_keep_last
+            from services.type_system import unique_equality_key
+
+            def _equality_identity(row: dict[str, Any]) -> tuple:
+                parts = []
+                for col in identity_cols:
+                    ddl = _lookup_target_ddl(col, target_types) if target_types else ""
+                    parts.append(
+                        unique_equality_key(
+                            row.get(col),
+                            ddl or "",
+                            dest_kind=dest_kind,
+                        )
+                    )
+                return tuple(parts)
+
+            collapsed_groups = []
+            for group in _rows_by_file(rows):
+                kept, dropped = collapse_keep_last(
+                    group, identity_cols, key_fn=_equality_identity
+                )
+                collapsed_extra += int(dropped or 0)
+                if dropped and not collapse_example and group:
+                    sample = group[-1]
+                    collapse_example = (
+                        "(" + ", ".join(str(sample.get(col)) for col in identity_cols) + ")"
+                    )
+                collapsed_groups.append(kept)
+            rows = [row for group in collapsed_groups for row in group]
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
     advisory_warnings = _advisory_unique_key_warnings(
         dest_kind=dest_kind,
@@ -826,13 +1353,79 @@ def _check_duplicate_keys(
         destination_pk_columns=destination_pk_columns,
         target_types=target_types,
     )
+    if population_extra:
+        # A finished payload scan counted every extra row. The example list is
+        # capped, so summing those examples under-counts the file.
+        advisory_warnings.append(
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                population_extra,
+                probe_example,
+                unique=population_unique,
+                scanned=population_scanned,
+            )
+        )
+    elif collapsed_extra:
+        advisory_warnings.append(
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                collapsed_extra,
+                collapse_example.lstrip("(").rstrip(")") if collapse_example else "",
+            )
+        )
+    elif sample_only and (sample_extra or probe_collapsed_extra):
+        # The scan stopped before the rest of the file. Say so. Do not promote
+        # the rows that were read into a population.
+        advisory_warnings.append(
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                sample_extra if sample_extra is not None else probe_collapsed_extra,
+                probe_example,
+                sample=True,
+            )
+        )
+    elif probe_collapsed_extra:
+        # The Validate sample missed the repeated keys (it is capped). The
+        # file scan found them. Upsert still keeps one row per key.
+        advisory_warnings.append(
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                probe_collapsed_extra,
+                probe_example,
+            )
+        )
 
+    dest_has_enforced_key = bool(destination_pk_columns) or any(
+        _unique_constraint_enforced(uk, dest_kind=dest_kind)
+        for uk in (destination_unique_keys or [])
+    )
+    if identity_declared is None:
+        identity_declared = dest_has_enforced_key
+    # A declared identity that repeats in the source cannot become the recreated
+    # table's key, so overwrite blocks. An inferred key on a heap only warns.
+    # Explicit append is the operator saying duplicate keys are the load.
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    append_allows_duplicates = normalize_duplicate_policy(duplicate_policy) == "append"
+    overwrite_enforces_uniqueness = (
+        _is_overwrite_like(sync)
+        and bool(identity_cols)
+        and bool(identity_declared or dest_has_enforced_key)
+        and not append_allows_duplicates
+    )
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
-    enforce_identity = bool(primary_key) and (
+    enforce_identity = bool(identity_cols) and (
         schemaless
-        or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-        or _is_overwrite_like(sync)
-        or not _is_append_like(sync)
+        or (
+            sync_requires_unique_identity(sync, dest_kind=dest_kind)
+            and not collapses_in_file
+        )
+        or overwrite_enforces_uniqueness
+        or (
+            not _is_append_like(sync)
+            and not _is_overwrite_like(sync)
+            and not collapses_in_file
+        )
     )
     covering_single = False
     covering_composite_only = False
@@ -875,17 +1468,21 @@ def _check_duplicate_keys(
 
     # Composite UNIQUE/PK probes run whenever catalog keys are known and mapped —
     # not only when the Studio identity column participates.
-    composite_issues = _check_destination_unique_constraints(
-        mappings,
-        rows,
-        destination_pk_columns=destination_pk_columns,
-        destination_unique_keys=destination_unique_keys,
-        target_types=target_types,
-        dest_kind=dest_kind,
-    )
+    composite_issues: list[str] = []
+    for group in _rows_by_file(rows):
+        composite_issues.extend(
+            _check_destination_unique_constraints(
+                mappings,
+                group,
+                destination_pk_columns=destination_pk_columns,
+                destination_unique_keys=destination_unique_keys,
+                target_types=target_types,
+                dest_kind=dest_kind,
+            )
+        )
     issues.extend(composite_issues)
 
-    if not primary_key and not issues:
+    if not identity_cols and not issues:
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -900,25 +1497,31 @@ def _check_duplicate_keys(
     # Quarantine→balanced must not green Validate when write-time DQ will fail.
     probe_authoritative = False
     probe_status = (source_duplicate_probe_status or "").strip().lower()
-    if primary_key:
+    if identity_cols:
         findings = source_duplicate_findings or []
         if findings:
             sample = ", ".join(
                 f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
             )
             issues.append(
-                f"{primary_key}: duplicate key values from source probe ({sample})"
+                f"{pk_label}: duplicate key values from source probe ({sample})"
             )
             probe_authoritative = True
 
+    # Expected but not "ran" is unavailable — including a status nobody set.
+    # Requiring a non-empty status let a probe that never reported pass as
+    # if it had proven uniqueness (QA MX3-22 fail-open).
     probe_unavailable = bool(
         source_duplicate_probe_expected
-        and probe_status
         and probe_status != "ran"
         and not probe_authoritative
     )
 
     if not enforce_identity and not issues and not probe_unavailable:
+        if _is_overwrite_like(sync) and identity_cols:
+            advisory_warnings = advisory_warnings + _inferred_identity_dup_warnings(
+                rows, identity_cols, pk_label
+            )
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -931,12 +1534,73 @@ def _check_duplicate_keys(
 
     # Single-column sample identity — skip when the only covering constraint is
     # composite (same code under different orgs must not false-fail).
-    run_single = bool(
-        enforce_identity
-        and primary_key
-        and not (covering_composite_only and not covering_single)
+    # Also skip when the destination has a composite PK that includes the identity
+    # column: checking single-column duplicates on a composite PK component is a
+    # false positive (ACC-03: (region,id) composite key has duplicate 'id' values).
+    dest_has_composite_pk = len(destination_pk_columns or []) > 1
+    identity_in_composite_pk = (
+        not composite_identity
+        and dest_has_composite_pk
+        and target_col
+        and target_col.lower() in {str(c).lower() for c in (destination_pk_columns or [])}
     )
-    if run_single and primary_key:
+    run_identity = bool(
+        enforce_identity
+        and identity_cols
+        and not (covering_composite_only and not covering_single)
+        and not identity_in_composite_pk
+    )
+    if run_identity and composite_identity:
+        # ACC-03 — dedupe on the whole tuple. ``composite_unique_equality_key``
+        # applies the same per-cell engine semantics (CI/AI collation, PAD
+        # rules) and joins components with a unit separator so ("ab","c") can
+        # never equal ("a","bc"). A NULL component is SQL-NULL: not a key, so
+        # that row cannot collide and is skipped — MATCH SIMPLE semantics.
+        from services.type_system import (
+            composite_unique_equality_key,
+            unique_key_forces_casefold,
+        )
+
+        comp_ddls = [
+            _lookup_target_ddl(tc, target_types) or _lookup_target_ddl(sc, target_types)
+            for sc, tc in zip(identity_cols, target_cols)
+        ]
+        comp_casefold = [
+            unique_key_forces_casefold(
+                tc, ddl_type=comp_ddls[i], unique_keys=destination_unique_keys or []
+            )
+            for i, tc in enumerate(target_cols)
+        ]
+        seen_t: dict[str, int] = {}
+        examples_t: dict[str, str] = {}
+        for row in rows:
+            key = composite_unique_equality_key(
+                [
+                    (
+                        row.get(col),
+                        comp_ddls[i],
+                        comp_casefold[i],
+                        None,
+                    )
+                    for i, col in enumerate(identity_cols)
+                ],
+                dest_kind=dest_kind,
+            )
+            if not key:
+                continue
+            scoped = _file_scope_key(row, key)
+            seen_t[scoped] = seen_t.get(scoped, 0) + 1
+            examples_t.setdefault(
+                scoped,
+                "(" + ", ".join(str(row.get(c)) for c in identity_cols) + ")",
+            )
+        dupes = [(examples_t.get(v, v), c) for v, c in seen_t.items() if c > 1]
+        if dupes:
+            sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+            issues.append(
+                f"{pk_label}: duplicate composite key values ({sample})"
+            )
+    elif run_identity and primary_key:
         from services.type_system import (
             unique_equality_key,
             unique_key_forces_casefold,
@@ -974,8 +1638,9 @@ def _check_duplicate_keys(
                 scope_row, target_col, unique_keys=single_uks
             ):
                 continue
-            raw_cell = row.get(primary_key, "")
-            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            # An absent cell is Missing (no key), never the '' key value (D53).
+            raw_cell = row.get(primary_key)
+            raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key = unique_equality_key(
                 None if raw_cell is None else raw,
                 dest_ddl,
@@ -987,8 +1652,9 @@ def _check_duplicate_keys(
                 continue
             if not key:
                 continue
-            seen[key] = seen.get(key, 0) + 1
-            examples.setdefault(key, raw if raw else "<NULL>")
+            scoped = _file_scope_key(row, key)
+            seen[scoped] = seen.get(scoped, 0) + 1
+            examples.setdefault(scoped, raw if raw else "<NULL>")
         dupes = [(examples.get(v, v), c) for v, c in seen.items() if c > 1]
         if dupes:
             sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
@@ -1013,7 +1679,7 @@ def _check_duplicate_keys(
         or covering_composite_only
         or schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-        or _is_overwrite_like(sync)
+        or overwrite_enforces_uniqueness
     )
     # Probe expected but did not complete → never invent population uniqueness.
     # Upsert/CDC/overwrite/dest-PK routes fail closed; append/create-new warns.
@@ -1044,7 +1710,9 @@ def _check_duplicate_keys(
             "sample-only uniqueness; append may still write duplicate keys"
         )
     if probe_authoritative and blocks:
-        if uniqueness_required:
+        # In-file copies collapse. A full-table probe that found duplicate
+        # keys is still a block: the source itself is not unique.
+        if uniqueness_required or collapses_in_file:
             return {
                 "check": "duplicate_keys",
                 "passed": False,
@@ -1082,8 +1750,8 @@ def _check_duplicate_keys(
         must_block = (
             schemaless
             or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-            or _is_overwrite_like(sync)
-            or not _is_append_like(sync)
+            or overwrite_enforces_uniqueness
+            or (not _is_append_like(sync) and not _is_overwrite_like(sync))
         )
         if must_block:
             return {
@@ -1108,6 +1776,21 @@ def _check_duplicate_keys(
             "warnings": (advisory_warnings + issues)[:15],
             "primary_key": primary_key,
             "dest_kind": dest_kind,
+        }
+    if blocks and append_allows_duplicates:
+        # Explicit append on overwrite reloads every source row. A repeated
+        # key is the data, including when the full-table probe found it.
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": (advisory_warnings + issues)[:15],
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+            "note": (
+                "Append keeps every source row, including repeated identity keys."
+            ),
         }
     return {
         "check": "duplicate_keys",
@@ -1195,18 +1878,30 @@ def _check_mapping_confidence(
     }
 
 
-def _format_control_chars(text: str) -> list[str]:
-    """Return U+XXXX codes for format/control chars that warehouses often reject."""
-    found: list[str] = []
+def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
+    """U+XXXX codes of ``(control, format)`` characters in ``text``.
+
+    Controls (Cc, minus tab/newline/CR — NUL, BEL, ESC …) are rejected or
+    corrupted by destinations. Format characters (Cf — U+200B, ZWJ/ZWNJ,
+    soft hyphen, BOM, bidi marks) are valid Unicode every UTF-8 destination
+    stores verbatim; they only make visually equal text compare unequal.
+    """
+    controls: list[str] = []
+    formats: list[str] = []
     for ch in text:
         cat = unicodedata.category(ch)
-        if cat == "Cf" or (cat == "Cc" and ch not in "\t\n\r"):
-            code = f"U+{ord(ch):04X}"
-            if code not in found:
-                found.append(code)
-            if len(found) >= 6:
-                break
-    return found
+        if cat == "Cc" and ch not in "\t\n\r":
+            bucket = controls
+        elif cat == "Cf":
+            bucket = formats
+        else:
+            continue
+        code = f"U+{ord(ch):04X}"
+        if code not in bucket:
+            bucket.append(code)
+        if len(controls) + len(formats) >= 6:
+            break
+    return controls, formats
 
 
 def _check_encoding_anomalies(
@@ -1217,9 +1912,11 @@ def _check_encoding_anomalies(
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
-    Strict/maximum: block at Validate. Balanced: warn + strip_controls path
-    (never silent-pass). Columns already mapped with ``strip_controls`` /
-    ``normalize_unicode`` are skipped.
+    Strict/maximum: U+FFFD and control characters block at Validate; format
+    characters alone (U+200B …) warn, because they are valid text the
+    destination keeps (D69). Balanced: every finding warns with the
+    strip_controls path (never silent-pass). Columns already mapped with
+    ``strip_controls`` / ``normalize_unicode`` are skipped.
     """
     sanitized_cols = {
         str(m.get("source") or "").lower()
@@ -1240,7 +1937,7 @@ def _check_encoding_anomalies(
                 continue
             if str(col).lower() in sanitized_cols:
                 continue
-            text = cell_to_string(val)
+            text = wire_cell_text(val)
             checked += 1
             if "\ufffd" in text:
                 findings.append({
@@ -1251,9 +1948,11 @@ def _check_encoding_anomalies(
                     "sample": text[:500],
                     "suggested_fix": "Re-encode the source as UTF-8, or apply strip_controls and quarantine remaining bad cells.",
                     "suggested_transform": "strip_controls",
+                    "blocking": True,
                 })
                 continue
-            bad = _format_control_chars(text)
+            controls, formats = _format_control_chars(text)
+            bad = controls + formats
             if bad:
                 findings.append({
                     "column": str(col),
@@ -1267,44 +1966,138 @@ def _check_encoding_anomalies(
                         "or quarantine affected rows — never drop silently."
                     ),
                     "suggested_transform": "strip_controls",
+                    "blocking": bool(controls),
                 })
         if len(findings) >= 12:
             break
 
     mode = (validation_mode or "strict").strip().lower()
-    # Strict/maximum: always block — control chars break Snowflake/PG/MySQL loads.
-    # Balanced: surface findings as warnings + strip_controls fix path so a single
-    # U+200B in legacy data does not hard-stop Validate; never silent-pass.
+    # Strict/maximum: U+FFFD and control chars block — they break Snowflake/PG/
+    # MySQL loads. Format characters only warn: they load and read back intact.
+    # Balanced: every finding warns + strip_controls fix path so a single bad
+    # cell in legacy data does not hard-stop Validate; never silent-pass.
     issue_payload: list[Any] = findings[:12] if findings else []
-    if mode == "balanced" and findings:
-        return {
-            "check": "encoding_anomalies",
-            "passed": True,
-            "blocks_transfer": False,
-            "issues": [],
-            "warnings": [
-                (
-                    f"{f.get('column')}: {f.get('message')} — apply strip_controls "
-                    "or quarantine before Run"
-                )
-                for f in issue_payload
-            ],
-            "values_checked": checked,
-            "affected_columns": sorted({f["column"] for f in findings}),
-            "suggested_transform": "strip_controls",
-            "encoding_findings": issue_payload,
-        }
-    blocks = bool(findings)
+    blocking = [] if mode == "balanced" else [f for f in issue_payload if f["blocking"]]
+    advisory = [f for f in issue_payload if f not in blocking]
+    blocks = bool(blocking)
     return {
         "check": "encoding_anomalies",
         "passed": not blocks,
         "blocks_transfer": blocks,
-        "issues": issue_payload,
-        "warnings": [],
+        "issues": blocking,
+        "warnings": [
+            (
+                f"{f.get('column')}: {f.get('message')} — apply strip_controls "
+                "or quarantine before Run"
+            )
+            for f in advisory
+        ],
         "values_checked": checked,
         "affected_columns": sorted({f["column"] for f in findings}),
         "suggested_transform": "strip_controls" if findings else None,
         "encoding_findings": issue_payload,
+    }
+
+
+def _check_null_keys(
+    key_columns: list[str],
+    null_rows: int,
+    *,
+    sync_mode: str,
+    dest_kind: str,
+) -> dict[str, Any]:
+    """D46: population rows whose identity key is NULL, from the source probe.
+
+    A keyed write matches on the key, and a NULL matches nothing: the row can
+    neither update nor insert. Found only at write time, it surfaced as an
+    unrelated "column not on the destination" failure after rows had landed.
+    """
+    from services.primary_key import sync_requires_unique_identity
+    from services.sync_cursor import normalize_sync_mode
+
+    label = " + ".join(key_columns) or "the key"
+    keyed = dest_kind in SCHEMALESS_DESTS or sync_requires_unique_identity(
+        normalize_sync_mode(sync_mode), dest_kind=dest_kind
+    )
+    message = (
+        f"{label}: {null_rows:,} source row(s) have a NULL upsert key — a keyed "
+        "write cannot match or insert a row without its key. Fill the key, "
+        "filter those rows out, or upsert on a key that is never NULL."
+    )
+    if not keyed:
+        return {
+            "check": "null_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [message],
+        }
+    return {
+        "check": "null_keys",
+        "passed": False,
+        "blocks_transfer": True,
+        "issues": [message],
+        "null_key_rows": int(null_rows),
+        "primary_key_columns": list(key_columns),
+    }
+
+
+def _check_transformed_key_collisions(
+    probe: dict[str, Any],
+    *,
+    sync_mode: str,
+    dest_kind: str,
+    identity_declared: bool = False,
+) -> dict[str, Any]:
+    """D39: distinct source keys that a key-column transform writes as one key."""
+    from services.primary_key import sync_requires_unique_identity
+    from services.sync_cursor import is_overwrite_sync, normalize_sync_mode
+
+    count = int(probe.get("collision_count") or 0)
+    label = " + ".join(probe.get("key_columns") or []) or "the key"
+    transforms = ", ".join(
+        f"{col}: {xform}" for col, xform in (probe.get("transforms") or {}).items()
+    )
+    sample = "; ".join(
+        f"{' vs '.join(repr(k) for k in c.get('source_keys') or [])} "
+        f"-> {c.get('written_key')!r}"
+        for c in (probe.get("collisions") or [])[:3]
+    )
+    message = (
+        f"{label}: {count:,} source row(s) share a key only after the key's "
+        f"transform ({transforms}) - {sample}. The destination key would treat them as one "
+        "row and keep one of them. Drop the transform from the key, dedupe the "
+        "source, or choose a key the transform leaves distinct."
+    )
+    if probe.get("destination_equality"):
+        from services.dest_key_equality import destination_equality_message
+
+        message = destination_equality_message(probe, count=count, label=label,
+                                               transforms=transforms, dest_kind=dest_kind)
+    # An overwrite recreates the table with the declared key as its PK, so the
+    # same collision is a unique violation there.
+    keyed = (
+        dest_kind in SCHEMALESS_DESTS
+        or sync_requires_unique_identity(
+            normalize_sync_mode(sync_mode), dest_kind=dest_kind
+        )
+        or (identity_declared and is_overwrite_sync(sync_mode))
+    )
+    if not keyed:
+        return {
+            "check": "transformed_key_collisions",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [message],
+        }
+    return {
+        "check": "transformed_key_collisions",
+        "passed": False,
+        "blocks_transfer": True,
+        "issues": [message],
+        "collision_count": count,
+        "primary_key_columns": list(probe.get("key_columns") or []),
     }
 
 
@@ -1317,6 +2110,7 @@ def run_integrity_audit(
     target_schemas: list[dict] | None = None,
     source_samples: dict[str, list[str]] | None = None,
     destination_db_type: str = "",
+    source_db_type: str = "",
     sample_rows: list[dict] | None = None,
     validation_mode: str = "strict",
     schema_policy: str = "manual_review",
@@ -1330,7 +2124,18 @@ def run_integrity_audit(
     source_duplicate_probe_status: str = "",
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
+    source_null_key_rows: int | None = None,
+    source_key_collisions: dict[str, Any] | None = None,
     dest_table_exists: bool | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
+    file_row_quarantine: bool = False,
+    source_measured_empty: bool = False,
+    stream_contracts: list[dict] | None = None,
+    proven_width_narrowings: dict | None = None,
+    in_file_dedupe: str = "",
+    duplicate_policy: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1378,6 +2183,33 @@ def run_integrity_audit(
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
     )
+    # Composite-aware identity (ACC-03): Studio contracts / destination PKs can
+    # name a multi-column key. The sample/probe dedupe must run on the whole
+    # tuple — checking any one component alone reports false duplicates for
+    # values that legitimately repeat inside a composite key.
+    from services.primary_key import resolve_primary_key_source_columns
+
+    pk_columns_uniqueness = resolve_primary_key_source_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=mode,
+        purpose="uniqueness",
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+    )
+    if len(pk_columns_uniqueness) > 1 and not pk_uniqueness:
+        # Label for operator output; the check itself reads the column list.
+        pk_uniqueness = pk_columns_uniqueness[0]
+    if len(pk_columns_uniqueness) <= 1:
+        pk_columns_uniqueness = [pk_uniqueness] if pk_uniqueness else []
+    identity_declared = bool(
+        str(contract_primary_key or "").strip()
+        or len(pk_columns_uniqueness) > 1
+        or destination_pk_columns
+        or _stream_contracts_declare_identity(stream_contracts)
+    )
 
     checks: list[dict[str, Any]] = []
 
@@ -1390,7 +2222,15 @@ def run_integrity_audit(
             "blocks_transfer": True,
             "issues": ["No source columns available for integrity validation"],
         })
-    if not rows:
+    if not rows and source_measured_empty:
+        checks.append({
+            "check": "sample_available",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": ["Source holds 0 rows (read, not assumed) — no value to audit"],
+        })
+    elif not rows:
         checks.append({
             "check": "sample_available",
             "passed": False,
@@ -1405,10 +2245,12 @@ def run_integrity_audit(
                 source_types,
                 target_types,
                 dest_kind=dest_kind,
+                source_db_type=source_db_type,
                 schema_policy=schema_policy,
                 validation_mode=validation_mode,
                 rows=rows,
                 dest_table_exists=dest_table_exists,
+                proven_width_narrowings=proven_width_narrowings,
             )
         )
         checks.append(
@@ -1419,10 +2261,33 @@ def run_integrity_audit(
                 rows,
                 dest_kind=dest_kind,
                 target_types=target_types,
+                empty_cells_as_null=empty_cells_as_null,
+                database_extract=database_extract,
+                dest_nullability=dest_nullability,
+                file_row_quarantine=file_row_quarantine,
             )
         )
-        checks.append(_check_financial_precision(mappings, source_types, rows))
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk_nulls, validation_mode=validation_mode))
+        checks.append(
+            _check_financial_precision(
+                mappings,
+                source_types,
+                rows,
+                file_row_quarantine=file_row_quarantine,
+            )
+        )
+        checks.append(
+            _check_required_nulls(
+                mappings,
+                rows,
+                null_rate_max=cfg["null_rate_max"],
+                dest_kind=dest_kind,
+                primary_key=pk_nulls,
+                validation_mode=validation_mode,
+                source_types=source_types,
+                empty_cells_as_null=empty_cells_as_null,
+                database_extract=database_extract,
+            )
+        )
         # Duplicate identity keys block when the write path will enforce uniqueness:
         # schemaless destinations, upsert/CDC/mirror/SCD2, overwrite (table recreated),
         # or append when the destination PK is known to include the mapped target.
@@ -1433,6 +2298,8 @@ def run_integrity_audit(
                 validation_mode,
                 dest_kind=dest_kind,
                 primary_key=pk_uniqueness,
+                primary_key_columns=pk_columns_uniqueness,
+            identity_declared=identity_declared,
                 source_duplicate_findings=source_duplicate_findings,
                 sync_mode=sync_mode,
                 destination_pk_columns=destination_pk_columns,
@@ -1441,8 +2308,28 @@ def run_integrity_audit(
                 source_duplicate_probe_status=source_duplicate_probe_status,
                 source_duplicate_probe_message=source_duplicate_probe_message,
                 source_duplicate_probe_expected=source_duplicate_probe_expected,
+                in_file_dedupe=in_file_dedupe,
+                duplicate_policy=duplicate_policy,
             )
         )
+        if source_null_key_rows:
+            checks.append(
+                _check_null_keys(
+                    pk_columns_uniqueness,
+                    int(source_null_key_rows),
+                    sync_mode=sync_mode,
+                    dest_kind=dest_kind,
+                )
+            )
+        if source_key_collisions and source_key_collisions.get("collision_count"):
+            checks.append(
+                _check_transformed_key_collisions(
+                    source_key_collisions,
+                    sync_mode=sync_mode,
+                    dest_kind=dest_kind,
+                    identity_declared=identity_declared,
+                )
+            )
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
@@ -1480,10 +2367,14 @@ def run_integrity_audit(
             source_columns,
             source_types,
             primary_key=pk_uniqueness,
+            primary_key_columns=pk_columns_uniqueness,
             dest_kind=dest_kind,
             validation_mode=validation_mode,
             sync_mode=sync_mode,
+            in_file_dedupe=in_file_dedupe,
         )
+        if file_row_quarantine:
+            exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings)
         checks.append({
             "check": "expectations_suite",
             "passed": exp.get("passed", True),
@@ -1500,6 +2391,22 @@ def run_integrity_audit(
 
     # Module 3: mapping_confidence never blocks_transfer (G4 is SSOT), so the
     # former balanced-mode "downgrade confidence blockers" path is gone.
+
+    if mode == "lenient":
+        # Cell and sample findings quarantine at write. They must not refuse
+        # the load. A missing schema or an unreadable sample still blocks:
+        # there is nothing to quarantine against.
+        structural = {"source_columns_available", "sample_available"}
+        for check in checks:
+            if check.get("check") in structural:
+                continue
+            if check.get("blocks_transfer"):
+                check["blocks_transfer"] = False
+                check["lenient_quarantine"] = True
+                note = "bad rows will quarantine; good rows still load"
+                warnings = list(check.get("warnings") or [])
+                warnings.append(note)
+                check["warnings"] = warnings
 
     passed_checks = [c for c in checks if c.get("passed")]
     failed_checks = [c for c in checks if not c.get("passed")]

@@ -7,6 +7,7 @@ versioned, reusable agreement that can break the pipeline if violated.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 try:
@@ -26,6 +27,132 @@ except ImportError:  # pragma: no cover - compatibility for tests
         build_contract_from_preflight,
     )
 
+_logger = logging.getLogger(__name__)
+
+
+def resolve_bound_contract(
+    *,
+    explicit_id: str = "",
+    explicit_require: bool | None = None,
+    policies: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
+    """Resolve opt-in contract bind. Explicit request fields win; else plan policies.
+
+    An empty explicit id does **not** mean "clear the bind" when a plan carries
+    ``contract_id`` — SDK / ``plan_id`` Execute often omit the form fields.
+    Selecting a contract defaults require-signed, matching Studio and schedules.
+    """
+    cid = str(explicit_id or "").strip()
+    if cid:
+        require = True if explicit_require is None else bool(explicit_require)
+        return cid, require
+    plan = policies or {}
+    plan_cid = str(plan.get("contract_id") or "").strip()
+    if plan_cid:
+        if "require_signed_contract" in plan:
+            return plan_cid, bool(plan.get("require_signed_contract"))
+        return plan_cid, True
+    return "", bool(explicit_require)
+
+
+def stamp_request_contract(
+    request: Any,
+    *,
+    explicit_id: str = "",
+    explicit_require: bool = False,
+    policies: dict[str, Any] | None = None,
+) -> None:
+    """Stamp Execute/replay bind. Explicit id wins; else plan policies.
+
+    ``require_signed`` without an id still fail-closes when the plan is unbound
+    (same as schedules). Form defaults of false do not wipe a stored plan bind.
+    """
+    cid = str(explicit_id or "").strip()
+    resolved_id, require = resolve_bound_contract(
+        explicit_id=cid,
+        explicit_require=bool(explicit_require) if cid else None,
+        policies=policies,
+    )
+    if not resolved_id and explicit_require and not cid:
+        require = True
+    stamp_bound_contract(request, contract_id=resolved_id, require_signed=require)
+
+
+def stamp_bound_contract(
+    request: Any,
+    *,
+    contract_id: str = "",
+    require_signed: bool = False,
+) -> None:
+    """Bind an operator-selected contract before enqueue. Fail-closed if SIGNED is required."""
+    cid = str(contract_id or "").strip()
+    require = bool(require_signed)
+    if cid or require:
+        from services.schedule_store import assert_signed_contract
+
+        assert_signed_contract(cid, require_signed=require)
+    if cid:
+        request.contract_id = cid
+        request.enforce_contract = True
+        request.require_signed_contract = require
+        _assert_breaker_allows(cid)
+
+
+def _assert_breaker_allows(contract_id: str) -> None:
+    """Fail-fast OPEN breaker at enqueue — same rule as enforce_or_create_contract."""
+    from services.contract_store import assert_contract_breaker_allows
+
+    assert_contract_breaker_allows(contract_id)
+
+
+def enforce_bound_contract(
+    request: Any,
+    schema: dict[str, str] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+) -> str:
+    """Enforce a bound contract. Never auto-create from missing preflight.
+
+    Quarantine replay and other skip_preflight writers must call this instead
+    of ``enforce_or_create_contract`` so an unbound job does not invent a draft.
+    """
+    cid = str(getattr(request, "contract_id", "") or "").strip()
+    if not cid or not getattr(request, "enforce_contract", True):
+        return cid
+    return enforce_or_create_contract(request, schema, mappings, preflight=None)
+
+
+def contract_route_refusal(
+    contract_id: str,
+    *,
+    source_format: str,
+    destination_format: str,
+    column_types: dict[str, str] | None = None,
+) -> str:
+    """Why the bound contract would be violated by this route; ``""`` if not.
+
+    The same ``ContractEnforcer`` the engine runs after Confirm, evaluated at
+    plan/staging time so a contract for another route is refused before an
+    ack is issued (QA MX3-18).
+    """
+    from types import SimpleNamespace
+
+    cid = str(contract_id or "").strip()
+    if not cid:
+        return ""
+    contract = get_contract_store().get_contract(cid)
+    if contract is None:
+        return f"Contract {cid} not found"
+    request = SimpleNamespace(
+        source=SimpleNamespace(format=str(source_format or "")),
+        destination=SimpleNamespace(format=str(destination_format or "")),
+    )
+    try:
+        ContractEnforcer(contract).enforce(request, sample_schema=column_types or {})
+    except ContractViolation as cv:
+        _logger.warning("Contract %s refused route at staging: %s", cid, cv)
+        return str(cv)
+    return ""
+
 
 def enforce_or_create_contract(
     request: Any,
@@ -40,14 +167,28 @@ def enforce_or_create_contract(
     The associated circuit breaker is also consulted: an OPEN breaker halts
     the transfer until the contract is re-signed or the recovery timeout elapses.
     Otherwise a new contract is generated from the preflight result and saved.
+
+    ``require_signed_contract`` is fail-closed on the engine path, not only at
+    the HTTP stamp: skip_preflight / SDK / desktop lab must not invent a DRAFT
+    and write when the operator demanded SIGNED.
     """
     store = get_contract_store()
-    if request.contract_id and getattr(request, "enforce_contract", True):
-        contract = store.get_contract(request.contract_id)
+    require_signed = bool(getattr(request, "require_signed_contract", False))
+    cid = str(getattr(request, "contract_id", "") or "").strip()
+    enforce = bool(getattr(request, "enforce_contract", True)) or require_signed
+
+    if require_signed and not cid:
+        raise ContractViolation(
+            "require_signed_contract is set but no contract_id — refuse write",
+            violations=[{"rule": "contract_required", "contract_id": ""}],
+        )
+
+    if cid and enforce:
+        contract = store.get_contract(cid)
         if contract is None:
             raise ContractViolation(
-                f"Contract {request.contract_id} not found",
-                violations=[{"rule": "contract_not_found", "contract_id": request.contract_id}],
+                f"Contract {cid} not found",
+                violations=[{"rule": "contract_not_found", "contract_id": cid}],
             )
         breaker = store.get_breaker(contract.id)
         if not breaker.allow():
@@ -55,17 +196,16 @@ def enforce_or_create_contract(
                 f"Circuit breaker for contract {contract.id} is OPEN; transfer blocked until recovery",
                 violations=[{"rule": "circuit_breaker_open", "contract_id": contract.id, "state": breaker.state.value}],
             )
-        require_signed = bool(getattr(request, "require_signed_contract", False))
         enforcer = ContractEnforcer(contract)
         enforcer.enforce(
             request,
-            sample_schema=schema or request.column_types or {},
+            sample_schema=schema or getattr(request, "column_types", None) or {},
             require_signed=require_signed,
         )
         return contract.id
 
     if not getattr(request, "enforce_contract", True):
-        return request.contract_id
+        return getattr(request, "contract_id", "") or ""
 
     contract = build_contract_from_preflight(request, preflight, schema=schema, mappings=mappings)
     store.save_contract(contract)

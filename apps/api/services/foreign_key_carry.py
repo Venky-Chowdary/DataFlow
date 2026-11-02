@@ -24,21 +24,42 @@ So this module:
 
 Ordering lives here too (:func:`order_tables_by_dependency`): parents before
 children, so a destination that *already* enforces the keys accepts the load.
+
+Cycles (A↔B, A→B→C→A) have no parents-first order. That is not a reason to
+drop the keys. Create-new already lands tables without FKs; post-load
+``ALTER`` is the portable deferred strategy (MySQL / SQL Server / PG / Oracle).
+PostgreSQL and Oracle also emit ``DEFERRABLE INITIALLY DEFERRED`` on cycle
+edges so a later same-transaction upsert can insert both sides. A cycle
+blocks the certificate only when an edge was not ``carried`` — never because
+a cycle was detected.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
+from services.fk_tuple_scan import match_rule_label, match_rules_agree, normalize_match
 from services.dialect_profiles import quote_char_for
+from services.foreign_key_identity import (
+    fk_identity,
+    fold,
+    relocated_parent_schema,
+    same_relationship,
+    select_job_table,
+)
 from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
     foreign_keys_from_payload,
+    normalize_action,
+    row_proof_gap,
+    row_proof_reason,
+    with_snowflake_index_detail,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +75,10 @@ ALTER_CAPABLE = frozenset({
     "mssql",
     "oracle",
 })
+
+# True deferred constraints (checked at COMMIT). MySQL / SQL Server have none —
+# their deferred strategy is the same post-load ALTER as everyone else.
+DEFERRABLE_DIALECTS = frozenset({"postgresql", "oracle"})
 
 # Referential actions each dialect accepts in DDL. MySQL parses SET DEFAULT and
 # then ignores it under InnoDB, and Oracle has no ON UPDATE clause at all, so
@@ -78,9 +103,21 @@ class ForeignKeyDecision:
     # Destination objects the statement touches, so a caller can order work and
     # a re-read knows what to look at.
     dest_table: str = ""
+    #: Selected source stream for this child. Empty on older decisions; the
+    #: cycle check then uses ``dest_table``.
+    source_table: str = ""
+    referenced_schema: str = ""
     referenced_table: str = ""
+    #: Selected source stream this key points at. Empty means the parent is
+    #: outside the job, which is not a cycle edge even when the leaf name
+    #: matches a stream in the cycle.
+    referenced_stream: str = ""
+    on_delete: str = ""
+    on_update: str = ""
     columns: tuple[str, ...] = ()
     referenced_columns: tuple[str, ...] = ()
+    #: Catalog match type. Empty is unreported and means MATCH SIMPLE.
+    match: str = ""
     # True when the destination *rejected* the constraint because the loaded
     # rows violate it. That is a data finding, not a capability gap.
     integrity_violation: bool = False
@@ -131,6 +168,41 @@ def _describe(fk: ForeignKey) -> str:
     return f"{detail} {suffix}".strip()
 
 
+def _map_lookup(maps: dict[str, dict[str, str]] | None, table: str) -> dict[str, str]:
+    """Case-insensitive table → column map. Missing table means identity."""
+    if not maps or not table:
+        return {}
+    if table in maps:
+        return maps[table]
+    lower = table.lower()
+    for key, value in maps.items():
+        if key.lower() == lower:
+            return value
+    return {}
+
+
+def _alias(name: str, cmap: dict[str, str], dest_cols_lower: dict[str, str]) -> str | None:
+    """Source column → destination column.
+
+    An empty mapping document is identity (the load wrote source names). An
+    explicit map that omits the column is a refusal, unless the destination
+    column list still contains that name — the operator kept it un-renamed.
+    """
+    if not name:
+        return None
+    if name in cmap:
+        return cmap[name]
+    lower = name.lower()
+    for key, value in cmap.items():
+        if key.lower() == lower:
+            return value
+    if dest_cols_lower:
+        return dest_cols_lower.get(lower)
+    if not cmap:
+        return name
+    return None
+
+
 def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
     """Derive the destination constraint name from the destination table.
 
@@ -149,9 +221,205 @@ def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
     # safe common denominator across every engine we emit to. Truncation can
     # collide, so a digest of the full name replaces the tail.
     if len(base) > 30:
-        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:6]
+        # Non-security: 6-hex suffix that disambiguates a truncated identifier.
+        # usedforsecurity=False documents intent and clears the weak-hash gate
+        # without changing the digest value.
+        digest = hashlib.sha1(  # nosec B324 - identifier shortening, not security
+            base.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:6]
         base = f"{base[:23]}_{digest}"
     return base
+
+
+def referential_actions_match(
+    planned_delete: str,
+    planned_update: str,
+    measured_delete: str,
+    measured_update: str,
+) -> bool:
+    """True when the destination enforces the source ON DELETE and ON UPDATE.
+
+    An unreported catalog action matches only the engine default (NO ACTION).
+    CASCADE on one side and NO ACTION on the other is a different rule:
+    CASCADE deletes rows the source would have kept, and NO ACTION keeps rows
+    the source would have removed.
+    """
+
+    def _one(planned: str, measured: str) -> bool:
+        want = normalize_action(planned) or "NO ACTION"
+        got = normalize_action(measured)
+        if not got:
+            return want == "NO ACTION"
+        return want == got
+
+    return _one(planned_delete, measured_delete) and _one(planned_update, measured_update)
+
+
+def referential_action_disagreement(
+    planned_delete: str,
+    planned_update: str,
+    measured_delete: str,
+    measured_update: str,
+) -> str:
+    """Why the destination actions do not keep the source rule.
+
+    Empty when :func:`referential_actions_match` is true. An unreported
+    action is the engine default, NO ACTION. ``unknown`` means the catalog
+    named two actions for one relationship, so the rule was not certified.
+    """
+
+    def _unreadable(value: str) -> bool:
+        return str(value or "").strip().casefold() == "unknown"
+
+    if any(
+        _unreadable(value)
+        for value in (planned_delete, planned_update, measured_delete, measured_update)
+    ):
+        return (
+            "Foreign key referential actions could not be read, so the "
+            "relationship was not certified."
+        )
+    if referential_actions_match(
+        planned_delete, planned_update, measured_delete, measured_update
+    ):
+        return ""
+    return (
+        "Destination has this relationship with "
+        f"ON DELETE {normalize_action(measured_delete) or 'unreported'} "
+        f"ON UPDATE {normalize_action(measured_update) or 'unreported'}; "
+        "the source rule is "
+        f"ON DELETE {normalize_action(planned_delete) or 'NO ACTION'} "
+        f"ON UPDATE {normalize_action(planned_update) or 'NO ACTION'}. "
+        "A different referential action is not the source rule."
+    )
+
+
+def _is_cycle_edge(child: str, parent_stream: str, cycle_tables: set[str]) -> bool:
+    """Self-ref or both selected streams sit in the detected cycle.
+
+    ``parent_stream`` is the stream :func:`resolve_parent_stream` chose. A
+    leaf name is not enough: ``customers`` in the cycle is not
+    ``archive.customers``.
+    """
+    child_l = fold(child)
+    parent_l = fold(parent_stream)
+    if child_l and parent_l and child_l == parent_l:
+        return True
+    return bool(child_l in cycle_tables and parent_l in cycle_tables)
+
+
+def classify_cycle_resolution(
+    cycle: list[str] | None,
+    decisions: list[Any],
+) -> dict[str, Any]:
+    """Did post-load ALTER recreate every cycle edge?
+
+    Detection alone is not a blocker. ``resolved`` is True only when every
+    planned edge whose both ends sit in ``cycle`` settled ``carried``.
+    Missing ``cycle_resolved`` on an old job stays fail-closed at the
+    certificate (treated as unresolved).
+    """
+    names = [str(t).strip() for t in (cycle or []) if str(t).strip()]
+    empty = {
+        "cycle": names,
+        "strategy": "n/a" if not names else "post_load_alter",
+        "resolved": True,
+        "unresolved": [],
+        "edge_count": 0,
+        "note": "No FK cycle in the selected streams.",
+    }
+    if not names:
+        return empty
+    cycle_l = {t.lower() for t in names}
+    edges: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for raw in decisions or []:
+        d = raw if isinstance(raw, dict) else getattr(raw, "__dict__", {})
+        if not isinstance(d, dict):
+            continue
+        dest = str(d.get("source_table") or d.get("dest_table") or "").strip()
+        if "referenced_stream" in d:
+            ref = str(d.get("referenced_stream") or "").strip()
+        else:
+            ref = str(d.get("referenced_table") or "").strip()
+        if not dest or not ref:
+            continue
+        if dest.lower() not in cycle_l or ref.lower() not in cycle_l:
+            continue
+        edge = {
+            "dest_table": dest,
+            "referenced_table": ref,
+            "status": str(d.get("status") or ""),
+            "name": d.get("name") or "",
+        }
+        edges.append(edge)
+        if edge["status"] != "carried":
+            unresolved.append(edge)
+    if not edges:
+        return {
+            "cycle": names,
+            "strategy": "post_load_alter",
+            "resolved": False,
+            "unresolved": [{"reason": "no cycle edges were planned or carried"}],
+            "edge_count": 0,
+            "note": (
+                "A cycle was detected but no cycle-edge constraint was planned — "
+                "the destination does not enforce the cycle."
+            ),
+        }
+    resolved = not unresolved
+    return {
+        "cycle": names,
+        "strategy": "post_load_alter",
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "edge_count": len(edges),
+        "note": (
+            "Post-load ALTER recreated every cycle edge; the destination engine "
+            "validated the loaded rows."
+            if resolved
+            else (
+                "Post-load ALTER did not recreate every cycle edge — "
+                "the cycle is not fully enforced on the destination."
+            )
+        ),
+    }
+
+
+# Engines that enforce MATCH FULL. MySQL parses the clause and ignores it.
+# SQL Server, Oracle, and SQLite have no MATCH clause. PostgreSQL enforces
+# FULL and does not implement PARTIAL.
+_MATCH_FULL_DIALECTS = frozenset({"postgresql"})
+
+
+def _match_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
+    """``(sql fragment, refusal)``. Empty refusal means the fragment is safe.
+
+    Unreported and MATCH SIMPLE emit no clause: that is the SQL default.
+    MATCH FULL is emitted only where the engine enforces it. MATCH PARTIAL
+    is refused everywhere, because a carried key would claim a rule the
+    engine does not check.
+    """
+    kind = normalize_match(fk.match)
+    if kind in {"", "simple"}:
+        return "", ""
+    if kind == "partial":
+        return "", (
+            "Source declares MATCH PARTIAL. PostgreSQL stores that type and "
+            "does not implement it, so the constraint is not carried."
+        )
+    if kind != "full":
+        return "", (
+            "Source match type could not be read, so the constraint is not carried."
+        )
+    dial = _dialect(dialect)
+    if dial not in _MATCH_FULL_DIALECTS:
+        return "", (
+            f"Source declares MATCH FULL, which {dial} does not enforce. "
+            "Carrying the key without it would accept a partial null the "
+            "source rejects."
+        )
+    return " MATCH FULL", ""
 
 
 def _action_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
@@ -182,6 +450,97 @@ def _action_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
     return (" " + " ".join(parts) if parts else ""), ""
 
 
+def parent_relation_schema(
+    *,
+    source_schema: str,
+    dest_schema: str,
+    in_job: bool,
+) -> str:
+    """Schema the ``REFERENCES`` clause names.
+
+    A parent this job loads lands in ``dest_schema``. A parent the catalog
+    placed in another schema stays in that schema. An unnamed source schema
+    uses the destination schema, which is how engines that omit the default
+    schema are written.
+    """
+    if in_job or not str(source_schema or "").strip():
+        return dest_schema or ""
+    if fold(source_schema) == fold(dest_schema):
+        return dest_schema or source_schema
+    return source_schema
+
+
+def parent_table_on_destination(
+    *,
+    schema: str,
+    table: str,
+    job_schema: str,
+    in_job: bool,
+    job_tables: set[str] | None,
+    tables_by_schema: Mapping[str, set[str] | None] | None,
+) -> bool | None:
+    """Whether the parent relation is on the destination.
+
+    ``True`` present, ``False`` absent, ``None`` when the catalog list that
+    would answer was not read. A leaf in the job schema is not a parent the
+    source catalog placed in a different schema.
+    """
+    if in_job:
+        return True
+    source = fold(schema)
+    job = fold(job_schema)
+    leaf = fold(table)
+    cross = bool(source and job and source != job)
+    if cross:
+        if tables_by_schema is None:
+            return None
+        bucket: set[str] | None = None
+        seen = False
+        for key, value in tables_by_schema.items():
+            if fold(key) == source:
+                bucket = value
+                seen = True
+                break
+        if not seen or bucket is None:
+            return None
+        return leaf in {fold(name) for name in bucket}
+    if job_tables is None:
+        return None
+    names = {fold(name) for name in job_tables}
+    return leaf in names or bool(source and f"{source}.{leaf}" in names)
+
+
+def resolve_parent_stream(
+    fk: ForeignKey,
+    table_map: Mapping[str, str] | None,
+    source_schema: str,
+) -> str | None:
+    """Selected source stream this foreign key points at, or None outside the job.
+
+    A known job schema uses :func:`select_job_table`, so ``archive.customers``
+    is not the local ``customers`` stream. When the job schema was not
+    measured, a single stream whose name is the parent leaf still matches.
+    That is the default-schema stamp (``public.customers`` → stream
+    ``customers``). Two qualified names are not guessed.
+    """
+    selected = [str(key) for key in (table_map or {})]
+    found = select_job_table(
+        fk.referenced_schema,
+        fk.referenced_table,
+        selected,
+        job_schema=source_schema,
+    )
+    if found:
+        return found
+    if fold(source_schema):
+        return None
+    leaf = fold(fk.referenced_table)
+    bare = [key for key in selected if fold(key) == leaf]
+    if len(bare) == 1:
+        return bare[0]
+    return None
+
+
 def plan_foreign_keys(
     *,
     source_foreign_keys: Any,
@@ -189,18 +548,28 @@ def plan_foreign_keys(
     dest_schema: str,
     dest_table: str,
     dest_columns: list[str],
+    source_table: str = "",
+    source_schema: str = "",
     column_map: dict[str, str] | None = None,
     table_map: dict[str, str] | None = None,
     dest_existing_tables: set[str] | None = None,
+    dest_tables_by_schema: Mapping[str, set[str] | None] | None = None,
+    referenced_column_maps: dict[str, dict[str, str]] | None = None,
+    cycle_tables: list[str] | set[str] | None = None,
 ) -> ForeignKeyPlan:
     """Plan the destination constraints for one child table.
 
     ``column_map`` maps source column → destination column for this table;
+    ``referenced_column_maps`` maps each source table → its column map, so a
+    renamed parent key is referenced under the name the load actually wrote.
     ``table_map`` maps source table → destination table for the tables this job
-    moves. ``dest_existing_tables`` are the tables already present on the
-    destination (lower-cased), used when the parent is not part of the job.
-    ``None`` means the destination catalog could not be listed, which is
-    ``unknown`` — never "the parent is missing".
+    moves. ``dest_existing_tables`` are the tables already present in the job
+    schema. ``dest_tables_by_schema`` lists every other schema a source key
+    names. A leaf in the job schema is not a parent that lives in another
+    schema. ``None`` means that list was not read, which is ``unknown``.
+    ``cycle_tables`` are members of a detected FK cycle (and self-refs are
+    treated as cycle edges even when omitted): PostgreSQL/Oracle emit
+    DEFERRABLE INITIALLY DEFERRED on those edges.
     """
     plan = ForeignKeyPlan()
     dial = _dialect(dest_dialect)
@@ -260,13 +629,14 @@ def plan_foreign_keys(
     known_tables = (
         None if dest_existing_tables is None else {t.lower() for t in dest_existing_tables}
     )
+    cycle_set = {str(t).lower() for t in (cycle_tables or []) if str(t).strip()}
 
     for index, fk in enumerate(keys):
         detail = _describe(fk)
         child_cols: list[str] = []
         missing: list[str] = []
         for col in fk.columns:
-            mapped = cmap.get(col) or dest_cols_lower.get(col.lower())
+            mapped = _alias(col, cmap, dest_cols_lower)
             if mapped:
                 child_cols.append(mapped)
             else:
@@ -289,45 +659,185 @@ def plan_foreign_keys(
             continue
 
         ref_source = fk.referenced_table
-        ref_dest = tmap.get(ref_source.lower(), "")
-        in_job = bool(ref_dest)
-        if not ref_dest:
-            ref_dest = ref_source
-        if not in_job:
-            if known_tables is None:
+        child_stream = source_table or dest_table
+        parent_stream = resolve_parent_stream(fk, table_map, source_schema)
+        in_job = parent_stream is not None
+        ref_dest = tmap.get(fold(parent_stream), parent_stream) if parent_stream else ref_source
+        relocated = relocated_parent_schema(
+            fk.referenced_schema,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+            in_job=in_job,
+        )
+        parent_schema = relocated or parent_relation_schema(
+            source_schema=fk.referenced_schema,
+            dest_schema=dest_schema,
+            in_job=in_job,
+        )
+        if not in_job and relocated:
+            present = parent_table_on_destination(
+                schema="",
+                table=ref_dest,
+                job_schema=dest_schema,
+                in_job=False,
+                job_tables=known_tables,
+                tables_by_schema=None,
+            )
+            qualified = (
+                f"{fk.referenced_schema}.{ref_source}"
+                if fk.referenced_schema
+                else ref_source
+            )
+            if present is None:
                 plan.decisions.append(
                     ForeignKeyDecision(
                         name=fk.name,
                         status="unknown",
                         reason=(
-                            f"Referenced table '{ref_source}' is not part of this job "
-                            "and the destination table list could not be read, so the "
-                            "key is unverified rather than absent."
+                            f"Referenced table '{qualified}' is the schema the rows "
+                            "were copied from, and the destination schema "
+                            f"{dest_schema or '(default)'} could not be listed, so "
+                            "the key is unverified. The source table is not the "
+                            "destination parent."
                         ),
                         source_detail=detail,
                         dest_table=dest_table,
+                        source_table=child_stream,
+                        referenced_schema=parent_schema,
                         referenced_table=ref_dest,
+                        referenced_stream="",
                     )
                 )
                 continue
-            if ref_dest.lower() not in known_tables:
+            if not present:
                 plan.decisions.append(
                     ForeignKeyDecision(
                         name=fk.name,
                         status="unsupported",
                         reason=(
-                            f"Referenced table '{ref_source}' is neither in this "
-                            "transfer nor present on the destination — add it to the "
-                            "stream selection, or create it first."
+                            f"Referenced table '{qualified}' is not in this job and "
+                            f"{ref_source} is not in destination schema "
+                            f"{dest_schema or '(default)'}. A foreign key back to "
+                            "the source schema would hide orphans in the destination "
+                            "parent."
                         ),
                         source_detail=detail,
                         dest_table=dest_table,
+                        source_table=child_stream,
+                        referenced_schema=parent_schema,
                         referenced_table=ref_dest,
+                        referenced_stream="",
+                    )
+                )
+                continue
+        elif not in_job:
+            present = parent_table_on_destination(
+                schema=fk.referenced_schema,
+                table=ref_dest,
+                job_schema=dest_schema,
+                in_job=False,
+                job_tables=known_tables,
+                tables_by_schema=dest_tables_by_schema,
+            )
+            qualified = (
+                f"{fk.referenced_schema}.{ref_source}"
+                if fk.referenced_schema
+                else ref_source
+            )
+            cross = bool(
+                fold(fk.referenced_schema)
+                and fold(dest_schema)
+                and fold(fk.referenced_schema) != fold(dest_schema)
+            )
+            if present is None:
+                reason = (
+                    f"Referenced table '{qualified}' is not part of this job, and "
+                    f"destination schema {fk.referenced_schema} was not listed. "
+                    f"The table {ref_source} in schema {dest_schema or '(default)'} "
+                    "is a different relation, so the key stays unverified."
+                    if cross
+                    else (
+                        f"Referenced table '{ref_source}' is not part of this job "
+                        "and the destination table list could not be read, so the "
+                        "key is unverified rather than absent."
+                    )
+                )
+                plan.decisions.append(
+                    ForeignKeyDecision(
+                        name=fk.name,
+                        status="unknown",
+                        reason=reason,
+                        source_detail=detail,
+                        dest_table=dest_table,
+                        source_table=child_stream,
+                        referenced_schema=parent_schema,
+                        referenced_table=ref_dest,
+                        referenced_stream="",
+                    )
+                )
+                continue
+            if not present:
+                reason = (
+                    f"Referenced table '{qualified}' is neither in this transfer "
+                    f"nor present in destination schema {fk.referenced_schema}. "
+                    f"A table named {ref_source} in schema {dest_schema} is a "
+                    "different relation — add the parent to the stream selection, "
+                    "or create it in its own schema first."
+                    if cross
+                    else (
+                        f"Referenced table '{ref_source}' is neither in this "
+                        "transfer nor present on the destination — add it to the "
+                        "stream selection, or create it first."
+                    )
+                )
+                plan.decisions.append(
+                    ForeignKeyDecision(
+                        name=fk.name,
+                        status="unsupported",
+                        reason=reason,
+                        source_detail=detail,
+                        dest_table=dest_table,
+                        source_table=child_stream,
+                        referenced_schema=parent_schema,
+                        referenced_table=ref_dest,
+                        referenced_stream="",
                     )
                 )
                 continue
 
-        if not fk.referenced_columns or len(fk.referenced_columns) != len(child_cols):
+        parent_cmap = _map_lookup(
+            referenced_column_maps, parent_stream or fk.referenced_table
+        )
+        ref_cols: list[str] = []
+        missing_ref: list[str] = []
+        for col in fk.referenced_columns:
+            mapped = _alias(col, parent_cmap, {})
+            if mapped:
+                ref_cols.append(mapped)
+            else:
+                missing_ref.append(col)
+        if missing_ref:
+            plan.decisions.append(
+                ForeignKeyDecision(
+                    name=fk.name,
+                    status="unsupported",
+                    reason=(
+                        "Referenced column(s) "
+                        + ", ".join(missing_ref)
+                        + " were remapped off the parent, so the reference cannot "
+                        "be reproduced."
+                    ),
+                    source_detail=detail,
+                    dest_table=dest_table,
+                    source_table=child_stream,
+                    referenced_schema=parent_schema,
+                    referenced_table=ref_dest,
+                    referenced_stream=parent_stream or "",
+                )
+            )
+            continue
+
+        if not ref_cols or len(ref_cols) != len(child_cols):
             plan.decisions.append(
                 ForeignKeyDecision(
                     name=fk.name,
@@ -338,12 +848,19 @@ def plan_foreign_keys(
                     ),
                     source_detail=detail,
                     dest_table=dest_table,
+                    source_table=child_stream,
+                    referenced_schema=parent_schema,
                     referenced_table=ref_dest,
+                    referenced_stream=parent_stream or "",
                 )
             )
             continue
 
-        clause, refusal = _action_clause(dial, fk)
+        match_sql, refusal = _match_clause(dial, fk)
+        clause = ""
+        if not refusal:
+            clause, refusal = _action_clause(dial, fk)
+            clause = f"{match_sql}{clause}"
         if refusal:
             plan.decisions.append(
                 ForeignKeyDecision(
@@ -352,18 +869,27 @@ def plan_foreign_keys(
                     reason=refusal,
                     source_detail=detail,
                     dest_table=dest_table,
+                    source_table=child_stream,
+                    referenced_schema=parent_schema,
                     referenced_table=ref_dest,
+                    referenced_stream=parent_stream or "",
                 )
             )
             continue
 
         name = _constraint_name(dest_table, fk, index)
+        defer = (
+            " DEFERRABLE INITIALLY DEFERRED"
+            if dial in DEFERRABLE_DIALECTS
+            and _is_cycle_edge(child_stream, parent_stream or "", cycle_set)
+            else ""
+        )
         statement = (
             f"ALTER TABLE {_qualified(dial, dest_schema, dest_table)} "
             f"ADD CONSTRAINT {_quote(dial, name)} FOREIGN KEY "
             f"({', '.join(_quote(dial, c) for c in child_cols)}) "
-            f"REFERENCES {_qualified(dial, dest_schema, ref_dest)} "
-            f"({', '.join(_quote(dial, c) for c in fk.referenced_columns)}){clause}"
+            f"REFERENCES {_qualified(dial, parent_schema, ref_dest)} "
+            f"({', '.join(_quote(dial, c) for c in ref_cols)}){clause}{defer}"
         )
         plan.statements.append(statement)
         plan.decisions.append(
@@ -377,9 +903,15 @@ def plan_foreign_keys(
                 source_detail=detail,
                 dest_ddl=statement,
                 dest_table=dest_table,
+                source_table=child_stream,
+                referenced_schema=parent_schema,
                 referenced_table=ref_dest,
+                referenced_stream=parent_stream or "",
+                on_delete=fk.on_delete,
+                on_update=fk.on_update,
                 columns=tuple(child_cols),
-                referenced_columns=tuple(fk.referenced_columns),
+                referenced_columns=tuple(ref_cols),
+                match=normalize_match(fk.match),
             )
         )
     return plan
@@ -390,16 +922,40 @@ def _is_violation(error: str) -> bool:
 
     Distinguishing this from "the engine cannot" is the whole value of adding
     constraints after the load: one is a data defect the operator must see, the
-    other is a capability statement about the destination.
+    other is a capability statement about the destination. Missing indexes
+    (MySQL 1215) and missing parents (42P01) are capability/order defects, not
+    orphans.
     """
     text = error.lower()
     markers = (
         "violat",  # PG 23503 / Oracle ORA-02298 wording
         "foreign key constraint fails",  # MySQL 1452
+        "cannot add or update a child row",  # MariaDB 1452 wording
         "conflicted with the foreign key",  # SQL Server 547
         "ora-02298",  # parent keys not found
         "ora-02291",
         "1452",
+        "23503",
+    )
+    return any(m in text for m in markers)
+
+
+def _is_already_present(error: str) -> bool:
+    """Has this constraint already been applied (resume, nested single-table carry)?
+
+    The ALTER is idempotent: a duplicate-object rejection is not a failure, it
+    is an invitation to re-read the destination catalog and certify.
+    """
+    text = error.lower()
+    markers = (
+        "already exists",
+        "duplicate foreign key",
+        "duplicate object",
+        "duplicate constraint",
+        "duplicate key on write or update",  # MariaDB 1005/121: FK index already there
+        "there is already an object named",
+        "42710",  # PostgreSQL duplicate_object
+        "1826",  # MySQL duplicate foreign key constraint name
     )
     return any(m in text for m in markers)
 
@@ -423,10 +979,13 @@ def apply_foreign_keys(
             execute(decision.dest_ddl)
         except Exception as exc:  # noqa: BLE001 — the failure is the finding
             message = f"{type(exc).__name__}: {exc}"
+            if _is_already_present(message):
+                out.append(decision)
+                continue
             violation = _is_violation(message)
             out.append(
-                ForeignKeyDecision(
-                    name=decision.name,
+                replace(
+                    decision,
                     status="unsupported",
                     reason=(
                         "Destination rejected the constraint because the loaded rows "
@@ -434,12 +993,6 @@ def apply_foreign_keys(
                         if violation
                         else f"Destination rejected the constraint. {message}"
                     ),
-                    source_detail=decision.source_detail,
-                    dest_ddl=decision.dest_ddl,
-                    dest_table=decision.dest_table,
-                    referenced_table=decision.referenced_table,
-                    columns=decision.columns,
-                    referenced_columns=decision.referenced_columns,
                     integrity_violation=violation,
                 )
             )
@@ -448,35 +1001,45 @@ def apply_foreign_keys(
     return out
 
 
-def _signature(columns: tuple[str, ...] | list[str], table: str,
-               referenced: tuple[str, ...] | list[str]) -> tuple:
-    return (
-        tuple(c.lower() for c in columns),
-        table.lower(),
-        tuple(c.lower() for c in referenced),
-    )
+def _relationship_fact(
+    columns: tuple[str, ...] | list[str],
+    schema: str,
+    table: str,
+    referenced: tuple[str, ...] | list[str],
+) -> dict[str, Any]:
+    return {
+        "constrained_columns": list(columns),
+        "referred_schema": schema,
+        "referred_table": table,
+        "referred_columns": list(referenced),
+    }
 
 
 def verify_foreign_keys(
     decisions: list[ForeignKeyDecision],
     dest_foreign_keys: ForeignKeys | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+    index_detail: str = "",
 ) -> list[ForeignKeyDecision]:
     """Settle planned keys against the destination catalog.
 
-    Matching is structural — child columns, parent table, parent columns —
-    because an engine may store the constraint under a name of its own, and a
-    name comparison would report a carried key as missing.
+    Matching uses :func:`services.foreign_key_identity.same_relationship`:
+    the parent relation, including schema, plus the set of column pairs.
+    An engine may store the constraint under a name of its own, and DDL
+    order is the same relationship. A same-named table in another schema
+    is not. ON DELETE and ON UPDATE must be the source rule; a different
+    action on the same columns is not carried. MATCH FULL on the source is
+    not carried when the destination match is SIMPLE. A catalog bit that says
+    existing rows were not checked is not carried either.     A Snowflake key
+    is that proof only when ``table_kind`` is the measured hybrid value,
+    the constraint row says it is enforced, and ``SHOW INDEXES`` status
+    is ``ACTIVE``.
     """
     out: list[ForeignKeyDecision] = []
     measured = dest_foreign_keys is not None and dest_foreign_keys.measured
-    present = (
-        {
-            _signature(fk.columns, fk.referenced_table, fk.referenced_columns)
-            for fk in dest_foreign_keys.items
-        }
-        if measured and dest_foreign_keys is not None
-        else set()
-    )
+    present = list(dest_foreign_keys.items) if measured and dest_foreign_keys is not None else []
     for decision in decisions:
         if decision.status != "planned":
             out.append(decision)
@@ -486,48 +1049,117 @@ def verify_foreign_keys(
                 "destination catalog not read"
             )
             out.append(
-                ForeignKeyDecision(
-                    name=decision.name,
+                replace(
+                    decision,
                     status="unknown",
                     reason=(
                         "The ALTER was issued, but the destination foreign key "
                         f"catalog could not be re-read ({detail}), so the carry is "
                         "unverified — emitted DDL is not proof."
                     ),
-                    source_detail=decision.source_detail,
-                    dest_ddl=decision.dest_ddl,
-                    dest_table=decision.dest_table,
-                    referenced_table=decision.referenced_table,
-                    columns=decision.columns,
-                    referenced_columns=decision.referenced_columns,
                 )
             )
             continue
-        signature = _signature(
-            decision.columns, decision.referenced_table, decision.referenced_columns
-        )
-        carried = signature in present
-        out.append(
-            ForeignKeyDecision(
-                name=decision.name,
-                status="carried" if carried else "unsupported",
-                reason=(
-                    "Destination catalog reports the constraint, and the engine "
-                    "validated the loaded rows when it was added."
-                    if carried
-                    else (
-                        "Destination catalog does not report this reference after the "
-                        "ALTER; the key is not enforced there."
-                    )
-                ),
-                source_detail=decision.source_detail,
-                dest_ddl=decision.dest_ddl,
-                dest_table=decision.dest_table,
-                referenced_table=decision.referenced_table,
-                columns=decision.columns,
-                referenced_columns=decision.referenced_columns,
+        wanted = fk_identity(
+            _relationship_fact(
+                decision.columns,
+                decision.referenced_schema,
+                decision.referenced_table,
+                decision.referenced_columns,
             )
         )
+        matches = [
+            fk
+            for fk in present
+            if same_relationship(
+                wanted,
+                fk_identity(
+                    _relationship_fact(
+                        fk.columns,
+                        fk.referenced_schema,
+                        fk.referenced_table,
+                        fk.referenced_columns,
+                    )
+                ),
+            )
+        ]
+        same_actions = [
+            fk
+            for fk in matches
+            if referential_actions_match(
+                decision.on_delete, decision.on_update, fk.on_delete, fk.on_update
+            )
+        ]
+        faithful = [
+            fk for fk in same_actions if match_rules_agree(decision.match, fk.match)
+        ]
+        dest_dialect = dest_foreign_keys.dialect if dest_foreign_keys else ""
+        covering = [
+            fk
+            for fk in faithful
+            if row_proof_gap(
+                dest_dialect,
+                fk.validated,
+                table_kind=table_kind,
+                index_status=index_status,
+            )
+            == ""
+        ]
+        if covering:
+            status = "carried"
+            if any(fk.validated is True for fk in covering):
+                reason = (
+                    "Destination catalog reports the constraint, and it records "
+                    "that existing rows were checked."
+                )
+            else:
+                reason = (
+                    "Destination catalog reports the constraint, and the engine "
+                    "validated the loaded rows when it was added."
+                )
+        elif faithful:
+            gap = row_proof_gap(
+                dest_dialect,
+                faithful[0].validated,
+                table_kind=table_kind,
+                index_status=index_status,
+            )
+            status = "unsupported"
+            reason = with_snowflake_index_detail(
+                row_proof_reason(
+                    gap,
+                    dest_dialect,
+                    table_kind=table_kind,
+                    index_status=index_status,
+                )
+                or row_proof_reason("not_checked"),
+                index_detail,
+            )
+        elif same_actions:
+            got = same_actions[0]
+            status = "unsupported"
+            reason = (
+                "Destination has this relationship with "
+                f"{match_rule_label(got.match)}; the source rule is "
+                f"{match_rule_label(decision.match)}. A different match type "
+                "is not the source rule."
+            )
+        elif matches:
+            got = matches[0]
+            status = "unsupported"
+            reason = referential_action_disagreement(
+                decision.on_delete,
+                decision.on_update,
+                got.on_delete,
+                got.on_update,
+            )
+        else:
+            status = "unsupported"
+            reason = (
+                "Destination catalog does not report this reference after the "
+                "ALTER; the key is not enforced there."
+            )
+        out.append(replace(decision, status=status, reason=reason))
     return out
 
 

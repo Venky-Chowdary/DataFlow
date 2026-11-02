@@ -28,6 +28,8 @@ import pytest
 from services.copy_fast_path import (
     FastPathUnavailable,
     copy_between_postgres,
+    occupied_pk_range_action,
+    skip_complete_identity_copy,
 )
 
 CFG = {
@@ -37,6 +39,31 @@ CFG = {
     "username": "dataflow",
     "password": "dataflow",
 }
+
+
+def test_append_does_not_delete_a_partial_occupied_range():
+    """E3-001: dest 50 → 54 after a full-refresh append deleted the 50."""
+    with pytest.raises(FastPathUnavailable, match="partly"):
+        occupied_pk_range_action(50, 54, replace_destination=False)
+    assert occupied_pk_range_action(0, 54, replace_destination=False) == "load"
+    assert occupied_pk_range_action(54, 54, replace_destination=False) == "skip"
+    assert occupied_pk_range_action(50, 54, replace_destination=True) == "reload"
+
+
+def test_skip_complete_identity_copy_shape():
+    result = skip_complete_identity_copy(
+        source_count=40,
+        dest_count=40,
+        shard_mode="collection",
+        extra_snapshot={"milvus_write": "skip"},
+    )
+    assert result.verified
+    assert result.source_snapshot["copy_split"] == "skip"
+    assert result.source_snapshot["shard_mode"] == "collection"
+    assert result.source_snapshot["milvus_write"] == "skip"
+    assert result.proof_scope == "dest_count_equals_source_snapshot_count"
+    assert result.source_checksum == "dest_count:40"
+
 
 
 def _pg_reachable() -> bool:
@@ -293,11 +320,79 @@ def test_replace_destination_false_appends(pg):
     try:
         tables.insert("INSERT INTO {src} VALUES (1, 'a')")
         assert _copy(tables, [("id", "id"), ("note", "note")]).verified
-        # Appending means the destination no longer matches the source snapshot,
-        # so the verdict must say so rather than report a clean load.
-        with pytest.raises(ValueError, match="does not match the source snapshot"):
+        # Occupied dest is not a second COPY — that would duplicate then fail
+        # the digest. Decline so the row path (quarantine) owns the case.
+        with pytest.raises(FastPathUnavailable, match="non-empty"):
             _copy(
                 tables, [("id", "id"), ("note", "note")], replace_destination=False
+            )
+        assert tables.count(tables.dst) == 1
+    finally:
+        tables.drop()
+
+
+def test_pk_resume_declines_a_partial_append_range(pg, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "4")
+    tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
+    try:
+        tables.insert("INSERT INTO {src} SELECT i, 'r' || i FROM generate_series(1, 8000) s(i)")
+        first = _copy(tables, [("id", "id"), ("note", "note")])
+        assert first.source_rows == 8000
+        parts = first.source_snapshot.get("partition_proof") or []
+        assert len(parts) == 4
+        victim = parts[2]
+        lo = victim["lo"]
+        assert lo is not None
+        with pg.cursor() as cur:
+            cur.execute(f'DELETE FROM "{tables.dst}" WHERE id = %s', (lo,))
+            cur.execute(f'SELECT COUNT(*) FROM "{tables.dst}"')
+            assert int(cur.fetchone()[0]) == 7999
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            _copy(
+                tables, [("id", "id"), ("note", "note")], replace_destination=False
+            )
+        assert tables.count(tables.dst) == 7999
+    finally:
+        tables.drop()
+
+
+def test_append_creates_missing_dest_and_counts(pg):
+    tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a')")
+        tables.insert("INSERT INTO {src} VALUES (2, 'b')")
+        result = _copy(
+            tables, [("id", "id"), ("note", "note")], replace_destination=False
+        )
+        assert result.verified
+        assert result.target_rows == 2
+        assert tables.count(tables.dst) == 2
+        assert result.source_snapshot.get("copy_split") == "binary"
+    finally:
+        tables.drop()
+
+
+def test_refuses_copy_onto_the_same_table(pg):
+    from services.copy_fast_path import postgres_same_relation
+
+    assert postgres_same_relation(
+        CFG, CFG, "public", "t", "public", "t"
+    ) is True
+    assert postgres_same_relation(
+        CFG, {**CFG, "port": 5433}, "public", "t", "public", "t"
+    ) is False
+    tables = _Tables(pg, "id bigint")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1)")
+        with pytest.raises(FastPathUnavailable, match="same PostgreSQL table"):
+            copy_between_postgres(
+                source_cfg=CFG,
+                source_schema="public",
+                source_table=tables.src,
+                dest_cfg=CFG,
+                dest_schema="public",
+                dest_table=tables.src,
+                pairs=[("id", "id")],
             )
     finally:
         tables.drop()
@@ -543,4 +638,141 @@ def test_repeated_runs_replace_rather_than_accumulate(pg):
             assert _copy(tables, [("id", "id"), ("note", "note")]).verified
         assert tables.count(tables.dst) == 2
     finally:
+        tables.drop()
+
+
+def test_a_gin_index_is_reproduced_not_silently_turned_into_btree(pg):
+    tables = _Tables(pg, "id bigint, payload jsonb")
+    try:
+        tables.insert("INSERT INTO {src} SELECT 1, jsonb_build_object('a', 1)")
+        with pg.cursor() as cur:
+            cur.execute(f'CREATE INDEX ix_gin ON "{tables.src}" USING gin (payload)')
+        result = _copy(tables, [("id", "id"), ("payload", "payload")])
+        assert result.verified
+        assert result.indexes_carried
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT am.amname
+                FROM pg_index ix
+                JOIN pg_class c ON c.oid = ix.indrelid
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN pg_am am ON am.oid = i.relam
+                WHERE c.relname = %s AND NOT ix.indisprimary
+                """,
+                (tables.dst,),
+            )
+            methods = [r[0] for r in cur.fetchall()]
+        assert methods == ["gin"]
+    finally:
+        tables.drop()
+
+
+def test_an_operator_class_travels_with_the_index(pg):
+    tables = _Tables(pg, "id bigint, code text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'aa'), (2, 'ab')")
+        with pg.cursor() as cur:
+            cur.execute(
+                f'CREATE INDEX ix_ops ON "{tables.src}" (code varchar_pattern_ops)'
+            )
+        result = _copy(tables, [("id", "id"), ("code", "code")])
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_get_indexdef(ix.indexrelid)
+                FROM pg_index ix
+                JOIN pg_class c ON c.oid = ix.indrelid
+                WHERE c.relname = %s AND NOT ix.indisprimary
+                """,
+                (tables.dst,),
+            )
+            defs = [r[0] for r in cur.fetchall()]
+        assert any("varchar_pattern_ops" in d for d in defs)
+    finally:
+        tables.drop()
+
+
+def test_a_non_default_collation_is_carried(pg):
+    tables = _Tables(pg, 'id bigint, code text COLLATE "C"')
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'A'), (2, 'b')")
+        result = _copy(tables, [("id", "id"), ("code", "code")])
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT col.collname
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_collation col ON col.oid = a.attcollation
+                WHERE c.relname = %s AND a.attname = 'code' AND a.attnum > 0
+                """,
+                (tables.dst,),
+            )
+            assert cur.fetchone()[0] == "C"
+    finally:
+        tables.drop()
+
+
+def test_a_stale_destination_shell_declines_and_is_left_untouched(pg):
+    """A stale shell must neither survive the load nor be rebuilt.
+
+    The old contract (DROP + CREATE) replaced the shell, which also discarded
+    the destination's CHECK / FK / DEFAULT / indexes (D195). An existing table
+    is now kept, so a shell whose types differ from the source must decline
+    to the row path *before* anything is emptied or loaded: CREATE IF NOT
+    EXISTS + TRUNCATE would load into the wrong types and still verify.
+    """
+    tables = _Tables(pg, "id bigint, amount numeric(12,2)")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 10.50)")
+        with pg.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE "{tables.dst}" (id text, amount integer)'
+            )
+            cur.execute(f"INSERT INTO \"{tables.dst}\" VALUES ('old', 7)")
+        with pytest.raises(FastPathUnavailable, match="typed differently"):
+            _copy(tables, [("id", "id"), ("amount", "amount")])
+        # Not truncated, not loaded, not rebuilt: the row path gets the table
+        # exactly as it was.
+        assert tables.rows(tables.dst) == [("old", 7)]
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                WHERE c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum
+                """,
+                (tables.dst,),
+            )
+            assert cur.fetchall() == [("id", "text"), ("amount", "integer")]
+    finally:
+        tables.drop()
+
+
+def test_a_trigger_makes_the_path_decline(pg):
+    tables = _Tables(pg, "id bigint, note text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a')")
+        with pg.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE FUNCTION {tables.src}_fn() RETURNS trigger AS $$
+                BEGIN RETURN NEW; END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+            cur.execute(
+                f'CREATE TRIGGER {tables.src}_tg BEFORE INSERT ON "{tables.src}" '
+                f"FOR EACH ROW EXECUTE PROCEDURE {tables.src}_fn()"
+            )
+        with pytest.raises(FastPathUnavailable, match="trigger"):
+            _copy(tables, [("id", "id"), ("note", "note")])
+    finally:
+        with pg.cursor() as cur:
+            cur.execute(f"DROP FUNCTION IF EXISTS {tables.src}_fn() CASCADE")
         tables.drop()

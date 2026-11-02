@@ -20,8 +20,19 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
+from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.default_expression import (
+    default_exprs_equivalent as _default_exprs_equivalent,
+    normalize_default_expr as _normalize_default_expr,
+)
+from services.decimal_identity import plan_decimal_identity_carry
+from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
+from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
+from services.unicode_form import plan_unicode_form_carry
+from services.value_serializer import present_cell_text
+from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +49,10 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "identity_sequence",
     "generated",
     "collation",
+    "offset_label",
+    "encoding",
+    "decimal",
+    "unicode_form",
     "charset",
     "index",
     "partitioning",
@@ -63,10 +78,12 @@ _SAFE_DEFAULT_RE = re.compile(
     r"'(?:[^']|'')*'"
     r"(?:::(?:text|character varying|varchar|bpchar|char|name|cstring))?"
     r"|"
-    r"current_timestamp|current_date|current_time|"
+    # MariaDB renders clock defaults as functions (``current_timestamp()``),
+    # MySQL as bare keywords, SQLite as ``datetime('now')``.
+    r"current_timestamp(?:\(\))?|current_date(?:\(\))?|current_time(?:\(\))?|"
+    r"localtime(?:\(\))?|localtimestamp(?:\(\))?|"
     r"\(datetime\('now'\)\)|datetime\('now'\)|"
-    r"now\(\)|"
-    r"CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME"
+    r"now\(\)|curdate\(\)|curtime\(\)"
     r")$",
     re.IGNORECASE,
 )
@@ -143,6 +160,7 @@ class SourceSchemaCatalog:
     generated_columns: list[str] = field(default_factory=list)
     identity_columns: list[str] = field(default_factory=list)
     collations: dict[str, str] = field(default_factory=dict)
+    charsets: dict[str, str] = field(default_factory=dict)
     comments: dict[str, str] = field(default_factory=dict)
     # Tri-state: None means the source catalog was not read for this aspect.
     has_partitioning: bool | None = None
@@ -321,6 +339,52 @@ def is_safe_default_expr(expr: str) -> bool:
     return bool(_SAFE_DEFAULT_RE.match(text))
 
 
+_MYSQL_CLOCK_DEFAULT_RE = re.compile(
+    r"^(?:current_timestamp|current_date|current_time|localtime|localtimestamp|"
+    r"now|curdate|curtime)\b",
+    re.IGNORECASE,
+)
+_MYSQL_ZERO_DATE_RE = re.compile(r"0000-00-00")
+_NUMERIC_LOGICALS = frozenset({"integer", "decimal", "float", "number"})
+_TEMPORAL_LOGICALS = frozenset({"date", "datetime", "time", "timestamp"})
+#: MySQL error 1101 — BLOB/TEXT/GEOMETRY/JSON columns cannot take a literal
+#: DEFAULT at all (expression defaults ``DEFAULT (expr)`` are a separate 8.0.13+
+#: feature we do not emit). MariaDB has allowed literal defaults on these types
+#: since 10.2.1, so the check is dialect-scoped.
+_MYSQL_NO_LITERAL_DEFAULT_LOGICALS = frozenset({"text", "binary", "json", "geography"})
+
+
+def mysql_default_is_legal(default_sql: str, dest_type: str, *, dialect: str = "mysql") -> bool:
+    """False when MySQL rejects this DEFAULT for the column type (errors 1067/1101).
+
+    An integer key cannot take ``''`` or ``CURRENT_TIMESTAMP``. A temporal
+    column cannot take a zero date under strict sql_mode. Clock functions stay
+    on temporal types. Numeric literals and quoted strings on text stay.
+    BLOB/TEXT/GEOMETRY/JSON take no literal DEFAULT on MySQL; MariaDB permits it.
+    """
+    from services.type_system import normalize_logical_type
+
+    expr = (default_sql or "").strip()
+    logical = normalize_logical_type(dest_type or "")
+    if logical in _MYSQL_NO_LITERAL_DEFAULT_LOGICALS and dialect != "mariadb":
+        return False
+    clock = bool(_MYSQL_CLOCK_DEFAULT_RE.match(expr))
+    if logical in _NUMERIC_LOGICALS:
+        if clock or expr in {"''", '""'}:
+            return False
+        return bool(re.match(r"^-?\d+(?:\.\d+)?$", expr))
+    if _MYSQL_ZERO_DATE_RE.search(expr):
+        return False
+    if clock:
+        if logical in {"date", "time"} and re.match(
+            r"^(?:current_timestamp|now|localtime|localtimestamp)\b", expr, re.I
+        ):
+            # 1067: a timestamp clock only sits on DATETIME/TIMESTAMP (D146).
+            return False
+        return logical in _TEMPORAL_LOGICALS
+    return True
+
+
 def build_catalog_from_introspect(
     *,
     dialect: str,
@@ -348,9 +412,9 @@ def build_catalog_from_introspect(
         if cols:
             unique_keys.append(cols)
     merged_defaults = {
-        str(k): str(v)
+        str(k): text
         for k, v in (defaults or keys.get("defaults") or {}).items()
-        if v is not None and str(v).strip()
+        if (text := present_cell_text(v)) is not None
     }
     return SourceSchemaCatalog(
         dialect=(dialect or "").strip().lower(),
@@ -370,6 +434,7 @@ def build_catalog_from_introspect(
         generated_columns=list(keys.get("generated_columns") or []),
         identity_columns=list(keys.get("identity_columns") or []),
         collations=dict(keys.get("collations") or {}),
+        charsets=dict(keys.get("charsets") or {}),
         comments=dict(keys.get("comments") or {}),
         has_partitioning=_partitioning_flag(keys),
         has_enums=_tristate(keys.get("has_enums")),
@@ -431,7 +496,11 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             columns=list(payload.get("columns") or []),
             column_types=dict(payload.get("column_types") or {}),
             nullable={str(k): bool(v) for k, v in (payload.get("nullable") or {}).items()},
-            defaults={str(k): str(v) for k, v in (payload.get("defaults") or {}).items()},
+            defaults={
+                str(k): text
+                for k, v in (payload.get("defaults") or {}).items()
+                if (text := present_cell_text(v)) is not None
+            },
             primary_key=[str(c) for c in (payload.get("primary_key") or []) if c],
             unique_keys=[
                 [str(c) for c in uk if c]
@@ -448,6 +517,7 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             generated_columns=list(payload.get("generated_columns") or []),
             identity_columns=list(payload.get("identity_columns") or []),
             collations=dict(payload.get("collations") or {}),
+            charsets=dict(payload.get("charsets") or {}),
             comments=dict(payload.get("comments") or {}),
             has_partitioning=_partitioning_flag(payload),
             has_enums=_tristate(payload.get("has_enums")),
@@ -468,6 +538,118 @@ def catalog_to_payload(catalog: SourceSchemaCatalog) -> dict[str, Any]:
     return asdict(catalog)
 
 
+_APPEND_KEY_REASON = (
+    "Append create-new does not declare a key. A second copy of the same row "
+    "is legal on this sync. Upsert or merge is what enforces the source key."
+)
+
+
+def withhold_append_key_constraints(plan: CreateFidelityPlan) -> CreateFidelityPlan:
+    """Drop PK, UNIQUE, and key generators from an append create-new plan.
+
+    The certificate records the skip. Leaving ``primary_key`` set while the
+    writer omitted it made the next append abort on a key the operator never
+    asked this sync to enforce.
+    """
+    for item in plan.report.items:
+        if item.aspect in {"primary_key", "unique"} and item.status == "carried":
+            item.status = "skipped"
+            item.reason = _APPEND_KEY_REASON
+            item.dest_ddl = ""
+        elif item.aspect == "identity" and item.status == "carried":
+            item.status = "skipped"
+            item.reason = (
+                "Append create-new does not declare the source key, so the key "
+                "generator is not emitted. The load writes the source values."
+            )
+            item.dest_ddl = ""
+    plan.primary_key = []
+    plan.unique_constraints = []
+    plan.identity_columns = {}
+    plan.identity_insert_columns = []
+    plan.table_constraints = [
+        clause
+        for clause in plan.table_constraints
+        if not str(clause).strip().upper().startswith(("PRIMARY KEY", "UNIQUE"))
+    ]
+    plan.post_create_sql = [
+        stmt
+        for stmt in plan.post_create_sql
+        if "UNIQUE" not in str(stmt).upper()
+    ]
+    cleaned: dict[str, list[str]] = {}
+    for col, suffixes in (plan.column_suffixes or {}).items():
+        kept = [
+            suffix
+            for suffix in suffixes
+            if "AUTO_INCREMENT" not in str(suffix).upper()
+            and "IDENTITY" not in str(suffix).upper()
+            and not str(suffix).upper().startswith("GENERATED")
+        ]
+        if kept:
+            cleaned[col] = kept
+    plan.column_suffixes = cleaned
+    return plan
+
+
+_FILE_SOURCE_DIALECTS = frozenset({
+    "csv", "tsv", "file", "upload", "json", "jsonl", "excel", "xlsx",
+    "parquet", "yaml", "yml",
+})
+
+
+def _operator_keys_in_target(
+    operator_key_columns: list[str] | None,
+    target_columns: list[str],
+) -> list[str]:
+    """Operator key columns that exist on the destination column list."""
+    folded = {str(col).casefold(): str(col) for col in target_columns}
+    resolved: list[str] = []
+    for raw in operator_key_columns or []:
+        name = str(raw or "").strip()
+        dest_col = folded.get(name.casefold())
+        if dest_col and dest_col not in resolved:
+            resolved.append(dest_col)
+    return resolved
+
+
+def _synthesized_primary_key(
+    *,
+    catalog: SourceSchemaCatalog,
+    dest_cols: list[str],
+    operator_key_columns: list[str] | None,
+    dest_name_for_source: Any,
+) -> list[str]:
+    """PK columns when the source catalog has none.
+
+    An upsert key the operator named is the destination key. A file upload
+    with a single ``id`` / ``*_id`` column is that key too — a real database
+    catalog that truly has no PK is left without one.
+    """
+    resolved: list[str] = []
+    for raw in operator_key_columns or []:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        dest_col = dest_name_for_source(name)
+        if dest_col is None and name in dest_cols:
+            dest_col = name
+        if dest_col and dest_col not in resolved:
+            resolved.append(dest_col)
+    if resolved:
+        return resolved
+    dialect = (catalog.dialect or "").strip().lower()
+    if dialect not in _FILE_SOURCE_DIALECTS:
+        return []
+    candidates = [
+        col for col in dest_cols
+        if col.lower() == "id" or col.lower().endswith("_id")
+    ]
+    if len(candidates) == 1:
+        return candidates
+    return []
+
+
 def resolve_create_fidelity_plan(
     *,
     source_schema_catalog: Any,
@@ -479,6 +661,8 @@ def resolve_create_fidelity_plan(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    carry_keys: bool = True,
+    operator_key_columns: list[str] | None = None,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -486,17 +670,49 @@ def resolve_create_fidelity_plan(
         dest = "postgresql"
     catalog = catalog_from_payload(source_schema_catalog)
     if catalog is None:
-        # Types-only CREATE still requires an explicit unsupported certificate.
-        return CreateFidelityPlan(
-            report=empty_unsupported_report(
-                source_dialect="",
-                dest_dialect=dest,
-                reason=(
-                    "Source schema catalog unavailable; create-new emitted column "
-                    "types only — PK/NOT NULL/DEFAULT/UNIQUE not certified carried."
+        # A file has no source catalog. The operator's upsert key is still the
+        # destination key; without it ON CONFLICT cannot see duplicate rows.
+        keys = (
+            _operator_keys_in_target(operator_key_columns, target_columns)
+            if carry_keys
+            else []
+        )
+        constraints: list[str] = []
+        suffixes: dict[str, list[str]] = {}
+        not_null: list[str] = []
+        if keys:
+            quoted = ", ".join(_q(col, dest) for col in keys)
+            constraints.append(f"PRIMARY KEY ({quoted})")
+            from services.created_key_collation import key_collation_suffix
+
+            for col in keys:
+                suffixes[col] = [*key_collation_suffix(col, target_columns, target_types, dest),
+                                 "NOT NULL"]
+                not_null.append(col)
+            reason = (
+                "Source schema catalog unavailable. Operator upsert key "
+                f"{','.join(keys)} is the destination PRIMARY KEY."
+            )
+        else:
+            reason = (
+                "Source schema catalog unavailable; create-new emitted column "
+                "types only — PK/NOT NULL/DEFAULT/UNIQUE not certified carried."
+            )
+        return _retarget_explode_parent_pk(
+            CreateFidelityPlan(
+                report=empty_unsupported_report(
+                    source_dialect="",
+                    dest_dialect=dest,
+                    reason=reason,
                 ),
+                dest_columns=list(target_columns),
+                column_suffixes=suffixes,
+                table_constraints=constraints,
+                primary_key=list(keys),
+                not_null_columns=not_null,
             ),
-            dest_columns=list(target_columns),
+            mappings,
+            target_columns,
         )
     plan = plan_create_new_fidelity(
         catalog,
@@ -507,7 +723,11 @@ def resolve_create_fidelity_plan(
         dest_table=dest_table,
         dest_schema=dest_schema,
         dest_tablespaces=dest_tablespaces,
+        operator_key_columns=operator_key_columns,
     )
+    if not carry_keys:
+        plan = withhold_append_key_constraints(plan)
+    plan = _retarget_explode_parent_pk(plan, mappings, target_columns)
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
         for item in plan.report.items:
@@ -532,6 +752,102 @@ def resolve_create_fidelity_plan(
     return plan
 
 
+def _retarget_explode_parent_pk(
+    plan: "CreateFidelityPlan",
+    mappings: list[dict[str, Any]] | None,
+    target_columns: list[str],
+) -> "CreateFidelityPlan":
+    """explode_rows duplicates the parent row once per array element — a PRIMARY
+    KEY carried on the parent key is a constraint the landed data provably
+    violates (X-30: a schedule full-refresh failed COPY with a duplicate key).
+
+    Landed child identity is (parent_pk, <col>_idx): keep a composite PK only
+    when every exploded column's ``_idx`` column is itself mapped to the
+    destination; otherwise withhold the PK and certify the skip honestly —
+    never emit a constraint the write violates, never silently invent one.
+    """
+    if not plan.primary_key:
+        return plan
+    from services.json_intelligence import (
+        ARRAY_POLICY_EXPLODE,
+        struct_policies_from_mappings,
+    )
+
+    explode_cols = [
+        src
+        for src, pol in struct_policies_from_mappings(mappings).items()
+        if pol == ARRAY_POLICY_EXPLODE
+    ]
+    if not explode_cols:
+        return plan
+
+    dest = str(getattr(plan.report, "dest_dialect", "") or "").strip().lower()
+    src_to_tgt = source_to_target_from_mappings(mappings)
+    idx_targets = [src_to_tgt.get(f"{c}_idx") for c in explode_cols]
+    composite_ok = bool(idx_targets) and all(
+        t and t in target_columns for t in idx_targets
+    )
+
+    if composite_ok:
+        plan.primary_key = [
+            *plan.primary_key,
+            *[t for t in idx_targets if t not in plan.primary_key],
+        ]
+        quoted = ", ".join(_q(c, dest) for c in plan.primary_key)
+        plan.table_constraints = [
+            f"PRIMARY KEY ({quoted})"
+            if str(c).lstrip().upper().startswith("PRIMARY KEY")
+            else c
+            for c in plan.table_constraints
+        ]
+        for t in idx_targets:
+            if t not in plan.not_null_columns:
+                plan.not_null_columns.append(t)
+                plan.column_suffixes.setdefault(t, []).append("NOT NULL")
+        for item in plan.report.items:
+            if item.aspect == "primary_key" and item.status == "carried":
+                item.reason = (
+                    f"{item.reason} Extended to composite "
+                    f"({', '.join(plan.primary_key)}) — explode_rows duplicates "
+                    "the parent key per element; (pk, <col>_idx) is the "
+                    "landed child identity."
+                )
+                item.dest_ddl = f"PRIMARY KEY ({quoted})"
+    else:
+        plan.table_constraints = [
+            c
+            for c in plan.table_constraints
+            if not str(c).lstrip().upper().startswith("PRIMARY KEY")
+        ]
+        withheld = ", ".join(plan.primary_key)
+        plan.primary_key = []
+        for item in plan.report.items:
+            if item.aspect == "primary_key" and item.status == "carried":
+                item.status = "skipped"
+                item.reason = (
+                    f"explode_rows duplicates parent key ({withheld}) per "
+                    "array element — a PRIMARY KEY on it is a constraint the "
+                    "write provably violates, so it is withheld. Map the "
+                    "<col>_idx column to keep (pk, idx) composite identity on "
+                    "the destination."
+                )
+                item.dest_ddl = ""
+        if not any(i.aspect == "primary_key" for i in plan.report.items):
+            plan.report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=withheld,
+                    status="skipped",
+                    reason=(
+                        f"explode_rows duplicates parent key ({withheld}) per "
+                        "array element — PRIMARY KEY withheld (child identity "
+                        "is (pk, <col>_idx))."
+                    ),
+                )
+            )
+    return plan
+
+
 def plan_create_new_fidelity(
     catalog: SourceSchemaCatalog,
     *,
@@ -542,14 +858,13 @@ def plan_create_new_fidelity(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    operator_key_columns: list[str] | None = None,
 ) -> CreateFidelityPlan:
     """Plan CREATE TABLE fidelity for mapped columns on dest_dialect."""
     dest = (dest_dialect or "").strip().lower()
     if dest in {"postgres", "redshift"}:
         dest = "postgresql"
     src_to_tgt = dict(source_to_target or {})
-    # Invert for target→source when needed.
-    tgt_to_src = {v: k for k, v in src_to_tgt.items() if v}
 
     # Collision policy on the target column names we are about to emit.
     # Case is preserved on every dialect because every create-new writer emits
@@ -599,26 +914,52 @@ def plan_create_new_fidelity(
         except ValueError:
             return None
 
+    def _dest_type(col: str) -> str:
+        try:
+            return str(target_types[dest_cols.index(col)] or "")
+        except (ValueError, IndexError):
+            return ""
+
     # --- CARRY: primary key ---
     pk_dest: list[str] = [
         c for c in (_dest_name_for_source(x) for x in catalog.primary_key) if c
     ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
-        quoted = ", ".join(_q(c, dest) for c in pk_dest)
-        table_constraints.append(f"PRIMARY KEY ({quoted})")
-        report.items.append(
-            SchemaFidelityItem(
-                aspect="primary_key",
-                name=",".join(pk_dest),
-                status="carried",
-                reason=(
-                    "PRIMARY KEY emitted on CREATE TABLE (provisional until "
-                    "destination catalog re-read)."
-                ),
-                source_detail=",".join(catalog.primary_key),
-                dest_ddl=f"PRIMARY KEY ({quoted})",
+        unindexable = [
+            c for c in pk_dest if dest in {"mysql", "mariadb"} and mysql_index_requires_prefix(_dest_type(c))
+        ]
+        if unindexable:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="unsupported",
+                    reason=(
+                        "MySQL/MariaDB cannot PRIMARY KEY TEXT/BLOB/JSON without a "
+                        "prefix length; refusing an invented prefix (that would "
+                        "enforce a different uniqueness rule than the source). "
+                        f"Unindexable: {','.join(unindexable)}."
+                    ),
+                    source_detail=",".join(catalog.primary_key),
+                )
             )
-        )
+            pk_dest = []
+        else:
+            quoted = ", ".join(_q(c, dest) for c in pk_dest)
+            table_constraints.append(f"PRIMARY KEY ({quoted})")
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="carried",
+                    reason=(
+                        "PRIMARY KEY emitted on CREATE TABLE (provisional until "
+                        "destination catalog re-read)."
+                    ),
+                    source_detail=",".join(catalog.primary_key),
+                    dest_ddl=f"PRIMARY KEY ({quoted})",
+                )
+            )
     elif catalog.primary_key:
         report.items.append(
             SchemaFidelityItem(
@@ -633,14 +974,50 @@ def plan_create_new_fidelity(
             )
         )
     else:
-        report.items.append(
-            SchemaFidelityItem(
-                aspect="primary_key",
-                name="*",
-                status="skipped",
-                reason="No PRIMARY KEY on source.",
-            )
+        synthesized = _synthesized_primary_key(
+            catalog=catalog,
+            dest_cols=dest_cols,
+            operator_key_columns=operator_key_columns,
+            dest_name_for_source=_dest_name_for_source,
         )
+        if synthesized:
+            pk_dest = synthesized
+            quoted = ", ".join(_q(c, dest) for c in pk_dest)
+            table_constraints.append(f"PRIMARY KEY ({quoted})")
+            for col in pk_dest:
+                suffixes.setdefault(col, [])
+                if "NOT NULL" not in suffixes[col]:
+                    suffixes[col].append("NOT NULL")
+                if col not in struct_not_null:
+                    struct_not_null.append(col)
+            why = (
+                "Operator upsert key"
+                if operator_key_columns
+                else "File identity column"
+            )
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="carried",
+                    reason=(
+                        "Source catalog has no PRIMARY KEY. "
+                        f"{why} {','.join(pk_dest)} is the destination "
+                        "PRIMARY KEY and NOT NULL."
+                    ),
+                    source_detail=",".join(pk_dest),
+                    dest_ddl=f"PRIMARY KEY ({quoted})",
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name="*",
+                    status="skipped",
+                    reason="No PRIMARY KEY on source.",
+                )
+            )
 
     # --- CARRY: NOT NULL ---
     nn_carried = 0
@@ -693,7 +1070,45 @@ def plan_create_new_fidelity(
                 )
             )
             continue
-        default_sql = _normalize_default_sql(expr, dest)
+        default_sql = _normalize_default_sql(expr, dest, _dest_type(dest_col))
+        dest_dialect = (dest or "").lower()
+        from services.pg_default_legal import pg_boolean_default
+
+        pg_bool = pg_boolean_default(default_sql, _dest_type(dest_col), dest_dialect)
+        if pg_bool == "":
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "PostgreSQL BOOLEAN takes only true/false; this source "
+                        "default is not a boolean literal. The column is created "
+                        "without it."
+                    ),
+                    source_detail=str(expr)[:200],
+                )
+            )
+            continue
+        default_sql = pg_bool or default_sql
+        if dest_dialect in {"mysql", "mariadb"} and not mysql_default_is_legal(
+            default_sql, _dest_type(dest_col), dialect=dest_dialect
+        ):
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "MySQL rejects this DEFAULT for the destination column "
+                        "type (invalid default, or BLOB/TEXT/GEOMETRY/JSON "
+                        "columns take no literal default). The column is "
+                        "created without it."
+                    ),
+                    source_detail=str(expr)[:200],
+                )
+            )
+            continue
         suffixes.setdefault(dest_col, []).append(f"DEFAULT {default_sql}")
         struct_defaults[dest_col] = default_sql
         def_carried += 1
@@ -736,6 +1151,23 @@ def plan_create_new_fidelity(
         dest_uk_s = [c for c in dest_uk if c]
         if set(dest_uk_s) == pk_set and pk_set:
             continue  # covered by PRIMARY KEY
+        if dest in {"mysql", "mariadb"} and any(
+            mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
+        ):
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="unique",
+                    name=",".join(dest_uk_s),
+                    status="unsupported",
+                    reason=(
+                        "MySQL/MariaDB cannot UNIQUE-index TEXT/BLOB/JSON without a "
+                        "prefix length; refusing an invented prefix (that would "
+                        "enforce a different uniqueness rule than the source)."
+                    ),
+                    source_detail=",".join(uk),
+                )
+            )
+            continue
         quoted = ", ".join(_q(c, dest) for c in dest_uk_s)
         table_constraints.append(f"UNIQUE ({quoted})")
         struct_unique.append(list(dest_uk_s))
@@ -826,6 +1258,107 @@ def plan_create_new_fidelity(
             ]
         suffixes.setdefault(dest_col, []).append(suffix)
 
+    # --- CARRY: collation equality (uniqueness polarity, not name-copy) ---
+    keyed_cols = set(pk_dest)
+    for uk in struct_unique:
+        keyed_cols.update(uk)
+    keyed_cols.update(str(c) for c in catalog.primary_key)
+    for uk in catalog.unique_keys:
+        keyed_cols.update(str(c) for c in uk)
+    collation_plan = plan_collation_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        unique_or_pk=keyed_cols,
+    )
+    charset_emitted = False
+    for decision in collation_plan.decisions:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+        if decision.dest_charset:
+            charset_emitted = True
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="charset",
+                    name=decision.dest_column,
+                    status=decision.status,
+                    reason=(
+                        f"Character set {decision.dest_charset} paired with "
+                        f"collation {decision.dest_collation or 'destination default'}."
+                    ),
+                    dest_ddl=(
+                        f"CHARACTER SET {decision.dest_charset}"
+                        if decision.status == "carried"
+                        else ""
+                    ),
+                )
+            )
+        prefixes = collation_plan.column_prefixes.get(decision.dest_column) or []
+        if prefixes and decision.status == "carried":
+            # MySQL: CHARACTER SET / COLLATE must sit on the type, before NOT NULL.
+            suffixes[decision.dest_column] = (
+                list(prefixes) + list(suffixes.get(decision.dest_column) or [])
+            )
+
+    offset_plan = plan_offset_label_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+    )
+    for decision in offset_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
+    dest_charsets = {
+        d.dest_column: d.dest_charset
+        for d in collation_plan.decisions
+        if d.dest_charset
+    }
+    encoding_plan = plan_encoding_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        dest_charset_for_column=dest_charsets.get,
+    )
+    for decision in encoding_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
+    decimal_plan = plan_decimal_identity_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+    )
+    for decision in decimal_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
+    dest_collations = {
+        d.dest_column: d.dest_collation
+        for d in collation_plan.decisions
+        if d.dest_collation
+    }
+    unicode_plan = plan_unicode_form_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        dest_collation_for_column=dest_collations.get,
+        unique_or_pk=keyed_cols,
+    )
+    for decision in unicode_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -848,6 +1381,12 @@ def plan_create_new_fidelity(
         skip_check=check_handled,
         skip_index=index_handled,
         skip_identity=bool(identity_plan.decisions),
+        skip_collation=bool(collation_plan.decisions),
+        skip_offset_label=bool(offset_plan),
+        skip_encoding=bool(encoding_plan),
+        skip_decimal=bool(decimal_plan),
+        skip_unicode_form=bool(unicode_plan),
+        skip_charset=charset_emitted,
     )
 
     # Column order — carried as mapping order (honest).
@@ -874,7 +1413,12 @@ def plan_create_new_fidelity(
         post_create_sql=post_sql,
         dest_columns=dest_cols,
         column_renames=renames,
-        primary_key=list(pk_dest) if len(pk_dest) == len(catalog.primary_key) else [],
+        primary_key=(
+            list(pk_dest)
+            if (catalog.primary_key and len(pk_dest) == len(catalog.primary_key))
+            or (not catalog.primary_key and bool(pk_dest))
+            else []
+        ),
         unique_constraints=struct_unique,
         check_predicates=struct_checks,
         not_null_columns=struct_not_null,
@@ -1019,6 +1563,74 @@ def certify_identity_on_destination(
             plan.identity_insert_columns = [
                 c for c in plan.identity_insert_columns if c != item.name
             ]
+
+
+def certify_collation_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> None:
+    """Settle collation equality from the destination catalog, not the DDL.
+
+    Emitting ``COLLATE utf8mb4_bin`` is a claim. Engines silently ignore unknown
+    collations or substitute the table default (CI), which is exactly the DMS
+    failure this carry exists to prevent.
+    """
+    if plan is None:
+        return
+    items = [
+        i for i in plan.report.items
+        if i.aspect == "collation" and i.status == "carried"
+    ]
+    if not items:
+        return
+    from services.collation_carry import classify_equality
+
+    found = destination_column_collations(
+        dialect=dialect, schema=schema, table=table, fetchall=fetchall
+    )
+    for item in items:
+        if found is None:
+            item.status = "unknown"
+            item.reason = (
+                "The destination collation catalog could not be read after CREATE, "
+                "so equality is unverified. Emitted DDL is not proof. "
+                f"Would have: {item.reason}"
+            )
+            continue
+        folded = {k.casefold(): v for k, v in found.items()}
+        actual = folded.get(item.name.casefold(), "")
+        actual_eq = classify_equality(dialect, collation=actual)
+        ddl = (item.dest_ddl or "").upper()
+        want_cs = "_BIN" in ddl or 'COLLATE "C"' in ddl or "POSIX" in ddl
+        want_ci = "_CI" in ddl or "CI_AS" in ddl or "CI_AI" in ddl
+        if want_cs and actual_eq.case != "sensitive":
+            item.status = "unsupported"
+            item.reason = (
+                f"Destination catalog collates as {actual or 'default'} "
+                f"(case={actual_eq.case}); case-sensitive uniqueness was not taken. "
+                f"Attempted: {item.dest_ddl}."
+            )
+            item.dest_ddl = ""
+        elif want_ci and actual_eq.case != "insensitive":
+            item.status = "unsupported"
+            item.reason = (
+                f"Destination catalog collates as {actual or 'default'} "
+                f"(case={actual_eq.case}); case-insensitive equality was not taken. "
+                f"Attempted: {item.dest_ddl}."
+            )
+            item.dest_ddl = ""
+        elif not ddl:
+            # Destination-default CS (PostgreSQL). Empty/C/POSIX/default is CS.
+            if actual_eq.case == "insensitive":
+                item.status = "unsupported"
+                item.reason = (
+                    f"Destination default collation {actual or 'default'} is "
+                    "case-insensitive; source uniqueness was case-sensitive."
+                )
 
 
 # --------------------------------------------------------------------------
@@ -1294,66 +1906,6 @@ def _fetch_not_null_columns(
         if flag_s in {"NO", "N", "FALSE", "0"}:
             not_null.add(str(name))
     return not_null
-
-
-# Clock/boolean default synonyms treated as equivalent across dialects so a
-# faithfully-carried default is not falsely downgraded on cosmetic differences.
-_CLOCK_DEFAULTS = {
-    "current_timestamp", "current_timestamp()", "now()", "now", "getdate()",
-    "getutcdate()", "sysdate", "systimestamp", "localtimestamp",
-    "localtimestamp()", "statement_timestamp()", "transaction_timestamp()",
-    "clock_timestamp()", "sysdatetime()",
-}
-_TRUE_DEFAULTS = {"true", "t", "1", "b'1'"}
-_FALSE_DEFAULTS = {"false", "f", "0", "b'0'"}
-
-
-def _normalize_default_expr(expr: Any) -> str:
-    """Fold a catalog/planned default into a comparable literal.
-
-    Iteratively strips wrapping parens, trailing type casts (``'x'::text``,
-    ``'x'::character varying``), national/escape/bit/hex string-literal prefixes
-    (``N'x'``, ``E'x'``, ``B'1'``), and surrounding quotes to a fixed point — so
-    ``('active'::character varying)``, ``N'active'`` and ``active`` all unify —
-    then collapses clock precision (``current_timestamp(6)`` -> ``()``) and
-    casefolds.
-    """
-    s = str(expr if expr is not None else "").strip()
-    prev: str | None = None
-    while s and s != prev:
-        prev = s
-        if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
-            s = s[1:-1].strip()
-            continue
-        stripped_cast = re.sub(r"::\s*[A-Za-z0-9_ \"\.\[\]]+\s*$", "", s).strip()
-        if stripped_cast != s:
-            s = stripped_cast
-            continue
-        prefix = re.match(r"^(?:[NnEeBbXx]|[Uu]&)(['\"].*)$", s)
-        if prefix:
-            s = prefix.group(1).strip()
-            continue
-        if len(s) >= 2 and s[0] in "'\"" and s[-1] == s[0]:
-            s = s[1:-1].strip()
-            continue
-    # current_timestamp(6) / localtimestamp(3) → drop precision for clock compare.
-    s = re.sub(r"\(\s*\d+\s*\)", "()", s)
-    return s.casefold()
-
-
-def _default_exprs_equivalent(a: str, b: str) -> bool:
-    if a == b:
-        return True
-    if a in _CLOCK_DEFAULTS and b in _CLOCK_DEFAULTS:
-        return True
-    if a in _TRUE_DEFAULTS and b in _TRUE_DEFAULTS:
-        return True
-    if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
-        return True
-    try:
-        return float(a) == float(b)
-    except (TypeError, ValueError):
-        return False
 
 
 def _claimed_default_literal(item: Any) -> str:
@@ -1829,6 +2381,81 @@ def certify_structure_on_destination(
             )
 
 
+def plan_covers_unique(
+    plan: CreateFidelityPlan | None,
+    columns: list[str] | None,
+) -> bool:
+    """True when CREATE already emits a PK or UNIQUE on exactly these columns.
+
+    Upsert writers must not add a second UNIQUE KEY for conflict columns the
+    Property 6 plan already carried — that is a duplicate index, not a
+    write-path requirement.
+    """
+    if plan is None or not columns:
+        return False
+    want = {str(c).casefold() for c in columns if str(c).strip()}
+    if not want:
+        return False
+    if plan.primary_key and {str(c).casefold() for c in plan.primary_key} == want:
+        return True
+    return any(
+        {str(c).casefold() for c in uk} == want
+        for uk in (plan.unique_constraints or [])
+    )
+
+
+def settle_create_new_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dest_dialect: str,
+    dest_schema: str,
+    dest_table: str,
+    table_already_exists: bool,
+    execute: Callable[[str], Any],
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+    cursor: Any | None = None,
+) -> dict[str, Any] | None:
+    """Run post-CREATE DDL and certify from the destination catalog.
+
+    Callers render CREATE from the plan, then call this. An emitted clause is a
+    claim; only the destination catalog may settle ``carried``.
+    """
+    if plan is None:
+        return None
+    apply_post_create_sql(plan, execute)
+    if not table_already_exists:
+        certify_structure_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        certify_identity_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        certify_collation_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        if cursor is not None:
+            certify_placement_on_destination(
+                plan,
+                dialect=dest_dialect,
+                cursor=cursor,
+                schema=dest_schema,
+                table=dest_table,
+            )
+    return plan.report.to_dict()
+
+
 def apply_post_create_sql(
     plan: CreateFidelityPlan | None,
     execute: Callable[[str], Any],
@@ -1868,6 +2495,9 @@ def render_create_column_defs(
     dialect: str,
 ) -> str:
     """Render `col type [NOT NULL] [DEFAULT …], … [, PRIMARY KEY …]` body."""
+    from services.type_stamp_grammar import require_safe_type_stamps
+
+    require_safe_type_stamps(types, context=f"{dialect} CREATE TABLE column")
     parts: list[str] = []
     suffixes = (plan.column_suffixes if plan else {}) or {}
     for col, typ in zip(columns, types):
@@ -1909,6 +2539,138 @@ def empty_unsupported_report(
 # ---------------------------------------------------------------------------
 
 
+def mysql_index_requires_prefix(typ: str) -> bool:
+    """True when MySQL/MariaDB would need a prefix length to index this type.
+
+    TEXT/BLOB/JSON cannot be a PRIMARY KEY or UNIQUE without a prefix. Inventing
+    ``(255)`` would enforce a different uniqueness rule than the source, so the
+    planner refuses rather than approximating.
+    """
+    u = re.sub(r"\s+", "", (typ or "").strip().upper())
+    if not u:
+        return False
+    return bool(re.match(r"^(TINY|MEDIUM|LONG)?(TEXT|BLOB)\b|^JSON\b", u))
+
+
+# InnoDB DYNAMIC/COMPRESSED key limit; utf8mb4 reserves 4 bytes per character.
+_MYSQL_MAX_KEY_BYTES = 3072
+_MYSQL_UTF8MB4_CHAR_BYTES = 4
+
+
+def _mysql_text_carrier(ddl: str) -> bool:
+    base = re.sub(r"\(.*$", "", str(ddl or "")).strip().split()[0:1]
+    return bool(base) and base[0].upper() in {"TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT"}
+
+
+def _mysql_fixed_key_bytes(ddl: str) -> int:
+    from services.type_system import parse_string_carrier_width
+
+    width = parse_string_carrier_width(ddl)
+    return width * _MYSQL_UTF8MB4_CHAR_BYTES if width else 8
+
+
+def mysql_key_compatible_types(
+    *,
+    table_name: str,
+    conflict_columns: list[str] | None,
+    target_cols: list[str],
+    target_types: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+) -> tuple[list[str], str | None]:
+    """Key-indexable create-new carriers for an upsert key, or an operator refusal.
+
+    MySQL cannot index TEXT/BLOB/JSON without a prefix length (error 1170), and
+    a prefix would enforce a different uniqueness rule than the source. A key
+    column whose carrier is a LOB becomes ``VARCHAR(n)`` from the width the
+    source declares; an undeclared text key (PG ``TEXT``) gets the widest
+    full-value key the 3072-byte limit allows. A JSON/BLOB key is refused.
+    G6 (Validate) and the MySQL writer (defence in depth) share this one rule.
+    """
+    from services.type_system import parse_string_carrier_width
+
+    types = list(target_types)
+    keys = [c for c in (conflict_columns or []) if c in target_cols]
+    source_of = {
+        str(m.get("target") or m.get("source") or ""): str(m.get("source") or "")
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    declared_types = column_types or {}
+    widened: dict[str, int] = {}
+    unresolved: list[str] = []
+    budgeted: list[str] = []
+    for col in keys:
+        idx = target_cols.index(col)
+        if not mysql_index_requires_prefix(types[idx]):
+            continue
+        declared = declared_types.get(source_of.get(col) or col) or declared_types.get(col)
+        width = parse_string_carrier_width(declared)
+        if not width:
+            if _mysql_text_carrier(types[idx]):
+                # An unbounded text key (PG TEXT): sized below to the widest
+                # full-value key MySQL can hold — the rule an existing TEXT key
+                # gets (services.upsert_identity). Never a prefix (CR-D126).
+                budgeted.append(col)
+            else:
+                unresolved.append(f"{col} ({declared or types[idx]})")
+            continue
+        widened[col] = width
+        types[idx] = f"VARCHAR({width})"
+    if budgeted and not unresolved:
+        other_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES + sum(
+            _mysql_fixed_key_bytes(types[target_cols.index(c)])
+            for c in keys
+            if c not in widened and c not in budgeted
+        )
+        budget = (_MYSQL_MAX_KEY_BYTES - other_bytes) // _MYSQL_UTF8MB4_CHAR_BYTES // len(budgeted)
+        if budget < 1:
+            unresolved.extend(f"{c} ({types[target_cols.index(c)]})" for c in budgeted)
+        else:
+            for col in budgeted:
+                types[target_cols.index(col)] = f"VARCHAR({budget})"
+            logger.info(
+                "MySQL upsert key carriers sized to the full-value key budget: "
+                "table=%s %s", table_name, {c: f"VARCHAR({budget})" for c in budgeted},
+            )
+    key_label = ", ".join(keys)
+    where = f"new table {table_name}" if table_name else "the new destination table"
+    if unresolved:
+        logger.error(
+            "MySQL upsert key refused before CREATE: table=%s key=(%s) unindexable=%s",
+            table_name, key_label, unresolved,
+        )
+        return target_types, (
+            f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
+            f"{', '.join(unresolved)} would be created as a TEXT/BLOB "
+            "column, which MySQL refuses in a key without a prefix length "
+            f"(error 1170), and it is not text {PRODUCT_NAME} can carry in a "
+            f"full-width VARCHAR key. {PRODUCT_NAME} will not invent a prefix (that "
+            "enforces a different uniqueness rule). Map the column to "
+            "VARCHAR(n) sized to its longest value, or use a scalar key."
+        )
+    key_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES
+    if key_bytes > _MYSQL_MAX_KEY_BYTES:
+        logger.error(
+            "MySQL upsert key too wide before CREATE: table=%s key=(%s) widths=%s",
+            table_name, key_label, widened,
+        )
+        return target_types, (
+            f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
+            f"the declared widths {widened} need {key_bytes} bytes "
+            f"in utf8mb4, above MySQL's {_MYSQL_MAX_KEY_BYTES}-byte key limit "
+            "(error 1071). Narrow the key columns or pre-create the destination "
+            "table with this key."
+        )
+    if widened:
+        logger.info(
+            "MySQL upsert key carriers sized from the source width: table=%s %s",
+            table_name, {c: f"VARCHAR({w})" for c, w in widened.items()},
+        )
+    return types, None
+
+
+
 def _q(ident: str, dialect: str) -> str:
     from connectors.sql_identifiers import quote_sql_identifier
 
@@ -1918,8 +2680,38 @@ def _q(ident: str, dialect: str) -> str:
     return quote_sql_identifier(ident, '"')
 
 
-def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
+_MYSQL_FSP_RE = re.compile(r"^(?:DATETIME|TIMESTAMP)\s*\((\d)\)", re.IGNORECASE)
+
+
+def _mysql_clock_default(keyword: str, dest_type: str) -> str:
+    """MySQL/MariaDB spelling of a clock default for the column it sits on.
+
+    MySQL accepts ``CURRENT_TIMESTAMP`` only on DATETIME/TIMESTAMP columns and
+    only with the column's own fractional precision: ``DATETIME(6) DEFAULT
+    CURRENT_TIMESTAMP`` is error 1067 at CREATE, which is how a PG
+    ``timestamp DEFAULT now()`` failed every MySQL destination after Validate
+    had passed. ``CURRENT_DATE``/``CURRENT_TIME`` are expression defaults and
+    need the parenthesised form (MySQL 8.0.13+, MariaDB 10.2+).
+
+    A timestamp clock on a DATE or TIME column (PG ``date DEFAULT now()``) is
+    error 1067 too; that column's own clock is the same rule (D146).
+    """
+    from services.type_system import normalize_logical_type
+
+    logical = normalize_logical_type(dest_type or "")
+    if keyword == "CURRENT_TIMESTAMP" and logical in {"date", "time"}:
+        keyword = "CURRENT_DATE" if logical == "date" else "CURRENT_TIME"
+    if keyword == "CURRENT_TIMESTAMP":
+        m = _MYSQL_FSP_RE.match((dest_type or "").strip())
+        if m and int(m.group(1)) > 0:
+            return f"CURRENT_TIMESTAMP({m.group(1)})"
+        return keyword
+    return f"({keyword})"
+
+
+def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") -> str:
     text = (expr or "").strip()
+    mysql_family = (dest_dialect or "").lower() in {"mysql", "mariadb"}
     if text.startswith("(") and text.endswith(")"):
         text = text[1:-1].strip()
     # Strip PG type cast: 'active'::text → 'active'
@@ -1930,16 +2722,51 @@ def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
     )
     if cast_m:
         text = cast_m.group(1)
-    if text.lower() in {"current_timestamp", "now()"}:
-        return "CURRENT_TIMESTAMP"
-    if text.lower() in {"current_date"}:
-        return "CURRENT_DATE"
-    if text.lower() in {"current_time"}:
-        return "CURRENT_TIME"
+    lowered = text.lower()
+    if lowered in {
+        "current_timestamp",
+        "current_timestamp()",
+        "now()",
+        "localtime",
+        "localtime()",
+        "localtimestamp",
+        "localtimestamp()",
+    }:
+        return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
+    if lowered in {"current_date", "current_date()", "curdate()"}:
+        return _mysql_clock_default("CURRENT_DATE", dest_type) if mysql_family else "CURRENT_DATE"
+    if lowered in {"current_time", "current_time()", "curtime()"}:
+        return _mysql_clock_default("CURRENT_TIME", dest_type) if mysql_family else "CURRENT_TIME"
     if text.lower() in {"datetime('now')", "(datetime('now'))"}:
         if (dest_dialect or "").lower() == "sqlite":
             return "(datetime('now'))"
-        return "CURRENT_TIMESTAMP"
+        return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
+    # SQL Server BIT and Oracle NUMBER(1) reject the token ``false``.
+    # PostgreSQL boolean defaults arrive as that token.
+    from src.transfer.engine_family import family_or_kind
+
+    numeric_bool = family_or_kind(dest_dialect) in {"sqlserver", "oracle"}
+    type_name = (dest_type or "").upper()
+    number_one = type_name.startswith("NUMBER(1)") or type_name.startswith("NUMBER(1,")
+    if numeric_bool and (
+        "BIT" in type_name or "BOOL" in type_name or number_one
+    ):
+        if lowered in {"false", "f", "'false'", "'f'"}:
+            return "0"
+        if lowered in {"true", "t", "'true'", "'t'"}:
+            return "1"
+    # MySQL TINYINT(1) / BIT(1) defaults arrive as ``0``/``1``/``b'0'``. Onto a
+    # real BOOLEAN column PostgreSQL rejects an integer default ("column is of
+    # type boolean but default expression is of type integer"), and the CREATE
+    # failure aborted the rest of the load's transaction (QA round 11, Rfam).
+    # One rule for that: services.pg_default_legal (the caller also drops and
+    # reports a default no boolean literal means, when this returns it as is).
+    if not numeric_bool and lowered not in {"true", "false"}:
+        from services.pg_default_legal import pg_boolean_default
+
+        pg_bool = pg_boolean_default(text, dest_type, dest_dialect or "")
+        if pg_bool:
+            return pg_bool
     return text
 
 
@@ -1962,7 +2789,24 @@ def _emit_check_aspect(
 
     payload = catalog.check_constraints_meta
     if not payload:
-        return False
+        # Legacy catalog shape: a list of predicate strings, no meta envelope.
+        # Same planner — never a second "v1 unsupported" path that drops a
+        # portable IN/comparison CHECK the meta path would carry.
+        raw = [
+            str(pred).strip()
+            for pred in (catalog.check_constraints or [])
+            if str(pred).strip()
+        ]
+        if not raw:
+            return False
+        payload = {
+            "dialect": catalog.dialect,
+            "status": "measured",
+            "items": [
+                {"name": f"check_{idx}", "predicate": pred, "columns": []}
+                for idx, pred in enumerate(raw, start=1)
+            ],
+        }
     status = str(payload.get("status") or "")
     if status != "measured":
         report.items.append(
@@ -2216,6 +3060,12 @@ def _emit_unsupported_catalog(
     skip_check: bool = False,
     skip_index: bool = False,
     skip_identity: bool = False,
+    skip_collation: bool = False,
+    skip_offset_label: bool = False,
+    skip_encoding: bool = False,
+    skip_decimal: bool = False,
+    skip_unicode_form: bool = False,
+    skip_charset: bool = False,
 ) -> None:
     if catalog.foreign_keys:
         for fk in catalog.foreign_keys[:20]:
@@ -2251,27 +3101,17 @@ def _emit_unsupported_catalog(
 
     if skip_check:
         pass
-    elif catalog.check_constraints:
-        for chk in catalog.check_constraints[:20]:
-            report.items.append(
-                SchemaFidelityItem(
-                    aspect="check",
-                    name="check",
-                    status="unsupported",
-                    reason="CHECK constraints are not carried on create-new in v1.",
-                    source_detail=str(chk)[:240],
-                )
-            )
     else:
-        # CHECK is not loaded from PG/SQLite catalogs yet — never certify absence.
+        # No CHECK catalog was measured (dialect without a reader, or probe
+        # never ran). Absence is unproven — never a silent skip.
         report.items.append(
             SchemaFidelityItem(
                 aspect="check",
                 name="*",
                 status="unsupported",
                 reason=(
-                    "CHECK constraints are not introspected for this source dialect "
-                    "in v1; refuse to certify absence."
+                    "CHECK constraints were not measured on this source catalog; "
+                    "refuse to certify absence."
                 ),
             )
         )
@@ -2338,20 +3178,63 @@ def _emit_unsupported_catalog(
             "Identity/sequence RESTART values are not carried; SERIAL polarity may widen.",
             "No identity columns flagged on source.",
         )
-    _aspect_list(
-        "collation",
-        bool(catalog.collations),
-        "Collation is annotated on introspect but not emitted on create-new DDL.",
-        "No per-column collations on source catalog.",
-    )
-    report.items.append(
-        SchemaFidelityItem(
-            aspect="charset",
-            name="*",
-            status="unknown",
-            reason="Character set is not introspected for this source dialect.",
+    if not skip_collation:
+        _aspect_list(
+            "collation",
+            bool(catalog.collations),
+            "Collation equality could not be planned for this destination.",
+            "No per-column collations on source catalog.",
         )
-    )
+    if not skip_offset_label:
+        _aspect_list(
+            "offset_label",
+            False,
+            "Originating offset label could not be planned for this destination.",
+            "No aware-temporal columns on the source catalog.",
+        )
+    if not skip_encoding:
+        _aspect_list(
+            "encoding",
+            bool(catalog.charsets),
+            "Unicode encoding capacity could not be planned for this destination.",
+            "No character columns on the source catalog.",
+        )
+    if not skip_decimal:
+        _aspect_list(
+            "decimal",
+            False,
+            "Exact decimal identity could not be planned for this destination.",
+            "No decimal/float columns on the source catalog.",
+        )
+    if not skip_unicode_form:
+        _aspect_list(
+            "unicode_form",
+            False,
+            "Unicode form / UCA canonical class could not be planned for this destination.",
+            "No character columns on the source catalog.",
+        )
+    if not skip_charset:
+        if catalog.charsets:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="charset",
+                    name="*",
+                    status="unsupported",
+                    reason=(
+                        "Source character sets were measured but not emitted on "
+                        "create-new for this destination."
+                    ),
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="charset",
+                    name="*",
+                    status="skipped",
+                    reason="No per-column character set measured on the source catalog.",
+                )
+            )
     _aspect_list(
         "comment",
         bool(catalog.comments),

@@ -6,6 +6,7 @@ readback assertions. Matrices import these — do not copy-paste seeds.
 
 from __future__ import annotations
 
+import os
 import socket
 import uuid
 from datetime import datetime, timezone
@@ -47,12 +48,65 @@ def reachable(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def pg_dsn_parts() -> dict[str, Any]:
+    """PostgreSQL connection parts, honoring DATAFLOW_PG_TEST_DSN.
+
+    Tests that drive a real PostgreSQL must not hardcode localhost:5432 — an
+    env where the project container lives elsewhere reads a probe failure as a
+    product failure. The DSN is the single override point; without it the
+    historical dev defaults apply.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    dsn = os.environ.get("DATAFLOW_PG_TEST_DSN", "").strip()
+    if dsn:
+        u = urlparse(dsn)
+        return {
+            "host": u.hostname or "localhost",
+            "port": int(u.port or 5432),
+            "database": (u.path or "/postgres").lstrip("/"),
+            "username": u.username or "postgres",
+            "password": u.password or "",
+        }
+    return {
+        "host": "localhost",
+        "port": 5432,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+    }
+
+
+def pg_connect():
+    """psycopg2 connection to the test PostgreSQL (DSN-aware)."""
+    import psycopg2
+
+    p = pg_dsn_parts()
+    return psycopg2.connect(
+        host=p["host"],
+        port=p["port"],
+        database=p["database"],
+        user=p["username"],
+        password=p["password"],
+    )
+
+
 def require_ports(*ports: int, host: str = "localhost") -> None:
     import pytest
 
-    missing = [p for p in ports if not reachable(host, p)]
+    # When DATAFLOW_PG_TEST_DSN points elsewhere, port 5432 lives at that host
+    # and port, not localhost.
+    pg = pg_dsn_parts()
+    checked: dict[tuple[str, int], bool] = {}
+    missing: list[tuple[str, int]] = []
+    for p in ports:
+        h, pt = (pg["host"], pg["port"]) if int(p) == 5432 else (host, int(p))
+        if not checked.get((h, pt), reachable(h, pt)):
+            missing.append((h, pt))
+        checked.setdefault((h, pt), True)
     if missing:
-        pytest.skip(f"Emulator not reachable on {host}:{missing}")
+        pytest.skip(f"Emulator not reachable on {missing}")
 
 
 def uniq(prefix: str) -> str:
@@ -60,14 +114,15 @@ def uniq(prefix: str) -> str:
 
 
 def pg_endpoint(table: str) -> EndpointConfig:
+    p = pg_dsn_parts()
     return EndpointConfig(
         kind="database",
         format="postgresql",
-        host="localhost",
-        port=5432,
-        database="dataflow",
-        username="dataflow",
-        password="dataflow",
+        host=p["host"],
+        port=p["port"],
+        database=p["database"],
+        username=p["username"],
+        password=p["password"],
         schema="public",
         table=table,
     )
@@ -95,6 +150,17 @@ def mongo_endpoint(collection: str) -> EndpointConfig:
         port=27017,
         database="dataflow",
         table=collection,
+    )
+
+
+def elasticsearch_endpoint(index: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="elasticsearch",
+        host="localhost",
+        port=9200,
+        database=index,
+        table=index,
     )
 
 
@@ -236,17 +302,25 @@ def redis_endpoint(prefix: str) -> EndpointConfig:
     )
 
 
+def _sqlserver_host() -> str:
+    return os.environ.get("DATAFLOW_SQLSERVER_HOST") or os.environ.get("DATAFLOW_TEST_MSSQL_HOST", "localhost")
+
+
 def sqlserver_endpoint(table: str) -> EndpointConfig:
     return EndpointConfig(
         kind="database",
         format="sqlserver",
-        host="localhost",
+        host=_sqlserver_host(),
         port=1433,
         database="dataflow",
         username="sa",
-        password="Datawrap_CDC_2022!",
+        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         schema="dbo",
         table=table,
+        # ODBC Driver 18 encrypts and verifies the chain by default; the compose
+        # server presents a self-signed certificate, so the trust has to be
+        # declared here exactly as an operator would declare it.
+        extra={"trust_server_certificate": True},
     )
 
 
@@ -279,7 +353,6 @@ def bigquery_endpoint(table: str) -> EndpointConfig:
 
 
 def oracle_endpoint(table: str) -> EndpointConfig:
-    import os
 
     return EndpointConfig(
         kind="database",
@@ -306,7 +379,6 @@ def duckdb_endpoint(db_path: str, table: str) -> EndpointConfig:
 
 
 def require_oracle_env() -> None:
-    import os
 
     import pytest
 
@@ -802,8 +874,13 @@ def assert_redis_typed_fidelity(prefix: str) -> None:
     dec = doc.get("amt_dec")
     assert Decimal(str(dec)) == Decimal("10.5000") or Decimal(str(dec)) == Decimal("10.5"), dec
     assert abs(float(doc.get("amt_float")) - 1500.0) < 1e-6
+    # Redis' only carrier is text, and the JSON wire writes RFC 3339 with the
+    # offset — so the instant must come back identical, not just the date part.
     ts = str(doc.get("ts_utc") or "")
     assert "2024-12-31" in ts, ts
+    parsed = datetime.fromisoformat(ts)
+    assert parsed.tzinfo is not None, f"redis wire dropped the offset: {ts}"
+    assert parsed == EXPECTED_PG_ROW_1["ts_utc"], ts
     assert doc.get("flag") in (True, "true", 1, "1")
 
 
@@ -824,10 +901,10 @@ def drop_sqlserver_table(table: str) -> None:
     import pymssql
 
     conn = pymssql.connect(
-        server="localhost",
+        server=_sqlserver_host(),
         port=1433,
         user="sa",
-        password="Datawrap_CDC_2022!",
+        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         database="dataflow",
     )
     try:
@@ -845,10 +922,10 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
         import pymssql
 
         conn = pymssql.connect(
-            server="localhost",
+            server=_sqlserver_host(),
             port=1433,
             user="sa",
-            password="Datawrap_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             database="dataflow",
         )
         try:
@@ -878,7 +955,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
 
         conn = pyodbc.connect(
             "DRIVER={ODBC Driver 17 for SQL Server};"
-            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=Datawrap_CDC_2022!;"
+            f"SERVER={_sqlserver_host()},1433;DATABASE=dataflow;UID=sa;PWD={os.environ.get('DATAFLOW_TEST_MSSQL_PASSWORD', '')};"
             "TrustServerCertificate=yes;"
         )
         try:

@@ -50,13 +50,27 @@ def test_catalog_typed_text_to_numeric_is_still_demoted() -> None:
 
 
 def test_unproven_varchar_source_is_still_demoted() -> None:
+    """Onto a column of another name, or a typed column, the cap stands."""
+    renamed = {**_mapping("TEXT"), "target": "nation"}
+    for mapping in (renamed, _mapping("INTEGER")):
+        out = _demote_untyped_varchar_confidence(
+            [mapping],
+            source_schemas=[{"name": "country", "inferred_type": "VARCHAR", "samples": []}],
+            source_types_authoritative=False,
+        )
+        assert out[0]["confidence"] == _UNTYPED_VARCHAR_CONF_CAP
+        assert "weak type evidence" in out[0]["reasoning"]
+
+
+def test_unproven_varchar_onto_same_named_text_column_is_not_demoted() -> None:
+    """Any value lands byte for byte in a text column of the same name (D159)."""
     out = _demote_untyped_varchar_confidence(
         [_mapping("TEXT")],
         source_schemas=[{"name": "country", "inferred_type": "VARCHAR", "samples": []}],
         source_types_authoritative=False,
     )
-    assert out[0]["confidence"] == _UNTYPED_VARCHAR_CONF_CAP
-    assert "weak type evidence" in out[0]["reasoning"]
+    assert out[0]["confidence"] == 0.99
+    assert not out[0].get("requires_review")
 
 
 def test_sampled_column_is_never_demoted() -> None:

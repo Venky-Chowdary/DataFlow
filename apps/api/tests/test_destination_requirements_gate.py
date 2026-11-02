@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from services.destination_requirements_gate import (
     build_destination_requirements_gate,
+    build_mapping_contract_gates,
 )
 
 _MAPPED = [
@@ -69,3 +70,52 @@ def test_unreadable_nullability_is_unmeasured_not_pass():
 def test_create_new_destination_has_no_existing_requirements_to_check():
     assert _gate(destination_table_exists=False) is None
     assert _gate(destination_table_exists=None) is None
+
+
+def test_partial_nullability_is_unmeasured_not_false_pass():
+    """Live dest columns without a nullability entry must not green G14."""
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True,
+        column_nullability={"id": False},
+        column_defaults={},
+        identity_columns=[],
+        generated_columns=[],
+        mappings=[{"source": "id", "target": "id"}],
+        dest_columns=["id", "tenant_id"],
+    )
+    assert gate is not None
+    assert gate["status"] == "skip"
+    assert gate["details"]["unmeasured"] is True
+    assert gate["details"]["reason"] == "nullability_metadata_partial"
+    assert "tenant_id" in gate["details"]["unmeasured_columns"]
+
+
+def test_partial_nullability_casefold_still_counts_as_measured():
+    gate = build_destination_requirements_gate(
+        destination_table_exists=True,
+        column_nullability={"ID": False, "TENANT_ID": True},
+        column_defaults={},
+        identity_columns=[],
+        generated_columns=[],
+        mappings=[{"source": "id", "target": "id"}],
+        dest_columns=["id", "tenant_id"],
+    )
+    assert gate is not None
+    assert gate["status"] == "pass"
+
+
+def test_mapping_contract_gates_pass_dest_columns_into_g14():
+    _coverage, gates, blockers = build_mapping_contract_gates(
+        source_columns=["id"],
+        mappings=[{"source": "id", "target": "id"}],
+        destination_table_exists=True,
+        column_nullability={"id": False},
+        column_defaults={},
+        identity_columns=[],
+        generated_columns=[],
+        dest_columns=["id", "tenant_id"],
+    )
+    g14 = next(g for g in gates if g["id"] == "g14_destination_requirements")
+    assert g14["status"] == "skip"
+    assert g14["details"]["reason"] == "nullability_metadata_partial"
+    assert blockers == []

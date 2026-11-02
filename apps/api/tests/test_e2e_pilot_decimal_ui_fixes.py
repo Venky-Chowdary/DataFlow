@@ -203,8 +203,14 @@ def test_e2e_quarantine_panel_uses_light_inspect_surface():
     # Findings table must not sit only on dark job-log body without light override
     assert ".df2-quarantine-inspect" in css
     assert ".df2-quarantine-inspect-body" in css
-    assert "background: #ffffff" in css
-    assert "color: #0f172a" in css
+    # The surface is asserted through the token, not a literal hex: tokens.css
+    # owns the primitive, and a hex pinned here would have kept the findings
+    # table white in the dark theme.
+    inspect_body = css.split(".df2-quarantine-inspect-body {", 1)[1].split("}", 1)[0]
+    assert "background: var(--df-surface)" in inspect_body
+    assert "color: var(--df-text-primary)" in inspect_body
+    tokens = (web_root / "src/styles/tokens.css").read_text(encoding="utf-8")
+    assert "--df-surface: #ffffff" in tokens
     # Job log contrast overrides present
     assert ".df2-job-log-panel-body .df2-job-log-line" in css
     assert "color: #e2e8f0 !important" in css

@@ -728,6 +728,15 @@ def _mapping_risk_contract_payload(mapping: Any) -> Any:
     return getattr(mapping, "risk_contract", None)
 
 
+def mapping_declares_risk_contract(mapping: Any) -> bool:
+    """Whether a mapping claims a Risk Contract, verified or not.
+
+    A claim that fails verification must fail closed rather than fall back to the
+    job posture, so callers need to tell "no contract" from "bad contract".
+    """
+    return _mapping_risk_contract_payload(mapping) is not None
+
+
 def resolve_write_action_for_mapping(
     mapping: Any,
     job_error_policy: str | None,

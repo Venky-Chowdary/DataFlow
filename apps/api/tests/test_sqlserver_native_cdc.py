@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from connectors.sqlserver_cdc_native import (
@@ -11,6 +12,7 @@ from connectors.sqlserver_cdc_native import (
 )
 from connectors.sqlserver_change_stream import encode_sqlserver_resume_token
 from connectors.writer_common import extract_cdc_lsn
+from services.value_serializer import SQL_NULL_SENTINEL
 
 
 def test_mssql_cdc_token_roundtrip_with_offset_and_capture() -> None:
@@ -69,10 +71,12 @@ def test_native_snapshot_handoff_and_capture_resolve() -> None:
     cur.description = [("id",), ("amount",)]
     # resolve capture, max_lsn, schema columns, page1, page2, empty
     cur.fetchone.side_effect = [
-        ("dbo_orders",),  # resolve
         (bytes.fromhex("0abc"),),  # max lsn
+        (bytes.fromhex("0abc"),),  # min lsn (floor)
+        (bytes.fromhex("0abc"),),  # capture start lsn
     ]
     cur.fetchall.side_effect = [
+        [("dbo_orders", bytes.fromhex("0abc"))],  # resolve capture instances
         [],  # captured_columns
         [("1", "10"), ("2", "20")],
         [("3", "30")],
@@ -121,11 +125,12 @@ def test_native_poll_ops_1_2_4() -> None:
     ]
     # resolve capture, min_lsn (arg eval), max_lsn, then change rows
     cur.fetchone.side_effect = [
-        ("dbo_orders",),
+        (1,),  # capture instance exists
         (bytes.fromhex("0a"),),  # min_lsn ≤ resume
         (bytes.fromhex("0c"),),  # max_lsn
     ]
     cur.fetchall.side_effect = [
+        [("dbo_orders", bytes.fromhex("0a"))],  # resolve capture instances
         [],  # captured_columns
         [
             (lsn, bytes.fromhex("01"), 2, "3", "30"),
@@ -195,6 +200,250 @@ def test_normalize_and_classify_before_image_and_net() -> None:
     )
     assert cdc.row_filter == ROW_FILTER_NET
     assert "fn_cdc_get_net_changes_" in cdc._changes_tvf()
+
+
+def test_native_cdc_binary_wire_roundtrips_bytes_and_empty_values() -> None:
+    from connectors.sql_bind import coerce_binary_wire
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+
+    payload = b"\x00\xffsqlserver-binary\x80"
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [
+            {"__$operation": 2, "id": 1, "payload": payload},
+            {"__$operation": 2, "id": 2, "payload": b""},
+            {"__$operation": 2, "id": 3, "payload": None},
+        ],
+        primary_key="id",
+        row_filter="all",
+    )
+
+    assert not updates
+    assert not deletes
+    by_id = {record["id"]: record["payload"] for record in inserts}
+    assert coerce_binary_wire(by_id["1"]) == payload
+    assert coerce_binary_wire(by_id["2"]) == b""
+    # SQL NULL stays NULL on the wire, distinct from b"" (D203).
+    assert by_id["3"] == SQL_NULL_SENTINEL
+
+
+def test_native_cdc_non_binary_values_preserve_legacy_wire_format() -> None:
+    from datetime import date, datetime
+    from decimal import Decimal
+    from uuid import UUID
+
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+
+    values = {
+        "null_value": None,
+        "timestamp": datetime(2024, 3, 4, 5, 6, 7, 890123),
+        "event_date": date(2024, 3, 4),
+        "enabled": True,
+        "amount": Decimal("123.4500"),
+        "guid": UUID("3a95e6d0-0200-4b2c-a7f9-15b3e8de4c11"),
+        "text": "unchanged",
+    }
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [{"__$operation": 2, "id": 1, **values}],
+        primary_key="id",
+        row_filter="all",
+    )
+
+    assert not updates
+    assert not deletes
+    expected = {
+        name: SQL_NULL_SENTINEL if value is None else str(value)
+        for name, value in values.items()
+    }
+    assert {name: inserts[0][name] for name in values} == expected
+
+
+def test_native_snapshot_binary_wire_roundtrips_bytes_and_empty_values() -> None:
+    from connectors.sql_bind import coerce_binary_wire
+    from connectors.sqlserver_cdc_native import SqlServerNativeCdc
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+        batch_size=10,
+    )
+    cur = MagicMock()
+    cur.description = [
+        ("id",),
+        ("payload",),
+        ("empty_payload",),
+        ("null_payload",),
+    ]
+
+    with patch(
+        "connectors.sql_snapshot_scan.fetch_scan_page",
+        return_value=[(1, b"\x00\xffsnapshot", b"", None)],
+    ):
+        batches = list(
+            cdc._iter_snapshot_table(
+                cur,
+                "orders",
+                handoff="0a",
+                offset=0,
+                last_pk="",
+                ack_barrier=False,
+            )
+        )
+
+    record = batches[0].inserts[0]
+    assert coerce_binary_wire(record["payload"]) == b"\x00\xffsnapshot"
+    assert coerce_binary_wire(record["empty_payload"]) == b""
+    assert record["null_payload"] == SQL_NULL_SENTINEL
+
+
+def test_native_incremental_snapshot_preserves_legacy_values_and_binary_wire() -> None:
+    from datetime import datetime
+    from decimal import Decimal
+
+    from connectors.sql_bind import coerce_binary_wire
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+    )
+
+    class _Sig:
+        primary_key = "id"
+        chunk_size = 2
+        last_pk = ""
+        table = "orders"
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [
+        ("id",),
+        ("created_at",),
+        ("enabled",),
+        ("amount",),
+        ("payload",),
+        ("null_payload",),
+    ]
+    payload = b"\x00\xffincremental"
+    cur.fetchall.return_value = [
+        (
+            1,
+            datetime(2024, 3, 4, 5, 6, 7, 890123),
+            True,
+            Decimal("123.4500"),
+            payload,
+            None,
+        )
+    ]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        records, new_last, done = cdc._fetch_incremental_chunk(_Sig())
+
+    record = records[0]
+    assert record["created_at"] == "2024-03-04 05:06:07.890123"
+    assert record["enabled"] == "True"
+    assert record["amount"] == "123.4500"
+    assert coerce_binary_wire(record["payload"]) == payload
+    assert record["null_payload"] == SQL_NULL_SENTINEL
+    assert new_last == "1"
+    assert done is True
+
+
+def test_native_cdc_update_old_before_image_nulls_are_not_written() -> None:
+    from connectors.sql_bind import coerce_binary_wire
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+
+    payload = b"\x00\xfeafter-image"
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [
+            {"__$operation": 3, "id": 1, "payload": None, "large_value": None},
+            {"__$operation": 4, "id": 1, "payload": payload, "large_value": "new"},
+        ],
+        primary_key="id",
+        row_filter="all update old",
+    )
+
+    assert not inserts
+    assert not deletes
+    assert len(updates) == 1
+    assert coerce_binary_wire(updates[0]["payload"]) == payload
+    assert updates[0]["large_value"] == "new"
+    assert updates[0]["_df_before"]["payload"] == SQL_NULL_SENTINEL
+    assert updates[0]["_df_before"]["large_value"] == SQL_NULL_SENTINEL
+
+
+def test_native_cdc_legacy_value_redelivery_is_already_committed(tmp_path) -> None:
+    from datetime import datetime
+    from decimal import Decimal
+
+    from connectors.cdc_eos_sql import (
+        apply_change_batch_exactly_once,
+        dest_engine_count,
+    )
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+    from services.cdc_engine import ChangeBatch
+
+    source_values = {
+        "created_at": datetime(2024, 3, 4, 5, 6, 7, 890123),
+        "enabled": True,
+        "amount": Decimal("123.4500"),
+    }
+    legacy_row = {
+        "id": "1",
+        **{
+            name: "" if value is None else str(value)
+            for name, value in source_values.items()
+        },
+    }
+    token = {"lsn": "0/3A", "phase": "streaming"}
+    dest_cfg = {"database": str(tmp_path / "serializer-upgrade.db")}
+    columns = ["id", *source_values]
+    mappings = [
+        {"source": name, "target": name, "confidence": 1.0}
+        for name in columns
+    ]
+    column_types = dict.fromkeys(columns, "string")
+
+    rows, _checksum, committed, _deleted = apply_change_batch_exactly_once(
+        dest_type="sqlite",
+        dest_cfg=dest_cfg,
+        dest_table="orders",
+        change=ChangeBatch(inserts=[legacy_row], resume_token=token),
+        mappings=mappings,
+        column_types=column_types,
+        headers=columns,
+        pk_target_cols=["id"],
+        cursor_key="serializer-upgrade|orders",
+    )
+    assert rows == 1
+    assert committed["exactly_once_active"] is True
+
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [{"__$operation": 2, "id": 1, **source_values}],
+        primary_key="id",
+        row_filter="all",
+    )
+    assert not updates
+    assert not deletes
+    rows2, _checksum2, replayed, _deleted2 = apply_change_batch_exactly_once(
+        dest_type="sqlite",
+        dest_cfg=dest_cfg,
+        dest_table="orders",
+        change=ChangeBatch(inserts=inserts, resume_token=token),
+        mappings=mappings,
+        column_types=column_types,
+        headers=columns,
+        pk_target_cols=["id"],
+        cursor_key="serializer-upgrade|orders",
+    )
+
+    assert replayed["eos_already_committed"] is True
+    assert rows2 == 0
+    assert dest_engine_count(dest_cfg, "orders") == 1
 
 
 def test_mssql_shared_reader_init_and_lease() -> None:
@@ -282,6 +531,8 @@ def test_mssql_shared_poll_demuxes_two_tables() -> None:
     cur.fetchone.side_effect = [
         ("dbo_orders",),
         ("dbo_users",),
+        (1,),  # orders capture exists
+        (1,),  # users capture exists
         (bytes.fromhex("0a"),),  # min orders
         (bytes.fromhex("0a"),),  # min users
         (bytes.fromhex("0b"),),  # max_lsn
@@ -332,6 +583,26 @@ def test_assert_resume_lsn_in_retention_raises_on_gap() -> None:
         assert "failover" in str(exc).lower() or "cleanup" in str(exc).lower()
 
 
+def test_snapshot_handoff_clamps_to_capture_min_lsn() -> None:
+    """New capture min_lsn can sit above stale database max_lsn until scan."""
+    from connectors.sqlserver_cdc_native import SqlServerNativeCdc
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+        schema="dbo",
+        capture_instance="dbo_orders",
+    )
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        (bytes.fromhex("0a"),),  # max_lsn below floor
+        (bytes.fromhex("0b"),),  # capture min_lsn
+        (bytes.fromhex("0b"),),  # capture start_lsn
+    ]
+    assert cdc._snapshot_handoff_lsn(cur, "dbo_orders") == "0b"
+
+
 def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
     """AG failover / cleanup: cursor behind retention must not silently skip."""
     from connectors.sqlserver_cdc_native import CdcLsnGapError, SqlServerNativeCdc
@@ -351,6 +622,7 @@ def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
     conn = MagicMock()
     cur = MagicMock()
     cur.fetchone.side_effect = [
+        (1,),  # capture instance exists
         (bytes.fromhex("0b"),),  # min_lsn
     ]
     conn.__enter__ = MagicMock(return_value=conn)
@@ -367,3 +639,109 @@ def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
                         raise AssertionError("expected CdcLsnGapError")
                     except CdcLsnGapError:
                         pass
+
+
+def _force_scan_connection(
+    *, scan_error: Exception | None = None, flush_error: Exception | None = None
+):
+    events = []
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+
+    def execute(statement):
+        events.append(("execute", statement))
+        if statement == "EXEC sys.sp_cdc_scan" and scan_error is not None:
+            raise scan_error
+        if statement == "EXEC sys.sp_replflush" and flush_error is not None:
+            raise flush_error
+
+    cursor.execute.side_effect = execute
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    conn.cursor.return_value = cursor
+    conn.commit.side_effect = lambda: events.append(("commit",))
+    conn.invalidate.side_effect = lambda: events.append(("invalidate",))
+    return conn, events
+
+
+def test_force_cdc_scan_releases_log_reader_ownership() -> None:
+    cdc = SqlServerNativeCdc(
+        {"database": "app"},
+        table="orders",
+        primary_key="id",
+        capture_instance="dbo_orders",
+        cursor_key="orders-to-warehouse",
+    )
+    conn, events = _force_scan_connection()
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        cdc.force_cdc_scan()
+
+    assert events == [
+        ("execute", "EXEC sys.sp_cdc_scan"),
+        ("commit",),
+        ("execute", "EXEC sys.sp_replflush"),
+        ("commit",),
+    ]
+
+
+def test_force_cdc_scan_does_not_flush_after_scan_error(caplog) -> None:
+    cdc = SqlServerNativeCdc(
+        {"database": "app"},
+        table="orders",
+        primary_key="id",
+        capture_instance="dbo_orders",
+    )
+    conn, events = _force_scan_connection(
+        scan_error=RuntimeError(22903, "capture agent owns sp_replcmds")
+    )
+    caplog.set_level(logging.DEBUG, logger="connectors.sqlserver_cdc_native")
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        cdc.force_cdc_scan()
+
+    assert events == [("execute", "EXEC sys.sp_cdc_scan")]
+    assert any(
+        record.levelno == logging.DEBUG and "sp_cdc_scan skipped" in record.message
+        for record in caplog.records
+    )
+
+
+def test_force_cdc_scan_invalidates_connection_when_flush_fails(caplog) -> None:
+    cdc = SqlServerNativeCdc(
+        {"database": "app"},
+        table="orders",
+        primary_key="id",
+        capture_instance="dbo_orders",
+        cursor_key="orders-to-warehouse",
+    )
+    conn, events = _force_scan_connection(flush_error=ValueError("flush failed"))
+    caplog.set_level(logging.WARNING, logger="connectors.sqlserver_cdc_native")
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        cdc.force_cdc_scan()
+
+    assert events == [
+        ("execute", "EXEC sys.sp_cdc_scan"),
+        ("commit",),
+        ("execute", "EXEC sys.sp_replflush"),
+        ("invalidate",),
+    ]
+    warning = next(
+        record for record in caplog.records if record.levelno == logging.WARNING
+    )
+    assert "orders-to-warehouse" in warning.message
+    assert "dbo_orders" in warning.message
+    assert "ValueError" in warning.message
+    assert "flush failed" in warning.message
+
+
+def test_mssql_connection_adapter_delegates_invalidate() -> None:
+    from connectors.generic_sql import _MssqlQmarkConnection
+
+    proxy = MagicMock()
+    _MssqlQmarkConnection(proxy).invalidate()
+
+    proxy.invalidate.assert_called_once_with()

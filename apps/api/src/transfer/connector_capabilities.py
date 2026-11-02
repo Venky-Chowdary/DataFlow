@@ -9,8 +9,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, FrozenSet
 
+from connectors.sdk import list_descriptors
+from services.brand import PRODUCT_NAME
+
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
-_DRIVER_CAPS: dict[str, dict[str, bool]] = {
+_DRIVER_CAPS: dict[str, dict[str, Any]] = {
     "postgresql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "mysql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "mongodb": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -25,9 +28,11 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
         "test": True, "read": True, "write": True, "introspect": True, "preflight": True,
         "certified": False,
     },
-    "pgvector": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
-    "qdrant": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
-    "weaviate": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    # pgvector is PostgreSQL plus the ``vector`` type: it reads through the
+    # PostgreSQL reader (``source_read_driver``) and writes vectors natively.
+    "pgvector": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "qdrant": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "weaviate": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -42,17 +47,38 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
+    # Stripe: incremental ``created`` cursor SKU as a *source* (named fixture
+    # dest COUNT). Reverse-ETL write exists in stripe_writer but is not a
+    # PRODUCTION_SKU dest — certified_dest stays False until execute + dest
+    # COUNT on a named Stripe object.
+    "stripe": {
+        "test": True, "read": True, "write": True, "introspect": False, "preflight": True,
+        "certified_dest": False,
+    },
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
     "airtable": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
-    "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "rest_api": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
-    "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "neo4j": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
+
+for _sdk_descriptor in list_descriptors():
+    if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
+        continue
+    _DRIVER_CAPS[_sdk_descriptor.id] = {
+        "test": True,
+        "read": True,
+        "write": False,
+        "introspect": False,
+        "preflight": False,
+        "source_only": True,
+        "incremental": False,
+        "evidence": _sdk_descriptor.evidence,
+    }
 
 # File format capabilities (FileParser + registry)
 _FILE_CAPS: dict[str, dict[str, bool]] = {
@@ -66,13 +92,59 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "avro": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "orc": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "xml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "yaml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "fixed_width": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "pdf": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "docx": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "html": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
 }
 
+
+def file_source_types() -> FrozenSet[str]:
+    """Catalog ids that are file sources — Test must not claim Connected without a path."""
+    return frozenset(_FILE_CAPS)
+
+
+# Sources whose cells reach the write path as text *we* rendered from a typed
+# carrier (``NUMERIC(12,3)`` → ``10.129``), never as something a human typed.
+_TYPED_WIRE_SOURCES: FrozenSet[str] = frozenset({
+    "postgresql", "redshift", "greenplum", "cockroachdb", "mysql", "mariadb",
+    "sqlserver", "synapse", "oracle", "db2", "teradata", "sap_hana", "vertica",
+    "snowflake", "bigquery", "databricks", "clickhouse", "duckdb", "sqlite",
+    "generic_sql", "mongodb", "dynamodb",
+})
+
+
+def renders_typed_wire_values(driver_type: str) -> bool:
+    """True when this source's numbers are machine-rendered, not human-written.
+
+    Decides the number-grouping contract for a run: ``10.129`` out of a typed
+    column is 10.129, while the same characters in a CSV are genuinely
+    ambiguous (US 10.129 / EU 10129) and must still fail closed. A file, an
+    object store holding files, and free-text stores are not on this list.
+    """
+    return (driver_type or "").strip().lower() in _TYPED_WIRE_SOURCES
+
+
+def typed_wire_number_locale(source_kind: str, source_format: str) -> str:
+    """``WIRE`` when this source's numbers are ours to read canonically, else ''.
+
+    One owner for the whole run: Validate and Execute must read ``10.129``
+    the same way, or Validate clears a route Run then quarantines (and the
+    reverse). Callers apply it only when the operator declared no locale.
+    """
+    from services.transform_engine import NUMBER_LOCALE_WIRE
+
+    if (source_kind or "").strip().lower() != "database":
+        return ""
+    driver = resolve_driver_type((source_format or "").strip())
+    return NUMBER_LOCALE_WIRE if renders_typed_wire_values(driver) else ""
+
 # Catalog marketplace id → driver / format type
 CATALOG_ID_ALIASES: dict[str, str] = {
+    # Rows saved by the pre-MXD13 Pilot normaliser, which dropped underscores.
+    "genericsql": "generic_sql",
+    "restapi": "rest_api",
     "csv___tsv": "csv",
     "amazon_s3": "s3",
     "aws_s3": "s3",
@@ -102,12 +174,23 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "amazon_rds_mysql": "mysql",
     "google_cloud_sql_postgresql": "postgresql",
     "google_cloud_sql_mysql": "mysql",
-    "azure_database_postgresql": "postgresql",
-    "azure_database_mysql": "mysql",
+    "azure_database_for_postgresql": "postgresql",
+    "azure_database_for_mysql": "mysql",
+    "google_cloud_sql_sql_server": "sqlserver",
+    "amazon_rds_oracle": "oracle",
+    "oracle_autonomous_warehouse": "oracle",
     "supabase": "postgresql",
     "neon": "postgresql",
     "timescaledb": "postgresql",
     "cockroachdb": "postgresql",
+    # OpenShift hosts PostgreSQL (CNPG / Crunchy) — not a dest engine.
+    "openshift": "postgresql",
+    "okd": "postgresql",
+    "openshift_postgresql": "postgresql",
+    "cloudnativepg": "postgresql",
+    "cnpg": "postgresql",
+    "crunchy_postgres": "postgresql",
+    "crunchy_pgo": "postgresql",
     "sql_server": "sqlserver",
     "mssql": "sqlserver",
     "microsoft_sql_server": "sqlserver",
@@ -131,6 +214,12 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "ssh": "sftp",
     "email": "email",
     "smtp": "email",
+    "excel_workbook": "excel",
+    "csv_upload": "csv",
+    "tsv_upload": "tsv",
+    "json_documents": "json",
+    "parquet_lake": "parquet",
+    "jsonl_stream": "jsonl",
 }
 
 # Suggested lists — only connectors users can configure today
@@ -140,16 +229,18 @@ SUGGESTED_SOURCES = [
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases.
 # Hosted twins (RDS/Neon/Atlas/…) share the same duplex driver and are transfer-ready
 # under the same evidence bar — counting them is honest; inventing rest_api SaaS is not.
 # Only SKU-proven / certified duplex brands. Uncertified SaaS writers
-# (stripe/shopify/airtable/zendesk/notion) stay out — certified:False in
-# _DRIVER_CAPS until they earn PRODUCTION_SKU. Redshift is declared RW but
-# not yet in PRODUCTION_SKU, so it is demoted from this frozenset.
+# (shopify/airtable/zendesk/notion) stay out — certified:False in
+# _DRIVER_CAPS until they earn PRODUCTION_SKU. Stripe earned a named
+# incremental-cursor SKU (created watermark → sqlite dest COUNT).
+# Redshift is declared RW but not yet in PRODUCTION_SKU, so it stays
+# demoted from this frozenset until execute + dest COUNT.
 _TRANSFER_READY_CORE = frozenset({
     "postgresql", "mysql", "mongodb", "sqlserver", "sql_server", "oracle",
     "snowflake", "bigquery",
@@ -157,8 +248,9 @@ _TRANSFER_READY_CORE = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+    "yaml", "fixed_width",
     # SFTP earns this with introspect (typed schema off the remote payload),
     # Validate gates and a Gate-8 read-back, proven against a real SFTP server
     # in test_sftp_live_transfer.py. email stays out: write-only, no read-back.
@@ -173,8 +265,16 @@ _TRANSFER_READY_HOSTED_TWINS = frozenset({
     "amazon_rds_oracle", "oracle_autonomous_warehouse",
     "google_bigquery", "bigquery_us", "bigquery_eu",
     "snowflake_aws", "snowflake_azure", "snowflake_gcp",
+    "snowflake_standard", "snowflake_enterprise",
     "amazon_dynamodb",
     "mongodb_atlas",
+    "openshift",
+    "okd",
+    "openshift_postgresql",
+    "cloudnativepg",
+    "cnpg",
+    "crunchy_postgres",
+    "crunchy_pgo",
     # Search / cache
     "opensearch", "amazon_elasticsearch", "elastic_cloud",
     "elasticsearch_aws", "elasticsearch_gcp",
@@ -236,7 +336,112 @@ def default_port(driver_type: str) -> int:
         "influxdb": 8086,
         "neo4j": 7474,
         "couchbase": 8093,
+        "yaml": 0,
+        "fixed_width": 0,
     }.get((driver_type or "").lower(), 5432)
+
+
+def effective_port(driver_type: str, port: Any) -> int:
+    """Listen port for a driver: an explicit port, otherwise :func:`default_port`.
+
+    ``0`` and empty mean the caller did not choose a port. A second fallback
+    chain used to send that case to 443, so Redis and Elasticsearch dialed
+    the HTTPS port instead of 6379 and 9200.
+    """
+    parsed = _parse_port(port)
+    return parsed or default_port(_driver_key(driver_type))
+
+
+# The connector store and the transfer form both used to stamp 5432 whenever
+# the operator had not picked a port. Redis, Elasticsearch, Kafka and Neo4j
+# then dialed Postgres. 5432 is a real choice only for drivers that listen there.
+_HISTORICAL_PORT_FALLBACK = 5432
+# This reader speaks HTTP Cypher. A saved Bolt port never answers a health check.
+_NEO4J_BOLT_PORT = 7687
+# SQL wires on which 5432 is evidence, not a stamp (QA r12 bug 8). An
+# ``amazon_aurora`` / MySQL connector saved with 5432 was "healed" to 3306, so
+# the Test dialed a port the operator never configured and answered "Cannot
+# reach the host" for a reachable PostgreSQL endpoint. The operator's 5432 is
+# dialed; a PostgreSQL answer there is named by services/wire_protocol_sniff.py.
+_PORT_5432_IS_A_CHOICE = frozenset({"mysql"})
+
+
+def _parse_port(raw: Any) -> int:
+    try:
+        parsed = int(raw) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        parsed = 0
+    return 0 if parsed < 0 else parsed
+
+
+def _driver_key(driver_type: str) -> str:
+    resolved = resolve_driver_type(driver_type or "")
+    if resolved in ("", "unknown"):
+        return (driver_type or "").lower()
+    return resolved
+
+
+def port_was_chosen(driver_type: str, raw: Any) -> bool:
+    """True when ``raw`` is a listen port this driver can actually be told to use.
+
+    Missing, ``0``, Neo4j Bolt ``7687``, and the old store-wide ``5432`` are
+    not a choice for a driver that does not listen there. Postgres and
+    pgvector keep ``5432``. An explicit tunnel port such as Redis ``6380``
+    stays chosen.
+    """
+    parsed = _parse_port(raw)
+    if parsed <= 0:
+        return False
+    driver = _driver_key(driver_type)
+    if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
+        return False
+    if (
+        parsed == _HISTORICAL_PORT_FALLBACK
+        and default_port(driver) != parsed
+        and driver not in _PORT_5432_IS_A_CHOICE
+    ):
+        return False
+    return True
+
+
+def stored_listen_port(driver_type: str, raw: Any) -> int:
+    """Port to persist and to dial.
+
+    One owner for the connector store and ``resolve_connector_config``.
+    Historical ``5432`` and Neo4j ``7687`` become the driver port. Any other
+    explicit port is kept, including Postgres ``5432`` and Redis ``6380``.
+    """
+    parsed = _parse_port(raw)
+    driver = _driver_key(driver_type)
+    if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
+        return 7474
+    driver_default = default_port(driver)
+    if parsed == _HISTORICAL_PORT_FALLBACK and driver in _PORT_5432_IS_A_CHOICE:
+        return parsed
+    if parsed in (0, _HISTORICAL_PORT_FALLBACK) and driver_default != parsed:
+        return driver_default
+    return parsed or driver_default
+
+
+def prefer_listen_port(driver_type: str, inline: Any, saved: Any) -> int:
+    """Pick the port the dial will use before the driver default is applied.
+
+    An inline historical ``5432`` must not override a saved tunnel port.
+    A form that stamps the driver default (DynamoDB ``443``, Redis ``6379``)
+    must not override a saved tunnel either. Returns ``0`` when neither side
+    chose a port, so the caller applies :func:`stored_listen_port`.
+    """
+    inline_port = _parse_port(inline) if port_was_chosen(driver_type, inline) else 0
+    saved_port = _parse_port(saved) if port_was_chosen(driver_type, saved) else 0
+    if inline_port and saved_port and inline_port != saved_port:
+        if inline_port == default_port(_driver_key(driver_type)):
+            return saved_port
+        return inline_port
+    if inline_port:
+        return inline_port
+    if saved_port:
+        return saved_port
+    return 0
 
 
 def resolve_driver_type(catalog_id: str) -> str:
@@ -244,6 +449,9 @@ def resolve_driver_type(catalog_id: str) -> str:
     cid = (catalog_id or "").lower().strip()
     if not cid:
         return "unknown"
+    for descriptor in list_descriptors():
+        if cid in descriptor.catalog_ids:
+            return descriptor.id
     if cid == "generic_sql":
         return "generic_sql"
     if cid in CATALOG_ID_ALIASES:
@@ -370,6 +578,39 @@ def resolve_driver_type(catalog_id: str) -> str:
     return base
 
 
+# Drivers whose *reads* are another driver's wire protocol. Writes keep the
+# native driver (pgvector upserts embeddings); reads dispatch to the reader that
+# already owns the protocol instead of a second, weaker copy (QA MX2-12).
+_SOURCE_READ_DRIVER: dict[str, str] = {"pgvector": "postgresql"}
+
+
+def source_read_driver(driver_type: str) -> str:
+    """Driver whose reader serves a *source* endpoint of ``driver_type``."""
+    key = (driver_type or "").strip().lower()
+    return _SOURCE_READ_DRIVER.get(key, key)
+
+
+def resolve_bind_dialect(catalog_id: str, *, config_type: str = "") -> str:
+    """Concrete SQL dialect the write path binds against.
+
+    ``resolve_driver_type`` collapses every SQLAlchemy engine onto the
+    ``generic_sql`` driver family. That token names a driver, not a dialect, so
+    carrier rules resolved from it (bare ``TIMESTAMP`` fractional precision,
+    integer storage bounds) fall back to the fail-closed unknown-engine defaults
+    while the writer — which reads the endpoint ``type`` and knows the target is
+    DuckDB or ClickHouse — resolves them per dialect. Gate-8 then hashes one
+    cell two ways: a DuckDB microsecond ``TIMESTAMP`` fingerprints as
+    ``01:59:27.535`` on the destination read-back and as the whole-second
+    ``01:59:28`` on the source re-read, failing the checksum on a byte-perfect
+    transfer. Both sides must name the same dialect.
+    """
+    driver = resolve_driver_type(catalog_id)
+    if driver != "generic_sql":
+        return driver
+    concrete = (config_type or "").strip().lower() or (catalog_id or "").strip().lower()
+    return concrete or driver
+
+
 @lru_cache(maxsize=1)
 def _saas_catalog_ids() -> FrozenSet[str]:
     """Catalog IDs that are SaaS/API connectors and can use the generic REST driver."""
@@ -446,6 +687,8 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "avro": "fastavro",
     "orc": "pyarrow",
     "xml": "xmltodict",
+    "yaml": "yaml",
+    "fixed_width": None,
 }
 
 
@@ -483,6 +726,15 @@ _GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
     "informix+pyodbc": "pyodbc",
     "awsathena+rest": "pyathena",
     "db2": "ibm_db",
+}
+
+
+#: Packages a driver also needs beyond its client module. Snowflake's keyed
+#: modes, mirror/SCD2, FK carry and the physical-state diff all go through
+#: SQLAlchemy, so a host with the connector but not the dialect cannot run the
+#: route and must say so up front instead of letting each check skip itself.
+_DRIVER_COMPANION_MODULES: dict[str, str] = {
+    "snowflake": "snowflake.sqlalchemy",
 }
 
 
@@ -564,21 +816,40 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
     if driver_type == "oracle":
         return _import_test("oracledb") or _import_test("cx_Oracle")
     module = _DRIVER_MODULE.get(driver_type)
-    return _module_is_installed(module)
+    if not _module_is_installed(module):
+        return False
+    companion = _DRIVER_COMPANION_MODULES.get(driver_type)
+    return companion is None or _module_is_installed(companion)
 
 
-def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
+def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, Any]:
+    """Registry capability bitmap, ignoring whether the package is installed.
+
+    Runtime ``get_capabilities`` zeroes this when the DBAPI is missing so
+    Execute cannot claim Full transfer. Certification must still say Certified
+    — missing psycopg2 is an environment gap, not a Planned product.
+    """
+    if driver_type == "generic_sql":
+        return {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+    if driver_type in _DRIVER_CAPS:
+        return dict(_DRIVER_CAPS[driver_type])
+    if driver_type in _FILE_CAPS:
+        return dict(_FILE_CAPS[driver_type])
+    return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
+
+
+def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, Any]:
     try:
         if driver_type == "generic_sql":
-            base = {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+            base = _declared_capabilities("generic_sql", catalog_id)
             if not catalog_id:
                 return base if driver_available("generic_sql") else {k: False for k in base}
             return base if driver_available("generic_sql", catalog_id) else {k: False for k in base}
         if driver_type in _DRIVER_CAPS:
-            caps = dict(_DRIVER_CAPS[driver_type])
+            caps = _declared_capabilities(driver_type, catalog_id)
             return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
         if driver_type in _FILE_CAPS:
-            caps = dict(_FILE_CAPS[driver_type])
+            caps = _declared_capabilities(driver_type, catalog_id)
             return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
     except Exception as exc:
         # Capability discovery should never crash the catalog; degrade gracefully.
@@ -622,8 +893,10 @@ def connect_only(caps: dict[str, bool]) -> bool:
     return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps) or can_rw))
 
 
-def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
+def effective_status(caps: dict[str, Any], catalog_status: str = "") -> str:
     if transfer_ready(caps) or _source_only_ready(caps):
+        if caps.get("evidence") == "synthetic-fixture" and _source_only_ready(caps):
+            return "beta"
         return "live"
     if connect_only(caps):
         return "connect_only"
@@ -638,6 +911,8 @@ def capability_label(caps: dict[str, bool]) -> str:
             return "Destination only"
         if caps.get("file_source"):
             return "File transfer"
+        if caps.get("certified_dest") is False:
+            return "Source certified"
         return "Full transfer"
     if _source_only_ready(caps):
         return "Source only"
@@ -719,12 +994,25 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
         if any(b in catalog_id for b in ("oracle", "sql_server", "mssql", "db2", "teradata", "informix", "sybase")):
             return False
         return False
+    if caps.get("file_source"):
+        # File formats are live when the transfer registry routes them. The
+        # SKU frozenset listed ``csv___tsv`` but not ``csv``, so the CSV tile
+        # (and Avro, ORC, XML) read "Planned" while CSV transfers ran (QA
+        # round 11). One owner now: the registry's LIVE_SOURCE_FORMATS.
+        return driver in live_file_source_formats()
     if driver in TRANSFER_READY_CATALOG_IDS:
         return True
     # Caps membership alone is not enough — transfer_ready() already enforced
     # read+write / preflight / certified. Reaching here means the driver is
     # known but not yet in the SKU frozenset (or was filtered above).
     return False
+
+
+def live_file_source_formats() -> frozenset[str]:
+    """File formats the transfer registry routes as live sources."""
+    from src.transfer.registry import LIVE_SOURCE_FORMATS
+
+    return frozenset(f.lower() for f in LIVE_SOURCE_FORMATS)
 
 
 def _is_rest_api_brand_alias(catalog_id: str, driver: str) -> bool:
@@ -769,7 +1057,15 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     catalog_id = (entry.get("id") or "").lower().strip()
     driver = resolve_driver_type(catalog_id)
     caps = get_capabilities(driver, catalog_id)
+    package_ok = driver_available(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
+    product_ready = (
+        not _is_uncertified_driver_alias(catalog_id, driver)
+        and _catalog_transfer_ready(
+            catalog_id, driver, _declared_capabilities(driver, catalog_id)
+        )
+    )
+    env_gap = bool(product_ready and not package_ok)
     # Brand stubs / uncertified generic_sql engines must not inherit "live".
     if _is_uncertified_driver_alias(catalog_id, driver):
         eff = "planned"
@@ -780,8 +1076,15 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
         label = capability_label(caps)
         is_connect_only = connect_only(caps) and not ready
     tier = certification_tier(catalog_id, driver, caps, transfer_ready_flag=ready)
-    # Uncertified/Planned drivers must not show a "live" status or "Full transfer" label.
-    if tier == "planned":
+    if env_gap:
+        # Missing DBAPI ≠ roadmap. Transfer pickers still key off transfer_ready.
+        tier = "certified"
+        label = "Certified — driver not installed"
+        eff = "live"
+        is_connect_only = False
+        ready = False
+    elif tier == "planned":
+        # Uncertified/Planned drivers must not show "live" or "Full transfer".
         eff = "planned"
         label = "Planned"
     out = dict(entry)
@@ -804,6 +1107,14 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["connect_only"] = is_connect_only
     out["capability_label"] = label
     out["certification_tier"] = tier
+    out["driver_available"] = package_ok
+    out["environment_gap"] = env_gap
+    if env_gap:
+        out["environment_gap_reason"] = (
+            f"{catalog_id} is Certified but its driver package is not loadable here — "
+            f"{_driver_install_hint(driver)}. "
+            "This is an environment gap, not a Planned connector."
+        )
     # Phase E1 — hosted SKU twins / regional tiles are aliases, not distinct engines.
     is_alias = bool(
         catalog_id in CATALOG_ID_ALIASES
@@ -829,8 +1140,42 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     """True when connector can act as a transfer destination."""
     if caps.get("file_export"):
         return True
+    # Writer code is not dest SKU. Stripe reverse-ETL stays off the dest picker
+    # until PRODUCTION_SKU execute + dest COUNT on a named Stripe object.
+    if caps.get("certified_dest") is False:
+        return False
     # Destination-only and duplex writers must be certified.
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")) and transfer_ready(caps))
+
+
+def source_only_destination_refusal(dest_type: str) -> str | None:
+    """The one sentence for "this connector cannot be a destination" (D139).
+
+    A source-only driver (Neo4j, InfluxDB, Couchbase, SaaS readers) has no
+    writer. Planning a load into one used to run every gate anyway: G2 said
+    "'neo4j' is not a supported destination" and the type gates graded each
+    column against a destination with no types, so even an integer id read as
+    a fidelity collapse. Refuse before any gate, naming the reason. Unknown
+    types return ``None`` — this never refuses a destination it cannot place.
+    """
+    raw = (dest_type or "").strip().lower()
+    if not raw:
+        return None
+    driver = resolve_driver_type(raw)
+    if driver not in _DRIVER_CAPS:
+        return None
+    caps = get_capabilities(driver)
+    if dest_ready(caps) or not _source_only_ready(dict(_DRIVER_CAPS.get(driver) or {})):
+        return None
+    label = {"neo4j": "Neo4j", "influxdb": "InfluxDB", "couchbase": "Couchbase", "github": "GitHub"}.get(
+        driver, driver.replace("_", " ").title()
+    )
+    return (
+        f"{label} is a source-only connector: {PRODUCT_NAME} has no {label} writer, so "
+        f"it cannot be a transfer destination. Use {label} as the source, or "
+        "choose a destination such as PostgreSQL, MySQL, SQL Server, Snowflake "
+        "or DynamoDB."
+    )
 
 
 def _driver_install_hint(driver: str) -> str:
@@ -841,7 +1186,10 @@ def _driver_install_hint(driver: str) -> str:
         "postgresql": "install psycopg2-binary",
         "mysql": "install pymysql",
         "mongodb": "install pymongo",
-        "snowflake": "install snowflake-connector-python (and fakesnow for local demos)",
+        "snowflake": (
+            "install snowflake-connector-python and snowflake-sqlalchemy "
+            "(and fakesnow for local demos)"
+        ),
         "s3": "install boto3; ensure Python pyexpat/libexpat load (Homebrew expat mismatch breaks S3 XML)",
         "bigquery": "install google-cloud-bigquery",
         "dynamodb": "install boto3",
@@ -969,6 +1317,60 @@ def assert_transfer_endpoint_honesty(
     return True, "supported"
 
 
+# Named fixture: ``transfer_live_driver_types()`` when optional SKU packages
+# (sftp, oracle, sqlserver, snowflake, bigquery, mysql) are loadable.
+# yaml + fixed_width earned this after the FE 44 freeze — bump
+# ``TRANSFER_READY_DRIVERS`` in provenEvidence.ts in the same change.
+TRANSFER_LIVE_WHEN_PACKAGES_PRESENT: FrozenSet[str] = frozenset({
+    "adls",
+    "avro",
+    "bigquery",
+    "couchbase",
+    "csv",
+    "docx",
+    "dynamodb",
+    "elasticsearch",
+    "excel",
+    "fixed_width",
+    "gcs",
+    "generic_sql",
+    "html",
+    "hubspot",
+    "iceberg",
+    "influxdb",
+    "json",
+    "jsonl",
+    "kafka",
+    "milvus",
+    "mongodb",
+    "mysql",
+    "ndjson",
+    "neo4j",
+    "oracle",
+    "orc",
+    "parquet",
+    "pdf",
+    "pgvector",
+    "pinecone",
+    "postgresql",
+    "qdrant",
+    "redis",
+    "rest_api",
+    "s3",
+    "salesforce",
+    "sftp",
+    "singer_tap",
+    "snowflake",
+    "sqlite",
+    "sqlserver",
+    "stripe",
+    "tsv",
+    "weaviate",
+    "xml",
+    "yaml",
+})
+
+
 def transfer_live_driver_types() -> list[str]:
     """Unique driver types that can run transfers *and* are package-available.
 
@@ -979,6 +1381,8 @@ def transfer_live_driver_types() -> list[str]:
     keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
     for k in keys:
         caps = get_capabilities(k)
+        if caps.get("evidence") == "synthetic-fixture":
+            continue
         if transfer_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))

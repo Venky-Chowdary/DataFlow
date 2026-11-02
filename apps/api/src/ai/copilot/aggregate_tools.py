@@ -26,14 +26,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .query_tools import _MAX_QUERY_ROWS, _quote_ident, _store_result, _tool_result
+from .query_tools import _quote_ident, _store_result, _tool_result
 from .schema_tools import (
     AmbiguousConnectorError,
-    _endpoint_from_connector,
-    _normalize_columns,
     _safe_connector,
 )
 
@@ -63,6 +62,89 @@ _NON_NUMERIC_HINTS = (
     "date", "time", "interval", "xml", "enum", "array", "struct", "geography",
 )
 
+# SQLite stores exact money as TEXT (NUMERIC affinity would drop scale).
+# SUM/AVG of those columns is a real total — the engine coerces numeric text.
+_TEXT_MONEY_NAME = re.compile(
+    r"(?:^|_)(?:amt|amount|price|total|qty|quantity|balance|fee|cost|rate|score|value)(?:_|$)",
+    re.I,
+)
+
+
+def _sqlite_text_money(name: str, col_type: str) -> bool:
+    low = (col_type or "").lower()
+    if "text" not in low and "char" not in low:
+        return False
+    return bool(_TEXT_MONEY_NAME.search(name or ""))
+
+
+def _absorb_bound_literal(where: str, parsed: Any, leftover: str) -> Any | None:
+    """Bind a quote/semicolon tail as the comparison value.
+
+    ``status = x'; DROP TABLE t; --`` is one literal. The comparison pattern
+    stops at the quote, and refusing the tail never runs the read. Binding the
+    whole remainder keeps the statement out of the SQL text. A second predicate
+    (``OR '1'='1``) is not absorbed — that tail is still refused.
+    """
+    from .predicates import ParsedFilter
+
+    tail = (leftover or "").strip()
+    if not isinstance(parsed, ParsedFilter) or not tail:
+        return None
+    if re.search(r"\b(?:and|or)\b", tail, re.I):
+        return None
+    if not re.match(
+        r"""['";]|--|DROP\b|DELETE\b|INSERT\b|UPDATE\b|ALTER\b|TRUNCATE\b""",
+        tail,
+        re.I,
+    ):
+        return None
+    text = (where or "").strip()
+    matched = re.match(
+        rf"^{re.escape(parsed.column)}\s*(>=|<=|!=|<>|>|=|<)\s*(.+)$",
+        text,
+        re.I | re.S,
+    )
+    if not matched:
+        return None
+    literal = matched.group(2).strip()
+    if not literal:
+        return None
+    return ParsedFilter(
+        column=parsed.column,
+        op=parsed.op,
+        raw_values=[literal],
+        text=text,
+    )
+
+
+def _unparsed_filter_warning(where: str, leftover: str) -> str:
+    """Refuse a where-clause tail the predicate parser did not consume.
+
+    ``STS = POSTED' OR '1'='1`` used to run as ``STS = POSTED`` and drop the
+    rest (QA RT5-10). A partial predicate is not applied.
+    """
+    from .predicates import parse_time_window
+
+    text = leftover or ""
+    window = parse_time_window(where or "")
+    if window is not None and window[2]:
+        text = re.sub(re.escape(window[2]), " ", text, count=1, flags=re.I)
+    text = re.sub(
+        r"\b(?:and|or|where|with|the|a|an|please|thanks|in|on|for|of|by|"
+        r"last|past|days?|weeks?|months?|years?)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"[\s,;:.]+", " ", text).strip()
+    if not text or not re.search(r"[A-Za-z_'\"=<>]|--", text):
+        return ""
+    fragment = (leftover or "").strip()
+    return (
+        "Refused the filter because this part is not a complete "
+        f"column = value predicate: {fragment!r}. The query was not run."
+    )
+
 _TEMPORAL_GRAINS = {
     "day": "day", "daily": "day", "date": "day",
     "week": "week", "weekly": "week",
@@ -83,6 +165,19 @@ _PLATFORM_NOUNS = frozenset({
     "contract", "contracts", "dataset", "datasets",
     "table", "tables", "collection", "collections", "column", "columns",
     "workspace", "workspaces", "preflight", "quarantine",
+    # The product's own inventory, which the documentation counts and no
+    # warehouse holds a table of. "How many sources can you connect to" and
+    # "how many file formats can you read" are questions about the catalog, and
+    # the rejection only applies when no connector was named — so "count
+    # sources on Demo Orders", where the operator really does mean a table of
+    # that name, still reaches the aggregator.
+    "source", "sources", "destination", "destinations",
+    "format", "formats", "engine", "engines",
+    "role", "roles", "gate", "gates", "mode", "modes",
+    # Plural only. "How many warehouses do you support" asks what the catalog
+    # carries; "how many datasets in the warehouse" is the operator naming
+    # their own store as the scope of a live read.
+    "warehouses",
 })
 
 
@@ -131,9 +226,92 @@ _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
     (r"(?:sum|total)(?: of)?", "sum"),
     (r"(?:minimum|min|lowest|smallest|earliest)(?: of)?", "min"),
     (r"(?:maximum|max|highest|largest|biggest|latest)(?: of)?", "max"),
+    # A breakdown that names no measure is a count per group: "break down orders
+    # by region" asks how many orders each region has. Without this the parser
+    # returned None, the turn was still recognised as a read of the operator's
+    # table, and it reached no tool at all — so the reply was a refusal to a
+    # question the engine can answer exactly. Last in the list so a stated
+    # measure keeps its metric: "sum amount by region" is still a sum.
+    # The verb needs something to group. Followed directly by ``by`` it is not a
+    # verb at all but the name of the SQL clause, and "what does group by do" is
+    # a question about the clause — it parsed as an aggregation and answered a
+    # documentation question with a connector error, the same way "what does
+    # quarantine mean" once did.
+    (
+        r"(?:break(?:\s+\w+)?\s+down|breakdown|group(?:ed)?|"
+        r"bucket(?:ed)?|segment(?:ed)?|split|roll(?:ed)?\s*up|tally)"
+        r"(?!\s+by\b)",
+        "count",
+    ),
 )
 
 _ASCENDING_HINTS = ("ascending", "lowest", "smallest", "bottom", "least", "fewest")
+
+# "mean" is also the English verb. "what does quarantine mean in Datawrap?" parsed
+# as AVG(in Datawrap) FROM Datawrap and answered a documentation question with a
+# connector error, so a definitional question is never an aggregation.
+_DEFINITIONAL_RE = re.compile(
+    r"\b(?:what|which|who|how)\b.*\b(?:mean|means|meaning)\b|"
+    r"\b(?:does|do|did)\b[^?]*\bmean\b",
+    re.I,
+)
+# "the mean", "mean of amount", "mean amount" keep their statistical reading.
+_STATISTICAL_MEAN_RE = re.compile(
+    r"\b(?:average|avg)\b|\b(?:the|a)\s+mean\b|\bmean\s+(?:of|value|amount|price)\b",
+    re.I,
+)
+
+
+def _asks_for_a_definition(text: str) -> bool:
+    """True when "mean" is the verb "to signify", not the statistical measure."""
+    return bool(_DEFINITIONAL_RE.search(text)) and not _STATISTICAL_MEAN_RE.search(text)
+
+
+# The operation named rather than commanded. A determiner in front of the
+# measure makes it the noun the question is *about* — "does **a breakdown**
+# include null values", "is **the count** exact or a sample" — where a request
+# uses it as a verb ("break down orders by region") or applies it to data ("the
+# count of orders by status").
+#
+# Measured over HTTP: both of those routed to the aggregator, which had nothing
+# to aggregate and answered "Connector not found" over the top of the
+# documentation that states the rule they asked about. Worse than a bare miss,
+# because the measure tail is read as a column name and the rest of the English
+# became one: "does a breakdown include null values" planned a count over a
+# table called `include null values`.
+#
+# Decided before any slot filling, for that reason — once the tail has been
+# mined for a column there is an invented subject to mistake for a real one.
+# Paired with the question naming no data at all, so "does the count include
+# nulls on Demo Orders" and "is the total revenue in orders" still reach the
+# aggregator, and "show me the count", which reads the same way and is a real
+# request, is untouched.
+_ABOUT_THE_OPERATION_RE = re.compile(
+    r"\b(?:is|are|does|do|can|could|will|would|should)\s+(?:a|an|the)\s+"
+    r"(?:count|sum|total|average|avg|mean|min|minimum|max|maximum|"
+    r"breakdown|break\s*down|aggregate|aggregation|group(?:ing)?)\b"
+    r"|\bwhat\s+does\s+(?:a|an|the)\s+"
+    r"(?:count|sum|total|average|avg|breakdown|break\s*down|aggregate|"
+    r"aggregation|group(?:ing)?)\b",
+    re.I,
+)
+
+
+#: A scope clause is the operator pointing at data — "in orders", "on Demo
+#: Orders". Its absence is what makes a measure word a topic rather than a
+#: request.
+_NAMES_A_SCOPE_RE = re.compile(
+    r"\b(?:on|from|in|inside|within)\s+(?:the\s+)?[A-Za-z_]",
+    re.I,
+)
+
+
+def _asks_about_the_operation(text: str) -> bool:
+    """True when the measure is the subject of the question, not the work to do."""
+    return bool(_ABOUT_THE_OPERATION_RE.search(text)) and not _NAMES_A_SCOPE_RE.search(
+        text
+    )
+
 
 # "top 5 customers by revenue" carries no metric word but is a ranking request:
 # group by the dimension, rank by the measure.
@@ -152,11 +330,31 @@ _COUNT_MEASURE_WORDS = _ROW_WORDS | {"count", "counts", "volume", "frequency", "
 # Conversational filler that can trail a captured name ("connectors do I have").
 # Only trimmed from measure/table candidates — a connector may legitimately be
 # called "My Warehouse".
+# A comparison word occupies the slot where the identifier goes, but it is never
+# the name of the thing being compared. "biggest table on Demo Orders" parsed as
+# MAX over a column called `table` in a table called `biggest`, and "which table
+# has the most rows" sampled one called `most` — invented names sent at a live
+# database. Canonical here because the planner in ``tools`` fails closed on the
+# same set rather than keeping its own copy.
+COMPARATIVE_WORDS = frozenset(
+    """
+    most fewest least largest biggest smallest widest narrowest
+    highest lowest bigger smaller larger fewer more less
+    top bottom first last latest newest oldest best worst
+    """.split()
+)
+
 _STOP_TOKENS = frozenset({
     "do", "does", "did", "i", "we", "you", "your", "my", "our", "is", "are",
     "was", "were", "have", "has", "had", "there", "here", "please", "thanks",
     "that", "this", "to", "and", "or", "be", "been", "get", "got", "show",
     "me", "tell", "currently", "right", "now", "again", "still",
+    # Modals. Without them "how many file formats can you read" and "how many
+    # sources can you connect to" produced tables called `file formats can`
+    # and `sources can` — no error reached the operator, because the
+    # documentation answer led, but every such turn ran a doomed lookup first.
+    # A modal is a fragment of the question, never part of a name.
+    "can", "could", "will", "would", "should", "may", "might", "must", "shall",
 })
 
 # Adjectives that mean a status/state filter, not part of the table name.
@@ -261,6 +459,9 @@ def parse_aggregation_request(message: str) -> AggregationRequest | None:
 
     # An explicit SQL statement is not a natural-language aggregation.
     if re.match(r"^\s*(?:select|with|show|describe|explain)\b", text.lower()):
+        return None
+
+    if _asks_for_a_definition(text) or _asks_about_the_operation(text):
         return None
 
     # "orders where amount > 10 on PilotSQLite" — table-first filtered count.
@@ -440,7 +641,14 @@ def _finish_request(
     table_tokens = req.table.lower().split()
     if (
         table_tokens
-        and (req.table.lower() in _PLATFORM_NOUNS or table_tokens[0] in _PLATFORM_NOUNS)
+        and (
+            req.table.lower() in _PLATFORM_NOUNS
+            # First token and last. The head of an English noun phrase is its
+            # final word, so "file formats" is a question about formats; only
+            # the first was checked, and "file" is not a platform noun.
+            or table_tokens[0] in _PLATFORM_NOUNS
+            or table_tokens[-1] in _PLATFORM_NOUNS
+        )
         and not req.connector_name
     ):
         # Platform inventory question — let the jobs/connectors routes answer it.
@@ -463,6 +671,15 @@ def _finish_request(
         and not coreferent_subject
         and req.metric in {"count", "sum", "avg"}
     ):
+        return None
+
+    # A superlative in the identifier slot means the sentence never named a
+    # subject — "biggest table on Demo Orders" measured a column called `table`
+    # in a table called `biggest`. Hand it back so the table-ranking route,
+    # which really does answer that question, can claim it.
+    if (req.table or "").strip().lower() in COMPARATIVE_WORDS:
+        return None
+    if (req.column or "").strip().lower() in COMPARATIVE_WORDS:
         return None
 
     needs_column = _METRICS[req.metric][1]
@@ -505,6 +722,21 @@ def _singular(token: str) -> str:
     return token
 
 
+# Words an operator says *around* a column name rather than as one: schema
+# vocabulary ("the amount column"), metric vocabulary ("distinct region") and
+# bare articles. They are only ever dropped after the whole phrase has already
+# failed to resolve, so a table that really owns a column called `total` still
+# answers `total` exactly.
+_COLUMN_PHRASE_NOISE = frozenset(
+    {
+        "a", "all", "an", "any", "by", "col", "cols", "column", "columns",
+        "count", "distinct", "each", "entries", "entry", "field", "fields",
+        "for", "in", "many", "much", "number", "of", "on", "record", "records",
+        "row", "rows", "the", "total", "unique", "value", "values",
+    }
+)
+
+
 def resolve_name(needle: str, available: list[str]) -> str:
     """Match a spoken name to a real schema name, or "" when nothing fits."""
     want = (needle or "").strip()
@@ -541,6 +773,28 @@ def resolve_name(needle: str, available: list[str]) -> str:
         ]
         if len(partial) == 1:
             return partial[0]
+    # Spoken phrases carry words the schema does not: "the amount column",
+    # "order amount", "distinct region". Resolve the content words one at a
+    # time and accept the answer only when they agree on a single column, so an
+    # ambiguous phrase still fails closed instead of guessing a column.
+    words = [w for w in re.split(r"[^a-z0-9]+", want.lower()) if w]
+    if len(words) > 1:
+        # A noise word that is itself a real column keeps its vote, so "total
+        # amount" stays ambiguous on a table owning both `total` and `amount`.
+        content = [
+            w
+            for w in words
+            if w not in _COLUMN_PHRASE_NOISE or resolve_name(w, available)
+        ]
+        probes = content or words
+        if len(probes) < len(words) and len(content) > 1:
+            joined = resolve_name(" ".join(content), available)
+            if joined:
+                return joined
+        hits = {resolve_name(w, available) for w in probes}
+        hits.discard("")
+        if len(hits) == 1:
+            return hits.pop()
     return ""
 
 
@@ -551,10 +805,12 @@ def _is_temporal(col_type: str) -> bool:
 
 def _temporal_group_expr(quoted: str, grain: str, dialect: str) -> str | None:
     """Dialect-correct date truncation for "by month" style grouping."""
-    d = (dialect or "").lower()
-    if d in {"postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "snowflake", "duckdb"}:
+    from src.transfer.engine_family import family_or_kind
+
+    d = family_or_kind(dialect)
+    if d in {"postgresql", "redshift", "snowflake", "duckdb"}:
         return f"DATE_TRUNC('{grain}', {quoted})"
-    if d in {"mysql", "mariadb", "tidb"}:
+    if d == "mysql":
         fmt = {
             "day": "%Y-%m-%d",
             "month": "%Y-%m-01",
@@ -672,9 +928,9 @@ def _mongo_pipeline(
 
 
 def _limit_clause(sql: str, dialect: str, limit: int) -> str:
-    if (dialect or "").lower() in {"mssql", "sqlserver"}:
-        return sql.replace("SELECT ", f"SELECT TOP {int(limit)} ", 1)
-    return f"{sql} LIMIT {int(limit)}"
+    from services.dialect_profiles import append_result_limit
+
+    return append_result_limit(dialect, sql, limit)
 
 
 def _column_names(columns: list[dict[str, Any]]) -> list[str]:
@@ -695,9 +951,164 @@ def _introspect_columns(conn: dict[str, Any], table: str) -> list[dict[str, Any]
     return introspect_connector_table(conn, table, purpose="source")["columns"]
 
 
+def _sibling_table(conn: dict[str, Any], wanted: str, table: str) -> str:
+    """The connector's own table this unresolved column name actually matches.
+
+    "how many distinct customers in orders" asks for a column that does not
+    exist, and `customers` is a *table* on the same connector. Naming that is the
+    difference between a dead end and the operator's next correct question.
+    """
+    probe = _normalize_name(wanted)
+    if not probe or probe == _normalize_name(table):
+        return ""
+    try:
+        from .schema_tools import list_connector_objects
+
+        result = list_connector_objects(
+            connector_id=str(conn.get("id") or conn.get("_id") or ""),
+            connector_name=str(conn.get("name") or ""),
+        )
+        objects = list((getattr(result, "output", None) or {}).get("objects") or [])
+    except Exception:
+        return ""
+    for name in objects:
+        norm = _normalize_name(str(name))
+        if norm == probe or _singular(norm) == _singular(probe):
+            return str(name)
+    return ""
+
+
 # --------------------------------------------------------------------------
 # The tool
 # --------------------------------------------------------------------------
+
+
+def _group_total(
+    *,
+    saved: Any,
+    dialect: str,
+    table: str,
+    collection: str,
+    dim_col: str,
+    grain: str,
+    dim_expr: str,
+    quoted_table: str,
+    where_sql: str,
+    binds: dict[str, Any],
+    match_stage: dict[str, Any],
+) -> int | None:
+    """True number of groups under the same filters (D105)."""
+    from src.routers.query_router import QueryExecuteRequest, _run_query
+
+    if dialect == "mongodb":
+        group_id = _mongo_group_id(dim_col, grain)
+        pipeline = []
+        if match_stage:
+            pipeline.append({"$match": match_stage})
+        pipeline += [
+            {"$group": {"_id": group_id}},
+            {"$count": "n"},
+        ]
+        body = QueryExecuteRequest(
+            connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+            query=json.dumps(pipeline, default=str),
+            collection=collection,
+            limit=10,
+        )
+        rows, _cols, _schema, _tr = _run_query(saved, body)
+        if rows:
+            val = rows[0].get("n")
+            return int(val) if val is not None else None
+        return 0
+
+    count_sql = (
+        f"SELECT COUNT(*) AS n_groups FROM ("
+        f"SELECT {dim_expr} FROM {quoted_table}{where_sql} "
+        f"GROUP BY {dim_expr}) _df_grp"
+    )
+    body = QueryExecuteRequest(
+        connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+        query=count_sql,
+        limit=10,
+        params=dict(binds or {}),
+    )
+    rows, _cols, _schema, _tr = _run_query(saved, body)
+    if rows:
+        val = next(iter(rows[0].values()), None)
+        return int(val) if val is not None else None
+    return 0
+
+
+def _groups_at_metric(
+    *,
+    saved: Any,
+    dialect: str,
+    table: str,
+    dim_col: str,
+    grain: str,
+    dim_expr: str,
+    agg_expr: str,
+    metric_alias: str,
+    quoted_table: str,
+    where_sql: str,
+    binds: dict[str, Any],
+    match_stage: dict[str, Any],
+    metric: str,
+    measure_col: str,
+    cut_value: Any,
+) -> int:
+    """How many groups share the metric value shown at the LIMIT cut (D105)."""
+    from src.routers.query_router import QueryExecuteRequest, _run_query
+
+    if dialect == "mongodb":
+        group_id = _mongo_group_id(dim_col, grain)
+        acc = _MONGO_ACCUMULATORS.get(metric)
+        if metric == "count_distinct":
+            accum = {"$addToSet": f"${measure_col}"}
+            group_stage = {"_id": group_id, "m": accum}
+            project = {"$project": {"m": {"$size": "$m"}}}
+        elif acc:
+            group_stage = {"_id": group_id, "m": {acc: f"${measure_col}" if acc != "$sum" or measure_col else 1}}
+            project = None
+        else:
+            return 0
+        pipeline = []
+        if match_stage:
+            pipeline.append({"$match": match_stage})
+        pipeline.append({"$group": group_stage})
+        if project:
+            pipeline.append(project)
+        pipeline += [{"$match": {"m": cut_value}}, {"$count": "n"}]
+        body = QueryExecuteRequest(
+            connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+            query=json.dumps(pipeline, default=str),
+            collection=table,
+            limit=10,
+        )
+        rows, _cols, _schema, _tr = _run_query(saved, body)
+        if rows:
+            val = rows[0].get("n")
+            return int(val or 0)
+        return 0
+
+    cut_binds = dict(binds or {})
+    cut_binds["_df_cut"] = cut_value
+    count_sql = (
+        f"SELECT COUNT(*) AS n FROM ("
+        f"SELECT {agg_expr} AS m FROM {quoted_table}{where_sql} "
+        f"GROUP BY {dim_expr}) _df_cut_t WHERE _df_cut_t.m = :_df_cut"
+    )
+    body = QueryExecuteRequest(
+        connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+        query=count_sql,
+        limit=10,
+        params=cut_binds,
+    )
+    rows, _cols, _schema, _tr = _run_query(saved, body)
+    if rows:
+        val = next(iter(rows[0].values()), None)
+        return int(val or 0)
+    return 0
 
 
 def aggregate_connector_data(
@@ -711,6 +1122,7 @@ def aggregate_connector_data(
     limit: int = _DEFAULT_GROUP_LIMIT,
     session_id: str = "",
     where: str = "",
+    date_column: str = "",
 ):
     """Run an exact server-side aggregate on a saved connector's table."""
     tool = "aggregate_data"
@@ -855,17 +1267,26 @@ def aggregate_connector_data(
             )
         measure_col = resolve_name(wanted, names)
         if not measure_col:
+            sibling = _sibling_table(conn, wanted, table)
+            hint = (
+                f" `{sibling}` is a table on {conn.get('name') or 'this connector'}, "
+                f"not a column in {table} — ask me to {metric_key.replace('_', ' ')} "
+                f"over `{sibling}` instead."
+                if sibling
+                else ""
+            )
             return _tool_result(
                 tool,
                 success=False,
                 error=(
                     f"Column '{wanted}' is not in {table}. "
-                    f"Available columns: {', '.join(names[:20])}."
+                    f"Available columns: {', '.join(names[:20])}." + hint
                 ),
             )
         if metric_key in {"sum", "avg"}:
             col_type = _column_type(columns, measure_col).lower()
-            if col_type and any(hint in col_type for hint in _NON_NUMERIC_HINTS):
+            money_text = ctype == "sqlite" and _sqlite_text_money(measure_col, col_type)
+            if col_type and any(hint in col_type for hint in _NON_NUMERIC_HINTS) and not money_text:
                 numeric = [
                     n
                     for n in names
@@ -886,13 +1307,92 @@ def aggregate_connector_data(
     grain = ""
     if group_by:
         wanted = group_by.strip()
-        dim_col = resolve_name(wanted, names)
+        # "year of Hire_Date" / "monthly by created_at" — grain + column.
+        # Without this, resolve_name fuzzy-matched the tail to Hire_Date and
+        # grouped by raw day values, returning 20 single-row buckets as an
+        # exact year answer (QA R13).
+        grain_hint = re.match(
+            r"(?i)^(year|years|yearly|annual|annually|quarter|quarterly|"
+            r"month|months|monthly|week|weeks|weekly|day|days|daily|date|"
+            r"hour|hours|hourly)\b[\s._-]*(?:of|by|in|per|each)?\s+(.+)$",
+            wanted,
+        )
+        if grain_hint:
+            candidate = grain_hint.group(2).strip()
+            resolved = resolve_name(candidate, names)
+            if resolved and _is_temporal(_column_type(columns, resolved)):
+                grain = _TEMPORAL_GRAINS.get(grain_hint.group(1).lower(), "")
+                dim_col = resolved
+            elif resolved:
+                # "year of status" — a real column but not a date. Refusing
+                # here matters: letting the whole phrase fuzzy-resolve to
+                # `status` grouped by the wrong thing while claiming a grain
+                # (same silent-wrong-answer class as R13).
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"'{resolved}' is not a date column — "
+                        f"'{grain_hint.group(1).lower()} of {candidate}' "
+                        "needs a date/timestamp column to bucket."
+                    ),
+                )
+        if not grain_hint and not dim_col and wanted not in names:
+            # "<col>:<grain>" / "<col> by <grain>" / "<col>_<grain>" — the
+            # answer path for "which date column?" (D105). The head must be a
+            # real column; a literal column named like "created_at_day" was
+            # already claimed by the `wanted not in names` guard above.
+            col_grain = re.match(
+                r"(?i)^(.+?)(?::|\s+(?:by|per)\s+|_)"
+                r"(day|daily|week|weekly|month|monthly|quarter|quarterly|"
+                r"year|yearly|annually)$",
+                wanted,
+            )
+            if col_grain:
+                candidate = col_grain.group(1).strip()
+                resolved = resolve_name(candidate, names)
+                if resolved:
+                    if not _is_temporal(_column_type(columns, resolved)):
+                        return _tool_result(
+                            tool,
+                            success=False,
+                            error=(
+                                f"'{resolved}' is not a date column — "
+                                f"'{wanted}' needs a date/timestamp column to bucket."
+                            ),
+                        )
+                    grain = _TEMPORAL_GRAINS.get(col_grain.group(2).lower(), "")
+                    dim_col = resolved
+        if not grain_hint and not dim_col:
+            dim_col = resolve_name(wanted, names)
         if not dim_col:
             # "by month" is a time grain, not a column — find the date column.
             grain = _TEMPORAL_GRAINS.get(wanted.lower(), "")
             if grain:
                 temporal = [n for n in names if _is_temporal(_column_type(columns, n))]
-                if len(temporal) == 1:
+                if (date_column or "").strip():
+                    # date_column= answers the "which date column" question (D105).
+                    resolved_dc = resolve_name(date_column.strip(), names)
+                    if not resolved_dc:
+                        return _tool_result(
+                            tool,
+                            success=False,
+                            error=(
+                                f"date_column '{date_column.strip()}' is not in {table}. "
+                                f"Available columns: {', '.join(names[:20])}."
+                            ),
+                        )
+                    if not _is_temporal(_column_type(columns, resolved_dc)):
+                        return _tool_result(
+                            tool,
+                            success=False,
+                            error=(
+                                f"date_column '{resolved_dc}' is not a date column — "
+                                f"'{wanted}' needs a date/timestamp column to bucket."
+                            ),
+                        )
+                    dim_col = resolved_dc
+                elif len(temporal) == 1:
                     dim_col = temporal[0]
                 elif len(temporal) > 1:
                     return _tool_result(
@@ -904,12 +1404,21 @@ def aggregate_connector_data(
                         ),
                     )
             if not dim_col:
+                sibling = _sibling_table(conn, wanted, table)
+                hint = (
+                    f" `{sibling}` is a table on "
+                    f"{conn.get('name') or 'this connector'}, not a column in "
+                    f"{table} — name a column of {table} to group by, or ask "
+                    f"about `{sibling}` instead."
+                    if sibling
+                    else ""
+                )
                 return _tool_result(
                     tool,
                     success=False,
                     error=(
                         f"Column '{wanted}' is not in {table}. "
-                        f"Available columns: {', '.join(names[:20])}."
+                        f"Available columns: {', '.join(names[:20])}." + hint
                     ),
                 )
 
@@ -924,7 +1433,12 @@ def aggregate_connector_data(
         )
 
         try:
-            parsed_filters, _ = parse_filters(where)
+            parsed_filters, leftover = parse_filters(where)
+            if len(parsed_filters) == 1 and (leftover or "").strip():
+                absorbed = _absorb_bound_literal(where, parsed_filters[0], leftover)
+                if absorbed is not None:
+                    parsed_filters = [absorbed]
+                    leftover = ""
             predicates = ground_filters(
                 parsed_filters, columns, resolve_name, _column_type
             )
@@ -948,6 +1462,9 @@ def aggregate_connector_data(
                         f"Columns: {', '.join(names[:20])}."
                     ),
                 )
+            filter_warning = _unparsed_filter_warning(where, leftover)
+            if filter_warning:
+                return _tool_result(tool, success=False, error=filter_warning)
         except PredicateError as exc:
             return _tool_result(tool, success=False, error=str(exc))
 
@@ -962,6 +1479,13 @@ def aggregate_connector_data(
     row_limit = max(1, min(int(limit or _DEFAULT_GROUP_LIMIT), _MAX_GROUP_LIMIT))
     descending = str(order or "desc").lower().startswith("d")
     binds: dict[str, Any] = {}
+    # SQL-side query fragments — mongo builds pipelines instead; the D105
+    # group-count probes read whichever shape applies.
+    dim_expr = ""
+    agg_expr = ""
+    quoted_table = ""
+    where_sql = ""
+    match_stage: dict[str, Any] = {}
 
     if dialect == "mongodb":
         for field_name in (measure_col, dim_col):
@@ -1031,10 +1555,11 @@ def aggregate_connector_data(
         query_text = sql
 
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import get_connector
         from src.routers.query_router import QueryExecuteRequest, _is_safe_sql, _run_query
 
-        saved = get_connector(cid)
+        saved = get_connector(cid, workspace_id=caller_workspace_id() or None)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
         if dialect != "mongodb" and not _is_safe_sql(query_text):
@@ -1055,6 +1580,59 @@ def aggregate_connector_data(
         detail = str(getattr(exc, "detail", exc))
         _LOG.warning("aggregate_data failed: %s", detail, exc_info=True)
         return _tool_result(tool, success=False, error=f"Aggregation failed: {detail}")
+
+    # D105: when LIMIT may have cut groups, the answer must name the true
+    # group count and truncated=true — not present a partial top-N as exact.
+    total_groups: int | None = None
+    ties_at_cut = False
+    if dim_col and rows:
+        try:
+            total_groups = _group_total(
+                saved=saved,
+                dialect=dialect,
+                table=table,
+                collection=table if dialect == "mongodb" else "",
+                dim_col=dim_col,
+                grain=grain,
+                dim_expr=dim_expr if dialect != "mongodb" else "",
+                quoted_table=quoted_table if dialect != "mongodb" else "",
+                where_sql=where_sql if dialect != "mongodb" else "",
+                binds=binds,
+                match_stage=match_stage if dialect == "mongodb" else {},
+            )
+        except Exception:
+            _LOG.debug("aggregate group-count probe failed", exc_info=True)
+        if total_groups is not None and len(rows) < total_groups:
+            truncated = True
+            try:
+                cut_value = rows[-1].get(metric_alias)
+                if cut_value is not None:
+                    ties_at_cut = bool(
+                        _groups_at_metric(
+                            saved=saved,
+                            dialect=dialect,
+                            table=table,
+                            dim_col=dim_col,
+                            grain=grain,
+                            dim_expr=dim_expr if dialect != "mongodb" else "",
+                            agg_expr=agg_expr if dialect != "mongodb" else "",
+                            metric_alias=metric_alias,
+                            quoted_table=quoted_table if dialect != "mongodb" else "",
+                            where_sql=where_sql if dialect != "mongodb" else "",
+                            binds=binds,
+                            match_stage=match_stage if dialect == "mongodb" else {},
+                            metric=metric_key,
+                            measure_col=measure_col,
+                            cut_value=cut_value,
+                        )
+                        > sum(
+                            1 for r in rows if r.get(metric_alias) == cut_value
+                        )
+                    )
+            except Exception:
+                _LOG.debug("aggregate tie-at-cut probe failed", exc_info=True)
+        elif total_groups is not None:
+            truncated = False
 
     meta = {
         "connector_id": cid,
@@ -1095,10 +1673,391 @@ def aggregate_connector_data(
             "result_id": result_id,
             "columns": result_cols,
             "metric_alias": metric_alias,
-            "group_count": len(rows) if dim_col else 0,
+            # The true group count under the filters — not the LIMIT (D105).
+            "group_count": (
+                total_groups if total_groups is not None else (len(rows) if dim_col else 0)
+            ),
+            "shown_groups": len(rows) if dim_col else 0,
+            "ties_at_cut": ties_at_cut,
             "value": scalar,
             "rows": rows[: min(row_limit, 50)],
             "exact": True,
+            "read_only": True,
+        },
+    )
+
+
+#: Counting every table on a connector is one round trip per table, so the fan-out
+#: is bounded. A wider schema is reported as truncated rather than counted
+#: partially and presented as the whole inventory.
+_MAX_RANKED_TABLES = 40
+
+#: Exact counts beyond the displayed ``limit`` — the catalog estimate can
+#: mis-rank near the cut, so a few boundary candidates are counted too and the
+#: real counts re-sort them.
+_RANK_MARGIN = 5
+
+#: Time a ranking may spend refining the estimate shortlist with exact
+#: COUNT(*) (D201: QA's bar is a PostgreSQL ranking under 10s).
+_RANK_COUNT_BUDGET_SECONDS = 6.0
+
+#: Exact counts sent at once to one source.
+_RANK_COUNT_PARALLEL = 4
+
+
+def _estimate_table_row_counts(
+    conn: dict[str, Any], names: list[str], *, whole_schema: bool = False
+) -> dict[str, int]:
+    """Bulk catalog row estimates — one query, never per-table COUNT(*).
+
+    ``pg_class.reltuples`` / ``information_schema.tables.table_rows`` are
+    planner estimates, not counts; they exist to shortlist which tables get
+    the exact COUNT so ``limit`` bounds the work instead of only trimming
+    the output (QA C12/C14 — 70 exact counts on million-row tables timed
+    out the request). Engines without cheap stats return ``{}`` and the
+    caller falls back to the bounded exact-count loop.
+    """
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    try:
+        from .schema_tools import _endpoint_from_connector
+        from src.transfer.adapters import resolve_connector_config
+
+        endpoint = _endpoint_from_connector(conn)
+        cfg = resolve_connector_config(endpoint)
+    except Exception:
+        return {}
+    wanted = {str(n).strip() for n in names if str(n).strip()}
+    if not wanted:
+        return {}
+    sql = ""
+    family = ""
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(ctype) in {"postgresql", "redshift", "greenplum"}:
+        family = "postgresql"
+        # A partitioned table (relkind 'p') and a TimescaleDB hypertable keep
+        # no rows of their own: their volume is the sum of their partitions /
+        # chunks (pg_inherits, any depth). A table never ANALYZEd has
+        # reltuples -1; the stats collector's n_live_tup still counts it
+        # (D201: a hypertable ranked as empty and every parent fell to exact
+        # COUNT(*) over all its chunks).
+        sql = (
+            "WITH RECURSIVE est AS ("
+            " SELECT c.oid, CASE WHEN c.relkind = 'p' THEN NULL"
+            "  WHEN c.reltuples >= 0 THEN c.reltuples::bigint"
+            "  ELSE COALESCE(NULLIF(s.n_live_tup, 0), -1) END AS n"
+            " FROM pg_class c LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid"
+            " WHERE c.relkind IN ('r','p')),"
+            " tree AS ("
+            " SELECT c.oid AS root, c.oid AS member FROM pg_class c WHERE c.relkind IN ('r','p')"
+            " UNION ALL SELECT t.root, i.inhrelid FROM tree t JOIN pg_inherits i ON i.inhparent = t.member)"
+            " SELECT c.relname, n.nspname,"
+            "  CASE WHEN bool_and(e.n IS NULL OR e.n >= 0) AND bool_or(e.n >= 0)"
+            "  THEN sum(GREATEST(e.n, 0))::bigint ELSE -1 END"
+            " FROM tree t JOIN pg_class c ON c.oid = t.root"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " JOIN est e ON e.oid = t.member"
+            " WHERE n.nspname NOT IN ('pg_catalog','information_schema')"
+            " AND n.nspname NOT LIKE '\\_timescaledb%' ESCAPE '\\'"
+            " GROUP BY c.relname, n.nspname"
+        )
+    elif ctype in {"mysql", "mariadb", "singlestore", "tidb"}:
+        family = "mysql"
+        sql = (
+            "SELECT table_name, table_schema, table_rows "
+            "FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
+        )
+    if not sql:
+        return {}
+    try:
+        from services.column_profile import _connect
+
+        db = _connect(family, cfg)
+        try:
+            cur = db.cursor()
+            cur.execute(sql)
+            raw = cur.fetchall() or []
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return {}
+    from connectors.sql_identifiers import split_qualified_table
+
+    stored: dict[tuple[str | None, str], int] = {}
+    for relname, nsp, est in raw:
+        try:
+            n = int(est)
+        except (TypeError, ValueError):
+            continue
+        # reltuples -1 means never analyzed — that is "no estimate", not 0.
+        if n < 0:
+            continue
+        stored[(str(nsp or ""), str(relname or ""))] = n
+    out: dict[str, int] = {}
+    for name in wanted:
+        sch, tbl = split_qualified_table(name, str(cfg.get("schema") or "") or None)
+        hit = stored.get((sch or "", tbl))
+        if hit is None and sch:
+            hit = stored.get(("", tbl))
+        if hit is None:
+            hits = [v for (s, t), v in stored.items() if t == tbl]
+            if len(hits) == 1:
+                hit = hits[0]
+        if hit is not None:
+            out[name] = hit
+    if whole_schema:
+        # The object listing is capped; the catalog is not. Every table in the
+        # connector's schema is ranked, listed or not (D24).
+        home = str(cfg.get("schema") or "").strip()
+        if home:
+            for (sch, tbl), value in stored.items():
+                if sch.lower() == home.lower() and tbl not in out:
+                    out[tbl] = value
+    return out
+
+
+def _direct_row_count(conn: dict[str, Any], name: str) -> int | None:
+    """One ``SELECT COUNT(*)`` on the endpoint's session (PostgreSQL / MySQL).
+
+    The aggregation path grounds every count (introspection, a sample, the
+    schema allow-list): eight catalog queries and a connect per table before
+    the COUNT itself. A ranking names tables the catalog just listed, so it
+    counts them directly; other engines keep the aggregation path (``None``).
+    A count that fails or is cancelled by its time budget raises.
+    """
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(ctype) in {"postgresql", "greenplum"}:
+        family = "postgresql"
+    elif family_or_kind(ctype) == "mysql":
+        family = "mysql"
+    else:
+        return None
+    try:
+        from connectors.sql_identifiers import split_qualified_table
+        from services.column_profile import _connect
+        from src.transfer.adapters import resolve_connector_config
+
+        from .schema_tools import _endpoint_from_connector
+
+        cfg = resolve_connector_config(_endpoint_from_connector(conn))
+        schema, table = split_qualified_table(name, str(cfg.get("schema") or "") or None)
+        db = _connect(family, cfg)
+    except Exception as exc:  # noqa: BLE001 - no session: the aggregation path decides
+        _LOG.info("direct count of %s unavailable: %s", name, exc)
+        return None
+    if family == "postgresql":
+        q = lambda part: '"' + str(part).replace('"', '""') + '"'  # noqa: E731
+    else:
+        q = lambda part: "`" + str(part).replace("`", "``") + "`"  # noqa: E731
+    target = f"{q(schema)}.{q(table)}" if schema else q(table)
+    try:
+        cur = db.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {target}")  # nosec B608 - quoted identifiers
+        row = cur.fetchone()
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001 - read-only
+            pass
+    finally:
+        db.close()
+    return int(row[0]) if row else None
+
+
+def rank_connector_tables(
+    connector_id: str = "",
+    connector_name: str = "",
+    order: str = "desc",
+    limit: int = 10,
+):
+    """Exact row counts for the tables on one connector, ranked by size.
+
+    "which table has the most rows on Demo Orders" had no tool behind it, so the
+    planner read the superlative as an identifier and sampled a table literally
+    named ``biggest`` — an invented name against a live database. This is the
+    real answer: list the objects, count each one server-side through the same
+    aggregate path as any other count, and rank what came back.
+
+    Tables that cannot be counted are returned in ``skipped`` with their reason.
+    A view that refuses a count is ordinary; dropping it from the ranking without
+    saying so would present a partial inventory as the whole one.
+    """
+    tool = "rank_connector_tables"
+    conn, err = _safe_connector(connector_id, connector_name, tool)
+    if err:
+        return err
+
+    cid = str(conn.get("id") or conn.get("_id") or "")
+    cname = str(conn.get("name") or connector_name or "")
+    from .schema_tools import list_connector_objects
+
+    listed = list_connector_objects(connector_id=cid, connector_name=cname)
+    if not listed.success:
+        return _tool_result(tool, success=False, error=listed.error)
+    info = listed.output or {}
+    names = [str(n).strip() for n in (info.get("objects") or []) if str(n).strip()]
+    if not names:
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                f"**{cname}** reported no tables to rank"
+                + (f" — {info.get('message')}" if info.get("message") else ".")
+            ),
+        )
+
+    ascending = str(order or "desc").strip().lower() in {"asc", "ascending", "up"}
+    shown = max(1, int(limit or 10))
+
+    # ``limit`` must bound the *work*, not just the output (QA C12/C14):
+    # exact-counting every object is one COUNT(*) per table and timed out on
+    # warehouses with million-row tables. A bulk catalog estimate shortlists
+    # limit+margin candidates; those alone get the exact COUNT and the real
+    # counts re-sort. Engines without cheap stats keep the bounded loop.
+    estimates = _estimate_table_row_counts(
+        conn, names, **({"whole_schema": True} if info.get("truncated") else {})
+    )
+    if estimates:
+        names = names + [n for n in estimates if n not in set(names)]
+        # The estimate query covers every table in one round trip, so it ranks
+        # the whole inventory; only the exact COUNTs are bounded, to the
+        # shortlist. Cutting to the first names before ranking dropped a big
+        # table that sorted late (D24).
+        est_ranked = sorted(
+            (n for n in names if n in estimates),
+            key=lambda n: estimates[n],
+            reverse=not ascending,
+        )
+        # Objects with no estimate (views, never-analyzed tables) cannot be
+        # ranked by catalog — they join the count set within the same bound.
+        unestimated = [n for n in names if n not in estimates]
+        considered = (
+            est_ranked[: shown + _RANK_MARGIN]
+            + unestimated[: shown + _RANK_MARGIN]
+        )
+    else:
+        considered = names[:_MAX_RANKED_TABLES]
+
+    # The answer is a ranking: the catalog estimate already ranks every table.
+    # Exact COUNT(*) refines the shortlist only as far as a step budget allows,
+    # a few at a time; a count that does not fit keeps its estimate, labelled
+    # (D201/D24: fifteen serial COUNTs on big PostgreSQL / TimescaleDB tables
+    # ran past the 45s deadline and the call returned nothing).
+    from .tool_deadline import Step, parallel_steps, step_seconds
+
+    counts: dict[str, int] = {}
+    skipped: list[dict[str, str]] = []
+    count_deadline = time.monotonic() + step_seconds(_RANK_COUNT_BUDGET_SECONDS)
+
+    def _count(name: str) -> Any:
+        try:
+            direct = _direct_row_count(conn, name)
+        except Exception as exc:  # noqa: BLE001 - reported as not counted
+            return _tool_result(tool, success=False, error=str(exc)[:200])
+        if direct is not None:
+            return _tool_result(tool, success=True, output={"value": direct})
+        return aggregate_connector_data(
+            connector_id=cid, connector_name=cname, table=name, metric="count"
+        )
+
+    # Tables the catalog cannot estimate are counted next, as far as the
+    # budget goes: they cannot be ranked any other way.
+    import collections
+    import threading
+
+    extra_unestimated = [n for n in names if n not in estimates and n not in set(considered)]
+    queue = collections.deque(list(considered) + extra_unestimated)
+    attempted: list[str] = []
+    failures: dict[str, str] = {}
+    qlock = threading.Lock()
+
+    def _worker() -> None:
+        # A few counters pull from one queue, so a slow table does not hold
+        # the small ones behind it.
+        while time.monotonic() < count_deadline - 0.05:
+            with qlock:
+                if not queue:
+                    return
+                name = queue.popleft()
+                attempted.append(name)
+            counted = _count(name)
+            value = (counted.output or {}).get("value") if counted.success else None
+            try:
+                if value is None:
+                    raise ValueError(str(counted.error or "count returned no value"))
+                counts[name] = int(value)
+            except (TypeError, ValueError) as exc:
+                failures[name] = str(exc)
+
+    parallel_steps(
+        [
+            Step(f"counting rows on {cname} (worker {i + 1})", _worker, conn, "source")
+            for i in range(_RANK_COUNT_PARALLEL)
+        ],
+        seconds=max(0.0, count_deadline - time.monotonic()),
+        bound_each=True,
+    )
+    with qlock:
+        considered = list(dict.fromkeys(list(considered) + attempted))
+        not_reached = list(queue)
+    for name in considered + not_reached:
+        if name in counts or name in estimates:
+            continue
+        skipped.append({
+            "table": name,
+            "error": failures.get(name)
+            or "not counted within the ranking's time budget and the catalog has no estimate",
+        })
+
+    ranked: list[dict[str, Any]] = []
+    for name in considered:
+        if name in counts:
+            ranked.append({"table": name, "rows": counts[name], "basis": "count"})
+        elif name in estimates:
+            ranked.append({"table": name, "rows": int(estimates[name]), "basis": "estimate"})
+    # Tables outside the shortlist are ranked by estimate already; they are
+    # not listed but they are part of the ranking (they sort below the cut).
+    ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
+    estimated = [r["table"] for r in ranked[:shown] if r["basis"] == "estimate"]
+    # ``exact`` means every shown row is an exact COUNT(*) over the full
+    # requested population; a catalog-estimate shortlist can omit a table whose
+    # stats are stale (D24), and an estimate shown is never exact.
+    full_population = (
+        len(considered) == len(names)
+        and not bool(info.get("truncated"))
+        and not estimated
+        and not skipped
+    )
+    return _tool_result(
+        tool,
+        success=True,
+        output={
+            "connector_id": cid,
+            "connector_name": cname,
+            "type": info.get("type") or "",
+            "order": "asc" if ascending else "desc",
+            "ranked": ranked[:shown],
+            # Tables given an exact COUNT(*); the rest of ``ranked`` is estimates.
+            "counted": len(counts),
+            "total_objects": int(info.get("total") or len(names)),
+            "considered": len(considered),
+            "total_rows": sum(r["rows"] for r in ranked),
+            "skipped": skipped,
+            # Rows shown from the catalog estimate because their exact count
+            # did not fit the time budget. Never presented as exact.
+            "estimated_tables": estimated,
+            "row_count_basis": (
+                "count" if not estimated else ("estimate" if not counts else "mixed")
+            ),
+            "truncated": len(names) > len(considered) or bool(info.get("truncated")),
+            # The shortlist came from catalog estimates; every reported row
+            # count is still an exact COUNT(*).
+            "shortlisted_by": "catalog_estimate" if estimates else "all_tables",
+            "exact": full_population,
             "read_only": True,
         },
     )

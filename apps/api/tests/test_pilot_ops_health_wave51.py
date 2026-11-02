@@ -29,7 +29,16 @@ def test_do_the_nightly_one_now():
 def test_pause_resume_open_named_pipeline():
     assert "open_schedule" in _names("pause Nightly Orders")
     assert _args("pause Nightly Orders", "open_schedule").get("name") == "nightly orders"
-    assert "open_schedule" in _names("stop the Nightly Orders schedule")
+    # With the schedule noun present, pause/stop/resume are staged as the
+    # confirm-gated set_schedule_enabled mutation instead of a navigation.
+    assert _args("stop the Nightly Orders schedule", "set_schedule_enabled") == {
+        "name": "Nightly Orders",
+        "enabled": False,
+    }
+    assert _args("resume the Nightly Orders pipeline", "set_schedule_enabled") == {
+        "name": "Nightly Orders",
+        "enabled": True,
+    }
     assert "open_schedule" in _names("resume Nightly Orders")
     assert "open_schedule" in _names("clone Nightly Orders")
     # CDC enable must not be treated as schedule manage.
@@ -46,9 +55,10 @@ def test_get_and_details_named_pipeline():
 def test_connector_health_lists_objects():
     assert _args("validate sales", "list_connector_objects").get("connector_name") == "sales"
     assert _args("check if sales is healthy", "list_connector_objects").get("connector_name") == "sales"
-    assert _args("is sales connected", "list_connector_objects").get("connector_name") == "sales"
-    assert _args("test connection to sales", "list_connector_objects").get("connector_name") == "sales"
-    assert _args("ping sales connector", "list_connector_objects").get("connector_name") == "sales"
+    # A reachability question is a live probe, not an object listing.
+    assert _args("is sales connected", "test_connector").get("name") == "sales"
+    assert _args("test connection to sales", "test_connector").get("name") == "sales"
+    assert _args("ping sales connector", "test_connector").get("name") == "sales"
 
 
 def test_how_big_and_has_column():

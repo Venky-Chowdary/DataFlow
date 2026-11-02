@@ -15,10 +15,12 @@ import {
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FAVICON = path.join(WEB, "public", "favicon.svg");
 
-test("the shipped favicon is the canonical mark, byte for byte", () => {
+test("the shipped favicon is the canonical mark", () => {
   // A hand-edited favicon is exactly how the app ended up shipping two logos:
   // the icon set stayed on an older mark while the exports moved on.
-  assert.equal(readFileSync(FAVICON, "utf8"), brandMarkSvg());
+  // Line endings come from the checkout (core.autocrlf), not from the mark.
+  const lf = (svg: string) => svg.replace(/\r\n/g, "\n");
+  assert.equal(lf(readFileSync(FAVICON, "utf8")), lf(brandMarkSvg()));
 });
 
 test("the mark keeps its proportions", () => {

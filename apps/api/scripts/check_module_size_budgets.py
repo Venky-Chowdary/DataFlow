@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 
 _API_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_API_ROOT))
+
+from services.platform_config import data_dir  # noqa: E402
 
 
 def main() -> int:
@@ -42,7 +45,7 @@ def main() -> int:
         "violations": violations,
         "ok": not violations,
     }
-    dest = _API_ROOT / "data" / "proofs" / "module_size_budgets.json"
+    dest = data_dir() / "proofs" / "module_size_budgets.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"ok": out["ok"], "violations": violations, "path": str(dest)}, indent=2))

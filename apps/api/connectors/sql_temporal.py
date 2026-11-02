@@ -12,6 +12,131 @@ from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
+_LEADING_YEAR_RE = re.compile(r"^\s*(\d{4,6})-")
+_BC_SUFFIX_RE = re.compile(r"\bBC\s*$", re.IGNORECASE)
+_FIVE_DIGIT_YEAR_RE = re.compile(r"^\s*[+]?\d{5,}-")
+
+
+def is_bc_temporal_literal(value: Any) -> bool:
+    """True for PostgreSQL's spelling of a BC date / timestamp (``0044-03-15 BC``)."""
+    return isinstance(value, str) and bool(_BC_SUFFIX_RE.search(value))
+
+
+def beyond_python_calendar(value: Any) -> bool:
+    """True when a temporal literal names a year Python ``datetime`` cannot hold.
+
+    PostgreSQL writes years outside 1..9999 AD as ``0044-03-15 BC`` or
+    ``10000-01-01``. They are real values, not malformed text: every step that
+    reads a temporal cell (the PostgreSQL decode, Map's date/datetime
+    transforms, the destination bind, the preflight wire probe) passes the
+    literal through to the one place that knows the destination's calendar,
+    :func:`coerce_sql_temporal`. That keeps it on carriers with a BC era / text
+    and refuses it by name on an AD-only carrier (D65).
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_BC_SUFFIX_RE.search(value) or _FIVE_DIGIT_YEAR_RE.match(value))
+
+
+def _strip_era(text: str) -> str:
+    return _BC_SUFFIX_RE.sub("", text).rstrip()
+
+
+# A year-first date, optionally with a clock and a zone: the shape every bulk
+# loader and every SQL engine parses on its own. Shape is not the calendar.
+_ISO_CIVIL_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})"
+    r"(?:[T ](?P<clock>\d{1,2}:\d{1,2}(?::\d{1,2}(?:[.,]\d+)?)?))?"
+    r"\s*(?:[Zz]|UTC|[+-]\d{2}(?::?\d{2})?)?$"
+)
+_CLOCK_RE = re.compile(r"^(?P<h>\d{1,2}):(?P<mi>\d{1,2})(?::(?P<s>\d{1,2})(?:[.,]\d+)?)?$")
+
+
+def _clock_reason(text: str, clock: str) -> str:
+    m = _CLOCK_RE.match(clock)
+    if m is None:
+        return ""
+    hour, minute = int(m.group("h")), int(m.group("mi"))
+    second = int(m.group("s") or 0)
+    # 24:00:00 is ISO-8601 end of day, and 23:59:60 a leap second; engines that
+    # take them do, engines that do not refuse them by name. Anything past that
+    # names no clock at all.
+    if minute > 59 or second > 60 or hour > 24 or (hour == 24 and (minute or second)):
+        return (
+            f"Invalid time: {text!r} is not a real time of day ({clock}); it is never "
+            "written as NULL or a shifted time"
+        )
+    return ""
+
+
+def invalid_calendar_reason(value: Any) -> str:
+    """Why a date-shaped string names no real calendar day / clock, else ``""``.
+
+    ``2024-02-30``, ``2024-13-01``, ``0000-00-00`` and ``2024-01-01 25:61``
+    look like ISO dates, so every shape check (the bulk-load census, Validate's
+    peek) used to wave them through. No engine stores them as written: the
+    PostgreSQL COPY / MySQL LOAD DATA abort the whole load on them, SQL Server
+    refuses the batch, and a lenient MySQL session stores a zero date. One rule
+    here lets the bind, the writer's quarantine pass and the COPY census refuse
+    exactly that cell. BC / five-digit years and PostgreSQL's ``infinity`` keep
+    their own rules (``coerce_sql_temporal``); free text is not this rule's.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or beyond_python_calendar(text):
+        return ""
+    if _CLOCK_RE.match(text) is not None:
+        return _clock_reason(text, text)
+    m = _ISO_CIVIL_RE.match(text)
+    if m is None:
+        return ""
+    import calendar
+
+    year, month, day = int(m.group("y")), int(m.group("m")), int(m.group("d"))
+    if year == 0:
+        return (
+            f"Invalid date: {text!r} is not a real calendar date (there is no year 0000); "
+            "it is never written as NULL or a zero date"
+        )
+    if not 1 <= month <= 12:
+        return (
+            f"Invalid date: {text!r} is not a real calendar date (month {month:02d}); "
+            "it is never written as NULL or a shifted date"
+        )
+    last = calendar.monthrange(year, month)[1]
+    if not 1 <= day <= last:
+        return (
+            f"Invalid date: {text!r} is not a real calendar date ({year:04d}-{month:02d} has "
+            f"{last} days); it is never written as NULL or a shifted date"
+        )
+    clock = m.group("clock")
+    return _clock_reason(text, clock) if clock else ""
+
+
+def temporal_text_unfit_reason(value: Any, ddl_type: str, *, engine: str = "") -> str:
+    """The bind's own verdict on one temporal text cell, without binding it.
+
+    Calendar validity, then the destination carrier's civil range (MySQL DATE
+    1000..9999, SQL Server DATETIME >= 1753, ...). The bulk-load census asks
+    this so a COPY / LOAD DATA never sees a cell the row path would hold out.
+    """
+    reason = invalid_calendar_reason(value)
+    if reason or not isinstance(value, str):
+        return reason
+    base = sql_base_type(ddl_type)
+    bounds = dest_temporal_bounds(engine, base)
+    if bounds is None:
+        return ""
+    lo, hi = bounds
+    year = _temporal_year_beyond(value, lo=lo.year, hi=hi.year)
+    if year is not None:
+        return f"year {year} is outside {engine} {base} range {lo.date()} .. {hi.date()}"
+    parsed = parse_sql_datetime(value, wall_clock=True)
+    if parsed is not None and not lo <= parsed.replace(tzinfo=None) <= hi:
+        return f"{value.strip()!r} is outside {engine} {base} range {lo.date()} .. {hi.date()}"
+    return ""
+
 
 def round_to_smalldatetime(value: datetime) -> datetime:
     """Round to SQL Server ``SMALLDATETIME`` minute accuracy (Microsoft docs).
@@ -108,7 +233,7 @@ def input_has_timezone(value: Any) -> bool:
         return True
     if not isinstance(value, str):
         return False
-    text = value.strip()
+    text = _strip_era(value.strip())
     if not text:
         return False
     if text.endswith(("Z", "z")) or text.upper().endswith(" UTC"):
@@ -116,7 +241,11 @@ def input_has_timezone(value: Any) -> bool:
     if text.isdigit() or (text[0] in "+-" and text[1:].isdigit()):
         return True
     # Trailing ±HH:MM / ±HHMM after a datetime body.
-    return bool(re.search(r"[+-]\d{2}:?\d{2}$", text))
+    if re.search(r"[+-]\d{2}:?\d{2}$", text):
+        return True
+    # pgoutput prints hours-only offsets (``2024-06-01 12:00:00+00``, ``+05``).
+    # The date's own hyphens must not count: the offset has to follow a clock.
+    return bool(re.search(r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", text))
 
 
 def parse_sql_datetime(
@@ -189,20 +318,31 @@ def parse_sql_datetime(
     try:
         dt = datetime.fromisoformat(text)
     except ValueError:
+        # Year-first space forms are unambiguous. Slash/dash day-month pairs
+        # go through apply_transform so Auto fails closed on 01/02/2024 00:00:00
+        # instead of inventing MDY the way strptime did.
+        dt = None
         for fmt in (
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M:%S.%f",
             "%Y/%m/%d %H:%M:%S",
-            "%m/%d/%Y %H:%M:%S",
-            "%d/%m/%Y %H:%M:%S",
         ):
             try:
                 dt = datetime.strptime(text, fmt)
                 break
             except ValueError:
                 continue
-        else:
-            return None
+        if dt is None:
+            from services.transform_engine import apply_transform
+
+            iso, err = apply_transform(text, "datetime")
+            if err or iso is None:
+                return None
+            try:
+                parsed = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            dt = parsed.replace(tzinfo=None) if parsed.tzinfo is None else parsed
     if dt.tzinfo is not None:
         if wall_clock:
             return dt.replace(tzinfo=None)
@@ -213,21 +353,62 @@ def parse_sql_datetime(
     return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
 
 
-def parse_sql_date(value: Any) -> date | None:
-    parsed = parse_sql_datetime(value)
-    if parsed is not None:
-        return parsed.date()
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
+def _integral_digit_token(value: Any) -> str | None:
+    """ASCII digits for a whole number, or ``None``.
+
+    Used to send compact ``YYYYMMDD`` / epoch tokens through the write-path
+    date parser without ``float`` scientific spelling.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value != int(value):
+            return None
+        return str(int(value))
     if isinstance(value, str):
         text = value.strip()
-        if "T" in text:
-            text = text.split("T", 1)[0]
-        try:
-            return date.fromisoformat(text)
-        except ValueError:
-            return None
+        if text.isdigit() or (text[:1] in "+-" and text[1:].isdigit()):
+            return text
     return None
+
+
+def parse_sql_date(value: Any) -> date | None:
+    """Calendar date only. Epoch instants refuse — they invent a UTC day.
+
+    Matches ``apply_transform(..., "date")``. Compact ``YYYYMMDD`` still
+    binds. ``DATETIME`` / ``TIMESTAMP`` still bind epoch via
+    ``parse_sql_datetime``. A typed ``datetime`` keeps its calendar day
+    (already a date, not an epoch invent).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        text = _integral_digit_token(value)
+        if text is None:
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+    else:
+        return None
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "date")
+    if err or iso is None:
+        return None
+    try:
+        return date.fromisoformat(str(iso)[:10])
+    except ValueError:
+        return None
 
 
 def _is_mysql_engine(engine: str) -> bool:
@@ -240,15 +421,53 @@ def _is_mysql_engine(engine: str) -> bool:
     return _normalize_dest_db(eng) == "mysql"
 
 
-def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> Any:
+def _bare_timestamp_is_instant(engine: str) -> bool:
+    """True when this dialect's bare ``TIMESTAMP`` token is an instant carrier.
+
+    BigQuery and Databricks spell the UTC instant ``TIMESTAMP`` and the wall
+    clock ``DATETIME``; MySQL is handled by its own epoch-bounded branch. The
+    polarity owner (``services.type_system.datetime_timezone_polarity``) decides
+    — binding must not carry a second table of dialect spellings.
+    """
+    if not (engine or "").strip():
+        return False
+    from services.type_system import datetime_timezone_polarity
+
+    return datetime_timezone_polarity("TIMESTAMP", dest_db=engine) in {"tz", "ltz"}
+
+
+@lru_cache(maxsize=8192)
+def sql_type_is_temporal(source_type: str) -> bool:
+    """True when ``coerce_sql_temporal`` can act on this DDL type.
+
+    Every branch of the coercion is gated on ``sql_base_type`` landing in
+    ``_TEMPORAL_BASES``, so a non-temporal column can skip the call entirely
+    instead of re-deriving the base for each of its cells.
+    """
+    return sql_base_type(source_type) in _TEMPORAL_BASES
+
+
+def coerce_sql_temporal(
+    value: Any,
+    source_type: str,
+    *,
+    engine: str = "",
+) -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value.
 
     ``engine`` disambiguates the bare ``TIMESTAMP`` token. On MySQL it is an
     instant carrier (stored UTC, converted with the session ``time_zone``, which
     writers pin to ``+00:00``), so an offset-bearing wire is converted to UTC
-    rather than having its offset stripped off the civil digits. Everywhere else
-    bare ``TIMESTAMP`` stays wall-clock.
+    rather than having its offset stripped off the civil digits. BigQuery and
+    Databricks spell the instant the same way (``DATETIME`` is their wall clock),
+    so an offset is kept there. On every other dialect bare ``TIMESTAMP`` stays
+    wall-clock.
     """
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     base = sql_base_type(source_type)
     # Empty → SQL NULL / MySQL zero-date on upsert wipe. Quarantine owns the cell.
     if base in _TEMPORAL_BASES and isinstance(value, str) and not value.strip():
@@ -256,6 +475,94 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
             f"empty string cannot coerce to {base} — "
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
+    if base in _TEMPORAL_BASES:
+        # A date-shaped string naming no real day was handed to the engine
+        # verbatim (the parses below return it when they cannot read it): the
+        # engine then failed the whole batch, or zeroed it on lenient MySQL.
+        calendar_reason = invalid_calendar_reason(value)
+        if not calendar_reason and isinstance(value, str):
+            from services.transform_engine import mixed_date_format_reason
+
+            calendar_reason = mixed_date_format_reason(value)
+        if calendar_reason:
+            raise ValueError(calendar_reason)
+    if base in _TEMPORAL_BASES and base not in {
+        "TIME",
+        "TIME WITH TIME ZONE",
+        "TIME WITHOUT TIME ZONE",
+        "TIMETZ",
+    }:
+        # C02 — temporal edge values are data, not decoration:
+        #  * PG 'infinity'/'-infinity' carry verbatim to the PG family and are
+        #    refused everywhere else with a named reason — never clamped to a
+        #    finite date (silent data loss) and never left to fail after write.
+        #  * 'epoch' resolves to the real instant it names.
+        #  * A finite value a bounded carrier cannot store (MySQL DATETIME
+        #    1000..9999, SQL Server DATETIME ≥1753, SMALLDATETIME ≤2079-06-06,
+        #    warehouse 1..9999) is refused here so the row quarantines.
+        special = pg_temporal_special(value)
+        if special is not None:
+            if _is_postgres_family(engine):
+                return special
+            if special == "epoch":
+                instant = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                aware = base in {
+                    "TIMESTAMPTZ",
+                    "TIMESTAMP_TZ",
+                    "TIMESTAMP_LTZ",
+                    "TIMESTAMP WITH TIME ZONE",
+                    "TIMESTAMP WITH LOCAL TIME ZONE",
+                    "DATETIMEOFFSET",
+                } or (base == "TIMESTAMP" and _bare_timestamp_is_instant(engine))
+                return instant if aware else instant.replace(tzinfo=None)
+            raise ValueError(
+                f"PostgreSQL {special!r} has no {base} carrier on "
+                f"{engine or 'this destination'} — quarantined; map to TEXT to "
+                "preserve the literal"
+            )
+        bounds = dest_temporal_bounds(engine, base)
+        if beyond_python_calendar(value):
+            # PostgreSQL and SQLite's text carrier hold the literal the source
+            # wrote; Python's datetime cannot, so it is never parsed here (D65).
+            if not (engine or "").strip() or _keeps_era_literal(engine):
+                return value.strip()
+            if bounds is None:
+                era = "a BC date" if is_bc_temporal_literal(value) else (
+                    "a year past 9999"
+                )
+                raise ValueError(
+                    f"{value.strip()!r} is {era} - {engine} {base} has no carrier "
+                    "for it. Quarantined; map to TEXT to keep the literal"
+                )
+        if bounds is not None:
+            lo, hi = bounds
+            if is_bc_temporal_literal(value):
+                # PostgreSQL writes BC dates as "0044-03-15 BC". Read as AD it
+                # looked like year 44 - a different date, and the range
+                # message below then blamed a year the source never held.
+                raise ValueError(
+                    f"{value.strip()!r} is a BC date - {engine or 'destination'} "
+                    f"{base} stores {lo.date()} .. {hi.date()} (AD) only and has "
+                    "no BC era. Quarantined; map to TEXT to keep the literal"
+                )
+            parsed = parse_sql_datetime(value, wall_clock=True)
+            if parsed is not None:
+                civil = parsed.replace(tzinfo=None)
+                if civil < lo or civil > hi:
+                    raise ValueError(
+                        f"{parsed.date().isoformat()} is outside "
+                        f"{engine or 'destination'} {base} range "
+                        f"{lo.date()} .. {hi.date()} — quarantined; map to a "
+                        "wider carrier"
+                    )
+            else:
+                year = _temporal_year_beyond(value, lo=lo.year, hi=hi.year)
+                if year is not None:
+                    raise ValueError(
+                        f"year {year} is outside {engine or 'destination'} "
+                        f"{base} range {lo.date()} .. {hi.date()} — "
+                        "quarantined; map to a wider carrier"
+                    )
     if base == "TIMESTAMP" and _is_mysql_engine(engine):
         from services.timezone_policy import (
             MYSQL_TIMESTAMP_MAX,
@@ -276,6 +583,18 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         if parsed is None:
             return value
         return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    if base == "TIMESTAMP" and _bare_timestamp_is_instant(engine):
+        # BigQuery / Databricks bare TIMESTAMP holds an instant, so the offset is
+        # part of the value, not decoration to strip. Stripping it here handed the
+        # JSON wire a naive datetime the engine then refused for the whole column.
+        if not input_has_timezone(value):
+            raise ValueError(
+                f"{base} refuses naive wall-clock on this dialect (would invent "
+                "UTC). Provide an offset/Z, or map to DATETIME for "
+                "timezone-less values."
+            )
+        parsed = parse_sql_datetime(value, aware_utc=True)
+        return parsed if parsed is not None else value
     if base in {
         "TIMESTAMPTZ",
         "TIMESTAMP_TZ",
@@ -288,10 +607,38 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         if not input_has_timezone(value):
             raise ValueError(
                 f"{base} refuses naive wall-clock (would invent UTC). "
-                "Provide an offset/Z, or map to TIMESTAMP_NTZ / DATETIME."
+                "Provide an offset/Z, set source_timezone to declare the "
+                "wall-clock zone, or map to TIMESTAMP_NTZ / DATETIME."
             )
         parsed = parse_sql_datetime(value, aware_utc=True)
-        return parsed if parsed is not None else value
+        if parsed is None:
+            return value
+        from services.offset_label import restore_offset_after_utc
+
+        restored = restore_offset_after_utc(
+            value, parsed, engine=engine, dest_type=source_type
+        )
+        # MySQL TIMESTAMP / MariaDB have no offset marker. An aware datetime
+        # is escaped by pymysql as civil digits plus an offset literal, and
+        # the server rejects that with 1292. Session time_zone is pinned to
+        # UTC, so the naive UTC clock is the same instant.
+        if _is_mysql_engine(engine) and isinstance(restored, datetime):
+            if restored.tzinfo is not None:
+                return restored.astimezone(timezone.utc).replace(tzinfo=None)
+            return restored
+        return restored
+    if base == "DATETIME" and _is_mysql_engine(engine):
+        # MariaDB/MySQL DATETIME has no zone marker. The timezone policy names
+        # this utc_normalized_wall_clock: an offset-bearing instant is stored
+        # as UTC digits (session time_zone is pinned to +00:00). Stripping the
+        # offset off the civil clock shifted every timestamptz on the way to
+        # Maria. A naive value stays a wall clock — UTC is not invented.
+        parsed = parse_sql_datetime(value)
+        if parsed is None:
+            return value
+        if isinstance(parsed, datetime) and parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     if base in {
         "DATETIME",
         "DATETIME64",
@@ -319,10 +666,28 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
             return value
         if base == "SMALLDATETIME":
             return round_to_smalldatetime(parsed)
+        if base == "DATETIME2" and _datetime2_digits(source_type) > 6:
+            # The seventh digit a DATETIME2(7) source spelled (Python's parse
+            # keeps six); sqlserver_datetime2 binds it.
+            from connectors.sqlserver_tick import tick_from_text, tick_of, with_tick
+
+            return with_tick(parsed, tick_of(value) or tick_from_text(value))
+        if base == "TIMESTAMP":
+            text = oracle_tick_bind(value, parsed, carrier=source_type, engine=engine)
+            if text is not None:
+                return text
         return parsed
     if base == "DATE":
         parsed = parse_sql_date(value)
-        return parsed if parsed is not None else value
+        if parsed is not None:
+            return parsed
+        if _integral_digit_token(value) is not None:
+            raise ValueError(
+                "DATE refuses epoch instants (would invent a UTC calendar day). "
+                "Map to TIMESTAMP/DATETIME, or send a calendar date "
+                "(ISO, unambiguous slash, or YYYYMMDD)."
+            )
+        return value
     if base in {"TIME", "TIME WITH TIME ZONE", "TIME WITHOUT TIME ZONE", "TIMETZ"}:
         aware = base in {"TIME WITH TIME ZONE", "TIMETZ"}
 
@@ -340,33 +705,96 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         def _parse_time_wire(raw: Any) -> time | None:
             if isinstance(raw, time):
                 return raw
-            if not isinstance(raw, str):
+            if isinstance(raw, bool):
                 return None
-            text = raw.strip()
+            if isinstance(raw, timedelta):
+                # pymysql returns TIME as timedelta (X-38): in-domain values
+                # are the same wall clock as a time object; out-of-domain
+                # (negative / >=24h) has no time carrier — leave the cell to
+                # the typed finding rather than inventing digits.
+                if timedelta(0) <= raw < timedelta(days=1):
+                    return (datetime.min + raw).time()
+                return None
+            from services.transform_engine import apply_transform
+
+            text = str(raw).strip() if raw is not None else ""
             if not text:
                 return None
-            iso = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
+            parsed, err = apply_transform(text, "time")
+            if err or parsed is None:
+                return None
+            iso = str(parsed)
             try:
                 return time.fromisoformat(iso)
             except ValueError:
-                pass
-            # Offset time that fromisoformat rejected — attach dummy date.
-            if input_has_timezone(text):
-                try:
-                    body = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
-                    dt = datetime.fromisoformat(f"1970-01-01T{body}")
-                    return dt.timetz()
-                except ValueError:
-                    return None
-            # AM/PM / odd forms via datetime parse (naive wall-clock).
-            parsed = parse_sql_datetime(text, wall_clock=True)
-            return parsed.time() if parsed is not None else None
+                return None
 
         tm = _parse_time_wire(value)
         if tm is None:
+            if _integral_digit_token(value) is not None:
+                raise ValueError(
+                    "TIME refuses epoch instants (would invent a clock). "
+                    "Send a clock (HH:MM[:SS] or AM/PM)."
+                )
             return value
         return _timetz_or_refuse(tm)
     return value
+
+
+def oracle_tick_bind(value: Any, parsed: Any, *, carrier: str, engine: str) -> str | None:
+    """ISO text keeping a seventh digit for an Oracle TIMESTAMP(7..9) column.
+
+    python-oracledb binds a ``datetime`` with six digits; the text is converted
+    with the session's ISO ``NLS_TIMESTAMP_FORMAT`` (connectors.oracle_tstz).
+    Every value of such a column binds as text: one executemany batch types a
+    bind variable from its first row, so text and ``datetime`` cannot mix.
+    ``None`` when the column is not one.
+    """
+    if not isinstance(parsed, datetime) or parsed.tzinfo is not None:
+        return None
+    if not _oracle_beyond_micro(engine, carrier):
+        return None
+    from connectors.sqlserver_tick import temporal_iso_text, tick_from_text, tick_of, with_tick
+
+    tick = tick_of(value) or tick_of(parsed) or tick_from_text(value)
+    return temporal_iso_text(with_tick(parsed, tick), " ")
+
+
+def _oracle_beyond_micro(engine: str, source_type: str) -> bool:
+    """An Oracle TIMESTAMP(7..9) destination column."""
+    from src.transfer.engine_family import is_oracle_family
+
+    if not is_oracle_family(engine):
+        return False
+    match = re.search(r"\(\s*(\d+)\s*\)", source_type or "")
+    return bool(match) and int(match.group(1)) > 6
+
+
+def _datetime2_digits(source_type: str) -> int:
+    """Declared DATETIME2 precision; bare is SQL Server's default of 7."""
+    match = re.search(r"\(\s*(\d+)\s*\)", source_type or "")
+    return int(match.group(1)) if match else 7
+
+
+def bind_time_clock(value: Any) -> time | None:
+    """One TIME clock. Reader-null is None. Unfit cells raise — never str() invent."""
+    coerced = coerce_sql_temporal(value, "TIME")
+    if coerced is None:
+        return None
+    if isinstance(coerced, time):
+        return coerced
+    if isinstance(coerced, datetime):
+        return coerced.time()
+    raise ValueError(
+        f"TIME refused {value!r} (refuse silent str() invent). "
+        "Send a clock (HH:MM[:SS] or AM/PM)."
+    )
+
+
+def bind_time_iso(value: Any) -> str | None:
+    """Dest-canonical TIME text (ISO clock) or SQL NULL."""
+    clock = bind_time_clock(value)
+    return None if clock is None else clock.isoformat()
 
 
 _TEMPORAL_BASES = frozenset({
@@ -390,22 +818,137 @@ _TEMPORAL_BASES = frozenset({
     "SMALLDATETIME",
 })
 
+def pg_temporal_special(value: Any) -> str | None:
+    """Canonical PostgreSQL temporal literal for a cell, or None.
+
+    ``'infinity'`` / ``'-infinity'`` are real *data* on Postgres
+    DATE/TIMESTAMP/TIMESTAMPTZ — "no bound", never a parseable instant and
+    never something a migration may clamp to ``9999-12-31``. ``'epoch'`` is
+    also a PG literal but resolves to a real instant (1970-01-01 UTC), so it
+    round-trips as a normal timestamp instead of being refused.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text in {"infinity", "+infinity"}:
+        return "infinity"
+    if text == "-infinity":
+        return "-infinity"
+    if text == "epoch":
+        return "epoch"
+    return None
+
+
+# Keyed on ``_normalize_dest_db`` (hosted tiles and grammar twins fold first).
+_PG_FAMILY = frozenset({"postgresql", "redshift"})
+
+_MSSQL_FAMILY = frozenset({
+    "sqlserver",
+    "synapse_analytics",
+    "azure_synapse_dedicated",
+    "azure_synapse_serverless",
+    "db2",
+    "h2",
+})
+
+
+def _is_postgres_family(engine: str) -> bool:
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return False
+    from services.type_system import _normalize_dest_db
+
+    return _normalize_dest_db(eng) in _PG_FAMILY
+
+
+def _keeps_era_literal(engine: str) -> bool:
+    """Destinations that store a BC / five-digit-year literal as written."""
+    if _is_postgres_family(engine):
+        return True
+    from services.type_system import _normalize_dest_db
+
+    return _normalize_dest_db((engine or "").strip().lower()) == "sqlite"
+
+
+def dest_temporal_bounds(
+    engine: str, base: str
+) -> tuple[datetime, datetime] | None:
+    """Civil (wall-clock) storage window for ``base`` on ``engine``, or None.
+
+    Returns None for unbounded/text carriers (Postgres family, SQLite text,
+    DuckDB) — those carry whatever the source produced. For bounded carriers
+    a value outside the window must be refused/quarantined *before* write:
+    clamping it is silent data loss and failing after write leaves a
+    half-committed batch.
+    """
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return None
+    from services.type_system import _normalize_dest_db
+
+    dialect = _normalize_dest_db(eng)
+    hi9999 = datetime(9999, 12, 31, 23, 59, 59, 999999)
+    if dialect == "mysql":
+        if base == "TIMESTAMP":
+            return None  # instant carrier — own epoch-bound branch above
+        return (datetime(1000, 1, 1), hi9999)
+    if dialect in _MSSQL_FAMILY or eng.startswith("mssql"):
+        if base == "SMALLDATETIME":
+            return (datetime(1900, 1, 1), datetime(2079, 6, 6, 23, 59, 59))
+        if base == "DATETIME":
+            return (datetime(1753, 1, 1), hi9999)
+        if base in {"DATE", "DATETIME2", "DATETIMEOFFSET"}:
+            return (datetime(1, 1, 1), hi9999)
+        return None
+    if dialect in {"snowflake", "bigquery", "databricks"}:
+        if base in _TEMPORAL_BASES and base not in {
+            "TIME",
+            "TIME WITH TIME ZONE",
+            "TIME WITHOUT TIME ZONE",
+            "TIMETZ",
+        }:
+            return (datetime(1, 1, 1), hi9999)
+        return None
+    if dialect == "oracle":
+        if base in {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE"}:
+            return (datetime(1, 1, 1), hi9999)
+        return None
+    return None
+
+
+
+
+def _temporal_year_beyond(value: Any, *, lo: int, hi: int) -> int | None:
+    """Leading ISO year of an unparseable wire that a bounded carrier rejects.
+
+    Python ``datetime`` cannot represent years outside 1..9999, so a PG date
+    like ``'10000-01-01'`` arrives unparseable and would otherwise reach the
+    engine to fail after write. SQL Server/MySQL then report it themselves;
+    refuse it first with a named reason.
+    """
+    if not isinstance(value, str):
+        return None
+    m = _LEADING_YEAR_RE.match(value)
+    if m is None:
+        return None
+    try:
+        year = int(m.group(1))
+    except ValueError:
+        return None
+    if year < lo or year > hi:
+        return year
+    return None
+
+
 # Destinations that bind temporals like MySQL/Postgres (ISO-Z literals unsafe).
-# Includes generic_sql dialects, warehouses, and common catalog aliases so Validate
-# matches the write path.
+# Includes generic_sql dialects and warehouses; a duplex SQL tile is looked up
+# by its engine family so Validate matches the write path.
 _WIRE_DESTS = frozenset({
     "mysql",
-    "mariadb",
-    "singlestore",
     "postgresql",
-    "postgres",
     "redshift",
-    "cockroachdb",
-    "timescaledb",
-    "supabase",
     "oracle",
     "sqlserver",
-    "mssql",
     "synapse",
     "generic_sql",
     "clickhouse",
@@ -440,14 +983,17 @@ def logical_to_temporal_ddl(logical: str) -> str | None:
         return "DATE"
     if t in {"time"}:
         return "TIME"
-    # Preserve TZ polarity: aware carriers keep UTC tzinfo on bind.
+    # Offset-storing carriers keep the originating label; instant-only
+    # TIMESTAMPTZ stays UTC. Folding DATETIMEOFFSET into TIMESTAMPTZ here
+    # is how a SQL Server dest received +00:00.
+    if t in {"datetimeoffset"}:
+        return "DATETIMEOFFSET"
     if t in {
         "timestamptz",
         "timestamp_tz",
         "timestamp_ltz",
         "timestamp with time zone",
         "timestamp with local time zone",
-        "datetimeoffset",
     }:
         return "TIMESTAMPTZ"
     if t in {
@@ -471,6 +1017,11 @@ def format_wire_value(value: Any, source_type: str, *, engine: str = "") -> str 
     if isinstance(coerced, datetime):
         if base == "DATE":
             return coerced.date().isoformat()
+        # Aware instants keep their offset. ``strftime`` drops ``tzinfo``, so a
+        # CSV/export of a timestamptz cell wrote a naive clock and the offset
+        # was gone even though the value had one.
+        if coerced.tzinfo is not None and coerced.utcoffset() is not None:
+            return coerced.isoformat(sep=" ")
         if coerced.microsecond:
             return coerced.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
         return coerced.strftime("%Y-%m-%d %H:%M:%S")
@@ -496,7 +1047,10 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
     if base not in _TEMPORAL_BASES:
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
 
-    if value is None:
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
     if isinstance(value, str) and not value.strip():
         return {
@@ -509,6 +1063,15 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
             "needs_normalize": False,
         }
 
+    if engine:
+        # The writer's unfit-cell rule, verbatim: a value Execute would hold
+        # out (offset-bearing text into a zoneless carrier, excess fractional
+        # digits) cannot pass Validate (M6).
+        from connectors.writer_quarantine_unfit import temporal_cell_unfit_reason
+
+        unfit = temporal_cell_unfit_reason(value, ddl_type, dest_db=engine)
+        if unfit:
+            return {"ok": False, "wire_value": None, "reason": unfit, "needs_normalize": False}
     try:
         coerced = coerce_sql_temporal(value, ddl_type, engine=engine)
         wire = format_wire_value(value, ddl_type, engine=engine)
@@ -523,6 +1086,17 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
     # Still a string after coerce → cannot bind as temporal.
     if isinstance(coerced, str):
         text = coerced.strip()
+        if beyond_python_calendar(text) and _keeps_era_literal(engine):
+            # D65 — a BC / five-digit-year literal binds as itself on the
+            # PostgreSQL family and SQLite's text carrier.
+            return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
+        if pg_temporal_special(text) is not None and _is_postgres_family(engine):
+            # D63 — the PG family stores 'infinity' / '-infinity' literally;
+            # coerce_sql_temporal carried it, so it binds as itself.
+            return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
+        if _oracle_beyond_micro(engine, ddl_type) and parse_sql_datetime(text) is not None:
+            # Oracle TIMESTAMP(7..9) binds ISO text (session NLS format).
+            return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
         return {
             "ok": False,
             "wire_value": None,
@@ -554,7 +1128,9 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
 
 
 def dest_uses_sql_wire_probe(dest_db_type: str | None) -> bool:
-    return (dest_db_type or "").strip().lower() in _WIRE_DESTS
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dest_db_type) in _WIRE_DESTS
 
 
 def extract_column_from_sql_error(exc: BaseException | str) -> str | None:

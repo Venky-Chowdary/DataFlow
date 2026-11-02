@@ -5,7 +5,7 @@ earlier column may not steal a target that is a stronger match for a later one)
 and must recover from typos / abbreviations via character-level similarity.
 """
 
-from ai.semantic_engine import generate_mappings
+from ai.semantic_engine import analyze_column, generate_mappings
 
 
 def _by_source(mappings):
@@ -40,6 +40,169 @@ def test_typo_recovers_via_char_similarity():
     by_source = _by_source(mappings)
     assert by_source["custmer_id"].target_column == "customer_id"
     assert by_source["custmer_id"].confidence > 0.5
+
+
+def test_analyze_column_does_not_invent_datetime_from_auto_ambiguous_slash_dates():
+    """01/02/2024 is Jan 2 or Feb 1 — Auto must not label the column datetime."""
+    ambiguous = analyze_column("event_date", ["01/02/2024", "03/04/2024"])
+    assert ambiguous.inferred_type == "string"
+    assert "standardize_iso8601" not in ambiguous.suggested_transformations
+    assert any("date locale" in w.lower() for w in ambiguous.warnings)
+    unambiguous = analyze_column("event_date", ["31/12/2024", "30/11/2024"])
+    assert unambiguous.inferred_type == "datetime"
+    assert "standardize_iso8601" in unambiguous.suggested_transformations
+    iso = analyze_column("event_date", ["2024-03-05", "2024-03-06"])
+    assert iso.inferred_type == "datetime"
+    assert "standardize_iso8601" in iso.suggested_transformations
+
+
+def test_analyze_column_does_not_invent_boolean_from_informal_yes_no():
+    informal = analyze_column("is_paid", ["yes", "no", "yes"])
+    assert informal.inferred_type == "string"
+    canonical = analyze_column("is_paid", ["true", "false", "true"])
+    assert canonical.inferred_type == "boolean"
+
+
+def test_reasoning_chain_does_not_invent_boolean_from_informal_yes_no():
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    chain = DataTransferReasoningChain()
+    # ``is_paid`` matches Payment Status first — use a Flag-shaped name.
+    informal = chain.analyze_column("is_active", ["yes", "no", "yes"])
+    assert informal.answer["semantic_type"] == "Boolean Flag"
+    assert informal.answer["inferred_type"] == "string"
+    canonical = chain.analyze_column("is_active", ["true", "false", "true"])
+    assert canonical.answer["semantic_type"] == "Boolean Flag"
+    assert canonical.answer["inferred_type"] == "boolean"
+
+
+def test_assist_boolean_patterns_are_write_path_tokens_only():
+    import re
+
+    from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN, _parse_boolean
+    from src.ai.knowledge.data_quality_rules import FORMAT_VALIDATORS, validate_column_quality
+    from src.ai.knowledge.semantic_patterns import SEMANTIC_PATTERNS
+    from src.ai.knowledge.type_conversions import suggest_type_conversion
+    from ai.semantic_engine import SEMANTIC_TYPES
+
+    flag = next(st for st in SEMANTIC_TYPES if st.name == "Boolean Flag")
+    rag_flag = next(p for p in SEMANTIC_PATTERNS if p.name == "Boolean Flag")
+    for pattern in (*flag.sample_patterns, *rag_flag.sample_patterns, *FORMAT_VALIDATORS["Boolean Flag"]):
+        assert re.match(pattern, "true", re.IGNORECASE)
+        assert re.match(pattern, "false", re.IGNORECASE)
+        assert not re.match(pattern, "yes", re.IGNORECASE)
+        assert not re.match(pattern, "no", re.IGNORECASE)
+        assert pattern == CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
+    hint = suggest_type_conversion("string", "boolean")
+    assert hint is not None
+    assert "yes" not in (hint.get("mapping") or {})
+    assert "no" not in (hint.get("mapping") or {})
+    assert all(_parse_boolean(tok) is not None for tok in (hint.get("mapping") or {}))
+    assert "yes/on" in (hint.get("note") or "").lower() or "informal" in (hint.get("note") or "").lower()
+
+    informal_q = validate_column_quality("is_paid", ["yes", "no"], semantic_type="Boolean Flag")
+    assert informal_q["metrics"]["validity"] < 90
+    canonical_q = validate_column_quality("is_paid", ["true", "false"], semantic_type="Boolean Flag")
+    assert canonical_q["metrics"]["validity"] == 100.0
+
+
+def test_assist_date_quality_uses_write_path_bind():
+    """01/02/2024 is not a valid Date under Auto; 31/12/2024 and ISO still bind."""
+    from src.ai.knowledge.data_quality_rules import FORMAT_VALIDATORS, validate_column_quality
+
+    assert not any("/" in pattern for pattern in FORMAT_VALIDATORS["Date"])
+    ambiguous = validate_column_quality(
+        "event_date", ["01/02/2024", "03/04/2024"], semantic_type="Date"
+    )
+    assert ambiguous["metrics"]["validity"] == 0.0
+    dmy = validate_column_quality(
+        "event_date", ["31/12/2024", "30/11/2024"], semantic_type="Date"
+    )
+    assert dmy["metrics"]["validity"] == 100.0
+    iso = validate_column_quality(
+        "event_date", ["2024-03-05", "2024-03-06"], semantic_type="Date"
+    )
+    assert iso["metrics"]["validity"] == 100.0
+    ts = validate_column_quality(
+        "last_login",
+        ["2024-01-01 12:00:00", "2024-02-01T08:30:00"],
+        semantic_type="Timestamp",
+    )
+    assert ts["metrics"]["validity"] == 100.0
+    amb_ts = validate_column_quality(
+        "last_login", ["01/02/2024 00:00:00"], semantic_type="Timestamp"
+    )
+    assert amb_ts["metrics"]["validity"] == 0.0
+
+
+def test_assist_currency_quality_uses_write_path_decimal():
+    """Grouped $1,000.00 binds; Auto-ambiguous 1,234 must not score valid."""
+    from src.ai.knowledge.data_quality_rules import validate_column_quality
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    grouped = validate_column_quality(
+        "amount", ["$1,000.00", "$2,500.50"], semantic_type="Currency Amount"
+    )
+    assert grouped["metrics"]["validity"] == 100.0
+    euro = validate_column_quality(
+        "amount", ["€1.000,89"], semantic_type="Currency Amount"
+    )
+    assert euro["metrics"]["validity"] == 100.0
+    ambiguous = validate_column_quality(
+        "amount", ["1,234", "5,678"], semantic_type="Currency Amount"
+    )
+    assert ambiguous["metrics"]["validity"] == 0.0
+
+    money = analyze_column("amount", ["$1,000.00", "$2,500.50"])
+    assert money.inferred_type == "decimal"
+    lone = analyze_column("amount", ["1,234", "5,678"])
+    assert lone.inferred_type == "string"
+
+    chain = DataTransferReasoningChain()
+    ch_money = chain.analyze_column("amount", ["$1,000.00", "$2,500.50"])
+    assert ch_money.answer["inferred_type"] == "decimal"
+    ch_lone = chain.analyze_column("amount", ["1,234", "5,678"])
+    assert ch_lone.answer["inferred_type"] == "string"
+
+
+def test_generate_mappings_does_not_invent_date_transform_for_ambiguous_slash():
+    mappings = generate_mappings(
+        ["event_date"],
+        ["event_date"],
+        {"event_date": ["01/02/2024", "03/04/2024"]},
+    )
+    by = _by_source(mappings)
+    assert by["event_date"].target_column == "event_date"
+    assert by["event_date"].suggested_transformation is None
+    assert by["event_date"].transformation_needed is False
+
+
+def test_reasoning_chain_does_not_invent_date_iso_from_auto_ambiguous_slash_dates():
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    chain = DataTransferReasoningChain()
+    ambiguous = chain.analyze_column("event_date", ["01/02/2024", "03/04/2024"])
+    assert ambiguous.answer["inferred_type"] == "string"
+    assert "standardize_iso8601" not in (ambiguous.answer.get("transformations") or [])
+    iso = chain.analyze_column("event_date", ["2024-03-05", "2024-03-06"])
+    assert iso.answer["inferred_type"] == "date"
+    assert "standardize_iso8601" in (iso.answer.get("transformations") or [])
+
+
+def test_reasoning_chain_map_does_not_invent_parse_date_for_ambiguous_slash():
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    chain = DataTransferReasoningChain()
+    result = chain.map_columns(
+        ["event_date"],
+        ["event_date"],
+        source_samples={"event_date": ["01/02/2024", "03/04/2024"]},
+    )
+    row = result.answer["mappings"][0]
+    assert row["target_column"] == "event_date"
+    assert row["suggested_transformation"] is None
+    assert row["transformation_needed"] is False
 
 
 def test_deterministic_output():

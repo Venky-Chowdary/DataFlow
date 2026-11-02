@@ -1,0 +1,93 @@
+auth overlap/contrast check — 2026-10-25T17:05:13.415Z
+ok   mobile/light/login: no decorative/text overlap
+ok   mobile/light/login: lp-btn.lp-btn--link "Back" 11.08:1
+ok   mobile/light/login: lp-btn.lp-btn--link "Forgot password?" 5.47:1
+ok   mobile/light/login: lp-btn.lp-btn--brand "Sign in to workspace" 6.74:1
+ok   mobile/light/login: lp-btn.lp-btn--link "Create an account" 5.47:1
+ok   mobile/light/login: lp-btn.lp-btn--link "Privacy" 5.47:1
+ok   mobile/light/login: lp-btn.lp-btn--link "Terms" 5.47:1
+ok   mobile/light/signup: no decorative/text overlap
+ok   mobile/light/signup: lp-btn.lp-btn--link "Back" 9.30:1
+ok   mobile/light/signup: lp-btn.lp-btn--brand "Send verification code" 6.74:1
+ok   mobile/light/signup: lp-btn.lp-btn--link "Sign in" 5.47:1
+ok   mobile/light/forgot: no decorative/text overlap
+ok   mobile/light/forgot: lp-btn.lp-btn--link "Back" 9.30:1
+ok   mobile/light/forgot: lp-btn.lp-btn--brand "Email me a reset link" 6.74:1
+ok   mobile/light/forgot: lp-btn.lp-btn--link "Back to sign in" 5.47:1
+ok   mobile/dark/login: no decorative/text overlap
+ok   mobile/dark/login: lp-btn.lp-btn--link "Back" 11.30:1
+ok   mobile/dark/login: lp-btn.lp-btn--link "Forgot password?" 10.23:1
+ok   mobile/dark/login: lp-btn.lp-btn--brand "Sign in to workspace" 6.74:1
+ok   mobile/dark/login: lp-btn.lp-btn--link "Create an account" 10.23:1
+ok   mobile/dark/login: lp-btn.lp-btn--link "Privacy" 10.23:1
+ok   mobile/dark/login: lp-btn.lp-btn--link "Terms" 10.23:1
+ok   mobile/dark/signup: no decorative/text overlap
+ok   mobile/dark/signup: lp-btn.lp-btn--link "Back" 11.30:1
+ok   mobile/dark/signup: lp-btn.lp-btn--brand "Send verification code" 6.74:1
+ok   mobile/dark/signup: lp-btn.lp-btn--link "Sign in" 10.23:1
+ok   mobile/dark/forgot: no decorative/text overlap
+ok   mobile/dark/forgot: lp-btn.lp-btn--link "Back" 9.30:1
+ok   mobile/dark/forgot: lp-btn.lp-btn--brand "Email me a reset link" 6.74:1
+ok   mobile/dark/forgot: lp-btn.lp-btn--link "Back to sign in" 10.23:1
+ok   tablet/light/login: no decorative/text overlap
+ok   tablet/light/login: lp-btn.lp-btn--link "Back" 11.08:1
+ok   tablet/light/login: lp-btn.lp-btn--link "Forgot password?" 5.47:1
+ok   tablet/light/login: lp-btn.lp-btn--brand "Sign in to workspace" 6.74:1
+ok   tablet/light/login: lp-btn.lp-btn--link "Create an account" 5.47:1
+ok   tablet/light/login: lp-btn.lp-btn--link "Privacy" 5.47:1
+ok   tablet/light/login: lp-btn.lp-btn--link "Terms" 5.47:1
+ok   tablet/light/signup: no decorative/text overlap
+ok   tablet/light/signup: lp-btn.lp-btn--link "Back" 9.30:1
+ok   tablet/light/signup: lp-btn.lp-btn--brand "Send verification code" 6.74:1
+ok   tablet/light/signup: lp-btn.lp-btn--link "Sign in" 5.47:1
+ok   tablet/light/forgot: no decorative/text overlap
+ok   tablet/light/forgot: lp-btn.lp-btn--link "Back" 9.30:1
+ok   tablet/light/forgot: lp-btn.lp-btn--brand "Email me a reset link" 6.74:1
+ok   tablet/light/forgot: lp-btn.lp-btn--link "Back to sign in" 5.47:1
+ok   tablet/dark/login: no decorative/text overlap
+ok   tablet/dark/login: lp-btn.lp-btn--link "Back" 11.08:1
+ok   tablet/dark/login: lp-btn.lp-btn--link "Forgot password?" 10.23:1
+ok   tablet/dark/login: lp-btn.lp-btn--brand "Sign in to workspace" 6.74:1
+ok   tablet/dark/login: lp-btn.lp-btn--link "Create an account" 10.23:1
+ok   tablet/dark/login: lp-btn.lp-btn--link "Privacy" 10.23:1
+ok   tablet/dark/login: lp-btn.lp-btn--link "Terms" 10.23:1
+ok   tablet/dark/signup: no decorative/text overlap
+ok   tablet/dark/signup: lp-btn.lp-btn--link "Back" 9.30:1
+ok   tablet/dark/signup: lp-btn.lp-btn--brand "Send verification code" 6.74:1
+ok   tablet/dark/signup: lp-btn.lp-btn--link "Sign in" 10.23:1
+ok   tablet/dark/forgot: no decorative/text overlap
+ok   tablet/dark/forgot: lp-btn.lp-btn--link "Back" 9.30:1
+ok   tablet/dark/forgot: lp-btn.lp-btn--brand "Email me a reset link" 6.74:1
+ok   tablet/dark/forgot: lp-btn.lp-btn--link "Back to sign in" 10.23:1
+ok   desktop/light/login: no decorative/text overlap
+ok   desktop/light/login: lp-btn.lp-btn--link "Back" 9.30:1
+ok   desktop/light/login: lp-btn.lp-btn--link "Forgot password?" 5.47:1
+ok   desktop/light/login: lp-btn.lp-btn--brand "Sign in to workspace" 6.74:1
+ok   desktop/light/login: lp-btn.lp-btn--link "Create an account" 5.47:1
+ok   desktop/light/login: lp-btn.lp-btn--link "Privacy" 5.47:1
+ok   desktop/light/login: lp-btn.lp-btn--link "Terms" 5.47:1
+ok   desktop/light/signup: no decorative/text overlap
+ok   desktop/light/signup: lp-btn.lp-btn--link "Back" 9.30:1
+ok   desktop/light/signup: lp-btn.lp-btn--brand "Send verification code" 6.74:1
+ok   desktop/light/signup: lp-btn.lp-btn--link "Sign in" 5.47:1
+ok   desktop/light/forgot: no decorative/text overlap
+ok   desktop/light/forgot: lp-btn.lp-btn--link "Back" 9.30:1
+ok   desktop/light/forgot: lp-btn.lp-btn--brand "Email me a reset link" 6.74:1
+ok   desktop/light/forgot: lp-btn.lp-btn--link "Back to sign in" 5.47:1
+ok   desktop/dark/login: no decorative/text overlap
+ok   desktop/dark/login: lp-btn.lp-btn--link "Back" 9.30:1
+ok   desktop/dark/login: lp-btn.lp-btn--link "Forgot password?" 10.23:1
+ok   desktop/dark/login: lp-btn.lp-btn--brand "Sign in to workspace" 6.74:1
+ok   desktop/dark/login: lp-btn.lp-btn--link "Create an account" 10.23:1
+ok   desktop/dark/login: lp-btn.lp-btn--link "Privacy" 10.23:1
+ok   desktop/dark/login: lp-btn.lp-btn--link "Terms" 10.23:1
+ok   desktop/dark/signup: no decorative/text overlap
+ok   desktop/dark/signup: lp-btn.lp-btn--link "Back" 9.30:1
+ok   desktop/dark/signup: lp-btn.lp-btn--brand "Send verification code" 6.74:1
+ok   desktop/dark/signup: lp-btn.lp-btn--link "Sign in" 10.23:1
+ok   desktop/dark/forgot: no decorative/text overlap
+ok   desktop/dark/forgot: lp-btn.lp-btn--link "Back" 9.30:1
+ok   desktop/dark/forgot: lp-btn.lp-btn--brand "Email me a reset link" 6.74:1
+ok   desktop/dark/forgot: lp-btn.lp-btn--link "Back to sign in" 10.23:1
+
+ALL CHECKS PASSED

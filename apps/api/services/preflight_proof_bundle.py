@@ -100,6 +100,86 @@ def _build_preview_reconciliation(
     }
 
 
+def _finding_lines(compliance: dict[str, Any]) -> list[str]:
+    """``col (category by rule, ...)`` for every detected column, high risk first.
+
+    Listing only the high-risk columns hid every email / phone / IP the content
+    scan found beside a passport column, so the hold read as a name-only
+    detector (D94).
+    """
+    high = set(compliance.get("high_risk_fields") or [])
+    findings = sorted(
+        (f for f in compliance.get("findings") or [] if str(f.get("column") or "")),
+        key=lambda f: 0 if str(f.get("column")) in high else 1,
+    )
+    parts: list[str] = []
+    for finding in findings:
+        col = str(finding.get("column") or "")
+        why = ", ".join(
+            f"{e.get('category')} by {str(e.get('rule') or '').replace('_', ' ')}"
+            for e in finding.get("evidence") or []
+        ) or ", ".join(finding.get("categories") or [])
+        parts.append(f"{col} ({why})")
+    return parts
+
+
+def _listed(parts: list[str], limit: int = 8) -> str:
+    return "; ".join(parts[:limit]) + (
+        f" (+{len(parts) - limit} more)" if len(parts) > limit else ""
+    )
+
+
+def pii_detection_warning(
+    compliance: dict[str, Any] | None, mappings: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
+    """A visible preflight warning for PII that does not force a review hold.
+
+    Email / phone / IP are medium-risk: they do not block, but a gate that
+    found them in a column's content and said nothing was indistinguishable
+    from one that never looked (D94). Columns already masked, hashed or
+    redacted by their mapping are named as protected.
+    """
+    compliance = compliance or {}
+    fields = list(compliance.get("sensitive_fields") or [])
+    if not fields:
+        return None
+    protected = {
+        str(m.get("source") or "")
+        for m in mappings or []
+        if str(m.get("transform") or "").strip().lower() in {"mask_pii", "hash_pii", "redact"}
+    }
+    parts = _finding_lines(compliance)
+    open_cols = [c for c in fields if c not in protected]
+    note = (
+        " Consider mask_pii / hash_pii / redact on "
+        + ", ".join(open_cols[:8])
+        + "."
+        if open_cols
+        else " Every detected column is masked, hashed or redacted by its mapping."
+    )
+    return {
+        "id": "pii_detected",
+        "message": f"PII detected in {len(fields)} column(s): {_listed(parts)}.{note}",
+        "details": {
+            "findings": list(compliance.get("findings") or []),
+            "protected_columns": sorted(c for c in protected if c in fields),
+            "requires_review": bool(compliance.get("requires_review")),
+        },
+    }
+
+
+def _compliance_review_message(compliance: dict[str, Any]) -> str:
+    """Name the columns, categories and rule behind a PII review hold."""
+    listed = _listed(_finding_lines(compliance))
+    return (
+        "PII/compliance review required"
+        + (f" — {listed}" if listed else "")
+        + f" (risk {float(compliance.get('risk_score') or 0.0):.2f}). Acknowledge with "
+        "pii_acknowledgement {approved_by, reason} (API: compliance_acknowledged + "
+        "acknowledgment_actor/acknowledgment_reason)."
+    )
+
+
 def build_preflight_proof_bundle(
     *,
     columns: list[str],
@@ -114,6 +194,7 @@ def build_preflight_proof_bundle(
     compliance_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
+    source_measured_empty: bool = False,
 ) -> dict[str, Any]:
     """Assemble the unified proof bundle for a transfer preflight decision."""
     mappings = mappings or []
@@ -151,8 +232,9 @@ def build_preflight_proof_bundle(
     blockers: list[str] = []
     compliance_blockers: list[str] = []
     if compliance.get("requires_review") and not compliance_acknowledged:
-        compliance_blockers.append("PII/compliance review required")
-        blockers.append("PII/compliance review required")
+        message = _compliance_review_message(compliance)
+        compliance_blockers.append(message)
+        blockers.append(message)
     elif compliance.get("requires_review") and compliance_acknowledged:
         compliance["review_status"] = "acknowledged"
     # Preview reconciliation must never block as a failed post-write proof.
@@ -206,7 +288,13 @@ def build_preflight_proof_bundle(
             decision = "review"
 
     confidence_band = "high" if min_confidence >= 0.9 else "medium" if min_confidence >= 0.75 else "low"
-    if quality_score is None:
+    if quality_score is None and source_measured_empty:
+        # A counted zero-row source has nothing to profile. That is a vacuous
+        # pass with a note, not a fidelity or sample-quality block (R8-005).
+        quality_grade = "vacuous"
+        quality_display = "0 rows (counted)"
+        quality_score = 1.0
+    elif quality_score is None:
         quality_grade = "not_profiled"
         quality_display = "not profiled"
         # No sample profile ⇒ never Execute-ready approve. Operators must re-sample

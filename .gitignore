@@ -12,6 +12,8 @@ venv/
 !.env.example
 *.egg-info/
 .pytest_cache/
+apps/web/test-results/
+apps/web/playwright-report/
 .coverage
 apps/api/uploads/
 packages/ml/data/
@@ -23,10 +25,23 @@ packages/ml/data/
 # directory and opt the few tracked catalogs back in.
 apps/api/data/*
 !apps/api/data/connector_catalog.json
-!apps/api/data/integrations.json
+!apps/api/data/connector_form_schema.json
 apps/api/localhost
 apps/api/exports/
 apps/api/test
 .devin-files/
 apps/web/tsconfig.tsbuildinfo
 apps/api/data/proofs/
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+
+# Vendor agent scaffolding (Emergent): pod-local cron, job markers, scratch
+# reports and working-memory notes. None of it is product, and the cron file
+# points at an external webhook host, so it must not ride in a release branch.
+.emergent/
+test_reports/
+memory/
+/.gitconfig

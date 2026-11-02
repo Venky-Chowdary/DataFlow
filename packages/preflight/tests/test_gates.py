@@ -503,6 +503,38 @@ def test_g2_blocks_create_unknown_even_when_write_true():
     assert "create" in g2.message.lower()
 
 
+def test_g2_object_store_put_is_not_a_create_table_denial():
+    """A missing GCS/S3 object with proven object-write is created by PUT.
+
+    can_create_table on these engines is bucket or container CREATE. objectAdmin
+    is write-true and create-false. A SQL destination with the same flags still
+    blocks, because INSERT on another table is not CREATE.
+    """
+    for kind in ("gcs", "google_cloud_storage", "minio", "s3", "adls", "azure_blob"):
+        plan = _happy_plan()
+        plan.destination.kind = kind
+        plan.destination.db_type = kind
+        plan.destination.can_write = True
+        plan.destination.can_create_table = False
+        plan.destination.table_exists = False
+        result = PreflightEngine().run(PreflightContext(plan=plan))
+        g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+        assert g2.status == GateStatus.PASS, kind
+        assert "CREATE is not proven" not in g2.message
+        assert "PUT" in g2.message
+
+    sql = _happy_plan()
+    sql.destination.kind = "postgresql"
+    sql.destination.db_type = "postgresql"
+    sql.destination.can_write = True
+    sql.destination.can_create_table = False
+    sql.destination.table_exists = False
+    blocked = PreflightEngine().run(PreflightContext(plan=sql))
+    g2_sql = next(g for g in blocked.gates if g.gate_id.value == "g2_destination")
+    assert g2_sql.status == GateStatus.BLOCK
+    assert "CREATE is not proven" in g2_sql.message
+
+
 def test_g2_blocks_unavailable_probe_on_create_new():
     """Connectivity-only fallback must not green-light create-new."""
     plan = _happy_plan()
@@ -534,6 +566,40 @@ def test_g2_passes_unavailable_probe_when_table_exists():
     g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
     assert g2.status == GateStatus.PASS
     assert "unavailable" in g2.message.lower()
+
+
+def test_g2_blocks_redshift_staging_denied():
+    plan = _happy_plan()
+    plan.destination.db_type = "redshift"
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.redshift_staging_probe = {
+        "status": "denied",
+        "method": "GetBucketAcl",
+        "detail": "Staging bucket `dw-stage` ACL does not grant write for COPY FROM S3",
+        "bucket": "dw-stage",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "staging" in g2.message.lower()
+    assert g2.details["redshift_staging_probe"]["status"] == "denied"
+
+
+def test_g2_passes_redshift_staging_not_configured():
+    plan = _happy_plan()
+    plan.destination.db_type = "redshift"
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.redshift_staging_probe = {
+        "status": "not_configured",
+        "detail": "PostgreSQL-wire insert remains valid.",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.PASS
+    assert "not configured" in g2.message.lower()
 
 
 def test_g3_schemaless_is_skip_not_pass():

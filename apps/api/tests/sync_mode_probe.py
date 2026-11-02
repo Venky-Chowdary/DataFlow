@@ -39,6 +39,20 @@ EXPECTED_AFTER_TWO_RUNS: dict[str, int] = {
 }
 
 
+def expected_rows_scaled(mode: str, *, rows: int, key_addressed: bool = False) -> int:
+    """Rows expected after two runs of ``mode`` over a source of ``rows`` rows.
+
+    The same semantics table as :func:`expected_rows`, parameterised so a scale
+    matrix moving 100K rows asks *one* owner what the mode means instead of
+    re-deriving ``2N`` next to its own assertions.
+    """
+    if mode not in EXPECTED_AFTER_TWO_RUNS:
+        raise KeyError(f"unknown sync mode: {mode}")
+    if mode == "full_refresh_append":
+        return rows if key_addressed else rows * 2
+    return rows
+
+
 def expected_rows(mode: str, *, key_addressed: bool = False) -> int:
     """Rows expected after two runs, accounting for how the sink is addressed.
 
@@ -53,9 +67,9 @@ def expected_rows(mode: str, *, key_addressed: bool = False) -> int:
     asserting N everywhere would have hidden a SQL table that silently
     deduplicated rows an operator expected to accumulate.
     """
-    if key_addressed and mode == "full_refresh_append":
-        return len(RECORDS)
-    return EXPECTED_AFTER_TWO_RUNS[mode]
+    return expected_rows_scaled(
+        mode, rows=len(RECORDS), key_addressed=key_addressed
+    )
 
 
 @dataclass

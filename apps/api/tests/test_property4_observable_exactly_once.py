@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import socket
 import sqlite3
 import uuid
 from pathlib import Path
@@ -28,24 +27,7 @@ import connectors.sqlite_writer as sqlite_writer_mod
 from connectors.writer_common import CHUNK_SIZE as WRITER_CHUNK_SIZE
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
-
-
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _pg_creds() -> dict:
-    return {
-        "host": os.environ.get("P4_PG_HOST", os.environ.get("P2_PG_HOST", "127.0.0.1")),
-        "port": int(os.environ.get("P4_PG_PORT", os.environ.get("P2_PG_PORT", "5432"))),
-        "database": os.environ.get("P4_PG_DB", os.environ.get("P2_PG_DB", "postgres")),
-        "username": os.environ.get("P4_PG_USER", os.environ.get("P2_PG_USER", "postgres")),
-        "password": os.environ.get("P4_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "admin")),
-    }
+from tests.helpers.live_env import pg_creds, pg_up
 
 
 def _ordered_checksum(ids_names: list[tuple]) -> str:
@@ -124,8 +106,10 @@ def test_sqlite_insert_ledger_mid_chunk_kill_resume(tmp_path: Path, monkeypatch)
     assert not first.success, "kill simulation must abort the first attempt"
     monkeypatch.setattr(sqlite_writer_mod, "mark_raw_chunk_committed", orig_mark)
 
-    # Resume / retry same job_id + same payload — ledger skips chunk 0.
-    second = engine.execute_tracked(_req(dst_kill), job_id)
+    # Resume same job_id + same payload — ledger skips chunk 0. ``resume=True``
+    # is the sanctioned exit from the terminal ``failed`` status; a bare re-run
+    # is refused by the job-status fence when a job store is live.
+    second = engine.execute_tracked(_req(dst_kill), job_id, resume=True)
     assert second.success, second.error
 
     conn = sqlite3.connect(str(dst_kill))
@@ -147,16 +131,21 @@ def test_sqlite_insert_ledger_mid_chunk_kill_resume(tmp_path: Path, monkeypatch)
     assert all(r[2] is not None for r in ledger_rows), ledger_rows
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up("P4"), reason="PostgreSQL not reachable")
 def test_pg_insert_ledger_mid_chunk_kill_resume(monkeypatch):
-    """Live PG: same kill/resume/checksum proof with the write ledger."""
+    """Live PG: same kill/resume/checksum proof with the write ledger.
+
+    The identity PG→PG COPY fast path has its own copy ledger; this proof is
+    about the chunked row-path ledger, so the COPY route is switched off.
+    """
     import psycopg2
 
     import connectors.postgresql_writer as pg_writer_mod
 
+    monkeypatch.setenv("DATAFLOW_PG_PG_COPY", "0")
     monkeypatch.setattr(pg_writer_mod, "write_chunk_size", lambda *_a, **_k: 2)
 
-    creds = _pg_creds()
+    creds = pg_creds("P4")
     src_table = f"p4_src_{uuid.uuid4().hex[:8]}"
     dst_clean = f"p4_cln_{uuid.uuid4().hex[:8]}"
     dst_kill = f"p4_kil_{uuid.uuid4().hex[:8]}"
@@ -252,7 +241,7 @@ def test_pg_insert_ledger_mid_chunk_kill_resume(monkeypatch):
         assert not first.success
         monkeypatch.setattr(pg_writer_mod, "mark_raw_chunk_committed", orig_mark)
 
-        second = engine.execute_tracked(_req(dst_kill), job_id)
+        second = engine.execute_tracked(_req(dst_kill), job_id, resume=True)
         assert second.success, second.error
 
         conn = psycopg2.connect(

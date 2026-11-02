@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import oracle
 
 from connectors.generic_sql import _logical_type_from_sa, _tz_safe_projection
-from services.column_case import column_type_or_none, lookup_column
+from services.column_case import column_type_or_none, header_index, lookup_column, lookup_row_value
 from services.source_schema_authority import reconcile_source_types
 from src.transfer.engine import _rekey_to_read_columns
 
@@ -28,6 +28,16 @@ def test_lookup_column_is_case_tolerant_but_refuses_ambiguity():
     assert lookup_column({"id": "INT", "ID": "TEXT"}, "Id") is None
     assert column_type_or_none({"AMOUNT": "   "}, "amount") is None
     assert column_type_or_none({"amount": "DECIMAL(12,2)"}, "amount") == "DECIMAL(12,2)"
+
+
+def test_lookup_row_value_finds_folded_oracle_keys():
+    row = {"ID": "1", "AMOUNT": "1000.00", "CODE": "USD"}
+    assert lookup_row_value(row, "amount", "") == "1000.00"
+    assert lookup_row_value(row, "id") == "1"
+    assert lookup_row_value(row, "missing", "SENTINEL") == "SENTINEL"
+    assert lookup_row_value({"id": "1", "ID": "2"}, "Id", "SENTINEL") == "SENTINEL"
+    assert header_index(["ID", "AMOUNT", "CODE"], "amount") == 1
+    assert header_index(["id", "ID"], "Id") is None
 
 
 def test_reconcile_keeps_declared_spelling_for_folded_live_key():

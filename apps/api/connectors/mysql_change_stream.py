@@ -10,7 +10,6 @@ after restart. Lag is exposed via ``replication_lag_seconds()``.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Iterator
@@ -18,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.cdc_capability import LogCaptureRefusal, classify_log_capture_failure
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -27,9 +27,16 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import read_table_batch
+from connectors.mysql_reader import (
+    _instant_set_from_types,
+    _mysql_column_types,
+    read_table_batch,
+    read_table_scan_batch,
+)
 from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcBinlogGapError
+from services.timezone_policy import mysql_timestamp_instant_wire
+from services.value_serializer import WireCell, wire_cell
 
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
@@ -39,18 +46,201 @@ _DDL_RE = re.compile(
 _logger = logging.getLogger(__name__)
 
 
-def _serialize(value: Any) -> str:
-    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+def _binlog_file_index(name: str) -> tuple[str, int] | None:
+    """``mysql-bin.000123`` → ``("mysql-bin", 123)``. None when unordered."""
+    text = str(name or "")
+    prefix, dot, suffix = text.rpartition(".")
+    if not dot or not prefix or not suffix.isdigit():
+        return None
+    return prefix, int(suffix)
 
-    if value is None:
-        return SQL_NULL_SENTINEL
+
+def resume_token_from_consumed(
+    previous: dict[str, Any] | None,
+    consumed: dict[str, Any] | None,
+    *,
+    tables: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Next resume position is a binlog point this poll actually read.
+
+    ``SHOW MASTER STATUS`` and ``gtid_executed`` move when other sessions
+    commit. Stamping that live head onto an empty poll made the next
+    ``auto_position`` start past an update that was never applied
+    (DEF-C-005: source id 7 is 7777, destination still 17, job completed
+    with 0 records).
+    """
+    base = dict(previous) if isinstance(previous, dict) else {}
+    if not consumed:
+        return base or None
+    token = dict(base)
+    file_name = consumed.get("file")
+    pos = consumed.get("pos")
+    if file_name:
+        token["file"] = file_name
+    if pos is not None:
+        token["pos"] = pos
+    if consumed.get("tables"):
+        token["tables"] = list(consumed["tables"])
+    elif tables and "tables" not in token:
+        token["tables"] = list(tables)
+    # File and position are the resume. A GTID copied from the live master
+    # includes transactions this poll did not apply, and the next reader
+    # uses it whenever the file is missing.
+    if file_name and pos is not None:
+        token.pop("gtid", None)
+        token.pop("gtid_set", None)
+    return token or None
+
+
+def published_resume_token(
+    previous: dict[str, Any] | None,
+    last_position: dict[str, Any] | None,
+    *,
+    emitted: bool,
+    captured_row_dropped: bool,
+) -> dict[str, Any] | None:
+    """Watermark this poll may publish.
+
+    An Xid moves the binlog even when this table emitted nothing. Publishing
+    that head made the next read start past an insert, update, or delete
+    that was never applied (DEF-B2-009). A captured-table row that could not
+    be applied also refuses the advance. Returns None unless a captured-table
+    batch was emitted and no captured row was dropped.
+    """
+    if not emitted or captured_row_dropped or not last_position:
+        return None
+    return resume_token_from_consumed(previous, last_position)
+
+
+def binlog_schema_matches(event_schema: str, database: str) -> bool:
+    """Row events for this database, case-insensitive.
+
+    A case mismatch used to drop the row and still let the following Xid
+    advance the resume position past it. An empty configured database does
+    not filter (the reader was not told a schema).
+    """
+    wanted = str(database or "").casefold()
+    if not wanted:
+        return True
+    return str(event_schema or "").casefold() == wanted
+
+
+def consumed_reached_binlog_head(
+    consumed_file: str,
+    consumed_pos: int,
+    head_file: str,
+    head_pos: int,
+) -> bool | None:
+    """True when this poll read up to the head captured before the stream opened.
+
+    A later file with the same prefix is past that head. Two names that cannot
+    be ordered return None so a busy server is not failed on a guess.
+    """
+    try:
+        consumed_at = int(consumed_pos)
+        head_at = int(head_pos)
+    except (TypeError, ValueError):
+        return None
+    if str(consumed_file) == str(head_file):
+        return consumed_at >= head_at
+    consumed_idx = _binlog_file_index(consumed_file)
+    head_idx = _binlog_file_index(head_file)
+    if (
+        consumed_idx is None
+        or head_idx is None
+        or consumed_idx[0] != head_idx[0]
+    ):
+        return None
+    if consumed_idx[1] != head_idx[1]:
+        return consumed_idx[1] > head_idx[1]
+    return consumed_at >= head_at
+
+
+def _decode_binlog_json(value: Any) -> Any:
+    """Turn the ``bytes`` keys and string leaves of a binlog JSON document into ``str``.
+
+    python-mysql-replication decodes a MySQL binary JSON column into Python
+    containers whose keys and string values are ``bytes``. Serialised as is,
+    the keys read ``"b'k'"`` and the strings base64. A container can only come
+    from a JSON column (a BLOB stays ``bytes``), so decoding inside containers
+    never touches real binary data.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {_decode_binlog_json(k): _decode_binlog_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_decode_binlog_json(v) for v in value]
+    return value
+
+
+_ROLE_GRANT = re.compile(r"^GRANT\s+(`[^`]+`(?:@`[^`]*`)?(?:\s*,\s*`[^`]+`(?:@`[^`]*`)?)*)\s+TO\s", re.I)
+_GLOBAL_GRANT = re.compile(r"^GRANT\s+(.+?)\s+ON\s+\*\.\*\s+TO\s", re.I)
+#: Global privileges that satisfy each binlog requirement (``ALL PRIVILEGES``
+#: satisfies both). SUPER and MariaDB's BINLOG MONITOR also allow SHOW MASTER STATUS.
+_BINLOG_PRIVILEGES = {
+    "REPLICATION SLAVE": {"REPLICATION SLAVE"},
+    "REPLICATION CLIENT": {"REPLICATION CLIENT", "SUPER", "BINLOG MONITOR"},
+}
+
+
+def _global_privileges(cur: Any, statement: str) -> tuple[set[str], list[str]]:
+    """Global (``*.*``) privileges and role names listed by a SHOW GRANTS statement."""
+    cur.execute(statement)
+    privileges: set[str] = set()
+    roles: list[str] = []
+    for (line,) in cur.fetchall():
+        text = str(line).strip()
+        role_match = _ROLE_GRANT.match(text)
+        if role_match:
+            roles.extend(part.strip() for part in role_match.group(1).split(","))
+            continue
+        global_match = _GLOBAL_GRANT.match(text)
+        if global_match:
+            privileges.update(p.strip().upper() for p in global_match.group(1).split(","))
+    return privileges, roles
+
+
+def _missing_replication_privileges(cur: Any) -> list[str]:
+    """Binlog privileges the current user lacks; empty when satisfied or unknowable."""
+    try:
+        privileges, roles = _global_privileges(cur, "SHOW GRANTS FOR CURRENT_USER()")
+        if roles:
+            privileges |= _global_privileges(
+                cur, f"SHOW GRANTS FOR CURRENT_USER() USING {', '.join(roles)}"
+            )[0]
+    except Exception as exc:
+        _logger.warning("MySQL CDC grant check inconclusive: %s", exc)
+        return []
+    if "ALL PRIVILEGES" in privileges or "ALL" in privileges:
+        return []
+    return [
+        name for name, accepted in _BINLOG_PRIVILEGES.items() if not privileges & accepted
+    ]
+
+
+def _serialize(value: Any, *, instant: bool = False) -> str:
+    """One binlog/keyset cell as a wire cell (marked, so apply encodes it once).
+
+    ``instant`` is a MySQL ``TIMESTAMP`` column: its digits are the UTC instant
+    (binlog and a UTC-pinned session both hand back naive UTC), so the wire
+    carries the offset the way ``mysql_reader`` does. A ``DATETIME`` stays
+    zoneless wall-clock.
+    """
+    if isinstance(value, (dict, list, tuple)):
+        value = _decode_binlog_json(value)
+    if instant:
+        value = mysql_timestamp_instant_wire(value)
     if isinstance(value, datetime):
-        return value.isoformat()
-    return cell_to_string(value, preserve_sql_null=True)
+        return WireCell(value.isoformat())
+    return wire_cell(value)
 
 
 class MySqlChangeStreamCdc:
     """Log-based CDC for MySQL using the binlog stream."""
+
+    #: Why :meth:`is_available` said no, classified for the caller.
+    unavailable_reason: LogCaptureRefusal | None = None
 
     def __init__(
         self,
@@ -65,17 +255,23 @@ class MySqlChangeStreamCdc:
         primary_keys: dict[str, str] | None = None,
     ) -> None:
         from services.cdc_multi_table import normalize_table_list
+        from services.cdc_table_name import bare_table_keys, split_cdc_tables
 
         self.cfg = cfg
-        self.database = cfg.get("database") or cfg.get("schema") or ""
-        self.tables = normalize_table_list(table)
+        default_db = cfg.get("database") or cfg.get("schema") or ""
+        # D223: 'shop.orders' is table orders in database shop, joined once.
+        resolved_db, self.tables = split_cdc_tables(
+            normalize_table_list(table), default_db, dialect="mysql"
+        )
+        self.database = resolved_db or default_db
         if not self.tables:
             raise ValueError("MySQL CDC requires at least one table")
         self.table = self.tables[0]
         from services.cdc_identity import require_cdc_primary_keys_map
 
         self.primary_keys = require_cdc_primary_keys_map(
-            self.tables, primary_key=primary_key, primary_keys=primary_keys
+            self.tables, primary_key=primary_key,
+            primary_keys=bare_table_keys(primary_keys, self.database),
         )
         self.primary_key = self.primary_keys[self.table]
         self.columns = columns
@@ -90,6 +286,8 @@ class MySqlChangeStreamCdc:
         # remapped every captured table's positional UNKNOWN_COLn keys into
         # the wrong columns, so deletes removed the wrong destination rows.
         self._column_names_cache: dict[str, list[str]] = {}
+        #: Per-table ``TIMESTAMP`` columns (instants on the wire), same keying.
+        self._instant_columns_cache: dict[str, frozenset[str]] = {}
         self.source_key = connection_fingerprint(
             {**cfg, "type": "mysql"},
             connector_id=str(cfg.get("connector_id") or ""),
@@ -106,7 +304,6 @@ class MySqlChangeStreamCdc:
         self._signal_table_ready = False
         self._last_signal_poll_at = 0.0
         try:
-            import os as _os
 
             self._signal_poll_interval_sec = float(
                 getenv_brand(
@@ -116,13 +313,12 @@ class MySqlChangeStreamCdc:
             )
         except Exception:
             self._signal_poll_interval_sec = 15.0
-        if isinstance(resume_token, str) and resume_token:
-            try:
-                self.resume_token = json.loads(resume_token)
-            except Exception:
-                self.resume_token = None
-        else:
-            self.resume_token = resume_token or None
+        from services.cdc_resume_tokens import unwrap_resume_token
+
+        parsed = unwrap_resume_token(resume_token) if resume_token else None
+        # A double-encoded watermark used to fail one json.loads and start
+        # the reader at the current end of the binlog, skipping the gap.
+        self.resume_token = parsed if isinstance(parsed, dict) else None
         from services.cdc_lease import CdcLeaseGuard
 
         self._lease = CdcLeaseGuard(
@@ -184,17 +380,56 @@ class MySqlChangeStreamCdc:
     def close(self) -> None:
         self._lease.release()
 
+    def capture_has_pending(self) -> bool | None:
+        """True when this poll stopped before the head captured at poll start.
+
+        The head is ``SHOW MASTER STATUS`` taken before the stream opens.
+        Writes that land after that snapshot belong to the next poll. Comparing
+        to the live master instead keeps a busy server pending until the round
+        budget fails a catch-up that already read this table.
+        ``None`` when this reader has not consumed a position, no head was
+        captured, or the two binlog names cannot be ordered.
+        """
+        consumed_file = getattr(self, "_consumed_file", None)
+        consumed_pos = getattr(self, "_consumed_pos", None)
+        head_file = getattr(self, "_poll_head_file", None)
+        head_pos = getattr(self, "_poll_head_pos", None)
+        if (
+            not consumed_file
+            or consumed_pos is None
+            or not head_file
+            or head_pos is None
+        ):
+            return None
+        reached = consumed_reached_binlog_head(
+            str(consumed_file),
+            int(consumed_pos),
+            str(head_file),
+            int(head_pos),
+        )
+        if reached is None:
+            return None
+        return not reached
+
     def is_available(self) -> bool:
         """True when binlog is ON + ROW format and pymysqlreplication is importable.
 
-        Stream open is best-effort: missing REPLICATION privileges still return
-        True when server vars are correct so CI/integration can proceed; poll()
-        surfaces privilege errors clearly.
+        Also False when the connecting user lacks ``REPLICATION SLAVE`` or
+        ``REPLICATION CLIENT`` (D176): the snapshot would otherwise commit and
+        the run die afterwards on error 1227. When the grants cannot be read
+        the check is inconclusive and does not block; poll() still raises.
+
+        A ``False`` answer records :attr:`unavailable_reason` so the caller can
+        separate "this server does not write a ROW binlog" (degrade, declared)
+        from an attach failure that would silently stop carrying DELETEs.
         """
+        self.unavailable_reason = None
         try:
             import pymysqlreplication  # noqa: F401
-        except ImportError:
+        except ImportError as exc:
+            self.unavailable_reason = classify_log_capture_failure("mysql", f"ImportError: {exc}")
             return False
+        binlog_row_ready: bool | None = None
         try:
             conn = self._conn()
             with conn.cursor() as cur:
@@ -202,19 +437,36 @@ class MySqlChangeStreamCdc:
                 row = cur.fetchone()
                 if not row or str(row[1]).lower() not in {"on", "1", "true"}:
                     conn.close()
-                    return False
+                    binlog_row_ready = False
+                    raise RuntimeError(
+                        f"log_bin={(row[1] if row else 'unknown')} — binary logging is off"
+                    )
                 cur.execute("SHOW VARIABLES LIKE 'binlog_format'")
                 row = cur.fetchone()
                 if not row or (row[1] or "").upper() != "ROW":
                     conn.close()
-                    return False
+                    binlog_row_ready = False
+                    raise RuntimeError(
+                        f"binlog_format={(row[1] if row else 'unknown')} — ROW format required"
+                    )
                 # Debezium-class: MINIMAL/PARTIAL after-images omit unchanged cols
                 # and would NULL-wipe on SQL upsert — refuse until FULL.
                 cur.execute("SHOW VARIABLES LIKE 'binlog_row_image'")
                 row = cur.fetchone()
                 if row and (row[1] or "").upper() not in {"FULL", ""}:
                     conn.close()
-                    return False
+                    binlog_row_ready = False
+                    raise RuntimeError(
+                        f"binlog_row_image={row[1]} — FULL required so upserts do not NULL-wipe"
+                    )
+                missing = _missing_replication_privileges(cur)
+                if missing:
+                    conn.close()
+                    raise RuntimeError(
+                        f"the MySQL user needs REPLICATION SLAVE and REPLICATION CLIENT "
+                        f"on *.* to read the binlog; missing {' and '.join(missing)} "
+                        "(access denied for binlog streaming, error 1227)"
+                    )
             conn.close()
 
             try:
@@ -224,10 +476,18 @@ class MySqlChangeStreamCdc:
                 stream = BinLogStreamReader(**kwargs)
                 stream.close()
             except Exception as exc:
-                # Vars OK — treat as available; poll will raise with detail.
+                # Vars and grants OK — treat as available; poll will raise with detail.
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return True
-        except Exception:
+        except Exception as exc:
+            self.unavailable_reason = classify_log_capture_failure(
+                "mysql", str(exc), server_log_enabled=binlog_row_ready
+            )
+            _logger.warning(
+                "MySQL binlog capture unavailable: %s (%s)",
+                self.unavailable_reason.detail,
+                self.unavailable_reason.cause,
+            )
             return False
 
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:
@@ -268,17 +528,24 @@ class MySqlChangeStreamCdc:
         return kwargs
 
     def snapshot(self) -> Iterator[ChangeBatch]:
-        # Use a locked MySQL session for a consistent, gap-free snapshot handoff.
-        # LOCK TABLES blocks writers, SHOW MASTER STATUS captures the exact binlog
-        # position for the read view, then we read all tables on the same session.
-        # Poll() resumes after that position, so concurrent writes are delivered
-        # at-least-once; duplicates are acceptable, gaps are not.
+        # Debezium-class *minimal* locking: the global read lock is held only long
+        # enough to open a REPEATABLE READ consistent-snapshot transaction and read
+        # the binlog coordinates, then released. The dump itself runs inside that
+        # transaction's read view, so it is still gap-free while the server keeps
+        # accepting writes. Holding FLUSH TABLES WITH READ LOCK for the whole dump
+        # instead freezes every write on the instance for the duration — including
+        # this pipeline's own destination when it lives on the same server, which
+        # self-deadlocks into 'Lock wait timeout exceeded'.
+        # Poll() resumes after the captured position, so concurrent writes are
+        # delivered at-least-once; duplicates are acceptable, gaps are not.
         self._acquire_cdc_lease()
         self._ensure_decode_schema(resume_offset=self.resume_token)
         self.heartbeat()
 
         lock_conn = None
         locked = False
+        global_lock = False
+        snapshot_txn = False
         start_pos: dict[str, Any] = {
             "table": self.table,
             "tables": list(self.tables),
@@ -299,69 +566,166 @@ class MySqlChangeStreamCdc:
             lock_conn.autocommit(True)
 
             try:
-                with lock_conn.cursor() as cur:
-                    cur.execute("FLUSH TABLES WITH READ LOCK")
-                locked = True
-            except Exception as exc:
-                _logger.warning(
-                    "FLUSH TABLES WITH READ LOCK unavailable (%s); falling back to per-table LOCK TABLES", exc
-                )
-            if not locked:
-                table_refs = [quote_table_ref(t, dialect="mysql") for t in self.tables]
-                lock_clause = ", ".join(f"{ref} READ" for ref in table_refs)
                 try:
                     with lock_conn.cursor() as cur:
-                        cur.execute(f"LOCK TABLES {lock_clause}")
+                        cur.execute("FLUSH TABLES WITH READ LOCK")
                     locked = True
+                    global_lock = True
                 except Exception as exc:
                     _logger.warning(
-                        "Could not LOCK TABLES for consistent CDC snapshot: %s", exc
+                        "FLUSH TABLES WITH READ LOCK unavailable (%s); falling back to per-table LOCK TABLES", exc
                     )
+                if not locked:
+                    table_refs = [
+                        quote_table_ref(t, dialect="mysql") for t in self.tables
+                    ]
+                    lock_clause = ", ".join(f"{ref} READ" for ref in table_refs)
+                    try:
+                        with lock_conn.cursor() as cur:
+                            cur.execute(f"LOCK TABLES {lock_clause}")
+                        locked = True
+                    except Exception as exc:
+                        _logger.warning(
+                            "Could not LOCK TABLES for consistent CDC snapshot: %s", exc
+                        )
 
-            if locked:
-                with lock_conn.cursor() as cur:
-                    # Capture GTID on the same locked session (Debezium-class
-                    # handoff). File/pos alone is weaker when binlogs rotate or
-                    # poll prefers auto_position — at-least-once upserts still apply.
-                    gtid = self._current_gtid_executed(cur)
-                    for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
-                        try:
-                            cur.execute(sql)
-                            row = cur.fetchone()
-                            if row:
-                                start_pos = {
-                                    "file": row[0],
-                                    "pos": int(row[1]),
-                                    "table": self.table,
-                                    "tables": list(self.tables),
-                                }
-                                if gtid:
-                                    start_pos["gtid"] = gtid
-                                break
-                        except Exception as exc:
-                            _logger.debug("CDC binlog status query failed: %s", exc)
-                    if gtid and not start_pos.get("gtid"):
-                        start_pos["gtid"] = gtid
+                if locked:
+                    with lock_conn.cursor() as cur:
+                        # Coordinates are read before the read view is pinned,
+                        # while the lock still holds. `START TRANSACTION` itself
+                        # releases per-table LOCK TABLES locks, so capturing the
+                        # position after it leaves a window in which a commit is
+                        # behind the replay position and ahead of the read view —
+                        # neither dumped nor streamed. Read first and the same
+                        # commit is replayed, and at worst dumped twice, which
+                        # the at-least-once upsert absorbs.
+                        # GTID travels with the position (Debezium-class handoff):
+                        # file/pos alone is weaker when binlogs rotate or poll
+                        # prefers auto_position.
+                        gtid = self._current_gtid_executed(cur)
+                        for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+                            try:
+                                cur.execute(sql)
+                                row = cur.fetchone()
+                                if row:
+                                    start_pos = {
+                                        "file": row[0],
+                                        "pos": int(row[1]),
+                                        "table": self.table,
+                                        "tables": list(self.tables),
+                                    }
+                                    if gtid:
+                                        start_pos["gtid"] = gtid
+                                    break
+                            except Exception as exc:
+                                _logger.debug("CDC binlog status query failed: %s", exc)
+                        if gtid and not start_pos.get("gtid"):
+                            start_pos["gtid"] = gtid
+                    with lock_conn.cursor() as cur:
+                        # Freeze the read view while the lock still holds, so the
+                        # dump is consistent with the coordinates captured above
+                        # even after the lock is released.
+                        cur.execute(
+                            "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                        )
+                        cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+                        snapshot_txn = True
+                    if not global_lock:
+                        # MySQL releases LOCK TABLES locks when a transaction
+                        # begins, so the per-table fallback holds nothing from
+                        # here on. Say so, or the release below issues an
+                        # UNLOCK TABLES that would commit this read view away.
+                        locked = False
+            finally:
+                # The lock exists only to make the coordinates agree with the read
+                # view. Nothing after this point needs it, so it is released here on
+                # every path — including the ones where pinning the read view or
+                # reading the coordinates raised. A lock that outlives this block is
+                # held for the whole dump, which freezes every write on the instance
+                # and is exactly how a mysql -> mysql route whose destination shares
+                # the server times out against itself (1205).
+                if locked and lock_conn is not None:
+                    try:
+                        with lock_conn.cursor() as cur:
+                            cur.execute("UNLOCK TABLES")
+                    except Exception as exc:
+                        _logger.warning("UNLOCK TABLES failed: %s", exc)
+                    locked = False
+                    global_lock = False
         except Exception as exc:
             _logger.warning(
                 "Could not acquire MySQL lock connection for CDC snapshot: %s", exc
             )
             locked = False
+            if lock_conn is not None:
+                # Dropping the reference is not a release: the server holds a
+                # session's locks until the socket closes, and whether that
+                # happens now is a garbage-collection detail. Close it here.
+                try:
+                    lock_conn.close()
+                except Exception as close_exc:
+                    _logger.debug("Error closing MySQL lock connection: %s", close_exc)
+            snapshot_txn = False
             lock_conn = None
 
-        if not start_pos.get("file"):
+        coords_from_lock = bool(start_pos.get("file"))
+
+        from services.cdc_snapshot_resume import streaming_handoff_fields
+
+        resume_handoff = {}
+        if (
+            isinstance(self.resume_token, dict)
+            and self.resume_token.get("phase") == "snapshot"
+        ):
+            resume_handoff = streaming_handoff_fields(self.resume_token)
+        if resume_handoff.get("file"):
+            # Mid-dump resume must keep the original binlog tip. Recapturing
+            # SHOW MASTER STATUS here would skip writes between the first lock
+            # and this restart (silent CDC loss).
+            start_pos = {
+                **start_pos,
+                **resume_handoff,
+                "table": self.table,
+                "tables": list(self.tables),
+            }
+        elif not start_pos.get("file"):
             # Fallback when binlog position cannot be captured while locked.
             start_pos = self._current_binlog_position() or start_pos
 
-        # Resume mid-snapshot from the recorded table/offset.
+        if snapshot_txn and not coords_from_lock and not resume_handoff.get("file"):
+            # A pinned read view whose coordinates had to be recaptured after the
+            # fact cannot be dumped: that position is *later* than the read view,
+            # so a change in between would be neither dumped nor replayed — a
+            # silent CDC gap. Give the read view up and dump live rows instead,
+            # which the replay from that later position does cover.
+            _logger.warning(
+                "MySQL CDC snapshot pinned a read view but captured no binlog "
+                "coordinates with it; dumping unpinned so the replay position "
+                "cannot sit ahead of the dump"
+            )
+            if lock_conn is not None:
+                try:
+                    lock_conn.rollback()
+                except Exception as exc:
+                    _logger.debug("snapshot transaction rollback failed: %s", exc)
+                try:
+                    lock_conn.close()
+                except Exception as exc:
+                    _logger.debug("Error closing MySQL lock connection: %s", exc)
+            snapshot_txn = False
+            lock_conn = None
+
+        # Resume mid-snapshot from last_pk (Debezium-class) or legacy offset.
         offset = 0
         resume_table = self.table
+        resume_last_pk = ""
         if (
             isinstance(self.resume_token, dict)
             and self.resume_token.get("phase") == "snapshot"
         ):
             offset = int(self.resume_token.get("offset") or 0)
             resume_table = self.resume_token.get("table") or self.table
+            resume_last_pk = str(self.resume_token.get("last_pk") or "")
 
         if resume_table in self.tables:
             tables_to_snapshot = self.tables[self.tables.index(resume_table) :]
@@ -371,8 +735,74 @@ class MySqlChangeStreamCdc:
         try:
             for table in tables_to_snapshot:
                 table_offset = offset if table == resume_table else 0
-                while True:
-                    batch = read_table_batch(
+                table_last_pk = resume_last_pk if table == resume_table else ""
+                yield from self._snapshot_table_pages(
+                    table,
+                    start_pos=start_pos,
+                    table_offset=table_offset,
+                    table_last_pk=table_last_pk,
+                    lock_conn=lock_conn if (locked or snapshot_txn) else None,
+                )
+            handoff = {
+                **start_pos,
+                "phase": "streaming",
+                "offset": 0,
+                "table": self.table,
+            }
+            handoff.pop("last_pk", None)
+            yield ChangeBatch(resume_token=handoff)
+            # Adopt the captured consistent point as the live resume. Poll after
+            # a when_needed gap recovery must stream from this tip, not the
+            # purged file:pos the adapter was constructed with.
+            self.resume_token = dict(handoff)
+        finally:
+            if lock_conn:
+                if locked:
+                    try:
+                        with lock_conn.cursor() as cur:
+                            cur.execute("UNLOCK TABLES")
+                    except Exception as exc:
+                        _logger.warning("UNLOCK TABLES failed: %s", exc)
+                if snapshot_txn:
+                    try:
+                        lock_conn.rollback()
+                    except Exception as exc:
+                        _logger.debug("snapshot transaction rollback failed: %s", exc)
+                try:
+                    lock_conn.close()
+                except Exception as exc:
+                    _logger.debug("Error closing MySQL lock connection: %s", exc)
+
+    def _snapshot_table_pages(
+        self,
+        table: str,
+        *,
+        start_pos: dict[str, Any],
+        table_offset: int,
+        table_last_pk: str,
+        lock_conn: Any | None,
+    ) -> Iterator[ChangeBatch]:
+        """Page one table: held scan, PK-seek resume, or legacy OFFSET."""
+        from connectors.sql_snapshot_scan import close_table_scan
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_cols = _pk_columns(self.primary_keys.get(table, self.primary_key))
+        mode = classify_snapshot_resume(last_pk=table_last_pk, offset=table_offset)
+        scan_state: dict = {}
+        try:
+            while True:
+                if mode == "keyset":
+                    records = self._mysql_keyset_page(
+                        table, pk_cols, table_last_pk, lock_conn
+                    )
+                    if not records:
+                        break
+                else:
+                    _read_kw = dict(
                         host=self.cfg.get("host") or "localhost",
                         port=self.cfg.get("port") or 3306,
                         database=self.database,
@@ -385,43 +815,89 @@ class MySqlChangeStreamCdc:
                         columns=self.columns,
                         offset=table_offset,
                         limit=self.batch_size,
-                        conn=lock_conn if locked else None,
+                        conn=lock_conn,
                     )
+                    if mode == "scan":
+                        batch = read_table_scan_batch(
+                            **_read_kw, scan_state=scan_state
+                        )
+                    else:
+                        batch = read_table_batch(**_read_kw)
                     if not batch.rows:
                         break
-                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
-                    table_offset += len(batch.rows)
-                    yield ChangeBatch(
-                        inserts=records,
-                        resume_token={
-                            **start_pos,
-                            "phase": "snapshot",
-                            "offset": table_offset,
-                            "table": table,
-                        },
-                    )
-                    if len(batch.rows) < self.batch_size:
-                        break
-            yield ChangeBatch(
-                resume_token={
+                    # ``mysql_reader`` rows are wire strings (NULL already spelled
+                    # as the sentinel); mark them so apply does not encode twice.
+                    records = [
+                        {h: WireCell(c) for h, c in zip(batch.headers, row)}
+                        for row in batch.rows
+                    ]
+                table_offset += len(records)
+                table_last_pk = last_pk_from_records(records, pk_cols) or table_last_pk
+                token = {
                     **start_pos,
-                    "phase": "streaming",
-                    "offset": 0,
-                    "table": self.table,
+                    "phase": "snapshot",
+                    "offset": table_offset,
+                    "table": table,
                 }
-            )
+                if table_last_pk:
+                    token["last_pk"] = table_last_pk
+                yield ChangeBatch(inserts=records, resume_token=token)
+                if len(records) < self.batch_size:
+                    break
         finally:
-            if lock_conn:
-                if locked:
-                    try:
-                        with lock_conn.cursor() as cur:
-                            cur.execute("UNLOCK TABLES")
-                    except Exception as exc:
-                        _logger.warning("UNLOCK TABLES failed: %s", exc)
+            close_table_scan(scan_state)
+
+    def _mysql_keyset_page(
+        self,
+        table: str,
+        pk_cols: list[str],
+        last_pk: str,
+        conn: Any | None,
+    ) -> list[dict[str, Any]]:
+        """PK-seek one snapshot page on the locked session when we hold it."""
+        from connectors.sql_identifiers import quote_column_list, quote_table_ref
+        from services.cdc_snapshot_resume import quoted_pk_columns, snapshot_keyset_sql
+
+        table_ref = quote_table_ref(table, dialect="mysql")
+        quoted = quoted_pk_columns(pk_cols, "`")
+        sql, params = snapshot_keyset_sql(
+            table_ref=table_ref,
+            quoted_pk_columns=quoted,
+            last_pk=last_pk,
+            limit=self.batch_size,
+            dialect="mysql",
+            select_list=quote_column_list(self.columns, quote_char="`"),
+        )
+        close = conn is None
+        if conn is None:
+            conn = get_connection(
+                host=self.cfg.get("host") or "localhost",
+                port=self.cfg.get("port") or 3306,
+                database=self.database,
+                username=self.cfg.get("username") or "",
+                password=self.cfg.get("password") or "",
+                connection_string=self.cfg.get("connection_string") or "",
+                ssl=bool(self.cfg.get("ssl")),
+            )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+                headers = [d[0] for d in (cur.description or [])]
+            instants = self._instant_columns(table)
+            return [
+                {
+                    h: mysql_timestamp_instant_wire(v) if h in instants else v
+                    for h, v in zip(headers, row)
+                }
+                for row in rows
+            ]
+        finally:
+            if close:
                 try:
-                    lock_conn.close()
+                    conn.close()
                 except Exception as exc:
-                    _logger.debug("Error closing MySQL lock connection: %s", exc)
+                    _logger.debug("Error closing MySQL keyset connection: %s", exc)
 
     def _binlog_file_pos_on(self, cur) -> str | None:
         """Return ``file:pos`` from the open cursor for snapshot row stamps.
@@ -868,6 +1344,7 @@ class MySqlChangeStreamCdc:
         # whole cache would force every sibling table back through an ordinal
         # lookup against tables[0]'s columns.
         self._column_names_cache[self.table] = list(live["columns"].keys())
+        self._instant_columns_cache.pop(self.table, None)
         self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
         try:
             from services.cdc_mapping_review import flag_mapping_review
@@ -934,6 +1411,31 @@ class MySqlChangeStreamCdc:
         self._column_names_cache[tbl] = cols
         return cols
 
+    def _instant_columns(self, table: str | None = None) -> frozenset[str]:
+        """``TIMESTAMP`` columns of one captured table (UTC instants on the wire).
+
+        A binlog row carries no column types, and a ``DATETIME`` and a
+        ``TIMESTAMP`` both decode to a naive ``datetime``. Without the catalog
+        type a ``TIMESTAMP`` reached the writer as zoneless wall-clock and a
+        ``TIMESTAMPTZ`` destination refused it (D177).
+        """
+        tbl = table or self.table
+        cached = self._instant_columns_cache.get(tbl)
+        if cached is not None:
+            return cached
+        found: frozenset[str] = frozenset()
+        try:
+            conn = self._conn()
+            try:
+                with conn.cursor() as cur:
+                    found = _instant_set_from_types(_mysql_column_types(cur, tbl))
+            finally:
+                conn.close()
+        except Exception:
+            _logger.debug("MySQL TIMESTAMP column lookup failed for %s", tbl, exc_info=True)
+        self._instant_columns_cache[tbl] = found
+        return found
+
     def _remap_positional(
         self, row: dict[str, Any], *, table: str | None = None
     ) -> dict[str, Any]:
@@ -960,7 +1462,8 @@ class MySqlChangeStreamCdc:
         self, row: dict[str, Any], *, table: str | None = None
     ) -> dict[str, str]:
         row = self._remap_positional(row, table=table)
-        return {k: _serialize(v) for k, v in row.items()}
+        instants = self._instant_columns(table)
+        return {k: _serialize(v, instant=k in instants) for k, v in row.items()}
 
     def _pk_columns_for(self, table: str | None = None) -> list[str]:
         from services.cdc_snapshot_window import _pk_columns
@@ -990,6 +1493,8 @@ class MySqlChangeStreamCdc:
         (DBZ-3577 read-only window). Composite primary keys use lexicographic
         ``(c1, c2, …)`` ordering — never invent a single-column ORDER BY.
         """
+        from services.cdc_snapshot_filter import signal_filter_sql
+        from services.cdc_snapshot_resume import snapshot_keyset_sql
         from connectors.sql_identifiers import (
             quote_sql_identifier,
             require_safe_identifier,
@@ -1001,7 +1506,6 @@ class MySqlChangeStreamCdc:
         from services.cdc_snapshot_window import (
             _pk_columns,
             _pk_value,
-            keyset_successor_predicate,
         )
 
         pk_cols = _pk_columns(sig.primary_key or self.primary_key)
@@ -1017,7 +1521,6 @@ class MySqlChangeStreamCdc:
         qualified = f"{db}.{table}" if db else table
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
-        order_sql = ", ".join(pk_quoted)
         conn = self._conn()
         gtid_low = ""
         gtid_high = ""
@@ -1030,18 +1533,19 @@ class MySqlChangeStreamCdc:
                 # events stay in the same LSN family and can update the row.
                 gtid_low = self._current_gtid_executed(cur) or ""
                 binlog_low = self._binlog_file_pos_on(cur) or ""
-                if last_pk:
-                    where, params = keyset_successor_predicate(pk_quoted, last_pk)
-                    cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {where} "  # nosec B608
-                        f"ORDER BY {order_sql} LIMIT %s",
-                        (*params, limit),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {order_sql} LIMIT %s",  # nosec B608
-                        (limit,),
-                    )
+                # Optional operator filter (Debezium additional-conditions);
+                # binds only, compiled from the structured spec on the signal.
+                filter_sql, filter_params = signal_filter_sql(sig, dialect="mysql")
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=pk_quoted,
+                    last_pk=last_pk,
+                    limit=limit,
+                    dialect="mysql",
+                    filter_sql=filter_sql,
+                    filter_params=filter_params,
+                )
+                cur.execute(sql, params)
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
                 gtid_high = self._current_gtid_executed(cur) or ""
@@ -1146,7 +1650,10 @@ class MySqlChangeStreamCdc:
                         or ""
                     )
                     continue
-                if getattr(binlog_event, "schema", "") != self.database:
+                if not binlog_schema_matches(
+                    str(getattr(binlog_event, "schema", "") or ""),
+                    str(self.database or ""),
+                ):
                     continue
                 event_table = getattr(binlog_event, "table", "") or ""
                 if self._canonical_table(event_table) != peek_table:
@@ -1234,6 +1741,7 @@ class MySqlChangeStreamCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         from pymysqlreplication import BinLogStreamReader
@@ -1253,6 +1761,7 @@ class MySqlChangeStreamCdc:
         deadline = datetime.now(timezone.utc).timestamp() + self.max_wait_seconds
         buf = MultiTableTransactionBuffer()
         emitted = False
+        captured_row_dropped = False
         event_count = 0
 
         def _pos_now() -> dict[str, Any]:
@@ -1264,39 +1773,59 @@ class MySqlChangeStreamCdc:
             return {k: v for k, v in pos.items() if v is not None}
 
         def _token_at(pos: dict[str, Any] | None) -> dict[str, Any]:
-            # Only advance the resume token to a position we actually read.
-            # If a poll window reads no events, falling back to the previous
-            # resume token prevents BinLogStreamReader from jumping past events
-            # that were committed while the (non-blocking) stream was open.
-            fallback = self.resume_token if isinstance(self.resume_token, dict) else {}
-            token = dict(fallback)
-            if pos:
-                token.update(pos)
-            if not token:
-                token = {"tables": list(self.tables)}
-            try:
-                current = self._current_binlog_position() or {}
-                # Keep GTID as metadata, but _binlog_kwargs uses file/pos when
-                # present so the next BinLogStreamReader never jumps past unread
-                # rows based on a GTID that raced ahead during the poll window.
-                if current.get("gtid"):
-                    token["gtid"] = current["gtid"]
-                if not token.get("file") and current.get("file"):
-                    token["file"] = current["file"]
-                    token["pos"] = current.get("pos")
-            except Exception as exc:
-                _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-            return token
+            # Only a position this poll read. Live gtid_executed is not a cursor.
+            token = resume_token_from_consumed(
+                self.resume_token if isinstance(self.resume_token, dict) else None,
+                pos,
+                tables=list(self.tables),
+            )
+            return token or {"tables": list(self.tables)}
 
         def _emit_commit():
             nonlocal emitted
+            if captured_row_dropped:
+                return
             for batch in buf.commit(
                 resume_token=_token_at(last_position),
                 table_order=self.tables,
             ):
+                # A commit that touched no captured table is not a cursor.
+                # Publishing it moved the watermark past unread changes.
+                if int(batch.total_changes or 0) <= 0:
+                    continue
+                token = published_resume_token(
+                    self.resume_token if isinstance(self.resume_token, dict) else None,
+                    last_position,
+                    emitted=True,
+                    captured_row_dropped=False,
+                )
+                if token is None:
+                    continue
+                batch.resume_token = token
                 emitted = True
-                self.resume_token = batch.resume_token
+                self.resume_token = token
                 yield batch
+
+        # Seed the consumed point from the cursor we opened at. An empty
+        # iterator must not look caught-up just because the library's
+        # log_pos sits on the live head.
+        prior = self.resume_token if isinstance(self.resume_token, dict) else {}
+        if prior.get("file"):
+            self._consumed_file = prior.get("file")
+            self._consumed_pos = prior.get("pos")
+
+        # Head first, then read. A commit after this snapshot is the next poll.
+        # The live master moves under other sessions; it is not this poll's debt.
+        self._poll_head_file = None
+        self._poll_head_pos = None
+        head = self._current_binlog_position()
+        if head and head.get("file") and head.get("pos") is not None:
+            try:
+                self._poll_head_file = str(head["file"])
+                self._poll_head_pos = int(head["pos"])
+            except (TypeError, ValueError):
+                self._poll_head_file = None
+                self._poll_head_pos = None
 
         # Row changes + rotation + QueryEvent (DDL/BEGIN) + XidEvent (COMMIT).
         kwargs = self._binlog_kwargs(
@@ -1342,6 +1871,15 @@ class MySqlChangeStreamCdc:
                             pos["pos"] = stream.log_pos
                         self._record_schema_change(ddl=query.strip()[:2000], offset=pos)
                         self._last_event_at = datetime.now(timezone.utc)
+                    # DDL commits implicitly and logs no XID. Without this, a
+                    # trailing DDL on any table (our own signal table) kept the
+                    # poll "behind" its head forever (MX3-20).
+                    if buf.open_xid is None and stream.log_pos:
+                        last_position = {
+                            "file": getattr(stream, "log_file", ""),
+                            "pos": stream.log_pos,
+                            "tables": list(self.tables),
+                        }
                     continue
                 if isinstance(binlog_event, XidEvent):
                     if stream.log_pos:
@@ -1352,7 +1890,10 @@ class MySqlChangeStreamCdc:
                         }
                     yield from _emit_commit()
                     continue
-                if getattr(binlog_event, "schema", "") != self.database:
+                if not binlog_schema_matches(
+                    str(getattr(binlog_event, "schema", "") or ""),
+                    str(self.database or ""),
+                ):
                     continue
                 event_table = getattr(binlog_event, "table", "") or ""
                 if not self._table_allowed(event_table):
@@ -1403,6 +1944,16 @@ class MySqlChangeStreamCdc:
                         if pk:
                             buf.delete(tbl, pk, lsn=str(stream.log_pos or ""))
                             event_count += 1
+                        else:
+                            # A delete with no key cannot be applied. Advancing
+                            # past it drops the row. Raising keeps the cursor
+                            # and fails the poll instead of spinning "behind".
+                            captured_row_dropped = True
+                            raise RuntimeError(
+                                f"MySQL CDC delete on {tbl} has no primary key, "
+                                "so the change was not applied and the binlog "
+                                "position was not advanced"
+                            )
 
                 if stream.log_pos:
                     last_position = {
@@ -1414,6 +1965,16 @@ class MySqlChangeStreamCdc:
                 if event_count >= self.batch_size and buf.open_xid is None:
                     break
         finally:
+            # The library's log_pos walks to the head even when this poll
+            # applied nothing. A dropped captured row must stay unconsumed so
+            # the drain does not report caught up. An other-table commit may
+            # mark this poll's head consumed without publishing a watermark:
+            # the next run re-reads from the last applied change.
+            if last_position and not captured_row_dropped:
+                if last_position.get("file"):
+                    self._consumed_file = last_position.get("file")
+                if last_position.get("pos") is not None:
+                    self._consumed_pos = last_position.get("pos")
             stream.close()
 
         # Mid-window open txn: hold only when BEGIN was seen (explicit txn).
@@ -1432,8 +1993,15 @@ class MySqlChangeStreamCdc:
                 )
             return
 
-        token = _token_at(last_position)
-        if token.get("file") or token.get("gtid") or token.get("pos") is not None:
-            self.resume_token = token
-        if not emitted and (token.get("file") or token.get("gtid") or token.get("pos") is not None):
-            yield ChangeBatch(resume_token=token)
+        # Nothing applied: do not publish a cursor. An Xid on another table,
+        # or a live master read, used to become the next resume and the
+        # following run started past a change it never applied.
+        token = published_resume_token(
+            self.resume_token if isinstance(self.resume_token, dict) else None,
+            last_position,
+            emitted=emitted,
+            captured_row_dropped=captured_row_dropped,
+        )
+        if token is None:
+            return
+        self.resume_token = token

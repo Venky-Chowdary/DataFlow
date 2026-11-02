@@ -11,10 +11,10 @@ import {
   type HelpDocWorkflowStep,
 } from "../../lib/helpDocs";
 import {
-  BACKEND_SUITE,
   EVIDENCE_AS_OF,
-  NOT_PROVEN,
+  MARKETING_STACK,
   PROVEN_EVIDENCE,
+  catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
@@ -54,7 +54,7 @@ interface DocsPortalProps {
 }
 
 /** Bust browser cache when docs screenshots are recaptured at full desktop size. */
-const DOCS_SHOT_V = "20260804f";
+const DOCS_SHOT_V = "20260829a";
 function docsShotUrl(src: string): string {
   const sep = src.includes("?") ? "&" : "?";
   return `${src}${sep}v=${DOCS_SHOT_V}`;
@@ -62,44 +62,44 @@ function docsShotUrl(src: string): string {
 
 const SPACE_FRAMES = [
   {
-    src: docsShotUrl("/docs/screenshots/app-overview.png"),
-    alt: "Workspace Overview with sidebar and health cards",
-    caption: "1 · Overview — Platform / Operations / System sidebar and workspace health",
+    src: docsShotUrl("/docs/screenshots/app-jobs.png"),
+    alt: "Job Theater with whole-history counts",
+    caption: "1 · Jobs — Job Theater proof for every transfer and schedule tick",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-connectors-wizard.png"),
-    alt: "Choose a connector dialog on Connectors",
-    caption: "2 · Connectors — New connection opens Choose a connector",
+    src: docsShotUrl("/docs/screenshots/app-connectors.png"),
+    alt: "Connectors catalog in the live workspace",
+    caption: "2 · Connectors — saved drivers Studio, Query, and Jobs share",
   },
   {
     src: docsShotUrl("/docs/screenshots/app-transfer-source.png"),
-    alt: "Transfer Studio source step with sample orders CSV",
-    caption: "3 · Transfer Studio — Source with sample-orders.csv profiled",
+    alt: "Transfer Studio source step",
+    caption: "3 · Transfer Studio — Source with File, Database, or Cloud",
+  },
+  {
+    src: docsShotUrl("/docs/screenshots/app-transfer-destination.png"),
+    alt: "Transfer Studio Destination",
+    caption: "4 · Destination — File Export or a saved warehouse",
   },
   {
     src: docsShotUrl("/docs/screenshots/app-transfer-map.png"),
     alt: "Transfer Studio Map columns",
-    caption: "4 · Map — column edges, confidence, Accept risk",
+    caption: "5 · Map — column edges, confidence, Accept risk",
   },
   {
     src: docsShotUrl("/docs/screenshots/app-transfer-validate.png"),
     alt: "Transfer Studio Validate gates",
-    caption: "5 · Validate — gate dashboard before Execute unlocks",
+    caption: "6 · Validate — gate dashboard before Execute unlocks",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-pipelines-create.png"),
-    alt: "Create recurring sync pipeline form",
-    caption: "6 · Pipelines — Create recurring sync form (inline)",
+    src: docsShotUrl("/docs/screenshots/app-pipelines.png"),
+    alt: "Schedules workspace",
+    caption: "7 · Schedules — cadence, mode, and health",
   },
   {
-    src: docsShotUrl("/docs/screenshots/app-pipelines-drawer.png"),
-    alt: "Pipeline detail drawer with Run now",
-    caption: "7 · Pipelines — right drawer Overview / Run now / Edit",
-  },
-  {
-    src: docsShotUrl("/docs/screenshots/app-jobs.png"),
-    alt: "Job Theater reconcile view",
-    caption: "8 · Jobs — Job Theater proof for every transfer and pipeline tick",
+    src: docsShotUrl("/docs/screenshots/app-query.png"),
+    alt: "Query Playground",
+    caption: "8 · Query — read-only SQL against saved connectors",
   },
   {
     src: docsShotUrl("/docs/screenshots/app-mcp.png"),
@@ -195,12 +195,12 @@ function DocsSpaceShell({
 }
 
 const CATEGORY_SHOTS: Record<string, string> = {
-  start: docsShotUrl("/docs/screenshots/app-overview.png"),
-  transfer: docsShotUrl("/docs/screenshots/app-transfer-validate.png"),
-  connect: docsShotUrl("/docs/screenshots/app-pipelines-create.png"),
+  start: docsShotUrl("/docs/screenshots/app-jobs.png"),
+  transfer: docsShotUrl("/docs/screenshots/app-transfer-source.png"),
+  connect: docsShotUrl("/docs/screenshots/app-connectors.png"),
   ai: docsShotUrl("/docs/screenshots/app-mcp.png"),
   ops: docsShotUrl("/docs/screenshots/app-jobs.png"),
-  enterprise: docsShotUrl("/docs/screenshots/app-settings-sso.png"),
+  enterprise: docsShotUrl("/docs/screenshots/app-pipelines.png"),
 };
 
 /** Confluence-style space home — left nav + product-first start page. */
@@ -248,7 +248,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         ) : null}
       </header>
 
-      <DocsShotReel frames={SPACE_FRAMES} className="docs-shot-reel--hero" />
+      <DocsShotReel frames={SPACE_FRAMES} className="docs-shot-reel--hero" surface="Operator workspace" />
 
       <section className="docs-space-start">
         <h2>Start here (recommended order)</h2>
@@ -260,7 +260,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-installation")}>
             <span>01</span>
             <strong>Access your workspace</strong>
-            <em>Tenant URL, SSO sign-in, Viewer / Editor / Owner roles, Owner checklist.</em>
+            <em>Tenant URL, SSO sign-in, Viewer / Editor / Admin roles, admin checklist.</em>
           </button>
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-getting-started")}>
             <span>02</span>
@@ -275,7 +275,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-transfer-studio")}>
             <span>04</span>
             <strong>Transfer Studio guide</strong>
-            <em>Full sample-orders example: Source → Destination → Map → Validate → Run.</em>
+            <em>Full sample-orders example: Source → Destination → Transform → Map → Validate → Run.</em>
           </button>
         </div>
       </section>
@@ -322,21 +322,20 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           </li>
           <li>
             <strong>3 · Write + quarantine</strong>
-            <span>Clean rows land; bad cells isolate with column, value, and reason — never silently dropped.</span>
+            <span>Clean rows land; held-back cells isolate with column, value, and reason, ready to replay.</span>
           </li>
           <li>
             <strong>4 · Reconcile in Jobs</strong>
-            <span>Row counts and checksums prove the load. Pipeline ticks use this same Job Theater path.</span>
+            <span>Gate-8 reads the destination back — row counts, checksums, and a value and key census. Pipeline ticks use this same Job Theater path.</span>
           </li>
         </ol>
       </section>
 
       <section className="docs-space-algorithm" aria-label="Measured evidence">
-        <h2>What is proven, and what is not ({EVIDENCE_AS_OF})</h2>
+        <h2>Measured on live engines ({EVIDENCE_AS_OF})</h2>
         <p className="docs-space-evidence-lead">
           Each line is a live matrix run through the product path against a real engine, with the
-          destination re-read afterwards. Backend suite: {BACKEND_SUITE.passed.toLocaleString()}{" "}
-          passed, {BACKEND_SUITE.failed} failed, {BACKEND_SUITE.skipped.toLocaleString()} skipped.
+          destination read back afterwards.
         </p>
         <ul className="docs-space-evidence-list">
           {PROVEN_EVIDENCE.map((row) => (
@@ -348,12 +347,16 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
             </li>
           ))}
         </ul>
-        <p className="docs-space-evidence-lead">Not proven yet — do not plan around these:</p>
-        <ul className="docs-space-evidence-list docs-space-evidence-list--gaps">
-          {NOT_PROVEN.map((gap) => (
-            <li key={gap.area}>
-              <strong>{gap.area}</strong>
-              <span>{gap.reason}</span>
+      </section>
+
+      <section className="docs-space-algorithm" aria-label="Catalog families">
+        <h2>Catalog families</h2>
+        <p className="docs-space-evidence-lead">{catalogHonestyLead()}</p>
+        <ul className="docs-space-evidence-list">
+          {MARKETING_STACK.map((row) => (
+            <li key={row.family}>
+              <strong>{row.family} · {row.badge}</strong>
+              <span>{row.items} — {row.note}</span>
             </li>
           ))}
         </ul>
@@ -366,6 +369,8 @@ interface DocArticlePageProps {
   docId: HelpDocId;
   onNavigate: (route: PublicRoute) => void;
   onGetStarted: () => void;
+  /** Signed-in workspace: hide the marketing Contact sales CTA. */
+  hideMarketingCta?: boolean;
 }
 
 function DocsAnnotatedFigure({ figure }: { figure: HelpDocFigure }) {
@@ -421,7 +426,7 @@ function DocsWorkflow({ steps }: { steps: HelpDocWorkflowStep[] }) {
   );
 }
 
-export function DocArticlePage({ docId, onNavigate, onGetStarted }: DocArticlePageProps) {
+export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingCta = false }: DocArticlePageProps) {
   const doc = getHelpDoc(docId);
   const { prev, next } = helpDocNeighbors(docId);
   const hasWorkflow = doc.sections.some((s) => s.workflow && s.workflow.length > 0);
@@ -502,9 +507,11 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted }: DocArticlePa
           <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
             Try in Transfer Studio
           </button>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-            Contact sales
-          </button>
+          {hideMarketingCta ? null : (
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
+              Contact sales
+            </button>
+          )}
         </div>
       </footer>
     </DocsSpaceShell>

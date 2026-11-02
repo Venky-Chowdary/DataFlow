@@ -26,7 +26,10 @@ def test_local_engine_is_default_without_cloud():
     agent = DataPilotAgent()
     resp = agent.chat("what can you do?")
     assert resp.method == "pilot_local_engine"
-    assert "confirm" in (resp.answer or "").lower() or "transfer" in (resp.answer or "").lower()
+    answer = (resp.answer or "").lower()
+    assert "confirm" in answer or "transfer" in answer
+    assert "chatgpt" in answer or "foundation" in answer or "gru" in answer
+    assert "first-party brain" not in answer
     stats = corpus_stats()
     assert stats["total"] >= 1000, stats
     assert stats["by_family"].get("aggregate", 0) >= 100
@@ -72,6 +75,43 @@ def test_how_many_rows_binds_connector():
     assert name == "aggregate_data"
     assert args.get("table") == "orders"
     assert "Local Postgres" in str(args.get("connector_name") or "")
+
+
+def test_explicit_source_connector_beats_same_named_uploaded_dataset(monkeypatch):
+    from types import SimpleNamespace
+
+    import src.ai.copilot.tools as tools
+
+    resolved = []
+
+    class Analyst:
+        def extract_dataset_hint(self, _message):
+            return None
+
+        def resolve_dataset(self, candidate):
+            resolved.append(candidate)
+            return SimpleNamespace(
+                source="upload",
+                path="/tmp/sample_payments.csv",
+                name="sample_payments",
+            )
+
+    monkeypatch.setattr(tools, "get_data_analyst", lambda: Analyst())
+    for prompt, expected in (
+        (
+            "plan transfer of payments from Local Postgres to Prod Mongo",
+            "plan_transfer",
+        ),
+        (
+            "transfer payments from Local Postgres to Prod Mongo as upsert",
+            "start_transfer",
+        ),
+    ):
+        planned = infer_tools_from_message(prompt)
+        names = {name for name, _ in planned}
+        assert expected in names, planned
+        assert "start_dataset_transfer" not in names, planned
+    assert resolved == []
 
 
 def test_full_prompt_corpus_routing():

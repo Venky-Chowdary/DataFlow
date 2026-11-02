@@ -9,6 +9,7 @@ class GateStatus(str, Enum):
     PASS = "pass"
     BLOCK = "block"
     SKIP = "skip"
+    WARN = "warn"
 
 
 class GateId(str, Enum):
@@ -21,6 +22,10 @@ class GateId(str, Enum):
     G7_CAPACITY = "g7_capacity"
     G8_RECONCILIATION = "g8_reconciliation"
     G9_DATA_INTEGRITY = "g9_data_integrity"
+    G9_SYNC_CONTRACT = "g9_sync_contract"
+    G13_SOURCE_COVERAGE = "g13_source_coverage"
+    G14_DESTINATION_REQUIREMENTS = "g14_destination_requirements"
+    G15_DEST_EXISTS_SHAPE = "g15_dest_exists_shape"
 
 
 @dataclass
@@ -83,6 +88,9 @@ class ColumnMapping:
     intentional_omit: bool = False
     # Migration Risk Contract (signed dict) — boolean ack alone is incomplete.
     risk_contract: dict[str, Any] | None = None
+    # Dest-exists / Map stamps — G15 must see pending extras and false-friends.
+    assignment_strategy: str | None = None
+    review_kind: str | None = None
 
 
 @dataclass
@@ -95,6 +103,8 @@ class SourceConfig:
     columns: list[ColumnSchema] = field(default_factory=list)
     row_count_estimate: int = 0
     error: str | None = None
+    # table | query | procedure — CDC / SCD2 / mirror + callable is refuse-closed.
+    source_read_mode: str = ""
 
 
 @dataclass
@@ -111,6 +121,18 @@ class DestinationConfig:
     error: str | None = None
     # Optional G2 privilege probe metadata (method/status/detail) for UI honesty.
     privilege_probe: dict[str, Any] | None = None
+    # Redshift COPY FROM S3 staging-bucket probe. Missing config is not a block
+    # (PostgreSQL-wire insert remains valid). Denied is a G2 block.
+    redshift_staging_probe: dict[str, Any] | None = None
+    # Dest-exists contract inputs (G14/G15). Empty when the host did not introspect.
+    column_nullability: dict[str, bool] = field(default_factory=dict)
+    column_defaults: dict[str, str] = field(default_factory=dict)
+    identity_columns: list[str] = field(default_factory=list)
+    generated_columns: list[str] = field(default_factory=list)
+    # Live dest column → type. Keys are the dest name list for G14/G15
+    # dest-exists honesty. target_columns may be mapping targets only —
+    # do not treat them as the full dest when this map is populated.
+    column_types: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -131,8 +153,16 @@ class TransferPlan:
     sync_mode: str = ""
     # Operator identity from stream_contracts (source column name). Empty = infer.
     contract_primary_key: str = ""
+    # Live source-catalog PK columns for keyed sync modes whose contract
+    # declared none (a CDC schedule created via the bare API carries
+    # ``primary_key: ""``). The same fallback Validate/Execute policy gates
+    # apply via ``_catalog_pk_for_policy`` — empty means the source had no
+    # catalog key or could not be read, and G9 still blocks and names the
+    # missing declaration. A contract-declared key is never replaced.
+    source_primary_key_columns: list[str] = field(default_factory=list)
     # Introspected destination PK column names (when table exists).
     destination_pk_columns: list[str] = field(default_factory=list)
+    destination_table: str = ""
     # Introspected UNIQUE indexes/constraints (columns + optional expression CI flags).
     destination_unique_keys: list[dict[str, Any]] = field(default_factory=list)
     # Optional FK metadata for constraint findings (not a GateId).
@@ -142,6 +172,19 @@ class TransferPlan:
     destination_foreign_keys: list[dict[str, Any]] = field(default_factory=list)
     # Operator acknowledged destination FK mapping risk for this Validate run.
     fk_risk_acknowledged: bool = False
+    # Studio stream contracts carried into G9 so composite identity keys
+    # (``primary_key: [region, id]``) dedupe on the whole tuple — ACC-03.
+    stream_contracts: list[dict[str, Any]] = field(default_factory=list)
+    # In-file duplicate policy. ``keep_last`` collapses the sample before
+    # uniqueness gates; ``block`` refuses a repeated key.
+    in_file_dedupe: str = ""
+    # Operator duplicate policy (upsert / dedupe_skip / append). Empty means
+    # the sync mode owns uniqueness. Explicit append allows duplicate keys,
+    # including on full_refresh_overwrite.
+    duplicate_policy: str = ""
+    # Native DynamoDB HASH/RANGE and secondary-index scalar constraints.
+    destination_dynamo_key_schema: list[dict[str, Any]] = field(default_factory=list)
+    destination_dynamo_index_attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -151,6 +194,12 @@ class PreflightContext:
     plan: TransferPlan
     # Validate / Studio sample rows for Gate-5/8/9 dry-run proof (host may override).
     sample_rows: list[dict[str, Any]] = field(default_factory=list)
+    # Why the host could not read a sample (named on Gate-8), empty when it did.
+    sample_unavailable_reason: str = ""
+    # The source was read and holds no row: Gate-5/8/9 prove 0 = 0, not "no sample".
+    source_measured_empty: bool = False
+    proven_width_narrowings: Any = field(default_factory=dict)
+    population_fit_report: Any = None
 
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         return []

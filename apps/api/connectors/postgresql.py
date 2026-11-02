@@ -40,24 +40,31 @@ def test_postgresql(
             # inventory to anything resolving a name against it.
             cur.execute(
                 """
-                SELECT table_name
+                SELECT table_name, table_type
                 FROM information_schema.tables
-                WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
                 ORDER BY table_name
                 LIMIT %s
                 """,
                 (schema_name, _TABLE_PAGE + 1),
             )
-            fetched = [row[0] for row in cur.fetchall()]
-            truncated = len(fetched) > _TABLE_PAGE
-            tables = fetched[:_TABLE_PAGE]
+            fetched_rows = cur.fetchall()
+            truncated = len(fetched_rows) > _TABLE_PAGE
+            fetched = fetched_rows[:_TABLE_PAGE]
+            tables = [row[0] for row in fetched]
+            # Keep the object kind so callers can tell a view from a table
+            # (M18 — the listing showed every object as a plain table).
+            table_types = {
+                row[0]: ("view" if str(row[1]).upper() == "VIEW" else "table")
+                for row in fetched
+            }
             total = len(tables)
             if truncated:
                 cur.execute(
                     """
                     SELECT count(*)
                     FROM information_schema.tables
-                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                    WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
                     """,
                     (schema_name,),
                 )
@@ -77,6 +84,7 @@ def test_postgresql(
             message=message,
             driver="psycopg2",
             tables_truncated=truncated,
+            table_types=table_types,
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="psycopg2")

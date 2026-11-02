@@ -313,6 +313,9 @@ def test_scale_csv_to_dest_with_proof(tmp_path: Path, dest_format: str) -> None:
             destination=dest,
             sync_mode="full_refresh_overwrite",
             validation_mode="strict",
+            compliance_acknowledged=True,
+            acknowledgment_actor="proof",
+            acknowledgment_reason="Scale fixture full_name is synthetic",
         ),
         job_id=f"proof-scale-{uuid.uuid4().hex[:8]}",
     )
@@ -405,6 +408,9 @@ def test_scale_sqlite_to_sqlite_db2db_with_proof(tmp_path: Path) -> None:
             sync_mode="full_refresh_overwrite",
             validation_mode="strict",
             mappings=[{"source": c, "target": c, "confidence": 0.99} for c in columns],
+            compliance_acknowledged=True,
+            acknowledgment_actor="proof",
+            acknowledgment_reason="Scale fixture full_name is synthetic",
         ),
         job_id=f"proof-db2db-scale-{uuid.uuid4().hex[:8]}",
     )

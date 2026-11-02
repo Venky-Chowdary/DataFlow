@@ -125,9 +125,9 @@ def test_source_only_saas_tiers():
 
 
 def test_transfer_ready_saas_tiers():
-    """HubSpot/Salesforce certified; Stripe/Shopify/Airtable/Zendesk/Notion Planned."""
-    certified = {"hubspot", "salesforce"}
-    planned = {"stripe", "shopify", "airtable", "zendesk", "notion"}
+    """HubSpot/Salesforce certified duplex; Stripe source-certified; rest Planned."""
+    certified = {"hubspot", "salesforce", "stripe"}
+    planned = {"shopify", "airtable", "zendesk", "notion"}
     for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
@@ -135,6 +135,11 @@ def test_transfer_ready_saas_tiers():
         assert row["transfer_ready"] is True, brand
         assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live"}
+    )
+    assert stripe["source_ready"] is True
+    assert stripe["dest_ready"] is False
     for brand in planned:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from services.column_case import column_type_or_none
 from services.decision_kernel import (
     is_lossy_coercion,
     is_precision_collapse_coercion,
@@ -15,7 +17,10 @@ from services.type_system import (
     specialty_carrier_base,
     specialty_wire_preserves_value,
     uuid_capacity_string_carrier,
+    uuid_carrier_is_dialect_equivalent,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def validate_mapping_coercions(
@@ -28,6 +33,9 @@ def validate_mapping_coercions(
     validation_mode: str = "strict",
     dest_db_type: str = "",
     dest_table_exists: bool | None = None,
+    sample_rows: list | None = None,
+    samples_by_source: dict | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -45,10 +53,21 @@ def validate_mapping_coercions(
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
     """
+    from services.timezone_policy import declared_source_column_types
+
+    # A declared source zone (assume_timezone:X) makes a naive column an
+    # instant. G3 already reads types this way; reading the raw TIMESTAMP here
+    # re-blocked the run the operator just answered (MX2-01).
+    declared = declared_source_column_types(source_types, mappings)
+    reprojected = sorted(c for c, t in declared.items() if t != source_types.get(c))
+    if reprojected:
+        _logger.info(
+            "coercion check reads declared source zone for column(s) %s", reprojected,
+        )
+    source_types = declared
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
     balanced = mode in {"balanced", "review"}
-    floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
     # A declared omission has no destination type to coerce into; reading its
     # empty target as "pending Studio/Map stamp" turned the operator's recorded
@@ -56,7 +75,10 @@ def validate_mapping_coercions(
     for m in write_mappings(mappings):
         src = m.get("source", "")
         tgt = m.get("target", "")
-        src_type = source_types.get(src, "VARCHAR")
+        src_type = (
+            column_type_or_none(source_types, src)
+            or source_types.get(src, "VARCHAR")
+        )
         # Create-new stamps (e.g. BQ UUID→STRING) must win over missing live DDL.
         tgt_type = resolve_mapping_target_type(
             m,
@@ -91,16 +113,28 @@ def validate_mapping_coercions(
         specialty = specialty_carrier_base(src_type)
         wire_ok = (
             (src_logical == "uuid" and uuid_capacity_string_carrier(tgt_type))
+            # SQLite-class engines declare one untyped TEXT carrier: VARCHAR(36)
+            # would enforce nothing more, so TEXT is the value-preserving wire.
+            or uuid_carrier_is_dialect_equivalent(
+                src_type, tgt_type, dest_db=dest_db_type
+            )
             or (specialty and specialty_wire_preserves_value(specialty, tgt_type))
             or (specialty and specialty_carrier_base(tgt_type) == specialty)
         )
         if wire_ok and not type_locked:
             continue
+        population = _measured_population(
+            src, sample_rows=sample_rows, samples_by_source=samples_by_source
+        )
         precision_collapse = is_precision_collapse_coercion(
             src_type,
             tgt_type,
             dest_db=dest_db_type,
             dest_table_exists=dest_table_exists,
+            population=population,
+            source=src,
+            target=tgt,
+            proven=proven_width_narrowings,
         )
         lossy = (
             is_lossy_coercion(
@@ -108,6 +142,10 @@ def validate_mapping_coercions(
                 tgt_type,
                 dest_db=dest_db_type,
                 dest_table_exists=dest_table_exists,
+                population=population,
+                source=src,
+                target=tgt,
+                proven=proven_width_narrowings,
             )
             or precision_collapse
         )
@@ -128,8 +166,17 @@ def validate_mapping_coercions(
             severity = "block"
             locked_block = True
         elif type_locked and precision_collapse:
-            severity = "block"
-            locked_block = True
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            # Logical-type change already blocked above. A same-family collapse
+            # (Latin-1 code page, width, DECIMAL scale) honors a verified
+            # continue-policy contract. Boolean ack never clears.
+            if mapping_has_clearing_risk_contract(m):
+                severity = "warn"
+                locked_block = False
+            else:
+                severity = "block"
+                locked_block = True
         elif uuid_string_create_new:
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
@@ -178,6 +225,22 @@ def validate_mapping_coercions(
             ),
         })
     return issues
+
+
+def _measured_population(
+    source: str,
+    *,
+    sample_rows: list | None,
+    samples_by_source: dict | None,
+) -> list | None:
+    """Cells already measured for ``source``, else None (unread stays a collapse)."""
+    from services.column_case import column_population, lookup_column
+
+    if samples_by_source:
+        hit = lookup_column(samples_by_source, source)
+        if isinstance(hit, (list, tuple)) and len(hit) > 0:
+            return list(hit)[:500]
+    return column_population(sample_rows, source)
 
 
 def coercion_blocks_transfer(issues: list[dict[str, Any]]) -> bool:

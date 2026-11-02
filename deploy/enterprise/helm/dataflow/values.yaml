@@ -64,7 +64,7 @@ worker:
     tag: latest
     pullPolicy: IfNotPresent
   replicas: 2
-  mode: cdc,batch
+  mode: batch
   resources:
     requests:
       cpu: 500m
@@ -83,6 +83,7 @@ worker:
 
 scheduler:
   enabled: true
+  replicas: 1
   image:
     repository: ghcr.io/venky-chowdary/dataflow-api
     tag: latest
@@ -101,6 +102,32 @@ scheduler:
       operator: Equal
       value: worker
       effect: NoSchedule
+  affinity: {}
+
+# CDC holds a slot for the life of the source. Fixed replicas, not the batch HPA.
+cdcWorker:
+  enabled: true
+  replicas: 1
+  mode: cdc
+  image:
+    repository: ghcr.io/venky-chowdary/dataflow-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  nodeSelector:
+    workload: worker
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: worker
+      effect: NoSchedule
+  affinity: {}
 
 data:
   rds:

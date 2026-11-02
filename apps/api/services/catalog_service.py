@@ -62,6 +62,15 @@ def _enriched_connectors() -> list[dict]:
     return enriched
 
 
+def enriched_connectors() -> list[dict]:
+    """Every catalog row with canonical capability enrichment applied.
+
+    One enrichment owner: any surface that lists connectors reads this, so a
+    raw ``status: live`` tile cannot reach a client through a second path.
+    """
+    return [dict(row) for row in _enriched_connectors()]
+
+
 def search_catalog(
     query: str = "",
     role: str = "all",
@@ -69,6 +78,7 @@ def search_catalog(
     status: str = "",
     limit: int = 60,
     transfer_only: bool = False,
+    offset: int = 0,
 ) -> dict:
     data = load_catalog()
     connectors = _enriched_connectors()
@@ -106,9 +116,11 @@ def search_catalog(
             c for c in connectors
             if q in c["name"].lower() or q in c["id"].lower()
             or q in c.get("category", "").lower()
-            or q in c.get("description", "").lower()
             or q in c.get("driver_type", "").lower()
         ]
+        # Description text is not an identity. SFTP, Excel and CrateDB mention
+        # Postgres in their blurbs and were returned for query=postgres
+        # (QA RT5-13). A product name matches the name, id, or driver only.
 
     if category:
         connectors = [c for c in connectors if c.get("category") == category]
@@ -140,7 +152,13 @@ def search_catalog(
             connectors = [c for c in connectors if c.get("status") == status or c.get("effective_status") == status]
 
     total = len(connectors)
-    page = connectors[:limit]
+    # ``offset`` pages the filtered list. It used to be ignored, so with 700+
+    # tiles and ``limit`` capped at 200 everything past the first page was
+    # unreachable (QA round 11). ``next_offset`` is None on the last page.
+    start = max(0, int(offset or 0))
+    size = max(0, int(limit))
+    page = connectors[start:start + size]
+    next_offset = start + size if start + size < total else None
 
     suggested = []
     ids = SUGGESTED_SOURCES if role == "source" else SUGGESTED_DESTINATIONS if role == "destination" else []
@@ -179,6 +197,9 @@ def search_catalog(
     return {
         "total": total,
         "filtered": total,
+        "offset": start,
+        "limit": size,
+        "next_offset": next_offset,
         "connectors": page,
         "suggested": suggested if not q else page[:16],
         "categories": categories,
@@ -195,10 +216,42 @@ def search_catalog(
         # the number always describes the list the operator is looking at.
         "source_live": source_drivers,
         "dest_live": dest_drivers,
+        **_capability_driver_counts(),
         "role_live": (
             source_drivers if role == "source"
             else dest_drivers if role == "destination"
             else unique_drivers
+        ),
+    }
+
+
+def _capability_driver_counts() -> dict[str, object]:
+    """Driver counts from the same functions get_transfer_capabilities uses.
+
+    ``source_live`` / ``dest_live`` stay the catalog-tile counts. These fields
+    are the transfer-ready driver sets, which are a different population.
+    """
+    try:
+        from src.transfer.connector_capabilities import (
+            dest_live_driver_types,
+            source_live_driver_types,
+            transfer_live_driver_types,
+        )
+    except ImportError:
+        from transfer.connector_capabilities import (
+            dest_live_driver_types,
+            source_live_driver_types,
+            transfer_live_driver_types,
+        )
+    return {
+        "capabilities_source_live": len(source_live_driver_types()),
+        "capabilities_dest_live": len(dest_live_driver_types()),
+        "capabilities_transfer_live": len(transfer_live_driver_types()),
+        "count_note": (
+            "source_live and dest_live count catalog tiles you can pick. "
+            "capabilities_source_live, capabilities_dest_live, and "
+            "capabilities_transfer_live are the transfer-ready driver sets "
+            "get_transfer_capabilities reports. Catalog tiles are not transfer-live drivers."
         ),
     }
 
@@ -266,11 +319,14 @@ def catalog_summary() -> dict:
         "dest_live": len({
             c.get("driver_type") for c in enriched if c.get("dest_ready") and c.get("driver_type")
         }),
+        "catalog_tiles_are_not_transfer_live": True,
+        "customer_tenant_warehouse_sku_claimed": False,
         "honesty_note": (
-            "Public live/certified counts are unique engines (unique_drivers). "
-            "source_live / dest_live are the per-side counts, which differ: a "
-            "vector store is a destination only and a REST feed a source only. "
-            "catalog_tile_total includes Planned roadmap and hosted aliases."
+            "Catalog tiles are not transfer-live. Public live/certified counts "
+            "are unique engines (unique_drivers). source_live / dest_live are "
+            "the per-side counts, which differ: a vector store is a destination "
+            "only and a REST feed a source only. catalog_tile_total includes "
+            "Planned roadmap and hosted aliases."
         ),
     }
 

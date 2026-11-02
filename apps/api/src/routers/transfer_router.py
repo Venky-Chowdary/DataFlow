@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-import os
 from services.brand_env import getenv_brand
+from services.log_redaction import redact_log_text
+from services.mapping_proof import mappings_from_request
+from services.safe_errors import safe_http_exception
+from services.shape_preflight import ShapePreflightRefused
+from services.upload_limits import PayloadTooLarge, read_upload
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     File,
     Form,
     Header,
@@ -19,20 +26,27 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
-from services.team_store import can_read_workspace, can_write_workspace
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from services.rbac import require_admin_for_endpoints
+from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
+from services.transfer_policy_values import (
+    PolicyFieldsModel,
+    canonicalize_policy_fields,
+    form_policy_value,
+)
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
 
 def _can_access_job(request: Request | None, job: dict) -> bool:
-    """Workspace + optional resource-ACL gate for job-scoped sub-resources."""
+    """Tenant scope (D154) + optional resource-ACL gate for job-scoped sub-resources."""
     if request is None:
         return True
     workspace_id = (job.get("workspace_id") or "").strip()
     actor = _actor_email(request)
-    if workspace_id and not can_read_workspace(workspace_id, actor):
+    scope = tenant_scope(request)
+    if not scope.allows(workspace_id):
         return False
     job_id = str(job.get("_id") or job.get("id") or "").strip()
     if not job_id:
@@ -40,15 +54,13 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
     try:
         from services.resource_acl import assert_resource_acl
 
-        user = getattr(request.state, "user", None) or {}
-        is_admin = str(user.get("role") or "").lower() == "admin"
         assert_resource_acl(
             tenant_id=workspace_id,
             resource_type="job",
             resource_id=job_id,
             principal=actor,
             min_role="viewer",
-            is_admin=is_admin,
+            is_admin=scope.unrestricted,
         )
     except PermissionError:
         return False
@@ -66,6 +78,7 @@ def _stamp_job_mapping_artifacts(
     plan_payload: dict | None = None,
     mappings: list | None = None,
     destination_format: str = "",
+    source_format: str = "",
     source_kind: str = "",
     dest_kind: str = "",
     sync_mode: str = "",
@@ -82,6 +95,7 @@ def _stamp_job_mapping_artifacts(
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",
         sync_mode=sync_mode or "",
+        source_db_type=(source_format or "").lower(),
     )
     updates: dict = {}
     if proof:
@@ -144,11 +158,83 @@ def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
-def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
-    workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Write access to workspace denied")
-    return workspace_id
+def _validated_read_options(raw: dict | str | None) -> dict:
+    """Normalize the declared source read window, or 400 with the fix.
+
+    Accepts the JSON body dict and the multipart JSON string. Refusing here
+    means an unreadable sheet name is a rejected request, not a job that
+    quietly ingests the active sheet instead.
+    """
+    from services.read_options import ReadOptionsError, parse_read_options_payload
+
+    try:
+        return parse_read_options_payload(raw).to_wire()
+    except ReadOptionsError as exc:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
+
+
+def _validated_shape_recipe(raw: dict | str | None) -> dict:
+    """Normalize the declared shaping recipe, or 400 with the operation at fault.
+
+    A recipe the engine cannot run must be refused at the door: accepting it here
+    would only surface as a failed run after the source has been read.
+    """
+    from services.shape_models import ShapeError, ShapeRecipe
+
+    payload: Any = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except ValueError as exc:
+            raise safe_http_exception(
+                exc,
+                event="transfer.shape_recipe.invalid",
+                public_message="shape_recipe is not valid JSON.",
+                status_code=400,
+            ) from exc
+    if not payload:
+        return {}
+    try:
+        recipe = ShapeRecipe.parse(payload)
+    except ShapeError as exc:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
+    if recipe.set_errors:
+        raise HTTPException(
+            status_code=400,
+            detail=redact_log_text(recipe.set_errors[0].message),
+        )
+    return recipe.to_wire()
+
+
+def _connector_id_of(endpoint: Any) -> str | None:
+    return endpoint if isinstance(endpoint, str) else getattr(endpoint, "connector_id", None)
+
+
+def _assert_endpoint_connectors(
+    request: Request,
+    *,
+    read: tuple[Any, ...] = (),
+    write: tuple[Any, ...] = (),
+) -> None:
+    """404 / 403 when a named saved connector is outside the caller's tenant scope.
+
+    A ``connector_id`` expands into stored host and credentials, so it is
+    authorized against the connector's own workspace before it is resolved;
+    a destination also needs write access there.
+    """
+    for endpoint in read:
+        assert_connector_accessible(request, _connector_id_of(endpoint))
+    for endpoint in write:
+        assert_connector_accessible(request, _connector_id_of(endpoint), write=True)
+
+
 class EndpointDTO(BaseModel):
     # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
     # can fold them into extra — never silently strip live DDL / existence SSOT.
@@ -157,15 +243,15 @@ class EndpointDTO(BaseModel):
     kind: str = Field(..., description="file | database | file_export")
     format: str = Field("", description="csv, json, mongodb, postgresql, snowflake")
     connector_id: Optional[str] = None
-    host: str = ""
-    port: int = 0
-    database: str = ""
-    db_schema: str = Field("", alias="schema")
+    host: str = Field("", max_length=253)
+    port: int = Field(0, ge=0, le=65535)
+    database: str = Field("", max_length=128)
+    db_schema: str = Field("", alias="schema", max_length=128)
     table: str = ""
     collection: str = ""
-    username: str = ""
+    username: str = Field("", max_length=128)
     password: str = ""
-    connection_string: str = ""
+    connection_string: str = Field("", max_length=4096)
     warehouse: str = ""
     ssl: bool = False
     auth_mode: str = ""
@@ -184,13 +270,21 @@ class AnalyzeRequest(BaseModel):
     source_schema: dict[str, str] = Field(default_factory=dict)
 
 
-class ExecuteTransferRequest(BaseModel):
+class ExecuteTransferRequest(PolicyFieldsModel):
     """JSON body for SDK / GitOps transfers (db→db, no multipart file)."""
     source: EndpointDTO
     destination: EndpointDTO
     mappings: list[dict] = Field(default_factory=list)
     column_types: dict[str, str] = Field(default_factory=dict)
     sync_mode: str = "full_refresh_overwrite"
+
+    @field_validator("mappings")
+    @classmethod
+    def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        validate_mapping_type_stamps(value, context="mapping")
+        return value
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     skip_preflight: bool = False
@@ -198,9 +292,11 @@ class ExecuteTransferRequest(BaseModel):
     backfill_new_fields: bool = False
     write_via_staging: bool = False
     source_filter: dict = Field(default_factory=dict)
+    # Tabular read window for a file source: sheet, header_row, skip_rows, skip_footer.
+    read_options: dict = Field(default_factory=dict)
     priority_column: str = ""
     priority_direction: str = "desc"
-    limit: int = 0
+    limit: int = Field(default=0, ge=0, le=10_000_000)
     plan_id: Optional[str] = None
     stream_contracts: list[dict] = Field(default_factory=list)
     data_region: str = ""
@@ -209,12 +305,34 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
-    # Delivery guarantee selector — only at_least_once is allowed (GA).
-    delivery_guarantee: str = "at_least_once"
+    source_timezone: str = ""
+
+    @field_validator("source_timezone")
+    @classmethod
+    def _validate_source_timezone(cls, value: str) -> str:
+        from services.timezone_policy import validate_source_timezone
+
+        zone, error = validate_source_timezone(value)
+        if error:
+            raise ValueError(error)
+        return zone
+
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
+    number_locale: str = ""
+    # Delivery guarantee — auto selects dest-owned exactly-once on an eligible
+    # CDC route. Pin at_least_once to keep upsert redelivery.
+    delivery_guarantee: str = "auto"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
     fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL disclosed at Validate (e.g. the
+    # unique index an upsert needs on an existing table — D101).
+    ddl_changes_acknowledged: bool = False
+    # Empty a populated destination from a 0-row source on purpose (D56).
+    empty_source_overwrite_acknowledged: bool = False
+    # Accept a load far below this route's history (strict volume guard, D82).
+    load_volume_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
@@ -223,9 +341,21 @@ class ExecuteTransferRequest(BaseModel):
     # Map→DDL fingerprint the operator saw pass at Validate. Without it Execute
     # can only re-check its own derived stamps against themselves.
     approved_ddl_identity_hash: str = ""
+    # Ordered row-local shaping applied on the read, before mapping.
+    shape_recipe: dict = Field(default_factory=dict)
+    # The recipe identity Validate approved; a different recipe is refused.
+    approved_shape_recipe_hash: str = ""
+    # Transform Library provenance — which recipe/version/params produced the
+    # shape_recipe. Proof-pack only; the engine executes shape_recipe.
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict = Field(default_factory=dict)
+    # Set-graph identity. Empty matches a recipe with no set nodes.
+    approved_set_hash: str = ""
 
 
-class MapColumnsRequest(BaseModel):
+class MapColumnsRequest(PolicyFieldsModel):
     source_columns: list[str]
     source_schema: dict[str, str] = Field(default_factory=dict)
     target_columns: list[str] = Field(default_factory=list)
@@ -250,6 +380,10 @@ class MapColumnsRequest(BaseModel):
     # Module 13 — prior operator mappings (user_override / risk contracts) must
     # survive re-map; engine alternatives attach as engine_suggestion only.
     prior_mappings: list[dict] = Field(default_factory=list)
+    # Optional job / plan id so N2 AI-egress events are job-scoped in the chain.
+    # Studio Map before a job exists leaves this empty; the manifest records
+    # resource ``map:unscoped`` rather than inventing a job.
+    job_id: str = ""
 
 
 @router.get("/capabilities")
@@ -305,8 +439,9 @@ async def transfer_readiness():
 
 
 @router.post("/route")
-async def analyze_route(body: AnalyzeRequest):
+async def analyze_route(body: AnalyzeRequest, request: Request):
     """Score a source → destination route with conversion and driver hints."""
+    _assert_endpoint_connectors(request, read=(body.source, body.destination))
     from services.universal_router import analyze_route as score_route
 
     from ..transfer.adapters import resolve_endpoint
@@ -320,8 +455,9 @@ async def analyze_route(body: AnalyzeRequest):
 
 
 @router.post("/analyze")
-async def analyze_transfer(request: AnalyzeRequest):
+async def analyze_transfer(request: AnalyzeRequest, http_request: Request):
     """Understand source/destination and show auto-creation plan."""
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
@@ -337,20 +473,27 @@ async def analyze_transfer(request: AnalyzeRequest):
 
 
 @router.post("/introspect")
-async def introspect_endpoint_route(request: AnalyzeRequest):
+async def introspect_endpoint_route(request: AnalyzeRequest, http_request: Request):
     """Probe source or destination — list tables/collections, infer schema."""
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     from ..transfer.endpoint_intelligence import introspect_endpoint
     from ..transfer.models import EndpointConfig
 
     src = EndpointConfig.from_dict(request.source.kind, request.source.model_dump(by_alias=True))
     dst = EndpointConfig.from_dict(request.destination.kind, request.destination.model_dump(by_alias=True))
     # Role-tag so missing-table copy is correct (source ≠ create-on-write).
-    src.extra = {**(src.extra or {}), "introspect_purpose": "source"}
+    src.extra = {**(src.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
     dst.extra = {**(dst.extra or {}), "introspect_purpose": "destination"}
-    return {
-        "source": introspect_endpoint(src),
-        "destination": introspect_endpoint(dst),
-    }
+
+    def _probe() -> dict[str, Any]:
+        return {
+            "source": introspect_endpoint(src),
+            "destination": introspect_endpoint(dst),
+        }
+
+    # Snowflake / warehouse introspect is seconds of network. Running it on the
+    # event loop freezes /health (nginx 504) while Destination is still open.
+    return await asyncio.to_thread(_probe)
 
 
 @router.post("/map")
@@ -379,10 +522,20 @@ async def map_columns_route(body: MapColumnsRequest):
         }
         for c in body.source_columns
     ]
-    target_schemas = [
-        {"name": c, "inferred_type": body.target_schema.get(c, "VARCHAR"), "samples": []}
-        for c in body.target_columns
-    ] if body.target_columns else None
+    # Only a destination type the probe actually read is a declared type. Filling
+    # the gap with "VARCHAR" made the mapper compare every DECIMAL/DATE source
+    # against a string column nothing declares, so faithful create-new carriers
+    # were billed as lossy casts; names-only lets the type kernel project the
+    # carrier the run will really CREATE.
+    target_schemas = (
+        [
+            {"name": c, "inferred_type": body.target_schema[c], "samples": []}
+            for c in body.target_columns
+        ]
+        if body.target_columns
+        and all(str(body.target_schema.get(c) or "").strip() for c in body.target_columns)
+        else None
+    )
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -417,7 +570,17 @@ async def map_columns_route(body: MapColumnsRequest):
                 body.source_kind, body.file_format or ""
             ),
             prior_mappings=list(body.prior_mappings or []),
+            job_id=str(body.job_id or "").strip(),
         )
+    from services.schema_drift_map_review import flag_rename_suggestions
+
+    flag_rename_suggestions(
+        result["mappings"],
+        source_columns=list(body.source_columns or []),
+        target_columns=list(body.target_columns or []),
+        schema_policy=body.schema_policy or "manual_review",
+        table_exists=body.destination_table_exists,
+    )
     nested_fields: list[dict[str, str]] = []
     try:
         from services.json_intelligence import flatten_column_recommendations
@@ -439,6 +602,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
+        "shape_contract": result.get("shape_contract", {}),
         "quality_issues": result.get("quality_issues", []),
         # The engine computes these; dropping them here left the Map step
         # showing client-side guesses while the real verdict stayed server-side.
@@ -461,8 +625,17 @@ class CreatePlanRequest(BaseModel):
     sample_rows: list[dict] = Field(default_factory=list)
     policies: dict = Field(default_factory=dict)
 
+    @field_validator("policies")
+    @classmethod
+    def _policy_values_are_known(cls, value):
+        # The Studio /run form inherits these when its own field is blank, so
+        # an unknown word here would reach Execute unchecked (QA r12 bugs 6/7).
+        if not isinstance(value, dict):
+            return value
+        return canonicalize_policy_fields(value, drop_blank=False)
 
-class PlanMapRequest(BaseModel):
+
+class PlanMapRequest(PolicyFieldsModel):
     validation_mode: str = "balanced"
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
@@ -480,9 +653,26 @@ class UpdatePlanRequest(BaseModel):
     sample_rows: Optional[list[dict]] = None
     policies: Optional[dict] = None
 
+    @field_validator("policies")
+    @classmethod
+    def _policy_values_are_known(cls, value):
+        # The Studio /run form inherits these when its own field is blank, so
+        # an unknown word here would reach Execute unchecked (QA r12 bugs 6/7).
+        if not isinstance(value, dict):
+            return value
+        return canonicalize_policy_fields(value, drop_blank=False)
+
 
 class SyncMappingsRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
+
+    @field_validator("mappings")
+    @classmethod
+    def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        validate_mapping_type_stamps(value, context="mapping")
+        return value
 
 
 @router.get("/plans")
@@ -538,7 +728,12 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
         plan = patch_plan(plan_id, body.model_dump(exclude_none=True))
         return {"plan": plan.to_dict()}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_update.errored",
+            public_message="Could not update transfer plan.",
+            status_code=404,
+        ) from e
 
 
 @router.post("/plans/{plan_id}/mappings")
@@ -549,7 +744,12 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
         plan = sync_plan_mappings(plan_id, body.mappings)
         return {"plan": plan.to_dict()}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_mappings.errored",
+            public_message="Could not update transfer mappings.",
+            status_code=404,
+        ) from e
 
 
 @router.post("/plans/{plan_id}/map")
@@ -564,17 +764,103 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
             source_samples=body.source_samples or None,
         )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_map.errored",
+            public_message="Could not map transfer plan.",
+            status_code=404,
+        ) from e
+
+
+class PlanPreflightRequest(BaseModel):
+    """Operator attestations posted with a persisted-plan preflight run.
+
+    Validate is where a PII/drift/FK risk is accepted, so this transport must
+    carry the attestation — a body-less call cannot clear a compliance gate.
+    """
+
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL disclosed at Validate (D101).
+    ddl_changes_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    # Approved pre-load transform recipe. Execute shapes rows on the read, so the
+    # gates have to judge the transformed image, not the raw source.
+    shape_recipe: dict[str, Any] | None = None
+    # Studio Validate of a stored 1M-row upload must not occupy the HTTP
+    # worker. When true the handler returns 202 and GET /preflight polls.
+    async_run: bool = False
+
+
+@router.get("/plans/{plan_id}/preflight")
+async def get_plan_preflight(plan_id: str, run_id: str = ""):
+    from services.plan_preflight_job import get_plan_preflight_job
+
+    job = get_plan_preflight_job(plan_id, run_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No Validate run for this plan")
+    return job
 
 
 @router.post("/plans/{plan_id}/preflight")
-async def preflight_transfer_plan(plan_id: str):
+async def preflight_transfer_plan(
+    plan_id: str,
+    body: PlanPreflightRequest | None = None,
+):
+    from fastapi.responses import JSONResponse
+
+    from services.acknowledgment_contract import (
+        AcknowledgmentRefused,
+        resolve_acknowledgments,
+    )
+    from services.plan_preflight_job import start_plan_preflight_job
     from services.transfer_plan_service import run_plan_preflight
 
+    payload = body or PlanPreflightRequest()
     try:
-        return run_plan_preflight(plan_id)
+        ack = resolve_acknowledgments(
+            compliance=payload.compliance_acknowledged,
+            schema_drift=payload.schema_drift_acknowledged,
+            fk_risk=payload.fk_risk_acknowledged,
+            ddl_changes=payload.ddl_changes_acknowledged,
+            actor=payload.acknowledgment_actor,
+            reason=payload.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as e:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(e))
+        ) from e
+
+    if payload.async_run:
+        job = start_plan_preflight_job(
+            plan_id,
+            acknowledgments=ack,
+            shape_recipe=payload.shape_recipe,
+        )
+        return JSONResponse(status_code=202, content=job)
+
+    try:
+        # Even the sync path leaves the event loop — /health must answer while
+        # a warehouse probe or file walk runs.
+        return await asyncio.to_thread(
+            run_plan_preflight,
+            plan_id,
+            acknowledgments=ack,
+            shape_recipe=payload.shape_recipe,
+        )
+    except ShapePreflightRefused as e:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(e))
+        ) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_preflight.errored",
+            public_message="Could not run transfer preflight.",
+            status_code=400,
+        ) from e
 
 
 @router.post("/plans/{plan_id}/approve")
@@ -585,7 +871,12 @@ async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
         plan = approve_plan(plan_id, version)
         return {"plan": plan.to_dict()}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_approve.errored",
+            public_message="Could not approve transfer plan.",
+            status_code=404,
+        ) from e
 
 
 @router.get("/plans/{plan_id}/run-payload")
@@ -596,7 +887,12 @@ async def transfer_plan_run_payload(plan_id: str):
     try:
         return build_run_payload(plan_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_run_payload.errored",
+            public_message="Could not build transfer run payload.",
+            status_code=400,
+        ) from e
 
 
 @router.post("/analyze-file")
@@ -613,15 +909,22 @@ async def analyze_file_transfer(
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
-    content = await file.read()
+    content = await read_upload(file)
     from ..services.file_parser import FileParser
     src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
     if src_fmt == "unknown":
         src_fmt = "csv"
     try:
         columns, schema, row_count = parse_file_route_sample(content, file.filename or "upload.csv")
+    except PayloadTooLarge:
+        raise
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.file_sample.invalid",
+            public_message="Could not parse the uploaded file sample.",
+            status_code=400,
+        ) from exc
     dest = EndpointConfig(
         kind=dest_kind,
         format=dest_format,
@@ -637,6 +940,16 @@ async def analyze_file_transfer(
         source_schema=schema,
     )
     plan["row_count_estimate"] = row_count
+    stored_file_id = ""
+    try:
+        from services.file_parser import store_upload
+
+        stored = store_upload(file.filename or "upload.csv", content)
+        stored_file_id = str(stored.get("file_id") or "")
+    except Exception:
+        stored_file_id = ""
+    if stored_file_id:
+        plan["file_id"] = stored_file_id
     return plan
 
 
@@ -649,22 +962,50 @@ async def execute_transfer_json(
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
-    from services.execution_engine_contract import (
-        DeliveryGuaranteeError,
-        assert_delivery_guarantee_allowed,
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        dest_allow_append_only,
+        route_declares_log_position,
+        route_has_cdc_pk,
+        select_route_delivery,
     )
+    from services.execution_engine_contract import DeliveryGuaranteeError
+    from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
-    from ..transfer.models import EndpointConfig, TransferRequest
+    from ..transfer.models import EndpointConfig, TransferRequest, endpoint_to_dict
 
+    src_preview = EndpointConfig.from_dict(
+        body.source.kind, body.source.model_dump(by_alias=True)
+    )
+    dst_preview = EndpointConfig.from_dict(
+        body.destination.kind, body.destination.model_dump(by_alias=True)
+    )
     try:
-        assert_delivery_guarantee_allowed(body.delivery_guarantee)
-    except DeliveryGuaranteeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # auto is the product default. select_route_delivery keeps an explicit
+        # pin and resolves auto. assert_requested_cdc_delivery rejects auto,
+        # which 400s every JSON execute that omits the field.
+        select_route_delivery(
+            body.delivery_guarantee,
+            sync_mode=body.sync_mode or "",
+            dest_type=str(getattr(dst_preview, "format", "") or ""),
+            source_type=str(getattr(src_preview, "format", "") or ""),
+            has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            has_lsn_column=route_declares_log_position(body.stream_contracts),
+            allow_append_only=dest_allow_append_only(dst_preview),
+            callable_source=is_callable_source(src_preview),
+            dest_cfg=endpoint_to_dict(dst_preview),
+        )
+    except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
 
-    workspace_id = _resolve_write_workspace(request, workspace_id)
-    src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
-    dst = EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True))
+    workspace_id = resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
+    src = src_preview
+    dst = dst_preview
+    require_admin_for_endpoints(request, workspace_id, src, dst)
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")
@@ -673,6 +1014,7 @@ async def execute_transfer_json(
     request_obj = TransferRequest(
         source=src,
         destination=dst,
+        source_timezone=body.source_timezone or "",
         mappings=list(body.mappings or []),
         column_types=dict(body.column_types or {}),
         # Public execute never honors client skip_preflight (enterprise fail-closed).
@@ -681,6 +1023,7 @@ async def execute_transfer_json(
         schema_policy=body.schema_policy or "manual_review",
         validation_mode=body.validation_mode or "strict",
         source_filter=dict(body.source_filter or {}),
+        read_options=_validated_read_options(body.read_options),
         priority_column=body.priority_column or "",
         priority_direction=body.priority_direction or "desc",
         limit=int(body.limit or 0),
@@ -693,12 +1036,18 @@ async def execute_transfer_json(
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
         date_locale=body.date_locale,
+        number_locale=body.number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=body.delivery_guarantee or "at_least_once",
+        delivery_guarantee=body.delivery_guarantee or "auto",
         compliance_acknowledged=bool(body.compliance_acknowledged),
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+        ddl_changes_acknowledged=bool(body.ddl_changes_acknowledged),
+        empty_source_overwrite_acknowledged=bool(
+            body.empty_source_overwrite_acknowledged
+        ),
+        load_volume_acknowledged=bool(body.load_volume_acknowledged),
         acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
         acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=str(
@@ -706,13 +1055,29 @@ async def execute_transfer_json(
         ).strip(),
         approved_ddl_identity_hash=str(body.approved_ddl_identity_hash or "").strip(),
         decision_artifact=dict(body.decision_artifact or {}),
+        shape_recipe=_validated_shape_recipe(body.shape_recipe),
+        approved_shape_recipe_hash=str(
+            body.approved_shape_recipe_hash or ""
+        ).strip(),
+        transform_recipe_id=str(body.transform_recipe_id or "").strip(),
+        transform_recipe_version=int(body.transform_recipe_version or 0),
+        transform_recipe_version_mode=str(
+            body.transform_recipe_version_mode or "pin"
+        ).strip().lower()
+        or "pin",
+        transform_recipe_params=dict(body.transform_recipe_params or {}),
+        approved_set_hash=str(body.approved_set_hash or "").strip(),
     )
     from services.batch_progress import effective_backfill_new_fields
 
+    # Only the operator's toggle and the policy persist on the request. A
+    # create_new stamp in the mappings is not folded in here: it says "the table
+    # did not exist" for the run that wrote it, and a schedule replaying it
+    # against the table that run created would silently ADD COLUMN. Execute
+    # derives that part from the live destination.
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
-        mappings=request_obj.mappings,
     )
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -727,18 +1092,33 @@ async def execute_transfer_json(
                 request_obj.column_types = payload.get("column_types") or {}
             plan_payload = payload
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise safe_http_exception(
+                e,
+                event="transfer.plan_execute.errored",
+                public_message="Could not prepare transfer execution.",
+                status_code=400,
+            ) from e
     else:
         plan_payload = None
 
-    # Recompute after plan mappings may have been merged (create_new → ADD COLUMN).
-    request_obj.backfill_new_fields = effective_backfill_new_fields(
-        backfill_new_fields=request_obj.backfill_new_fields,
-        schema_policy=request_obj.schema_policy,
-        mappings=request_obj.mappings,
-    )
-
     _residency_check(request, dst, region)
+    from src.transfer.contract_engine import stamp_request_contract
+
+    plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
+    try:
+        stamp_request_contract(
+            request_obj,
+            explicit_id=body.contract_id or "",
+            explicit_require=bool(body.require_signed_contract),
+            policies=plan_policies if isinstance(plan_policies, dict) else {},
+        )
+    except ValueError as exc:
+        raise safe_http_exception(
+            exc,
+            event="transfer.plan_execute.errored",
+            public_message="Could not validate the transfer request contract.",
+            status_code=400,
+        ) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -749,15 +1129,26 @@ async def execute_transfer_json(
             status_code=409,
             detail={
                 "error": "duplicate_transfer",
-                "message": str(exc),
+                "message": redact_log_text(str(exc)),
                 "existing_job_id": exc.existing_job_id,
                 "existing_status": exc.existing_status,
+                "existing_created_at": exc.existing_created_at,
             },
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.invalid",
+            public_message="Could not create transfer job.",
+            status_code=400,
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.errored",
+            public_message="Could not create transfer job.",
+            status_code=500,
+        ) from exc
 
     try:
         from services.audit_log import actor_from_request, append_audit_event
@@ -785,8 +1176,9 @@ async def execute_transfer_json(
         job_id,
         plan_id=str(body.plan_id).strip() if body.plan_id else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dst.format or "",
+        source_format=src.format or "",
         source_kind=src.kind or "",
         dest_kind=dst.kind or "",
         sync_mode=request_obj.sync_mode or "",
@@ -831,6 +1223,7 @@ async def execute_transfer_json(
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 
@@ -874,6 +1267,14 @@ async def run_universal_transfer(
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("balanced"),
     source_filter_json: str = Form(""),
+    read_options_json: str = Form(""),
+    shape_recipe_json: str = Form(""),
+    approved_shape_recipe_hash: str = Form(""),
+    transform_recipe_id: str = Form(""),
+    transform_recipe_version: str = Form("0"),
+    transform_recipe_version_mode: str = Form("pin"),
+    transform_recipe_params_json: str = Form(""),
+    approved_set_hash: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
@@ -882,18 +1283,23 @@ async def run_universal_transfer(
     enable_ocr: str = Form("false"),
     dest_extra_json: str = Form(""),
     source_extra_json: str = Form(""),
+    source_file_id: str = Form(""),
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
-    delivery_guarantee: str = Form("at_least_once"),
+    number_locale: str = Form(""),
+    delivery_guarantee: str = Form("auto"),
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
     fk_risk_acknowledged: str = Form("false"),
+    ddl_changes_acknowledged: str = Form("false"),
     acknowledgment_actor: str = Form(""),
     acknowledgment_reason: str = Form(""),
     approved_decision_artifact_hash: str = Form(""),
     approved_ddl_identity_hash: str = Form(""),
     decision_artifact_json: str = Form(""),
+    contract_id: str = Form(""),
+    require_signed_contract: str = Form("false"),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -910,16 +1316,26 @@ async def run_universal_transfer(
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
+    # Same 422 as the JSON routes; blank still means "inherit the plan".
+    validation_mode = form_policy_value("validation_mode", validation_mode)
+    schema_policy = form_policy_value("schema_policy", schema_policy)
     try:
         assert_delivery_guarantee_allowed(delivery_guarantee)
     except DeliveryGuaranteeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
 
-    workspace_id = _resolve_write_workspace(request, workspace_id)
+    workspace_id = resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(
+        request,
+        read=tuple(c for c in (source_connector_id,) if c),
+        write=tuple(c for c in (dest_connector_id,) if c),
+    )
 
     src_fmt = source_format
     if source_kind == "file" and file:
-        content = await file.read()
+        content = await read_upload(file)
         filename = file.filename or "upload.csv"
         if not src_fmt:
             from ..services.file_parser import FileParser
@@ -942,6 +1358,17 @@ async def run_universal_transfer(
                 source_extra.update(parsed)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    stored_file_id = (source_file_id or "").strip() or str(source_extra.get("file_id") or "").strip()
+    if stored_file_id:
+        source_extra["file_id"] = stored_file_id
+        if not content:
+            from services.file_parser import get_file
+
+            stored = get_file(stored_file_id)
+            if stored:
+                filename = filename or str(stored.get("filename") or "upload.csv")
+                if not src_fmt:
+                    src_fmt = str(stored.get("format") or "")
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -986,6 +1413,7 @@ async def run_universal_transfer(
         auth_source=dest_auth_source,
         extra=dest_extra,
     )
+    require_admin_for_endpoints(request, workspace_id, source, destination)
 
     source_filter: dict = {}
     if source_filter_json.strip():
@@ -1012,6 +1440,19 @@ async def run_universal_transfer(
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         source_filter=source_filter,
+        read_options=_validated_read_options(read_options_json),
+        shape_recipe=_validated_shape_recipe(shape_recipe_json),
+        approved_shape_recipe_hash=(approved_shape_recipe_hash or "").strip(),
+        transform_recipe_id=(transform_recipe_id or "").strip(),
+        transform_recipe_version=int(transform_recipe_version or 0),
+        transform_recipe_version_mode=(transform_recipe_version_mode or "pin")
+        .strip()
+        .lower()
+        or "pin",
+        transform_recipe_params=_validated_shape_recipe(transform_recipe_params_json)
+        if (transform_recipe_params_json or "").strip()
+        else {},
+        approved_set_hash=(approved_set_hash or "").strip(),
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,
@@ -1020,12 +1461,14 @@ async def run_universal_transfer(
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
         date_locale=date_locale,
+        number_locale=number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=delivery_guarantee or "at_least_once",
+        delivery_guarantee=delivery_guarantee or "auto",
         compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
         schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
+        ddl_changes_acknowledged=ddl_changes_acknowledged.lower() in ("true", "1", "yes"),
         acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
         acknowledgment_reason=(acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),
@@ -1049,6 +1492,7 @@ async def run_universal_transfer(
     form_schema_policy = (schema_policy or "").strip()
     form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
     plan_payload = None
+    plan_policies: dict = {}
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -1075,6 +1519,8 @@ async def run_universal_transfer(
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
+            if isinstance(policies, dict):
+                plan_policies = policies
             if not form_sync_mode:
                 request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
             if not form_schema_policy:
@@ -1087,12 +1533,36 @@ async def run_universal_transfer(
                 request_obj.write_via_staging = True
             if not date_locale:
                 request_obj.date_locale = policies.get("date_locale", request_obj.date_locale)
+            if not number_locale:
+                request_obj.number_locale = policies.get("number_locale", request_obj.number_locale)
             if not stream_contracts_json.strip():
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:
                     request_obj.stream_contracts = plan_contracts
+            from services.procedure_source import merge_callable_source_extra
+
+            request_obj.source.extra = merge_callable_source_extra(
+                request_obj.source.extra,
+                payload.get("source") or {},
+            )
+            plan_src = payload.get("source") or {}
+            plan_fid = str(
+                plan_src.get("file_id")
+                or (plan_src.get("extra") or {}).get("file_id")
+                or ""
+            ).strip()
+            if plan_fid:
+                request_obj.source.extra = {
+                    **(request_obj.source.extra or {}),
+                    "file_id": plan_fid,
+                }
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise safe_http_exception(
+                e,
+                event="transfer.plan_execute.errored",
+                public_message="Could not prepare transfer execution.",
+                status_code=400,
+            ) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):
         try:
             import json as _json
@@ -1118,7 +1588,6 @@ async def run_universal_transfer(
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
-        mappings=getattr(request_obj, "mappings", None),
     )
     if stream_contracts_json.strip():
         try:
@@ -1131,6 +1600,23 @@ async def run_universal_transfer(
 
     _residency_check(request, destination, region)
 
+    from src.transfer.contract_engine import stamp_request_contract
+
+    try:
+        stamp_request_contract(
+            request_obj,
+            explicit_id=contract_id,
+            explicit_require=require_signed_contract.lower() in ("true", "1", "yes"),
+            policies=plan_policies,
+        )
+    except ValueError as exc:
+        raise safe_http_exception(
+            exc,
+            event="transfer.plan_execute.errored",
+            public_message="Could not validate the transfer request contract.",
+            status_code=400,
+        ) from exc
+
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -1139,15 +1625,26 @@ async def run_universal_transfer(
             status_code=409,
             detail={
                 "error": "duplicate_transfer",
-                "message": str(exc),
+                "message": redact_log_text(str(exc)),
                 "existing_job_id": exc.existing_job_id,
                 "existing_status": exc.existing_status,
+                "existing_created_at": exc.existing_created_at,
             },
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.invalid",
+            public_message="Could not create transfer job.",
+            status_code=400,
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.errored",
+            public_message="Could not create transfer job.",
+            status_code=500,
+        ) from exc
 
     try:
         from services.audit_log import actor_from_request, append_audit_event
@@ -1176,8 +1673,9 @@ async def run_universal_transfer(
         job_id,
         plan_id=plan_id.strip() if plan_id and plan_id.strip() else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dest_format or "",
+        source_format=source_format or "",
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",
         sync_mode=request_obj.sync_mode or "",
@@ -1228,6 +1726,7 @@ async def run_universal_transfer(
         "reconciliation": result.reconciliation,
         "explanation": result.explanation,
         "mapping_proof": result.mapping_proof or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 
@@ -1240,7 +1739,12 @@ async def get_transfer_explanation(job_id: str, request: Request):
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     return {
@@ -1263,7 +1767,12 @@ async def get_transfer_mapping_proof(job_id: str, request: Request):
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1277,6 +1786,7 @@ async def get_transfer_mapping_proof(job_id: str, request: Request):
             mappings,
             destination_db_type=str(dest.get("format") or job.get("destination_type") or "").lower(),
             source_kind=str(src.get("kind") or job.get("source_type") or ""),
+            source_db_type=str(src.get("format") or src.get("type") or ""),
             dest_kind=str(dest.get("kind") or job.get("destination_kind") or ""),
             sync_mode=str(job.get("sync_mode") or req.get("sync_mode") or ""),
         )
@@ -1316,7 +1826,12 @@ async def get_transfer_proof_pack(job_id: str, request: Request):
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1335,17 +1850,17 @@ async def get_transfer_proof_pack(job_id: str, request: Request):
     return pack
 
 
-class ProofPackVerifyBody(BaseModel):
-    pack: dict = Field(default_factory=dict)
-
-
 @router.post("/proof-pack/verify")
-async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
-    """Verify a previously exported signed proof pack against the platform secret."""
+async def verify_transfer_proof_pack(body: Any = Body(...)):
+    """Verify a previously exported signed proof pack against the platform secret.
+
+    Accepts ``{"pack": <pack>}`` or the pack itself, like ``/audit/verify-pack``;
+    a body that is not a pack is a 422 naming the missing keys (PP3).
+    """
+    from services.proof_pack_request import pack_from_body
     from services.signed_proof_pack import verify_signed_proof_pack
 
-    result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
-    return result
+    return verify_signed_proof_pack(pack_from_body(body))
 
 
 @router.get("/{job_id}/certificate")
@@ -1368,7 +1883,12 @@ async def get_migration_certificate(job_id: str, request: Request, format: str =
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1439,7 +1959,6 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
     from services.migration_rollback import (
         RollbackContractError,
         RollbackRefuseError,
-        discard_staging_table,
         execute_rollback,
     )
 
@@ -1450,7 +1969,12 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1486,19 +2010,29 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
         )
 
     dest_ep = None
-    req = job.get("request") if isinstance(job.get("request"), dict) else {}
-    raw_dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
-    if not raw_dest:
-        raw_dest = job.get("destination") if isinstance(job.get("destination"), dict) else {}
+    # The run is stored under ``transfer_request`` (job_submission). Reading
+    # only ``request`` rebuilt an endpoint with no engine or connector, so the
+    # drop failed closed on every job (QA: 409 "Failed to discard staging").
+    from services.staging_discard import job_destination_config
+
+    raw_dest = job_destination_config(job)
 
     def _drop(staging: str) -> bool:
         nonlocal dest_ep
+        from services.staging_discard import StagingDiscardError, drop_staging_table
+
         if dest_ep is None:
             dest_ep = EndpointConfig.from_dict(
                 str(raw_dest.get("kind") or "database"),
                 {**raw_dest, "table": staging},
             )
-        return bool(discard_staging_table(dest_ep, staging))
+        try:
+            drop_staging_table(dest_ep, staging)
+        except StagingDiscardError as exc:
+            raise RollbackRefuseError(
+                f"Failed to discard staging table `{staging}` — {exc}"
+            ) from exc
+        return True
 
     try:
         result = execute_rollback(
@@ -1508,16 +2042,20 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
             drop_staging_fn=_drop,
         )
     except RollbackContractError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
     except RollbackRefuseError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=409, detail=redact_log_text(str(exc))
+        ) from exc
 
     try:
         append_audit_event(
             action="migration_rollback.executed",
             resource=f"job:{job_id}",
             actor=actor,
-            level="warning",
+            level="warn",
             details={
                 "rollback_id": result.get("rollback_id"),
                 "strategy": result.get("strategy"),
@@ -1547,6 +2085,8 @@ class JobCdcSnapshotBody(BaseModel):
     table: str = ""
     primary_key: str = ""
     chunk_size: int = 1000
+    # Structured filter spec (services/cdc_snapshot_filter.py), never raw SQL.
+    row_filter: dict | list | None = None
 
 
 @router.get("/{job_id}/cdc/snapshots")
@@ -1563,14 +2103,24 @@ async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     try:
         ctx = resolve_job_cdc_snapshot_context(job)
         signals = list_signals_for_job(job, status=status)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.cdc_snapshot.list.invalid",
+            public_message="Could not list CDC snapshots for this job.",
+            status_code=400,
+        ) from e
     return {
         "job_id": job_id,
         "signals": signals,
@@ -1596,7 +2146,12 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     try:
@@ -1605,9 +2160,15 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
             table=body.table,
             primary_key=body.primary_key,
             chunk_size=body.chunk_size,
+            row_filter=body.row_filter,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.cdc_snapshot.request.invalid",
+            public_message="Could not request a CDC snapshot.",
+            status_code=400,
+        ) from e
 
 
 @router.post("/{job_id}/cdc/snapshots/{signal_id}/cancel")
@@ -1622,21 +2183,30 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     try:
         ctx = resolve_job_cdc_snapshot_context(job)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.cdc_snapshot.cancel.invalid",
+            public_message="Could not resolve CDC snapshot context for this job.",
+            status_code=400,
+        ) from e
     sig = get_signal(signal_id)
     if sig is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")
     if sig.source_key not in ctx["source_keys"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Signal source_key does not match this job's CDC fingerprint",
-        )
+        # Another job's (possibly another workspace's) signal answers exactly
+        # like one that does not exist; a 403 here confirmed the id (D222).
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
     cancelled = cancel_signal(signal_id)
     if cancelled is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")
@@ -1654,3 +2224,48 @@ async def download_export(filename: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Export not found")
     return FileResponse(file_path, filename=filename)
+
+
+class ContinuityRebaselineBody(BaseModel):
+    destination: EndpointDTO
+    reason: str = Field("", max_length=2000)
+
+
+@router.post("/continuity/rebaseline")
+async def rebaseline_append_continuity(
+    body: ContinuityRebaselineBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Accept the current destination as the X-97 append baseline (audited).
+
+    Only after an operator has investigated a continuity mismatch. Never
+    automatic: requires a reason, writes an audit event before the baseline
+    moves, and does not touch destination data.
+    """
+    from services.append_continuity import RebaselineError, rebaseline
+
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
+
+    resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, write=(body.destination,))
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail="A reason is required to accept the current destination.",
+        )
+    dst = resolve_endpoint(
+        EndpointConfig.from_dict(
+            body.destination.kind, body.destination.model_dump(by_alias=True)
+        )
+    )
+    try:
+        return await asyncio.to_thread(
+            rebaseline, dst, actor=_actor_email(request), reason=reason
+        )
+    except RebaselineError as exc:
+        raise HTTPException(
+            status_code=409, detail=redact_log_text(str(exc))
+        ) from exc

@@ -11,10 +11,16 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, sanitize_json_value
+from services.value_serializer import (
+    cell_to_string,
+    json_dumps_exact_numbers,
+    load_http_json,
+    sanitize_json_value,
+)
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -41,10 +47,9 @@ def _requests_session() -> Any:
 def _base_url(host: str, port: int, ssl: bool, connection_string: str = "") -> str:
     if connection_string.strip():
         return connection_string.rstrip("/")
-    scheme = "https" if ssl else "http"
-    host = host or "localhost"
-    port = port or 19530
-    return f"{scheme}://{host}:{port}"
+    from connectors.url_authority import http_service_base_url
+
+    return http_service_base_url(host, port, ssl, 19530)
 
 
 def _auth_token(
@@ -127,6 +132,14 @@ def test_milvus(
         return False, str(exc)
 
 
+def _milvus_schema_text(value: Any, cap: int) -> str:
+    """Dest-canonical schema field text. ``or ''`` wiped integer 0 / False."""
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    return (text or "")[:cap]
+
+
 def build_milvus_entities(
     vector_rows: list[dict[str, Any]],
     *,
@@ -144,17 +157,22 @@ def build_milvus_entities(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
+        vector_reject_row_label,
     )
 
     entities: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
-        meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
+        from connectors.writer_common import vector_prepare_metadata
+
+        meta = vector_prepare_metadata(row.get("metadata") or {})
         try:
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "chunk_index",
                 "target": "chunk_index",
                 "value": cell_to_string(row.get("chunk_index")),
@@ -165,7 +183,7 @@ def build_milvus_entities(
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "embedding",
                 "target": "vector",
                 "value": "",
@@ -188,9 +206,8 @@ def build_milvus_entities(
             else:
                 entity_id = raw_s
         else:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -200,18 +217,22 @@ def build_milvus_entities(
                     "policy": "quarantine",
                 })
                 continue
-            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
             entity_id = str(uuid.UUID(digest[:32]))
         entity: dict[str, Any] = {
             "id": entity_id,
             "vector": sanitize_json_value(values),
-            "content": str(row.get("content") or "")[:65000],
-            "source_id": cell_to_string(row.get("source_id", ""))[:256],
+            "content": vector_cell_token(row.get("content"))[:65000],
+            "source_id": vector_cell_token(row.get("source_id"))[:256],
             "chunk_index": chunk,
-            "filename": str(meta.get("filename") or "")[:512],
-            "page": str(meta.get("page") or "")[:64],
-            "heading": str(meta.get("heading") or "")[:1024],
-            "element_type": str(meta.get("element_type") or row.get("element_type") or "")[:128],
+            "filename": _milvus_schema_text(meta.get("filename"), 512),
+            "page": _milvus_schema_text(meta.get("page"), 64),
+            "heading": _milvus_schema_text(meta.get("heading"), 1024),
+            "element_type": _milvus_schema_text(
+                meta["element_type"] if "element_type" in meta else row.get("element_type"),
+                128,
+            ),
+            "metadata": sanitize_json_value(meta),
         }
         entities.append(entity)
     return entities, rejected
@@ -271,14 +292,13 @@ def _milvus_dtype_to_carrier(data_type: Any) -> str:
     return mapping.get(u, u)
 
 
-def _milvus_describe_collection(
+def _milvus_describe_data(
     session: Any,
     base_url: str,
     headers: dict[str, str],
     collection_name: str,
     db_name: str = "",
-) -> tuple[dict[str, str], int | None]:
-    """POST /collections/describe → (non-vector field carriers, vector dim)."""
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"collectionName": collection_name}
     if db_name:
         payload["dbName"] = db_name
@@ -290,9 +310,41 @@ def _milvus_describe_collection(
     )
     body = resp.json() if resp.content else {}
     if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
-        return {}, None
+        return {}
     data = body.get("data") if isinstance(body, dict) else None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else {}
+
+
+def milvus_pk_info_from_describe_data(data: dict[str, Any]) -> tuple[str, str]:
+    """Primary-key field name and Milvus data type from a describe payload."""
+    fields = data.get("fields") or data.get("schema", {}).get("fields") or []
+    pk_name = "id"
+    pk_type = "VarChar"
+    if isinstance(fields, list):
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            if field.get("isPrimary") or field.get("primaryKey"):
+                pk_name = str(
+                    field.get("fieldName") or field.get("name") or "id"
+                ).strip() or "id"
+                pk_type = str(field.get("dataType") or field.get("type") or "VarChar")
+                break
+    return pk_name, pk_type
+
+
+def _milvus_describe_collection(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> tuple[dict[str, str], int | None]:
+    """POST /collections/describe → (non-vector field carriers, vector dim)."""
+    data = _milvus_describe_data(
+        session, base_url, headers, collection_name, db_name=db_name
+    )
+    if not data:
         return {}, None
     fields = data.get("fields") or data.get("schema", {}).get("fields") or []
     if not isinstance(fields, list):
@@ -411,6 +463,7 @@ def _ensure_collection(
             "dataType": "VarChar",
             "elementTypeParams": {"max_length": 128},
         },
+        {"fieldName": "metadata", "dataType": "JSON"},
     ]
     payload: dict[str, Any] = {
         "collectionName": collection_name,
@@ -443,6 +496,544 @@ def _ensure_collection(
         if _has_collection(session, base_url, headers, collection_name, db_name=db_name):
             return
         raise RuntimeError(f"Milvus create collection failed: {resp.status_code} {body or resp.text}")
+
+
+def _ensure_metadata_field(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> None:
+    described = _milvus_describe_data(
+        session, base_url, headers, collection_name, db_name=db_name
+    )
+    fields = {
+        str(field.get("fieldName") or field.get("name") or "")
+        for field in described.get("fields") or []
+        if isinstance(field, Mapping)
+    }
+    if "metadata" in fields:
+        return
+    payload: dict[str, Any] = {
+        "collectionName": collection_name,
+        "fieldName": "metadata",
+        "dataType": "JSON",
+        "nullable": True,
+    }
+    if db_name:
+        payload["dbName"] = db_name
+    response = session.post(
+        f"{base_url}/v2/vectordb/collections/fields/add",
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
+    body = response.json() if response.content else {}
+    if not _ok_response(body if isinstance(body, dict) else {}, response.status_code):
+        described = _milvus_describe_data(
+            session, base_url, headers, collection_name, db_name=db_name
+        )
+        if any(
+            str(field.get("fieldName") or field.get("name") or "") == "metadata"
+            for field in described.get("fields") or []
+            if isinstance(field, Mapping)
+        ):
+            return
+        raise RuntimeError(
+            "Milvus collection is missing the metadata JSON field; upgrade Milvus "
+            "to a version that supports adding nullable fields or create a new collection"
+        )
+
+
+# REST query offset+limit must stay below this (Milvus v2 entities/query).
+# Identity COPY does not use offset past this window: PK keyset / INT range
+# split keeps every request at offset 0.
+_MILVUS_QUERY_WINDOW = 16384
+_MILVUS_INT64_MIN = -9223372036854775808
+_MILVUS_INT64_MAX = 9223372036854775807
+_MILVUS_QUERY_PAGE = 1000
+
+
+class MilvusUnorderedPkPage(Exception):
+    """Query page was not strictly increasing on PK — refuse keyset skip/dup."""
+
+
+def _milvus_ident(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "", (name or "").strip())
+    if not cleaned:
+        raise ValueError("Milvus field name empty after sanitise")
+    return cleaned
+
+
+def milvus_pk_is_int(pk_type: str) -> bool:
+    return "INT" in str(pk_type or "").upper()
+
+
+def milvus_quote_pk_expr(value: Any, *, integer: bool) -> str:
+    if integer:
+        return str(int(value))
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def milvus_all_pk_filter(pk_name: str, pk_type: str) -> str:
+    """Always-true PK predicate — includes negative Int64 (never ``pk >= 0``)."""
+    ident = _milvus_ident(pk_name)
+    if milvus_pk_is_int(pk_type):
+        return f"{ident} >= {_MILVUS_INT64_MIN}"
+    return f'{ident} != ""'
+
+
+def milvus_pk_gt_filter(pk_name: str, pk_type: str, last: Any) -> str:
+    ident = _milvus_ident(pk_name)
+    return f"{ident} > {milvus_quote_pk_expr(last, integer=milvus_pk_is_int(pk_type))}"
+
+
+def milvus_pk_range_filter(pk_name: str, lo: int, hi: int) -> str:
+    ident = _milvus_ident(pk_name)
+    return f"{ident} >= {int(lo)} and {ident} <= {int(hi)}"
+
+
+def milvus_normalize_pk(value: Any, *, integer: bool) -> Any:
+    if integer:
+        return int(value)
+    return str(value)
+
+
+def milvus_pks_strictly_increasing(values: list[Any], *, integer: bool) -> bool:
+    prev: Any = None
+    for raw in values:
+        if raw is None or raw == "":
+            return False
+        cur = milvus_normalize_pk(raw, integer=integer)
+        if prev is not None and not (cur > prev):
+            return False
+        prev = cur
+    return True
+
+
+def milvus_int_pk_split_windows(
+    lo: int,
+    hi: int,
+    count_in_range: Callable[[int, int], int],
+    page_size: int,
+    *,
+    _depth: int = 0,
+) -> Iterator[tuple[int, int, int]]:
+    """Inclusive ``[lo, hi]`` windows each with ``0 < count <= page_size``.
+
+    Binary range split — pymilvus QueryIterator's REST-compatible form.
+    Offset stays 0 so ``limit + offset`` never hits ``_MILVUS_QUERY_WINDOW``.
+    Int64 depth is ≤ 64; a single PK with count > page_size fails closed.
+    """
+    if lo > hi:
+        return
+    if _depth > 64:
+        raise ValueError("Milvus INT PK range split exceeded Int64 depth")
+    size = int(page_size)
+    if size <= 0:
+        raise ValueError("Milvus query page_size must be > 0")
+    n = int(count_in_range(int(lo), int(hi)))
+    if n <= 0:
+        return
+    if n <= size:
+        yield (int(lo), int(hi), n)
+        return
+    if lo == hi:
+        raise ValueError(
+            f"Milvus PK {lo} reports count {n} > page {size}; refuse silent loss"
+        )
+    mid = lo + (hi - lo) // 2
+    yield from milvus_int_pk_split_windows(
+        lo, mid, count_in_range, size, _depth=_depth + 1
+    )
+    yield from milvus_int_pk_split_windows(
+        mid + 1, hi, count_in_range, size, _depth=_depth + 1
+    )
+
+
+def _milvus_with_db(payload: dict[str, Any], db_name: str) -> dict[str, Any]:
+    if db_name:
+        payload = dict(payload)
+        payload["dbName"] = db_name
+    return payload
+
+
+def _milvus_order_by_rejected(body: Any, status_code: int) -> bool:
+    if _ok_response(body if isinstance(body, dict) else {}, status_code):
+        return False
+    text = json.dumps(body if body is not None else {}, default=str).lower()
+    return any(token in text for token in ("orderby", "order_by", "order-by", "sort"))
+
+
+def milvus_query_entities_page(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    filt: str,
+    output_fields: list[str],
+    limit: int,
+    order_by_pk: str | None = None,
+) -> list[dict[str, Any]]:
+    """One entities/query page at offset 0 (never walks the 16,384 window)."""
+    payload: dict[str, Any] = {
+        "collectionName": collection,
+        "filter": filt,
+        "outputFields": output_fields,
+        "limit": int(limit),
+        "offset": 0,
+    }
+    if order_by_pk:
+        payload["orderByFields"] = [f"{_milvus_ident(order_by_pk)}:asc"]
+    payload = _milvus_with_db(payload, db_name)
+    resp = session.post(
+        f"{base_url}/v2/vectordb/entities/query",
+        data=json.dumps(payload),
+        headers=headers,
+        timeout=60,
+    )
+    body = load_http_json(resp) if resp.content else {}
+    if order_by_pk and _milvus_order_by_rejected(body, resp.status_code):
+        raise MilvusUnorderedPkPage("orderByFields rejected by this Milvus")
+    if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
+        raise ValueError(
+            f"Milvus query failed: {resp.status_code} {str(body)[:200]}"
+        )
+    rows = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("Milvus query returned no data")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def milvus_count_in_filter(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    filt: str,
+) -> int:
+    payload = _milvus_with_db(
+        {
+            "collectionName": collection,
+            "filter": filt,
+            "outputFields": ["count(*)"],
+        },
+        db_name,
+    )
+    resp = session.post(
+        f"{base_url}/v2/vectordb/entities/query",
+        data=json.dumps(payload),
+        headers=headers,
+        timeout=30,
+    )
+    body = resp.json() if resp.content else {}
+    if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
+        raise ValueError(
+            f"Milvus count(*) failed: {resp.status_code} {str(body)[:200]}"
+        )
+    n = _milvus_count_star(body.get("data") if isinstance(body, dict) else body)
+    if n is None:
+        raise ValueError("Milvus count(*) unmeasured")
+    return int(n)
+
+
+def iter_milvus_query_pages(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    pk_name: str,
+    pk_type: str,
+    output_fields: list[str],
+    filter_expr: str | None = None,
+    page_size: int = _MILVUS_QUERY_PAGE,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield entity pages covering the collection without offset pagination.
+
+    Prefer PK keyset (``pk > last`` + ``orderByFields``). INT PK falls back to
+    binary range split when this Milvus ignores/rejects ORDER BY. VarChar
+    collections without ordered pages fail closed rather than skip keys.
+    """
+    ident = _milvus_ident(pk_name)
+    integer = milvus_pk_is_int(pk_type)
+    page = max(1, min(int(page_size), _MILVUS_QUERY_PAGE))
+    base_filt = milvus_all_pk_filter(ident, pk_type)
+    if filter_expr:
+        base_filt = f"({base_filt}) and ({filter_expr})"
+    keyset = _iter_milvus_pk_keyset(
+        session=session,
+        base_url=base_url,
+        headers=headers,
+        collection=collection,
+        db_name=db_name,
+        pk_name=ident,
+        integer=integer,
+        base_filt=base_filt,
+        output_fields=output_fields,
+        page_size=page,
+    )
+    try:
+        first = next(keyset)
+    except StopIteration:
+        return
+    except MilvusUnorderedPkPage:
+        if integer:
+            yield from _iter_milvus_int_ranges(
+                session=session,
+                base_url=base_url,
+                headers=headers,
+                collection=collection,
+                db_name=db_name,
+                pk_name=ident,
+                output_fields=output_fields,
+                base_filter=base_filt,
+                page_size=page,
+            )
+            return
+        raise ValueError(
+            "Milvus VarChar PK COPY requires ordered query (orderByFields); "
+            "refuse offset past the 16,384 window"
+        )
+    yield first
+    try:
+        yield from keyset
+    except MilvusUnorderedPkPage as exc:
+        raise ValueError(
+            "Milvus PK keyset lost order mid-copy; refuse silent skip"
+        ) from exc
+
+
+def _iter_milvus_pk_keyset(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    pk_name: str,
+    integer: bool,
+    base_filt: str,
+    output_fields: list[str],
+    page_size: int,
+) -> Iterator[list[dict[str, Any]]]:
+    last: Any = None
+    seen: set[Any] = set()
+    while True:
+        filt = base_filt
+        if last is not None:
+            gt = milvus_pk_gt_filter(pk_name, "Int64" if integer else "VarChar", last)
+            filt = f"({base_filt}) and ({gt})"
+        rows = milvus_query_entities_page(
+            session=session,
+            base_url=base_url,
+            headers=headers,
+            collection=collection,
+            db_name=db_name,
+            filt=filt,
+            output_fields=output_fields,
+            limit=page_size,
+            order_by_pk=pk_name,
+        )
+        if not rows:
+            break
+        pks = [row.get(pk_name) for row in rows]
+        if any(pk is None or pk == "" for pk in pks):
+            raise ValueError("Milvus query page missing PK; refuse silent loss")
+        if not milvus_pks_strictly_increasing(pks, integer=integer):
+            raise MilvusUnorderedPkPage("query page not strictly increasing on PK")
+        for pk in pks:
+            key = milvus_normalize_pk(pk, integer=integer)
+            if key in seen:
+                raise ValueError("Milvus keyset returned duplicate PK; refuse silent dup")
+            seen.add(key)
+        yield rows
+        if len(rows) < page_size:
+            break
+        last = milvus_normalize_pk(pks[-1], integer=integer)
+
+
+def _iter_milvus_int_ranges(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    pk_name: str,
+    output_fields: list[str],
+    base_filter: str,
+    page_size: int,
+) -> Iterator[list[dict[str, Any]]]:
+    def _window_filter(lo: int, hi: int) -> str:
+        return f"({base_filter}) and ({milvus_pk_range_filter(pk_name, lo, hi)})"
+
+    def _count(lo: int, hi: int) -> int:
+        return milvus_count_in_filter(
+            session=session,
+            base_url=base_url,
+            headers=headers,
+            collection=collection,
+            db_name=db_name,
+            filt=_window_filter(lo, hi),
+        )
+
+    for lo, hi, n in milvus_int_pk_split_windows(
+        _MILVUS_INT64_MIN,
+        _MILVUS_INT64_MAX,
+        _count,
+        page_size,
+    ):
+        rows = milvus_query_entities_page(
+            session=session,
+            base_url=base_url,
+            headers=headers,
+            collection=collection,
+            db_name=db_name,
+            filt=_window_filter(lo, hi),
+            output_fields=output_fields,
+            limit=n,
+            order_by_pk=None,
+        )
+        if len(rows) != n:
+            raise ValueError(
+                f"Milvus range [{lo}, {hi}] count(*) {n} != query {len(rows)}; "
+                "refuse partial copy"
+            )
+        yield rows
+
+
+def _milvus_count_star(data: Any) -> int | None:
+    """Parse entities/query ``count(*)`` — physical entities, never identity."""
+    if isinstance(data, int):
+        return data if data >= 0 else None
+    if isinstance(data, dict):
+        for key in ("rowCount", "row_count", "count(*)", "count"):
+            if key in data:
+                try:
+                    n = int(data[key])
+                except (TypeError, ValueError):
+                    return None
+                return n if n >= 0 else None
+        data = data.get("data")
+    if isinstance(data, list) and data:
+        row = data[0]
+        if isinstance(row, dict):
+            for key, raw in row.items():
+                compact = str(key).lower().replace(" ", "")
+                if "count" in compact:
+                    try:
+                        n = int(raw)
+                    except (TypeError, ValueError):
+                        return None
+                    return n if n >= 0 else None
+        if isinstance(row, (int, float)):
+            n = int(row)
+            return n if n >= 0 else None
+    return None
+
+
+def _entity_source_id(entity: Any) -> Any:
+    if not isinstance(entity, dict):
+        return None
+    if "source_id" in entity:
+        return entity.get("source_id")
+    return entity.get("sourceId")
+
+
+def scan_source_ids(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    max_entities: int = 20_000,
+) -> tuple[str, list[Any]]:
+    """Dest-engine ``source_id`` values. Never ``num_entities`` / ``rowCount``.
+
+    Returns ``(state, values)``:
+
+    * ``missing`` — collection absent (create-on-first-write → identity 0)
+    * ``no_field`` — live schema has no ``source_id`` (unmeasured)
+    * ``truncated`` — physical cardinality exceeds the REST/census bound
+    * ``complete`` — every entity's ``source_id`` is in ``values``
+    * ``unmeasured`` — transport / describe / query failure
+
+    A prefix scan is never ``complete``. Callers DISTINCT only on complete.
+    """
+    table = str(table_name or "").strip()
+    if not table:
+        return "unmeasured", []
+    try:
+        session = _requests_session()
+        token = _auth_token(
+            api_key=str(cfg.get("api_key") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+        )
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 19530),
+            bool(cfg.get("ssl", False)),
+            str(cfg.get("connection_string") or ""),
+        )
+        hdrs = _headers(token)
+        collection = _collection_name(table or str(cfg.get("database") or "") or "dataflow_chunks")
+        db_name = str(cfg.get("database") or cfg.get("schema") or "").strip()
+        if db_name.lower() in {"", "test_db", "default", "public"}:
+            db_name = ""
+        if not _has_collection(session, base_url, hdrs, collection, db_name=db_name):
+            return "missing", []
+        carriers, _dim = _milvus_describe_collection(
+            session, base_url, hdrs, collection, db_name=db_name
+        )
+        if not carriers:
+            return "unmeasured", []
+        if "source_id" not in {str(k).lower() for k in carriers}:
+            return "no_field", []
+        cap = int(max_entities)
+        describe = _milvus_describe_data(
+            session, base_url, hdrs, collection, db_name=db_name
+        )
+        pk_name, pk_type = milvus_pk_info_from_describe_data(describe)
+        filt = milvus_all_pk_filter(pk_name, pk_type)
+        physical = milvus_count_in_filter(
+            session=session,
+            base_url=base_url,
+            headers=hdrs,
+            collection=collection,
+            db_name=db_name,
+            filt=filt,
+        )
+        if physical == 0:
+            return "complete", []
+        if physical > cap:
+            return "truncated", []
+        values: list[Any] = []
+        for page in iter_milvus_query_pages(
+            session=session,
+            base_url=base_url,
+            headers=hdrs,
+            collection=collection,
+            db_name=db_name,
+            pk_name=pk_name,
+            pk_type=pk_type,
+            output_fields=["source_id", pk_name],
+        ):
+            for row in page:
+                values.append(_entity_source_id(row))
+                if len(values) > cap:
+                    return "truncated", []
+        if len(values) != physical:
+            return "truncated", []
+        return "complete", values
+    except Exception:
+        return "unmeasured", []
 
 
 def write_mapped_rows(
@@ -535,6 +1126,19 @@ def write_mapped_rows(
         collection_existed = _has_collection(
             session, base_url, hdrs, collection, db_name=db_name
         )
+        if not collection_existed and not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Milvus collection '{collection}' is missing and "
+                    "create_table is disabled"
+                ),
+            )
         if collection_existed:
             schema_types, cached_live_dim = _milvus_describe_collection(
                 session, base_url, hdrs, collection, db_name=db_name
@@ -639,18 +1243,58 @@ def write_mapped_rows(
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
         )
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        create_embedding_usage,
+    )
+    from services.vectorization import vector_identity_columns
+    from services.vector_sync import prepare_vector_sync_write
+
+    sync_cfg = {
+        "host": host,
+        "port": port,
+        "database": db_name,
+        "username": username,
+        "password": password,
+        "schema": schema,
+        "ssl": ssl,
+        "connection_string": connection_string,
+        "api_key": api_key,
+    }
+    usage = create_embedding_usage(embedding_model, _kwargs, embedding_column)
     try:
-        vector_rows = vectorize_records(
+        sync_context = prepare_vector_sync_write(
+            "milvus",
+            sync_cfg,
+            collection,
             records,
+            identity_columns=vector_identity_columns(pk_cols, mappings, records),
+            model=embedding_model,
             content_column=content_column,
             embedding_column=embedding_column,
             metadata_columns=metadata_columns,
             exclude_pii_columns=exclude_pii_columns,
-            model=embedding_model,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
             durable_embedding_cache=durable_embedding_cache,
+            options=_kwargs,
+            usage=usage,
+            vectorizer=vectorize_records,
+        )
+        vector_rows = sync_context["rows"]
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=db_name,
+            checksum="",
+            chunks_completed=0,
+            error=f"Embedding provider {usage.provider} model {usage.model} failed ({type(exc).__name__}): {exc}",
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
@@ -660,12 +1304,68 @@ def write_mapped_rows(
             target_schema=db_name,
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vector synchronization preparation failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     if not vector_rows:
+        if sync_context["unchanged_skipped"]:
+            try:
+                if sync_context["fingerprint"] is not None:
+                    from services.vector_fingerprint import enforce_fingerprint
+
+                    enforce_fingerprint(
+                        "milvus",
+                        sync_cfg,
+                        collection,
+                        sync_context["fingerprint"],
+                    )
+            except Exception as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=f"Milvus fingerprint enforcement failed ({type(exc).__name__})",
+                    meta={"embedding_usage": usage.to_dict()},
+                )
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+                meta={
+                    "embedding_usage": usage.to_dict(),
+                    "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+                    "vector_docs_embedded": 0,
+                    "stale_chunks_deleted": 0,
+                    "vector_stale_cleanup_skipped_docs": 0,
+                },
+            )
+        from connectors.writer_common import refuse_empty_vectorization
+
+        empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
+        if empty_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=empty_err,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+                meta={"embedding_usage": usage.to_dict()},
+            )
         return WriteResult(
             ok=True,
             rows_written=0,
@@ -676,6 +1376,7 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     from services.vector_embedding import resolve_embedding_dimension
@@ -702,6 +1403,7 @@ def write_mapped_rows(
                 }
             ],
             rejected_rows=len(map_rejected) + 1,
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     entities, embed_rejected = build_milvus_entities(vector_rows, dimension=dimension)
@@ -718,6 +1420,7 @@ def write_mapped_rows(
             or "all embeddings rejected",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     from connectors.writer_common import reject_on_strict_policy
 
@@ -733,26 +1436,28 @@ def write_mapped_rows(
             error=strict_error,
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     token = _auth_token(api_key=api_key, username=username, password=password)
     base_url = _base_url(host, port, ssl, connection_string)
     inserted = 0
+    fingerprint_status = "unknown"
+    stale_chunks_deleted = 0
+    stale_cleanup_skipped = 0
     rejected: list[dict[str, Any]] = list(map_rejected)
     try:
         session = _requests_session()
         hdrs = _headers(token)
         if not collection_existed:
-            if not create_table:
-                raise RuntimeError(
-                    f"Milvus collection '{collection}' is missing and "
-                    "create_table is disabled"
-                )
             _ensure_collection(
                 session, base_url, hdrs, collection, dimension, db_name=db_name
             )
             live_dim = None
         else:
+            _ensure_metadata_field(
+                session, base_url, hdrs, collection, db_name=db_name
+            )
             live_dim = cached_live_dim
             if live_dim is None:
                 live_dim = _milvus_live_vector_dim(
@@ -774,6 +1479,7 @@ def write_mapped_rows(
                     ),
                     rejected_details=list(rejected),
                     rejected_rows=len(rejected),
+                    meta={"embedding_usage": usage.to_dict()},
                 )
             if int(live_dim) != int(dimension):
                 return WriteResult(
@@ -800,7 +1506,39 @@ def write_mapped_rows(
                         }
                     ],
                     rejected_rows=len(rejected) + 1,
+                    meta={"embedding_usage": usage.to_dict()},
                 )
+
+        incoming_fingerprint = sync_context["fingerprint"]
+        if incoming_fingerprint is None:
+            from services.vector_fingerprint import fingerprint_for_write
+
+            incoming_fingerprint = fingerprint_for_write(
+                model=embedding_model,
+                dimension=dimension,
+                distance="cosine",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                skip_chunking=skip_chunking,
+                embedding_column=embedding_column,
+                chunk_strategy=str(_kwargs.get("chunk_strategy") or "recursive"),
+                chunk_unit=str(_kwargs.get("chunk_unit") or "chars"),
+                chunk_tokenizer=(
+                    _kwargs.get("chunk_tokenizer")
+                    if isinstance(_kwargs.get("chunk_tokenizer"), str)
+                    else None
+                ),
+                text_template=(
+                    _kwargs.get("text_template")
+                    if isinstance(_kwargs.get("text_template"), str)
+                    else None
+                ),
+            )
+        from services.vector_fingerprint import enforce_fingerprint
+
+        fingerprint_status = enforce_fingerprint(
+            "milvus", sync_cfg, collection, incoming_fingerprint
+        )
 
         batch_size = 100
         total = len(entities)
@@ -814,7 +1552,7 @@ def write_mapped_rows(
                 payload["dbName"] = db_name
             resp = session.post(
                 f"{base_url}/v2/vectordb/entities/upsert",
-                data=json.dumps(payload, default=sanitize_json_value),
+                data=json_dumps_exact_numbers(payload),
                 headers=hdrs,
                 timeout=60,
             )
@@ -832,9 +1570,10 @@ def write_mapped_rows(
             target_schema=db_name,
             checksum="",
             chunks_completed=(inserted + 99) // 100,
-            error=str(exc),
+            error=f"Milvus write failed ({type(exc).__name__}): {exc}",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     _final_abort = reject_on_strict_policy(error_policy, rejected, "Milvus")
@@ -850,7 +1589,48 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
             warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+            meta={"embedding_usage": usage.to_dict()},
         )
+
+    keep: dict[str, set[str]] = {}
+    for entity in entities:
+        source_id = str(entity.get("source_id") or "")
+        if source_id:
+            keep.setdefault(source_id, set()).add(str(entity.get("id") or ""))
+    from services.vector_sync import (
+        _rejected_doc_keys,
+        vector_engine_delete_stale_chunks,
+    )
+
+    rejected_source_ids = _rejected_doc_keys(
+        headers, data_rows, pk_cols, mappings, rejected
+    )
+    for source_id in rejected_source_ids | sync_context["unchanged_source_ids"]:
+        keep.pop(source_id, None)
+    if rejected:
+        stale_cleanup_skipped = len(keep)
+    else:
+        try:
+            stale_chunks_deleted = vector_engine_delete_stale_chunks(
+                "milvus", sync_cfg, collection, keep
+            )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=inserted,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=(inserted + 99) // 100,
+                error=f"Milvus stale cleanup failed ({type(exc).__name__})",
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+                meta={
+                    "embedding_usage": usage.to_dict(),
+                    "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+                    "vector_docs_embedded": sync_context["embedded_docs"],
+                },
+            )
 
     return WriteResult(
         ok=True,
@@ -862,7 +1642,15 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
-        meta=_milvus_gate8_meta(entities),
+        meta={
+            **_milvus_gate8_meta(entities),
+            "embedding_usage": usage.to_dict(),
+            "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+            "vector_docs_embedded": sync_context["embedded_docs"],
+            "vector_fingerprint_status": fingerprint_status,
+            "stale_chunks_deleted": stale_chunks_deleted,
+            "vector_stale_cleanup_skipped_docs": stale_cleanup_skipped,
+        },
     )
 
 

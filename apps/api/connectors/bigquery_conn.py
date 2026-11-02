@@ -20,6 +20,38 @@ def _is_local_endpoint(host: str, connection_string: str) -> tuple[bool, str]:
     return False, ""
 
 
+# The emulator reports every SQL failure as HTTP 500 ``internalError`` (hosted
+# BigQuery reserves that reason for transient backend faults), and the client's
+# default job retry replays such jobs for 10 minutes — one refused statement
+# reads as a hang. Bound the replay so the refusal surfaces in seconds.
+_EMULATOR_RETRY_DEADLINE_S = 20.0
+_emulator_client_cls: type | None = None
+
+
+def _emulator_client_class(bigquery: Any) -> type:
+    global _emulator_client_cls
+    if _emulator_client_cls is not None:
+        return _emulator_client_cls
+    from google.cloud.bigquery.retry import DEFAULT_JOB_RETRY, DEFAULT_RETRY
+
+    bounded_retry = DEFAULT_RETRY.with_deadline(_EMULATOR_RETRY_DEADLINE_S)
+    bounded_job_retry = DEFAULT_JOB_RETRY.with_deadline(_EMULATOR_RETRY_DEADLINE_S)
+
+    class _EmulatorClient(bigquery.Client):  # type: ignore[misc, name-defined]
+        def query(self, query: str, *args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("retry", bounded_retry)
+            kwargs.setdefault("job_retry", bounded_job_retry)
+            return super().query(query, *args, **kwargs)
+
+        def query_and_wait(self, query: str, *args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("retry", bounded_retry)
+            kwargs.setdefault("job_retry", bounded_job_retry)
+            return super().query_and_wait(query, *args, **kwargs)
+
+    _emulator_client_cls = _EmulatorClient
+    return _EmulatorClient
+
+
 def get_client(
     *,
     project_id: str,
@@ -51,7 +83,7 @@ def get_client(
             client_options = ClientOptions(api_endpoint=f"http://{host}:{port}")
         elif host in ("localhost", "127.0.0.1"):
             client_options = ClientOptions(api_endpoint="http://127.0.0.1:9050")
-        return bigquery.Client(
+        return _emulator_client_class(bigquery)(
             project=project_id,
             credentials=creds,
             location=location or None,

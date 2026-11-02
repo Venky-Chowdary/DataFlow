@@ -29,4 +29,5 @@ SCHEMALESS_SOURCE_TYPES = frozenset({
     "elasticsearch",
     "redis",
     "kafka",
+    "qdrant",
 })

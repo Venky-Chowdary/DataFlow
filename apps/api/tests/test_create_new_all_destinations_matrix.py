@@ -7,6 +7,7 @@ Redshift — fix once, prove on the matrix, not only the failing pair.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
@@ -19,7 +20,7 @@ from services.ddl_compatibility import evaluate_ddl_compatibility
 from services.preflight_rules import explain_issue
 
 _API_ROOT = Path(__file__).resolve().parents[1]
-_PROOF = _API_ROOT / "data" / "proofs" / "create_new_all_destinations_matrix.json"
+_PROOF = data_dir() / "proofs" / "create_new_all_destinations_matrix.json"
 
 # Typed destinations that ADD COLUMN on backfill (writers call resolve_writer_backfill).
 SQL_DEST_FAMILIES = [

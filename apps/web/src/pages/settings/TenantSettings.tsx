@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../../components/Toast";
-import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
+import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
+import { PermissionNotice } from "../../components/PermissionNotice";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
+import { Button } from "../../components/ui/Button";
+import { tenantSaveFeedback, type SaveFeedback } from "../../lib/postureCopy";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -19,7 +24,10 @@ const PROVIDER_LABELS: Record<ByokKey["provider"], string> = {
 
 export function TenantSettings() {
   const { toast } = useToast();
+  // Tenant identity, data region, security posture and BYOK are administration.
+  const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
@@ -32,17 +40,53 @@ export function TenantSettings() {
   const [securityContact, setSecurityContact] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(8);
+  // A saved timeout is enforced unless the admin unticks this (QA round 11).
+  const [enforceTimeout, setEnforceTimeout] = useState(true);
+  // What the last save reported as enforced (from the API, not assumed).
+  const [saveFeedback, setSaveFeedback] = useState<SaveFeedback | null>(null);
   const [ipAllowlist, setIpAllowlist] = useState("");
+  const [egressAllowlist, setEgressAllowlist] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
 
   const [newKeyLabel, setNewKeyLabel] = useState("");
   const [newKeyProvider, setNewKeyProvider] = useState<ByokKey["provider"]>("local");
   const [newKeyMaterial, setNewKeyMaterial] = useState("");
+  const [rotatingKeyId, setRotatingKeyId] = useState<string | null>(null);
+
+  // The workspace being viewed, re-read when the switcher moves: mounting before
+  // the shell had named one read the tenant of no workspace and reported a saved
+  // tenant as missing.
+  const [activeWorkspace, setActiveWorkspace] = useState(getActiveWorkspaceId());
+  useEffect(() => {
+    const onChanged = () => setActiveWorkspace(getActiveWorkspaceId());
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+  }, []);
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([fetchTenant().catch(() => null), fetchSecurityPosture().catch(() => null), fetchByokKeys().catch(() => ({ keys: [] })), fetchWorkspaces().catch(() => [])])
-      .then(([t, p, k, ws]) => {
+    // A refused read is not an unconfigured tenant: reporting "no tenant yet"
+    // after a 403 would invite a viewer to create one and fail at the button.
+    let readFailure = "";
+    const remember = (err: unknown) => {
+      if (!readFailure) readFailure = err instanceof Error ? err.message : "Could not read enterprise settings.";
+      return null;
+    };
+    Promise.all([
+      fetchTenant(activeWorkspace).catch(remember),
+      fetchSecurityPosture(activeWorkspace).catch(remember),
+      fetchByokKeys(activeWorkspace).catch((err) => {
+        remember(err);
+        return { keys: [] };
+      }),
+      fetchWorkspaces().catch((err) => {
+        remember(err);
+        return { workspaces: [] };
+      }),
+    ])
+      .then(([t, p, k, wsResult]) => {
+        setLoadError(readFailure);
+        const ws = wsResult.workspaces;
         setTenant(t);
         setPosture(p);
         setKeys(k.keys ?? []);
@@ -54,23 +98,44 @@ export function TenantSettings() {
           setSecurityContact(t.security_contact_email);
           setMfaRequired(t.mfa_required);
           setSessionTimeout(t.session_timeout_hours);
+          setEnforceTimeout(Boolean(t.enforce_session_timeout));
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
+          setEgressAllowlist((t.egress_allowlist || []).join("\n"));
           setWorkspaceId(t.workspace_id);
-        } else if (ws.length > 0) {
-          setWorkspaceId(ws[0].id);
+        } else {
+          // The workspace this session is working in — the same one the read is
+          // scoped to. Defaulting to the first workspace in the list saved a
+          // tenant the operator could not then read back, because GET resolves
+          // the tenant by the active workspace.
+          const scoped = ws.find((w) => w.id === activeWorkspace)?.id || (ws.length === 1 ? ws[0].id : "");
+          setWorkspaceId(scoped);
         }
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [activeWorkspace]);
+
+  /** Switch the live workspace so General, Team, and notifications re-read too. */
+  const selectWorkspace = (id: string) => {
+    setActiveWorkspaceId(id);
+  };
 
   const canSave = useMemo(() => {
-    if (!tenant) return name.trim() && workspaceId;
+    if (!tenant) return Boolean(name.trim() && (workspaceId || activeWorkspace));
     return true;
-  }, [tenant, name, workspaceId]);
+  }, [tenant, name, workspaceId, activeWorkspace]);
+
+  const allowManage = () => {
+    if (manage.allowed) return true;
+    toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+    return false;
+  };
 
   const save = async () => {
+    if (!allowManage()) return;
     setSaving(true);
     try {
+      const scope = (activeWorkspace || workspaceId).trim();
+      if (scope && scope !== getActiveWorkspaceId()) setActiveWorkspaceId(scope);
       const payload = {
         name: name.trim() || "Enterprise tenant",
         custom_domain: customDomain.trim(),
@@ -79,18 +144,26 @@ export function TenantSettings() {
         security_contact_email: securityContact.trim(),
         mfa_required: mfaRequired,
         session_timeout_hours: Math.max(1, Math.min(24, Number(sessionTimeout) || 8)),
+        enforce_session_timeout: enforceTimeout,
         ip_allowlist: ipAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
+        egress_allowlist: egressAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
       };
       let next: Tenant;
       if (tenant) {
         next = await updateTenant(tenant.id, payload);
       } else {
-        next = await createTenant({ workspace_id: workspaceId, ...payload });
+        next = await createTenant({ workspace_id: scope, ...payload });
       }
       setTenant(next);
-      const p = await fetchSecurityPosture().catch(() => null);
+      setEnforceTimeout(Boolean(next.enforce_session_timeout));
+      setEgressAllowlist((next.egress_allowlist || []).join("\n"));
+      const p = await fetchSecurityPosture(scope || undefined).catch(() => null);
       if (p) setPosture(p);
-      toast({ title: "Tenant saved", message: "Enterprise SaaS settings applied.", tone: "success" });
+      window.dispatchEvent(new CustomEvent(TENANT_SAVED_EVENT));
+      // Report what the API says is enforced now, never a blanket "applied".
+      const feedback = tenantSaveFeedback(next.enforcement ?? p?.enforcement);
+      setSaveFeedback(feedback);
+      toast({ title: feedback.title, message: feedback.message, tone: feedback.tone });
     } catch (err) {
       toast({ title: "Save failed", message: err instanceof Error ? err.message : "Could not save tenant settings", tone: "error" });
     } finally {
@@ -99,6 +172,7 @@ export function TenantSettings() {
   };
 
   const addByokKey = async () => {
+    if (!allowManage()) return;
     if (!tenant) {
       toast({ title: "Create tenant first", message: "Save the tenant profile before adding BYOK keys.", tone: "warning" });
       return;
@@ -122,10 +196,32 @@ export function TenantSettings() {
     }
   };
 
+  const rotateActiveKey = async (keyId: string) => {
+    if (!allowManage() || !tenant) return;
+    setRotatingKeyId(keyId);
+    try {
+      const next = await rotateByokKey(keyId);
+      setKeys((prev) => [next, ...prev.map((k) => (k.id === keyId ? { ...k, status: "rotated" as const } : k))]);
+      const updated = await updateTenant(tenant.id, { byok_key_id: next.id });
+      setTenant(updated);
+      toast({
+        title: "BYOK key rotated",
+        message: "New connector secrets use the new key. Existing byok: ciphertext still decrypts with the rotated key. Not a SOC 2 letter.",
+        tone: "success",
+      });
+    } catch (err) {
+      toast({ title: "Rotate failed", message: err instanceof Error ? err.message : "Could not rotate key", tone: "error" });
+    } finally {
+      setRotatingKeyId(null);
+    }
+  };
+
   if (loading) return <p className="df2-cell-meta">Loading enterprise settings…</p>;
 
   return (
     <div className="df2-settings-enterprise">
+      <PermissionNotice allowed={manage.allowed} reason={manage.reason} what="Enterprise tenant settings are read-only for you." />
+      {loadError && <div className="df2-team-error df2-mb-md">{loadError}</div>}
       <section className="df2-settings-section">
         <div className="df2-settings-section-head">
           <div>
@@ -139,21 +235,26 @@ export function TenantSettings() {
 
         <div className="df2-settings-section-body">
           <div className="df2-settings-grid df2-settings-grid--row">
-            {!tenant && (
-              <div className="df2-settings-field">
-                <label htmlFor="tenant-workspace">Workspace</label>
-                <select id="tenant-workspace" className="df2-select" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
-                  {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                </select>
-              </div>
-            )}
+            <div className="df2-settings-field">
+              <label htmlFor="tenant-workspace">Workspace</label>
+              <select
+                id="tenant-workspace"
+                className="df2-select"
+                data-testid="tenant-workspace-select"
+                value={activeWorkspace || workspaceId}
+                onChange={(e) => selectWorkspace(e.target.value)}
+              >
+                {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+              <p className="df2-settings-hint">Same live workspace as Team and the top bar. Tenant profile reloads immediately.</p>
+            </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-name">Tenant name</label>
-              <input id="tenant-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Wells Fargo" />
+              <input id="tenant-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Legal entity name" />
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-domain">Custom domain</label>
-              <input id="tenant-domain" className="df2-input" value={customDomain} onChange={(e) => setCustomDomain(e.target.value)} placeholder="dataflow.wellsfargo.com" />
+              <input id="tenant-domain" className="df2-input" value={customDomain} onChange={(e) => setCustomDomain(e.target.value)} placeholder="transfers.example.com" />
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-region">Data region</label>
@@ -166,38 +267,88 @@ export function TenantSettings() {
               <input id="tenant-contact" className="df2-input" value={securityContact} onChange={(e) => setSecurityContact(e.target.value)} placeholder="security@example.com" />
             </div>
             <div className="df2-settings-field">
-              <label htmlFor="tenant-timeout">Session timeout (hours)</label>
+              <label htmlFor="tenant-timeout">Session timeout (idle hours)</label>
               <input id="tenant-timeout" className="df2-input" type="number" min={1} max={24} value={sessionTimeout} onChange={(e) => setSessionTimeout(Number(e.target.value))} />
+              <label className="df2-settings-hint" htmlFor="tenant-timeout-enforce">
+                <input id="tenant-timeout-enforce" type="checkbox" checked={enforceTimeout} onChange={(e) => setEnforceTimeout(e.target.checked)} />{" "}
+                Enforce as idle timeout — sign members out after this many idle hours (API keys are not affected).
+              </label>
             </div>
           </div>
 
-          <div className="df2-settings-policy-row" style={{ marginTop: 16 }}>
+          <div className="df2-settings-policy-row df2-team-spaced">
             <div>
-              <h3>Require MFA for admins</h3>
-              <p>Enforce multi-factor authentication for owner and admin roles.</p>
+              <h3>Require two-factor authentication</h3>
+              <p>
+                Every member who signs in with a password must use an authenticator app (TOTP). Members who
+                have not set it up can only reach two-factor setup until they do. Single sign-on sessions are
+                exempt (your identity provider handles MFA); API keys are not affected. Set it up for your own
+                account first under Settings → Security.
+              </p>
             </div>
-            <button type="button" role="switch" aria-checked={mfaRequired} className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
+            <button type="button" role="switch" aria-checked={mfaRequired} aria-label="Require two-factor authentication" className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
               <span className="df2-switch-thumb" />
             </button>
           </div>
 
-          <div className="df2-settings-field" style={{ marginTop: 16 }}>
-            <label htmlFor="tenant-allowlist">IP allowlist (one CIDR or IP per line)</label>
+          <div className="df2-settings-field df2-team-spaced">
+            <label htmlFor="tenant-allowlist">IP allowlist</label>
             <textarea
               id="tenant-allowlist"
               className="df2-input"
               rows={4}
               value={ipAllowlist}
               onChange={(e) => setIpAllowlist(e.target.value)}
-              placeholder="10.0.0.0/8&#10;192.168.1.50"
+              placeholder={"one CIDR or IPv4 per line\n203.0.113.0/24"}
             />
+            <p className="df2-settings-hint">
+              When set, every sign-in session and API key using this workspace must come from an address on this list, on any host.
+              A list that leaves out your current address is refused so you cannot lock yourself out.
+            </p>
+          </div>
+
+          <div className="df2-settings-field df2-team-spaced">
+            <label htmlFor="tenant-egress-allowlist">Connector egress allowlist</label>
+            <textarea
+              id="tenant-egress-allowlist"
+              className="df2-input"
+              rows={4}
+              value={egressAllowlist}
+              onChange={(e) => setEgressAllowlist(e.target.value)}
+              placeholder={"one CIDR per line"}
+            />
+            <p className="df2-settings-hint">
+              Off when empty: connector dials refuse private, loopback, link-local, and cloud metadata addresses.
+              An admin CIDR permits an on-prem or VPC host. Metadata and link-local cannot be listed. This does not change deployment config.
+            </p>
           </div>
         </div>
 
+        {saveFeedback && (
+          <div
+            className={`df2-alert ${saveFeedback.tone === "warning" ? "df2-alert-warn" : "df2-alert-success"} df2-team-spaced`}
+            role="status"
+            data-testid="tenant-save-enforcement"
+          >
+            <strong>{saveFeedback.title}</strong>
+            <ul>
+              {saveFeedback.lines.map((line) => <li key={line}>{line}</li>)}
+            </ul>
+            {saveFeedback.warnings.map((w) => <p key={w} className="df2-settings-hint">{w}</p>)}
+          </div>
+        )}
+
         <div className="df2-settings-section-footer">
-          <button type="button" className="df2-btn df2-btn-primary" disabled={!canSave || saving} onClick={() => void save()}>
-            {saving ? "Saving…" : tenant ? "Update tenant" : "Create tenant"}
-          </button>
+          <Button
+            variant="primary"
+            disabled={!canSave || saving || !manage.allowed}
+            title={manage.reason || undefined}
+            loading={saving}
+            loadingLabel="Saving…"
+            onClick={() => void save()}
+          >
+            {tenant ? "Update tenant" : "Create tenant"}
+          </Button>
         </div>
       </section>
 
@@ -228,7 +379,7 @@ export function TenantSettings() {
           <div className="df2-settings-section-head">
             <div>
               <h2>Bring your own key (BYOK)</h2>
-              <p>Customer-managed encryption keys for data at rest.</p>
+              <p>An Active key wraps newly saved connector secrets for this tenant. Existing platform-Fernet credentials stay readable until you re-save the connection. This is encryption evidence — not a SOC 2 or HIPAA letter.</p>
             </div>
           </div>
           <div className="df2-settings-section-body">
@@ -256,19 +407,41 @@ export function TenantSettings() {
                 </div>
               )}
             </div>
-            <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" onClick={() => void addByokKey()} style={{ marginTop: 12 }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="df2-team-spaced"
+              disabled={!manage.allowed}
+              title={manage.reason || undefined}
+              onClick={() => void addByokKey()}
+            >
               Add BYOK key
-            </button>
+            </Button>
 
             {keys.length > 0 && (
-              <div className="df2-byok-key-list" style={{ marginTop: 16 }}>
+              <div className="df2-byok-key-list df2-team-spaced">
                 {keys.map((k) => (
                   <div key={k.id} className={`df2-settings-policy-row ${k.status}`}>
                     <div>
                       <h3>{k.label}</h3>
                       <p>{k.provider} · {k.id.slice(0, 8)}… · {k.status}</p>
                     </div>
-                    {k.id === tenant.byok_key_id && <span className="df2-badge df2-badge-live">Active</span>}
+                    <div className="df2-settings-policy-actions">
+                      {k.id === tenant.byok_key_id && <span className="df2-badge df2-badge-live">Active</span>}
+                      {k.status === "active" && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={!manage.allowed || rotatingKeyId === k.id}
+                          title={manage.reason || "Mark this key rotated and mint a new active key. Existing secrets stay readable."}
+                          loading={rotatingKeyId === k.id}
+                          loadingLabel="Rotating…"
+                          onClick={() => void rotateActiveKey(k.id)}
+                        >
+                          Rotate
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

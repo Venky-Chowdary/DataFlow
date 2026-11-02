@@ -34,11 +34,19 @@ export function TransferRouteBar({
         <ConnectorIcon id={sourceType || "file"} size={18} />
         <span className="df2-route-bar-label" title={sourceLabel}>{sourceLabel}</span>
       </div>
-      <span className="df2-route-bar-arrow" aria-hidden>→</span>
+      <span className="df2-route-bar-arrow" aria-hidden>
+        <svg width="10" height="8" viewBox="0 0 10 8" fill="currentColor">
+          <path d="M0 3h6v2H0zM5 0l5 4-5 4V0z" />
+        </svg>
+      </span>
       <div className={`df2-route-bar-endpoint${hasDest ? "" : " is-pending"}`}>
         {hasDest ? (
           <ConnectorIcon id={destType} size={18} />
         ) : (
+          // Two flex:1 endpoints share the bar. A font arrow is 11px, so the
+          // leftover is odd and each endpoint starts on a half pixel. CI then
+          // snaps "Choose destination" one pixel left of the baseline. The
+          // arrow slot is 12px so that split lands on whole pixels.
           <span className="df2-route-bar-placeholder-icon" aria-hidden />
         )}
         <span className="df2-route-bar-label" title={destLabel}>{hasDest ? destLabel : "Choose destination"}</span>

@@ -246,3 +246,19 @@ def test_parity_falls_back_table_exists_when_inspect_omits() -> None:
             destination_table_exists_fallback=False,
         )
     assert parity["destination_table_exists"] is False
+
+
+def test_execute_policy_gates_emit_g17_row_cap() -> None:
+    """Execute must name the same Advanced cap Validate already proved."""
+    silent = _execute_policy_gates_for_request(_request())
+    assert all(g["id"] != "g17_row_cap" for g in silent)
+
+    gates = _execute_policy_gates_for_request(
+        _request(priority_column="updated_at", priority_direction="asc", limit=2500)
+    )
+    g17 = next(g for g in gates if g["id"] == "g17_row_cap")
+    assert g17["status"] == "pass"
+    assert g17["details"]["row_limit"] == 2500
+    assert g17["details"]["priority_column"] == "updated_at"
+    assert "uncapped source" in g17["message"]
+    assert "capped write" in g17["message"]

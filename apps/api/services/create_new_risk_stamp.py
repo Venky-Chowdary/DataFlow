@@ -11,7 +11,41 @@ not the other way round.
 
 from __future__ import annotations
 
-from typing import Any
+# Warn-only chips that name a destination *domain* the write already
+# quarantines. They must stay visible on Map, but they are not a mapping-
+# identity question and must not drop G4 under the confidence floor.
+# A sampled value already outside the window is severity=block and locks.
+# ``uuid_carrier_equivalent`` / ``fixed_width_not_enforced`` name a domain the
+# destination engine cannot declare in *any* carrier it can spell (SQLite's one
+# untyped TEXT affinity). Every value round-trips exactly, and no remap the
+# operator could choose enforces more — so they are stated, not held.
+_INFORMATIONAL_WARN_KINDS = frozenset({
+    "instant_range_cap",
+    "uuid_carrier_equivalent",
+    "objectid_carrier_equivalent",
+    "fixed_width_not_enforced",
+    # A bare NUMERIC onto the engine's unbounded exact decimal (D68).
+    "unbounded_decimal_carrier",
+    # Float-residue-shaped text held exactly by the DECIMAL it lands in (D161).
+    "ieee_float_residue_kept_exact",
+})
+
+
+def create_new_risk_locks_review(risk: dict) -> bool:
+    """True when a create-new chip must hold Map/Validate until the operator acts.
+
+    ``instant_range_cap`` at ``warn`` is the MySQL TIMESTAMP 1970..2038 ceiling
+    with no out-of-window sample — the instant is kept, out-of-range rows
+    quarantine, and auto-map Execute must not die as ``g4_mapping_confidence``.
+    The same kind at ``block`` (a sampled year past 2038) still locks.
+    """
+    kind = str((risk or {}).get("kind") or "")
+    severity = str((risk or {}).get("severity") or "warn").lower()
+    if severity == "block":
+        return True
+    if kind in _INFORMATIONAL_WARN_KINDS:
+        return False
+    return True
 
 
 def apply_create_new_risk_stamps(
@@ -20,11 +54,15 @@ def apply_create_new_risk_stamps(
     *,
     source_samples: dict[str, list] | None = None,
     dest_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> list[dict]:
     """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
     # Deferred: semantic_mapper imports this module, so binding its calibration
     # helper at import time would close the cycle.
-    from services.semantic_mapper import _calibrated_confidence
+    from services.semantic_mapper import (
+        IDENTITY_PASSTHROUGH_CONFIDENCE,
+        _calibrated_confidence,
+    )
     from services.mapping_proof import mapping_fidelity
     from services.decimal_observe import (
         ieee_float_create_new_risk,
@@ -36,9 +74,18 @@ def apply_create_new_risk_stamps(
         is_precision_collapse_coercion,
         normalize_logical_type as _nlt,
     )
-    from services.type_system import assess_create_new_type_risk
+    from services.data_profiler import source_numbers_are_typed
+    from services.type_system import (
+        assess_create_new_type_risk,
+        ddl_type,
+        reinvent_would_drop_dest_instant_carrier,
+    )
 
     samples_by_src = source_samples or {}
+    # A relational/warehouse source declared its own carriers; a file had them
+    # inferred from text, and only that inference can be wrong. A BSON double
+    # or a Kafka JSON/Avro number is an IEEE double on the wire too (D161).
+    declared_source = source_numbers_are_typed(source_db_type)
     out: list[dict] = []
     for m in mappings:
         row = dict(m)
@@ -60,12 +107,25 @@ def apply_create_new_risk_stamps(
         stamped = str(row.get("target_type") or "").strip()
         col_samples = samples_by_src.get(str(row.get("source") or "")) or None
         physical_from_src = (
-            create_new_mapping_target_type(src, db, samples=col_samples) if db else ""
+            create_new_mapping_target_type(
+                src, db, samples=col_samples, source_db=source_db_type
+            )
+            if db
+            else ""
         )
         if db and stamped:
             physical_from_stamp = create_new_mapping_target_type(
-                stamped, db, samples=col_samples
+                stamped, db, samples=col_samples, source_db=source_db_type
             )
+            if reinvent_would_drop_dest_instant_carrier(
+                stamped, physical_from_stamp, dest_db=db
+            ):
+                # The stamp is already the destination's own instant carrier;
+                # re-invent read it as a dialect-less source token and dropped
+                # the instant it declares (MySQL TIMESTAMP(6) → DATETIME(6)).
+                # Catalog TIMESTAMPTZ(6) on MySQL is that same carrier — legalize
+                # to the physical spelling Map and CREATE emit (TIMESTAMP(6)).
+                physical_from_stamp = ddl_type(db, "TIMESTAMPTZ") or stamped
             stamp_l = _nlt(stamped)
             src_phys_l = _nlt(physical_from_src or src)
             if physical_from_src and stamp_l == "float" and _nlt(src) == "float":
@@ -96,10 +156,16 @@ def apply_create_new_risk_stamps(
             # as a collapse. The calibration below reads ``fidelity``, so a
             # stale verdict caps a lossless create-new under the G4 floor and
             # demands a Risk Contract. Re-derive on the type that will run.
+            # The same measured population the first verdict used: a PostgreSQL
+            # TIMESTAMPTZ declares microseconds, and a BSON date keeps only
+            # milliseconds. Judged without the samples the re-derived verdict
+            # read a column of whole-millisecond cells as a truncation and
+            # parked the mapping at 0.70 under the G4 floor (D148/D156).
             verdict = mapping_fidelity(
                 row,
                 destination_db_type=db,
                 dest_table_exists=dest_table_exists,
+                population=col_samples,
             )
             row["fidelity"] = verdict["verdict"]
             row["fidelity_reason"] = verdict["reason"]
@@ -108,19 +174,31 @@ def apply_create_new_risk_stamps(
             row["invents_capacity"] = verdict.get("invents_capacity")
             row["requires_risk_contract"] = verdict.get("requires_risk_contract")
         risks = assess_create_new_type_risk(
-            src, tgt, destination_db_type=db, samples=col_samples
+            src,
+            tgt,
+            destination_db_type=db,
+            samples=col_samples,
+            source_types_declared=declared_source,
         )
-        ieee = ieee_float_create_new_risk(observe_numeric_samples(col_samples))
-        if ieee and not any(r.get("kind") == "ieee_float_artifact" for r in risks):
+        ieee = (
+            None
+            if declared_source
+            else ieee_float_create_new_risk(
+                observe_numeric_samples(col_samples), target_type=tgt, dest_db=db
+            )
+        )
+        if ieee and not any(r.get("kind") == ieee["kind"] for r in risks):
             risks = list(risks) + [ieee]
+        locking_risks = [r for r in risks if create_new_risk_locks_review(r)] if risks else []
         if risks:
             row["create_new_risks"] = risks
-            row["requires_review"] = True
             kinds = ", ".join(sorted({r.get("kind", "") for r in risks if r.get("kind")}))
             reason = str(row.get("reasoning") or "")
             note = f"create-new type risk: {kinds}"
             if note not in reason.lower():
                 row["reasoning"] = f"{reason} · {note}".strip(" ·")
+        if locking_risks:
+            row["requires_review"] = True
             if (
                 (not row.get("fidelity") or row.get("fidelity") == "lossless")
                 and (
@@ -145,7 +223,7 @@ def apply_create_new_risk_stamps(
             fid = str(row.get("fidelity") or "").strip().lower()
             # Lossless ADD COLUMN (INTEGER→INTEGER) — Approve-eligible, not 70% spam.
             # Still not silent Ready; operator confirms invent onto existing table.
-            if fid in {"preserve", "lossless"} and not risks:
+            if fid in {"preserve", "lossless", "normalizing"} and not risks:
                 row["requires_review"] = False
                 row["mapping_class"] = "equivalent_add_column"
                 try:
@@ -170,9 +248,14 @@ def apply_create_new_risk_stamps(
                 )
         elif strategy == "identity_passthrough":
             fid = str(row.get("fidelity") or "").strip().lower()
+            # A warn-only domain chip (MySQL TIMESTAMP 1970..2038) is not a
+            # fidelity verdict. Empty fidelity plus no locking risk is the
+            # same as preserve — Map still shows the chip from create_new_risks.
+            if not fid and not locking_risks:
+                fid = "preserve"
             # Equivalent create-new (preserve) — high type certainty, still not
             # silent Ready: UI Approve / Approve-eligible; no Risk Contract spam.
-            if fid in {"preserve", "lossless"}:
+            if fid in {"preserve", "lossless", "normalizing"}:
                 row["requires_review"] = False
                 row["mapping_class"] = "equivalent_create_new"
                 try:

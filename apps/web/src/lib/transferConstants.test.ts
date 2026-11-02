@@ -3,7 +3,15 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { availableSyncModes } from "./transferConstants.js";
+import {
+  availableSyncModes,
+  DEFAULT_SCHEMA_POLICY,
+  formatSchemaPolicyLabel,
+  formatSyncModeLabel,
+  formatValidationModeLabel,
+  schemaPolicyHonestyLine,
+  syncModeHonestyLine,
+} from "./transferConstants.js";
 
 describe("availableSyncModes", () => {
   it("hides SCD2/mirror on Mongo destinations", () => {
@@ -19,16 +27,57 @@ describe("availableSyncModes", () => {
     assert.ok(modes.includes("cdc"));
   });
 
-  it("hides SCD2/mirror for multi-stream even on Postgres", () => {
+  it("offers SCD2/mirror for multi-stream on SQL destinations", () => {
     const modes = availableSyncModes({
       destDriver: "postgresql",
       sourceDriver: "postgresql",
       sourceKind: "database",
       isMultiStream: true,
     }).map((m) => m.id);
+    assert.ok(modes.includes("scd2"));
+    assert.ok(modes.includes("mirror"));
+    assert.ok(modes.includes("cdc"));
+  });
+
+  it("still hides SCD2/mirror multi-stream on non-SQL destinations", () => {
+    const modes = availableSyncModes({
+      destDriver: "mongodb",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: true,
+    }).map((m) => m.id);
     assert.ok(!modes.includes("scd2"));
     assert.ok(!modes.includes("mirror"));
-    assert.ok(modes.includes("cdc"));
+  });
+
+  it("hides CDC for dest stored-procedure / dest query writes", () => {
+    const modes = availableSyncModes({
+      destDriver: "postgresql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      destWriteMode: "procedure",
+    }).map((m) => m.id);
+    assert.ok(!modes.includes("cdc"));
+    assert.ok(!modes.includes("scd2"));
+    assert.ok(!modes.includes("mirror"));
+    assert.ok(modes.includes("full_refresh_append"));
+  });
+
+  it("hides CDC for stored-procedure extracts", () => {
+    const modes = availableSyncModes({
+      destDriver: "postgresql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      sourceReadMode: "procedure",
+    }).map((m) => m.id);
+    assert.ok(!modes.includes("cdc"));
+    assert.ok(!modes.includes("scd2"));
+    assert.ok(!modes.includes("mirror"));
+    assert.ok(modes.includes("full_refresh_append"));
+    assert.ok(modes.includes("incremental_append"));
+    assert.ok(modes.includes("incremental_deduped"));
   });
 
   it("hides CDC for file sources", () => {
@@ -50,5 +99,97 @@ describe("availableSyncModes", () => {
     }).map((m) => m.id);
     assert.ok(modes.includes("scd2"));
     assert.ok(modes.includes("mirror"));
+  });
+});
+
+describe("formatSyncModeLabel", () => {
+  it("labels full_refresh_mirror as Mirror, not underscored engine id", () => {
+    assert.equal(formatSyncModeLabel("mirror"), "Mirror");
+    assert.equal(formatSyncModeLabel("full_refresh_mirror"), "Mirror");
+    assert.equal(formatSyncModeLabel("full_refresh_overwrite"), "Full overwrite");
+    assert.equal(formatSyncModeLabel(""), "—");
+  });
+
+  it("does not reuse sync-mode formatting for schema policy or validation", () => {
+    assert.equal(formatSchemaPolicyLabel("manual_review"), "Manual approval");
+    assert.equal(formatValidationModeLabel("strict"), "Strict");
+  });
+});
+
+describe("DEFAULT_SCHEMA_POLICY", () => {
+  it("starts a classic wizard session on manual approval", () => {
+    assert.equal(DEFAULT_SCHEMA_POLICY, "manual_review");
+    assert.match(schemaPolicyHonestyLine(DEFAULT_SCHEMA_POLICY), /does not ADD COLUMN/i);
+  });
+});
+
+describe("syncModeHonestyLine", () => {
+  it("names leftover empty tables as dest-exists on Full append — no CREATE, no ALTER", () => {
+    const line = syncModeHonestyLine("full_refresh_append", true);
+    assert.match(line, /existing table/i);
+    assert.match(line, /does not CREATE/i);
+    assert.match(line, /does not ALTER/i);
+    assert.match(line, /empty leftover/i);
+  });
+
+  it("names missing tables as create-new on Full append", () => {
+    const line = syncModeHonestyLine("full_refresh_append", false);
+    assert.match(line, /CREATE TABLE/i);
+    assert.match(line, /create-new/i);
+  });
+
+  it("names PG dest-exists overwrite as drop-and-recreate and points at G19", () => {
+    const line = syncModeHonestyLine("full_refresh_overwrite", true, "postgresql");
+    assert.match(line, /recreates/i);
+    assert.match(line, /G19/);
+    assert.doesNotMatch(line, /Does not by itself ALTER/);
+  });
+
+  it("keeps CRM overwrite as in-place — no silent recreate claim", () => {
+    const line = syncModeHonestyLine("full_refresh_overwrite", true, "salesforce");
+    assert.match(line, /Does not by itself ALTER/);
+    assert.doesNotMatch(line, /G19/);
+  });
+});
+
+describe("schemaPolicyHonestyLine", () => {
+  it("manual approval does not ADD COLUMN and hard-narrow still pauses", () => {
+    const line = schemaPolicyHonestyLine("manual_review");
+    assert.match(line, /does not ADD COLUMN/i);
+    assert.match(line, /Acknowledge|remap/i);
+    assert.match(line, /type-narrow always pauses/i);
+  });
+
+  it("propagate adds columns but never silent type rewrite", () => {
+    const line = schemaPolicyHonestyLine("propagate_columns");
+    assert.match(line, /ADD COLUMN/i);
+    assert.match(line, /Type narrow/i);
+    assert.doesNotMatch(line, /rewrite destination types/i);
+  });
+
+  it("pause on drift includes additive changes", () => {
+    const line = schemaPolicyHonestyLine("pause_on_change");
+    assert.match(line, /including additive/i);
+    assert.match(line, /scheduled beats/i);
+  });
+
+  it("type locked refuses silent cast", () => {
+    const line = schemaPolicyHonestyLine("type_locked");
+    assert.match(line, /silent-cast/i);
+  });
+
+  it("propagate_all shares the ADD COLUMN kernel — not a second mapper", () => {
+    const line = schemaPolicyHonestyLine("propagate_all");
+    assert.match(line, /ADD COLUMN kernel/i);
+    assert.match(line, /every selected stream/i);
+    assert.match(line, /Hard-breaking/i);
+  });
+
+  it("block_all pauses a source change and keeps destination-only columns as an audit note", () => {
+    const line = schemaPolicyHonestyLine("block_all");
+    assert.match(line, /nullable add/i);
+    assert.match(line, /Accept drift for this run/i);
+    assert.match(line, /Destination-only/i);
+    assert.match(line, /cannot be accepted away/i);
   });
 });

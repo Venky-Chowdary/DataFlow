@@ -185,6 +185,17 @@ function jobDestLabel(job: TransferJob): string {
   return job.destination_collection || job.destination_database || "destination";
 }
 
+/** Topology identity for a job dest — type+database, not a per-table collection. */
+function jobDestTopologyLabel(job: TransferJob): string {
+  return job.destination_database || job.destination_type || "destination";
+}
+
+/** Edges whose both ends are saved connections — not virtual job ghosts. */
+export function countSavedConnectionRoutes(topology: DataPlaneTopology): number {
+  const real = new Set(topology.nodes.filter((n) => !n.isVirtual).map((n) => n.id));
+  return topology.edges.filter((e) => real.has(e.sourceNodeId) && real.has(e.destNodeId)).length;
+}
+
 function findConnectorForJobSource(connectors: Connector[], job: TransferJob): Connector | undefined {
   const sourceName = job.source_name ?? "";
   if (!sourceName) return undefined;
@@ -301,7 +312,7 @@ export function buildDataPlaneTopology(
     const dstId = dstConn
       ? touchNode(dstConn.id, "destination")
       : ensureVirtualNode(
-          jobDestLabel(job) || job.destination_type || "Destination",
+          jobDestTopologyLabel(job),
           job.destination_type || "database",
           "destination",
           job.status === "completed" || job.status === "completed_with_quarantine" || running,

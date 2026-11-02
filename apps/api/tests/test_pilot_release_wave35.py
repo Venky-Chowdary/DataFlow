@@ -85,7 +85,9 @@ def test_refuse_reply_for_remove_connector():
 
     assert "search_knowledge" not in {_tool_name(t) for t in (resp.tools_used or [])}
     lower = (resp.answer or "").lower()
-    assert "delete" in lower or "ui" in lower or "not sure" in lower or "can't" in lower or "cannot" in lower
+    # Either a staged, confirm-gated delete of a real connector, or a plain
+    # statement that nothing matched — never a docs answer or a silent delete.
+    assert "confirm to proceed" in lower or "no connector matched" in lower
 
 
 def test_aggregate_insight_includes_result_id():

@@ -18,9 +18,22 @@ from typing import Any
 from services.validation_assistant import explain_validation
 
 _LOCK = threading.RLock()
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-_AUDIT_PATH = os.path.join(_DATA_DIR, "agentic_repair_audit.jsonl")
-_PROPOSALS_PATH = os.path.join(_DATA_DIR, "agentic_repair_proposals.json")
+
+
+def _data_dir() -> str:
+    # Resolve per call — an import-time snapshot would pin the dev data dir
+    # before test isolation or a reconfigured volume can take effect.
+    from services.platform_config import data_dir
+
+    return str(data_dir())
+
+
+def _audit_path() -> str:
+    return os.path.join(_data_dir(), "agentic_repair_audit.jsonl")
+
+
+def _proposals_path() -> str:
+    return os.path.join(_data_dir(), "agentic_repair_proposals.json")
 _MONGO_COLL = "repair_proposals"
 _MONGO_AUDIT = "repair_audit"
 
@@ -66,9 +79,9 @@ def _audit(event: str, payload: dict[str, Any]) -> None:
             return
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-    os.makedirs(_DATA_DIR, exist_ok=True)
+    os.makedirs(_data_dir(), exist_ok=True)
     with _LOCK:
-        with open(_AUDIT_PATH, "a", encoding="utf-8") as f:
+        with open(_audit_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")
 
 
@@ -87,10 +100,10 @@ def _load_proposals() -> list[dict[str, Any]]:
             return out
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-    if not os.path.isfile(_PROPOSALS_PATH):
+    if not os.path.isfile(_proposals_path()):
         return []
     try:
-        with open(_PROPOSALS_PATH, encoding="utf-8") as f:
+        with open(_proposals_path(), encoding="utf-8") as f:
             return list(json.load(f).get("proposals") or [])
     except Exception:
         return []
@@ -108,11 +121,11 @@ def _save_proposals(rows: list[dict[str, Any]]) -> None:
             doc["_id"] = pid
             coll.replace_one({"_id": pid}, doc, upsert=True)
         return
-    os.makedirs(_DATA_DIR, exist_ok=True)
-    tmp = _PROPOSALS_PATH + ".tmp"
+    os.makedirs(_data_dir(), exist_ok=True)
+    tmp = _proposals_path() + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"proposals": rows[-200:]}, f, indent=2, default=str)
-    os.replace(tmp, _PROPOSALS_PATH)
+    os.replace(tmp, _proposals_path())
 
 
 def _upsert_proposal(proposal: RepairProposal) -> None:
@@ -388,6 +401,12 @@ def action_is_mapping_mutative(action: dict[str, Any]) -> bool:
         return False
     if action.get("mapping_applyable") is False:
         return False
+    # Live destination DDL — Map destType cannot ALTER Snowflake/MySQL/PG.
+    # Stamping a wider type would re-Validate against the same live carrier.
+    if action.get("requires_ddl") and kind == "change_target_type":
+        return False
+    if kind == "change_target_type" and action.get("apply_proven") is False:
+        return False
     return bool(action.get("column") or action.get("source"))
 
 
@@ -411,8 +430,11 @@ def apply_actions_to_mappings(
             out.append(m)
             by_source[col] = m
         if kind == "change_target_type" and action.get("to_type"):
-            m["destination_type"] = action["to_type"]
-            m["target_type"] = action["to_type"]
+            widened = action["to_type"]
+            m["destination_type"] = widened
+            m["target_type"] = widened
+            m["destType"] = widened
+            m["dest_type"] = widened
         elif kind == "add_transform" and action.get("transform"):
             xf = action["transform"]
             transforms = list(m.get("transforms") or [])

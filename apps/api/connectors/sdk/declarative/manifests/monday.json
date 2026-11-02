@@ -1,0 +1,107 @@
+{
+  "name": "monday",
+  "docs": "https://developer.monday.com/api-reference/docs",
+  "base_url": "https://api.monday.com/v2",
+  "auth": {
+    "type": "api_key",
+    "location": "header",
+    "name": "Authorization"
+  },
+  "defaults": {
+    "page_size": 500,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "boards",
+      "path": ".",
+      "method": "POST",
+      "records_path": "data.boards",
+      "primary_key": ["id"],
+      "request_headers": {
+        "API-Version": "2024-10"
+      },
+      "request_body_template": {
+        "query": "{ boards(limit: 500) { id name state board_kind workspace_id updated_at } }"
+      },
+      "paginator": {
+        "type": "none"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "state": {"type": "string"},
+          "board_kind": {"type": "string"},
+          "workspace_id": {"type": "integer"},
+          "updated_at": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "users",
+      "path": ".",
+      "method": "POST",
+      "records_path": "data.users",
+      "primary_key": ["id"],
+      "request_headers": {
+        "API-Version": "2024-10"
+      },
+      "request_body_template": {
+        "query": "{ users(limit: 500) { id name email enabled is_admin is_guest created_at } }"
+      },
+      "paginator": {
+        "type": "none"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "email": {"type": "string"},
+          "enabled": {"type": "boolean"},
+          "is_admin": {"type": "boolean"},
+          "is_guest": {"type": "boolean"},
+          "created_at": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "items",
+      "path": ".",
+      "method": "POST",
+      "records_path": "data.boards.0.items_page.items",
+      "primary_key": ["id"],
+      "request_headers": {
+        "API-Version": "2024-10"
+      },
+      "request_body_template": {
+        "query": "query($cursor: String) { boards(ids: {board_id}) { items_page(limit: 200, cursor: $cursor) { cursor items { id name created_at updated_at column_values { id title text } } } } }",
+        "variables": {"cursor": null}
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "variables.cursor",
+        "cursor_location": "body",
+        "cursor_path": "data.boards.0.items_page.cursor",
+        "page_size": 200,
+        "page_size_param": ""
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "created_at": {"type": "string"},
+          "updated_at": {"type": "string"},
+          "column_values": {"type": "array"}
+        }
+      }
+    }
+  ]
+}

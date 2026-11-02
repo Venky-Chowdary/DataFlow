@@ -16,8 +16,11 @@ Honesty contract:
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from services.value_serializer import cell_to_string
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +29,27 @@ ProbeStatus = Literal[
     "skipped_no_pk",
     "skipped_no_source",
     "skipped_unsupported",
+    "skipped_callable",
     "error",
 ]
 
-# SQL path covers generic_sql and all SQL-like catalog IDs.
+# SQL path: the duplex SQL families plus the SQLAlchemy dialects the generic
+# driver serves. Keyed on engine family — a hosted tile (``alloydb``,
+# ``amazon_rds_mysql``, ``sql_server``, ``amazon_rds_oracle``, ``pgvector``)
+# is its family through :func:`is_sqlish_source`, never a spelling listed here.
 SQLISH_SOURCE_TYPES = frozenset({
-    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
-    "mysql", "mariadb", "singlestore",
-    "sqlserver", "mssql", "synapse", "azure_sql_database",
-    "oracle", "db2", "sqlite", "duckdb", "generic_sql", "h2",
+    "postgresql", "mysql", "sqlserver", "oracle", "redshift",
+    "synapse", "db2", "sqlite", "duckdb", "generic_sql", "h2",
     "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
 })
+
+
+def is_sqlish_source(kind: str | None) -> bool:
+    """True when a GROUP BY / catalog probe can address this engine."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(kind) in SQLISH_SOURCE_TYPES
+
 
 # Sources whose whole payload is readable, so uniqueness is proven by scanning
 # it rather than by asking the engine to GROUP BY. These have no query language
@@ -50,17 +63,68 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
     "sftp",
 })
 
+# Keyspace / document / log sources with no identity aggregate to push down,
+# whose whole population is still readable through the batch reader the
+# transfer uses. Same proof as an object payload: scan and count, cap-aware.
+# Kafka uniqueness is a topic payload scan (watermarks bound the log), not
+# SQL GROUP BY.
+READER_PAGED_SOURCE_TYPES = frozenset(
+    {"redis", "elasticsearch", "opensearch", "kafka", "qdrant"}
+)
+
+# Warehouse emulators (fakesnow is DuckDB; goccy BQ has no INFORMATION_SCHEMA
+# the SQLAlchemy inspector can see) still expose every seeded row through the
+# transfer reader. SQL GROUP BY that cannot address the catalog object must
+# not fail-close uniqueness — scan the readable population instead.
+_SQL_INSPECT_FALLBACK_TYPES = frozenset({"snowflake", "bigquery"})
+
+# Lakehouse snapshot (filesystem CoW or catalog files): no SQL GROUP BY to
+# push down. The transfer reader already pages the current snapshot, so
+# uniqueness is the same payload scan as Redis / object stores.
+ICEBERG_SOURCE_TYPES = frozenset({"iceberg", "apache_iceberg"})
+REST_API_SOURCE_TYPES = frozenset({"rest_api", "rest"})
+
+#: Sources whose population the payload scan can page through.
+PAYLOAD_SCANNED_SOURCE_TYPES = (
+    OBJECT_PAYLOAD_SOURCE_TYPES
+    | READER_PAGED_SOURCE_TYPES
+    | ICEBERG_SOURCE_TYPES
+    | REST_API_SOURCE_TYPES
+)
+
 PROBED_SOURCE_TYPES = (
     SQLISH_SOURCE_TYPES
     | frozenset(
-        {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce"}
+        {
+            "mongodb",
+            "mongodb_atlas",
+            "dynamodb",
+            "amazon_dynamodb",
+            "redis",
+            "salesforce",
+            "stripe",
+        }
     )
-    | OBJECT_PAYLOAD_SOURCE_TYPES
+    | PAYLOAD_SCANNED_SOURCE_TYPES
 )
 
-#: Rows scanned before a payload probe reports partial coverage instead of proof.
-_PAYLOAD_SCAN_CAP = 1_000_000
+#: Paged readers (Redis, Kafka) still stop here and report partial coverage.
+#: Object files do not use this cap: they stream once through hash partitions.
+_PAYLOAD_SCAN_CAP = 10_000_000
 _PAYLOAD_PAGE = 10_000
+
+_OBJECT_STORE_FOR_DB = {
+    "s3": "s3",
+    "minio": "s3",
+    "s3_compatible": "s3",
+    "aws_s3": "s3",
+    "gcs": "gcs",
+    "google_cloud_storage": "gcs",
+    "adls": "adls",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
+}
 
 
 @dataclass
@@ -72,6 +136,10 @@ class SourceDuplicateProbeResult:
     message: str = ""
     db_type: str = ""
     primary_key_columns: list[str] = field(default_factory=list)
+    #: Source rows with a NULL in any key column, counted on the population
+    #: (``None`` when this source kind was not counted). GROUP BY folds NULL
+    #: keys into one group, so a single NULL never shows up as a duplicate.
+    null_key_rows: int | None = None
 
     @property
     def ran(self) -> bool:
@@ -93,12 +161,47 @@ def _normalize_pk_columns(
     return [raw]
 
 
+def _identity_cell(value: Any) -> str:
+    """One identity cell on the transfer wire.
+
+    ``str(value)`` invented ``True`` / ``1E+2`` / a Python ``b'...'`` repr and
+    a space timestamp. ``None`` used a private ``\\x00NULL`` token, then
+    findings collapsed it to ``""`` so Validate could not tell NULL from empty.
+    """
+    return cell_to_string(value, preserve_sql_null=True)
+
+
 def _finding_value(columns: list[str], values: tuple[Any, ...]) -> Any:
     """Scalar for single-col (backward compat); joined label for composite."""
     if len(columns) == 1:
         return values[0] if values else None
-    parts = ["" if v is None else str(v) for v in values]
+    parts = [str(v) for v in values]
     return "(" + ", ".join(parts) + ")"
+
+
+def _pk_header_indexes(
+    pk_columns: list[str], headers: list[str]
+) -> tuple[list[int], list[str]]:
+    """(positions, missing) of each pk in the payload headers.
+
+    Exact match first; a case-folded match only when unambiguous — a
+    case-folding engine (Snowflake, Oracle) stores unquoted identifiers
+    uppercased while the declared mapping keeps the typed name. Two headers
+    that fold equal (``ID`` and ``"id"``) stay ambiguous and count missing:
+    resolving there would guess at which column is the key.
+    """
+    idx: list[int] = []
+    missing: list[str] = []
+    for c in pk_columns:
+        if c in headers:
+            idx.append(headers.index(c))
+            continue
+        folded = [i for i, h in enumerate(headers) if h.casefold() == c.casefold()]
+        if len(folded) == 1:
+            idx.append(folded[0])
+        else:
+            missing.append(c)
+    return idx, missing
 
 
 def _sql_duplicates(
@@ -106,18 +209,32 @@ def _sql_duplicates(
     table: str,
     pk_columns: list[str],
     limit: int = 5,
+    *,
+    null_counts: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
+    """Duplicate key groups; fills ``null_counts["rows"]`` when a dict is passed."""
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+    from services.sql_object_identity import resolve_object_identity
 
     engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
+    schema, table = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
+    # Case-folding engines and Studio ``schema.table`` spellings must address
+    # the catalog object, not ``public."public.case_a_src"``.
+    ident = resolve_object_identity(engine, table, schema, columns=pk_columns)
+    if ident.exists:
+        table = sa.sql.quoted_name(ident.table, True)
+        schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
+        pk_columns = [ident.columns.get(c, c) for c in pk_columns]
 
     # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
     # syntax for SQL Server, Oracle, etc.
+    # Quote PK columns the same way as the table: Oracle folds unquoted `id` to
+    # ID while create-new SQLAlchemy tables keep lowercase `"id"`.
     tbl = sa.table(table, schema=schema)
-    pk_cols = [sa.column(c) for c in pk_columns]
+    pk_cols = [sa.column(sa.sql.quoted_name(str(c), True)) for c in pk_columns]
     cnt = sa.func.count().label("_cnt")
     stmt = (
         sa.select(*pk_cols, cnt)
@@ -129,11 +246,22 @@ def _sql_duplicates(
 
     with engine.connect() as conn:
         rows = conn.execute(stmt).fetchall()
+        if null_counts is not None:
+            # D46: a NULL key passed this probe (one NULL is no duplicate) and
+            # then failed the keyed write with a misleading error.
+            null_stmt = (
+                sa.select(sa.func.count())
+                .select_from(tbl)
+                .where(sa.or_(*[c.is_(None) for c in pk_cols]))
+            )
+            null_counts["rows"] = int(conn.execute(null_stmt).scalar() or 0)
 
     out: list[dict[str, Any]] = []
     n = len(pk_columns)
     for row in rows:
-        vals = tuple(row[i] if i < len(row) else None for i in range(n))
+        vals = tuple(
+            _identity_cell(row[i] if i < len(row) else None) for i in range(n)
+        )
         count = int(row[n]) if len(row) > n else 1
         out.append(
             {
@@ -153,6 +281,7 @@ def _mongo_duplicates(
     limit: int = 5,
 ) -> list[dict[str, Any]]:
     from pymongo import MongoClient
+    from connectors.mongodb_common import guarded_mongo_client
 
     from connectors.mongodb_common import normalize_mongodb_connection_string
 
@@ -166,7 +295,7 @@ def _mongo_duplicates(
         ssl=bool(cfg.get("ssl")),
         auth_source=cfg.get("auth_source", ""),
     )
-    client: MongoClient = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    client: MongoClient = guarded_mongo_client(uri, serverSelectionTimeoutMS=5000)
     db_name = cfg.get("database") or cfg.get("auth_source") or "test"
     db = client[db_name]
     coll = db[collection]
@@ -190,14 +319,14 @@ def _mongo_duplicates(
         rid = r.get("_id")
         count = int(r.get("count", 1))
         if len(pk_columns) == 1:
-            vals = (rid,)
-            values = {pk_columns[0]: rid}
+            vals = (_identity_cell(rid),)
+            values = {pk_columns[0]: vals[0]}
         elif isinstance(rid, dict):
-            vals = tuple(rid.get(c) for c in pk_columns)
-            values = {c: rid.get(c) for c in pk_columns}
+            vals = tuple(_identity_cell(rid.get(c)) for c in pk_columns)
+            values = {c: vals[i] for i, c in enumerate(pk_columns)}
         else:
-            vals = (rid,)
-            values = {pk_columns[0]: rid}
+            vals = (_identity_cell(rid),)
+            values = {pk_columns[0]: vals[0]}
         out.append(
             {
                 "value": _finding_value(pk_columns, vals),
@@ -209,7 +338,56 @@ def _mongo_duplicates(
     return out
 
 
+def _spill_object(cfg: dict[str, Any], db_type: str, key: str) -> tuple[Any, str] | None:
+    """Local spill plus the filename the parser should trust, or None."""
+    store = _OBJECT_STORE_FOR_DB.get(db_type)
+    bucket = str(cfg.get("database") or cfg.get("bucket") or "")
+    if store and bucket and key:
+        from connectors.object_store_common import materialize_store_spill
+
+        return materialize_store_spill(store, cfg, bucket, key), key
+    if db_type == "sftp":
+        from connectors.sftp_reader import materialize_spill
+
+        return materialize_spill(cfg=cfg, bucket=bucket, key=key)
+    return None
+
+
 def _object_payload_duplicates(
+    cfg: dict[str, Any],
+    db_type: str,
+    key: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Count identity keys across an object payload.
+
+    File and object sources are streamed once from the spill. Paging them
+    re-parsed every prefix, so a 2M-row file spent minutes inside one gate
+    and then stopped at 1M rows without a proof.
+    """
+    spilled = _spill_object(cfg, db_type, key)
+    if spilled is not None:
+        from services.identity_uniqueness import scan_identity_file
+
+        path, filename = spilled
+        return scan_identity_file(
+            path,
+            filename,
+            pk_columns,
+            limit=limit,
+            normalize_key=_normalize_key_cell,
+            identity_cell=_identity_cell,
+            finding_value=_finding_value,
+        )
+
+    return _paged_payload_duplicates(
+        cfg, db_type, key, pk_columns, limit=limit
+    )
+
+
+def _paged_payload_duplicates(
     cfg: dict[str, Any],
     db_type: str,
     key: str,
@@ -228,57 +406,104 @@ def _object_payload_duplicates(
     and the load agree on parsing, encoding and column order rather than
     reaching two different answers about the same bytes.
     """
-    from collections import Counter
+    from services.identity_uniqueness import PartitionedUniqueness
+    from src.transfer.batch_readers import CONTINUATION_KWARG, _read_batch_impl
+    from src.transfer.connector_capabilities import resolve_driver_type
 
-    from src.transfer.batch_readers import _read_batch_impl
+    # Kafka schema sampling already uses an ephemeral group so it never
+    # advances the transfer cursor. Uniqueness is the same contract: a
+    # read-only proof scan must not join the job consumer group. Sharing
+    # group_id kicks the transfer member out on commit (kafka-python:
+    # "consumer was kicked out of the group") after dest apply — fail-closed
+    # on a unique payload.
+    if db_type == "kafka":
+        cfg = dict(cfg)
+        gid = f"dataflow-kafka-uniqueness-{uuid.uuid4().hex[:12]}"
+        cfg["group_id"] = gid
+        cfg["auto_offset_reset"] = cfg.get("auto_offset_reset") or "earliest"
+        extra = dict(cfg.get("extra") or {})
+        extra["group_id"] = gid
+        extra["auto_offset_reset"] = cfg["auto_offset_reset"]
+        cfg["extra"] = extra
 
-    counts: Counter[tuple[str, ...]] = Counter()
+    scanner = PartitionedUniqueness()
     scanned = 0
     offset = 0
     total: int | None = None
-    while True:
-        result = _read_batch_impl(
-            db_type,
-            cfg,
-            key,
-            None,
-            offset,
-            _PAYLOAD_PAGE,
-            known_total_rows=total,
-        )
-        batch = result[0] if isinstance(result, tuple) else result
-        headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
-        rows = list(getattr(batch, "rows", None) or [])
-        if total is None:
-            total = getattr(batch, "total_rows", None)
-        if not rows:
-            break
-        missing = [c for c in pk_columns if c not in headers]
-        if missing:
-            # The key is not in the payload at all: that is a mapping question,
-            # not a duplicate one, and inventing "unique" here would green a
-            # column the file never carried.
-            raise ValueError(
-                f"identity column(s) {', '.join(missing)} are not present in {key}"
+    # SCAN / search_after sources ignore ``offset``: page two only exists if the
+    # token page one returned is handed back. Paged by offset instead, the probe
+    # re-read page one and reported its own re-reads as source duplicate keys —
+    # a fail-closed gate on a unique keyspace.
+    token_kwarg = CONTINUATION_KWARG.get(resolve_driver_type(db_type), "")
+    token: Any = None
+    complete = True
+    try:
+        while True:
+            result = _read_batch_impl(
+                db_type,
+                cfg,
+                key,
+                None,
+                offset,
+                _PAYLOAD_PAGE,
+                known_total_rows=total,
+                **({token_kwarg: token} if token_kwarg and token is not None else {}),
             )
-        idx = [headers.index(c) for c in pk_columns]
-        for row in rows:
-            if isinstance(row, dict):
-                vals = tuple(_normalize_key_cell(row.get(c)) for c in pk_columns)
-            else:
-                vals = tuple(
-                    _normalize_key_cell(row[i] if i < len(row) else None) for i in idx
+            batch = result[0] if isinstance(result, tuple) else result
+            if token_kwarg:
+                token = result[1] if isinstance(result, tuple) and len(result) == 2 else None
+            headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
+            rows = list(getattr(batch, "rows", None) or [])
+            if total is None:
+                total = getattr(batch, "total_rows", None)
+            if not rows:
+                break
+            idx, missing = _pk_header_indexes(pk_columns, headers)
+            if missing:
+                # The key is not in the payload at all: that is a mapping question,
+                # not a duplicate one, and inventing "unique" here would green a
+                # column the file never carried.
+                raise ValueError(
+                    f"identity column(s) {', '.join(missing)} are not present in {key}"
                 )
-            counts[vals] += 1
-        scanned += len(rows)
-        offset += len(rows)
-        if scanned >= _PAYLOAD_SCAN_CAP:
-            return _counter_findings(counts, pk_columns, limit), scanned, False
-        if total is not None and offset >= int(total):
-            break
-        if len(rows) < _PAYLOAD_PAGE:
-            break
-    return _counter_findings(counts, pk_columns, limit), scanned, True
+            for row in rows:
+                if isinstance(row, dict):
+                    vals = tuple(
+                        _normalize_key_cell(row.get(headers[i])) for i in idx
+                    )
+                else:
+                    vals = tuple(
+                        _normalize_key_cell(row[i] if i < len(row) else None) for i in idx
+                    )
+                scanner.add(vals)
+            scanned += len(rows)
+            offset += len(rows)
+            if scanned >= _PAYLOAD_SCAN_CAP:
+                complete = False
+                break
+            if total is not None and offset >= int(total):
+                break
+            if len(rows) < _PAYLOAD_PAGE:
+                break
+            if token_kwarg and token is None:
+                # Reader handed back no continuation: it cannot be resumed, and
+                # re-reading from the top would count its own re-reads as duplicates.
+                break
+        from services.identity_uniqueness import annotate_identity_findings
+
+        findings = annotate_identity_findings(
+            scanner.findings(
+                pk_columns,
+                limit,
+                identity_cell=_identity_cell,
+                finding_value=_finding_value,
+            ),
+            scanner,
+            complete=complete,
+        )
+        return findings, scanned, complete
+    finally:
+        scanner.close()
 
 
 def _salesforce_duplicates(
@@ -331,14 +556,21 @@ def _salesforce_duplicates(
         timeout=60,
     )
     response.raise_for_status()
+    from services.value_serializer import load_http_json
+
+    # Identity cells live in ``records``. Response.json() is stdlib
+    # json.loads — a long fraction in an External Id collapses to IEEE
+    # before Validate shows the duplicate key.
+    body = load_http_json(response)
+    records = body.get("records") if isinstance(body, dict) else None
     findings: list[dict[str, Any]] = []
-    for record in (response.json().get("records") or [])[: max(1, int(limit))]:
+    for record in (records or [])[: max(1, int(limit))]:
         if not isinstance(record, dict):
             continue
-        value = record.get(field)
+        value = _identity_cell(record.get(field))
         findings.append(
             {
-                "value": _finding_value(pk_columns, [value]),
+                "value": _finding_value(pk_columns, (value,)),
                 "values": [value],
                 "columns": list(pk_columns),
                 "count": int(record.get("dupes") or 0),
@@ -348,6 +580,41 @@ def _salesforce_duplicates(
         findings,
         "ran",
         f"Salesforce aggregate uniqueness probe on {obj}.({field})",
+    )
+
+
+def _stripe_duplicates(
+    cfg: dict[str, Any],
+    object_name: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a Stripe object.
+
+    Stripe assigns ``id`` (``cus_…``, ``ch_…``) and the platform guarantees it
+    is unique. That is the same class of evidence as Salesforce ``Id`` — stronger
+    than a sample, so the probe reports ``ran`` rather than skipped.
+
+    Any other identity is unproven: Stripe list APIs have no GROUP BY.
+    """
+    wanted = [c.strip().lower() for c in pk_columns]
+    if wanted == ["id"]:
+        return (
+            [],
+            "ran",
+            (
+                f"Stripe assigns id on {object_name or 'object'}; "
+                "uniqueness is guaranteed by the platform"
+            ),
+        )
+    return (
+        [],
+        "skipped_unsupported",
+        (
+            "Stripe uniqueness is proven only for platform id — "
+            f"({', '.join(pk_columns)}) is unproven"
+        ),
     )
 
 
@@ -387,12 +654,11 @@ def _dynamodb_duplicates(
 
     batch = read_all_paginated(cfg, table, limit=_PAYLOAD_SCAN_CAP)
     headers = [str(h) for h in (batch.headers or [])]
-    missing = [c for c in pk_columns if c not in headers]
+    idx, missing = _pk_header_indexes(pk_columns, headers)
     if missing:
         raise ValueError(
             f"identity column(s) {', '.join(missing)} are not present in {table}"
         )
-    idx = [headers.index(c) for c in pk_columns]
     counts: Counter[tuple[str, ...]] = Counter()
     for row in batch.rows or []:
         counts[
@@ -407,15 +673,80 @@ def _dynamodb_duplicates(
     )
 
 
-def _normalize_key_cell(value: Any) -> str:
-    """Render one identity cell the way the destination key would compare it.
+def _redis_duplicates(
+    cfg: dict[str, Any],
+    keyspace: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a Redis keyspace source.
 
-    ``None`` is kept distinct from the empty string: a NULL key is a
-    nullability finding, not a duplicate of a row that carried ``''``.
+    ``redis_key`` is unique by construction — one value per key — so an identity
+    that is the key itself is answered structurally, like a DynamoDB table key.
+    An identity read out of the stored document carries no such guarantee (two
+    keys may hold the same ``id``), so those are counted across a real SCAN of
+    the keyspace. Skipping the engine entirely failed every uniqueness-required
+    Redis route closed for a probe the keyspace can actually answer.
     """
-    if value is None:
-        return "\x00NULL"
-    return str(value)
+    from collections import Counter
+
+    from connectors.redis_reader import RedisScanState, read_keys_batch, resolve_key_pattern
+
+    wanted = [c.strip().lower() for c in pk_columns]
+    if wanted == ["redis_key"]:
+        return (
+            [],
+            "ran",
+            "Redis enforces uniqueness on the key itself (redis_key)",
+        )
+
+    pattern = resolve_key_pattern(keyspace)
+    state = RedisScanState.from_any(None)
+    counts: Counter[tuple[str, ...]] = Counter()
+    scanned = 0
+    idx: list[int] = []
+    while scanned < _PAYLOAD_SCAN_CAP:
+        batch, state = read_keys_batch(
+            cfg=cfg, pattern=pattern, limit=_PAYLOAD_PAGE, scan_state=state
+        )
+        rows = list(batch.rows or [])
+        if rows and not idx:
+            headers = [str(h) for h in (batch.headers or [])]
+            idx, missing = _pk_header_indexes(pk_columns, headers)
+            if missing:
+                raise ValueError(
+                    f"identity column(s) {', '.join(missing)} are not present "
+                    f"in Redis keyspace {pattern}"
+                )
+        for row in rows:
+            counts[
+                tuple(_normalize_key_cell(row[i] if i < len(row) else None) for i in idx)
+            ] += 1
+        scanned += len(rows)
+        if not rows or state.exhausted:
+            break
+    if scanned >= _PAYLOAD_SCAN_CAP and not state.exhausted:
+        return (
+            _counter_findings(counts, pk_columns, limit),
+            "skipped_unsupported",
+            (
+                f"Redis keyspace exceeds the {_PAYLOAD_SCAN_CAP:,}-key uniqueness "
+                f"scan cap ({scanned:,} read); uniqueness on "
+                f"({','.join(pk_columns)}) is unproven for the remainder"
+            ),
+        )
+    return (
+        _counter_findings(counts, pk_columns, limit),
+        "ran",
+        f"Redis keyspace uniqueness scan on {pattern}.({','.join(pk_columns)}) "
+        f"over {scanned:,} key(s)",
+    )
+
+
+def _normalize_key_cell(value: Any) -> str:
+    """Render one identity cell the way the destination key would compare it."""
+    return _identity_cell(value)
 
 
 def _counter_findings(
@@ -427,7 +758,10 @@ def _counter_findings(
             break
         if len(out) >= max(1, int(limit)):
             break
-        values = ["" if v == "\x00NULL" else v for v in vals]
+        # vals are already identity cells from _normalize_key_cell — passing
+        # them through cell_to_string again would escape the SQL-NULL sentinel
+        # a second time (NULL must stay distinct from "" in findings).
+        values = [str(v) for v in vals]
         out.append(
             {
                 "value": _finding_value(pk_columns, values),
@@ -451,6 +785,17 @@ def probe_source_duplicate_keys_result(
     limit: int = 5,
 ) -> SourceDuplicateProbeResult:
     """Run the source duplicate probe and return an honest status + findings."""
+    try:
+        from services.procedure_source import callable_skip_note, is_callable_source
+
+        if is_callable_source(source_config):
+            return SourceDuplicateProbeResult(
+                status="skipped_callable",
+                message=callable_skip_note(source_config, "uniqueness GROUP BY"),
+                primary_key_columns=_normalize_pk_columns(primary_key, primary_key_columns),
+            )
+    except Exception:
+        pass
     pk_columns = _normalize_pk_columns(primary_key, primary_key_columns)
     if not pk_columns:
         return SourceDuplicateProbeResult(
@@ -483,6 +828,12 @@ def probe_source_duplicate_keys_result(
 
                 cfg = probe_cfg_from_saved(conn)
                 db_type = (conn.type or "").lower()
+                # D91 — the run's endpoint names the schema it reads; the saved
+                # connector only carries its default (``public``), so probing
+                # with it alone checked a different table, or none.
+                run_schema = str((source_config or {}).get("schema") or "").strip()
+                if cfg is not None and run_schema:
+                    cfg = {**cfg, "schema": run_schema}
 
         if cfg is None and source_config:
             cfg = dict(source_config)
@@ -493,6 +844,10 @@ def probe_source_duplicate_keys_result(
                 or ""
             ).lower()
 
+        # One resolver for the engine family; the catalog id stays on cfg.
+        from src.transfer.engine_family import family_or_kind
+
+        db_type = family_or_kind(db_type)
         if not cfg:
             return SourceDuplicateProbeResult(
                 status="skipped_no_source",
@@ -555,6 +910,26 @@ def probe_source_duplicate_keys_result(
                 primary_key_columns=pk_columns,
             )
 
+        if db_type == "stripe":
+            obj = source_table or source_collection
+            if not obj:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Stripe source missing object for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _stripe_duplicates(
+                cfg, obj, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
         if db_type in ("dynamodb", "amazon_dynamodb"):
             tbl = source_table or source_collection
             if not tbl:
@@ -575,7 +950,30 @@ def probe_source_duplicate_keys_result(
                 primary_key_columns=pk_columns,
             )
 
-        if db_type in OBJECT_PAYLOAD_SOURCE_TYPES:
+        # Redis answers its own keyspace: a ``redis_key`` identity is unique by
+        # construction, which the generic payload scan below cannot know. Any
+        # other identity still falls through to a real SCAN inside the probe.
+        if db_type == "redis":
+            keyspace = source_table or source_collection
+            if not keyspace:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Redis source missing keyspace for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _redis_duplicates(
+                cfg, keyspace, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type in PAYLOAD_SCANNED_SOURCE_TYPES:
             obj = source_table or source_collection
             if not obj:
                 return SourceDuplicateProbeResult(
@@ -587,6 +985,15 @@ def probe_source_duplicate_keys_result(
             findings, scanned, complete = _object_payload_duplicates(
                 cfg, db_type, obj, pk_columns, limit=limit
             )
+            # A file or object payload is one batch. Duplicate keys in it are
+            # in-file copies the upsert writer collapses, not a SQL table that
+            # is itself non-unique. Stamp them so G9 can tell the two apart.
+            # A Kafka topic is a changelog: a repeated key is a later version
+            # of the record, and upsert keeps the last one in log order (D89).
+            if db_type in OBJECT_PAYLOAD_SOURCE_TYPES or db_type == "kafka":
+                for finding in findings:
+                    if isinstance(finding, dict):
+                        finding["in_file"] = True
             if not complete:
                 # A truncated scan proves the duplicates it found but cannot
                 # prove their absence, so it must not be stamped as population
@@ -613,7 +1020,7 @@ def probe_source_duplicate_keys_result(
                 primary_key_columns=pk_columns,
             )
 
-        if db_type not in SQLISH_SOURCE_TYPES:
+        if not is_sqlish_source(db_type):
             msg = f"Duplicate-key probe not implemented for source type {db_type or 'unknown'}"
             logger.debug(msg)
             return SourceDuplicateProbeResult(
@@ -631,13 +1038,82 @@ def probe_source_duplicate_keys_result(
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )
-        findings = _sql_duplicates(cfg, table, pk_columns, limit=limit)
+        proven = _enforced_key_proves_unique(cfg, db_type, table, pk_columns)
+        if proven:
+            return SourceDuplicateProbeResult(
+                status="ran",
+                message=proven,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+                null_key_rows=0,
+            )
+        null_counts: dict[str, int] = {}
+        try:
+            from src.ai.copilot.tool_deadline import bounded_step
+
+            scan = bounded_step(
+                f"checking key uniqueness on source table {table}",
+                lambda: _sql_duplicates(
+                    cfg, table, pk_columns, limit=limit, null_counts=null_counts
+                ),
+                seconds=DUPLICATE_SCAN_STEP_SECONDS,
+                conn=cfg,
+                role="source",
+            )
+            if scan.timed_out:
+                return SourceDuplicateProbeResult(
+                    status="error",
+                    message=(
+                        f"the uniqueness scan of {table}.({pk_label}) did not finish "
+                        f"within the plan's step budget ({DUPLICATE_SCAN_STEP_SECONDS:g}s "
+                        "at most); uniqueness is unproven. An enforced PRIMARY KEY on "
+                        "these columns proves it without a scan"
+                    ),
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            if scan.error is not None:
+                raise scan.error
+            findings = scan.value
+        except Exception as sql_exc:
+            if db_type not in _SQL_INSPECT_FALLBACK_TYPES:
+                raise
+            # fakesnow / goccy: inspector ``exists=False`` or a quoting miss.
+            # The transfer reader still sees the seeded rows — count those.
+            findings, scanned, complete = _object_payload_duplicates(
+                cfg, db_type, table, pk_columns, limit=limit
+            )
+            if not complete:
+                return SourceDuplicateProbeResult(
+                    findings=findings,
+                    status="skipped_unsupported",
+                    message=(
+                        f"{db_type} SQL uniqueness probe failed ({sql_exc}); "
+                        f"payload exceeds the {_PAYLOAD_SCAN_CAP:,}-row "
+                        f"scan cap ({scanned:,} read); uniqueness on "
+                        f"({pk_label}) is unproven for the remainder"
+                    )[:400],
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status="ran",
+                message=(
+                    f"{db_type} payload uniqueness scan on {table}.({pk_label}) "
+                    f"over {scanned:,} row(s) after SQL inspect could not "
+                    f"address the source table"
+                ),
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
         return SourceDuplicateProbeResult(
             findings=findings,
             status="ran",
             message=f"SQL uniqueness probe on {table}.({pk_label})",
             db_type=db_type,
             primary_key_columns=pk_columns,
+            null_key_rows=null_counts.get("rows"),
         )
     except Exception as exc:
         logger.warning("Source duplicate-key probe failed: %s", exc, exc_info=exc)
@@ -647,6 +1123,56 @@ def probe_source_duplicate_keys_result(
             db_type=db_type,
             primary_key_columns=pk_columns,
         )
+
+
+#: Longest a planning tool spends on the GROUP BY uniqueness scan (D187).
+DUPLICATE_SCAN_STEP_SECONDS = 10.0
+
+#: Engines that enforce PRIMARY KEY constraints: a declared key there IS the
+#: population's uniqueness and non-NULL-ness. Snowflake, Redshift, BigQuery,
+#: Databricks and friends accept a PRIMARY KEY they never enforce: scanned.
+_ENFORCED_KEY_TYPES = frozenset({
+    "postgresql", "postgres", "timescaledb", "supabase", "pgvector", "cockroachdb",
+    "mysql", "mariadb", "sqlserver", "mssql", "azure_sql_database", "oracle", "sqlite",
+})
+
+
+def _enforced_key_proves_unique(
+    cfg: dict[str, Any], db_type: str, table: str, pk_columns: list[str]
+) -> str:
+    """A message when the source's enforced primary key is exactly these columns.
+
+    The probe ran two full-table aggregates (GROUP BY key HAVING count > 1, and
+    COUNT of NULL keys) on every plan. On a large PostgreSQL table they ran past
+    the 45s tool deadline (D187), while the catalog already said the database
+    itself refuses a duplicate or NULL key. Reading the constraint is the proof;
+    a key the engine does not enforce, or any other column set, is still scanned.
+    """
+    if db_type not in _ENFORCED_KEY_TYPES or not pk_columns:
+        return ""
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import _engine
+        from connectors.sql_identifiers import split_qualified_table
+
+        engine = _engine(cfg)
+        schema, name = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
+        inspector = sa.inspect(engine)
+        if not inspector.has_table(name, schema=schema):
+            return ""
+        declared = inspector.get_pk_constraint(name, schema=schema) or {}
+        key = [str(c) for c in (declared.get("constrained_columns") or [])]
+    except Exception as exc:  # noqa: BLE001 - fall back to the scan
+        logger.debug("enforced-key lookup failed for %s: %s", table, exc)
+        return ""
+    if not key or {c.lower() for c in key} != {str(c).lower() for c in pk_columns}:
+        return ""
+    label = ", ".join(key)
+    return (
+        f"{db_type} enforces PRIMARY KEY ({label}) on {table}: every key is unique "
+        "and non-NULL (proven by the constraint; no table scan)"
+    )
 
 
 def probe_source_duplicate_keys(

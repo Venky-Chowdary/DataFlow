@@ -12,7 +12,6 @@ configured so multi-replica workers can materialize.
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,9 +23,9 @@ _logger = logging.getLogger(__name__)
 
 
 def _safe_filename(name: str) -> str:
-    raw = (name or "upload.bin").strip() or "upload.bin"
-    base = Path(raw).name
-    return re.sub(r"[^A-Za-z0-9._-]", "_", base)[:160] or "upload.bin"
+    from services.file_parser import safe_upload_filename
+
+    return safe_upload_filename(name)
 
 
 #: Filename prefix for per-job source spills in the shared upload directory.
@@ -39,8 +38,41 @@ def is_transfer_staging_file(name: str) -> bool:
     return str(name or "").startswith(TRANSFER_STAGING_PREFIX)
 
 
+def _source_file_id(request: "TransferRequest") -> str:
+    extra = getattr(getattr(request, "source", None), "extra", None) or {}
+    if not isinstance(extra, dict):
+        extra = {}
+    return str(extra.get("file_id") or getattr(request, "source_file_id", "") or "").strip()
+
+
+def _bind_stored_upload(request: "TransferRequest") -> bool:
+    """Stamp path/URI from a persisted /connectors/upload id. Same bytes Validate scanned."""
+    fid = _source_file_id(request)
+    if not fid:
+        return False
+    from services.file_parser import get_file
+
+    record = get_file(fid)
+    if not record:
+        return False
+    path = str(record.get("path") or "").strip()
+    if path and Path(path).is_file():
+        request.source_path = path
+        if not (getattr(request, "source_filename", None) or "").strip():
+            request.source_filename = str(record.get("filename") or Path(path).name)
+        uri = str(record.get("object_uri") or "").strip()
+        if uri.startswith("s3://"):
+            request.source_object_uri = uri
+        return True
+    uri = str(record.get("object_uri") or "").strip()
+    if uri.startswith("s3://"):
+        request.source_object_uri = uri
+        return True
+    return False
+
+
 def file_source_bytes_available(request: "TransferRequest") -> bool:
-    """True when Execute can read file bytes (memory, path, or object URI)."""
+    """True when Execute can read file bytes (memory, path, object URI, or stored upload)."""
     if getattr(request, "source", None) is None:
         return False
     if getattr(request.source, "kind", "") != "file":
@@ -51,7 +83,9 @@ def file_source_bytes_available(request: "TransferRequest") -> bool:
     if path and Path(path).is_file():
         return True
     uri = (getattr(request, "source_object_uri", None) or "").strip()
-    return bool(uri.startswith("s3://"))
+    if uri.startswith("s3://"):
+        return True
+    return _bind_stored_upload(request)
 
 
 def requires_file_reupload(request: "TransferRequest") -> bool:
@@ -69,7 +103,9 @@ def requires_file_reupload(request: "TransferRequest") -> bool:
     if path:
         return False
     uri = (getattr(request, "source_object_uri", None) or "").strip()
-    return not uri.startswith("s3://")
+    if uri.startswith("s3://"):
+        return False
+    return not _bind_stored_upload(request)
 
 
 def persist_file_source(
@@ -112,12 +148,24 @@ def persist_file_source(
 
 
 def hydrate_file_source(request: "TransferRequest") -> "TransferRequest":
-    """Ensure ``source_path`` exists for claim workers (materialize from URI)."""
+    """Ensure ``source_path`` exists for claim workers (materialize from URI).
+
+    A journal replay (``source.extra.journal_id``) resolves to the verified
+    journal file here; ``JournalError`` refuses a missing/foreign/corrupt one.
+    """
+    from services.transfer_journal import apply_replay_source
+
+    if apply_replay_source(request):
+        return request
     if getattr(request.source, "kind", "") != "file":
         return request
     path = (getattr(request, "source_path", None) or "").strip()
     if path and Path(path).is_file():
         return request
+    if _bind_stored_upload(request):
+        path = (getattr(request, "source_path", None) or "").strip()
+        if path and Path(path).is_file():
+            return request
     uri = (getattr(request, "source_object_uri", None) or "").strip()
     if not uri.startswith("s3://"):
         return request

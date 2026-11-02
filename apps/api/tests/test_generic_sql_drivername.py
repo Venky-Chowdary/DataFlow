@@ -2,8 +2,13 @@
 
 from connectors.generic_sql import (
     _build_url,
+    _connect_args_for,
     _drivername,
+    _mssql_drivername,
+    _mssql_odbc_driver,
     _normalize_sqlalchemy_url_string,
+    adapt_mssql_sql,
+    with_connection_options,
 )
 
 
@@ -77,3 +82,178 @@ def test_normalize_preserves_password_with_at_sign():
     out = _normalize_sqlalchemy_url_string(raw, "mysql")
     assert out.startswith("mysql+pymysql://")
     assert "p@ss@" in out
+
+
+def test_mssql_drivername_falls_back_to_pymssql_without_odbc_driver(monkeypatch):
+    """pyodbc imported is not enough — missing libmsodbcsql must not win."""
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_odbc_driver", lambda: None)
+    assert _mssql_drivername() == "mssql+pymssql"
+
+
+def test_connect_timeout_reaches_driver_connect_args():
+    """QA C07 — the probe's handshake bound must reach the DBAPI, not the OS.
+
+    An unbounded connect against a dead host outlives the MCP request
+    timeout, so the operator got no result at all. Each driver takes a
+    differently-named kwarg; SQL_ATTR_LOGIN_TIMEOUT (103) is pyodbc's form —
+    its ``timeout`` kwarg is a query timeout and would leave the handshake
+    unbounded.
+    """
+    import sqlalchemy as sa
+
+    url = sa.URL.create("mssql+pymssql", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "login_timeout": 15
+    }
+    url = sa.URL.create("mssql+pyodbc", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "attrs_before": {103: 15}
+    }
+    url = sa.URL.create("mysql+pymysql", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "connect_timeout": 15
+    }
+    url = sa.URL.create("postgresql+psycopg2", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "connect_timeout": 15
+    }
+    # Unset / junk fall back to the platform default (D169: an unset timeout
+    # used to mean "wait for the OS"); an explicit zero opts out; sqlite
+    # ignores silently.
+    assert _connect_args_for(url, {}) == {"connect_timeout": 15}
+    assert _connect_args_for(url, {"connect_timeout": "abc"}) == {"connect_timeout": 15}
+    assert _connect_args_for(url, {"connect_timeout": 0}) == {}
+    assert _connect_args_for(
+        sa.URL.create("sqlite", database=":memory:"), {"connect_timeout": 15}
+    ) == {}
+
+
+def test_mssql_odbc_driver_prefers_installed_microsoft_driver():
+    found = _mssql_odbc_driver()
+    if found is None:
+        assert _mssql_drivername() == "mssql+pymssql"
+        return
+    assert found.startswith("ODBC Driver")
+    assert _mssql_drivername() == "mssql+pyodbc"
+    url = str(
+        _build_url(
+            {
+                "type": "sqlserver",
+                "host": "127.0.0.1",
+                "port": 1433,
+                "database": "dataflow",
+                "username": "sa",
+                "password": "x",
+            }
+        )
+    )
+    assert "mssql+pyodbc" in url
+    assert "ODBC+Driver" in url or "ODBC Driver" in url
+
+
+def test_adapt_mssql_sql_rewrites_percent_s_for_pyodbc(monkeypatch):
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_drivername", lambda: "mssql+pyodbc")
+    assert (
+        adapt_mssql_sql("WHERE t.name = %s AND s.name = %s")
+        == "WHERE t.name = ? AND s.name = ?"
+    )
+
+
+def test_adapt_mssql_sql_keeps_percent_s_for_pymssql(monkeypatch):
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_drivername", lambda: "mssql+pymssql")
+    sql = "WHERE t.name = %s AND s.name = %s"
+    assert adapt_mssql_sql(sql) == sql
+
+
+def test_build_url_encodes_at_in_password():
+    url = str(_build_url({
+        "type": "mysql",
+        "connection_string": "mysql://root:p@ss@127.0.0.1:3306/demo",
+    }))
+    assert url.startswith("mysql+pymysql://")
+    assert "p%40ss" in url
+    assert "127.0.0.1" in url
+    assert "demo" in url
+
+
+def _pin_odbc_driver(monkeypatch) -> None:
+    """ODBC-only keywords are refused on a pymssql-only host; test the ODBC vocabulary."""
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_odbc_driver", lambda: "ODBC Driver 18 for SQL Server")
+
+
+def test_build_url_sqlserver_trust_server_certificate(monkeypatch):
+    _pin_odbc_driver(monkeypatch)
+    url = _build_url(
+        {
+            "type": "sqlserver",
+            "host": "127.0.0.1",
+            "port": 1433,
+            "database": "dataflow",
+            "username": "sa",
+            "password": "x",
+            "trust_server_certificate": True,
+            "encrypt": "yes",
+        }
+    )
+    query = dict(getattr(url, "query", {}) or {})
+    assert query.get("TrustServerCertificate") == "Yes"
+    assert str(query.get("Encrypt") or "").lower() == "yes"
+
+
+def test_with_connection_options_flattens_nested_extra_tls(monkeypatch):
+    _pin_odbc_driver(monkeypatch)
+    cfg = with_connection_options(
+        {
+            "type": "sqlserver",
+            "host": "127.0.0.1",
+            "extra": {"trust_server_certificate": True, "encrypt": "yes"},
+        }
+    )
+    assert cfg["trust_server_certificate"] is True
+    assert cfg["encrypt"] == "yes"
+    query = dict(getattr(_build_url(cfg), "query", {}) or {})
+    assert query.get("TrustServerCertificate") == "Yes"
+
+
+def test_write_mapped_rows_sqlserver_tls_reaches_engine(monkeypatch):
+    """Seed/write must dial the same Driver 18 handshake as Validate."""
+    import connectors.generic_sql as gs
+
+    seen: dict = {}
+
+    def _capture(cfg):
+        seen.update(cfg)
+        raise RuntimeError("stop-after-tls-cfg")
+
+    monkeypatch.setattr(gs, "_engine", _capture)
+    try:
+        gs.write_mapped_rows(
+            host="127.0.0.1",
+            port=1433,
+            database="dataflow",
+            username="sa",
+            password="x",
+            schema="dbo",
+            connection_string="",
+            ssl=False,
+            table_name="payments",
+            headers=["id"],
+            data_rows=[["1"]],
+            mappings=[{"source": "id", "target": "id"}],
+            column_types={"id": "INTEGER"},
+            type="sqlserver",
+            trust_server_certificate=True,
+            encrypt="yes",
+        )
+    except RuntimeError as exc:
+        assert "stop-after-tls-cfg" in str(exc)
+    assert seen.get("trust_server_certificate") is True
+    assert seen.get("encrypt") == "yes"

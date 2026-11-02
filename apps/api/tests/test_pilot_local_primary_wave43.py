@@ -9,6 +9,23 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_configured_provider(tmp_path, monkeypatch):
+    """Local-primary means: with no provider key saved, Pilot is local.
+
+    A saved key is not enough to leave the box — Hybrid/Cloud must be
+    explicit (``test_byo_provider_keys.py``). These cases pin the
+    zero-key and auto baseline.
+    """
+    from services import integrations_store
+
+    monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
 
 def test_auto_engine_is_local_even_if_ollama_up(monkeypatch):
     from src.ai.llm import provider as prov

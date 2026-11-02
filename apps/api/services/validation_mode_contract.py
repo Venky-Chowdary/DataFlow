@@ -26,6 +26,7 @@ VALIDATION_MODES = frozenset(
         "migration",
         "discovery",
         "audit",
+        "lenient",
     }
 )
 
@@ -37,8 +38,14 @@ class ValidationModeWriteRefused(RuntimeError):
     """Execute attempted under a mode that never writes."""
 
 
+#: Unknown names still fail closed. ``lenient`` is its own mode (same floor
+#: as balanced) so a plan does not silently rename the operator's word.
+VALIDATION_MODE_ALIASES: dict[str, str] = {}
+
+
 def normalize_validation_mode(mode: str | None) -> str:
     m = (mode or "strict").strip().lower()
+    m = VALIDATION_MODE_ALIASES.get(m, m)
     if m not in VALIDATION_MODES:
         return "strict"
     return m
@@ -107,6 +114,26 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
                 "Checksum mismatch always fails Gate-8 — sample success never "
                 "overrides diverging digests; population proof remains false.",
                 "Not a substitute for Strict on financial cutovers.",
+            ],
+        },
+        "lenient": {
+            "id": "lenient",
+            "label": "Lenient",
+            "confidence_floor": 0.75,
+            "allows_write": True,
+            "allows_approved_risks": True,
+            "hard_block_fidelity": True,
+            "warn_recoverable": True,
+            "report_only": False,
+            "coverage": "sample_unless_probe_says_otherwise",
+            "guarantees": [
+                "Lenient is a named policy with the balanced confidence floor (0.75).",
+                "It is not silently rewritten to balanced.",
+                "Unapproved fidelity risks still block. Sample validation never claims population proof.",
+            ],
+            "non_guarantees": [
+                "Checksum mismatch always fails Gate-8.",
+                "Lenient is not a license to drop rows.",
             ],
         },
         "migration": {

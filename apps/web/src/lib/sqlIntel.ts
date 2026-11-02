@@ -513,13 +513,12 @@ export function extractBindParams(sql: string): string[] {
   const seen = new Set<string>();
   let i = 0;
   while (i < cleaned.length) {
-    if (!inAnyLiteral(s) && cleaned[i] === ":") {
-      // `::` is a cast, not a parameter.
-      if (cleaned[i + 1] === ":") {
+    if (!inAnyLiteral(s) && (cleaned[i] === ":" || cleaned[i] === "@")) {
+      // `::` is a cast; `@@` is a T-SQL global — neither is a bind.
+      if (cleaned[i + 1] === cleaned[i]) {
         i += 2;
         continue;
       }
-      // A preceding `:` already handled above; require an identifier start.
       const m = cleaned.slice(i + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/);
       if (m) {
         const name = m[0];

@@ -21,7 +21,9 @@ from src.transfer.models import EndpointConfig, TransferRequest
 COLUMNS = ["id", "amount", "note", "created", "active", "meta", "tags"]
 ROWS = [
     {"id": 1, "amount": "1000.00", "note": "hello", "created": "2024-01-15T00:00:00", "active": "true", "meta": '{"k":"v"}', "tags": '["a","b"]'},
-    {"id": 2, "amount": "2000.50", "note": "", "created": "2024-02-28T14:30:00", "active": "false", "meta": "", "tags": ""},
+    # ``""`` is not a JSON document: a typed json column refuses to invent NULL
+    # from it (FAIL_JOB under the default contract), so the absent case is null.
+    {"id": 2, "amount": "2000.50", "note": "", "created": "2024-02-28T14:30:00", "active": "false", "meta": None, "tags": None},
     {"id": 3, "amount": "3.14", "note": "null", "created": "2024-03-01T00:00:00", "active": "1", "meta": "{}", "tags": "[]"},
 ]
 

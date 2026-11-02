@@ -27,7 +27,15 @@ export type MappingTransform =
   | "percentage"
   | "strip_controls"
   | "identity_specialty"
+  | "assume_timezone"
   | "omit";
+
+/**
+ * Engine transform prefix for an operator-declared source zone — parameterised
+ * because the zone is data the source never recorded, not a mode. Must stay
+ * aligned with ``services.transform_engine.ASSUME_TIMEZONE_PREFIX``.
+ */
+export const ASSUME_TIMEZONE_PREFIX = "assume_timezone:";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
@@ -49,6 +57,13 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   { id: "currency", label: "Parse currency", detail: "Strip currency symbols → decimal" },
   { id: "percentage", label: "Parse percentage", detail: "Parse percent strings → decimal" },
   {
+    id: "assume_timezone",
+    label: "Assume source zone…",
+    detail:
+      "Declare the zone a zoneless timestamp was recorded in, so an instant destination "
+      + "(BSON date, TIMESTAMPTZ) stores an asserted instant instead of a guessed UTC one",
+  },
+  {
     id: "identity_specialty",
     label: "Identity (specialty)",
     detail: "VECTOR / INTERVAL / GEOGRAPHY travel as identity — no invented cast or dimension",
@@ -60,6 +75,17 @@ export interface CreateNewTypeRisk {
   severity?: "info" | "warn" | "block" | string;
   message: string;
 }
+
+/** Engine-stamped Map review kinds — keep aligned with ``semantic_mapper``. */
+export type MappingReviewKind =
+  | "measure_kind"
+  | "entity_identity"
+  | "dest_collision"
+  | "identity_leaf"
+  | "temporal_polarity"
+  | "lossy"
+  | "create_new"
+  | "generic";
 
 export interface EditableMapping {
   source: string;
@@ -112,6 +138,12 @@ export interface EditableMapping {
   /** True when the type path itself narrows (independent of transform). */
   typeNarrowing?: boolean;
   /**
+   * Overwrite recreate: the live dest carrier will be dropped. G19 names a
+   * narrowing replacement at Validate. Signing a Risk Contract here would
+   * demote that hard block to a warning, so Map must not require one.
+   */
+  liveCarrierDoomed?: boolean;
+  /**
    * Create-new precision / width / TZ risks stamped by the mapping pipeline
    * (`assess_create_new_type_risk`). Visible before Validate/write — never invent
    * green when the engine stamped a risk.
@@ -135,6 +167,268 @@ export interface EditableMapping {
    * Engine-stamped — never invent client-side invent from sample string alone.
    */
   columnProfile?: ColumnProfile;
+  /**
+   * Engine Map review kind from ``semantic_mapper.classify_review_kind``.
+   * False-friends stay off Approve eligible until Confirm this pair / Remap.
+   */
+  reviewKind?: MappingReviewKind;
+  /** Operator explicitly confirmed a false-friend pair (not Approve eligible). */
+  falseFriendConfirmed?: boolean;
+  /**
+   * Field Reduction Ledger (G16) disposition for an omitted column — why this
+   * source field is not carried. Empty means the drop is declared but
+   * unexplained: the ledger records it as `dropped_unclassified`.
+   */
+  omitReason?: ReductionReasonCode;
+  /** Operator note behind a judgement reason (required by every judgement code). */
+  omitReasonText?: string;
+  /** Where the field is retained when the reason is archive_only. */
+  archiveReference?: string;
+  /** Retention horizon of that archive copy, when known. */
+  retentionUntil?: string;
+  /** Named accepter of the drop — recorded, not authenticated. */
+  omitApprovedBy?: string;
+  /**
+   * Operator-declared source→target code map (G20). Missing means this column
+   * is not a coded field. Empty object is a declaration that covers nothing.
+   */
+  codeCrosswalk?: Record<string, string>;
+  /** Optional code-system label for the proof pack (ICD-9→ICD-10, …). */
+  codeCrosswalkSystem?: string;
+  /**
+   * G21 — operator asked for an independent source/dest SUM of this column
+   * after write. Opt-in; a DECIMAL named "amount" is not a control total
+   * until this is set (MONEY/CURRENCY/SMALLMONEY carriers default on).
+   */
+  controlTotal?: boolean;
+  /**
+   * The destination carrier the operator chose by hand, as distinct from the
+   * one Map inferred. Kept alongside `destType` because Map re-derives every
+   * row on re-entry: without a record of what was *declared*, a widened
+   * `VARCHAR(255)` was silently replaced by the inferred `VARCHAR(4)` on the
+   * way back from Validate. On an existing physical column this is the type
+   * the operator asked for, which still requires an ALTER or a remap.
+   */
+  destTypeDeclared?: string;
+  /**
+   * Compiled business-rule workbook row that produced this pair. Empty when
+   * the operator mapped by hand. Provenance (sheet/line) is the audit trail
+   * for "why this dest column" — not a second confidence score.
+   */
+  businessRule?: MappingBusinessRule;
+  /**
+   * Execute-enforced business-rule contracts attached to this write. Emitted
+   * as ``rule_contracts``; the writer quarantines rows that fail them.
+   */
+  ruleContracts?: RuleContractWire[];
+}
+
+/** A compiled validate contract carried to Execute on the mapping that writes its dest. */
+export interface RuleContractWire {
+  rule_id: string;
+  type: string;
+  value?: string;
+  values?: string[];
+  op?: string;
+  pattern?: string;
+  rule_text?: string;
+}
+
+/** One compiled rule from an uploaded Excel / CSV / JSON workbook. */
+export interface MappingBusinessRule {
+  kind: string;
+  kindLabel: string;
+  text: string;
+  status: "executable" | "needs_confirmation" | "conflict" | string;
+  confidence: number;
+  sheet?: string;
+  row?: number;
+  issues?: string[];
+  /** Compiled rule id — links this mapping's evidence to the report row. */
+  ruleId?: string;
+  /** Compile-report fingerprint — links to the business_rules.compiled audit event. */
+  reportFingerprint?: string;
+}
+
+/** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
+export type ReductionReasonCode =
+  | "dropped_empty"
+  | "dropped_constant"
+  | "dropped_redundant"
+  | "dropped_obsolete"
+  | "dropped_pii_minimization"
+  | "dropped_not_required"
+  | "archive_only"
+  | "deferred_phase";
+
+export interface ReductionReasonOption {
+  id: ReductionReasonCode;
+  label: string;
+  detail: string;
+  /**
+   * "observed" codes assert a fact about the data. G16 checks them against the
+   * Validate sample and blocks the ones the sample disproves, so they are
+   * offered as claims the operator can be held to — not as convenient labels.
+   */
+  kind: "observed" | "judgement";
+  requires: ("omitReasonText" | "archiveReference")[];
+}
+
+export const REDUCTION_REASONS: ReductionReasonOption[] = [
+  {
+    id: "dropped_empty",
+    label: "Empty in source",
+    detail:
+      "The column holds no values. Checked against the Validate sample — a single "
+      + "sampled value blocks this claim.",
+    kind: "observed",
+    requires: [],
+  },
+  {
+    id: "dropped_constant",
+    label: "Single constant value",
+    detail:
+      "Every row carries the same value, so it holds no information. Checked "
+      + "against the Validate sample.",
+    kind: "observed",
+    requires: [],
+  },
+  {
+    id: "dropped_redundant",
+    label: "Redundant — derivable elsewhere",
+    detail: "The value is available from another field that is carried. Name that field.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "dropped_obsolete",
+    label: "Obsolete in the target process",
+    detail: "COBOL filler, dead flags, retired codes — no longer part of the process.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "dropped_pii_minimization",
+    label: "Dropped for data minimisation",
+    detail: "Deliberately not carried so the target holds less personal data.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "dropped_not_required",
+    label: "Not required by the target process",
+    detail: "A judgement call: the new screen/process does not use this field.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "archive_only",
+    label: "Retained in an archive, not in the target",
+    detail:
+      "The data still exists somewhere else. G16 blocks unless the archive is "
+      + "named — \"kept elsewhere\" is not evidence until the elsewhere is.",
+    kind: "judgement",
+    requires: ["omitReasonText", "archiveReference"],
+  },
+  {
+    id: "deferred_phase",
+    label: "Deferred to a later migration phase",
+    detail: "Not dropped permanently — out of scope for this cutover. Say which phase.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+];
+
+export function reductionReasonMeta(
+  code?: string | null,
+): ReductionReasonOption | undefined {
+  if (!code) return undefined;
+  return REDUCTION_REASONS.find((r) => r.id === code);
+}
+
+/**
+ * What G16 still needs from this omitted row, in operator words.
+ *
+ * Mirrors the backend requirement table so Map can show the gap before
+ * Validate does. It deliberately does NOT predict the sample-contradiction
+ * block: only the engine sees the sample, and guessing here would either
+ * invent a block or promise a pass Datawrap has not checked.
+ */
+export function reductionEvidenceGap(m: EditableMapping): string | null {
+  if (!isIntentionalOmit(m)) return null;
+  const meta = reductionReasonMeta(m.omitReason);
+  if (!meta) return "No reduction reason — the drop is recorded as unexplained";
+  if (meta.requires.includes("omitReasonText") && !String(m.omitReasonText || "").trim()) {
+    return `${meta.label} needs a note saying why`;
+  }
+  if (meta.requires.includes("archiveReference") && !String(m.archiveReference || "").trim()) {
+    return "Archive-only needs the archive that holds the field";
+  }
+  return null;
+}
+
+/** Serialize a code crosswalk for the Map editor (`OLD=NEW` per line). */
+export function formatCodeCrosswalk(map?: Record<string, string> | null): string {
+  if (!map) return "";
+  return Object.entries(map)
+    .map(([src, dest]) => `${src}=${dest}`)
+    .join("\n");
+}
+
+/** Parse `OLD=NEW` / `OLD→NEW` / `OLD -> NEW` lines into a crosswalk. */
+export function parseCodeCrosswalk(text: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  let saw = false;
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    saw = true;
+    let src = "";
+    let dest = "";
+    const arrow = line.indexOf("->");
+    const eq = line.indexOf("=");
+    if (line.includes("→")) {
+      const parts = line.split("→");
+      src = (parts[0] || "").trim();
+      dest = (parts.slice(1).join("→") || "").trim();
+    } else if (arrow >= 0 && (eq < 0 || arrow < eq)) {
+      src = line.slice(0, arrow).trim();
+      dest = line.slice(arrow + 2).trim();
+    } else if (eq >= 0) {
+      src = line.slice(0, eq).trim();
+      dest = line.slice(eq + 1).trim();
+    } else {
+      src = line;
+      dest = "";
+    }
+    if (src) out[src] = dest;
+  }
+  if (!saw) return undefined;
+  return out;
+}
+
+/** Record (or clear) the reduction reason on an omitted row. */
+export function applyReductionReason(
+  m: EditableMapping,
+  code: string,
+): EditableMapping {
+  const meta = reductionReasonMeta(code);
+  if (!meta) {
+    return {
+      ...m,
+      omitReason: undefined,
+      // Reason-scoped evidence goes with the reason it justified; keeping a
+      // stale archive reference under "no reason" would ship an orphan claim.
+      archiveReference: undefined,
+      retentionUntil: undefined,
+    };
+  }
+  return {
+    ...m,
+    omitReason: meta.id,
+    archiveReference: meta.requires.includes("archiveReference") ? m.archiveReference : undefined,
+    retentionUntil: meta.requires.includes("archiveReference") ? m.retentionUntil : undefined,
+  };
 }
 
 /** Compact profiler strip from ``mapping_quality.column_profile_for_map``. */
@@ -376,6 +670,10 @@ export const UI_TO_ENGINE_TRANSFORM: Record<MappingTransform, string> = {
   percentage: "percentage",
   strip_controls: "strip_controls",
   identity_specialty: "none",
+  // Carries no zone on its own: the engine transform is only complete once the
+  // operator names one, and an empty value must never reach the engine as a
+  // guessed default.
+  assume_timezone: "",
   omit: "omit",
 };
 
@@ -488,9 +786,14 @@ export function createNewRiskChipLabel(m: EditableMapping): string | null {
   if (!hasCreateNewTypeRisk(m)) return null;
   const kinds = new Set((m.createNewRisks || []).map((r) => (r.kind || "").toLowerCase()));
   if (kinds.has("timezone_polarity")) return "TZ risk";
+  if (kinds.has("instant_range_cap")) return "range risk";
   if (kinds.has("varchar_width_cap") || kinds.has("varchar_narrow")) return "width risk";
   if (kinds.has("precision_collapse")) return "precision";
   if (kinds.has("uuid_domain")) return "UUID domain";
+  // SQLite-class engines: one untyped TEXT carrier, so the domain cannot be
+  // declared at all — a note about the destination, not a mapping choice.
+  if (kinds.has("uuid_carrier_equivalent")) return "UUID domain (carrier note)";
+  if (kinds.has("fixed_width_not_enforced")) return "width not enforced";
   if (kinds.has("objectid_domain")) return "ObjectId domain";
   if (kinds.has("lossy_coercion")) return "create-new risk";
   return "create-new risk";
@@ -511,7 +814,27 @@ export function engineStampedRiskChip(m: EditableMapping): {
 } | null {
   // Safe normalize (email/trim/case) is Approve-tier — do not scare with mutate/cast chips.
   if (isSafeNormalizeMapping(m)) return null;
+  // Unknown destination type outranks any cast verdict: there is nothing to cast
+  // into yet, and the row's only exit is reloading the destination schema.
+  if (isDestSchemaPending(m)) {
+    return {
+      label: "dest type not loaded",
+      detail:
+        "Destination column type has not been read from the destination yet — "
+        + "reload the destination schema.",
+      severity: "block",
+    };
+  }
   const fidelity = (m.fidelity || "").toLowerCase();
+  if (isDoomedLiveCarrierNarrowing(m)) {
+    return {
+      label: "replaced on overwrite",
+      detail:
+        m.fidelityReason
+        || `${m.inferredType || "source"} replaces declared ${m.destType || "destination"} on recreate — Validate (G19) names it`,
+      severity: "warn",
+    };
+  }
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
     return {
       label: fidelity === "lossy_cast" ? "lossy" : fidelity === "mutate" ? "mutate" : "cast",
@@ -613,6 +936,22 @@ export function mappingHasClearingRiskContract(m: EditableMapping): boolean {
   );
 }
 
+/**
+ * Where a risk row stands.
+ * - `open`: nothing signed yet
+ * - `accepted`: acknowledged with no policy on record that stops the write
+ * - `fail_closed`: a contract policy stops the write by design —
+ *   never call this "accepted", or Map claims clearance it does not have
+ */
+export type MappingRiskChipState = "open" | "accepted" | "fail_closed";
+
+export function mappingRiskChipState(m: EditableMapping): MappingRiskChipState {
+  if (!m.riskAcknowledged) return "open";
+  const policy = String(m.riskContract?.execution_policy || "").toUpperCase() as ExecutionPolicy;
+  if (policy && !CONTINUE_EXECUTION_POLICIES.has(policy)) return "fail_closed";
+  return "accepted";
+}
+
 export function mappingAckDoneLabel(m: EditableMapping): string {
   if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
     const policy = m.riskContract?.execution_policy;
@@ -623,20 +962,85 @@ export function mappingAckDoneLabel(m: EditableMapping): string {
   return "Ready";
 }
 
+/**
+ * True when the destination column type was never read from the destination.
+ *
+ * This is not a fidelity risk and no signature can clear it: until the
+ * destination catalog answers (or the table is proven absent, which is
+ * create-new), there is no destination type to compare against. Showing it as
+ * "loses fidelity (T \u2192 T)" with a Risk Contract sent operators round a loop.
+ */
+export function isDestSchemaPending(m: EditableMapping): boolean {
+  return m.assignmentStrategy === "pending_dest_schema";
+}
+
+/** Fidelity class for a destination type that was never read (mirrors the engine). */
+export const FIDELITY_DEST_TYPE_UNREAD = "dest_type_unread";
+
+export const DEST_TYPE_UNREAD_REASON =
+  "Destination column type has not been read from the destination yet — "
+  + "reload the destination schema. If the table does not exist the probe proves "
+  + "it absent and the column becomes a CREATE.";
+
+/**
+ * Single way to say "this row has no destination type yet".
+ *
+ * Every caller that loses (or never had) destination metadata must go through
+ * here: leaving the previous `reason` in place printed provenance the row no
+ * longer has — "Inferred from live connector schema" on a destination nothing
+ * had read — and leaving `destType` set showed the source type as the
+ * destination's own.
+ */
+export function markMappingDestUnread(m: EditableMapping): EditableMapping {
+  return {
+    ...m,
+    destType: "",
+    createNew: undefined,
+    existsInDestination: undefined,
+    assignmentStrategy: "pending_dest_schema",
+    requiresReview: true,
+    approved: false,
+    fidelity: FIDELITY_DEST_TYPE_UNREAD,
+    fidelityReason: DEST_TYPE_UNREAD_REASON,
+    reason: "Destination schema not read — no destination type to compare against",
+    confidence: Math.min(m.confidence, 0.55),
+  };
+}
+
+/**
+ * Live dest INTEGER vs source DECIMAL on a recreate is not a write-path
+ * narrowing — the column is dropped. G19 is the hard gate. A signed contract
+ * here would demote that block, so Map must not require one for this pair.
+ */
+export function isDoomedLiveCarrierNarrowing(m: EditableMapping): boolean {
+  if (!m.liveCarrierDoomed || m.existsInDestination !== true) return false;
+  if (m.typeNarrowing) return true;
+  if ((m.fidelity || "").toLowerCase() === "lossy_cast") return true;
+  return declaredCarrierFidelityRisk(m.inferredType, m.destType);
+}
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  // Unknown destination type is a reload, not a risk to accept.
+  if (isDestSchemaPending(m)) return false;
   // Safe normalize (email/trim/case) is not fidelity risk — Approve is enough.
   if (isSafeNormalizeMapping(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
+  const doomedReplacement = isDoomedLiveCarrierNarrowing(m);
   // cast = type path holds but unparseable values quarantine — never silent Ready.
-  if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast" || m.typeNarrowing) {
+  // Doomed-carrier lossy_cast / typeNarrowing is G19's question, not Map's.
+  if (
+    (!doomedReplacement && (fidelity === "lossy_cast" || m.typeNarrowing))
+    || fidelity === "mutate"
+    || fidelity === "cast"
+  ) {
     return true;
   }
   if (hasCreateNewTypeRisk(m)) return true;
   // Dest-type edits clear engine fidelity — recompute from carriers so Approve
   // cannot look green until Accept risk (Map→Validate SSOT).
-  if (declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
+  if (!doomedReplacement && declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
   if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
   if (m.transform === "identity_specialty") return true;
   if (
@@ -653,9 +1057,219 @@ export function mappingRequiresRiskAck(m: EditableMapping): boolean {
 /** True when Approve-all must leave this row for operator review. */
 export function mappingRequiresManualApproval(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  if (isDestSchemaPending(m)) return true;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
+  // Airbyte hole: Approve-all must not clear qty≠amt / user≠customer / dest fold.
+  if (isFalseFriendReview(m) && !m.falseFriendConfirmed) return true;
   return false;
+}
+
+export const FALSE_FRIEND_REVIEW_KINDS: ReadonlySet<MappingReviewKind> = new Set([
+  "measure_kind",
+  "entity_identity",
+  "dest_collision",
+  "identity_leaf",
+  "temporal_polarity",
+]);
+
+const REVIEW_KIND_SET: ReadonlySet<string> = new Set([
+  "measure_kind",
+  "entity_identity",
+  "dest_collision",
+  "identity_leaf",
+  "temporal_polarity",
+  "lossy",
+  "create_new",
+  "generic",
+]);
+
+const FALSE_FRIEND_KIND_ORDER: MappingReviewKind[] = [
+  "dest_collision",
+  "measure_kind",
+  "identity_leaf",
+  "temporal_polarity",
+  "entity_identity",
+];
+
+export interface MappingReviewKindMeta {
+  kind: MappingReviewKind;
+  chip: string;
+  noun: string;
+  detail: string;
+  primaryLabel: string;
+  confirmLabel: string;
+}
+
+const REVIEW_KIND_META: Record<MappingReviewKind, Omit<MappingReviewKindMeta, "kind">> = {
+  measure_kind: {
+    chip: "qty≠amt",
+    noun: "quantity≠amount pair(s)",
+    detail: "Count is not money. Remap the destination column — do not write quantity into amount.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  entity_identity: {
+    chip: "user≠customer",
+    noun: "user≠customer pair(s)",
+    detail: "Different entities share an id leaf. Remap to the intended destination — user is not customer.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  dest_collision: {
+    chip: "dest collision",
+    noun: "destination identifier collision(s)",
+    detail: "Two destination names fold to the same identifier (UserID vs userid). Remap to the intended column.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  identity_leaf: {
+    chip: "sku≠id",
+    noun: "sku≠product_id pair(s)",
+    detail: "Identity kinds differ (sku vs id/key). Remap to the matching destination column.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  temporal_polarity: {
+    chip: "created≠updated",
+    noun: "created≠updated pair(s)",
+    detail: "Created and updated are opposite time polarity. Remap — do not write one into the other.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  lossy: {
+    chip: "lossy",
+    noun: "lossy type pair(s)",
+    detail: "Type path narrows or mutates. Sign a Risk Contract — Approve eligible will not clear this.",
+    primaryLabel: "Sign Risk Contract",
+    confirmLabel: "Approve",
+  },
+  create_new: {
+    chip: "create-new",
+    noun: "create-new column(s)",
+    detail: "This source will ADD a destination column. Confirm the name and type before Validate.",
+    primaryLabel: "Review dest name",
+    confirmLabel: "Approve",
+  },
+  generic: {
+    chip: "review",
+    noun: "mapping(s)",
+    detail: "Engine held this pair below the auto-approve floor. Remap or confirm the pair.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Approve",
+  },
+};
+
+export function mappingReviewKindMeta(kind: MappingReviewKind): MappingReviewKindMeta {
+  return { kind, ...(REVIEW_KIND_META[kind] || REVIEW_KIND_META.generic) };
+}
+
+function parseReviewKindFromReason(reason?: string): MappingReviewKind | null {
+  const text = (reason || "").toLowerCase();
+  if (!text) return null;
+  if (text.includes("destination identifier collision")) return "dest_collision";
+  if (text.includes("measure-kind mismatch")) return "measure_kind";
+  if (text.includes("identity leaf mismatch")) return "identity_leaf";
+  if (text.includes("temporal polarity")) return "temporal_polarity";
+  if (text.includes("entity qualifier conflict") || text.includes("conflicting entity qualifiers")) {
+    return "entity_identity";
+  }
+  return null;
+}
+
+export function classifyMappingReview(m: EditableMapping): MappingReviewKind | null {
+  if (isIntentionalOmit(m) || m.approved || m.falseFriendConfirmed) return null;
+  if (m.reviewKind && REVIEW_KIND_SET.has(m.reviewKind)) return m.reviewKind;
+  const fromReason = parseReviewKindFromReason(m.reason);
+  if (fromReason) return fromReason;
+  if (!m.requiresReview) return null;
+  if (mappingRequiresRiskAck(m)) return "lossy";
+  if (m.createNew) return "create_new";
+  return "generic";
+}
+
+export function isFalseFriendReview(m: EditableMapping): boolean {
+  const kind = classifyMappingReview(m);
+  return kind != null && FALSE_FRIEND_REVIEW_KINDS.has(kind);
+}
+
+/** Per-row confirm of a false-friend. Approve eligible must not call this. */
+export function confirmFalseFriendMapping(m: EditableMapping): EditableMapping {
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  return {
+    ...m,
+    approved: true,
+    requiresReview: false,
+    falseFriendConfirmed: true,
+    reason: [m.reason, "Operator confirmed proposed pair"].filter(Boolean).join(" · "),
+  };
+}
+
+/**
+ * Validate-step confirm for G15. Named sources win; empty list confirms every
+ * unconfirmed false-friend. Approve-all must not call this.
+ */
+export function confirmFalseFriendsBySource(
+  mappings: EditableMapping[],
+  sources?: string[] | null,
+): {
+  mappings: EditableMapping[];
+  confirmed: string[];
+  blocked: string[];
+  unmatched: string[];
+} {
+  const named = (sources || []).map((s) => String(s || "").trim()).filter(Boolean);
+  const want = new Set(named.map((s) => s.toLowerCase()));
+  const confirmed: string[] = [];
+  const blocked: string[] = [];
+  const seen = new Set<string>();
+
+  const next = mappings.map((m) => {
+    const src = String(m.source || "").trim();
+    if (!src) return m;
+    const key = src.toLowerCase();
+    const targeted = want.size === 0
+      ? isFalseFriendReview(m) && !m.falseFriendConfirmed
+      : want.has(key);
+    if (!targeted) return m;
+    if (!isFalseFriendReview(m) || m.falseFriendConfirmed) return m;
+    seen.add(key);
+    const stamped = confirmFalseFriendMapping(m);
+    if (stamped.falseFriendConfirmed) {
+      confirmed.push(src);
+      return stamped;
+    }
+    blocked.push(src);
+    return stamped;
+  });
+
+  const unmatched = named.filter((s) => !seen.has(s.toLowerCase()));
+  return { mappings: next, confirmed, blocked, unmatched };
+}
+
+/** Operator changed the dest name — drop stale false-friend kind until rematch. */
+export function applyOperatorRemapDest(m: EditableMapping, target: string): EditableMapping {
+  const next = String(target || "").trim();
+  const baseReason = (m.reason || "")
+    .replace(/(?: · )?Operator remapped dest to .+$/u, "")
+    .replace(/(?: · )?Operator cleared dest$/u, "")
+    .trim();
+  return {
+    ...m,
+    target: next,
+    approved: false,
+    requiresReview: true,
+    reviewKind: "generic",
+    falseFriendConfirmed: false,
+    reason: [baseReason, next ? `Operator remapped dest to ${next}` : "Operator cleared dest"]
+      .filter(Boolean)
+      .join(" · "),
+  };
 }
 
 /**
@@ -679,6 +1293,21 @@ export function acknowledgeMappingRisk(
 ): EditableMapping {
   if (!mappingRequiresRiskAck(m)) {
     return approveMappingHonestly(m);
+  }
+  // A contract cannot green a dest-type request Map will not perform: mapping
+  // never ALTERs a physical column, so signing here would promise DDL work the
+  // write path does not do. Same refusal as approveMappingHonestly.
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) {
+    return {
+      ...m,
+      approved: false,
+      requiresReview: true,
+      riskAcknowledged: false,
+      reason: [
+        m.reason,
+        `Risk Contract cannot cover an ALTER — restore destination type ${m.destType || "as-is"}, remap to a compatible column, or ALTER the destination first`,
+      ].filter(Boolean).join(" · "),
+    };
   }
   const policy = opts?.executionPolicy;
   if (!policy || !EXECUTION_POLICY_OPTIONS.some((p) => p.id === policy)) {
@@ -881,10 +1510,18 @@ export function mergeSignedRiskContracts(
  * Risk rows require {@link acknowledgeMappingRisk}, not bare Approve.
  */
 export function approveMappingHonestly(m: EditableMapping): EditableMapping {
+  // Nothing to approve while the destination type is unread — approving it once
+  // unlocked Validate for a destination the engine had never inspected.
+  if (isDestSchemaPending(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
   if (isExistingEnumBooleanConflict(m)) {
     return flagExistingEnumBooleanConflict(m);
   }
   if (isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isFalseFriendReview(m) && !m.falseFriendConfirmed) {
     return { ...m, approved: false, requiresReview: true };
   }
   if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
@@ -1275,14 +1912,52 @@ export function flagExistingTypeConflict(m: EditableMapping, destKind = "destina
   };
 }
 
+/** Reason tags stamped when Map refuses to change an existing physical column. */
+const EXISTING_DEST_OVERRIDE_TAGS: RegExp[] = [
+  /(?: · )?Existing [^·]*?cannot be changed from Map[^·]*/gu,
+  /(?: · )?Desired type [^·]*?requires ALTER or remap[^·]*/gu,
+  /(?: · )?Risk Contract cannot cover an ALTER[^·]*/gu,
+];
+
+/**
+ * Withdraw an ALTER request on an existing column.
+ *
+ * The override is detected from the reason tag, so a tag that outlives the
+ * operator's edit strands the row: bare Approve refuses it and a Risk Contract
+ * cannot cover it. Restoring the live physical type drops the tag; fidelity
+ * risk (narrowing, lossy cast) is untouched and still needs a contract.
+ */
+export function clearExistingDestTypeOverride(m: EditableMapping): EditableMapping {
+  const reason = EXISTING_DEST_OVERRIDE_TAGS
+    .reduce((acc, tag) => acc.replace(tag, ""), m.reason || "")
+    .replace(/^(?: · )+/u, "")
+    .trim();
+  return {
+    ...m,
+    reason,
+    destTypeDeclared: undefined,
+    approved: false,
+    requiresReview: mappingRequiresRiskAck(m),
+  };
+}
+
 /**
  * When the operator picks a new dest type on an existing column, keep the live
  * type in destType for preflight honesty and force review.
  */
 export function applyDestTypeChange(m: EditableMapping, nextDestType: string): EditableMapping {
+  if (
+    m.existsInDestination
+    && nextDestType
+    && nextDestType === m.destType
+    && isExistingDestTypeOverride(m)
+  ) {
+    return clearExistingDestTypeOverride(m);
+  }
   if (m.existsInDestination && nextDestType && nextDestType !== m.destType) {
     return {
       ...flagExistingTypeConflict(m, m.destType || "destination"),
+      destTypeDeclared: nextDestType,
       // Keep physical type for G3/G6; note the desired type in reason.
       reason: [
         m.reason,
@@ -1298,6 +1973,7 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
   return {
     ...m,
     destType: nextDestType,
+    destTypeDeclared: nextDestType,
     approved: false,
     riskAcknowledged: false,
     // Stale engine fidelity must not greenwash the new dest type until re-stamp.
@@ -1314,6 +1990,70 @@ export function isIntentionalOmit(m: EditableMapping): boolean {
   return m.transform === "omit" || m.engineTransform === "omit" || Boolean((m as { intentionalOmit?: boolean }).intentionalOmit);
 }
 
+const MONEY_LOGICAL = /\b(MONEY|CURRENCY|SMALLMONEY)\b/i;
+const CONTROL_TOTAL_ROLES = new Set([
+  "payment_amount",
+  "order_total",
+  "tax_amount",
+  "discount_amount",
+  "line_amount",
+  "net_amount",
+  "gross_amount",
+  "salary_amount",
+  "commission_amount",
+  "bonus_amount",
+  "unit_price",
+  "unit_cost",
+]);
+
+/** Dest/source MONEY carriers default the G21 checkbox on — not name guessing. */
+export function defaultControlTotal(
+  sourceType?: string,
+  destType?: string,
+  semanticRole?: string,
+): boolean | undefined {
+  const types = `${sourceType || ""} ${destType || ""}`;
+  if (MONEY_LOGICAL.test(types)) return true;
+  void semanticRole;
+  return undefined;
+}
+
+/** Show the G21 checkbox: money carriers, amount roles, or already declared. */
+export function isControlTotalCandidate(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (typeof m.controlTotal === "boolean") return true;
+  const types = `${m.inferredType || ""} ${m.destType || ""}`;
+  if (MONEY_LOGICAL.test(types)) return true;
+  const role = (m.semanticRole || "").toLowerCase();
+  if (CONTROL_TOTAL_ROLES.has(role)) return true;
+  return false;
+}
+
+const CHARACTER_CARRIER = /\b(CHAR|VARCHAR|NVARCHAR|NCHAR|TEXT|STRING|CLOB|KEYWORD)\b/i;
+
+/**
+ * Can an operator declare a G20 crosswalk on this row?
+ *
+ * Any character carrier can hold codes — a `varchar(4)` status column is the
+ * ordinary case, and it carries no enum marker to detect. So candidacy is the
+ * carrier's type, and declaring is still the operator's act: no crosswalk is
+ * inferred, and a row nobody declares is reported as *not asked*, never as
+ * covered.
+ */
+export function isCodeCrosswalkCandidate(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (m.codeCrosswalk) return true;
+  if ((m.semanticRole || "").toLowerCase() === "string_enum") return true;
+  const types = `${m.inferredType || ""} ${m.destType || ""}`;
+  if (/enum/i.test(types)) return true;
+  return CHARACTER_CARRIER.test(types);
+}
+
+/** Already declared, or a carrier whose enum-ness the profiler asserted. */
+export function isCodeCrosswalkDeclared(m: EditableMapping): boolean {
+  return Boolean(m.codeCrosswalk && Object.keys(m.codeCrosswalk).length > 0);
+}
+
 export function applyTransformChange(m: EditableMapping, next: MappingTransform): EditableMapping {
   if (next === "omit") {
     return {
@@ -1327,6 +2067,11 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
       reason: "Intentionally omitted from transfer",
     };
   }
+  if (next === "assume_timezone") {
+    // Keep a zone already declared on this row; selecting the control again is
+    // not a withdrawal.
+    return applyDeclaredSourceZone(m, declaredSourceZone(m));
+  }
   const restoring = m.transform === "omit";
   return {
     ...m,
@@ -1335,6 +2080,12 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
     engineTransform: next === "none" ? undefined : UI_TO_ENGINE_TRANSFORM[next],
     target: restoring && !String(m.target || "").trim() ? m.source : m.target,
     reason: restoring && m.reason === "Intentionally omitted from transfer" ? undefined : m.reason,
+    // A carried column has no reduction to justify.
+    omitReason: restoring ? undefined : m.omitReason,
+    omitReasonText: restoring ? undefined : m.omitReasonText,
+    archiveReference: restoring ? undefined : m.archiveReference,
+    retentionUntil: restoring ? undefined : m.retentionUntil,
+    omitApprovedBy: restoring ? undefined : m.omitApprovedBy,
     approved: false,
     riskAcknowledged: false,
   };
@@ -1367,19 +2118,9 @@ function boostIdentityConfidence(
   let next = confidence;
   if (exact) {
     if (createNew) {
-      // Vary create-new identity by fidelity — avoid a flat 93% wall.
-      if (fid === "lossy_cast") next = Math.min(Math.max(confidence, 0.62), 0.74);
-      else if (fid === "mutate" && !SAFE_NORMALIZE_TRANSFORMS.has(tf)) {
-        next = Math.min(Math.max(confidence, 0.78), 0.88);
-      } else if (fid === "mutate") {
-        next = Math.min(Math.max(confidence, 0.88), 0.94);
-      } else if (fid === "cast") {
-        next = Math.min(Math.max(confidence, 0.8), 0.9);
-      } else if (fid === "preserve" || !fid) {
-        next = Math.min(Math.max(confidence, 0.9), 0.96);
-      } else {
-        next = Math.min(Math.max(confidence, 0.86), 0.93);
-      }
+      // Trust the API evidence band — do not flatten every create-new row to 95%.
+      if (fid === "lossy_cast") next = Math.min(confidence, 0.74);
+      else next = Math.min(confidence, 0.93);
     } else {
       next = Math.max(confidence, fid === "lossy_cast" ? 0.7 : 0.95);
     }
@@ -1454,7 +2195,8 @@ export function mappingsFromAnalysis(
       createNew: createNew || undefined,
       // Create-new / ADD must carry a destType stamp — Execute refuse Map VARCHAR
       // invent under partial Studio when target_type is blank (Excel→PG cliff).
-      destType: createNew && !pendingDest ? inferred : undefined,
+      // Catalog DDL wins over sample semantic_type (BIGINT invented from 1,2,150000).
+      destType: createNew && !pendingDest ? (col.inferred_type || inferred) : undefined,
       assignmentStrategy: pendingDest
         ? "pending_dest_schema"
         : createNew
@@ -1473,6 +2215,12 @@ export function uiTransformToEngine(t?: MappingTransform, engineTransform?: stri
     }
   }
   if (!t || t === "none" || t === "identity_specialty") return undefined;
+  // An unnamed zone is not a transform — the row stays blocked instead of
+  // sending the engine a declaration with no zone in it.
+  if (t === "assume_timezone") {
+    const engine = String(engineTransform || "");
+    return engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX) ? engine : undefined;
+  }
   return UI_TO_ENGINE_TRANSFORM[t];
 }
 
@@ -1514,6 +2262,18 @@ export function buildPreflightMappings(
         user_override: Boolean(safe.riskAcknowledged) || (safe.approved && !enumBool && !mappingRequiresRiskAck(safe)),
         transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
         intentional_omit: omitted || undefined,
+        // Field Reduction Ledger (G16) evidence. Only travels for omitted rows:
+        // a reason left over from an earlier omit must not describe a column
+        // that is now carried.
+        omit_reason: omitted ? (safe.omitReason || undefined) : undefined,
+        omit_reason_text: omitted ? (safe.omitReasonText?.trim() || undefined) : undefined,
+        archive_reference: omitted ? (safe.archiveReference?.trim() || undefined) : undefined,
+        retention_until: omitted ? (safe.retentionUntil?.trim() || undefined) : undefined,
+        omit_approved_by: omitted ? (safe.omitApprovedBy?.trim() || undefined) : undefined,
+        // G20 — a declared code map travels with the mapping, never invented.
+        code_crosswalk: omitted ? undefined : (safe.codeCrosswalk || undefined),
+        code_crosswalk_system: omitted ? undefined : (safe.codeCrosswalkSystem?.trim() || undefined),
+        rule_contracts: omitted ? undefined : (safe.ruleContracts?.length ? safe.ruleContracts : undefined),
         // Existing dest: never invent target_type from inferredType when Map
         // left destType blank (partial Studio honesty — write path fail-closes).
         // Create-new may still preview from inferredType / destType stamp.
@@ -1546,6 +2306,24 @@ export function buildPreflightMappings(
         type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
         risk_contract: omitted ? undefined : (safe.riskContract || undefined),
+        review_kind: omitted ? undefined : (safe.reviewKind || classifyMappingReview(safe) || undefined),
+        // Engine G15 only clears false-friend on this flag — not Approve / user_override.
+        false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
+        control_total: omitted ? undefined : (safe.controlTotal === true ? true : safe.controlTotal === false ? false : undefined),
+        business_rule: safe.businessRule
+          ? {
+              kind: safe.businessRule.kind,
+              kind_label: safe.businessRule.kindLabel,
+              text: safe.businessRule.text,
+              status: safe.businessRule.status,
+              confidence: safe.businessRule.confidence,
+              sheet: safe.businessRule.sheet,
+              row: safe.businessRule.row,
+              issues: safe.businessRule.issues,
+              rule_id: safe.businessRule.ruleId,
+              report_fingerprint: safe.businessRule.reportFingerprint,
+            }
+          : undefined,
       };
     });
   }
@@ -1570,7 +2348,77 @@ export function buildPreflightMappings(
 
 export function engineTransformToUi(engine?: string): MappingTransform {
   if (!engine || engine === "none" || engine === "identity") return "none";
+  if (engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "assume_timezone";
   return ENGINE_TO_UI_TRANSFORM[engine] ?? "none";
+}
+
+/** The zone the operator declared for a zoneless source column, if any. */
+export function declaredSourceZone(m: EditableMapping): string {
+  const engine = String(m.engineTransform || "");
+  if (!engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "";
+  return engine.slice(ASSUME_TIMEZONE_PREFIX.length).trim();
+}
+
+/**
+ * Record (or withdraw) the zone for a zoneless timestamp column.
+ *
+ * An empty zone leaves the row on the control with no engine transform: the
+ * declaration is incomplete, and half of it is a guess.
+ */
+export function applyDeclaredSourceZone(m: EditableMapping, zone: string): EditableMapping {
+  const named = zone.trim();
+  return {
+    ...m,
+    transform: "assume_timezone",
+    engineTransform: named ? `${ASSUME_TIMEZONE_PREFIX}${named}` : undefined,
+    approved: false,
+    riskAcknowledged: false,
+  };
+}
+
+/** True when the operator chose to declare a zone but has not named one yet. */
+export function assumeTimezoneAwaitingZone(m: EditableMapping): boolean {
+  return m.transform === "assume_timezone" && !declaredSourceZone(m);
+}
+
+/** Zones always offered, so the list does not depend on the runtime's ICU vintage. */
+const COMMON_IANA_ZONES: readonly string[] = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Paris",
+  "Europe/Moscow",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Asia/Shanghai",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+/**
+ * Zone names to suggest on the declaration control, UTC first.
+ *
+ * Suggestions only — the authoritative check is the engine's own zone database,
+ * so a zone this runtime has never heard of is still accepted here and refused
+ * (by name) at Validate rather than being hidden from the operator.
+ */
+export function suggestedSourceZones(): readonly string[] {
+  const supported =
+    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const zone of ["UTC", ...COMMON_IANA_ZONES, ...supported]) {
+    if (seen.has(zone)) continue;
+    seen.add(zone);
+    out.push(zone);
+  }
+  return out;
 }
 
 export function editableFromPipelineMappings(
@@ -1600,6 +2448,24 @@ export function editableFromPipelineMappings(
     type_narrowing?: boolean;
     create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
     column_profile?: ColumnProfile | Record<string, unknown> | null;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
+    code_crosswalk?: Record<string, string>;
+    code_crosswalk_system?: string;
+    rule_contracts?: RuleContractWire[];
+    control_total?: boolean;
+    business_rule?: {
+      kind?: string;
+      kind_label?: string;
+      text?: string;
+      status?: string;
+      confidence?: number;
+      sheet?: string;
+      row?: number;
+      issues?: string[];
+      rule_id?: string;
+      report_fingerprint?: string;
+    };
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -1636,7 +2502,11 @@ export function editableFromPipelineMappings(
     // destType from source_type (false-green Map before write fail-close).
     const destSchemaLoaded = Object.keys(destSchema || {}).length > 0;
     let destType = liveDestType || m.target_type || undefined;
-    if (!destType && (rowCreateNew || !destSchemaLoaded)) {
+    // Never echo the source type back as the destination type when the
+    // destination schema is pending: that produced "loses fidelity
+    // (VARCHAR(16777216) \u2192 VARCHAR(16777216))" on 10 columns whose destination
+    // type nobody had read yet. A proven create-new projection may show it.
+    if (!destType && !pendingDest && (rowCreateNew || !destSchemaLoaded)) {
       destType = m.source_type;
     }
     const destTypeGap = destSchemaLoaded && !destType && !rowCreateNew && !pendingDest;
@@ -1720,6 +2590,7 @@ export function editableFromPipelineMappings(
     // Fail-closed: never invent Approve from confidence. Operator must Approve
     // (or Approve-all for eligible rows). Ready ≡ approved only.
     const autoApproved = false;
+    const friendConfirmed = Boolean(m.false_friend_confirmed);
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -1727,7 +2598,8 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: autoApproved,
+      approved: friendConfirmed || autoApproved,
+      falseFriendConfirmed: friendConfirmed || undefined,
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
@@ -1737,7 +2609,9 @@ export function editableFromPipelineMappings(
             ? "ARRAY — JSON default; optional normalize/hybrid/explode (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
+      requiresReview: friendConfirmed
+        ? false
+        : requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
       scoreGap: m.score_gap,
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
@@ -1756,6 +2630,50 @@ export function editableFromPipelineMappings(
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
       columnProfile,
+      reviewKind: m.review_kind && REVIEW_KIND_SET.has(m.review_kind)
+        ? (m.review_kind as MappingReviewKind)
+        : parseReviewKindFromReason(m.reasoning) || undefined,
+      codeCrosswalk: m.code_crosswalk && typeof m.code_crosswalk === "object"
+        ? Object.fromEntries(
+            Object.entries(m.code_crosswalk).map(([k, v]) => [String(k), String(v ?? "")]),
+          )
+        : undefined,
+      codeCrosswalkSystem: m.code_crosswalk_system || undefined,
+      ruleContracts: Array.isArray(m.rule_contracts)
+        ? m.rule_contracts
+            .filter((c) => c && typeof c === "object")
+            .map((c) => ({
+              rule_id: String(c.rule_id || ""),
+              type: String(c.type || ""),
+              value: c.value,
+              values: c.values,
+              op: c.op,
+              pattern: c.pattern,
+              rule_text: c.rule_text,
+            }))
+        : undefined,
+      controlTotal: typeof m.control_total === "boolean"
+        ? m.control_total
+        : defaultControlTotal(sourceType, destType, m.semantic_role),
+      businessRule: m.business_rule && typeof m.business_rule === "object"
+        ? {
+            kind: String(m.business_rule.kind || ""),
+            kindLabel: String(m.business_rule.kind_label || m.business_rule.kind || ""),
+            text: String(m.business_rule.text || ""),
+            status: String(m.business_rule.status || ""),
+            confidence: typeof m.business_rule.confidence === "number"
+              && Number.isFinite(m.business_rule.confidence)
+              ? m.business_rule.confidence
+              : 0,
+            sheet: m.business_rule.sheet,
+            row: m.business_rule.row,
+            issues: m.business_rule.issues,
+            ruleId: m.business_rule.rule_id ? String(m.business_rule.rule_id) : undefined,
+            reportFingerprint: m.business_rule.report_fingerprint
+              ? String(m.business_rule.report_fingerprint)
+              : undefined,
+          }
+        : undefined,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {
@@ -1788,6 +2706,10 @@ export interface MappingHealthSummary {
   intentionalOmit: number;
   specialtyIdentity: number;
   existingTypeConflict: number;
+  /** Contracts signed with a policy that stops the write — Validate stays shut. */
+  failClosedContract: number;
+  falseFriendCount: number;
+  falseFriendKinds: Partial<Record<MappingReviewKind, number>>;
   weak: boolean;
   headline: string;
   detail: string;
@@ -1815,6 +2737,17 @@ export function mappingHealthSummary(
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
   ).length;
+  const failClosedContract = active.filter(
+    (m) => mappingRiskChipState(m) === "fail_closed",
+  ).length;
+  const falseFriendKinds: Partial<Record<MappingReviewKind, number>> = {};
+  for (const m of active) {
+    const kind = classifyMappingReview(m);
+    if (kind && FALSE_FRIEND_REVIEW_KINDS.has(kind)) {
+      falseFriendKinds[kind] = (falseFriendKinds[kind] || 0) + 1;
+    }
+  }
+  const falseFriendCount = Object.values(falseFriendKinds).reduce((s, n) => s + (n || 0), 0);
   // Ready ≡ operator-approved (and Accept risk when required) — never confidence alone.
   const ready = mappings.filter((m) => {
     if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
@@ -1827,7 +2760,8 @@ export function mappingHealthSummary(
     || needsReview > 0
     || lowConfidence > 0
     || existingTypeConflict > 0
-    || specialtyIdentity > 0;
+    || specialtyIdentity > 0
+    || falseFriendCount > 0;
 
   let headline = "Map looks ready";
   let detail = `${ready}/${total} mappings approved for Validate.`;
@@ -1843,6 +2777,15 @@ export function mappingHealthSummary(
   } else if (existingTypeConflict > 0) {
     headline = `${existingTypeConflict} existing-column type conflict(s)`;
     detail = "Remap to a compatible column or ALTER the destination — Map Widen cannot change DDL.";
+  } else if (falseFriendCount > 0) {
+    const parts = FALSE_FRIEND_KIND_ORDER
+      .filter((k) => (falseFriendKinds[k] || 0) > 0)
+      .map((k) => `${falseFriendKinds[k]} ${mappingReviewKindMeta(k).noun}`);
+    headline = `${parts.join(" · ")} need confirm`;
+    detail = "Approve eligible will not clear these. Remap the destination column, or Confirm this pair on the row.";
+  } else if (failClosedContract > 0) {
+    headline = `${failClosedContract} contract(s) signed with a fail-closed policy`;
+    detail = "FAIL_JOB / STOP_TABLE / ABORT_TRANSACTION / RETRY stop the write by design — re-sign with a continue policy (quarantine, skip, stop-column, cast-fail-quarantine) or fix the type path.";
   } else if (needsReview > 0 || lowConfidence > 0) {
     // One row can be both requiresReview and low-confidence — count unique mappings.
     const reviewCount = active.filter(
@@ -1867,6 +2810,9 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
+    failClosedContract,
+    falseFriendCount,
+    falseFriendKinds,
     weak,
     headline,
     detail,

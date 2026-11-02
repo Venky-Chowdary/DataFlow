@@ -82,7 +82,7 @@ def test_session_opens_only_when_the_load_supplies_the_key(
     monkeypatch, dialect, identity_cols, target_cols, expect_session
 ):
     monkeypatch.setattr(
-        "connectors.writer_common.sqlserver_identity_columns",
+        "connectors.identity_insert.sqlserver_identity_columns",
         lambda *_a, **_k: identity_cols,
     )
     conn = _Conn()
@@ -103,7 +103,7 @@ def test_probe_failure_declines_the_session_rather_than_guessing(monkeypatch):
     def _boom(*_a: Any, **_k: Any) -> set[str]:
         raise RuntimeError("catalog unreadable")
 
-    monkeypatch.setattr("connectors.writer_common.sqlserver_identity_columns", _boom)
+    monkeypatch.setattr("connectors.identity_insert.sqlserver_identity_columns", _boom)
     conn = _Conn()
     assert (
         begin_identity_insert(

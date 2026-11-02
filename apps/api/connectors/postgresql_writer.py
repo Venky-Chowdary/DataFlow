@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 import tempfile
 import json
 import logging
@@ -13,12 +12,17 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from services.error_handling import TransferCancelled  # noqa: E402
 from services.schema_inference import infer_type
 from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
+from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
+from connectors.pg_tx_guard import savepoint as pg_savepoint
+from connectors.pg_tx_guard import tolerated as pg_tolerated
 from connectors.schema_drift import widen_existing_columns_native
+from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -38,42 +42,26 @@ from connectors.write_resilience import (
 from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
+    _is_nullish_conflict_key,
     _rejected_row_count,
-    assert_sparse_upsert_has_pk,
-    build_mapped_rows_with_details,
+    early_array_strategy_gate,
     flush_normalized_child_batches,
-    dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
     postgres_lsn_update_guard_sql,
-    quarantine_currency_markers_into_numeric,
-    quarantine_unfit_binaries,
-    quarantine_unfit_bitstrings,
-    quarantine_unfit_booleans,
-    quarantine_unfit_decimals,
-    quarantine_unfit_arrays,
-    quarantine_unfit_enum_set,
-    quarantine_unfit_integers,
-    quarantine_unfit_json,
-    quarantine_unfit_specialty_types,
-    quarantine_unfit_strings,
-    quarantine_unfit_temporals,
-    quarantine_unfit_years,
     bind_sql_mapped_rows_with_quarantine,
     overlay_physical_bind_types,
     require_physical_types_for_existing_table,
     resolve_conflict_targets,
     resolve_target_columns,
-    row_checksum,
     sanitize_identifier,
     reject_on_strict_policy,
-    sparse_present_bindings,
     transform_error_policy,
 )
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
 from services.transform_resolver import LiveDestTypes
+from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +102,11 @@ def _pg_apply_sparse_upsert(
         return cursor.fetchone()
 
     def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
-        set_cols = list(non_pk.keys())
+        from services.mirror_engine import upsert_set_columns
+
+        set_cols = upsert_set_columns(list(non_pk.keys()), [])
+        if not set_cols:
+            return 0
         set_clause = sql.SQL(", ").join(
             sql.SQL("{} = %s").format(sql.Identifier(c)) for c in set_cols
         )
@@ -130,7 +122,11 @@ def _pg_apply_sparse_upsert(
         return int(cursor.rowcount or 0)
 
     def insert_present(present: dict[str, Any]) -> None:
-        cols = list(present.keys())
+        from services.mirror_engine import upsert_insert_columns
+
+        cols = upsert_insert_columns(list(present.keys()))
+        if not cols:
+            return
         cursor.execute(
             sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
                 sql.Identifier(schema),
@@ -203,6 +199,10 @@ def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[st
                 ddl = f"VARCHAR({int(char_len)})"
             elif data in {"CHARACTER", "CHAR"} and char_len:
                 ddl = f"CHAR({int(char_len)})"
+            elif data in {"BIT", "BIT VARYING"} and char_len:
+                # Bare ``BIT`` reads as the BOOLEAN logical and cast every
+                # ``10101010`` cell as a boolean; the width is the bitstring.
+                ddl = f"{data}({int(char_len)})"
             elif udt in _udt_scalar:
                 ddl = _udt_scalar[udt]
             elif data in {
@@ -234,6 +234,129 @@ def uses_pg_on_conflict_upsert(engine: str) -> bool:
     return (engine or "postgresql").lower() not in {"redshift", "amazon_redshift", "redshift_serverless"}
 
 
+def _pg_probe_physical_lattice(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+) -> tuple[str, ...]:
+    """Catalog lookup of ``_deleted``. Failure must not abort the write txn.
+
+    A bare ``SELECT col WHERE FALSE`` that does not raise is not proof — unit
+    mocks succeed on any SELECT. The catalog must *name* the column.
+    """
+    from services.mirror_engine import SOFT_DELETE_COLUMN, lattice_column_names
+
+    del sql_mod
+    sp = "df_lat_probe"
+    try:
+        cursor.execute(f"SAVEPOINT {sp}")
+    except Exception:
+        sp = ""
+    try:
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s "
+            "AND LOWER(CAST(column_name AS VARCHAR)) = %s",
+            (schema, table_name, SOFT_DELETE_COLUMN.casefold()),
+        )
+        row = cursor.fetchone()
+        if sp:
+            cursor.execute(f"RELEASE SAVEPOINT {sp}")
+        if not row:
+            return ()
+        return lattice_column_names([row[0]])
+    except Exception:
+        if sp:
+            try:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            except Exception as exc:
+                logger.debug("Exception suppressed: %s", exc, exc_info=exc)
+        return ()
+
+
+def _pg_family_update_insert_upsert(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[Any],
+    lattice: tuple[str, ...],
+) -> list[Any]:
+    """psycopg spelling of ``merge_dialects.update_insert_upsert``. Never DELETE."""
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict_cols, lattice)
+    insert_cols = upsert_insert_columns(target_cols, lattice)
+
+    def _project(row: Any, cols: list[str]) -> tuple[Any, ...]:
+        if isinstance(row, dict):
+            return tuple(row.get(c) for c in cols)
+        return tuple(row[target_cols.index(c)] for c in cols)
+
+    keys = [_project(row, conflict_cols) for row in batch]
+    existing: set[tuple[Any, ...]] = set()
+    pk_idents = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
+    for i in range(0, len(keys), 400):
+        part = keys[i : i + 400]
+        row_ph = sql_mod.SQL(", ").join(
+            sql_mod.SQL("(" + ", ".join(["%s"] * len(conflict_cols)) + ")")
+            for _ in part
+        )
+        cursor.execute(
+            sql_mod.SQL("SELECT {} FROM {}.{} WHERE ({}) IN ({})").format(
+                pk_idents,
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                pk_idents,
+                row_ph,
+            ),
+            [v for key in part for v in key],
+        )
+        existing.update(tuple(found) for found in cursor.fetchall())
+    to_update: list[tuple[Any, ...]] = []
+    to_insert: list[tuple[Any, ...]] = []
+    for row, key in zip(batch, keys):
+        if key in existing:
+            if update_cols:
+                to_update.append(_project(row, update_cols) + key)
+        else:
+            to_insert.append(_project(row, insert_cols))
+    if to_update and update_cols:
+        set_clause = sql_mod.SQL(", ").join(
+            sql_mod.SQL("{} = %s").format(sql_mod.Identifier(c)) for c in update_cols
+        )
+        where = sql_mod.SQL(" AND ").join(
+            sql_mod.SQL("{} = %s").format(sql_mod.Identifier(c)) for c in conflict_cols
+        )
+        cursor.executemany(
+            sql_mod.SQL("UPDATE {}.{} SET {} WHERE {}").format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                set_clause,
+                where,
+            ),
+            to_update,
+        )
+    if to_insert:
+        cols_sql = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in insert_cols)
+        ph = sql_mod.SQL(", ").join(sql_mod.Placeholder() * len(insert_cols))
+        cursor.executemany(
+            sql_mod.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                cols_sql,
+                ph,
+            ),
+            to_insert,
+        )
+    return []
+
+
 def _redshift_delete_by_keys(
     cursor: Any,
     sql_mod: Any,
@@ -245,13 +368,20 @@ def _redshift_delete_by_keys(
     batch: list[tuple] | list[list],
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
+    copy_config: Any | None = None,
+    s3_client: Any | None = None,
+    job_id: str = "",
+    dest_types: dict[str, str] | None = None,
+    stage_format: str = "tsv",
 ) -> list[tuple] | list[list]:
-    """Upsert matching keys on Redshift (MERGE preferred, delete+insert fallback).
+    """Upsert matching keys on Redshift (MERGE preferred).
 
-    Prefer native ``MERGE`` (AWS Redshift) so update+insert is one statement —
-    Airbyte/Fivetran-class. Falls back to TEMP stage DELETE + caller INSERT when
-    MERGE is unavailable. Honors ``_df_lsn`` (stale redelivery skip). Returns
-    rows that still need INSERT (empty when MERGE applied the batch).
+    Prefer native ``MERGE`` so update+insert is one statement. Dest-owned
+    lattice is never SET. When MERGE is unavailable and the dest has lattice
+    columns, portable UPDATE+INSERT runs — never DELETE (INSERT DEFAULT would
+    un-delete). Delete+insert remains only when the dest has no lattice.
+    Honors ``_df_lsn``. Returns rows that still need INSERT (empty when this
+    function applied the batch).
     """
     if not batch or not conflict_cols:
         return list(batch)
@@ -278,14 +408,36 @@ def _redshift_delete_by_keys(
             target_cols=target_cols,
             conflict_cols=conflict_cols,
             batch=batch,
+            copy_config=copy_config,
+            s3_client=s3_client,
+            job_id=job_id,
+            dest_types=dest_types,
+            stage_format=stage_format,
         )
     except ValueError:
         raise
     except Exception as exc:
         logger.warning(
-            "Redshift MERGE unavailable (%s); falling back to delete+insert",
+            "Redshift MERGE unavailable (%s); falling back",
             exc,
             exc_info=exc,
+        )
+
+    from services.mirror_engine import lattice_column_names
+
+    lattice = lattice_column_names(target_cols) or _pg_probe_physical_lattice(
+        cursor, sql_mod, schema=schema, table_name=table_name
+    )
+    if lattice:
+        return _pg_family_update_insert_upsert(
+            cursor,
+            sql_mod,
+            schema=schema,
+            table_name=table_name,
+            target_cols=target_cols,
+            conflict_cols=conflict_cols,
+            batch=batch,
+            lattice=lattice,
         )
 
     # Set-based path: stage → DELETE USING → return rows that should insert.
@@ -315,7 +467,7 @@ def _redshift_delete_by_keys(
         values: list[Any] = []
         for col, idx in zip(conflict_cols, conflict_idxs):
             val = row[idx] if idx < len(row) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"Redshift upsert delete refused null/empty conflict key {col!r} — "
                     "IS NULL predicates would mass-delete destination rows"
@@ -366,6 +518,35 @@ def _redshift_null_safe_match(sql_mod: Any, conflict_cols: list[str], *, left: s
     return sql_mod.SQL(" AND ").join(parts)
 
 
+def _conflict_key_sql_predicates(
+    sql_mod: Any,
+    conflict_cols: list[str],
+    conflict_idxs: list[int],
+    row: Any,
+) -> tuple[list[Any], list[Any]]:
+    """IS NULL for reader-null / blank keys; equality otherwise.
+
+    Shared by Redshift LSN lookup and stage-delete so extract
+    ``SQL_NULL_SENTINEL`` never binds as ``col = '__DF_SQL_NULL__'``.
+    """
+    from services.value_serializer import unescape_wire_text
+
+    predicates: list[Any] = []
+    values: list[Any] = []
+    for col, idx in zip(conflict_cols, conflict_idxs):
+        val = row[idx] if idx < len(row) else None
+        if _is_nullish_conflict_key(val):
+            predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
+        else:
+            predicates.append(
+                sql_mod.SQL("{} = {}").format(
+                    sql_mod.Identifier(col), sql_mod.Placeholder()
+                )
+            )
+            values.append(unescape_wire_text(val))
+    return predicates, values
+
+
 def _redshift_filter_stale_lsn_rows(
     cursor: Any,
     sql_mod: Any,
@@ -383,19 +564,9 @@ def _redshift_filter_stale_lsn_rows(
     to_write: list[Any] = []
     for row in batch:
         if lsn_idx is not None:
-            predicates = []
-            values: list[Any] = []
-            for col, idx in zip(conflict_cols, conflict_idxs):
-                val = row[idx] if idx < len(row) else None
-                if val is None:
-                    predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
-                else:
-                    predicates.append(
-                        sql_mod.SQL("{} = {}").format(
-                            sql_mod.Identifier(col), sql_mod.Placeholder()
-                        )
-                    )
-                    values.append(val)
+            predicates, values = _conflict_key_sql_predicates(
+                sql_mod, conflict_cols, conflict_idxs, row
+            )
             where = sql_mod.SQL(" AND ").join(predicates)
             cursor.execute(
                 sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
@@ -423,6 +594,11 @@ def _redshift_merge_upsert(
     target_cols: list[str],
     conflict_cols: list[str],
     batch: list[tuple] | list[list],
+    copy_config: Any | None = None,
+    s3_client: Any | None = None,
+    job_id: str = "",
+    dest_types: dict[str, str] | None = None,
+    stage_format: str = "tsv",
 ) -> list[tuple] | list[list]:
     """Apply batch via native Redshift MERGE; return [] (nothing left to INSERT)."""
     to_write = _redshift_filter_stale_lsn_rows(
@@ -456,20 +632,39 @@ def _redshift_merge_upsert(
         rows_out.append(
             tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
         )
-    cursor.executemany(insert_sql, rows_out)
+    if copy_config is not None:
+        from connectors.redshift_copy import copy_redshift_rows_from_s3
+
+        copy_redshift_rows_from_s3(
+            cursor,
+            schema="",
+            table=stage,
+            columns=target_cols,
+            rows=rows_out,
+            config=copy_config,
+            s3_client=s3_client,
+            job_id=job_id,
+            dest_types=dest_types,
+            stage_format=stage_format,
+        )
+    else:
+        cursor.executemany(insert_sql, rows_out)
 
     # Redshift MERGE: target without alias; source aliased as s.
-    # NULL-safe ON (Airbyte destination-redshift class).
+    # NULL-safe ON (Airbyte destination-redshift class). Lattice is dest-owned
+    # — never SET (Fivetran ``_fivetran_deleted=false`` hole).
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
     tgt = sql_mod.SQL("{}.{}").format(
         sql_mod.Identifier(schema), sql_mod.Identifier(table_name)
     )
-    set_clause = sql_mod.SQL(", ").join(
-        sql_mod.SQL("{} = s.{}").format(sql_mod.Identifier(c), sql_mod.Identifier(c))
-        for c in target_cols
+    set_cols = upsert_set_columns(target_cols, conflict_cols)
+    insert_cols_src = upsert_insert_columns(target_cols)
+    insert_col_list = sql_mod.SQL(", ").join(
+        sql_mod.Identifier(c) for c in insert_cols_src
     )
-    insert_col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
     insert_val_list = sql_mod.SQL(", ").join(
-        sql_mod.SQL("s.{}").format(sql_mod.Identifier(c)) for c in target_cols
+        sql_mod.SQL("s.{}").format(sql_mod.Identifier(c)) for c in insert_cols_src
     )
     on_parts = []
     for c in conflict_cols:
@@ -480,11 +675,30 @@ def _redshift_merge_upsert(
             ).format(t=tgt, c=col)
         )
     on_sql = sql_mod.SQL(" AND ").join(on_parts)
-    merge_sql = sql_mod.SQL(
-        "MERGE INTO {} USING {} AS s ON {} "
-        "WHEN MATCHED THEN UPDATE SET {} "
-        "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
-    ).format(tgt, sql_mod.Identifier(stage), on_sql, set_clause, insert_col_list, insert_val_list)
+    if set_cols:
+        set_clause = sql_mod.SQL(", ").join(
+            sql_mod.SQL("{} = s.{}").format(sql_mod.Identifier(c), sql_mod.Identifier(c))
+            for c in set_cols
+        )
+        merge_sql = sql_mod.SQL(
+            "MERGE INTO {} USING {} AS s ON {} "
+            "WHEN MATCHED THEN UPDATE SET {} "
+            "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
+        ).format(
+            tgt,
+            sql_mod.Identifier(stage),
+            on_sql,
+            set_clause,
+            insert_col_list,
+            insert_val_list,
+        )
+    else:
+        merge_sql = sql_mod.SQL(
+            "MERGE INTO {} USING {} AS s ON {} "
+            "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
+        ).format(
+            tgt, sql_mod.Identifier(stage), on_sql, insert_col_list, insert_val_list
+        )
     cursor.execute(merge_sql)
     try:
         cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
@@ -505,49 +719,26 @@ def _redshift_stage_delete(
     batch: list[tuple] | list[list],
 ) -> list[tuple] | list[list]:
     """Stage batch keys and delete matches in one statement (txn-atomic)."""
-    from connectors.writer_common import DF_LSN_COL, compare_lsn
-
     stage = f"_df_upsert_stage_{abs(hash((schema, table_name, tuple(conflict_cols)))) % 10_000_000}"
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
-    lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
 
-    # Filter stale LSN rows client-side first (same honesty as per-row path).
-    to_write: list[Any] = []
-    for row in batch:
-        if lsn_idx is not None:
-            predicates = []
-            values: list[Any] = []
-            for col, idx in zip(conflict_cols, conflict_idxs):
-                val = row[idx] if idx < len(row) else None
-                if val is None:
-                    predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
-                else:
-                    predicates.append(
-                        sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder())
-                    )
-                    values.append(val)
-            where = sql_mod.SQL(" AND ").join(predicates)
-            cursor.execute(
-                sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
-                    sql_mod.Identifier(DF_LSN_COL),
-                    sql_mod.Identifier(schema),
-                    sql_mod.Identifier(table_name),
-                    where,
-                ),
-                values,
-            )
-            existing = cursor.fetchone()
-            incoming_lsn = row[lsn_idx] if lsn_idx < len(row) else None
-            if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
-                continue
-        to_write.append(row)
+    # Filter stale LSN rows client-side first (same honesty as MERGE path).
+    to_write = _redshift_filter_stale_lsn_rows(
+        cursor,
+        sql_mod,
+        schema=schema,
+        table_name=table_name,
+        target_cols=target_cols,
+        conflict_cols=conflict_cols,
+        batch=batch,
+    )
     if not to_write:
         return []
 
     for row in to_write:
         for col, idx in zip(conflict_cols, conflict_idxs):
             val = row[idx] if idx < len(row) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"Redshift upsert stage-delete refused null/empty conflict key "
                     f"{col!r} — NULL-safe join would mass-delete destination rows"
@@ -570,42 +761,23 @@ def _redshift_stage_delete(
         key_rows.append(tuple(row[idx] if idx < len(row) else None for idx in conflict_idxs))
     cursor.executemany(insert_sql, key_rows)
 
-    join_pred = sql_mod.SQL(" AND ").join(
-        sql_mod.SQL("t.{} IS NOT DISTINCT FROM s.{}").format(
-            sql_mod.Identifier(c), sql_mod.Identifier(c)
+    # Null-safe equality spelled without IS NOT DISTINCT FROM, which Redshift
+    # lacks: trying it first aborted the transaction, so the fallback DELETE
+    # failed "current transaction is aborted" (Redshift has no savepoints; R11).
+    eq_pred = sql_mod.SQL(" AND ").join(
+        sql_mod.SQL("(({t} = s.{c}) OR ({t} IS NULL AND s.{c} IS NULL))").format(
+            t=sql_mod.Identifier(table_name, c), c=sql_mod.Identifier(c)
         )
         for c in conflict_cols
     )
-    # Redshift may lack IS NOT DISTINCT FROM — use equality + null-safe OR.
-    try:
-        cursor.execute(
-            sql_mod.SQL(
-                "DELETE FROM {}.{} USING {} AS s WHERE {}"
-            ).format(
-                sql_mod.Identifier(schema),
-                sql_mod.Identifier(table_name),
-                sql_mod.Identifier(stage),
-                join_pred,
-            )
+    cursor.execute(
+        sql_mod.SQL("DELETE FROM {}.{} USING {} AS s WHERE {}").format(
+            sql_mod.Identifier(schema),
+            sql_mod.Identifier(table_name),
+            sql_mod.Identifier(stage),
+            eq_pred,
         )
-    except Exception:
-        # Null-safe equality fallback
-        eq_pred = sql_mod.SQL(" AND ").join(
-            sql_mod.SQL(
-                "((t.{c} = s.{c}) OR (t.{c} IS NULL AND s.{c} IS NULL))"
-            ).format(c=sql_mod.Identifier(c))
-            for c in conflict_cols
-        )
-        cursor.execute(
-            sql_mod.SQL(
-                "DELETE FROM {}.{} USING {} AS s WHERE {}"
-            ).format(
-                sql_mod.Identifier(schema),
-                sql_mod.Identifier(table_name),
-                sql_mod.Identifier(stage),
-                eq_pred,
-            )
-        )
+    )
     try:
         cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
     except Exception as exc:
@@ -638,6 +810,273 @@ class _PgMaterializedBatch:
     target_types: list[str]
     bind_types: list[str]
     rows_for_checksum: list[tuple]
+    source_row_count: int = 0
+
+
+def _pg_resolve_carriers(
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    engine: str,
+    allow_logical_fallback: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Physical + bind DDL from dest carriers. Does not map a row."""
+    from services.type_system import parse_enum_or_set_ordered_members
+
+    target_types: list[str] = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and allow_logical_fallback:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        target_types.append(pg_type(carrier, engine=engine) if carrier else "")
+
+    def _bind_ddl(idx: int) -> str:
+        logical = logical_types[idx] if idx < len(logical_types) else ""
+        target = target_types[idx] if idx < len(target_types) else ""
+        if logical and parse_enum_or_set_ordered_members(logical) is not None:
+            return logical
+        logical_u = (logical or "").strip().upper()
+        if logical_u in {"ROWVERSION", "HIERARCHYID", "SQL_VARIANT", "ROWID", "UROWID"}:
+            return logical
+        return target or logical
+
+    bind_types = [_bind_ddl(i) for i in range(len(target_cols))]
+    return target_types, bind_types
+
+
+def _pg_coerce_bytea_rows(
+    rows: list[tuple],
+    target_types: list[str],
+) -> list[tuple]:
+    if not rows or not any(t == "BYTEA" for t in target_types):
+        return rows
+    from connectors.sql_bind import coerce_binary_wire
+    from services.value_serializer import is_missing_sentinel
+
+    bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
+
+    def _coerce_bytea_row(row: tuple) -> tuple:
+        row_list = list(row)
+        for idx in bytea_positions:
+            val = row_list[idx]
+            if is_missing_sentinel(val) or val is None:
+                continue
+            row_list[idx] = coerce_binary_wire(val)
+        return tuple(row_list)
+
+    return [_coerce_bytea_row(row) for row in rows]
+
+
+def _pg_map_kwargs(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    destination_pk_columns: list[str] | None,
+    destination_column_nullability: Any,
+    empty_cells_as_null: bool,
+    records: list[dict[str, Any]] | None,
+    source_spool: Any,
+    extra: dict[str, Any] | None,
+    materialize_batch: int | None,
+) -> dict[str, Any]:
+    return {
+        "headers": headers,
+        "data_rows": data_rows,
+        "mappings": mappings,
+        "target_cols": target_cols,
+        "column_types": column_types,
+        "dest_types": dest_types,
+        "error_policy": policy,
+        "preserve_case": True,
+        "dest_kind": "postgresql",
+        "destination_pk_columns": list(destination_pk_columns or []) or None,
+        "destination_column_nullability": destination_column_nullability,
+        "empty_cells_as_null": bool(empty_cells_as_null),
+        "records": records,
+        "source_spool": source_spool,
+        "extra": extra,
+        "batch_size": materialize_batch,
+    }
+
+
+def _pg_finish_mapped_bundle(
+    bundle: Any,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    engine: str,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    mappings: list,
+    allow_logical_fallback: bool = True,
+    bind_types: list[str] | None = None,
+) -> Any:
+    """Quarantine + in-bundle dedupe + bind one bundle. Peak RAM is this bundle."""
+    from connectors.sql_write_materialize import finish_sql_mapped_bundle
+    from connectors.writer_common import (
+        combined_mapped_rows_for_checksum,
+        materialize_missing_as_null_for_dense_write,
+    )
+
+    dest_db = (
+        "redshift"
+        if str(engine or "").startswith("redshift")
+        or str(engine or "") in {"amazon_redshift", "redshift_serverless"}
+        else "postgresql"
+    )
+    dialect_label = "Redshift" if dest_db == "redshift" else "PostgreSQL"
+    target_types, resolved_bind = _pg_resolve_carriers(
+        target_cols=target_cols,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        engine=engine,
+        allow_logical_fallback=allow_logical_fallback,
+    )
+    if bind_types is None:
+        bind_types = resolved_bind
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=target_cols,
+        target_types=target_types,
+        policy=policy,
+        dialect_label=dialect_label,
+        dest_db=dest_db,
+        mappings=mappings,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
+    finished.dense_rows = _pg_coerce_bytea_rows(finished.dense_rows, target_types)
+    finished.sparse_rows = _pg_coerce_bytea_rows(finished.sparse_rows, target_types)
+    finished.dense_rows = bind_sql_mapped_rows_with_quarantine(
+        finished.dense_rows,
+        target_cols,
+        bind_types,
+        finished.rejected_details,
+        policy,
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+        mappings=mappings,
+        row_numbers=finished.dense_row_numbers or None,
+    )
+    finished.sparse_rows = bind_sql_mapped_rows_with_quarantine(
+        finished.sparse_rows,
+        target_cols,
+        bind_types,
+        finished.rejected_details,
+        policy,
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+        mappings=mappings,
+        row_numbers=finished.sparse_row_numbers or None,
+    )
+    finished.dense_rows = materialize_missing_as_null_for_dense_write(finished.dense_rows)
+    finished.checksum_rows = combined_mapped_rows_for_checksum(
+        finished.dense_rows, finished.sparse_rows
+    )
+    finished.target_types = target_types
+    finished.bind_types = list(bind_types)
+    return finished
+
+
+def iter_pg_finished_bundles(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    engine: str,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
+    empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+    bind_types: list[str] | None = None,
+) -> Any:
+    """Yield finished PG/Redshift bundles. Caller writes and drops each one."""
+    from connectors.sql_write_materialize import iter_finished_sql_bundles
+
+    def _finish(bundle):
+        return _pg_finish_mapped_bundle(
+            bundle,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            logical_types=logical_types,
+            policy=policy,
+            engine=engine,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            mappings=mappings,
+            allow_logical_fallback=allow_logical_fallback,
+            bind_types=bind_types,
+        )
+
+    yield from iter_finished_sql_bundles(
+        finish=_finish,
+        **_pg_map_kwargs(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            policy=policy,
+            destination_pk_columns=destination_pk_columns,
+            destination_column_nullability=destination_column_nullability,
+            empty_cells_as_null=empty_cells_as_null,
+            records=records,
+            source_spool=source_spool,
+            extra=extra,
+            materialize_batch=materialize_batch,
+        ),
+    )
+
+
+def _pg_scan_finished_bundles(**kwargs: Any) -> Any:
+    """Map + finish every bundle, keep rejects, discard accepted tuples."""
+    from connectors.sql_write_materialize import SqlWriteAccumulator
+
+    target_cols = kwargs["target_cols"]
+    dest_types = kwargs["dest_types"]
+    engine = str(kwargs.get("engine") or "postgresql")
+    dest_db = (
+        "redshift"
+        if engine.startswith("redshift") or engine in {"amazon_redshift", "redshift_serverless"}
+        else "postgresql"
+    )
+    acc = SqlWriteAccumulator(
+        target_cols=target_cols,
+        dest_db_type=dest_db,
+        dest_types=dest_types if isinstance(dest_types, dict) else {},
+        dialect_label="Redshift" if dest_db == "redshift" else "PostgreSQL",
+    )
+    source_row_count = 0
+    target_types: list[str] = []
+    bind_types: list[str] = []
+    for finished in iter_pg_finished_bundles(**kwargs):
+        acc.note_rejects(finished.rejected_details, finished.transform_errors)
+        source_row_count = finished.source_row_count
+        target_types = finished.target_types
+        bind_types = finished.bind_types
+        del finished
+    acc.stop_writing()
+    return acc, source_row_count, target_types, bind_types
 
 
 def _pg_materialize_mapped_batch(
@@ -657,185 +1096,62 @@ def _pg_materialize_mapped_batch(
     destination_column_nullability: Any = None,
     allow_logical_fallback: bool = True,
     empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
 ) -> _PgMaterializedBatch:
     """Build mapped rows against ``dest_types`` then quarantine/bind.
 
-    Call again after live DDL overlay so Map stamps cannot coerce before
-    physical types win (BQ-class reorder — existing-table invent cliff).
+    STRUCT flatten/explode streams through ``SourceRowSpool``. Each bundle is
+    finished independently (in-bundle last-write-wins) then concatenated so
+    existing unit tests that inspect ``.mapped_rows`` stay green. The write
+    loop must call :func:`iter_pg_finished_bundles` instead of this helper —
+    concatenating here is the retain contract, not the production RAM path.
     """
-    target_types = []
-    for i, c in enumerate(target_cols):
-        carrier = str(dest_types.get(c) or "").strip()
-        if not carrier and allow_logical_fallback:
-            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
-        target_types.append(pg_type(carrier, engine=engine) if carrier else "")
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    mapped_rows: list[tuple] = []
+    sparse_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list = []
+    rows_for_checksum: list[tuple] = []
+    source_row_count = 0
+    target_types, bind_types = _pg_resolve_carriers(
+        target_cols=target_cols,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        engine=engine,
+        allow_logical_fallback=allow_logical_fallback,
+    )
+    for finished in iter_pg_finished_bundles(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="postgresql",
-        destination_pk_columns=list(destination_pk_columns or []) or None,
+        logical_types=logical_types,
+        policy=policy,
+        engine=engine,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=destination_pk_columns,
         destination_column_nullability=destination_column_nullability,
-        empty_cells_as_null=bool(empty_cells_as_null),
-    )
-    mapped_rows = quarantine_currency_markers_into_numeric(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    _decimal_dest = (
-        "redshift"
-        if engine.startswith("redshift") or engine in {"amazon_redshift", "redshift_serverless"}
-        else "postgresql"
-    )
-    mapped_rows = quarantine_unfit_decimals(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label=(
-            "PostgreSQL NUMERIC" if _decimal_dest == "postgresql" else "Redshift NUMERIC"
-        ),
-        dest_db=_decimal_dest,
-    )
-    mapped_rows = quarantine_unfit_years(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_booleans(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_temporals(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_specialty_types(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_integers(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="PostgreSQL INTEGER",
-        dest_db="postgresql",
-    )
-    mapped_rows = quarantine_unfit_bitstrings(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_binaries(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="PostgreSQL BYTEA",
-    )
-    mapped_rows = quarantine_unfit_enum_set(
-        mapped_rows, target_cols, logical_types, rejected_details, policy
-    )
-    string_dialect = (
-        "Redshift VARCHAR"
-        if engine in {"redshift", "amazon_redshift", "redshift_serverless"}
-        else "PostgreSQL VARCHAR"
-    )
-    mapped_rows = quarantine_unfit_strings(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label=string_dialect,
-    )
-    mapped_rows = quarantine_unfit_arrays(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Redshift" if _decimal_dest == "redshift" else "PostgreSQL",
-        dest_db=_decimal_dest,
-    )
-    mapped_rows = quarantine_unfit_json(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label=string_dialect.split()[0] + " JSON",
-    )
-    sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = list(mapped_rows)
-    if write_mode == "upsert" and conflict_columns:
-        from connectors.writer_common import split_dense_sparse_rows
-
-        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-
-    if write_mode == "upsert" and conflict_columns:
-        if DF_LSN_COL in target_cols:
-            mapped_rows = dedupe_rows_by_pk_and_lsn(
-                mapped_rows, conflict_columns, target_cols
-            )
-        else:
-            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
-
-    if any(t == "BYTEA" for t in target_types):
-        from connectors.sql_bind import coerce_binary_wire
-        from services.value_serializer import is_missing_sentinel
-
-        bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
-
-        def _coerce_bytea_row(row: tuple) -> tuple:
-            row_list = list(row)
-            for idx in bytea_positions:
-                val = row_list[idx]
-                if is_missing_sentinel(val) or val is None:
-                    continue
-                row_list[idx] = coerce_binary_wire(val)
-            return tuple(row_list)
-
-        mapped_rows = [_coerce_bytea_row(row) for row in mapped_rows]
-        sparse_rows = [_coerce_bytea_row(row) for row in sparse_rows]
-
-    from services.type_system import parse_enum_or_set_ordered_members
-
-    def _bind_ddl(idx: int) -> str:
-        logical = logical_types[idx] if idx < len(logical_types) else ""
-        target = target_types[idx] if idx < len(target_types) else ""
-        if logical and parse_enum_or_set_ordered_members(logical) is not None:
-            return logical
-        logical_u = (logical or "").strip().upper()
-        if logical_u in {"ROWVERSION", "HIERARCHYID", "SQL_VARIANT", "ROWID", "UROWID"}:
-            return logical
-        return target or logical
-
-    bind_types = [_bind_ddl(i) for i in range(len(target_cols))]
-    mapped_rows = bind_sql_mapped_rows_with_quarantine(
-        mapped_rows,
-        target_cols,
-        bind_types,
-        rejected_details,
-        policy,
-        engine="postgresql",
-        dialect_label="PostgreSQL",
-        mappings=mappings,
-    )
-    sparse_rows = bind_sql_mapped_rows_with_quarantine(
-        sparse_rows,
-        target_cols,
-        bind_types,
-        rejected_details,
-        policy,
-        engine="postgresql",
-        dialect_label="PostgreSQL",
-        mappings=mappings,
-    )
-    from connectors.writer_common import materialize_missing_as_null_for_dense_write
-
-    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+        allow_logical_fallback=allow_logical_fallback,
+        empty_cells_as_null=empty_cells_as_null,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        materialize_batch=materialize_batch,
+    ):
+        mapped_rows.extend(finished.dense_rows)
+        sparse_rows.extend(finished.sparse_rows)
+        rows_for_checksum.extend(finished.checksum_rows)
+        transform_errors.extend(finished.transform_errors)
+        rejected_details.extend(finished.rejected_details)
+        source_row_count = finished.source_row_count
+        target_types = finished.target_types
+        bind_types = finished.bind_types
+        del finished
     return _PgMaterializedBatch(
         mapped_rows=mapped_rows,
         sparse_rows=sparse_rows,
@@ -844,6 +1160,7 @@ def _pg_materialize_mapped_batch(
         target_types=target_types,
         bind_types=bind_types,
         rows_for_checksum=rows_for_checksum,
+        source_row_count=source_row_count,
     )
 
 
@@ -864,19 +1181,27 @@ def _escape_copy_text(text: str) -> str:
 
 
 def _copy_text_value(value: Any) -> str:
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_reader_null_cell
 
-    # Dense COPY: absent schemaless fields → SQL NULL (never bind sentinel text).
-    if value is None or is_missing_sentinel(value):
+    # Dense COPY: reader-null / Missing → SQL NULL (never bind sentinel text).
+    if is_reader_null_cell(value):
         return "\\N"
     if isinstance(value, bool):
-        return "t" if value else "f"
+        # PostgreSQL's canonical boolean text. A boolean column reads it the
+        # same as 't'; a text column (a source field that is not boolean in
+        # every row) keeps a real boolean distinct from the string 't' — the
+        # bind path already lands 'true' there (boolean::text).
+        return "true" if value else "false"
     if isinstance(value, (dict, list)):
         # json.dumps escapes backslashes for JSON; COPY would then eat that
         # escape and hand jsonb a different string — "C:\\temp" arrives as
         # "C:\temp", whose \t jsonb reads as a tab. Where the leftover escape is
         # not valid JSON at all the row is rejected outright.
-        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
+        # Document numbers stay numbers — a Decimal leaf is not a string
+        # (``{"pi": 3.14}`` must not write ``{"pi": "3.14"}``, D74).
+        from services.value_serializer import json_document_text
+
+        raw = json_document_text(value)
     elif isinstance(value, (bytes, bytearray, memoryview)):
         # ``\x`` is COPY's hex character escape, so an unescaped
         # ``\x68656c6c6f`` is consumed as the byte 0x68 plus the literal text
@@ -884,7 +1209,11 @@ def _copy_text_value(value: Any) -> str:
         # field ``\x68656c6c6f``, which bytea parses as hex.
         raw = "\\x" + bytes(value).hex()
     elif isinstance(value, Decimal):
-        return str(value)
+        from services.value_serializer import safe_decimal_text
+
+        # Dest-canonical text — str(Decimal("1E+2")) is "1E+2" so COPY and
+        # parameter binds checksum-diverged after extract emits 100.
+        return safe_decimal_text(value) or str(value)
     elif isinstance(value, (int, float)):
         return str(value)
     else:
@@ -1010,6 +1339,15 @@ def _copy_upsert_batch(
         except Exception as exc:
             logger.debug("TEMP upsert stage drop skipped: %s", exc)
 
+    def _rollback_aborted() -> None:
+        """A failed COPY aborts the transaction. The values fallback must not run in it."""
+        if conn is None:
+            return
+        try:
+            conn.rollback()
+        except Exception:
+            logger.debug("upsert stage rollback skipped", exc_info=True)
+
     try:
         cur.execute(
             sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
@@ -1021,7 +1359,9 @@ def _copy_upsert_batch(
         _copy_rows_temp(cur, stage, target_cols, [tuple(r) for r in batch])
         col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
         conflict = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
-        update_cols = [c for c in target_cols if c not in conflict_cols]
+        from services.mirror_engine import upsert_set_columns
+
+        update_cols = upsert_set_columns(target_cols, conflict_cols)
         if update_cols:
             set_clause = sql_mod.SQL(", ").join(
                 sql_mod.SQL("{} = EXCLUDED.{}").format(
@@ -1056,10 +1396,21 @@ def _copy_upsert_batch(
         cur.execute(merge)
         _drop_stage_best_effort()
         return len(batch)
-    except Exception:
-        # Clear aborted txn + orphan stage, then values-based upsert.
+    except Exception as exc:
+        # COPY or the merge failed. PostgreSQL then rejects every later
+        # statement with "current transaction is aborted" and hides the
+        # first error (MariaDB → Postgres upsert). Roll back, then the
+        # values path. If that path only repeats the aborted-transaction
+        # error, raise the original failure.
+        _rollback_aborted()
         _drop_stage_best_effort()
-        _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        try:
+            _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        except Exception as fallback_exc:
+            fallback = str(fallback_exc).lower()
+            if "current transaction is aborted" in fallback or "infailedsqltransaction" in fallback:
+                raise exc from fallback_exc
+            raise
         return len(batch)
 
 
@@ -1119,6 +1470,16 @@ def write_mapped_rows(
         mappings=mappings,
         schema_policy=_kwargs.get("schema_policy"),
     )
+    # X-31: normalize/hybrid contract gate must block before the parent
+    # INSERT — a bad child_table_spec must never half-write on the
+    # schedule path (interactive preflight already blocked it).
+    _array_gate = early_array_strategy_gate(headers=headers, mappings=mappings)
+    if _array_gate:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name,
+            target_schema=database, checksum="", chunks_completed=0,
+            error=_array_gate,
+        )
     # Shared connection (stream reuse): default to not closing the caller's conn.
     if close_connection is None:
         close_connection = connection is None
@@ -1137,8 +1498,11 @@ def write_mapped_rows(
                 error=require_driver("psycopg2", "psycopg2-binary"),
                 driver="none",
             )
+        _stub_rows = data_rows
+        if not _stub_rows and isinstance(_kwargs.get("records"), list):
+            _stub_rows = [list(r.values()) for r in _kwargs["records"]]
         rows, checksum, chunks = simulate_stub_write(
-            data_rows=data_rows, table_name=table_name, target_schema=schema or "public",
+            data_rows=_stub_rows, table_name=table_name, target_schema=schema or "public",
             on_checkpoint=on_checkpoint,
         )
         return WriteResult(
@@ -1148,15 +1512,28 @@ def write_mapped_rows(
 
     from psycopg2 import sql
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.sql_write_materialize import (
+        SqlWriteAccumulator,
+        dest_types_signature,
+        ensure_sql_source_spool,
+        sample_sql_source_values,
+        sql_source_from_writer,
+    )
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    _sql_src = sql_source_from_writer(
+        _kwargs,
+        _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+    )
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_sql_src["records"]
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="postgresql",
     )
     if not target_cols:
         return WriteResult(
@@ -1203,6 +1580,9 @@ def write_mapped_rows(
                 error=str(exc),
             )
 
+    from connectors.sql_identifiers import split_qualified_table
+
+    schema, table_name = split_qualified_table(table_name, schema or "public")
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
     engine = str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql").lower()
@@ -1217,68 +1597,106 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="PostgreSQL",
+        dest_db="redshift" if engine == "redshift" else "postgresql",
     )
     policy = transform_error_policy(error_policy)
+    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    spool, close_spool = ensure_sql_source_spool(
+        headers=headers,
+        data_rows=data_rows,
+        records=_sql_src["records"],
+        mappings=mappings,
+        extra=extra,
+        source_spool=_sql_src.get("source_spool"),
+        spill_max=_sql_src.get("source_spill_max"),
+    )
+
+    def _cleanup_spool() -> None:
+        nonlocal close_spool
+        if not close_spool:
+            return
+        close_spool = False
+        try:
+            spool.close()
+        except Exception:
+            logger.debug("sql source spool close skipped", exc_info=True)
 
     # Partial Studio: defer Map + strict abort until live DDL rematerialize
     # (Map-blank invent must not fail batches that succeed against physical carriers).
     # Matches generic_sql / BigQuery. Create-new already refused below on studio_err.
-    mapped_rows: list = []
-    sparse_rows: list = []
     transform_errors: list[str] = []
     rejected_details: list = []
-    target_types: list[str] = []
-    bind_types: list[str] = []
-    rows_for_checksum: list = []
+    target_types, bind_types = _pg_resolve_carriers(
+        target_cols=target_cols,
+        dest_types=dest_types if isinstance(dest_types, dict) else {},
+        logical_types=logical_types,
+        engine=engine,
+        allow_logical_fallback=True,
+    )
     rejected_rows = 0
     coerced_null_rows = 0
+    source_row_count = int(getattr(spool, "row_count", 0) or 0)
+    scanned_dest_sig: tuple[str, ...] | None = None
+    write_acc = SqlWriteAccumulator(
+        target_cols=target_cols,
+        dest_db_type="redshift" if engine.startswith("redshift") else "postgresql",
+        dest_types=dest_types if isinstance(dest_types, dict) else {},
+        dialect_label="Redshift" if engine.startswith("redshift") else "PostgreSQL",
+    )
     # Strict-policy abort withheld from the Map-projected pass until live DDL
     # either confirms it or rematerializes it away.
     deferred_map_abort: str | None = None
-    if not studio_err:
-        # Map before opening a socket so public proxies are not idle during transform.
-        _batch = _pg_materialize_mapped_batch(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            dest_types=dest_types,
-            logical_types=logical_types,
-            policy=policy,
-            engine=engine,
-            conflict_columns=conflict_columns,
-            write_mode=write_mode,
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=_kwargs.get("destination_column_nullability"),
-            allow_logical_fallback=True,
-            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+    _pg_finish_kwargs = dict(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        policy=policy,
+        engine=engine,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        allow_logical_fallback=True,
+        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+        records=None,
+        source_spool=spool,
+        extra=extra,
+        materialize_batch=_sql_src["materialize_batch"],
+    )
+    if not studio_err and policy == "fail":
+        # Scan without retaining accepted tuples so public proxies are not
+        # opened when Map/live types already refuse the batch.
+        scan_acc, source_row_count, target_types, bind_types = _pg_scan_finished_bundles(
+            **_pg_finish_kwargs
         )
-        mapped_rows = _batch.mapped_rows
-        sparse_rows = _batch.sparse_rows
-        transform_errors = _batch.transform_errors
-        rejected_details = _batch.rejected_details
-        target_types = _batch.target_types
-        bind_types = _batch.bind_types
-        rows_for_checksum = _batch.rows_for_checksum
-
+        rejected_details = list(scan_acc.rejected_details)
+        transform_errors = list(scan_acc.transform_errors)
+        scanned_dest_sig = dest_types_signature(
+            dest_types if isinstance(dest_types, dict) else {}, target_cols
+        )
         rejected_rows = _rejected_row_count(
-            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+            data_rows,
+            [],
+            rejected_details,
+            policy,
+            source_row_count=source_row_count or None,
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        _map_abort = reject_on_strict_policy(
-            policy, rejected_details, "PostgreSQL", transform_errors
-        )
-        # Map stamps only *project* the carriers create-new would invent. An
-        # existing table's physical DDL is read below and rematerializes the
-        # batch, so aborting here fails rows the real sink accepts (BOOLEAN
-        # stamp over a live TEXT column rejected every 'Y'). Hold the verdict:
-        # the post-overlay pass re-decides, and the no-physical path re-raises
-        # it unchanged.
-        if _map_abort and not isinstance(dest_types, LiveDestTypes):
+        _map_abort = scan_acc.abort_error(policy)
+        # Live carriers are not final either while backfill may still widen
+        # them in setup: a value that overflows today's NUMERIC(8,2) fits the
+        # NUMERIC(12,2) the source grew to, and the widen runs before any row.
+        if _map_abort and (
+            not isinstance(dest_types, LiveDestTypes) or backfill_new_fields
+        ):
             deferred_map_abort = _map_abort
             _map_abort = None
         if _map_abort:
+            _cleanup_spool()
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -1293,7 +1711,7 @@ def write_mapped_rows(
             )
 
     chunk_size = write_chunk_size(host, connection_string=connection_string)
-    total = len(mapped_rows)
+    total = source_row_count
     chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 0
     written = 0
     chunks_completed = 0
@@ -1308,6 +1726,46 @@ def write_mapped_rows(
         and not any(t == "BYTEA" for t in target_types)
         and port != 5439
     )
+    redshift_copy_cfg = None
+    redshift_copy_warning = ""
+    redshift_stage_format = "tsv"
+    if engine in {"redshift", "amazon_redshift", "redshift_serverless"}:
+        from connectors.redshift_copy import (
+            resolve_redshift_copy_config,
+            resolve_redshift_stage_format,
+            should_use_redshift_s3_copy_for_insert,
+        )
+
+        extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+        redshift_stage_format = resolve_redshift_stage_format(extra)
+        try:
+            redshift_copy_cfg = resolve_redshift_copy_config(extra)
+        except ValueError as exc:
+            _cleanup_spool()
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema,
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
+        if redshift_copy_cfg is None:
+            redshift_copy_warning = (
+                "Redshift bulk COPY FROM S3 is available when staging_bucket and "
+                "iam_role are set; this load uses the PostgreSQL-wire insert path."
+            )
+            transform_errors.append(redshift_copy_warning)
+    use_redshift_s3_copy = should_use_redshift_s3_copy_for_insert(
+        copy_config=redshift_copy_cfg,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+        row_count=total,
+    ) if engine in {"redshift", "amazon_redshift", "redshift_serverless"} else False
+    load_method = (
+        "s3_copy" if use_redshift_s3_copy else ("copy" if use_copy else "insert")
+    )
     job_id = str(_kwargs.get("job_id") or "").strip()
     write_batch_key = str(_kwargs.get("write_batch_key") or "").strip() or build_write_batch_key(
         table_name=table_name,
@@ -1320,6 +1778,11 @@ def write_mapped_rows(
     )
     conn = None
 
+    def _held_overwrite():
+        from connectors.write_resilience import overwrite_transaction_for
+
+        return overwrite_transaction_for(conn)
+
     def _build_insert():
         placeholders = sql.SQL(", ").join(sql.Placeholder() * len(target_cols))
         # Redshift: no ON CONFLICT — plain INSERT after delete-by-key (see chunk loop).
@@ -1330,7 +1793,9 @@ def write_mapped_rows(
         ):
             conflict = [c for c in conflict_columns if c in target_cols]
             if conflict:
-                update_cols = [c for c in target_cols if c not in conflict]
+                from services.mirror_engine import upsert_set_columns
+
+                update_cols = upsert_set_columns(target_cols, conflict)
                 if update_cols:
                     set_clause = sql.SQL(", ").join(
                         sql.SQL("{} = EXCLUDED.{}").format(
@@ -1349,7 +1814,12 @@ def write_mapped_rows(
                             placeholders,
                             sql.SQL(", ").join(map(sql.Identifier, conflict)),
                             set_clause,
-                            sql.SQL(postgres_lsn_update_guard_sql(table_name)),
+                            sql.SQL(
+                                postgres_lsn_update_guard_sql(
+                                    table_name,
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
+                                )
+                            ),
                         )
                     return sql.SQL(
                         "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
@@ -1403,19 +1873,29 @@ def write_mapped_rows(
 
     def _run_setup(cursor) -> None:
         nonlocal target_types, additive_refuse
+        # The chunk ledger is ``_dataflow_write_*`` in this schema. Creating it
+        # before the schema exists fails the job after preflight already passed.
+        if schema:
+            cursor.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+            )
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
+        # None = existence never established; only a proven False allows the
+        # orphan-rollback registration below to drop the object. Declared at
+        # write scope: the upsert unique-key check below reads it on the
+        # create_table=False path too (operator's existing table).
+        pg_table_existed: bool | None = None
         if create_table:
-            cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
             if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
                 from services.type_system import collect_pg_enum_prerequisites
 
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
+                from connectors.pgvector_extension import ensure_vector_extension
+
+                ensure_vector_extension(cursor, target_types, engine=engine)  # R11
             fidelity_plan = None
-            # None = existence never established; only a proven False allows the
-            # orphan-rollback registration below to drop the object.
-            pg_table_existed: bool | None = None
             from services.schema_fidelity import (
                 empty_unsupported_report,
                 render_create_column_defs,
@@ -1423,101 +1903,129 @@ def write_mapped_rows(
             )
 
             try:
-                # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
-                cursor.execute(
-                    """
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                    LIMIT 1
-                    """,
-                    (schema, table_name),
-                )
-                pg_table_existed = cursor.fetchone() is not None
-                from services.physical_placement_ddl import (
-                    list_destination_tablespaces,
-                )
-
-                fidelity_plan = resolve_create_fidelity_plan(
-                    source_schema_catalog=_kwargs.get("source_schema_catalog"),
-                    mappings=mappings,
-                    target_columns=target_cols,
-                    target_types=target_types,
-                    dest_dialect="postgresql",
-                    table_already_exists=pg_table_existed,
-                    dest_table=table_name,
-                    dest_schema=schema,
-                    dest_tablespaces=list_destination_tablespaces(
-                        "postgresql", cursor
-                    ),
-                )
-                if fidelity_plan.column_renames and fidelity_plan.dest_columns:
-                    target_cols[:] = list(fidelity_plan.dest_columns)
-                body = render_create_column_defs(
-                    columns=target_cols,
-                    types=target_types,
-                    plan=(None if pg_table_existed else fidelity_plan),
-                    dialect="postgresql",
-                )
-                # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
-                # itself — a table cannot be partitioned after the fact.
-                cursor.execute(
-                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) {}").format(
-                        sql.Identifier(schema),
-                        sql.Identifier(table_name),
-                        sql.SQL(body),
-                        sql.SQL(fidelity_plan.create_suffix or ""),
+                # A refused fidelity CREATE is rolled back before the types-only
+                # fallback runs; otherwise the fallback failed "aborted" (R11).
+                with pg_savepoint(cursor, engine=engine, label="schema fidelity CREATE"):
+                    # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
+                    cursor.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
                     )
-                )
-                from services.schema_fidelity import apply_post_create_sql
+                    pg_table_existed = cursor.fetchone() is not None
+                    from services.physical_placement_ddl import (
+                        list_destination_tablespaces,
+                    )
 
-                # A refused CREATE INDEX must not abort the load or leave the
-                # certificate claiming an index the destination does not have;
-                # each statement gets its own savepoint.
-                def _run_post_create(stmt: str) -> None:
-                    cursor.execute("SAVEPOINT df_post_create")
-                    try:
-                        cursor.execute(stmt)
-                    except Exception:
-                        cursor.execute("ROLLBACK TO SAVEPOINT df_post_create")
-                        raise
-                    cursor.execute("RELEASE SAVEPOINT df_post_create")
+                    fidelity_plan = resolve_create_fidelity_plan(
+                        source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                        mappings=mappings,
+                        target_columns=target_cols,
+                        target_types=target_types,
+                        dest_dialect="postgresql",
+                        table_already_exists=pg_table_existed,
+                        dest_table=table_name,
+                        dest_schema=schema,
+                        dest_tablespaces=list_destination_tablespaces(
+                            "postgresql", cursor
+                        ),
+                        carry_keys=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
+                        operator_key_columns=(
+                            list(conflict_columns or []) if write_mode == "upsert" else None
+                        ),
+                    )
+                    if fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                        target_cols[:] = list(fidelity_plan.dest_columns)
+                    body = render_create_column_defs(
+                        columns=target_cols,
+                        types=target_types,
+                        plan=(None if pg_table_existed else fidelity_plan),
+                        dialect="postgresql",
+                    )
+                    if not pg_table_existed:
+                        from services.overwrite_keep import append_kept_column_sql
 
-                apply_post_create_sql(fidelity_plan, _run_post_create)
-                from services.schema_fidelity import (
-                    certify_placement_on_destination,
-                )
+                        body = append_kept_column_sql(
+                            body,
+                            list(_kwargs.get("preserve_columns") or []),
+                            dialect="postgresql",
+                            existing=list(target_cols),
+                        )
+                    # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
+                    # itself — a table cannot be partitioned after the fact.
+                    cursor.execute(
+                        sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) {}").format(
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                            sql.SQL(body),
+                            sql.SQL(fidelity_plan.create_suffix or ""),
+                        )
+                    )
+                    from services.schema_fidelity import apply_post_create_sql
 
-                certify_placement_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    cursor=cursor,
-                    schema=schema,
-                    table=table_name,
-                )
-                from services.identity_carry import psycopg2_fetchall
-                from services.schema_fidelity import (
-                    certify_identity_on_destination,
-                )
+                    # A refused CREATE INDEX must not abort the load or leave the
+                    # certificate claiming an index the destination does not have;
+                    # each statement gets its own savepoint.
+                    def _run_post_create(stmt: str) -> None:
+                        cursor.execute("SAVEPOINT df_post_create")
+                        try:
+                            cursor.execute(stmt)
+                        except Exception:
+                            cursor.execute("ROLLBACK TO SAVEPOINT df_post_create")
+                            raise
+                        cursor.execute("RELEASE SAVEPOINT df_post_create")
 
-                certify_identity_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    schema=schema,
-                    table=table_name,
-                    fetchall=psycopg2_fetchall(cursor),
-                )
-                from services.schema_fidelity import (
-                    certify_structure_on_destination,
-                )
+                    apply_post_create_sql(fidelity_plan, _run_post_create)
+                    from services.schema_fidelity import (
+                        certify_placement_on_destination,
+                    )
 
-                certify_structure_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    schema=schema,
-                    table=table_name,
-                    fetchall=psycopg2_fetchall(cursor),
-                )
-                _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+                    certify_placement_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        cursor=cursor,
+                        schema=schema,
+                        table=table_name,
+                    )
+                    from services.identity_carry import psycopg2_fetchall
+                    from services.schema_fidelity import (
+                        certify_identity_on_destination,
+                    )
+
+                    certify_identity_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        schema=schema,
+                        table=table_name,
+                        fetchall=psycopg2_fetchall(cursor),
+                    )
+                    from services.schema_fidelity import (
+                        certify_collation_on_destination,
+                    )
+
+                    certify_collation_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        schema=schema,
+                        table=table_name,
+                        fetchall=psycopg2_fetchall(cursor),
+                    )
+                    from services.schema_fidelity import (
+                        certify_structure_on_destination,
+                    )
+
+                    certify_structure_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        schema=schema,
+                        table=table_name,
+                        fetchall=psycopg2_fetchall(cursor),
+                    )
+                    _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
                 logger.warning(
                     "PostgreSQL schema fidelity plan failed; falling back to types-only CREATE: %s",
@@ -1527,6 +2035,24 @@ def write_mapped_rows(
                     sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
                     for c, t in zip(target_cols, target_types)
                 )
+                if not pg_table_existed:
+                    have = {str(c).casefold() for c in target_cols}
+                    extras = []
+                    for col in list(_kwargs.get("preserve_columns") or []):
+                        if not isinstance(col, dict):
+                            continue
+                        name = str(col.get("name") or "").strip()
+                        if not name or name.casefold() in have:
+                            continue
+                        ddl = str(col.get("ddl_type") or "text").strip() or "text"
+                        extras.append(
+                            sql.SQL("{} {} NULL").format(
+                                sql.Identifier(name), sql.SQL(ddl)
+                            )
+                        )
+                        have.add(name.casefold())
+                    if extras:
+                        col_defs = sql.SQL(", ").join([col_defs, *extras])
                 cursor.execute(
                     sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
                         sql.Identifier(schema),
@@ -1539,7 +2065,8 @@ def write_mapped_rows(
                     source_dialect="",
                     dest_dialect="postgresql",
                     reason=(
-                        f"Schema fidelity CREATE failed ({type(exc).__name__}); "
+                        f"Schema fidelity CREATE failed ({type(exc).__name__}: "
+                        f"{str(exc).strip().splitlines()[0][:300] if str(exc).strip() else ''}); "
                         "fell back to types-only CREATE TABLE — constraints not carried."
                     ),
                 ).to_dict()
@@ -1549,6 +2076,20 @@ def write_mapped_rows(
             # table, and registering that made a failed write (a NOT NULL
             # violation on row 1) drop a populated destination.
             if pg_table_existed is False:
+                # Durable ownership marker: a table this run created is ours —
+                # later upserts/replays may add the unique index without the
+                # operator-table disclosed-DDL gate (D101). Operator tables
+                # never carry this comment, so the gate stays fail-closed.
+                with pg_tolerated(cursor, "managed-table comment", engine=engine):
+                    from services.brand import new_marker_comment
+
+                    cursor.execute(
+                        sql.SQL("COMMENT ON TABLE {}.{} IS {}").format(
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                            sql.Literal(new_marker_comment(f"{schema}.{table_name}")),
+                        )
+                    )
                 try:
                     from services.auto_create_lifecycle import register_auto_create
 
@@ -1591,6 +2132,8 @@ def write_mapped_rows(
                 studio_err=studio_err,
                 product="PostgreSQL",
                 materialize_stamp=lambda stamp: pg_type(stamp, engine=engine),
+                dest_db="redshift" if engine == "redshift" else "postgresql",
+                column_types=column_types,
             )
             if add_err:
                 additive_refuse = add_err
@@ -1681,6 +2224,67 @@ def write_mapped_rows(
                 index_name = sanitize_identifier(
                     f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                 )
+                if pg_table_existed is None:
+                    # create_table=False path never probed — establish whether
+                    # this is an operator's existing table honestly before the
+                    # disclosed-DDL gate below decides on it.
+                    cursor.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
+                    )
+                    pg_table_existed = cursor.fetchone() is not None
+                pg_table_managed = False
+                if pg_table_existed:
+                    # A table a prior run created carries the 'dataflow:managed'
+                    # (or, flag on, 'datawrap:managed') comment — index DDL on
+                    # it is ours to make; only unmarked (operator) tables gate.
+                    with pg_tolerated(cursor, "managed-table probe", engine=engine):
+                        cursor.execute(
+                            "SELECT obj_description(to_regclass(%s), 'pg_class')",
+                            (f'"{schema}"."{table_name}"',),
+                        )
+                        _row = cursor.fetchone()
+                        from services.brand import is_own
+
+                        pg_table_managed = bool(_row and is_own("managed_table_comment", _row[0]))
+                if pg_table_existed and not pg_table_managed:
+                    # D101: DDL on an operator's existing table is disclosed
+                    # and approved at Validate — never created silently.
+                    cursor.execute(
+                        "SELECT 1 FROM pg_index i "
+                        "JOIN pg_class t ON t.oid = i.indrelid "
+                        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                        "WHERE i.indisunique AND t.relname = %s "
+                        "AND n.nspname = %s "
+                        "AND (SELECT array_agg(a.attname ORDER BY a.attname)::text[] "
+                        "     FROM pg_attribute a "
+                        "     WHERE a.attrelid = t.oid "
+                        "       AND a.attnum = ANY(i.indkey)) "
+                        "  = (SELECT array_agg(x ORDER BY x) "
+                        "     FROM unnest(%s::text[]) x) LIMIT 1",
+                        (table_name, schema, list(conflict_cols)),
+                    )
+                    if cursor.fetchone() is None and not bool(
+                        _kwargs.get("upsert_ddl_approved")
+                    ):
+                        raise ValueError(
+                            f"Upsert into existing table "
+                            f"'{schema}.{table_name}' needs unique index "
+                            f"{index_name} on ({', '.join(conflict_cols)}) — "
+                            "destination DDL must be disclosed and approved "
+                            "at Validate (ddl_changes_acknowledged); "
+                            f"{PRODUCT_NAME} does not silently alter a table it "
+                            "did not create. To proceed: re-run Validate and "
+                            "acknowledge the planned DDL change, or create "
+                            "the index yourself — "
+                            f"CREATE UNIQUE INDEX {index_name} "
+                            f"ON {schema}.{table_name} "
+                            f"({', '.join(conflict_cols)});"
+                        )
                 cursor.execute(
                     sql.SQL(
                         "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}.{} ({})"
@@ -1691,7 +2295,11 @@ def write_mapped_rows(
                         sql.SQL(", ").join(sql.Identifier(c) for c in conflict_cols),
                     )
                 )
-        conn.commit()
+        # A deferred overwrite already holds TRUNCATE + inserted rows on this
+        # connection. Committing setup here would publish that prefix (R4-D06).
+        held = _held_overwrite()
+        if not (held and held.active):
+            conn.commit()
 
     try:
         if connection is not None:
@@ -1715,17 +2323,45 @@ def write_mapped_rows(
             # Existence before CREATE — create-new may skip overlay require.
             table_existed = False
             try:
-                cur.execute(
-                    """
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                    LIMIT 1
-                    """,
-                    (schema, table_name),
-                )
-                table_existed = cur.fetchone() is not None
+                with pg_savepoint(cur, engine=engine, label="table existence probe"):
+                    cur.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
+                    )
+                    table_existed = cur.fetchone() is not None
             except Exception:
                 table_existed = not create_table
+
+            # Bind before CREATE/setup commits. A new table used to commit the
+            # first 20k-row chunk, then the next batch tried to store the
+            # overwrite flag on the psycopg2 connection and left that prefix
+            # behind (R5-002).
+            # pg_overwrite_in_transaction only makes sense for an insert-mode
+            # load. If it leaks into an upsert call (e.g. a quarantine replay
+            # inheriting the parent's destination extra), honoring it would
+            # truncate the table and delete landed rows (P0-R1).
+            overwrite_requested = (
+                bool(_kwargs.get("pg_overwrite_in_transaction"))
+                and port != 5439
+                and write_mode == "insert"
+            )
+            if overwrite_requested:
+                from connectors.write_resilience import (
+                    PgOverwriteTransaction,
+                    bind_overwrite_transaction,
+                )
+
+                held = _held_overwrite()
+                if held is None:
+                    held = PgOverwriteTransaction()
+                    bind_overwrite_transaction(conn, held)
+                held.begin(job_id=job_id)
+                if not table_existed:
+                    held.note_truncated(table_name)
 
             # Create-new: partial Studio must not soft-bind Map VARCHAR.
             if not table_existed and studio_err:
@@ -1748,6 +2384,9 @@ def write_mapped_rows(
                     _run_setup(cur)
                     break
                 except Exception as setup_exc:
+                    held = _held_overwrite()
+                    if held and held.active:
+                        raise
                     try:
                         conn.rollback()
                     except Exception as exc:
@@ -1759,6 +2398,36 @@ def write_mapped_rows(
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
+
+            if table_existed and not backfill_new_fields and not additive_refuse:
+                missing_cols: list[str] = []
+                try:
+                    with pg_savepoint(cur, engine=engine, label="missing-column probe"):
+                        cur.execute(
+                            """SELECT column_name FROM information_schema.columns
+                               WHERE table_schema = %s AND table_name = %s""",
+                            (schema, table_name),
+                        )
+                        existing_cols = {str(row[0]).lower() for row in cur.fetchall()}
+                    missing_cols = [
+                        str(col)
+                        for col in target_cols
+                        if str(col).lower() not in existing_cols
+                    ]
+                except Exception:  # noqa: BLE001 — probe failure must not hide the write
+                    logger.debug(
+                        "PostgreSQL missing-column probe skipped", exc_info=True
+                    )
+                    missing_cols = []
+                if missing_cols:
+                    shown = ", ".join(missing_cols[:8])
+                    additive_refuse = (
+                        f"Destination table {schema}.{table_name} is missing "
+                        f"column(s) {shown}. Schema policy did not add them, so "
+                        "the load stopped before INSERT. Open Validate and approve "
+                        "the new column, or set the schema policy to propagate "
+                        "columns so Execute can ADD COLUMN."
+                    )
 
             if additive_refuse:
                 return WriteResult(
@@ -1837,86 +2506,32 @@ def write_mapped_rows(
                     != str(live_dest_types.get(c) or "").strip().upper()
                     for c in target_cols
                 )
-                need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
+                need_remap = carriers_differ or bool(studio_err)
                 if need_remap:
                     dest_types = live_dest_types
-                    _batch = _pg_materialize_mapped_batch(
-                        headers=headers,
-                        data_rows=data_rows,
-                        mappings=mappings,
+                    target_types, bind_types = _pg_resolve_carriers(
                         target_cols=target_cols,
-                        column_types=column_types,
                         dest_types=dest_types,
                         logical_types=logical_types,
-                        policy=policy,
                         engine=engine,
-                        conflict_columns=conflict_columns,
-                        write_mode=write_mode,
-                        destination_pk_columns=list(conflict_columns or []) or None,
-                        destination_column_nullability=_kwargs.get(
-                            "destination_column_nullability"
-                        ),
-                        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+                        allow_logical_fallback=False,
                     )
-                    mapped_rows = _batch.mapped_rows
-                    sparse_rows = _batch.sparse_rows
-                    transform_errors = _batch.transform_errors
-                    rejected_details = _batch.rejected_details
-                    target_types = _batch.target_types
-                    bind_types = _batch.bind_types
-                    rows_for_checksum = _batch.rows_for_checksum
-                    total = len(mapped_rows)
-                    chunks = (
-                        max(1, (total + chunk_size - 1) // chunk_size) if total else 0
-                    )
-                    rejected_rows = _rejected_row_count(
-                        data_rows,
-                        mapped_rows,
-                        rejected_details,
-                        policy,
-                        sparse_rows=sparse_rows,
-                    )
-                    coerced_null_rows = _coerced_null_row_count(
-                        rejected_details, policy
-                    )
+                    _pg_finish_kwargs["dest_types"] = dest_types
+                    _pg_finish_kwargs["allow_logical_fallback"] = False
+                    _pg_finish_kwargs["bind_types"] = None
                 else:
                     bind_types = overlay_physical_bind_types(
                         target_cols, bind_types, physical
                     )
                     target_types = list(bind_types)
-                    mapped_rows = bind_sql_mapped_rows_with_quarantine(
-                        mapped_rows,
-                        target_cols,
-                        bind_types,
-                        rejected_details,
-                        policy,
-                        engine="postgresql",
-                        dialect_label="PostgreSQL",
-                        mappings=mappings,
-                    )
-                    sparse_rows = bind_sql_mapped_rows_with_quarantine(
-                        sparse_rows,
-                        target_cols,
-                        bind_types,
-                        rejected_details,
-                        policy,
-                        engine="postgresql",
-                        dialect_label="PostgreSQL",
-                        mappings=mappings,
-                    )
-                    from connectors.writer_common import (
-                        materialize_missing_as_null_for_dense_write,
-                    )
-
-                    mapped_rows = materialize_missing_as_null_for_dense_write(
-                        mapped_rows
-                    )
-                    rows_for_checksum = list(mapped_rows)
-                deferred_map_abort = None
-                _phys_abort = reject_on_strict_policy(
-                    policy, rejected_details, "PostgreSQL", transform_errors
+                    _pg_finish_kwargs["bind_types"] = bind_types
+                write_acc.dest_types = dest_types if isinstance(dest_types, dict) else {}
+                final_sig = dest_types_signature(
+                    dest_types if isinstance(dest_types, dict) else {}, target_cols
                 )
-                if _phys_abort:
+                if deferred_map_abort and final_sig == scanned_dest_sig:
+                    # Setup left the carriers exactly as scanned: the verdict
+                    # computed against them stands.
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -1924,34 +2539,142 @@ def write_mapped_rows(
                         target_schema=schema,
                         checksum="",
                         chunks_completed=0,
-                        error=_phys_abort,
+                        error=deferred_map_abort,
+                        rejected_rows=rejected_rows,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+                deferred_map_abort = None
+                if policy == "fail" and final_sig != scanned_dest_sig:
+                    scan_acc, source_row_count, scanned_types, scanned_bind = (
+                        _pg_scan_finished_bundles(**_pg_finish_kwargs)
+                    )
+                    target_types = scanned_types or target_types
+                    bind_types = scanned_bind or bind_types
+                    rejected_details = list(scan_acc.rejected_details)
+                    transform_errors = list(scan_acc.transform_errors)
+                    rejected_rows = _rejected_row_count(
+                        data_rows,
+                        [],
+                        rejected_details,
+                        policy,
+                        source_row_count=source_row_count or None,
+                    )
+                    coerced_null_rows = _coerced_null_row_count(
+                        rejected_details, policy
+                    )
+                    _phys_abort = scan_acc.abort_error(policy)
+                    if _phys_abort:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=schema,
+                            checksum="",
+                            chunks_completed=0,
+                            error=_phys_abort,
+                            rejected_details=rejected_details,
+                            warnings=transform_errors,
+                        )
+
+            # Overwrite replaces the key set. The append probe opens its own
+            # connection and still sees the pre-truncate rows, so it would
+            # refuse a correct full refresh (R5-002).
+            if (
+                write_mode == "insert"
+                and table_existed
+                and data_rows
+                and not overwrite_requested
+            ):
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config={
+                        "type": "postgresql",
+                        "host": host,
+                        "port": port,
+                        "database": database,
+                        "username": username,
+                        "password": password,
+                        "schema": schema,
+                        "connection_string": connection_string,
+                        "ssl": ssl,
+                    },
+                    destination_db_type="postgresql",
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
 
-            rows_skipped = 0
-            if sparse_rows and write_mode == "upsert" and conflict_columns:
-                from psycopg2 import sql as _psql
-                from connectors.writer_common import row_has_missing_sentinel
+            held_before = _held_overwrite()
+            if (
+                bool(_kwargs.get("pg_overwrite_in_transaction"))
+                and table_existed
+                and port != 5439
+                and not (held_before and held_before.was_truncated(table_name))
+            ):
+                from connectors.sql_identifiers import quote_table_ref
+                from connectors.table_manager import overwrite_empty_statements
 
-                written_sparse, sparse_skipped, sparse_checksum = _pg_apply_sparse_upsert(
-                    cur,
-                    _psql,
-                    schema=schema,
-                    table_name=table_name,
-                    target_cols=target_cols,
-                    conflict_columns=conflict_columns,
-                    sparse_rows=sparse_rows,
-                    rejected_details=rejected_details,
-                    policy=policy,
+                quoted = quote_table_ref(table_name, schema, dialect="postgresql")
+                truncate_sql, delete_sql = overwrite_empty_statements("postgresql", quoted)
+                try:
+                    # A foreign key can refuse TRUNCATE. Roll back that statement
+                    # only (savepoint), then delete in place.
+                    with pg_savepoint(cur, engine=engine, label="overwrite TRUNCATE"):
+                        cur.execute(truncate_sql or delete_sql)
+                except Exception as trunc_exc:
+                    missing = str(trunc_exc).lower()
+                    if any(
+                        token in missing
+                        for token in ("does not exist", "undefined table", "unknown table", "no such table")
+                    ):
+                        pass
+                    else:
+                        logger.info(
+                            "Overwrite TRUNCATE refused for %s (%s); deleting rows in place",
+                            quoted,
+                            trunc_exc,
+                        )
+                        cur.execute(delete_sql)
+                from connectors.write_resilience import (
+                    PgOverwriteTransaction,
+                    bind_overwrite_transaction,
                 )
-                conn.commit()
-                written += written_sparse
-                rows_skipped += sparse_skipped
-                rows_for_checksum = [
-                    r for r in rows_for_checksum if not row_has_missing_sentinel(r)
-                ] + list(sparse_checksum)
 
+                held = _held_overwrite()
+                if held is None:
+                    held = PgOverwriteTransaction()
+                    bind_overwrite_transaction(conn, held)
+                held.note_truncated(table_name)
+
+            use_copy = (
+                write_mode == "insert"
+                and not conflict_columns
+                and not any(t == "BYTEA" for t in target_types)
+                and port != 5439
+            )
+            load_method = (
+                "s3_copy" if use_redshift_s3_copy else ("copy" if use_copy else "insert")
+            )
+
+            rows_skipped = 0
+            skipped_identity_keys: list[str] = []
             insert = None if use_copy else _build_insert()
             redshift_upsert_cols = (
                 [c for c in (conflict_columns or []) if c in target_cols]
@@ -1963,17 +2686,25 @@ def write_mapped_rows(
                 else []
             )
 
-            for chunk_idx in range(chunks):
-                start = chunk_idx * chunk_size
-                batch = mapped_rows[start : start + chunk_size]
+            def _land_dense_chunk(batch, chunk_idx, row_numbers):
+                nonlocal written, rows_skipped, insert, rejected_details, transform_errors
                 if not batch:
-                    break
+                    return 0
+                # D102: stop the NEXT chunk when the job was cancelled — the
+                # post-commit on_checkpoint alone lets one in-flight batch land.
+                from services.cancel_check import cancel_checkpoint
 
+                cancel_checkpoint(written)
+                start = int(row_numbers[0]) if row_numbers else 1
                 attempt = 0
                 chunk_started = time.monotonic()
                 chunk_written = 0
                 while True:
                     try:
+                        if _held_overwrite() and _held_overwrite().active:
+                            # A failed chunk must not roll back the truncate and
+                            # the rows already accepted in this overwrite.
+                            cur.execute("SAVEPOINT df_ow_chunk")
                         if use_ledger:
                             already = raw_chunk_rows_written(
                                 cur,
@@ -1990,34 +2721,26 @@ def write_mapped_rows(
                                 # reconcile checksum disagree with the table.
                                 chunk_written = already
                                 break
-                        if use_copy:
+                        if use_redshift_s3_copy:
+                            from connectors.redshift_copy import copy_redshift_rows_from_s3
+
+                            copy_redshift_rows_from_s3(
+                                cur,
+                                schema=schema,
+                                table=table_name,
+                                columns=target_cols,
+                                rows=batch,
+                                config=redshift_copy_cfg,
+                                s3_client=_kwargs.get("s3_client"),
+                                job_id=job_id,
+                                chunk_idx=chunk_idx,
+                                dest_types=dest_types if isinstance(dest_types, dict) else None,
+                                stage_format=redshift_stage_format,
+                            )
+                        elif use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
                             write_batch = batch
-                            if (
-                                write_mode == "upsert"
-                                and conflict_columns
-                                and uses_pg_on_conflict_upsert(engine)
-                                and not redshift_upsert_cols
-                            ):
-                                from connectors.writer_common import (
-                                    partition_dense_upsert_rows,
-                                )
-
-                                conflict_for_part = [
-                                    c for c in conflict_columns if c in target_cols
-                                ]
-                                if conflict_for_part:
-                                    before = len(write_batch)
-                                    write_batch = partition_dense_upsert_rows(
-                                        write_batch,
-                                        conflict_for_part,
-                                        target_cols=target_cols,
-                                        rejected_details=rejected_details,
-                                        policy=policy,
-                                        row_offset=start,
-                                    )
-                                    rows_skipped += before - len(write_batch)
                             if redshift_upsert_cols:
                                 write_batch = _redshift_delete_by_keys(
                                     cur,
@@ -2029,6 +2752,11 @@ def write_mapped_rows(
                                     batch=batch,
                                     rejected_details=rejected_details,
                                     policy=policy,
+                                    copy_config=redshift_copy_cfg,
+                                    s3_client=_kwargs.get("s3_client"),
+                                    job_id=job_id,
+                                    dest_types=dest_types if isinstance(dest_types, dict) else None,
+                                    stage_format=redshift_stage_format,
                                 )
                                 rows_skipped += max(0, len(batch) - len(write_batch))
                             elif (
@@ -2047,6 +2775,7 @@ def write_mapped_rows(
                                     target_cols,
                                     quote='"',
                                     placeholder="%s",
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                                 )
                                 rows_skipped += skipped
                             if write_batch:
@@ -2073,7 +2802,7 @@ def write_mapped_rows(
                                     _execute_values_insert(
                                         cur, insert, [tuple(r) for r in write_batch]
                                     )
-                        landed = len(batch if use_copy else write_batch)
+                        landed = len(batch if (use_copy or use_redshift_s3_copy) else write_batch)
                         if use_ledger:
                             mark_raw_chunk_committed(
                                 cur,
@@ -2087,15 +2816,31 @@ def write_mapped_rows(
                                 row_end=start + max(landed - 1, 0),
                                 attempt=1,
                             )
-                        conn.commit()
+                        held = _held_overwrite()
+                        if not (held and held.active):
+                            conn.commit()
                         chunk_written = landed
                         break
                     except Exception as chunk_exc:
-                        try:
-                            conn.rollback()
-                        except Exception as exc:
-                            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-                        if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
+                        held_chunk = _held_overwrite()
+                        if held_chunk and held_chunk.active:
+                            try:
+                                cur.execute("ROLLBACK TO SAVEPOINT df_ow_chunk")
+                            except Exception as exc:
+                                logger.warning(
+                                    "Overwrite chunk savepoint rollback failed: %s",
+                                    exc,
+                                    exc_info=exc,
+                                )
+                                raise
+                        else:
+                            try:
+                                conn.rollback()
+                            except Exception as exc:
+                                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                        if is_sql_data_error(chunk_exc) and salvage_policy(
+                            policy, mappings
+                        ) in SALVAGE_POLICIES:
                             if insert is None:
                                 insert = _build_insert()
                             # SAVEPOINT per row + single commit — avoids one RTT/commit
@@ -2125,12 +2870,22 @@ def write_mapped_rows(
                                         cur.execute("ROLLBACK TO SAVEPOINT df_row_sp")
                                     except Exception as exc:
                                         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                        if _held_overwrite() and _held_overwrite().active:
+                                            raise
                                         try:
                                             conn.rollback()
                                         except Exception as exc2:
                                             logger.warning(
                                                 "Exception suppressed: %s", exc2, exc_info=exc2
                                             )
+                                        # The rollback discarded the rows this chunk had
+                                        # already released: stop, never count them (R11).
+                                        raise RuntimeError(
+                                            "PostgreSQL lost the salvage savepoint "
+                                            f"({exc}); the {chunk_written} row(s) salvaged in "
+                                            "this chunk were rolled back and are not counted. "
+                                            f"First row error: {row_exc}"
+                                        ) from row_exc
                                     if is_connection_lost(row_exc):
                                         raise
                                     col_name = extract_column_from_sql_error(row_exc) or "*"
@@ -2147,7 +2902,11 @@ def write_mapped_rows(
                                     append_write_quarantine_detail(
                                         rejected_details,
                                         {
-                                            "row": start + row_i,
+                                            "row": (
+                                                int(row_numbers[row_i])
+                                                if row_numbers and row_i < len(row_numbers)
+                                                else start + row_i
+                                            ),
                                             "column": col_name,
                                             "value": sample_val,
                                             "reason": str(row_exc)[:300],
@@ -2172,11 +2931,23 @@ def write_mapped_rows(
                                         row_end=start + max(chunk_written - 1, 0),
                                         attempt=1,
                                     )
-                                conn.commit()
+                                held = _held_overwrite()
+                                if not (held and held.active):
+                                    conn.commit()
                             except Exception as exc:
-                                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                # Uncommitted salvage is not written (R11).
+                                raise RuntimeError(
+                                    f"PostgreSQL salvage commit failed ({exc}); "
+                                    f"{chunk_written} salvaged row(s) are not written."
+                                ) from exc
                             break
                         attempt += 1
+                        held = _held_overwrite()
+                        if held and held.active:
+                            # Reconnecting would append onto the pre-truncate
+                            # table. The open transaction rolls back with the
+                            # connection, so the previous rows stay.
+                            raise
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
                             attempt=attempt, started_at=chunk_started, proxy=proxy_dest
                         ):
@@ -2188,7 +2959,8 @@ def write_mapped_rows(
 
                 written += chunk_written
                 chunks_completed = chunk_idx + 1
-                if written > 0 and job_id:
+                held_mark = _held_overwrite()
+                if written > 0 and job_id and not (held_mark and held_mark.active):
                     try:
                         from services.auto_create_lifecycle import mark_auto_create_committed
 
@@ -2196,7 +2968,128 @@ def write_mapped_rows(
                     except Exception:
                         logger.debug("auto_create commit mark skipped", exc_info=True)
                 if on_checkpoint:
-                    on_checkpoint(chunks_completed, chunks, written)
+                    on_checkpoint(chunks_completed, max(chunks, chunk_idx + 1), written)
+                return chunk_written
+
+            chunk_idx = 0
+            writing = True
+            # Fail already scanned this dest_types image — do not duplicate
+            # map/quarantine details. Quarantine collects them on this pass.
+            collect_map_details = policy != "fail"
+            if write_mode == "upsert" and conflict_columns:
+                write_acc.conflict_columns = [
+                    c for c in conflict_columns if c in target_cols
+                ]
+            for finished in iter_pg_finished_bundles(**_pg_finish_kwargs):
+                if collect_map_details:
+                    rejected_details.extend(finished.rejected_details)
+                    transform_errors.extend(finished.transform_errors)
+                if writing and reject_on_strict_policy(
+                    policy, rejected_details, "PostgreSQL", transform_errors
+                ):
+                    writing = False
+                    write_acc.stop_writing()
+                if writing:
+                    if finished.sparse_rows and write_mode == "upsert" and conflict_columns:
+                        from psycopg2 import sql as _psql
+
+                        written_sparse, sparse_skipped, sparse_checksum = (
+                            _pg_apply_sparse_upsert(
+                                cur,
+                                _psql,
+                                schema=schema,
+                                table_name=table_name,
+                                target_cols=target_cols,
+                                conflict_columns=conflict_columns,
+                                sparse_rows=finished.sparse_rows,
+                                rejected_details=rejected_details,
+                                policy=policy,
+                            )
+                        )
+                        held = _held_overwrite()
+                        if not (held and held.active):
+                            conn.commit()
+                        written += written_sparse
+                        rows_skipped += sparse_skipped
+                        write_acc.add_accepted(list(sparse_checksum))
+                    dense = list(finished.dense_rows)
+                    dense_nums = list(finished.dense_row_numbers or [])
+                    if (
+                        write_mode == "upsert"
+                        and conflict_columns
+                        and uses_pg_on_conflict_upsert(engine)
+                        and not redshift_upsert_cols
+                    ):
+                        from connectors.writer_common import (
+                            assert_dense_upsert_keys_present,
+                            partition_dense_upsert_rows,
+                        )
+
+                        conflict_for_part = [
+                            c for c in conflict_columns if c in target_cols
+                        ]
+                        if conflict_for_part:
+                            dense = partition_dense_upsert_rows(
+                                dense,
+                                conflict_for_part,
+                                target_cols=target_cols,
+                                rejected_details=rejected_details,
+                                policy=policy,
+                                source_row_numbers=dense_nums or None,
+                            )
+                            # Null keys are already in rejected_details. Counting
+                            # them as skipped as well makes 97+3+1 against 100 read.
+                            dense, dense_nums, skipped_keys = _drop_skip_existing_keys(
+                                cur,
+                                schema=schema,
+                                table_name=table_name,
+                                dense=dense,
+                                dense_nums=dense_nums,
+                                target_cols=target_cols,
+                                conflict_columns=conflict_for_part,
+                                engine=engine,
+                            )
+                            rows_skipped += len(skipped_keys)
+                            skipped_identity_keys.extend(skipped_keys)
+                            if dense_nums and len(dense) != len(dense_nums):
+                                kept_nums: list[int] = []
+                                for i, row in enumerate(finished.dense_rows):
+                                    try:
+                                        assert_dense_upsert_keys_present(
+                                            [row],
+                                            conflict_for_part,
+                                            target_cols=target_cols,
+                                        )
+                                        kept_nums.append(finished.dense_row_numbers[i])
+                                    except ValueError:
+                                        continue
+                                dense_nums = kept_nums
+                    for offset in range(0, len(dense), chunk_size) if dense else []:
+                        sub = dense[offset : offset + chunk_size]
+                        sub_nums = (
+                            dense_nums[offset : offset + chunk_size]
+                            if dense_nums
+                            else None
+                        )
+                        _land_dense_chunk(sub, chunk_idx, sub_nums)
+                        chunk_idx += 1
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
+                    write_acc.add_accepted(dense)
+                del finished
+            chunks = chunk_idx
+            from connectors.sql_write_materialize import accounted_rejected_rows
+
+            rejected_rows = _rejected_row_count(
+                data_rows,
+                [()] * write_acc.accepted_row_count,
+                rejected_details,
+                policy,
+                source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
+            )
+            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
             child_flush = flush_normalized_child_batches(
                 headers=headers,
@@ -2219,7 +3112,9 @@ def write_mapped_rows(
                 )
             elif child_flush.get("rows_written"):
                 try:
-                    conn.commit()
+                    held = _held_overwrite()
+                    if not (held and held.active):
+                        conn.commit()
                 except Exception as exc:
                     logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                 for t in child_flush.get("tables") or []:
@@ -2229,6 +3124,19 @@ def write_mapped_rows(
                 cur.close()
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        overwrite_failed = bool(child_flush_error)
+        held = _held_overwrite()
+        if held and held.active and not overwrite_failed:
+            overwrite_failed = bool(
+                reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+            )
+        if held and held.active and (overwrite_failed or close_connection):
+            from connectors.write_resilience import finish_held_overwrite
+
+            # This call owns the socket, or the load already failed. The stream
+            # path leaves a successful transaction open until the last batch.
+            finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
         if close_connection:
             close_quietly(conn)
@@ -2241,12 +3149,17 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=child_flush_error,
-                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=(source_row_count or len(data_rows)),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
-                load_method="copy" if use_copy else "insert",
+                load_method=load_method,
             )
         _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
         if _final_abort:
@@ -2258,23 +3171,36 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=_final_abort,
-                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=(source_row_count or len(data_rows)),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
-                load_method="copy" if use_copy else "insert",
+                load_method=load_method,
             )
-        from connectors.writer_common import gate8_writer_meta
-
-        _checksum_rows = (
-            rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows
-        )
-        meta_out = gate8_writer_meta(
-            _checksum_rows,
-            target_cols,
-            conflict_columns=conflict_columns or None,
-        )
+        meta_out = write_acc.gate8_meta(conflict_columns=conflict_columns or None)
+        # STRUCT explode: the spool holds the expanded matrix and records the
+        # pre-expand input count itself (data_rows may already be materialized
+        # upstream). Gate-8 expected = source - filtered + expanded — without
+        # this stamp every exploded row reads as extra.
+        try:
+            _unexpanded = int(
+                getattr(spool, "unexpanded_row_count", 0) or len(data_rows)
+            )
+        except TypeError:
+            _unexpanded = int(source_row_count or 0)
+        _expanded = int(source_row_count or 0) - _unexpanded
+        if _expanded > 0:
+            meta_out = dict(meta_out or {})
+            meta_out["rows_expanded"] = _expanded
+        if skipped_identity_keys:
+            meta_out = dict(meta_out or {})
+            meta_out["skipped_identity_keys"] = list(skipped_identity_keys)
         fid_report = _kwargs.get("_schema_fidelity_report")
         if isinstance(fid_report, dict):
             meta_out = dict(meta_out or {})
@@ -2284,22 +3210,29 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
-            checksum=row_checksum(
-                _checksum_rows,
-                target_cols,
-                dest_db_type="postgresql",
-                dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
-            ),
+            checksum=write_acc.digest(),
             chunks_completed=chunks_completed or chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+            rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=(source_row_count or len(data_rows)),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
-            load_method="copy" if use_copy else "insert",
+            load_method=load_method,
             meta=meta_out,
         )
+    except TransferCancelled:
+        # D102: cancel is control flow, not a write failure.
+        raise
     except Exception as exc:
+        if _held_overwrite() and _held_overwrite().active:
+            from connectors.write_resilience import finish_held_overwrite
+
+            finish_held_overwrite(conn, success=False)
         if close_connection:
             close_quietly(conn)
         return WriteResult(
@@ -2307,21 +3240,96 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema or "public",
-            checksum=row_checksum(
-                rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows,
-                target_cols,
-                dest_db_type="postgresql",
-                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
-                if target_types
-                else None,
-            )
-            if written
-            else "",
+            checksum=write_acc.digest() if written else "",
             chunks_completed=chunks_completed,
-            error=str(exc),
+            error=pg_explain_aborted(exc, locals().get("conn")),
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped if 'rows_skipped' in locals() else 0,
             warnings=transform_errors,
         )
+    finally:
+        _cleanup_spool()
+
+
+def _identity_marker(values: tuple) -> str:
+    if len(values) == 1:
+        return "" if values[0] is None else str(values[0]).strip()
+    return "\x1f".join("" if value is None else str(value).strip() for value in values)
+
+
+def _drop_skip_existing_keys(
+    cur,
+    *,
+    schema: str,
+    table_name: str,
+    dense: list,
+    dense_nums: list,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    engine: str = "",
+) -> tuple[list, list, list[str]]:
+    """Drop keys already stored when the policy is skip-duplicates.
+
+    ON CONFLICT DO NOTHING would leave the old cells in place. Counting those
+    rows as written makes read-back compare the file to values the policy
+    refused to change. New keys still insert.
+    """
+    from services.duplicate_policy import current_match_action
+
+    if current_match_action() != "skip" or not dense or not conflict_columns:
+        return dense, dense_nums, []
+    names = [col for col in conflict_columns if col in target_cols]
+    if len(names) != len(list(conflict_columns)):
+        return dense, dense_nums, []
+    indexes = [target_cols.index(col) for col in names]
+    from psycopg2 import sql as psql
+
+    existing: set[tuple] = set()
+    table_sql = psql.SQL("{}.{}").format(
+        psql.Identifier(schema or "public"),
+        psql.Identifier(table_name),
+    )
+    cols_sql = psql.SQL(", ").join(psql.Identifier(col) for col in names)
+    try:
+        # A failed probe falls back to "drop nothing"; the savepoint keeps the
+        # write transaction usable for the INSERT that follows (R11).
+        with pg_savepoint(cur, engine=engine, label="skip-existing key probe"):
+            for start in range(0, len(dense), 200):
+                chunk = dense[start : start + 200]
+                placeholders = psql.SQL(", ").join(
+                    psql.SQL("({})").format(
+                        psql.SQL(", ").join(psql.Placeholder() for _ in names)
+                    )
+                    for _ in chunk
+                )
+                params = [row[index] for row in chunk for index in indexes]
+                cur.execute(
+                    psql.SQL("SELECT {} FROM {} WHERE ({}) IN (VALUES {})").format(
+                        cols_sql, table_sql, cols_sql, placeholders
+                    ),
+                    params,
+                )
+                for found in cur.fetchall():
+                    existing.add(tuple(
+                        None if value is None else str(value).strip() for value in found
+                    ))
+    except Exception:
+        return dense, dense_nums, []
+    kept = []
+    kept_nums = []
+    skipped: list[str] = []
+    for index, row in enumerate(dense):
+        key = tuple(
+            None if row[col] is None else str(row[col]).strip() for col in indexes
+        )
+        if key in existing:
+            skipped.append(_identity_marker(key))
+            continue
+        kept.append(row)
+        if dense_nums and index < len(dense_nums):
+            kept_nums.append(dense_nums[index])
+    if not dense_nums:
+        kept_nums = dense_nums
+    return kept, kept_nums, skipped

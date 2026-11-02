@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 from services.decision_kernel.findings import typed_cast_incompatible_with_text_sink
-from services.transform_engine import infer_transform_for_mapping
+from services.transform_engine import (
+    infer_transform_for_mapping,
+    is_parameterized_transform,
+    normalize_engine_transform,
+)
 from services.type_system import normalize_logical_type
 
 
@@ -42,6 +49,7 @@ ENGINE_TO_UI: dict[str, str] = {
     "hash_pii": "hash_pii",
     # Studio has no separate mask control — align with FE hash_pii.
     "mask_pii": "hash_pii",
+    "redact": "redact",
     "strip_controls": "strip_controls",
     "normalize_unicode": "strip_controls",
     "phone": "phone",
@@ -60,6 +68,7 @@ UI_TO_ENGINE: dict[str, str] = {
     "time_iso": "time",
     "hash_pii": "hash_pii",
     "mask_pii": "mask_pii",
+    "redact": "redact",
     "cast_number": "decimal",
     "cast_integer": "integer",
     "cast_boolean": "boolean",
@@ -77,9 +86,10 @@ UI_TO_ENGINE: dict[str, str] = {
 
 # Transforms that naturally produce string output and are safe for string targets.
 _STRING_TRANSFORMS: frozenset[str] = {
-    "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "none",
+    "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "redact",
+    "none",
     "date", "datetime", "json", "binary", "decimal",
-    "phone", "email", "url", "iban", "postal",
+    "phone", "email", "url", "iban", "postal", "time",
     "currency", "percentage", "base64", "strip_controls", "normalize_unicode",
 }
 
@@ -93,6 +103,34 @@ def _declares_zone(raw: str) -> bool:
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
 
     return str(raw or "").lower().startswith(ASSUME_TIMEZONE_PREFIX)
+
+
+# Typed numeric carriers and the transform that validates their wire.
+_NUMERIC_WIRE_GUARD: dict[str, str] = {
+    "integer": "integer",
+    "decimal": "decimal",
+    "float": "decimal",
+}
+
+
+def numeric_wire_guard(inferred: str, target_type: str) -> str:
+    """Re-arm cell validation when inference calls a numeric mapping identity.
+
+    Map answers a presentation question — a native numeric source widening into
+    a numeric destination is not an invented parse, so it infers ``none`` and
+    the operator is not shown a cast that changes nothing. The write path answers
+    a different one: the row still arrives as untyped wire, and a declared-INTEGER
+    file/SaaS column carrying ``'bad'`` handed straight to the driver fails the
+    whole batch instead of quarantining the one row that caused it. Identity into
+    a typed numeric carrier therefore still parses on the way in; a value that is
+    already numeric round-trips unchanged.
+
+    Callers that bind or probe cells pass ``for_write=True`` to
+    :func:`resolve_transform`; callers that render Map do not.
+    """
+    if str(inferred or "none").strip().lower() not in {"", "none", "identity"}:
+        return inferred
+    return _NUMERIC_WIRE_GUARD.get(normalize_logical_type(target_type), inferred)
 
 
 def _type_compatible_transform(target_type: str, raw: str) -> bool:
@@ -128,18 +166,42 @@ def resolve_transform(
     *,
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
+    for_write: bool = True,
 ) -> str:
     """Pick engine transform for a mapping dict.
 
     Respects explicit transforms when they are compatible with the target type;
     otherwise falls back to a type-correct transform derived from source/target
     logical types.
+
+    ``for_write`` distinguishes the two questions this function is asked. The
+    write and coercion-probe paths bind real cells and must validate the wire
+    (:func:`numeric_wire_guard`); Map rendering must not show a cast it does not
+    need. It defaults to the safe answer — a caller that forgets it validates
+    one cell too many rather than one too few.
     """
     column_types = column_types or {}
     dest_types = dest_types or {}
     raw = mapping.get("transform")
-    if raw in UI_TO_ENGINE:
+    named = str(raw).strip() if raw not in (None, "") else ""
+    # ``direct`` is the rule compiler's "no explicit cast". It is not an
+    # engine id — inference still picks the carrier, the way an empty
+    # transform does. A name the registry does not contain is kept so
+    # dry-run and Execute both report Unknown transform.
+    if named and named.lower() not in {"none", "null", "direct"}:
+        canon = normalize_engine_transform(named)
+        if canon is None:
+            return named
+        if is_parameterized_transform(canon):
+            return canon
+        raw = canon
+    elif raw in UI_TO_ENGINE:
         raw = UI_TO_ENGINE[raw]
+    # Replay / Map sent this transform on purpose. Do not replace it with an
+    # inferred cast: that turned a valid IBAN, time, or id into NULL when the
+    # guessed carrier could not parse the token.
+    if mapping.get("transform_override") and raw not in {None, "", "none", "null"}:
+        return str(raw)
     # Intentional omit never participates in row projection / type coercion.
     if str(raw or "").lower() in {"omit", "intentional_omit", "drop", "exclude"}:
         return "omit"
@@ -174,6 +236,22 @@ def resolve_transform(
             or column_types.get(mapping["target"])
             or "VARCHAR",
         )
+
+    # D79 — the logical type of BIT/VARBIT is "binary", so the decision below
+    # would validate 0/1 text as hex/base64 bytes and refuse ``101``. Decide on
+    # the declared carriers instead (the same rule infer_transform_for_mapping
+    # applies when it is handed them).
+    if str(raw or "").lower() in {"", "none", "null", "binary"}:
+        from services.type_system import is_bitstring_carrier
+
+        declared_target = live_hit or mapping.get("target_type") or column_types.get(
+            mapping["target"]
+        )
+        if is_bitstring_carrier(declared_target) or (
+            is_bitstring_carrier(column_types.get(mapping["source"]))
+            and target_type == "binary"
+        ):
+            return "none"
 
     if raw and _type_compatible_transform(target_type, raw):
         return str(raw)
@@ -221,7 +299,7 @@ def resolve_transform(
         # same argument as a projection, so only proven-live carriers qualify.
         if typed_cast_incompatible_with_text_sink(inferred, target_type):
             return "none"
-    return inferred
+    return numeric_wire_guard(inferred, target_type) if for_write else inferred
 
 
 def attach_transforms_to_mappings(
@@ -229,14 +307,47 @@ def attach_transforms_to_mappings(
     *,
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
+    for_write: bool = True,
 ) -> list[dict]:
     """Ensure every mapping carries a resolved engine transform."""
     out: list[dict] = []
     for m in mappings:
         enriched = dict(m)
-        enriched["transform"] = resolve_transform(enriched, column_types=column_types, dest_types=dest_types)
+        enriched["transform"] = resolve_transform(
+            enriched,
+            column_types=column_types,
+            dest_types=dest_types,
+            for_write=for_write,
+        )
         out.append(enriched)
     return out
+
+
+def write_plan_transform(
+    mapping: dict,
+    *,
+    column_types: dict[str, str] | None = None,
+    dest_types: dict[str, str] | None = None,
+    destination_table_exists: bool | None = None,
+) -> Any:
+    """Write-path cast Gate-8 will apply — the same resolver Execute stamps.
+
+    The Decision Artifact keeps the operator's transform. Only the gate plan
+    sees the resolved cast, so a blank integer is judged as SQL NULL on
+    Validate instead of passing as identity and failing at Run. A resolver
+    failure returns the operator transform; it does not invent a cast.
+    """
+    raw = mapping.get("transform") if isinstance(mapping, dict) else None
+    try:
+        live = dest_types if destination_table_exists is True else {}
+        return resolve_transform(
+            mapping if isinstance(mapping, dict) else {},
+            column_types=dict(column_types or {}),
+            dest_types=dict(live or {}),
+        )
+    except Exception:
+        logger.debug("write-path transform resolve skipped", exc_info=True)
+        return raw
 
 
 def mapping_for_api(m: dict) -> dict[str, Any]:

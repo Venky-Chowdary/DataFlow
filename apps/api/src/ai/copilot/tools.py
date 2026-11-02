@@ -2,15 +2,43 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.ops_events import emit_event
 from services.value_serializer import json_default
+from services.workspace_filter import bound_allows, current_workspace_filter
 
+from ..rag.product_docs import (
+    cited_sources,
+    compose_product_answer,
+    names_product_subject,
+    product_doc_search,
+    retrieve_product_answer,
+)
+from ..rag.query_analysis import (
+    CUSTOM_SLOT_NAME_RE,
+    INCREMENTAL_UPDATED_AT_RE,
+    PAUSE_CDC_RE,
+    classify_ask,
+    is_cdc_delivery_question,
+)
 from .data_analyst import get_data_analyst
+from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
+from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
+from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
+from .transfer_rules import parse_transfer_data_rules
+from .unsupported_question import (
+    asks_a_commercial_question,
+    commercial_question_output,
+    is_answerable_subject,
+    unsupported_question_output,
+)
 
 
 @dataclass
@@ -21,6 +49,45 @@ class ToolResult:
     error: str = ""
 
 
+_logger = logging.getLogger(__name__)
+
+
+def _tool_executed(
+    result: ToolResult,
+    started: float,
+    *,
+    tool: str | None = None,
+    reason: str | None = None,
+    error: BaseException | None = None,
+    role: str | None = None,
+) -> ToolResult:
+    """Emit ``pilot.tool.executed`` for one dispatch and return ``result``.
+
+    Carries the tool name, a bounded reason and the error class only — never
+    the prompt, the arguments, the output, or the error text.
+    """
+    if result.success:
+        outcome, level = "succeeded", None
+    else:
+        outcome = "failed"
+        # An unhandled exception is a defect (ERROR); a refused or rejected call
+        # is an expected outcome the operator can act on (WARNING).
+        level = None if reason == "exception" else logging.WARNING
+        reason = reason or "tool_reported_failure"
+    emit_event(
+        _logger,
+        "pilot.tool.executed",
+        outcome=outcome,
+        level=level,
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        error=error,
+        tool=tool or result.name,
+        reason=reason,
+        caller_role=role,
+    )
+    return result
+
+
 @dataclass
 class ToolDefinition:
     name: str
@@ -28,6 +95,59 @@ class ToolDefinition:
     parameters: dict
     handler: Callable[..., ToolResult]
 
+
+# D58: every parameter a tool's handler takes is advertised in its schema, so
+# an MCP client or the model can name it (tests/test_d58_tool_schemas_match_handlers).
+_ROUTE_ID_PROPS: dict[str, dict] = {
+    "source_connector_id": {
+        "type": "string",
+        "description": "Saved source connector id (list_connectors); use instead of the name.",
+    },
+    "dest_connector_id": {
+        "type": "string",
+        "description": "Saved destination connector id (list_connectors); use instead of the name.",
+    },
+}
+_ROW_RULE_PROPS: dict[str, dict] = {
+    "source_filter": {
+        "type": "object",
+        "description": "Row filter applied to the source read, e.g. {\"column\": \"region\", \"op\": \"=\", \"value\": \"EU\"}.",
+    },
+    "dedupe_key": {
+        "type": "string",
+        "description": "Column(s) that identify a duplicate row; used as the key when upsert_key is not given.",
+    },
+    "rule_questions": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Stated rules not yet applied. Any entry refuses the run and asks for the missing detail.",
+    },
+    "applied_rules": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Stated rules already applied to the plan, echoed in its data_rules preview.",
+    },
+}
+_KEY_ALIAS_PROPS: dict[str, dict] = {
+    "primary_key": {
+        "type": "string",
+        "description": "Alias of upsert_key. Same identity column or composite.",
+    },
+    "dedupe_key": _ROW_RULE_PROPS["dedupe_key"],
+}
+_CHAT_ONE_RUN_PROPS: dict[str, dict] = {
+    "cadence": {
+        "type": "string",
+        "description": "A stated cadence. One run is staged; the plan reports it as not scheduled (use create_schedule).",
+    },
+    "all_tables": {
+        "type": "boolean",
+        "description": "Operator asked for every table. Refused without a source_table: one table per run.",
+    },
+}
+_WORKSPACE_PROP: dict[str, dict] = {
+    "workspace_id": {"type": "string", "description": "Workspace to scope to; defaults to the caller's."},
+}
 
 TOOL_DEFINITIONS: list[dict] = [
     {
@@ -63,15 +183,37 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_connectors",
-        "description": "List saved database/warehouse connectors.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": (
+            "List saved database/warehouse connectors. ``health`` filters by the "
+            "last connection test: passed | failed | untested | any."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "health": {
+                    "type": "string",
+                    "enum": ["any", "passed", "failed", "untested"],
+                    "default": "any",
+                },
+                "engine": {
+                    "type": "string",
+                    "description": "Only connectors of this engine (postgresql, mysql, ...).",
+                },
+                "engine_excluded": {
+                    "type": "boolean",
+                    "description": "Invert engine: list every connector that is not that engine.",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "create_connector",
         "description": (
             "Create a saved connector from credentials the user provided "
             "(MySQL, PostgreSQL, MongoDB, etc.). Always confirm before saving. "
-            "Accepts a connection URL and/or host, port, database, username, password."
+            "Accepts a connection URL and/or host, port, database, username, password. "
+            "BigQuery also accepts service_account (the JSON key) and database as the project id."
         ),
         "input_schema": {
             "type": "object",
@@ -87,8 +229,95 @@ TOOL_DEFINITIONS: list[dict] = [
                 "username": {"type": "string"},
                 "password": {"type": "string"},
                 "connection_string": {"type": "string"},
+                "service_account": {
+                    "type": "string",
+                    "description": (
+                        "Service-account JSON key for BigQuery or GCS. "
+                        "Paste the key file contents. It is stored on the "
+                        "server ledger and is not echoed in the preview."
+                    ),
+                },
                 "ssl": {"type": "boolean"},
                 "schema": {"type": "string"},
+                "warehouse": {
+                    "type": "string",
+                    "description": "Warehouse/database-engine resource name where required "
+                    "(Snowflake warehouse e.g. COMPUTE_WH, Databricks SQL warehouse).",
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Topology role: source, destination, or both.",
+                    "enum": ["source", "destination", "both"],
+                },
+                "auth_role": {
+                    "type": "string",
+                    "description": (
+                        "Engine login role (Snowflake account role, e.g. ACCOUNTADMIN) — "
+                        "distinct from the topology role (source/destination/both)."
+                    ),
+                },
+                "auth_mode": {
+                    "type": "string",
+                    "description": (
+                        "Declared authentication mode: user_pass, pat (Snowflake "
+                        "programmatic access token), key_pair, connection_string, "
+                        "service_account, api_key. Determines which credential the "
+                        "driver uses — a PAT/password record never routes to key-pair."
+                    ),
+                },
+                "private_key": {
+                    "type": "string",
+                    "description": (
+                        "PKCS#8 private key for key_pair auth (never echoed). "
+                        "Omit to leave unchanged; pass \"\" to explicitly clear "
+                        "a stored key (stray-key repair)."
+                    ),
+                },
+                "private_key_passphrase": {
+                    "type": "string",
+                    "description": (
+                        "Passphrase for the private key (never echoed; stored in "
+                        "the password field). Omit to leave unchanged; pass \"\" "
+                        "to clear it."
+                    ),
+                },
+                "secret_sha256": {
+                    "type": "string",
+                    "description": (
+                        "Optional SHA-256 hex of the secret being staged — the "
+                        "server fails loudly when the received secret's hash "
+                        "differs, so a truncated credential is never stored."
+                    ),
+                },
+                "secret_field": {
+                    "type": "string",
+                    "description": "When the call carries several secret fields, name the field secret_length/secret_sha256 cover.",
+                },
+                "secret_length": {
+                    "type": "integer",
+                    "description": (
+                        "Optional byte length of the secret being staged — the "
+                        "server fails loudly when the received secret's length "
+                        "differs, so a truncated credential is never stored."
+                    ),
+                },
+                "host_key": {
+                    "type": "string",
+                    "description": "SFTP only: operator-approved server key fingerprint "
+                    "(SHA256:...) shown by a failed test; pins this connector.",
+                },
+                "known_hosts": {
+                    "type": "string",
+                    "description": "SFTP only: known_hosts entry or file contents to trust for this connector.",
+                },
+                "host_key_policy": {
+                    "type": "string",
+                    "description": "SFTP only: host-key policy (e.g. strict/pin/auto) recorded with the connector.",
+                },
+                "trust_server_certificate": {
+                    "type": "boolean",
+                    "description": "SQL Server only: operator-declared skip of TLS chain verification for self-signed / private-CA servers.",
+                },
                 "message": {
                     "type": "string",
                     "description": "Original user message (for credential extraction)",
@@ -100,11 +329,28 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_jobs",
-        "description": "List recent transfer jobs with status, IDs, and record counts.",
+        "description": (
+            "List recent transfer jobs with status, IDs, and record counts. "
+            "``total`` is the whole history for ``scope`` (default ``workspace``, "
+            "the same population as brief_workspace). Pass ``scope=all`` only when "
+            "you explicitly need every workspace."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max jobs to return", "default": 10},
+                "limit": {
+                    "type": "integer",
+                    "description": "Max jobs to return. Integer from 1 to 100. Negative and unbounded limits are refused.",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 100,
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["workspace", "all"],
+                    "default": "workspace",
+                    "description": "workspace = this workspace; all = every workspace",
+                },
             },
             "required": [],
         },
@@ -125,8 +371,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_transfer_capabilities",
-        "description": "Show supported source→destination transfer combinations.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": (
+            "Show supported source→destination transfer combinations. "
+            "The default is a short summary (counts and driver lists). "
+            "Pass detail=full only when the complete route matrix is required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "string",
+                    "enum": ["summary", "full"],
+                    "description": "summary (default) omits the route matrix; full returns every combination",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "navigate",
@@ -192,6 +452,7 @@ TOOL_DEFINITIONS: list[dict] = [
                     ],
                 },
                 "run_id": {"type": "string"},
+                **_WORKSPACE_PROP,
             },
             "required": ["kind"],
         },
@@ -233,7 +494,13 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "plan_transfer_route",
-        "description": "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, and risk controls.",
+        "description": (
+            "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, "
+            "and risk controls. When source, destination, and table resolve to saved connectors, "
+            "this delegates to plan_transfer and must forward contract_id, require_signed_contract, "
+            "validation_mode, and schema_policy — never invent a contract, skip_preflight, or "
+            "propagate_all. A generic sketch is not a plan for the operator's data."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -243,6 +510,60 @@ TOOL_DEFINITIONS: list[dict] = [
                 "table": {"type": "string", "description": "Source table — required for a real plan"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
+                "leftover_nl": {
+                    "type": "string",
+                    "description": "Remaining operator prose (contract / migrate / data rules). Never parse skip_preflight.",
+                },
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
+                "require_signed_contract": {"type": "boolean"},
             },
             "required": [],
         },
@@ -250,16 +571,30 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "plan_transfer",
         "description": (
-            "Plan a real transfer between two saved connectors: introspect both schemas live, "
+            "Plan a real transfer between two saved connectors: introspect both schemas live "
+            "(or peek a CALL/SELECT result — never treat a procedure stream name as a table), "
             "map columns, list type conversions and lossy casts, and run the 9 preflight gates. "
+            "CDC/SCD2/mirror are refused for procedure/query sources. "
             "Read-only — it never moves data. Use whenever the operator asks what a transfer "
-            "would do, or before starting one."
+            "would do, or before starting one. When a contract_id is supplied, the plan "
+            "names the bind and breaker (Confirm still fail-closed on SIGNED / OPEN)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string", "description": "Saved source connector"},
-                "source_table": {"type": "string", "description": "Source table or collection"},
+                **_ROUTE_ID_PROPS,
+                **_ROW_RULE_PROPS,
+                **_CHAT_ONE_RUN_PROPS,
+                "limit": {
+                    "type": "integer",
+                    "description": "Row cap for the run start_transfer would stage. A plan reads no rows, so the plan itself is unchanged.",
+                },
+                "source_table": {"type": "string", "description": "Source table, collection, or a CALL/SELECT statement"},
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
+                "procedure_call": {"type": "string", "description": "CALL/EXEC text when source_read_mode is procedure"},
+                "source_query": {"type": "string", "description": "Read-only SELECT when source_read_mode is query"},
+                "procedure_params": {"type": "object", "description": "Bound :name parameters for CALL/SELECT"},
                 "dest_connector_name": {"type": "string", "description": "Saved destination connector"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {
@@ -269,9 +604,160 @@ TOOL_DEFINITIONS: list[dict] = [
                         "incremental_upsert, or cdc_incremental"
                     ),
                 },
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped. "
+                        "A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
+                "require_signed_contract": {"type": "boolean"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Operator signature for mappings that already require a "
+                        "Migration Risk Contract. Requires approved_by, reason, "
+                        "and a continue execution_policy (QUARANTINE_ROW, "
+                        "CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, SKIP_ROW, "
+                        "STOP_COLUMN). Omitted means nothing is signed. "
+                        "FAIL_JOB does not clear a gate. Confirm is still required. "
+                        "CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE take optional "
+                        "on_cast_failure: 'quarantine' (default — the row is held "
+                        "out, disposition=cast_failure) or 'null' (the failing cell "
+                        "is written as NULL and counted in coerced_null_rows)."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms keyed by source or target column. "
+                        "Applied on the planned mapping as an operator override. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Acknowledge a schema_drift review block so the plan can clear."
+                    ),
+                },
+                "foreign_keys": {
+                    "type": "string",
+                    "enum": ["carry", "guard", "ignore"],
+                    "description": (
+                        "Source foreign keys on this route. 'carry' (default): child "
+                        "rows are checked against destination parents that exist and "
+                        "the constraint is added after the load; a parent missing at "
+                        "the destination is reported at plan time and not carried. "
+                        "'guard': check rows, add no constraint. 'ignore': copy rows "
+                        "as read."
+                    ),
+                },
+                "fk_risk_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept foreign-key risk: orphan child rows are quarantined "
+                        "instead of refusing the run in strict mode."
+                    ),
+                },
+                "vector_layout": {
+                    "type": "string",
+                    "enum": ["table", "document"],
+                    "description": (
+                        "pgvector destinations only (D209): 'table' creates the "
+                        "typed table the Map shows; 'document' is an embedding/RAG "
+                        "load (id, content, embedding, metadata). Omitted: the "
+                        "saved connector's choice, else the existing table's shape, "
+                        "else a typed table with an embedding column."
+                    ),
+                },
+                "delete_mode": {
+                    "type": "string",
+                    "enum": ["soft", "hard"],
+                    "description": (
+                        "Mirror sync only. 'soft' (default): destination rows whose "
+                        "key left the source are kept and flagged _deleted. 'hard': "
+                        "they are physically DELETEd; the plan warns before staging."
+                    ),
+                },
+                "ddl_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Approve the destination DDL Validate disclosed (D101): "
+                        "the unique index an upsert into an existing PostgreSQL/"
+                        "MySQL table without one needs. Object with approved_by "
+                        "and reason."
+                    ),
+                    "properties": {
+                        "approved_by": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
             },
-            "required": ["source_table"],
+            "required": [],
         },
     },
     {
@@ -279,19 +765,178 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a transfer between two saved connectors for the operator to Confirm. "
             "Runs the plan and preflight first and refuses when any gate blocks. "
-            "This never moves data on its own — execution happens only after Confirm."
+            "This never moves data on its own — execution happens only after confirm_action. "
+            "An uploaded file uses start_dataset_transfer, not this tool."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string"},
+                **_ROUTE_ID_PROPS,
+                **_ROW_RULE_PROPS,
+                **_CHAT_ONE_RUN_PROPS,
                 "source_table": {"type": "string"},
+                "source_read_mode": {"type": "string"},
+                "procedure_call": {"type": "string"},
+                "source_query": {"type": "string"},
+                "procedure_params": {"type": "object"},
                 "dest_connector_name": {"type": "string"},
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped. "
+                        "A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged. "
+                        "Values that already carry an offset are not rewritten."
+                    ),
+                },
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
+                "require_signed_contract": {"type": "boolean"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Same operator signature as plan_transfer. Applied only "
+                        "to mappings that already require a continue-policy "
+                        "Migration Risk Contract. Never signed when omitted."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms applied on the load, keyed by "
+                        "source or target column name. Example: {\"email\": \"hash_pii\"}. "
+                        "Stamped as an operator override, not only on quarantine replay. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Acknowledge a schema_drift block (type change or new "
+                        "columns under manual_review) so Validate can proceed. "
+                        "The acknowledgement is recorded on the transfer."
+                    ),
+                },
+                "ddl_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Approve the destination DDL Validate disclosed for this "
+                        "run (D101) — the unique index an upsert into an existing "
+                        "table without one needs (PostgreSQL/MySQL only; MERGE "
+                        "engines such as Snowflake never need one). Object with "
+                        "approved_by and reason; it covers only the statements "
+                        "the refusal listed."
+                    ),
+                    "properties": {
+                        "approved_by": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
+                "foreign_keys": {
+                    "type": "string",
+                    "enum": ["carry", "guard", "ignore"],
+                    "description": (
+                        "Source foreign keys on this route. 'carry' (default): child "
+                        "rows are checked against destination parents that exist and "
+                        "the constraint is added after the load; a parent missing at "
+                        "the destination is reported at plan time and not carried. "
+                        "'guard': check rows, add no constraint. 'ignore': copy rows "
+                        "as read."
+                    ),
+                },
+                "fk_risk_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept foreign-key risk: orphan child rows are quarantined "
+                        "instead of refusing the run in strict mode."
+                    ),
+                },
+                "vector_layout": {
+                    "type": "string",
+                    "enum": ["table", "document"],
+                    "description": (
+                        "pgvector destinations only (D209): 'table' creates the "
+                        "typed table the Map shows; 'document' is an embedding/RAG "
+                        "load (id, content, embedding, metadata). Omitted: the "
+                        "saved connector's choice, else the existing table's shape, "
+                        "else a typed table with an embedding column."
+                    ),
+                },
+                "delete_mode": {
+                    "type": "string",
+                    "enum": ["soft", "hard"],
+                    "description": (
+                        "Mirror sync only. 'soft' (default): destination rows whose "
+                        "key left the source are kept and flagged _deleted. 'hard': "
+                        "they are physically DELETEd; the plan warns before staging."
+                    ),
+                },
             },
-            "required": ["source_table"],
+            "required": [],
         },
     },
     {
@@ -309,6 +954,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "has_cursor": {"type": "boolean"},
                 "has_primary_key": {"type": "boolean"},
                 "needs_history": {"type": "boolean"},
+                "row_count": {"type": "number"},
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
             },
             "required": [],
         },
@@ -324,6 +971,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "enum": ["new_column", "removed_column", "new_stream", "removed_stream", "type_change", "cursor_removed", "primary_key_removed", "unknown"],
                 },
                 "auto_apply": {"type": "boolean"},
+                "old_schema": {
+                    "type": "object",
+                    "description": "Previous {column: type} schema; with new_schema, classifies the real change.",
+                },
+                "new_schema": {"type": "object", "description": "Current {column: type} schema."},
             },
             "required": [],
         },
@@ -345,6 +997,15 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "describe_connector_transforms",
+        "description": (
+            "List every column transform the engine applies — exact semantics, "
+            "deterministic flag, and lossy flag per op, plus accepted aliases and "
+            "parameterized forms (replace:/concat:/default:/assume_timezone:)."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "explain_product",
         "description": (
             "Answer product how-to questions about Datawrap (transfer, mapping, preflight, "
@@ -360,7 +1021,10 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_schedules",
-        "description": "List pipeline schedules (Pipelines page) with cadence, next run, and last status.",
+        "description": (
+            "List pipeline schedules (Pipelines page) with cadence, next run, last status, "
+            "and bound contract / breaker when one is set."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -371,7 +1035,10 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_schedule",
-        "description": "Fetch one pipeline schedule by id or name.",
+        "description": (
+            "Fetch one pipeline schedule by id or name, including route, sync mode, "
+            "and bound contract / breaker when one is set."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -385,7 +1052,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "run_schedule_now",
         "description": (
             "Propose an immediate run of a pipeline schedule. Returns a pending action — "
-            "the UI must confirm before the run starts."
+            "confirm_action must be called with the returned ack_id before the run starts."
         ),
         "input_schema": {
             "type": "object",
@@ -397,8 +1064,248 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "create_schedule",
+        "description": (
+            "Stage a recurring pipeline (schedule) between two saved connectors for the "
+            "operator to Confirm. Grounds the route against live schemas, requires "
+            "preflight to clear, and stores the approved mapping on the schedule. "
+            "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
+            "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
+            "nothing on its own: the schedule exists only after confirm_action."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_connector_name": {"type": "string"},
+                **_ROUTE_ID_PROPS,
+                **_ROW_RULE_PROPS,
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
+                "procedure_call": {"type": "string", "description": "CALL/EXEC text when source_read_mode is procedure"},
+                "source_query": {"type": "string", "description": "Read-only SELECT when source_read_mode is query"},
+                "procedure_params": {"type": "object", "description": "Bound :name parameters for CALL/SELECT"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": "IANA zone for source timestamps that carry no offset.",
+                },
+                "limit": {"type": "integer", "description": "Row cap per scheduled run (0 = no cap)."},
+                "source_table": {"type": "string"},
+                "dest_connector_name": {"type": "string"},
+                "dest_table": {"type": "string"},
+                "cadence": {
+                    "type": "string",
+                    "description": "Cadence wording, with time/timezone when stated",
+                },
+                "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Watermark column for incremental modes. When omitted and "
+                        "the source has exactly one modification-timestamp column, "
+                        "that column is selected. Two candidates are not guessed."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert."
+                    ),
+                },
+                "name": {"type": "string", "description": "Schedule display name"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "duplicate_policy": {
+                    "type": "string",
+                    "enum": ["upsert", "skip_duplicates", "append"],
+                    "description": (
+                        "How a scheduled file load treats rows already in the destination. "
+                        "upsert (default when a primary key is set) needs no cursor on files. "
+                        "skip_duplicates inserts only new keys. append is explicit and keeps duplicates."
+                    ),
+                },
+                "in_file_dedupe": {
+                    "type": "string",
+                    "enum": ["block", "keep_last"],
+                    "description": (
+                        "Duplicates inside one file. block refuses the file. "
+                        "keep_last writes the last row for each key."
+                    ),
+                },
+                "file_wait_seconds": {
+                    "type": "integer",
+                    "description": (
+                        "How long a glob pickup waits for the expected file before "
+                        "reporting expected file not arrived."
+                    ),
+                },
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms stored on the schedule mapping, "
+                        "keyed by source or target column. Applied on every run, "
+                        "not only on quarantine replay. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept additive schema drift for this schedule. "
+                        "Hard-breaking changes (type change, narrowing, NOT NULL) "
+                        "still block. The same flag on plan_transfer and start_transfer "
+                        "accepts drift for a manual run."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "for this standing route. Requires approved_by and reason. "
+                        "Stored on the schedule so unattended runs carry the same "
+                        "acknowledgement a one-shot Confirm records on the job."
+                    ),
+                },
+            },
+            "required": ["cadence"],
+        },
+    },
+    {
+        "name": "start_dataset_transfer",
+        "description": (
+            "Stage a transfer from an uploaded file (csv, tsv, json, jsonl, and the "
+            "other formats the file parser reads) into a saved connector. Resolves "
+            "the file by the name analyze_dataset uses, maps columns with the same "
+            "pipeline as Transfer Studio, and runs preflight. Nothing is written "
+            "until confirm_action. A template with no file is refused. A timestamp "
+            "column that mixes offsets with wall-clock values is refused until "
+            "source_timezone names the zone for the values that have none."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dataset_name": {"type": "string", "description": "Uploaded dataset name"},
+                "dest_connector_name": {"type": "string"},
+                "dest_connector_id": {"type": "string"},
+                "dest_table": {"type": "string", "description": "Destination table; defaults to the file name"},
+                "sync_mode": {"type": "string"},
+                # D58: the handler always took the key; the schema never
+                # offered it, so an upsert of a file had no way to name one.
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "File column that identifies a row for upsert, SCD2, or mirror. "
+                        "Comma-separate a composite key. A column named id is never invented."
+                    ),
+                },
+                **_KEY_ALIAS_PROPS,
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                },
+                "limit": {"type": "integer"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for timestamp values that have no offset. "
+                        "Required when a column mixes those values with offset-bearing "
+                        "ones. Empty does not invent UTC. Offset-bearing values stay as written."
+                    ),
+                },
+                "source_encoding": {
+                    "type": "string",
+                    "description": (
+                        "The file's text encoding (cp1251, cp1250, iso-8859-7, utf-16...). "
+                        "Declared, it is read strictly. Undeclared, a non-UTF-8 file is "
+                        "read as Windows-1252 with a preflight warning, or refused when "
+                        "its bytes cannot be Windows-1252."
+                    ),
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept additive schema drift for this file load. "
+                        "Hard-breaking changes still block. The flag is stored "
+                        "on the staged job and survives Confirm into Execute."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+            },
+            "required": ["dataset_name"],
+        },
+    },
+    {
+        "name": "confirm_action",
+        "description": (
+            "Consume a pending approval (ack_id) and perform the mutation the operator "
+            "already staged: create_connector, start_transfer, start_dataset_transfer, create_schedule, "
+            "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
+            "quarantine, delete connector, enable, update, or delete a schedule). "
+            "This is the same gate as Confirm in the product. Calling the staging "
+            "tool does not move data; confirm_action does. Replaying a consumed "
+            "ack_id returns the original result and does not run the mutation twice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ack_id": {
+                    "type": "string",
+                    "description": "ack_id returned by the staging tool",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Audit note stored with the approval",
+                },
+            },
+            "required": ["ack_id"],
+        },
+    },
+    {
         "name": "list_contracts",
-        "description": "List data contracts available in the workspace.",
+        "description": (
+            "List data contracts. ``count`` is this page. ``total`` is the whole "
+            "store from the status census, not the page length."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 50}},
@@ -445,6 +1352,46 @@ TOOL_DEFINITIONS: list[dict] = [
                 "limit": {"type": "integer", "default": 100},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "rank_connector_tables",
+        "description": (
+            "Rank every table on one saved connector by exact row count. Use for "
+            "“which table has the most rows on Demo Orders”, “biggest/smallest "
+            "table”, “how big is this database” and connector-vs-connector size "
+            "comparisons. Counts are server-side, not sampled."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "connector_name": {"type": "string"},
+                "order": {"type": "string", "enum": ["desc", "asc"], "default": "desc"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "compare_connectors",
+        "description": (
+            "Compare two saved connectors side by side on engine, endpoint, "
+            "connection health, transfer-readiness and live object count. Use for "
+            "“compare Demo Orders and Quarantine SQLite”, “what is the difference "
+            "between my two Postgres connectors”, “X vs Y”."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "left": {"type": "string", "description": "First saved connector name"},
+                "right": {"type": "string", "description": "Second saved connector name"},
+                "criterion": {
+                    "type": "string",
+                    "description": "The word the operator compared on, e.g. faster, better",
+                },
+            },
+            "required": ["left", "right"],
         },
     },
     {
@@ -627,13 +1574,31 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["source_table"],
         },
     },
+    {
+        "name": "brief_workspace",
+        "description": (
+            "Spoken sitrep of this workspace: connectors (tested/failed), recent "
+            "jobs, pipelines due or parked on approval, contracts. Use when the "
+            "operator asks what's going on, for a briefing, or to summarize the workspace."
+        ),
+        "input_schema": {"type": "object", "properties": {**_WORKSPACE_PROP}, "required": []},
+    },
+    *LIFECYCLE_TOOL_DEFINITIONS,
 ]
 
 TOOL_FAMILIES: list[dict] = [
     {
         "id": "discover",
         "label": "Discover",
-        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
+        "tools": [
+            "list_datasets",
+            "search_data",
+            "search_connectors",
+            "search_knowledge",
+            "describe_pilot",
+            "describe_connector_transforms",
+            "brief_workspace",
+        ],
     },
     {
         "id": "profile",
@@ -643,6 +1608,8 @@ TOOL_FAMILIES: list[dict] = [
             "compare_datasets",
             "profile_quality_rules",
             "list_connector_objects",
+            "rank_connector_tables",
+            "compare_connectors",
             "introspect_connector_schema",
             "sample_connector_object",
             "aggregate_data",
@@ -660,6 +1627,7 @@ TOOL_FAMILIES: list[dict] = [
             "plan_transfer_route",
             "plan_transfer",
             "start_transfer",
+            "start_dataset_transfer",
             "get_transfer_capabilities",
             "recommend_sync_mode",
         ],
@@ -681,12 +1649,25 @@ TOOL_FAMILIES: list[dict] = [
             "list_schedules",
             "get_schedule",
             "run_schedule_now",
+            "create_schedule",
+            "confirm_action",
             "list_contracts",
             "open_job",
             "open_schedule",
             "start_transfer_studio",
             "create_connector",
             "list_connectors",
+            "cancel_job",
+            "retry_job",
+            "rerun_job",
+            "resume_job",
+            "replay_quarantine",
+            "test_connector",
+            "delete_connector",
+            "update_connector",
+            "set_schedule_enabled",
+            "delete_schedule",
+            "update_schedule",
         ],
     },
 ]
@@ -721,6 +1702,119 @@ def get_tool_registry() -> dict:
     }
 
 
+# Names operators and models send that the schema spells differently.
+# Applied only when the handler accepts the canonical name and not the alias.
+_TOOL_ARG_ALIASES = {
+    "connector_name": "name",
+    "connector": "name",
+    "table_name": "table",
+    "source_name": "source_connector_name",
+    "dest_name": "dest_connector_name",
+    "serviceAccount": "service_account",
+}
+
+
+def _tool_schema_properties(name: str) -> list[str]:
+    for tool in TOOL_DEFINITIONS:
+        if tool.get("name") == name:
+            props = (tool.get("input_schema") or {}).get("properties") or {}
+            return [str(key) for key in props]
+    return []
+
+
+def _tool_argument_error(name: str, raw: str) -> str:
+    """Operator text for a bad call. Never the Python signature."""
+    accepted = _tool_schema_properties(name)
+    if "unexpected keyword" not in raw and "required positional" not in raw and "missing" not in raw:
+        if accepted:
+            return f"{name} could not run with those arguments. Accepted parameters: {', '.join(accepted)}."
+        return f"{name} could not run with those arguments."
+    if accepted:
+        return (
+            f"{name} does not accept that argument. "
+            f"Accepted parameters: {', '.join(accepted)}."
+        )
+    return f"{name} does not accept that argument."
+
+
+def _bind_tool_arguments(
+    name: str,
+    handler: Callable[..., Any],
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Rewrite known aliases, and refuse anything the handler cannot take."""
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return _canonical_policy_arguments(name, dict(args))
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return _canonical_policy_arguments(name, dict(args))
+    accepted = {
+        key for key, param in params.items()
+        if key != "self" and param.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    }
+    bound: dict[str, Any] = {}
+    unknown: list[str] = []
+    for key, value in args.items():
+        target = key
+        alias = _TOOL_ARG_ALIASES.get(key)
+        if target not in accepted and alias in accepted and alias not in args:
+            target = alias
+        if target not in accepted:
+            unknown.append(key)
+            continue
+        bound[target] = value
+    if unknown:
+        return {}, _tool_argument_error(name, "unexpected keyword argument")
+    return _canonical_policy_arguments(name, bound)
+
+
+def _canonical_policy_arguments(name: str, bound: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """QA r12 bugs 6/7: one check for every tool taking validation_mode / schema_policy.
+
+    plan_transfer, start_transfer, create_schedule, ... Blank means "not given"
+    (the tool's own default applies); a legacy alias becomes its canonical id;
+    an unknown word is refused with the allowed values.
+    """
+    from services.transfer_policy_values import PolicyValueError, canonicalize_policy_fields
+
+    try:
+        return canonicalize_policy_fields(bound), ""
+    except PolicyValueError as exc:
+        return {}, f"{name} refused: {exc}"
+
+
+def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
+    """Host, port, and URL password the saved connector will really use.
+
+    A URL names its own port (or none: the driver/scheme default applies);
+    the draft's stamped default port and "a connection string exists" are not
+    evidence of either (QA MXD03 / MX1-04).
+    """
+    from connectors.url_authority import parse_url_authority
+
+    cs = str(draft.get("connection_string") or "").strip()
+    host = str(draft.get("host") or "").strip()
+    if cs and "://" in cs:
+        url = parse_url_authority(cs)
+        return url.host or host or "(from URL)", url.port or None, bool(url.password)
+    if cs:
+        return host or "(from URL)", draft.get("port") or None, False
+    if "://" in host:
+        url = parse_url_authority(host)
+        return host, url.port or draft.get("port") or None, bool(url.password)
+    return host or "(from URL)", draft.get("port"), False
+
+
+
+def _contract_status_label(contract: Any) -> str:
+    from services.contract_read_model import status_label
+
+    return status_label(contract)
+
 class DataPilotTools:
     """Execute Datawrap Pilot tools against live app state."""
 
@@ -735,6 +1829,7 @@ class DataPilotTools:
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
             "create_connector": self._create_connector,
+            "confirm_action": self._confirm_action,
             "list_jobs": self._list_jobs,
             "get_job": self._get_job,
             "get_transfer_capabilities": self._get_capabilities,
@@ -745,10 +1840,12 @@ class DataPilotTools:
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
             "describe_pilot": self._describe_pilot,
+            "describe_connector_transforms": self._describe_connector_transforms,
             "explain_product": self._explain_product,
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
             "start_transfer": self._start_transfer,
+            "start_dataset_transfer": self._start_dataset_transfer,
             "explain_mapping_assurance": self._explain_mapping_assurance,
             "recommend_sync_mode": self._recommend_sync_mode,
             "inspect_schema_policy": self._inspect_schema_policy,
@@ -756,11 +1853,14 @@ class DataPilotTools:
             "list_schedules": self._list_schedules,
             "get_schedule": self._get_schedule,
             "run_schedule_now": self._run_schedule_now,
+            "create_schedule": self._create_schedule,
             "list_contracts": self._list_contracts,
             "open_job": self._open_job,
             "open_schedule": self._open_schedule,
             "start_transfer_studio": self._start_transfer_studio,
             "list_connector_objects": self._list_connector_objects,
+            "rank_connector_tables": self._rank_connector_tables,
+            "compare_connectors": self._compare_connectors,
             "sample_connector_object": self._sample_connector_object,
             "run_query": self._run_query,
             "aggregate_data": self._aggregate_data,
@@ -769,20 +1869,114 @@ class DataPilotTools:
             "introspect_connector_schema": self._introspect_connector_schema,
             "diff_schemas": self._diff_schemas,
             "map_connector_schemas": self._map_connector_schemas,
+            "brief_workspace": self._brief_workspace,
+            "cancel_job": self._cancel_job,
+            "retry_job": self._retry_job,
+            "rerun_job": self._rerun_job,
+            "resume_job": self._resume_job,
+            "replay_quarantine": self._replay_quarantine,
+            "repair_cdc_drift": self._repair_cdc_drift,
+            "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
+            "rebaseline_transfer": self._rebaseline_transfer,
+            "prepare_cdc_source": self._prepare_cdc_source,
+            "test_connector": self._test_connector,
+            "delete_connector": self._delete_connector,
+            "update_connector": self._update_connector,
+            "set_schedule_enabled": self._set_schedule_enabled,
+            "delete_schedule": self._delete_schedule,
+            "update_schedule": self._update_schedule,
         }
+        started = time.monotonic()
         handler = handlers.get(name)
         if not handler:
-            return ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}")
+            # The requested name is model/caller text, so it is not logged.
+            return _tool_executed(
+                ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}"),
+                started,
+                tool="unknown",
+                reason="unknown_tool",
+            )
+        # One chokepoint for permissions: every path into a tool — the
+        # deterministic planner, an LLM tool loop, a recovery follow-up — comes
+        # through here, so none of them can reach a tool the caller's role does
+        # not hold.
+        role = current_caller_role()
+        if not is_tool_allowed(role, name):
+            return _tool_executed(
+                ToolResult(
+                    name=name,
+                    success=False,
+                    output=None,
+                    error=denial_message(role, name),
+                ),
+                started,
+                reason="permission_denied",
+                role=role,
+            )
         try:
-            return handler(**args)
+            bound, bind_error = _bind_tool_arguments(name, handler, args)
+            if bind_error:
+                return _tool_executed(
+                    ToolResult(name=name, success=False, output=None, error=bind_error),
+                    started,
+                    reason="invalid_arguments",
+                    role=role,
+                )
+            if name in DEADLINE_TOOLS | QUERY_DEADLINE_TOOLS:
+                # D169/D181: a source that accepts and never answers must fail this
+                # call with the host named, not hold it until the client's
+                # -32001 timeout.
+                result = run_with_deadline(
+                    name,
+                    lambda: handler(**bound),
+                    lambda message: ToolResult(
+                        name=name, success=False, output=None, error=message
+                    ),
+                )
+            else:
+                result = handler(**bound)
         except TypeError as e:
-            return ToolResult(name=name, success=False, output=None, error=str(e))
+            return _tool_executed(
+                ToolResult(
+                    name=name,
+                    success=False,
+                    output=None,
+                    error=_tool_argument_error(name, str(e)),
+                ),
+                started,
+                reason="invalid_arguments",
+                error=e,
+                role=role,
+            )
         except Exception as e:
-            return ToolResult(name=name, success=False, output=None, error=str(e))
+            return _tool_executed(
+                ToolResult(name=name, success=False, output=None, error=str(e)),
+                started,
+                reason="exception",
+                error=e,
+                role=role,
+            )
+        return _tool_executed(result, started, role=role)
 
     def _list_datasets(self) -> ToolResult:
         datasets = self.analyst.list_datasets()
-        return ToolResult(name="list_datasets", success=True, output={"datasets": datasets, "count": len(datasets)})
+        # QA DS03: the tool result is what the client shows — a full
+        # `columns: [...]` dump per dataset reads as a raw metadata blob.
+        # Business summary per dataset; `_search_data` and column-matching
+        # paths keep calling `analyst.list_datasets()` for the full schema.
+        shaped = []
+        for ds in datasets:
+            cols = [str(c) for c in (ds.get("columns") or [])]
+            shaped.append({
+                **{k: v for k, v in ds.items() if k != "columns"},
+                "column_preview": cols[:8],
+                "column_count": ds.get("column_count") or len(cols),
+            })
+        return ToolResult(
+            name="list_datasets",
+            success=True,
+            output={"datasets": shaped, "count": len(shaped)},
+        )
 
     def _analyze_dataset(self, dataset_name: str = "") -> ToolResult:
         schema = self.analyst.resolve_dataset(dataset_name)
@@ -823,14 +2017,25 @@ class DataPilotTools:
                             break
         return ToolResult(name="search_data", success=True, output={"query": query, "hits": hits[:25]})
 
-    def _list_connectors(self) -> ToolResult:
+    def _list_connectors(
+        self,
+        health: str = "any",
+        engine: str = "",
+        engine_excluded: bool = False,
+    ) -> ToolResult:
         summary = []
         errors: list[str] = []
         try:
+            from services.connector_access import caller_workspace_id
             from services.connector_store import list_connectors as store_list
 
-            for c in store_list():
-                d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
+            for c in store_list(workspace_id=caller_workspace_id() or None):
+                if hasattr(c, "to_dict"):
+                    d = c.to_dict()
+                elif isinstance(c, dict):
+                    d = dict(c)
+                else:
+                    d = dict(getattr(c, "__dict__", {}) or {})
                 summary.append({
                     "id": str(d.get("id") or d.get("_id") or ""),
                     "name": d.get("name"),
@@ -838,6 +2043,9 @@ class DataPilotTools:
                     "host": d.get("host"),
                     "database": d.get("database"),
                     "status": d.get("status", "saved"),
+                    "last_test_ok": d.get("last_test_ok"),
+                    "last_tested_at": d.get("last_tested_at"),
+                    "last_transfer_ok_at": d.get("last_transfer_ok_at"),
                 })
         except Exception as exc:
             logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
@@ -855,6 +2063,9 @@ class DataPilotTools:
                         "host": c.get("host"),
                         "database": c.get("database"),
                         "status": c.get("status", "unknown"),
+                        "last_test_ok": c.get("last_test_ok"),
+                        "last_tested_at": c.get("last_tested_at"),
+                        "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                     })
             except Exception as exc:
                 logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
@@ -872,10 +2083,47 @@ class DataPilotTools:
                     + "). Check Settings → storage, then retry."
                 ),
             )
+        total_saved = len(summary)
+        saved_engines = sorted(
+            {canonical_engine(str(c.get("type") or "")) for c in summary if c.get("type")}
+        )
+        # "how many of those are postgres" listed every connector unchanged. On
+        # this workspace both are SQLite so the reply happened to be right; on a
+        # mixed workspace it is a silently wrong answer, which is why the engine
+        # is filtered here rather than left to the wording of the summary.
+        engine_want = canonical_engine(engine)
+        if engine_want:
+            matches = [
+                c for c in summary if canonical_engine(str(c.get("type") or "")) == engine_want
+            ]
+            summary = (
+                [c for c in summary if c not in matches] if engine_excluded else matches
+            )
+
+        # "get me the passed connectors" must not list every connector. Health is
+        # the saved probe, overruled only by a transfer that completed after it —
+        # never a guess from the engine name.
+        from services.connector_store import connector_health
+
+        for c in summary:
+            c["health"] = connector_health(c)
+        want = (health or "any").strip().lower()
+        if want in {"passed", "failed", "untested"}:
+            summary = [c for c in summary if c["health"] == want]
+        else:
+            want = "any"
         return ToolResult(
             name="list_connectors",
             success=True,
-            output={"connectors": summary, "count": len(summary)},
+            output={
+                "connectors": summary,
+                "count": len(summary),
+                "health": want,
+                "engine": engine_want,
+                "engine_excluded": bool(engine_want and engine_excluded),
+                "saved_engines": saved_engines,
+                "total_saved": total_saved,
+            },
         )
 
     def _create_connector(  # nosec B107
@@ -888,13 +2136,37 @@ class DataPilotTools:
         username: str = "",
         password: str = "",
         connection_string: str = "",
+        service_account: str = "",
         ssl: bool = False,
         schema: str = "",
+        warehouse: str = "",
+        role: str = "",
+        auth_role: str = "",
+        auth_mode: str = "",
+        private_key: str = "",
+        private_key_passphrase: str = "",
+        secret_sha256: str = "",
+        secret_length: int = 0,
+        secret_field: str = "",
         message: str = "",
         test_first: bool = True,
+        host_key: str = "",
+        known_hosts: str = "",
+        host_key_policy: str = "",
+        trust_server_certificate: bool | None = None,
     ) -> ToolResult:
         from .connector_create import build_connector_draft, draft_is_complete
 
+        if (host_key or "").strip():
+            from connectors.sftp_common import normalize_host_key_pin
+
+            try:
+                host_key = normalize_host_key_pin(host_key)
+            except ValueError as exc:
+                logging.getLogger(__name__).warning(
+                    "create_connector refused a malformed SFTP host_key pin for %r", name
+                )
+                return ToolResult(name="create_connector", success=False, output=None, error=str(exc))
         draft = build_connector_draft(
             message or "",
             {
@@ -904,12 +2176,39 @@ class DataPilotTools:
                 "port": port,
                 "database": database,
                 "username": username,
-                "password": password,
                 "connection_string": connection_string,
+                "service_account": service_account,
                 "ssl": ssl,
+                "host_key": host_key,
+                "known_hosts": known_hosts,
+                "host_key_policy": host_key_policy,
+                "trust_server_certificate": bool(trust_server_certificate),
                 "schema": schema,
+                "warehouse": warehouse,
+                "role": role,
+                "auth_role": auth_role,
+                "auth_mode": auth_mode,
+                "private_key": private_key,
+                # Snowflake key-pair carries the passphrase in ``password``
+                # (``private_key_passphrase=password`` at connect time).
+                "password": password or private_key_passphrase,
             },
         )
+        from .lifecycle_tools import secret_integrity_error
+
+        integrity = secret_integrity_error(
+            secret_sha256=secret_sha256,
+            secret_length=secret_length,
+            secret_field=secret_field,
+            password=password or private_key_passphrase,
+            private_key=private_key,
+            connection_string=connection_string,
+            service_account=service_account,
+        )
+        if integrity:
+            return ToolResult(
+                name="create_connector", success=False, output=None, error=integrity
+            )
         ok, missing = draft_is_complete(draft)
         if not ok:
             from .ack_ledger import redact_payload
@@ -919,6 +2218,66 @@ class DataPilotTools:
                 success=False,
                 output=redact_payload(draft),
                 error=missing,
+            )
+        from services.connector_store import (
+            connector_name_conflict_message,
+            connector_name_taken,
+        )
+
+        if connector_name_taken(
+            str(draft.get("name") or ""),
+            workspace_id=str(draft.get("workspace_id") or "") or None,
+        ):
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=connector_name_conflict_message(str(draft.get("name") or "")),
+            )
+
+        from services.connector_request_limits import connector_request_errors
+        from services.egress_guard import metadata_endpoint_refusal
+
+        bound_err = connector_request_errors(
+            name=draft.get("name"),
+            db_type=draft.get("type"),
+            host=draft.get("host"),
+            port=draft.get("port") or 0,
+            database=draft.get("database"),
+            username=draft.get("username"),
+            schema=draft.get("schema"),
+            connection_string=draft.get("connection_string"),
+            require_name=True,
+        )
+        if not bound_err and str(draft.get("type") or "").lower() in {"sftp", "ssh"}:
+            from connectors.sftp_common import sftp_port_conflict
+
+            bound_err = sftp_port_conflict(host, port)  # D208
+        if bound_err:
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=bound_err,
+            )
+        refusal = metadata_endpoint_refusal(
+            str(draft.get("host") or ""),
+            str(draft.get("connection_string") or ""),
+            workspace_id=str(draft.get("workspace_id") or ""),
+            db_type=str(draft.get("type") or ""),
+        )
+        if refusal:
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=refusal,
             )
 
         probe_msg = ""
@@ -941,19 +2300,54 @@ class DataPilotTools:
                         "auth_mode": draft.get("auth_mode") or "",
                         "warehouse": draft.get("warehouse") or "",
                         "account": draft.get("account") or "",
+                        "service_account": draft.get("service_account") or "",
+                        "host_key": draft.get("host_key") or "",
+                        "trust_server_certificate": draft.get("trust_server_certificate") or "",
+                        "workspace_id": str(draft.get("workspace_id") or ""),
                     },
                 )
                 if not probe_ok:
                     from .ack_ledger import redact_payload
 
+                    # A host-key or preauth refusal is not a bad password.
+                    # Prefixing "credentials" is the message QA recorded.
+                    # An unsupported connector type is not a credentials
+                    # failure either — 'No connectivity probe for foobardb'
+                    # wrapped as "Could not connect with those credentials"
+                    # blames the password for a missing driver (QA N05).
+                    not_credentials = re.search(
+                        r"host key|not trusted|fingerprint|known_hosts|"
+                        r"preauth|before authentication|"
+                        r"unsupported connector type|no connectivity probe|"
+                        r"no probe configured",
+                        probe_msg or "",
+                        re.I,
+                    )
+                    if not_credentials:
+                        error = probe_msg
+                    else:
+                        from .connector_create import probe_failure_advice
+
+                        host = str(draft.get("host") or "")
+                        port = str(draft.get("port") or "")
+                        attempted = f"{host}:{port}" if host and port else host
+                        target = f" to {attempted}" if attempted else ""
+                        advice = probe_failure_advice(
+                            str(draft.get("type") or ""),
+                            host=host,
+                            connection_string=str(
+                                draft.get("connection_string") or ""
+                            ),
+                        )
+                        error = (
+                            f"Could not connect{target} with those credentials: "
+                            f"{probe_msg}. {advice}"
+                        )
                     return ToolResult(
                         name="create_connector",
                         success=False,
                         output=redact_payload(draft),
-                        error=(
-                            f"Could not connect with those credentials: {probe_msg}. "
-                            "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
-                        ),
+                        error=error,
                     )
             except Exception as exc:
                 from .ack_ledger import redact_payload
@@ -964,19 +2358,65 @@ class DataPilotTools:
                     output=redact_payload(draft),
                     error=f"Connection test failed: {exc}",
                 )
+        # A successful handshake is not a usable connector: the login may own
+        # zero readable objects (public RNAcentral lacked schema USAGE — QA
+        # N09). Count readable objects once and warn in the preview rather
+        # than letting the operator save a connector that can read nothing.
+        readable_objects: int | None = None
+        readable_warning = ""
+        if test_first:
+            try:
+                from src.transfer.endpoint_intelligence import introspect_endpoint
+                from .schema_tools import _endpoint_from_connector
+
+                endpoint = _endpoint_from_connector(draft)
+                info = introspect_endpoint(endpoint)
+                if info.get("connected"):
+                    readable_objects = len(info.get("objects") or [])
+                    if readable_objects == 0:
+                        readable_warning = (
+                            "Connected, but the login can read 0 tables/schemas. "
+                            "Check USAGE/SELECT grants on the target schema "
+                            "before saving — transfers from this connector "
+                            "will find nothing to read."
+                        )
+            except Exception as exc:
+                # A listing failure must not block connector creation — the
+                # probe already proved connectivity; the warning is best-effort.
+                logging.getLogger(__name__).info(
+                    "create_connector readable-object check skipped: %s", exc
+                )
+        preview_host, preview_port, url_password = _preview_endpoint(draft)
+        preview_type = str(draft.get("type") or "").strip().lower().replace("-", "_")
+        preview_user = draft.get("username") or ""
+        if preview_type in {
+            "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
+            "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
+            "azure_data_lake", "azure_data_lake_storage",
+        }:
+            # S3 stores the access key id in username. The preview must not echo it.
+            preview_user = ""
         safe_preview = {
             "name": draft["name"],
             "type": draft["type"],
-            "host": draft.get("host") or "(from URL)",
-            "port": draft.get("port"),
+            "host": preview_host,
+            "port": preview_port,
             "database": draft.get("database") or "",
-            "username": draft.get("username") or "",
+            "username": preview_user,
             "ssl": bool(draft.get("ssl")),
             "auth_mode": draft.get("auth_mode") or "",
             "schema": draft.get("schema") or "",
-            "has_password": bool(draft.get("password") or draft.get("connection_string")),
+            "has_password": bool(draft.get("password") or url_password),
+            "has_service_account": bool(draft.get("service_account")),
             "test": probe_msg or "skipped",
         }
+        if draft.get("host_key"):
+            # A fingerprint is public; a human must see the pin before Confirm.
+            safe_preview["host_key"] = str(draft["host_key"])
+        if readable_objects is not None:
+            safe_preview["readable_objects"] = readable_objects
+        if readable_warning:
+            safe_preview["warning"] = readable_warning
         from .ack_ledger import get_ack_ledger
 
         ack_id = get_ack_ledger().put(
@@ -998,31 +2438,93 @@ class DataPilotTools:
             },
         )
 
-    def _list_jobs(self, limit: int = 10) -> ToolResult:
-        from ...services.mongodb_service import get_mongodb_service
-        mongo = get_mongodb_service()
-        jobs = mongo.list_jobs(limit=limit)
-        summary = [
-            {
-                "id": str(j.get("_id", j.get("id", ""))),
-                "source": j.get("source_name", j.get("source_type", "")),
-                "destination": j.get("destination_collection") or j.get("destination_type", ""),
-                "status": j.get("status"),
-                "records": j.get("records_processed", 0),
-                "rejected_rows": j.get("rejected_rows", 0),
-                "error": (j.get("error") or "")[:240] or None,
-                "created_at": str(j.get("created_at", "")),
-            }
-            for j in jobs
-        ]
-        return ToolResult(name="list_jobs", success=True, output={"jobs": summary, "count": len(summary)})
+    def _confirm_action(self, ack_id: str = "", reason: str = "") -> ToolResult:
+        from .confirm_ack import confirm_from_tool
+
+        body = confirm_from_tool(ack_id, reason or "")
+        if not body.get("ok"):
+            return ToolResult(
+                name="confirm_action",
+                success=False,
+                output=body,
+                error=str(body.get("error") or "Confirm failed"),
+            )
+        return ToolResult(name="confirm_action", success=True, output=body)
+
+    def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
+        from .job_reads import job_list_workspace_scope, list_transfer_jobs
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
+            return ToolResult(
+                name="list_jobs",
+                success=False,
+                output=None,
+                error="limit must be an integer from 1 to 100.",
+            )
+        try:
+            workspace_id = job_list_workspace_scope(scope)
+        except ValueError as exc:
+            return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
+        summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
+        # "How many jobs?" must be answered from the whole history for this scope.
+        # The page we read here is only the window we can show.
+        return ToolResult(
+            name="list_jobs",
+            success=True,
+            output={
+                "jobs": summary,
+                "count": len(summary),
+                "total": int(counts.get("total") or 0),
+                "status_counts": counts.get("by_status") or {},
+                "store": source,
+                "scope": "all" if workspace_id is None else "workspace",
+            },
+        )
+
+    @staticmethod
+    def _offers_bad_data_fix(job: dict, quarantine: list, stored_rejected: int) -> bool:
+        """True only when row-level bad data is the plausible cause.
+
+        Held-out rows (quarantine / rejected_rows / rejected_details) always
+        qualify. A bare failure qualifies only when the error names a value-
+        level defect (cast, null, overflow, constraint on data) — structural
+        causes (missing destination, schema drift, pagination, array/struct
+        gaps, auth/network faults) get no Fix-bad-data CTA.
+        """
+        if quarantine or stored_rejected or job.get("rejected_details"):
+            return True
+        err = str(job.get("error") or job.get("message") or "").lower()
+        if not err:
+            return False
+        structural = (
+            "does not exist", "dropped", "destination reset", "schema drift",
+            "drifted", "pagination", "next page", "array", "struct",
+            "could not translate host", "authentication failed",
+            "permission denied", "connection refused", "timed out",
+            "no persisted column mappings", "not a supported destination",
+            "privilege", "decision artifact", "content_hash",
+        )
+        if any(k in err for k in structural):
+            return False
+        value_level = (
+            "invalid integer", "invalid number", "cannot cast", "could not cast",
+            "invalid literal", "not null", "null value", "violates",
+            "overflow", "too long", "do not fit", "does not fit",
+            "cannot fit", "invalid timestamp", "invalid boolean",
+            "quarantined cell", "rejected row",
+        )
+        return any(k in err for k in value_level)
 
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from ...services.mongodb_service import get_mongodb_service
+        from services.job_status import job_timestamp_iso
 
-        job = get_mongodb_service().get_job((job_id or "").strip())
+        from services.phase_profile import job_phase_timings
+
+        from .job_reads import job_governance, job_lineage, read_transfer_job
+
+        job = read_transfer_job((job_id or "").strip())
         if not job:
             return ToolResult(
                 name="get_job",
@@ -1030,22 +2532,50 @@ class DataPilotTools:
                 output=None,
                 error=f"Job '{job_id}' not found. Ask the user for the job ID shown on Jobs / Job Theater.",
             )
+        from services.quarantine_dlq import replay_quarantine_details
+
         quarantine = merge_job_quarantine(job)
-        row_ids = {d.get("row") for d in quarantine if d.get("row") is not None}
-        quarantine_row_count = len(row_ids) if row_ids else len(quarantine)
+        # Skipped and NULL-coerced rows are audit findings, not held-out rows.
+        held_out = replay_quarantine_details(quarantine)
+        row_ids = {d.get("row") for d in held_out if d.get("row") is not None}
+        quarantine_row_count = len(row_ids) if row_ids else len(held_out)
+        from services.quarantine_from_preflight import drop_phantom_identity_rows
+
+        stored_rejected = int(job.get("rejected_rows") or 0)
+        stored_details = list(job.get("rejected_details") or [])
+        if stored_details and not drop_phantom_identity_rows(stored_details) and not quarantine:
+            stored_rejected = 0
+        reported_rejected = stored_rejected or quarantine_row_count
+        from services.dest_quarantine import operator_quarantine_json_cell
+
         samples = [
             {
                 "row": d.get("row"),
                 "column": d.get("column"),
-                "value": str(d.get("value") or "")[:120],
+                # SQL NULL shows as null, a literal as itself; never the wire token.
+                "value": (
+                    None if (shown := operator_quarantine_json_cell(d.get("value"))) is None
+                    else str(shown)[:120]
+                ),
                 "reason": str(d.get("reason") or "")[:200],
+                # Which signed policy held the row out (cast_failure vs quarantined).
+                **{
+                    k: d[k]
+                    for k in ("execution_policy", "disposition")
+                    if d.get(k)
+                },
             }
             for d in quarantine[:8]
         ]
         remediations: list[dict[str, str]] = []
         status = str(job.get("status") or "").lower()
         if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
-            remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
+            # "Fix bad data" only remediates row-level value failures — a
+            # dropped destination table, schema drift, REST pagination gaps
+            # or transport faults send operators to a screen that cannot
+            # help them. Filter by failure class (C23 / D81 / D82).
+            if self._offers_bad_data_fix(job, quarantine, stored_rejected):
+                remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         req = job.get("transfer_request") or {}
@@ -1061,52 +2591,37 @@ class DataPilotTools:
             "mappings_count": len(req.get("mappings") or []),
             "sync_mode": req.get("sync_mode") or job.get("operation"),
         }
-        live_schema: dict | None = None
-        # When job failed / quarantine, attach a live source schema snapshot if possible.
-        if (
-            route.get("source_connector_id")
-            and route.get("source_table")
-            and (status in {"failed", "cancelled"} or quarantine or job.get("rejected_rows"))
-        ):
-            try:
-                from .schema_tools import introspect_connector_schema
-
-                sch = introspect_connector_schema(
-                    connector_id=str(route["source_connector_id"]),
-                    table=str(route["source_table"]),
-                )
-                if sch.success and sch.output:
-                    live_schema = {
-                        "connector_name": sch.output.get("connector_name"),
-                        "table": sch.output.get("table"),
-                        "column_count": sch.output.get("column_count"),
-                        "columns": [
-                            {"name": c.get("name"), "inferred_type": c.get("inferred_type")}
-                            for c in (sch.output.get("columns") or [])[:40]
-                        ],
-                    }
-            except Exception:
-                live_schema = None
+        # D19: get_job reads only the stored record. A live source
+        # introspection here hung the whole call for minutes behind a slow or
+        # dead source (MCP -32001 timeouts after a cancel). The schema the run
+        # captured is on the record already.
+        live_schema = job.get("live_source_schema") or job.get("source_schema")
         return ToolResult(
             name="get_job",
             success=True,
             output={
                 "id": str(job.get("_id", job.get("id", job_id))),
                 "status": job.get("status"),
+                **job_lineage(job),
                 "source": job.get("source_name") or job.get("source_type"),
                 "destination": job.get("destination_collection") or job.get("destination_database") or job.get("destination_type"),
                 "source_type": job.get("source_type"),
                 "destination_type": job.get("destination_type"),
                 "records_processed": job.get("records_processed", 0),
-                "rejected_rows": int(job.get("rejected_rows") or 0) or quarantine_row_count,
+                "rejected_rows": reported_rejected,
                 "coerced_null_rows": job.get("coerced_null_rows", 0),
                 "quarantine_issue_count": len(quarantine),
                 "quarantine_row_count": quarantine_row_count,
                 "quarantine_samples": samples,
                 "progress_pct": job.get("progress_pct"),
+                "reconcile_pct": job.get("reconcile_pct"),
+                "message": job.get("message"),
                 "error": job.get("error"),
-                "created_at": str(job.get("created_at", "")),
-                "completed_at": str(job.get("completed_at", "")),
+                "created_at": job_timestamp_iso(job.get("created_at")),
+                "updated_at": job_timestamp_iso(job.get("updated_at")),
+                "completed_at": job_timestamp_iso(job.get("completed_at")),
+                "governance": job_governance(job),
+                "phase_timings": job_phase_timings(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,
@@ -1114,9 +2629,21 @@ class DataPilotTools:
             },
         )
 
-    def _get_capabilities(self) -> ToolResult:
+    def _get_capabilities(self, detail: str = "summary") -> ToolResult:
         from ...transfer.registry import get_capabilities
-        return ToolResult(name="get_transfer_capabilities", success=True, output=get_capabilities())
+
+        full = get_capabilities()
+        if str(detail or "").strip().lower() in {"full", "all", "verbose"}:
+            return ToolResult(name="get_transfer_capabilities", success=True, output=full)
+        combos = list(full.get("live_combinations") or [])
+        summary = {k: v for k, v in full.items() if k != "live_combinations"}
+        summary["detail"] = "summary"
+        summary["live_combination_count"] = len(combos)
+        summary["full_detail"] = (
+            "Pass detail=full to receive every source×destination combination. "
+            "The default summary omits that matrix."
+        )
+        return ToolResult(name="get_transfer_capabilities", success=True, output=summary)
 
     def _navigate(self, screen: str = "dashboard") -> ToolResult:
         # Alias product labels → Screen ids
@@ -1165,7 +2692,12 @@ class DataPilotTools:
             )
         return ToolResult(name="get_preflight_run", success=True, output=record)
 
-    def _remediate_validation(self, kind: str = "", run_id: str = "") -> ToolResult:
+    def _remediate_validation(
+        self,
+        kind: str = "",
+        run_id: str = "",
+        workspace_id: str = "",
+    ) -> ToolResult:
         allowed = {
             "normalize_control_chars",
             "open_bad_data_fix",
@@ -1180,6 +2712,20 @@ class DataPilotTools:
                 output=None,
                 error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
             )
+        cited = (run_id or "").strip()
+        if cited:
+            from services.preflight_run_store import get_preflight_run
+
+            if not get_preflight_run(cited):
+                return ToolResult(
+                    name="remediate_validation",
+                    success=False,
+                    output=None,
+                    error=(
+                        f"Preflight run '{cited}' not found. "
+                        "Ask the user for the pf_… ID shown on Validate."
+                    ),
+                )
         labels = {
             "normalize_control_chars": "Normalize control characters…",
             "open_bad_data_fix": "Fix bad data…",
@@ -1187,6 +2733,28 @@ class DataPilotTools:
             "review_mappings": "Open Map step to review mappings",
             "rerun_preflight": "Re-run Validate",
         }
+        requires_confirm = kind in {"open_bad_data_fix", "quarantine_and_rerun"}
+        ack_id = ""
+        if requires_confirm:
+            from .ack_ledger import get_ack_ledger
+
+            destructive = kind == "quarantine_and_rerun"
+            payload = {
+                "remediation_kind": kind,
+                "run_id": cited or None,
+                "destructive": destructive,
+                "workspace_id": str(workspace_id or "").strip() or None,
+            }
+            ack_id = get_ack_ledger().put(
+                kind="studio_remediation",
+                payload=payload,
+                preview={
+                    "remediation_kind": kind,
+                    "run_id": cited or None,
+                    "label": labels[kind],
+                    "destructive": destructive,
+                },
+            )
         return ToolResult(
             name="remediate_validation",
             success=True,
@@ -1194,9 +2762,22 @@ class DataPilotTools:
                 "action": "studio",
                 "kind": kind,
                 "label": labels[kind],
-                "run_id": run_id or None,
-                "risk": "mutate",
-                "requires_confirm": True,
+                "run_id": cited or None,
+                "risk": "mutate" if requires_confirm else "safe",
+                "requires_confirm": requires_confirm,
+                "destructive": kind == "quarantine_and_rerun",
+                "ui_only": not requires_confirm,
+                **({"ack_id": ack_id} if ack_id else {}),
+                "note": (
+                    "This stages a change for confirmation in Transfer Studio. "
+                    "Nothing is written from this chat."
+                    if requires_confirm
+                    else (
+                        "This opens the studio control. It does not change data "
+                        "until you use that screen. There is no confirm ack because "
+                        "nothing is written here."
+                    )
+                ),
             },
         )
 
@@ -1226,6 +2807,33 @@ class DataPilotTools:
         result = search_catalog(query, role, limit=20)
         return ToolResult(name="search_connectors", success=True, output=result)
 
+    def _describe_connector_transforms(self) -> ToolResult:
+        """One canonical catalog — the engine's own contract table (D14)."""
+        from services.transform_engine import (
+            TRANSFORM_SEMANTICS,
+            describe_transforms,
+        )
+
+        return ToolResult(
+            name="describe_connector_transforms",
+            success=True,
+            output={
+                "transforms": describe_transforms(),
+                "parameterized": [
+                    "replace:OLD:NEW — replace literal text",
+                    "concat:TEXT — append literal suffix",
+                    "default:TEXT — use literal when the cell is empty",
+                    "assume_timezone:ZONE — attach a timezone to naive instants",
+                ],
+                "alias_note": (
+                    "Common spellings resolve automatically (cast_integer, "
+                    "to_date, uppercase, strip, hash, normalize_email, "
+                    "date_to_iso, ...). Ambiguous argument strings are refused."
+                ),
+                "count": len(TRANSFORM_SEMANTICS),
+            },
+        )
+
     def _describe_pilot(self) -> ToolResult:
         """Local capability card — never dump raw semantic-type training shards."""
         datasets = []
@@ -1233,7 +2841,9 @@ class DataPilotTools:
         try:
             ds = self._list_datasets()
             if ds.success:
-                datasets = (ds.output or {}).get("datasets", [])[:8]
+                # The whole inventory — an 8-item cap hid 14 of 22 datasets
+                # (QA D09). Entries are name/shape summaries, cheap to return.
+                datasets = (ds.output or {}).get("datasets", [])
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
@@ -1256,9 +2866,10 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "Primary brain is Datawrap's local Pilot engine "
-                    "(NL → tools → compose). OpenAI / Anthropic / Ollama are optional "
-                    "add-ons only — not required."
+                    "First-party attention+copy GRU on this host. Warehouse "
+                    "evidence stays on-box by default — OpenAI / Anthropic / "
+                    "Ollama are explicit Hybrid/Cloud opt-in only, never the "
+                    "default, because this is a data product."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
@@ -1275,17 +2886,32 @@ class DataPilotTools:
                     "Create a saved connector from a URL or host/user/password (server ack + Confirm)",
                     "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
+                    "Create, pause, resume, or delete a pipeline schedule after you Confirm",
+                    "Delete a saved connector after you Confirm",
                     "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
+                    "Brief the live workspace (connectors, jobs, parked pipelines, contracts)",
                 ],
                 "cannot_yet": [
                     "Export a table to a downloadable file from chat "
                     "(sample the table or use Query for larger pulls)",
-                    "Create a brand-new schedule/pipeline definition from chat "
-                    "(I can list and run existing ones)",
                     "Rewrite quarantine rows in place from chat "
                     "(I open Transfer Studio Fix with your Confirm)",
-                    "Delete connectors, jobs, or data",
+                    "Delete jobs or warehouse rows from chat "
+                    "(deleting a connector or a schedule asks you to Confirm "
+                    "and does not undo a committed load)",
+                    "Run dbt Cloud or use dbt as the transfer engine "
+                    "(transform projects can export a dbt starter pack)",
+                    "Open an SSH tunnel or bastion in front of a database "
+                    "(SFTP is a file connector)",
+                    "Invent a legal no-data-loss SLA "
+                    "(bad rows are quarantined; the row ledger must close)",
+                    "Load an Airbyte connector pack or custom Airbyte CDK spec "
+                    "(transfers run Datawrap's own transfer-ready drivers)",
+                    "Invent a signed SOC 2 letter, GDPR DPA, or HIPAA BAA "
+                    "(audit export is diligence, not an attestation)",
+                    "Undo a committed transfer or roll back a load "
+                    "(resume and quarantine replay exist; warehouse restore does not)",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
                 "screens": [
@@ -1298,8 +2924,16 @@ class DataPilotTools:
                     "Run changing actions without your Confirm",
                 ],
                 "datasets": [
-                    {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
+                    {
+                        "name": d.get("name"),
+                        "columns": d.get("column_count"),
+                        "rows": d.get("row_count"),
+                        "file": d.get("file") or "",
+                        "file_type": d.get("file_type") or "",
+                        "duplicate_name": bool(d.get("duplicate_name")),
+                    }
                     for d in datasets
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
                 ],
                 "connectors": [
                     {"name": c.get("name"), "type": c.get("type")}
@@ -1314,6 +2948,7 @@ class DataPilotTools:
                     f"Transfer orders from {ex_src} to {ex_dst} as upsert",
                     "Why did job <id> fail?",
                     "Show my pipelines",
+                    "Give me a workspace briefing",
                 ],
                 "remembers": [
                     "Last connector, table, metric, and grouping in this chat",
@@ -1326,15 +2961,44 @@ class DataPilotTools:
             },
         )
 
-    def _explain_product(self, query: str = "") -> ToolResult:
-        """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
-        from ..knowledge.copilot_knowledge import (
-            CONVERSATION_TEMPLATES,
-            INTENT_PATTERNS,
-            PRODUCT_CAPABILITIES,
+    def _brief_workspace(self, workspace_id: str = "") -> ToolResult:
+        """Live sitrep — counts only from the same stores Jobs / Connectors use."""
+        from .workspace_briefing import collect_workspace_briefing
+
+        facts = collect_workspace_briefing(workspace_id=workspace_id or "")
+        attention = [str(a) for a in (facts.get("attention") or []) if a]
+        return ToolResult(
+            name="brief_workspace",
+            success=True,
+            output={
+                "facts": facts,
+                "connector_count": facts.get("connector_count", 0),
+                "job_count": facts.get("job_count", 0),
+                "schedule_count": facts.get("schedule_count", 0),
+                "contract_count": facts.get("contract_count", 0),
+                "attention": attention,
+                "empty_workspace": bool(facts.get("empty_workspace")),
+            },
         )
 
+    def _explain_product(self, query: str = "") -> ToolResult:
+        """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
+        from ..knowledge.copilot_knowledge import PRODUCT_CAPABILITIES
+
         lower = (query or "").lower().strip()
+
+        # A price or an SLA is not an engineering fact, so retrieval over the
+        # engineering corpus has nothing to say about it. Left to the term filter
+        # this refusal held only when the sentence named nothing else: "how much
+        # does a transfer cost" anchored on ``transfer`` and answered with the
+        # Transfer Studio walkthrough, which is the invented answer this product
+        # exists to refuse.
+        if asks_a_commercial_question(query):
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output=commercial_question_output(query),
+            )
 
         # Direct high-value FAQ snippets (beat generic intent templates).
         direct: list[tuple[re.Pattern[str], str, str]] = [
@@ -1409,7 +3073,13 @@ class DataPilotTools:
                 ),
             ),
             (
-                re.compile(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s+run|nine\s+gates|9\s+gates)\b"),
+                # Listing / count of the set — not a single gate id. "what is G3"
+                # used to match ``g[1-9]`` and the 9-gates blurb buried Schema
+                # contract, the card the operator named.
+                re.compile(
+                    r"\b(?:nine\s+gates|9\s+gates|quality\s+gates|"
+                    r"what\s+(?:are\s+)?(?:the\s+)?(?:preflight\s+)?gates)\b"
+                ),
                 "preflight",
                 (
                     "Preflight has **9 gates** (G1–G9). **G5 Dry run** samples coercion "
@@ -1434,143 +3104,185 @@ class DataPilotTools:
                     r"|\blocal\s+only\b"
                     r"|\b(?:don'?t|do\s+not|never)\s+use\s+(?:openai|anthropic|ollama|cloud)\b"
                     r"|\bare\s+you\s+local\b"
+                    r"|\bare\s+you\s+chat\s*gpt\b"
+                    r"|\b(?:use|using|need)\s+(?:chatgpt|openai|anthropic|a\s+third[\s-]?party)\b"
+                    r"|\b(?:our|your)\s+own\s+(?:llm|engine|model)\b"
+                    r"|\bgenerative\s+llm\b"
                 ),
                 "local_primary",
                 (
-                    "Yes. **Datawrap Pilot local engine is primary** — NL → tools → compose works with no "
-                    "OpenAI, Anthropic, or Ollama key. Optional `DATAFLOW_PILOT_ENGINE=hybrid` can polish "
-                    "narration with a cloud/local LLM, but transfers, aggregates, schema, and Confirm "
-                    "do not require them."
+                    "Datawrap Pilot's **own local engine** is the default brain — a "
+                    "first-party copy-grounded generator (NL → tools → compose) "
+                    "with no OpenAI, Anthropic, or Ollama key. This is a data product: "
+                    "schemas and job evidence stay on-box. A third-party LLM is optional "
+                    "polish: save a key in Settings → AI Models and Pilot uses it for "
+                    "wording until you remove it. It never supplies transfer, "
+                    "aggregate, or Confirm facts."
                 ),
             ),
         ]
-        for pattern, intent, answer in direct:
-            if pattern.search(lower):
-                return ToolResult(
-                    name="explain_product",
-                    success=True,
-                    output={
-                        "intent": intent,
-                        "answer": answer,
-                        "capabilities": PRODUCT_CAPABILITIES[:6],
-                        "actions": [],
-                        "source": "local_product_faq",
-                    },
-                )
-
-        scores: dict[str, int] = {}
-        for intent, keywords in INTENT_PATTERNS.items():
-            score = sum(1 for kw in keywords if kw in lower)
-            if score:
-                scores[intent] = score
-        # Boost common product how-tos
-        if re.search(r"\b(?:transfer|move|migrate|sync|copy)\b", lower):
-            scores["transfer_help"] = scores.get("transfer_help", 0) + 3
-        if re.search(r"\b(?:map|mapping|column|schema)\b", lower):
-            scores["mapping_help"] = scores.get("mapping_help", 0) + 2
-        if re.search(r"\b(?:preflight|gate|validate|validation)\b", lower):
-            scores["preflight_help"] = scores.get("preflight_help", 0) + 3
-        if re.search(r"\b(?:connector|mongodb|postgres|snowflake|connect)\b", lower):
-            scores["connector_help"] = scores.get("connector_help", 0) + 2
-        if re.search(r"\b(?:pii|gdpr|hipaa|compliance)\b", lower):
-            scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
-        if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
-            scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
-        if re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|what is|what'?s different|airbyte|fivetran)\b",
-            lower,
+        curated = next(
+            ((intent, answer) for pattern, intent, answer in direct if pattern.search(lower)),
+            None,
+        )
+        # A comparison names both sides. The curated snippets are one-sided
+        # definitions ("**Append** adds…", "**Overwrite** replaces…"), so
+        # prepending one buried "what is the difference between append and
+        # overwrite" under the append-only paragraph.
+        if curated and (
+            "difference" in lower
+            or ("append" in lower and "overwrite" in lower)
+            or " vs " in lower
+            or " versus " in lower
+            or "same as" in lower
+            or ("upsert" in lower and "merge" in lower)
+            or "merge-on-read" in lower
+            or "merge on read" in lower
         ):
-            scores["product_help"] = scores.get("product_help", 0) + 3
-        if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
-            scores["analytics_help"] = scores.get("analytics_help", 0) + 2
+            curated = None
+        # A named gate (G3) or a listing the docs already answer must not sit
+        # under the uncited 9-gates blurb. The cited Help / generated cards
+        # are the lead; the FAQ is only a fallback when retrieval cannot.
+        if curated and curated[0] == "preflight" and (
+            re.search(r"\bg[1-9]\b|\bgate\s*[1-9]\b", lower)
+        ):
+            curated = None
 
-        intent = max(scores, key=scores.get) if scores else "greeting"
-        matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
-        if not matched:
-            matched = CONVERSATION_TEMPLATES[0]
-        actions = list(matched.get("actions") or [])
+        # The shipped operator documentation plus the passages generated from the
+        # product's own enforcing modules, retrieved hybrid and judged by the
+        # evidence policy. Documentation leads even when a curated definition
+        # matched: the curated prose carries no citation, so answering from it
+        # alone gave the operator a confident paragraph they could not trace to
+        # any page.
+        retrieved = retrieve_product_answer(query, limit=4)
+        if curated and curated[0] == "preflight" and retrieved.answerable:
+            curated = None
+        # ``\bcdc\b`` also matches "what happens to a delete in CDC" and
+        # "hand off from snapshot to the CDC stream". The one-sentence mode
+        # definition then buried the cited handoff / tombstone cards.
+        # Only the CDC snippet is suppressed here — upsert/append still
+        # lead with their curated key/insert definitions.
+        if curated and curated[0] == "sync_mode" and retrieved.answerable:
+            if re.search(r"\bcdc\b", lower) and not re.search(
+                r"^\s*what\s+is\s+cdc\b", lower
+            ):
+                curated = None
+        if curated and curated[0] == "local_primary" and retrieved.answerable:
+            curated = None
+        if retrieved.answerable:
+            documented = compose_product_answer(retrieved)
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": curated[0] if curated else "documentation",
+                    # Curated regex is the lead definition; Help citations follow
+                    # so every sentence sits next to a page the operator can open.
+                    "answer": f"{curated[1]}\n\n{documented}" if curated else documented,
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    # No navigate action: the citations below are the control that
+                    # opens the article, and a second one only competes with them.
+                    "actions": [],
+                    "sources": cited_sources(retrieved, documented),
+                    "grounded": True,
+                    "source": "product_documentation",
+                    # A partial answer is reported as partial so the caller can
+                    # tell an answer with a documented gap from a complete one.
+                    "coverage": retrieved.verdict.outcome,
+                    "evidence": retrieved.verdict.as_dict(),
+                },
+            )
+
+        if curated:
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": curated[0],
+                    "answer": curated[1],
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [],
+                    "sources": [],
+                    "grounded": False,
+                    "source": "local_product_faq",
+                },
+            )
+
+        # No Help hit and no explicit FAQ regex: refuse. Keyword-bucket
+        # CONVERSATION_TEMPLATES are not evidence.
         return ToolResult(
             name="explain_product",
             success=True,
-            output={
-                "intent": intent,
-                "answer": matched.get("assistant") or "",
-                "capabilities": PRODUCT_CAPABILITIES[:6],
-                "actions": actions,
-                "source": "local_product_faq",
-            },
+            output=unsupported_question_output(query),
         )
 
     def _search_knowledge(self, query: str = "") -> ToolResult:
         if not query.strip():
             return ToolResult(name="search_knowledge", success=False, output=None, error="query required")
-        try:
-            from ..rag.pipeline import get_rag_pipeline
-            rag = get_rag_pipeline()
-            rag.ingestion.ensure_knowledge_loaded()
-            result = rag.retriever.retrieve(query, n_results=8)
-            hits = []
-            for d in result.documents:
-                text = (d.text or "").strip()
-                score = float(d.score or 0)
-                # Drop low-score noise and raw ontology shards that read like debug dumps.
-                if score < 0.28:
-                    continue
-                meta_type = str(d.metadata.get("type") or "").lower()
-                # Prefer real product/docs hits over synthetic catalog training docs.
-                if meta_type in {
-                    "synthetic_catalog",
-                    "catalog_schema",
-                    "generated_qna",
-                    "training",
-                    "ontology",
-                    "embedding_shard",
-                } and score < 0.62:
-                    continue
-                if "650+" in text or "620+" in text:
-                    # Catalog marketing counts are not transfer-ready evidence.
-                    continue
-                if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
-                    continue
-                # Synonym / industry catalog dumps are never answers to "get users
-                # from postgres" — only keep them when the operator asked about
-                # synonyms / PII / semantic types explicitly.
-                qlow = query.lower()
-                wants_ontology = any(
-                    w in qlow
-                    for w in ("synonym", "semantic type", "pii", "column pattern", "canonical")
-                )
-                if _is_noise_knowledge_hit(text) and not wants_ontology:
-                    continue
-                hits.append({
-                    "text": text[:600],
-                    "score": round(score, 3),
-                    "type": d.metadata.get("type", ""),
-                    "summary": _summarize_knowledge_hit(text),
-                })
-                if len(hits) >= 4:
-                    break
+
+        # Embedding search always returns its nearest neighbours, so a question about
+        # nothing this product does still came back with three confident-looking
+        # fragments ("how do I cook rice" → paste a job id, your dataset has 11
+        # columns). If the question names no documented subject, refuse before
+        # retrieval instead of narrating whatever the index happened to be closest to.
+        if asks_a_commercial_question(query):
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output=commercial_question_output(query),
+            )
+        if not is_answerable_subject(query):
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output=unsupported_question_output(query),
+            )
+
+        # Shipped operator documentation answers first, with citations. Embedding
+        # similarity alone returned readable-looking fragments the operator could
+        # not trace back to any page, so a documented answer looked like a guess.
+        retrieved = retrieve_product_answer(query, limit=4)
+        if retrieved.answerable:
+            spoken = compose_product_answer(retrieved)
             return ToolResult(
                 name="search_knowledge",
                 success=True,
                 output={
                     "query": query,
-                    "hits": hits,
-                    "count": len(hits),
-                    "empty": len(hits) == 0,
-                    "hint": (
-                        None
-                        if hits
-                        else (
-                            "No grounded product knowledge matched. Ask about a saved "
-                            "connector, table, job ID, or pf_ validation run — or say "
-                            "what can you do."
-                        )
-                    ),
+                    "answer": spoken,
+                    "hits": [
+                        {
+                            "text": hit.chunk.text[:600],
+                            "score": round(hit.score, 3),
+                            "type": "product_doc",
+                            "summary": hit.chunk.citation,
+                        }
+                        for hit in retrieved.hits
+                    ],
+                    "count": len(retrieved.hits),
+                    "empty": False,
+                    "sources": cited_sources(retrieved, spoken),
+                    "grounded": True,
+                    "source": "product_documentation",
+                    "coverage": retrieved.verdict.outcome,
+                    "evidence": retrieved.verdict.as_dict(),
                 },
             )
-        except Exception as e:
-            return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
+
+        # On-vocabulary but no citable Help page: refuse. Embedding nearest
+        # neighbours are not an answer — they narrated ontology shards as
+        # product knowledge (subscriber_id → telecom synonym dump).
+        refused = unsupported_question_output(query)
+        refused["hint"] = (
+            "No grounded product knowledge matched. Ask about a saved "
+            "connector, table, job ID, or pf_ validation run — or say "
+            "what can you do."
+        )
+        return ToolResult(
+            name="search_knowledge",
+            success=True,
+            output=refused,
+        )
 
     def _plan_transfer_route(
         self,
@@ -1580,6 +3292,16 @@ class DataPilotTools:
         table: str = "",
         dest_table: str = "",
         sync_mode: str = "",
+        upsert_key: str = "",
+        primary_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
+        leftover_nl: str = "",
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        validation_mode: str = "",
+        schema_policy: str = "",
     ) -> ToolResult:
         """Route guidance. Real plan when connectors resolve, honest sketch otherwise.
 
@@ -1587,7 +3309,24 @@ class DataPilotTools:
         gate list whose IDs did not exist in ``PREFLIGHT_GATES``. Now the named
         gates come from the registry, and naming a table gets the operator the
         engine's actual mapping and gate results instead of a guess.
+
+        Bind / validation / schema posture must survive the hop into
+        ``plan_transfer``. Unbound still leaves enforce unset. A generic sketch
+        names the requested posture but is not a plan for the operator's data.
         """
+        bind = resolve_transfer_bind_kwargs(
+            leftover_nl,
+            source,
+            destination,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            validation_mode=validation_mode,
+            schema_policy=schema_policy,
+        )
+        source_clean, _ = parse_transfer_bind_and_rules(source)
+        dest_clean, _ = parse_transfer_bind_and_rules(destination)
+        source = (source_clean or source or "").strip()
+        destination = (dest_clean or destination or "").strip()
         if source and destination and table:
             from .transfer_tools import plan_transfer
 
@@ -1597,16 +3336,48 @@ class DataPilotTools:
                 dest_connector_name=destination,
                 dest_table=dest_table or table,
                 sync_mode=sync_mode or workload,
+                upsert_key=upsert_key or primary_key,
+                primary_key=primary_key,
+                cursor_column=cursor_column,
+                cursor_semantics=cursor_semantics,
+                cursor_lookback_days=cursor_lookback_days,
+                **bind,
             )
             if planned.success:
                 return planned
 
-        try:
-            from preflight.gates import PREFLIGHT_GATES
+        # Engine registry first; the rules table also carries non-gate entries
+        # (proof_bundle, schema_drift) a run never emits.
+        gate_ids = self._engine_gate_ids()
+        if not gate_ids:
+            try:
+                from services.preflight_rules import PREFLIGHT_GATE_RULES
 
-            gate_ids = [gid.value if hasattr(gid, "value") else str(gid) for gid, _ in PREFLIGHT_GATES]
-        except Exception:
-            gate_ids = []
+                gate_ids = [
+                    str(gid) for gid in PREFLIGHT_GATE_RULES if str(gid).startswith("g")
+                ]
+            except ImportError:
+                gate_ids = []
+
+        from src.transfer.connector_capabilities import source_only_destination_refusal
+
+        # D139: the generic sketch listed every gate for a destination that has
+        # no writer. Name the saved connector's engine, or the engine itself.
+        dest_type = destination
+        try:
+            from services.connector_store import list_connectors
+
+            for saved in list_connectors():
+                if str(getattr(saved, "name", "") or "").strip().casefold() == destination.casefold():
+                    dest_type = str(getattr(saved, "type", "") or destination)
+                    break
+        except Exception:  # noqa: BLE001 - the store is a hint here, not a gate
+            pass
+        not_a_destination = source_only_destination_refusal(dest_type)
+        if not_a_destination:
+            return ToolResult(
+                name="plan_transfer_route", success=False, output=None, error=not_a_destination
+            )
 
         from .example_phrases import example_connector_name, example_dest_connector_name
 
@@ -1615,10 +3386,11 @@ class DataPilotTools:
             "source": source or "source not specified",
             "destination": destination or "destination not specified",
             "required_gates": gate_ids,
+            **bind,
             "note": (
-                "This is the standard gate sequence, not a plan for your data. "
                 "Name two saved connectors and a table and I will introspect both "
-                "ends, map the columns and run the real gates."
+                "ends, map the columns and run the real gates. Until then this is "
+                "the standard gate sequence, not a plan for your data."
             ),
             "next": (
                 f'Try: "plan a transfer of orders from {example_connector_name()} '
@@ -1655,87 +3427,325 @@ class DataPilotTools:
         has_cursor: bool = False,
         has_primary_key: bool = False,
         needs_history: bool = False,
+        source_read_mode: str = "",
+        row_count: int = 0,
     ) -> ToolResult:
+        for label, value in (
+            ("has_cursor", has_cursor),
+            ("has_primary_key", has_primary_key),
+            ("needs_history", needs_history),
+        ):
+            if not isinstance(value, bool):
+                return ToolResult(
+                    name="recommend_sync_mode",
+                    success=False,
+                    output=None,
+                    error=f"{label} must be a boolean.",
+                )
+        if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+            return ToolResult(
+                name="recommend_sync_mode",
+                success=False,
+                output=None,
+                error="row_count must be an integer that is zero or greater.",
+            )
+        read_mode = (source_read_mode or "").strip().lower()
+        if read_mode not in {"", "table", "query", "procedure"}:
+            return ToolResult(
+                name="recommend_sync_mode",
+                success=False,
+                output=None,
+                error="source_read_mode must be table, query, or procedure.",
+            )
         w = workload.lower()
-        if "cdc" in w:
-            mode = "Incremental CDC"
-            reason = "Source changes should be read from a log stream and resumed from cursor state."
+        callable_src = read_mode in {"procedure", "query"}
+        mentions_delete = bool(re.search(r"\bdelet", w))
+        mentions_update = bool(re.search(r"\bupdat", w))
+        near_realtime = any(
+            token in w
+            for token in (
+                "near-real-time",
+                "near real-time",
+                "near realtime",
+                "real-time",
+                "realtime",
+                "real time",
+            )
+        )
+        # S04: Lookup tables (small dimension tables without PK/cursor) should use
+        # Full Refresh Overwrite, not Full Refresh Append. Append is not rerun-safe
+        # for static reference data - it would accumulate duplicates.
+        is_lookup_table = (
+            not has_cursor
+            and not has_primary_key
+            and row_count > 0
+            and row_count < 10000  # Heuristic: lookup tables are typically small
+            and ("lookup" in w or "reference" in w or "dimension" in w or "config" in w)
+        )
+        if is_lookup_table:
+            mode = "full_refresh_overwrite"
+            reason = (
+                "Lookup/reference tables without a cursor or primary key should use "
+                "Full Refresh Overwrite. Full Refresh Append would accumulate duplicates "
+                "on each run because there is no cursor to detect new rows or key to dedupe."
+            )
+        # A procedure or query is a result set, not a log. CDC / SCD2 / mirror
+        # cannot run on it. Append is the non-destructive refusal unless the
+        # workload says rows disappear: appending that snapshot duplicates the
+        # full result and leaves deleted rows behind.
+        if callable_src and mentions_delete:
+            mode = "full_refresh_overwrite"
+            reason = (
+                "A query or procedure returns the current result, not a change log. "
+                "Deletes in that result are rows that are no longer present, so the "
+                "destination has to be replaced. Append would copy the full result "
+                "again and leave the deleted rows in place."
+            )
+        elif callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
+            mode = "full_refresh_append"
+            reason = (
+                "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
+                "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
+                "or incremental only when the procedure is cursor-stable."
+            )
+        elif "cdc" in w or (
+            near_realtime and has_primary_key and (mentions_delete or mentions_update)
+        ):
+            mode = "cdc_incremental"
+            reason = (
+                "Updates and deletes at near-real-time have to be read from the "
+                "log. Incremental append inserts new rows only, so a changed row "
+                "is duplicated and a deleted row stays. CDC here is at-least-once "
+                "upsert and needs log access plus the primary key."
+            )
         elif "upsert" in w or "merge" in w or (has_primary_key and "incremental" in w):
-            mode = "Incremental Upsert"
+            mode = "incremental_deduped"
             reason = (
                 "Primary key (or upsert/merge wording) lets destination rows be "
                 "updated in place without a full reload."
             )
         elif has_cursor and has_primary_key and needs_history:
-            mode = "Incremental Append + Deduped"
-            reason = "Cursor and key allow efficient updates while preserving change history."
+            # D37: history means every changed row keeps a version — upsert
+            # (incremental_deduped) collapses to one row per key and destroys
+            # it. SCD2 is the history-preserving mode.
+            mode = "scd2"
+            reason = (
+                "Change history needs every version of a row, not one row per "
+                "key. Incremental upsert would overwrite the old version and the "
+                "history is lost. SCD-2 closes the current version and inserts "
+                "the new one, keyed by the primary key."
+            )
+        elif has_primary_key and mentions_update:
+            mode = "incremental_deduped"
+            reason = (
+                "The workload updates existing rows and a primary key is present. "
+                "Incremental append would insert a second copy of each changed row. "
+                "Incremental upsert updates the destination row in place."
+            )
+        elif mentions_delete and has_primary_key:
+            mode = "full_refresh_mirror"
+            reason = (
+                "Deletes have to remove the destination row. Incremental append "
+                "and upsert leave it. Mirror rewrites the key and deletes "
+                "destination rows the source no longer has. It is a full read, "
+                "not a log capture."
+            )
+        elif mentions_delete or "snapshot" in w or "full" in w or "overwrite" in w:
+            mode = "full_refresh_overwrite"
+            reason = (
+                "Snapshot workloads should replace the destination with the latest "
+                "source state. Append would keep rows the source has already deleted."
+                if mentions_delete
+                else "Snapshot workloads should replace the destination with the latest source state."
+            )
         elif has_cursor:
-            mode = "Incremental Append"
+            mode = "incremental_append"
             reason = "Cursor allows new records to be read without a full scan."
-        elif "snapshot" in w or "full" in w or "overwrite" in w:
-            mode = "Full Refresh Overwrite"
-            reason = "Snapshot workloads should replace the destination with the latest source state."
         elif has_primary_key:
-            mode = "Incremental Upsert"
+            mode = "incremental_deduped"
             reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
-            mode = "Full Refresh Append"
-            reason = "Use append until cursor/key metadata is confirmed."
+            # S04: No cursor and no key - recommend Overwrite for small tables to avoid
+            # duplicate accumulation on reruns. This is safer than Append for static data.
+            if row_count > 0 and row_count < 10000:
+                mode = "full_refresh_overwrite"
+                reason = (
+                    "Small tables without cursor or key should use Full Refresh Overwrite "
+                    "to avoid duplicate accumulation on reruns. Append would keep adding "
+                    "the same rows on each run."
+                )
+            else:
+                mode = "full_refresh_append"
+                reason = "Use append until cursor/key metadata is confirmed."
+        history_deduped = (
+            mode == "incremental_deduped"
+            and has_cursor
+            and needs_history
+            and "upsert" not in w
+            and "merge" not in w
+        )
+        labels = {
+            "full_refresh_overwrite": "Full Refresh Overwrite",
+            "full_refresh_append": "Full Refresh Append",
+            "incremental_append": "Incremental Append",
+            "incremental_deduped": (
+                "Incremental Append + Deduped" if history_deduped else "Incremental Upsert"
+            ),
+            "cdc_incremental": "Incremental CDC",
+            "full_refresh_mirror": "Mirror",
+            "scd2": "SCD-2 Versioned History",
+        }
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,
+            "label": labels.get(mode, mode),
             "reason": reason,
             "requires": {
-                "cursor": "Append" in mode or "CDC" in mode,
-                "primary_key": "Upsert" in mode or "Deduped" in mode,
-                "cdc_log_access": "CDC" in mode,
+                # A cursor is required only for a mode that advances one.
+                # Upsert (incremental_deduped without history) does not.
+                "cursor": mode in {"incremental_append", "cdc_incremental"} or history_deduped,
+                "primary_key": mode in {
+                    "incremental_deduped",
+                    "cdc_incremental",
+                    "full_refresh_mirror",
+                    "scd2",
+                },
+                "cdc_log_access": mode == "cdc_incremental",
             },
         })
 
-    def _profile_quality_rules(self, dataset_name: str = "") -> ToolResult:
-        schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
-        columns = schema.columns if schema else []
-        pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
-        gate_ids: list[str] = []
+    @staticmethod
+    def _engine_gate_ids() -> list[str]:
+        """Gate ids from the engine registry; [] when the package is absent."""
         try:
             from preflight.gates import PREFLIGHT_GATES
+        except ImportError:
+            return []
+        return [
+            gid.value if hasattr(gid, "value") else str(gid)
+            for gid, _ in PREFLIGHT_GATES
+        ]
 
-            gate_ids = [
-                gid.value if hasattr(gid, "value") else str(gid)
-                for gid, _ in PREFLIGHT_GATES
+    def _profile_quality_rules(self, dataset_name: str = "") -> ToolResult:
+        """Profile one named upload. A miss or two same-named files is not a profile.
+
+        The six gate sentences used to come back for every string, including a
+        name that is not a dataset, and PII was a four-token substring that
+        missed ``ACCT_NO``. Duplicate stems (CSV and TSV both called
+        ``sample_payments``) were silently reduced to the wider file.
+        """
+        from services.dataset_resolve import exact_datasets
+
+        gate_ids = self._engine_gate_ids()
+        name = (dataset_name or "").strip()
+        honesty = (
+            "No invented numeric parse-success floor — cite preflight_gates / "
+            "evidence pack measurements, not marketing thresholds."
+        )
+        empty_steps = [
+            "Upload a file in Transfer or name a dataset to analyze",
+            "Or: sample <table> on <connector>",
+            "Ask what quality gates do you have for the G1–G9 list",
+        ]
+
+        def _miss(message: str, *, candidates: list[dict] | None = None) -> ToolResult:
+            return ToolResult(
+                name="profile_quality_rules",
+                success=True,
+                output={
+                    "dataset": name,
+                    "rules": [],
+                    "honesty": honesty,
+                    "message": message,
+                    "preflight_gates": gate_ids,
+                    "pii_candidates": [],
+                    "column_count": 0,
+                    "has_dataset": False,
+                    "ambiguous": bool(candidates),
+                    "candidates": candidates or [],
+                    "next_steps": empty_steps,
+                },
+            )
+
+        if not name:
+            return _miss("Name a dataset to profile. No file was measured.")
+
+        schemas = []
+        feeder = getattr(self.analyst, "feeder", None)
+        if feeder is not None and hasattr(feeder, "feed_all"):
+            schemas = list(feeder.feed_all() or [])
+        matches = exact_datasets(schemas, name)
+        shapes = {
+            (
+                (getattr(s, "file_type", "") or "").lower(),
+                tuple(getattr(s, "columns", []) or []),
+            )
+            for s in matches
+        }
+        if len(matches) > 1 and len(shapes) > 1:
+            candidates = [
+                {
+                    "name": getattr(s, "name", ""),
+                    "file_type": getattr(s, "file_type", "") or "",
+                    "column_count": len(getattr(s, "columns", []) or []),
+                    "columns": list(getattr(s, "columns", []) or []),
+                    "row_count": int(getattr(s, "row_count", 0) or 0),
+                }
+                for s in matches
             ]
-        except Exception:
-            gate_ids = []
-        return ToolResult(name="profile_quality_rules", success=True, output={
-            "dataset": schema.name if schema else dataset_name or "active dataset",
-            "rules": [
-                "declared types validated by G3 schema contract (sample-aware when rows exist)",
-                "null rate checked against inferred required / NOT NULL fields",
-                "primary key uniqueness when candidate key exists",
-                "PII columns tagged before destination write",
-                "row rejection quarantine enabled for lossy coercions",
-                "post-write row count and checksum reconciliation (G8/G9)",
-            ],
-            "honesty": (
-                "No invented numeric parse-success floor — cite preflight_gates / "
-                "evidence pack measurements, not marketing thresholds."
+            listed = ", ".join(
+                f"{c['name']}.{c['file_type'] or 'file'} "
+                f"({c['column_count']} columns, {c['row_count']} rows)"
+                for c in candidates
+            )
+            return _miss(
+                f"More than one dataset is named {name}. Name the file: {listed}.",
+                candidates=candidates,
+            )
+
+        schema = self.analyst.resolve_dataset(name)
+        columns = list(schema.columns) if schema else []
+        if not schema or not columns:
+            return _miss(
+                f"Dataset {name!r} was not found. No quality rules were measured for it."
+            )
+
+        insight = self.analyst.analyze_schema(schema)
+        pii_candidates = list(getattr(insight, "pii_columns", []) or [])
+        rules = [
+            (
+                f"Measured {len(columns)} columns"
+                + (f" and {int(schema.row_count):,} rows" if schema.row_count else "")
+                + f" on {schema.name}"
+                + (f" ({schema.file_type})" if getattr(schema, "file_type", "") else "")
             ),
+            (
+                "PII columns tagged before destination write: "
+                + ", ".join(pii_candidates)
+                if pii_candidates
+                else "Pattern engine found no PII columns on this dataset"
+            ),
+            "null rate checked against inferred required / NOT NULL fields",
+            "primary key uniqueness when candidate key exists",
+            "row rejection quarantine enabled for lossy coercions",
+            "post-write row count and checksum reconciliation (G8/G9)",
+        ]
+        return ToolResult(name="profile_quality_rules", success=True, output={
+            "dataset": schema.name,
+            "file_type": getattr(schema, "file_type", "") or "",
+            "rules": rules,
+            "honesty": honesty,
+            "message": "",
             "preflight_gates": gate_ids,
             "pii_candidates": pii_candidates,
             "column_count": len(columns),
-            "has_dataset": bool(schema and columns),
-            "next_steps": (
-                [
-                    "Sample a live table to profile real null/type rates",
-                    "Say fix bad data to open Transfer Studio remediation (Confirm)",
-                    "Run Validate (9 gates) before Execute",
-                ]
-                if schema and columns
-                else [
-                    "Upload a file in Transfer or name a dataset to analyze",
-                    "Or: sample <table> on <connector>",
-                    "Ask what quality gates do you have for the G1–G9 list",
-                ]
-            ),
+            "has_dataset": True,
+            "ambiguous": False,
+            "candidates": [],
+            "next_steps": [
+                "Sample a live table to profile real null/type rates",
+                "Say fix bad data to open Transfer Studio remediation (Confirm)",
+                "Run Validate (9 gates) before Execute",
+            ],
         })
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):
@@ -1745,31 +3755,40 @@ class DataPilotTools:
         sid = (schedule_id or "").strip()
         if sid:
             sched = get_schedule(sid)
-            if sched:
+            if sched and bound_allows(sched.workspace_id):
                 return sched, None
         needle = (name or "").strip().lower()
         if not needle:
             return None, None
-        exact = []
-        fuzzy = []
-        for s in list_schedules():
-            label = (s.name or "").strip().lower()
-            if label == needle:
-                exact.append(s)
-            elif needle in label or label in needle:
-                fuzzy.append(s)
-        if exact:
+        # Full name only. A substring used to run or delete a different
+        # pipeline, and two schedules were allowed to share a name.
+        exact = [
+            s for s in list_schedules(current_workspace_filter())
+            if (s.name or "").strip().lower() == needle
+        ]
+        if len(exact) == 1:
             return exact[0], None
-        if len(fuzzy) == 1:
-            return fuzzy[0], None
-        if len(fuzzy) > 1:
-            names = [s.name for s in fuzzy[:5] if s.name]
-            listed = ", ".join(f"**{n}**" for n in names)
-            return None, f"Which pipeline did you mean? {listed}"
+        if len(exact) > 1:
+            shown = [
+                f"**{s.name}** ({s.id})" for s in exact[:5] if s.name
+            ]
+            listed = ", ".join(shown)
+            return None, (
+                f"“{name.strip()}” matches {len(exact)} pipelines. "
+                f"Pass the schedule id. {listed}"
+            )
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        return {
+        from services.schedule_run_lifecycle import derive_status, recent_runs
+        from services.schedule_store import (
+            has_open_approval,
+            schedule_bind_summary,
+            visible_next_run_at,
+        )
+
+        derived = derive_status(s)
+        row = {
             "id": s.id,
             "name": s.name,
             "enabled": s.enabled,
@@ -1778,16 +3797,51 @@ class DataPilotTools:
             "timezone": s.timezone,
             "source_table": s.source_table,
             "dest_table": s.dest_table,
-            "next_run_at": s.next_run_at,
+            "sync_mode": getattr(s, "sync_mode", "") or "",
+            "next_run_at": visible_next_run_at(s),
             "last_run_at": s.last_run_at,
-            "last_status": s.last_status,
+            # Derived from the latest run record, with its reason (QA round 5).
+            "last_status": derived["last_status"],
+            "last_status_reason": derived["last_status_reason"],
+            "current_run": derived["current_run"],
+            "last_skip": derived["last_skip"],
+            "recent_runs": recent_runs(s, 5),
             "run_count": s.run_count,
+            "missed_window_count": int(getattr(s, "missed_window_count", 0) or 0),
+            "last_missed_windows": int(getattr(s, "last_missed_windows", 0) or 0),
+            # One overdue slot fires after resume. Extra missed windows are
+            # counted on the schedule and are not replayed (QA R2-115).
+            "catch_up_policy": (
+                "Resume keeps a past next_run_at so the beat fires one catch-up. "
+                "Further missed windows are counted and not replayed."
+            ),
         }
+        validation_mode = str(getattr(s, "validation_mode", "") or "").strip()
+        schema_policy = str(getattr(s, "schema_policy", "") or "").strip()
+        if validation_mode:
+            row["validation_mode"] = validation_mode
+        if schema_policy:
+            row["schema_policy"] = schema_policy
+        row.update(schedule_bind_summary(s))
+        if has_open_approval(s):
+            # Parked: due_schedules skips it until a human decides, so
+            # next_run_at stops advancing. Say why instead of looking stuck.
+            req = s.approval_request
+            row.update(
+                needs_approval=True,
+                approval_id=str(req.get("id") or ""),
+                approval_code=str(req.get("code") or ""),
+                approval_finding=str(req.get("finding") or ""),
+                approval_corrective_action=str(req.get("corrective_action") or ""),
+                approvable=bool(req.get("approvable")),
+            )
+        return row
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
         from services.schedule_store import list_schedules
 
-        rows = [self._schedule_summary(s) for s in list_schedules()[: max(1, min(int(limit or 20), 100))]]
+        visible = list_schedules(current_workspace_filter())
+        rows = [self._schedule_summary(s) for s in visible[: max(1, min(int(limit or 20), 100))]]
         return ToolResult(name="list_schedules", success=True, output={"schedules": rows, "count": len(rows)})
 
     def _get_schedule(self, schedule_id: str = "", name: str = "") -> ToolResult:
@@ -1815,7 +3869,15 @@ class DataPilotTools:
                 error="Which pipeline should I run? Give a schedule name or id.",
             )
         from .ack_ledger import get_ack_ledger
+        from services.schedule_store import assert_schedule_run_allowed
 
+        try:
+            bind = assert_schedule_run_allowed(sched)
+        except ValueError as exc:
+            return ToolResult(name="run_schedule_now", success=False, output=None, error=str(exc))
+
+        sync_mode = str(getattr(sched, "sync_mode", "") or "")
+        overwrite = sync_mode == "full_refresh_overwrite"
         preview = {
             "schedule_id": sched.id,
             "name": sched.name,
@@ -1823,8 +3885,15 @@ class DataPilotTools:
             "dest_connector_id": getattr(sched, "dest_connector_id", "") or "",
             "source_table": getattr(sched, "source_table", "") or "",
             "dest_table": getattr(sched, "dest_table", "") or "",
-            "sync_mode": getattr(sched, "sync_mode", "") or "",
+            "sync_mode": sync_mode,
+            **bind,
         }
+        validation_mode = str(getattr(sched, "validation_mode", "") or "").strip()
+        schema_policy = str(getattr(sched, "schema_policy", "") or "").strip()
+        if validation_mode:
+            preview["validation_mode"] = validation_mode
+        if schema_policy:
+            preview["schema_policy"] = schema_policy
         ack_id = get_ack_ledger().put(
             kind="run_schedule",
             payload={"schedule_id": sched.id, "name": sched.name},
@@ -1839,17 +3908,184 @@ class DataPilotTools:
                 "name": sched.name,
                 "label": f"Run pipeline “{sched.name}” now",
                 "risk": "mutate",
+                "destructive": overwrite,
                 "requires_confirm": True,
                 "ack_id": ack_id,
                 "preview": preview,
             },
         )
 
-    def _list_contracts(self, limit: int = 50) -> ToolResult:
-        from services.contract_store import get_contract_store
+    # Lifecycle operations: staged acks, executed by the REST handler on Confirm.
+    def _cancel_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
 
-        store = get_contract_store()
-        contracts = store.list_contracts(limit=max(1, min(int(limit or 50), 200)))
+        return _job_tool("cancel_job", job_id, selector)
+
+    def _retry_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("retry_job", job_id, selector)
+
+    def _rerun_job(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        force: bool = False,
+        risk_acceptance: dict | None = None,
+    ) -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool(
+            "rerun_job",
+            job_id,
+            selector,
+            force=bool(force),
+            risk_acceptance=risk_acceptance,
+        )
+
+    def _resume_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("resume_job", job_id, selector)
+
+    def _replay_quarantine(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        transform_overrides: dict | None = None,
+        rows: list | None = None,
+    ) -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool(
+            "replay_quarantine",
+            job_id,
+            selector,
+            transform_overrides=transform_overrides,
+            rows=rows,
+        )
+
+    def _repair_cdc_drift(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        key_ids: list[str] | None = None,
+    ) -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool(
+            "repair_cdc_drift",
+            job_id,
+            selector,
+            key_ids=key_ids or [],
+        )
+
+    def _clear_cursor_resnapshot(
+        self, cursor_key: str = "", reason: str = ""
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_clear_cursor_resnapshot
+
+        return stage_clear_cursor_resnapshot(cursor_key, reason)
+
+    def _rebaseline_transfer(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        table: str = "",
+        reason: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_rebaseline_transfer
+
+        return stage_rebaseline_transfer(connector_id, name, table, reason)
+
+    def _prepare_cdc_source(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        restart: bool = True,
+        enable_gtid: bool = True,
+    ) -> ToolResult:
+        from .lifecycle_tools import prepare_cdc_source
+
+        return prepare_cdc_source(connector_id, name, restart, enable_gtid)
+
+    def _test_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import test_connector
+
+        return test_connector(connector_id, name)
+
+    def _delete_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import delete_connector
+
+        return delete_connector(connector_id, name)
+
+    def _update_connector(  # nosec B107
+        self,
+        connector_id: str = "",
+        name: str = "",
+        host: str = "",
+        port: int = 0,
+        database: str = "",
+        username: str = "",
+        password: str = "",
+        connection_string: str = "",
+        schema: str = "",
+        ssl: bool | None = None,
+        new_name: str = "",
+        host_key: str = "",
+        known_hosts: str = "",
+        host_key_policy: str = "",
+        trust_server_certificate: bool | None = None,
+        warehouse: str = "",
+        auth_role: str = "",
+        auth_mode: str = "",
+        private_key: str | None = None,
+        private_key_passphrase: str | None = None,
+        secret_sha256: str = "",
+        secret_length: int = 0,
+        secret_field: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_connector
+
+        return update_connector(
+            connector_id, name, host=host, port=port, database=database,
+            username=username, password=password, connection_string=connection_string,
+            schema=schema, ssl=ssl, new_name=new_name, host_key=host_key,
+            known_hosts=known_hosts, host_key_policy=host_key_policy,
+            trust_server_certificate=trust_server_certificate,
+            warehouse=warehouse, auth_role=auth_role, auth_mode=auth_mode,
+            private_key=private_key, private_key_passphrase=private_key_passphrase,
+            secret_sha256=secret_sha256, secret_length=secret_length,
+            secret_field=secret_field,
+        )
+
+    def _set_schedule_enabled(
+        self, schedule_id: str = "", name: str = "", enabled: bool = True
+    ) -> ToolResult:
+        from .lifecycle_tools import set_schedule_enabled
+
+        return set_schedule_enabled(self._resolve_schedule, schedule_id, name, enabled)
+
+    def _delete_schedule(self, schedule_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import delete_schedule
+
+        return delete_schedule(self._resolve_schedule, schedule_id, name)
+
+    def _update_schedule(
+        self,
+        schedule_id: str = "",
+        name: str = "",
+        cadence: str = "",
+        new_name: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_schedule
+
+        return update_schedule(self._resolve_schedule, schedule_id, name, cadence, new_name)
+
+    def _list_contracts(self, limit: int = 50) -> ToolResult:
+        from services.contract_store import visible_contracts
+
+        contracts, census = visible_contracts(limit=max(1, min(int(limit or 50), 200)))
         rows = []
         for c in contracts:
             if hasattr(c, "to_dict"):
@@ -1862,9 +4098,23 @@ class DataPilotTools:
                 "id": d.get("id") or d.get("contract_id"),
                 "name": d.get("name") or d.get("title") or d.get("id"),
                 "status": d.get("status"),
+                "version": d.get("version"),
+                # Same "Signed v3" the Contracts page shows (contract_read_model).
+                "status_label": _contract_status_label(d),
                 "updated_at": str(d.get("updated_at") or ""),
             })
-        return ToolResult(name="list_contracts", success=True, output={"contracts": rows, "count": len(rows)})
+        total = sum(int(n) for n in census.values()) if census else len(rows)
+        return ToolResult(
+            name="list_contracts",
+            success=True,
+            output={
+                "contracts": rows,
+                "count": len(rows),
+                "total": total,
+                "truncated": total > len(rows),
+                "by_status": census,
+            },
+        )
 
     def _open_job(self, job_id: str = "") -> ToolResult:
         jid = (job_id or "").strip()
@@ -1927,6 +4177,32 @@ class DataPilotTools:
         from .schema_tools import list_connector_objects
 
         return list_connector_objects(connector_id, connector_name, limit)
+
+    def _rank_connector_tables(
+        self,
+        connector_id: str = "",
+        connector_name: str = "",
+        order: str = "desc",
+        limit: int = 10,
+    ) -> ToolResult:
+        from .aggregate_tools import rank_connector_tables
+
+        return rank_connector_tables(
+            connector_id=connector_id,
+            connector_name=connector_name,
+            order=order,
+            limit=limit,
+        )
+
+    def _compare_connectors(
+        self,
+        left: str = "",
+        right: str = "",
+        criterion: str = "",
+    ) -> ToolResult:
+        from .schema_tools import compare_connectors
+
+        return compare_connectors(left=left, right=right, criterion=criterion)
 
     def _sample_connector_object(
         self,
@@ -2009,6 +4285,34 @@ class DataPilotTools:
         sync_mode: str = "",
         schema_policy: str = "manual_review",
         validation_mode: str = "balanced",
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        primary_key: str = "",
+        dedupe_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        cadence: str = "",
+        all_tables: bool = False,
+        limit: int = 0,
+        risk_acceptance: dict | None = None,
+        pii_acknowledgement: dict | None = None,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
+        ddl_acknowledgement: dict | None = None,
+        vector_layout: str = "",
+        foreign_keys: str = "",
+        fk_risk_acknowledged: bool = False,
+        delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2022,6 +4326,33 @@ class DataPilotTools:
             sync_mode=sync_mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
+            dedupe_key=dedupe_key,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            cadence=cadence,
+            all_tables=all_tables,
+            risk_acceptance=risk_acceptance,
+            pii_acknowledgement=pii_acknowledgement,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
+            ddl_acknowledgement=ddl_acknowledgement,
+            vector_layout=vector_layout,
+            foreign_keys=foreign_keys,
+            fk_risk_acknowledged=fk_risk_acknowledged,
+            delete_mode=delete_mode,
         )
 
     def _start_transfer(
@@ -2037,6 +4368,32 @@ class DataPilotTools:
         validation_mode: str = "balanced",
         limit: int = 0,
         source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        primary_key: str = "",
+        dedupe_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        cadence: str = "",
+        all_tables: bool = False,
+        risk_acceptance: dict | None = None,
+        pii_acknowledgement: dict | None = None,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
+        ddl_acknowledgement: dict | None = None,
+        vector_layout: str = "",
+        foreign_keys: str = "",
+        fk_risk_acknowledged: bool = False,
+        delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2052,6 +4409,150 @@ class DataPilotTools:
             validation_mode=validation_mode,
             limit=limit,
             source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
+            dedupe_key=dedupe_key,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            cadence=cadence,
+            all_tables=all_tables,
+            risk_acceptance=risk_acceptance,
+            pii_acknowledgement=pii_acknowledgement,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
+            ddl_acknowledgement=ddl_acknowledgement,
+            vector_layout=vector_layout,
+            foreign_keys=foreign_keys,
+            fk_risk_acknowledged=fk_risk_acknowledged,
+            delete_mode=delete_mode,
+        )
+
+    def _start_dataset_transfer(
+        self,
+        dataset_name: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        limit: int = 0,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_timezone: str = "",
+        schema_drift_acknowledged: bool = False,
+        pii_acknowledgement: dict | None = None,
+        upsert_key: str = "",
+        primary_key: str = "",
+        dedupe_key: str = "",
+        source_encoding: str = "",
+    ) -> ToolResult:
+        from .dataset_transfer import stage_dataset_transfer
+
+        return stage_dataset_transfer(
+            dataset_name=dataset_name,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            limit=limit,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_timezone=source_timezone,
+            schema_drift_acknowledged=schema_drift_acknowledged,
+            pii_acknowledgement=pii_acknowledgement,
+            upsert_key=upsert_key,
+            primary_key=primary_key,
+            dedupe_key=dedupe_key,
+            source_encoding=source_encoding,
+        )
+
+    def _create_schedule(
+        self,
+        source_connector_id: str = "",
+        source_connector_name: str = "",
+        source_table: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        cadence: str = "",
+        name: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        primary_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        limit: int = 0,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
+        pii_acknowledgement: dict | None = None,
+        duplicate_policy: str = "",
+        in_file_dedupe: str = "block",
+        file_wait_seconds: int = 0,
+    ) -> ToolResult:
+        from .schedule_tools import create_schedule
+
+        return create_schedule(
+            source_connector_id=source_connector_id,
+            source_connector_name=source_connector_name,
+            source_table=source_table,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            cadence=cadence,
+            name=name,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            limit=limit,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
+            pii_acknowledgement=pii_acknowledgement,
+            duplicate_policy=duplicate_policy,
+            in_file_dedupe=in_file_dedupe,
+            file_wait_seconds=file_wait_seconds,
         )
 
     def _analyze_result(
@@ -2182,6 +4683,7 @@ class DataPilotTools:
 _META_PILOT_PHRASES = (
     "what knowledge",
     "what do you know",
+    "what do you knows",
     "your knowledge",
     "what can you",
     "what do you do",
@@ -2213,11 +4715,35 @@ _META_PILOT_PHRASES = (
     "can you help me move",
     "able to help me move",
     "tell me what you can",
+    "your limits",
+    "your limitations",
+    "what are you bad at",
 )
+
+# The inverse of "what can you do" is the same question about the same card, and
+# it reached retrieval and was refused as undocumented — which reads as though the
+# product cannot even name its own limits. A regex rather than phrases because the
+# typo normalizer rewrites ``can't`` to ``cannot`` before routing sees it, so both
+# spellings have to be reachable.
+_META_LIMITS_RE = re.compile(
+    r"\bwhat\s+(?:can|could|will|would|do|does)(?:\s*not|'?t)\s+you\b"
+    r"|\bwhat\s+can\s+you\s+not\b"
+    r"|\bwhat\s+(?:are|is)\s+your\s+"
+    r"(?:limits?|limitations?|boundaries|constraints|weaknesses)\b"
+    r"|\bwhat\s+are\s+you\s+(?:bad|not\s+good)\s+at\b",
+    re.I,
+)
+
+
+def asks_about_pilot_limits(message: str) -> bool:
+    """Whether a meta question is about what Pilot *cannot* do."""
+    return bool(_META_LIMITS_RE.search((message or "").strip()))
 
 
 def _is_meta_pilot_question(lower: str) -> bool:
     if any(p in lower for p in _META_PILOT_PHRASES):
+        return True
+    if _META_LIMITS_RE.search(lower):
         return True
     if lower.strip() in {"capabilities", "help", "about", "about you"}:
         return True
@@ -2234,6 +4760,25 @@ def _is_meta_pilot_question(lower: str) -> bool:
     return False
 
 
+# Ask types that can only be answered from the documentation. ``definition`` and
+# ``procedure`` are deliberately absent: their patterns overlap with imperative
+# requests ("create a connector", "set up a transfer from A to B") that have
+# their own handlers, and the keyword patterns below already cover the question
+# forms of both.
+_KNOWLEDGE_ASKS = frozenset({"enumeration", "comparison"})
+
+# A question, as opposed to a command. Either it opens with an interrogative or
+# it ends in one — "my connector test passed but the transfer failed, why".
+_INTERROGATIVE = re.compile(
+    r"^\s*(?:so\s+|and\s+|ok(?:ay)?\s+|but\s+)?"
+    r"(?:what|why|how|when|where|which|who|whose|can|could|do|does|did|is|are|"
+    r"was|were|will|would|should|am|any|explain|tell\s+me|remind)\b"
+    r"|\bwhy\s*\?*\s*$"
+    r"|\?\s*$",
+    re.I,
+)
+
+
 def _looks_like_product_howto(lower: str) -> bool:
     """Product how-to / FAQ — answer from curated local FAQ, not RAG or cloud."""
     text = (lower or "").strip()
@@ -2241,26 +4786,68 @@ def _looks_like_product_howto(lower: str) -> bool:
         return False
     howto = bool(
         re.search(
-            r"\b(?:what is|what'?s|what are|how do i|how does|how to|explain|"
+            # "how do you handle booleans" is the same product question as "how
+            # does Datawrap handle booleans", and the list held every other
+            # person: ``how do i``, ``how does``. Asking the product about
+            # itself in the second person reached no knowledge tool at all.
+            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how do you|how do we|"
+            r"how does|how to|how are|how is|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
-            r"what makes|remind me|"
-            r"do i need|is .+ dangerous|how is)\b",
+            r"what makes|remind me|meaning of|"
+            r"do i need|how is)\b"
+            # Property and capability questions about the product. "is a green
+            # test on connectors enough to skip validation" is one of these, and
+            # matched nothing, so it collected a connector inventory instead of
+            # the sentence in the FAQ that answers it outright.
+            r"|\bis\s+.{3,48}?\s+(?:enough|the\s+same|different|safe|dangerous|"
+            r"required|optional|supported|reversible|idempotent|lossy)\b"
+            # Advisory shapes. "which sync mode should I pick for a nightly
+            # load" is a product question by any reading, but matched none of
+            # the patterns above, so the advisory tool answered it in one line
+            # with no citation at all.
+            r"|which\s+[\w\s]{0,24}\bshould\s+i\b"
+            r"|what\s+should\s+i\s+(?:use|pick|choose|do)\b"
+            r"|when\s+should\s+i\b"
+            r"|do\s+you\s+support\b"
+            r"|does\s+.{3,48}?\s+skip\b"
+            r"|is\s+it\s+possible\b"
+            r"|^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b"
+            r"|what\s+(?:are|is)\s+the\s+(?:options?|modes?|types?|gates?|roles?|policies|steps?)\b"
+            r"|what\s+happens\s+(?:to|when|if|on)\b"
+            r"|what\s+if\b"
+            r"|who\s+can\b",
             text,
         )
     )
+    # The retrieval layer already decides what kind of answer a question wants,
+    # and it recognises shapes no keyword list here did: "which preflight gate
+    # blocks a lossy type change" is an enumeration over a documented set.
+    # Sharing that classifier is also how the two surfaces stay in agreement.
+    if not howto and classify_ask(text) in _KNOWLEDGE_ASKS:
+        howto = True
+    # A question shape plus a live-data fetch is still a fetch: "show me the
+    # failed jobs" must answer from Jobs, not from an article about jobs.
+    if howto and _looks_like_live_data_fetch(text):
+        howto = False
+    # Competitor and vendor names, and the phrases about this assistant itself,
+    # are not subjects the documentation has a heading for — they stay listed.
     product = bool(
         re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|data transfer|transfer studio|preflight|"
-            r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
-            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data|"
+            r"\b(?:dataflow|datawrap|datatransfer|data transfer|gdpr|hipaa|"
+            r"airbyte|fivetran|move (?:my |the )?data|sync data|"
             r"schema types?|semantic types?|type system|logical types?|"
-            r"transfers?|pilot|openai|anthropic|"
-            r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
-            r"api key|accurate)\b",
+            r"openai|anthropic|ollama|chatgpt|chat\s*gpt|api key|accurate)\b",
             text,
         )
     )
-    if howto and product:
+    # Everything else asks the same corpus-derived subject model the retrieval
+    # layer uses. A hand-maintained keyword list was the second reason ordinary
+    # questions went unanswered: retrieval could answer "what happens to bad
+    # rows" and "what does the viewer role let me do", but the router never
+    # planned a knowledge tool for them because ``row``, ``role`` and
+    # ``checksum`` were not on the list. One subject model, derived from the
+    # corpus, cannot drift from what is retrievable.
+    if howto and (product or names_product_subject(text)):
         return True
     # Bare product identity questions (legacy DataFlow + current Datawrap brand)
     if re.search(r"\bwhat is data(?:flow|wrap|transfer)\b", text):
@@ -2281,6 +4868,10 @@ def _looks_like_product_howto(lower: str) -> bool:
         return True
     if re.search(r"\b(?:need|require)\s+(?:an?\s+)?(?:openai|anthropic|ollama|api)\s+key\b", text):
         return True
+    if re.search(r"\b(?:chat\s*gpt|chatgpt|generative\s+llm|third[\s-]?party\s+(?:llm|model))\b", text):
+        return True
+    if re.search(r"\b(?:our|your)\s+own\s+(?:llm|engine|model)\b", text):
+        return True
     if re.search(r"\b(?:append|upsert|cdc|full refresh)\s+mode\b", text):
         return True
     if re.search(r"\bfull refresh\b.+\b(?:dangerous|safe|overwrite)\b|\b(?:dangerous|safe).+\bfull refresh\b", text):
@@ -2300,6 +4891,264 @@ def _looks_like_product_howto(lower: str) -> bool:
     return False
 
 
+def _asks_about_the_product(message: str) -> bool:
+    """Whether an otherwise unroutable message is a question about this product.
+
+    The gate for the knowledge fallback. It has to be strict about *kind* of
+    message — a live-data fetch, a mutation or a question about the assistant
+    itself each have their own handler and must not be diverted into
+    documentation — but it delegates "is this about the product" to the corpus
+    so it cannot fall behind what the corpus can answer.
+    """
+    lower = (message or "").strip().lower()
+    if len(lower) < 8:
+        return False
+    if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower) or _has_explicit_workspace_subject(lower):
+        return False
+    return names_product_subject(message)
+
+
+def _wants_documentation_companion(message: str) -> bool:
+    """Whether a documented explanation belongs *beside* whatever live tool ran.
+
+    An operator asking why something happened, or how to do something, wants
+    both halves: what their workspace says now, and what the product documents.
+    Returning only the live half meant an empty workspace answered "No transfer
+    jobs yet" to a question about where quarantined rows go, and "Name two saved
+    connectors" to a question about losing decimal precision — in both cases the
+    documentation answered outright and was dropped.
+
+    Strict on the *kind* of message: a live-state read, a command, a meta
+    question and an unsupported mutation each already have the right owner.
+    """
+    lower = (message or "").strip().lower()
+    if len(lower) < 8:
+        return False
+    if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower):
+        return False
+    # A named connection-test bucket is a live-state read: "which of my
+    # connectors are broken" is answered by the bucket itself, and the
+    # Connectors page tour in front of it buries the list that was asked for.
+    if connector_health_filter(lower) != "any":
+        return False
+    if not _INTERROGATIVE.search(lower):
+        return False
+    if classify_ask(message) == "other" and not _looks_like_product_howto(lower):
+        return False
+    return names_product_subject(message)
+
+
+# Throughput, limits and "can you" capability questions are about Datawrap, not
+# counts over the operator's tables. "how many rows can you move per second"
+# parsed as COUNT(*) GROUP BY a column named `second`, so the answer was
+# "Column 'second' is not in orders. Available columns: id, region, amount".
+# Deliberately excludes per-hour/day/month, which are real temporal grains an
+# operator does group by ("orders per day").
+_PRODUCT_CAPACITY_ASK = re.compile(
+    r"\bthroughput\b"
+    r"|\bhow\s+fast\b"
+    r"|\brows?\s*(?:/|per\s+)(?:sec|second)\b"
+    r"|\bper\s+(?:sec|second)\b"
+    r"|\bhow\s+(?:many|much|big|large)\b[^.?!]*?\b(?:can|could)\s+"
+    r"(?:you|it|we|i|datawrap|dataflow|the\s+(?:engine|product|platform|tool))\b"
+    r"|\bwhat(?:'s| is)\s+(?:the\s+)?(?:max(?:imum)?|biggest|largest|upper\s+limit|ceiling)\b"
+    r"[^.?!]*?\b(?:you|it|datawrap|dataflow|supported?|allowed?)\b",
+    re.I,
+)
+
+
+def asks_about_product_capacity(message: str) -> bool:
+    """A rate or limit question about the product, not a count over live rows."""
+    return bool(_PRODUCT_CAPACITY_ASK.search(message or ""))
+
+
+# "did anything fail in the last 24 hours", "any failures today", "anything
+# break overnight", "what about last week". Every one of these is the jobs
+# ledger, but the pattern set only recognised the word *jobs*: asked in the way
+# an operator actually asks it, "did anything fail in the last 24 hours"
+# retrieved the paragraph about Daily cadence presets, and the natural follow-up
+# reached no tool at all and was refused as undocumented.
+_FAILURE_WORD = (
+    r"(?:fail(?:s|ed|ing|ure|ures)?|break|breaks|broke|broken|breakage|"
+    r"error(?:s|ed)?|crash(?:es|ed)?|die[ds]?|blow\s+up|blew\s+up|go\s+wrong|"
+    r"went\s+wrong)"
+)
+_RECENT_WINDOW = (
+    r"(?:today|tonight|yesterday|overnight|so\s+far|recently|lately|just\s+now|"
+    r"this\s+(?:morning|afternoon|evening|week|month)|"
+    r"last\s+(?:night|week|month|hour|run)|"
+    r"(?:in|over|during|within|for)\s+the\s+(?:last|past)\s+"
+    r"(?:\d+\s+)?(?:minute|hour|day|week|month)s?)"
+)
+_FAILED_RECENTLY = re.compile(
+    # A window makes the tense unambiguous: this is history, not a definition.
+    rf"\b{_FAILURE_WORD}\b[^.?!]{{0,30}}?\b{_RECENT_WINDOW}\b"
+    rf"|\b{_RECENT_WINDOW}\b[^.?!]{{0,30}}?\b{_FAILURE_WORD}\b"
+    # Without a window it still has to be asked as a state-of-the-world question
+    # about an indefinite subject: "did anything fail", "is anything broken".
+    rf"|\b(?:did|do|does|has|have|is|are|was|were)\s+"
+    rf"(?:anything|any\s+\w+|something|everything|it|we|they|my\s+\w+)\s+"
+    rf"(?:\w+\s+){{0,2}}?{_FAILURE_WORD}\b"
+    rf"|^\s*(?:any|anything|something)\s+(?:\w+\s+){{0,2}}?{_FAILURE_WORD}\b",
+    re.I,
+)
+
+#: A documentation question that happens to contain a failure word. "what
+#: happens if a transfer fails" is the runbook, not last night's ledger.
+_FAILURE_IS_A_DOC_ASK = re.compile(
+    r"\bwhat\s+happens\s+(?:if|when)\b|\bwhat\s+(?:do|should)\s+i\s+do\s+(?:if|when)\b"
+    r"|\bhow\s+(?:do|does|can|should)\b|\bwhy\s+(?:do|does|would)\s+"
+    r"(?:a|an|the|transfers?|jobs?)\b|\bwhat\s+is\b|\bwhat'?s\s+(?:a|an|the)\b",
+    re.I,
+)
+
+
+def asks_what_failed_recently(message: str) -> bool:
+    """Is this "show me what broke", as opposed to "what does failing mean"?"""
+    text = message or ""
+    if _FAILURE_IS_A_DOC_ASK.search(text):
+        return False
+    return bool(_FAILED_RECENTLY.search(text))
+
+
+# Ranking the tables on one connector by size. Without a tool behind these the
+# superlative itself was read as an identifier: "biggest table on Demo Orders"
+# planned COUNT/MAX over a table literally named ``biggest``, and "which table
+# has the most rows on Demo Orders" sampled one named ``most``. Both are invented
+# names sent at a live database.
+_TABLE_RANK_RE = re.compile(
+    r"\b(?:which|what)\s+(?:table|collection)\b[^.?!]{0,60}?"
+    r"\b(?:most|fewest|least|largest|biggest|smallest|highest|lowest)\b"
+    r"|\b(?:largest|biggest|smallest|widest)\s+(?:table|collection)s?\b"
+    r"|\b(?:table|collection)s?\s+(?:ranked|sorted|ordered)\s+by\s+(?:row|size)"
+    r"|\brank\s+(?:the\s+)?(?:table|collection)s?\b"
+    r"|\b(?:table|collection)\s+(?:row\s+)?counts?\b"
+    r"|\brow\s+counts?\s+(?:for|of|per|by)\s+(?:each|every|all)?\s*(?:table|collection)s?\b"
+    r"|\bhow\s+(?:big|large)\s+is\s+(?:my|the|this)\b"
+    r"|\bhow\s+many\s+rows?\s+(?:in\s+)?(?:total|altogether|overall)\b",
+    re.I,
+)
+_ASCENDING_RANK = re.compile(
+    r"\b(?:fewest|least|smallest|lowest|ascending|asc|bottom)\b", re.I
+)
+
+
+def asks_to_rank_connector_tables(message: str) -> bool:
+    """A size question about the tables on a connector, not about one table."""
+    return bool(_TABLE_RANK_RE.search(message or ""))
+
+
+def table_rank_order(message: str) -> str:
+    return "asc" if _ASCENDING_RANK.search(message or "") else "desc"
+
+
+#: The shapes a two-sided comparison arrives in. Each captures both sides so the
+#: names can be resolved against the saved connectors before anything commits to
+#: a tool: "append vs overwrite" and "Demo Orders vs Quarantine SQLite" are the
+#: same sentence and completely different questions.
+_COMPARE_FRAMES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\bcompare\s+(?P<a>.+?)\s+(?:and|to|with|against|vs\.?|versus)\s+(?P<b>.+?)"
+        r"[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:what(?:'?s| is| are)?\s+the\s+)?(?:difference|differences|diff)\s+"
+        r"between\s+(?P<a>.+?)\s+(?:and|vs\.?|versus)\s+(?P<b>.+?)[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:which|what)\s+(?:one\s+)?(?:is|has|was)\s+(?:the\s+)?[a-z]+"
+        r"(?:er|est)?\s*[,:]?\s*(?P<a>.+?)\s+or\s+(?P<b>.+?)[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\bhow\s+do(?:es)?\s+(?P<a>.+?)\s+and\s+(?P<b>.+?)\s+"
+        r"(?:differ|compare)\b[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(r"^(?P<a>[^?!.]+?)\s+(?:vs\.?|versus)\s+(?P<b>[^?!.]+?)[\s.?!]*$", re.I),
+)
+
+#: Words the comparison itself contributes, which are not part of either name.
+_COMPARE_NOISE = re.compile(
+    r"^(?:my|our|the|a|an|both|two)\s+|\s+(?:connector|connectors|connection|"
+    r"connections|one|ones)$",
+    re.I,
+)
+
+#: The adjective a "which is …" comparison asked on, so the answer can say what
+#: this workspace does not measure instead of inventing a benchmark.
+_COMPARE_CRITERION = re.compile(
+    r"\b(?:which|what)\s+(?:one\s+)?(?:is|has|was)\s+(?:the\s+)?(?P<word>[a-z]+)\b",
+    re.I,
+)
+
+
+def _compare_side(text: str) -> str:
+    """One side of a comparison with the comparison's own words stripped off."""
+    want = re.sub(r"\s+", " ", (text or "").strip().strip("\"'“”‘’"))
+    for _ in range(2):
+        stripped = _COMPARE_NOISE.sub("", want).strip()
+        if stripped == want:
+            break
+        want = stripped
+    return want
+
+
+def connector_comparison(message: str) -> dict[str, str] | None:
+    """The two saved connectors this message asks to compare, or None.
+
+    Resolution happens here rather than inside the tool because the same sentence
+    shape is a documentation question when the names are product concepts. Both
+    sides must resolve to a saved connector — anything less falls through to
+    retrieval, which is the right owner for "append vs overwrite".
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    from .schema_tools import saved_connector_name
+
+    for pattern in _COMPARE_FRAMES:
+        hit = pattern.search(text)
+        if not hit:
+            continue
+        left = saved_connector_name(_compare_side(hit.group("a")))
+        right = saved_connector_name(_compare_side(hit.group("b")))
+        if not left or not right or left == right:
+            continue
+        criterion = ""
+        word = _COMPARE_CRITERION.search(text)
+        if word:
+            criterion = word.group("word").lower()
+        return {"left": left, "right": right, "criterion": criterion}
+    return None
+
+
+# Creative writing is not a documentation subject. "write me a poem about data"
+# matched the product-subject model on the word *data* and was answered with the
+# Iceberg merge-on-read passage and a Help citation, which is worse than saying
+# no: it presents a real product fact as though it were the reply to that turn.
+_CREATIVE_REQUEST = re.compile(
+    r"\b(?:write|compose|make\s+up|give\s+me|tell\s+me|sing|draft|generate)\b"
+    r"[^.?!]{0,40}?"
+    r"\b(?:poem|poetry|haiku|limerick|sonnet|song|rap|joke|riddle|pun|story|"
+    # No bare "script": "generate a sql script" is a product request.
+    r"fairy\s*tale|essay|screenplay|lyrics)\b"
+    r"|\b(?:poem|haiku|limerick|joke|riddle)\s+about\b",
+    re.I,
+)
+
+
+def asks_for_creative_writing(message: str) -> bool:
+    """A creative-writing request, which the documentation cannot answer."""
+    return bool(_CREATIVE_REQUEST.search(message or ""))
+
+
 def _has_explicit_workspace_subject(lower: str) -> bool:
     """True when the ask names a live connector/table/job — keep ops tools."""
     if re.search(r"\bfrom\s+.+\s+to\s+\w", lower):
@@ -2315,7 +5164,15 @@ def _has_explicit_workspace_subject(lower: str) -> bool:
         return True
     if re.search(r"\b(?:job_|pf_)[A-Za-z0-9_\-]+", lower):
         return True
+    # "status of job 64f1a2…" names a specific run — the explanatory-question
+    # drop then must not strip get_job (QA Q04).
+    if re.search(r"\b(?:job|run|transfer)\s+[a-f0-9]{12,26}\b|\b[a-f0-9]{20,26}\b", lower):
+        return True
     if re.search(r"\bmapping assurance\b", lower):
+        return True
+    # "which of my connectors are broken" names a live connection-test bucket.
+    # That is workspace state, so the Connectors page tour must not lead it.
+    if connector_health_filter(lower) != "any":
         return True
     return False
 
@@ -2424,6 +5281,273 @@ def _capture_connector_name(raw: str) -> str:
     return _clean_connector_phrase(re.sub(r"[.?!]+$", "", text).strip())
 
 
+# "get me the passed connectors" is a health filter, not a full inventory dump.
+_CONNECTOR_HEALTH = (
+    (
+        re.compile(
+            r"\b(?:passed|passing|pass|green|healthy|working|ok|connected|"
+            r"successful|success|good)\b",
+            re.I,
+        ),
+        "passed",
+    ),
+    (
+        re.compile(
+            r"\b(?:failed|failing|fail|red|broken|unhealthy|bad|error|"
+            r"errored|down|not\s+working)\b",
+            re.I,
+        ),
+        "failed",
+    ),
+    (
+        re.compile(r"\b(?:untested|not\s+tested|never\s+tested|unknown)\b", re.I),
+        "untested",
+    ),
+)
+
+
+# Datawrap's own inventory nouns, and the tool that reads each. Warehouse nouns
+# (tables, rows, columns) are deliberately absent: counting those is a live read
+# on a named connector, not a platform count.
+_WORKSPACE_INVENTORY_TOOLS: tuple[tuple[re.Pattern[str], tuple[str, dict]], ...] = (
+    (
+        re.compile(r"\b(?:schedules?|pipelines?|cadences?)\b", re.I),
+        ("list_schedules", {"limit": 20}),
+    ),
+    (
+        re.compile(r"\b(?:connectors?|connections?)\b", re.I),
+        ("list_connectors", {}),
+    ),
+    (
+        re.compile(r"\b(?:jobs?|transfers?|runs?)\b", re.I),
+        ("list_jobs", {"limit": 10}),
+    ),
+    (
+        re.compile(r"\b(?:datasets?|uploads?)\b", re.I),
+        ("list_datasets", {}),
+    ),
+)
+
+# Only possessive framings. "How many connectors do you support" and "how many
+# connectors are there" ask about the catalog and belong to the documentation;
+# "how many do I have" asks about this workspace.
+_WORKSPACE_COUNT_ASK = re.compile(
+    r"\bhow\s+many\s+[\w \-]{0,40}?\b(?:do|does|did)\s+(?:i|we|you)\s+have\b"
+    r"|\bhow\s+many\s+[\w \-]{0,40}?\bhave\s+(?:i|we|you)\s+"
+    r"(?:run|ran|done|completed|started|created|made|scheduled|executed|performed|saved|kicked\s+off|set\s+up)\b"
+    r"|\bhow\s+many\s+(?:of\s+)?(?:my|our)\b"
+    r"|\b(?:number|count|total)\s+of\s+(?:my|our)\b",
+    re.I,
+)
+
+
+# "tell me about my datasets" and "what are my pipelines" are the same read as
+# "how many datasets do i have" — the operator's own inventory. Asked without a
+# counting verb they reached the documentation instead.
+_WORKSPACE_POSSESSIVE_ASK = re.compile(
+    r"\b(?:tell\s+me\s+about|what\s+(?:are|is)|which\s+are|show\s+me|"
+    r"show|list|give\s+me|walk\s+me\s+through)\s+"
+    r"(?:all\s+(?:of\s+)?)?(?:my|our)\b",
+    re.I,
+)
+
+
+def _asks_to_count_workspace_objects(lower: str) -> bool:
+    """A read of the operator's own inventory, not of warehouse rows."""
+    if re.search(r"\bon\s+[a-z0-9]", lower):
+        return False
+    return bool(
+        _WORKSPACE_COUNT_ASK.search(lower) or _WORKSPACE_POSSESSIVE_ASK.search(lower)
+    )
+
+
+def _saved_connector_exists(name: str) -> bool:
+    """Whether ``name`` matches a saved connector — never a guess from wording."""
+    want = (name or "").strip().lower()
+    if not want:
+        return False
+    try:
+        from services.connector_store import list_connectors as _saved
+
+        for row in _saved() or []:
+            data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            if str(data.get("name") or "").strip().lower() == want:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+# A health word inside a how-to or consequence frame is documentation vocabulary,
+# not a filter: "how do I fix a broken connector" and "what happens when a
+# connector test fails" are answered from Help, not from the failed bucket.
+_HEALTH_WORD_IS_DOCUMENTATION = re.compile(
+    r"\bhow\s+(?:do|can|to|should|would)\b"
+    r"|\bwhat\s+happens\b|\bwhat\s+if\b|\bwhat\s+does\b"
+    r"|\bwhy\s+(?:does|do|is|are)\s+(?:a|an|the)\b"
+    r"|\bmeans?\b|\bmeaning\b|\bshould\s+i\b"
+    r"|\benough\s+to\b|\bskip\b|\bdefinition\b",
+    re.I,
+)
+
+
+def connector_health_filter(message: str) -> str:
+    """Which connection-test bucket the operator asked for, or ``any``.
+
+    Health is ``connector_store.connector_health``. Listing all twelve
+    connectors for "the passed connectors" reads like every one is green.
+    """
+    text = (message or "").strip()
+    # Plural on purpose: a bucket is a subset of the saved list. "my connector
+    # test passed but the transfer failed, why" is one connector and a
+    # diagnosis, and filtering the list is not what it asked for.
+    if not text or not re.search(r"\b(?:connectors|connections)\b", text, re.I):
+        return "any"
+    if _HEALTH_WORD_IS_DOCUMENTATION.search(text):
+        return "any"
+    for pattern, bucket in _CONNECTOR_HEALTH:
+        if pattern.search(text):
+            return bucket
+    return "any"
+
+
+# Engine names operators say out loud, mapped to the driver token the connector
+# store records. Exact driver names resolve from the catalog instead, so this only
+# needs the spoken forms.
+_ENGINE_ALIASES: dict[str, str] = {
+    "postgres": "postgresql",
+    "postgre": "postgresql",
+    "pgsql": "postgresql",
+    "mongo": "mongodb",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "sql server": "sqlserver",
+    "bq": "bigquery",
+    "s3": "s3",
+    "lite": "sqlite",
+}
+
+# Engines the pilot can name in a filter. Deliberately the spoken vocabulary
+# rather than the whole 600-row catalog: a catalog slug is not what an operator
+# types, and matching one loosely turns a documentation ask into an inventory read.
+_ENGINE_WORDS: tuple[str, ...] = (
+    "postgresql", "postgres", "postgre", "pgsql",
+    "mysql", "mariadb", "sqlite",
+    "snowflake", "bigquery", "bq", "redshift", "databricks", "clickhouse",
+    "mongodb", "mongo", "sqlserver", "ms sql", "sql server", "mssql",
+    "oracle", "kafka", "s3", "gcs", "csv", "json", "parquet",
+)
+
+# The frames that make an engine word a *filter on my inventory* rather than a
+# question about the catalog. "do you support postgres" is the second kind.
+_ENGINE_FILTER_FRAME = re.compile(
+    r"\b(?:my|our|saved)\s+(?:connectors?|connections?)\b"
+    r"|\b(?:connectors?|connections?)\s+(?:do\s+)?(?:i|we)\s+have\b"
+    r"|\b(?:of|among)\s+(?:those|them|these)\b"
+    r"|^(?:list|show|which|what|count|how\s+many)\b[^?]*"
+    r"\b(?:connectors?|connections?)\b",
+    re.I,
+)
+
+# A capability question names an engine without asking about saved rows.
+_ENGINE_IS_CAPABILITY_ASK = re.compile(
+    r"\bdo\s+(?:you|we)\s+(?:support|have)\b"
+    r"|\bcan\s+you\s+(?:connect|read|write|load|move)\b"
+    r"|\bis\s+[\w ]+\s+supported\b"
+    r"|\bsupported?\b|\bsupports\b",
+    re.I,
+)
+
+_ENGINE_NEGATION = re.compile(
+    r"\b(?:not|aren'?t|isn'?t|other\s+than|except|excepting|excluding|exclude|"
+    r"besides|without|non)\b",
+    re.I,
+)
+
+
+def canonical_engine(engine: str) -> str:
+    """One spelling per engine, so ``postgres`` and ``postgresql`` are one bucket."""
+    want = re.sub(r"[^a-z0-9 ]+", "", (engine or "").strip().lower())
+    if not want:
+        return ""
+    want = _ENGINE_ALIASES.get(want, want)
+    return want.replace(" ", "")
+
+
+def connector_engine_filter(message: str) -> tuple[str, bool]:
+    """The engine bucket the operator asked their inventory for, and whether negated.
+
+    Returns ``("", False)`` for anything that is not a filter on saved rows —
+    "do you support postgres" is a catalog question and answering it from the
+    saved list would be a different claim entirely.
+    """
+    text = (message or "").strip()
+    if not text or _ENGINE_IS_CAPABILITY_ASK.search(text):
+        return "", False
+    if not _ENGINE_FILTER_FRAME.search(text):
+        return "", False
+    for word in sorted(_ENGINE_WORDS, key=len, reverse=True):
+        hit = re.search(rf"(?<![A-Za-z0-9]){re.escape(word)}(?![A-Za-z0-9])", text, re.I)
+        if not hit:
+            continue
+        # Negation belongs to the clause that carries the engine word: "connectors
+        # that are not postgres", "everything except sqlite".
+        before = text[max(0, hit.start() - 40) : hit.start()]
+        return canonical_engine(word), bool(_ENGINE_NEGATION.search(before))
+    return "", False
+
+
+# A pasted inventory row: ``Snowflake_venky (snowflake) → EMPLOYEE_DB``.
+# Operators paste our own bullet back with a question glued on the end.
+_PASTED_CONNECTOR_ROW = re.compile(
+    # Operators paste back exactly what Pilot printed, bullet and bold included:
+    # ``• **Demo Orders** (sqlite) → /data/demo.db list the tables``.
+    r"^\s*(?:[•·*\u2013\u2014-]\s+)?"
+    r"(?:\*\*|__|`)?\s*"
+    r"(?P<name>[A-Za-z][A-Za-z0-9_. -]{0,79}?)\s*"
+    r"(?:\*\*|__|`)?\s*"
+    r"\(\s*(?P<engine>[a-z0-9_]{2,24})\s*\)\s*"
+    r"(?:→|->|=>)?\s*"
+    r"(?P<db>[A-Za-z0-9_./-]*)\s*"
+    r"(?P<rest>.*)$",
+    re.I | re.S,
+)
+
+
+def _is_known_driver_type(engine: str) -> bool:
+    """Whether the parenthesised engine is a real driver — from the catalog."""
+    want = (engine or "").strip().lower()
+    if not want:
+        return False
+    try:
+        from services.catalog_service import catalog_summary
+
+        types = catalog_summary().get("unique_driver_types") or ()
+        return want in {str(t).strip().lower() for t in types}
+    except Exception:
+        return False
+
+
+def split_pasted_connector_row(message: str) -> tuple[str, str]:
+    """Split a pasted connector row into (connector_name, remaining question).
+
+    ``Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there`` must
+    become a live table read on that connector — not a documentation refuse.
+    The parenthesised engine is what makes the shape unambiguous, so it is
+    checked against the catalog's own driver types rather than assumed.
+    """
+    match = _PASTED_CONNECTOR_ROW.match((message or "").strip())
+    if not match:
+        return "", ""
+    name = _clean_connector_phrase(match.group("name") or "")
+    rest = (match.group("rest") or "").strip()
+    if not name or not rest:
+        return "", ""
+    if not _is_known_driver_type(match.group("engine") or ""):
+        return "", ""
+    return name, rest
+
+
 def _is_raw_knowledge_shard(text: str) -> bool:
     t = text.strip()
     if t.startswith("Semantic type:"):
@@ -2466,32 +5590,99 @@ def _summarize_knowledge_hit(text: str) -> str:
     return text[:280]
 
 
+_EXPLANATORY_QUESTION = re.compile(
+    r"\bhow\s+(?:do|can|would|should)\s+(?:i|we|you)\b"
+    r"|\bhow\s+to\b"
+    r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
+    r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
+    r"|\bwhat\s+happens\s+(?:if|when|to|on)\b"
+    r"|\bwhat\s+if\b"
+    r"|\bwalk\s+me\s+through\b"
+    r"|\bexplain\s+how\b",
+    re.I,
+)
+
+# "can I land tables in Redshift" is a destination-capability question. The
+# inventory parser otherwise reads ``tables in Redshift`` as "list objects on a
+# saved connector named redshift" and the miss leads the reply.
+_CAPABILITY_TABLE_LANDING = re.compile(
+    r"\b(?:land|write|load|put|send|replicate)\s+(?:the\s+|my\s+|our\s+)?"
+    r"(?:tables?|data|rows|records)\b"
+    r"|\bland\s+(?:in|to|into)\b",
+    re.I,
+)
+
+# "is Slack a connector" is a catalog-capability question. The inventory
+# parser otherwise reads the word ``connector`` as "list my saved
+# connections" and the reply opens on "You have 2 saved connector(s)".
+_IS_A_CONNECTOR_ASK = re.compile(
+    r"^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b"
+    r"|^\s*is\s+there\s+(?:a|an)\s+(?!saved\b|my\b)[\w .+/-]{2,48}\s+connector\b",
+    re.I,
+)
+
+# Exporting a *schedule* as YAML is a shipped feature (the GitOps manifest the
+# CLI validates and applies). Exporting *rows* to a file is not something Pilot
+# does. The refusal list keyed on the bare word ``export``, so "how do I export a
+# schedule as YAML" was answered with "I can't export files yet" — a documented
+# capability denied.
+_SUPPORTED_EXPORT = re.compile(
+    r"\bexport\s+(?:the\s+|a\s+|an\s+|my\s+|this\s+)?(?:schedule|pipeline|manifest|contract|ya?ml)\b"
+    r"|\bexport\s+(?:as\s+)?ya?ml\b"
+    r"|\b(?:schedule|pipeline|manifest|contract)\b[^.?!]{0,40}\bas\s+ya?ml\b"
+    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest|export)\b"
+    # Workspace audit download is GET /api/v1/audit/export, not a file write.
+    r"|\bexport\s+audit\b"
+    r"|\baudit\s+logs?\b",
+    re.I,
+)
+
+
 def _looks_like_unsupported_mutation(lower: str) -> bool:
     """True when the operator asked for delete / export / create-schedule we refuse.
 
     These must never fall into RAG — synonym dumps look like we can do the action.
+
+    A *how-to question* about one of them is not a request to perform it: the
+    honest answer to "how do I delete a connector" is the documented procedure,
+    not a refusal to do something the operator never asked us to do. Capability
+    questions ("can I export rows to CSV") are still refused, because the answer
+    is genuinely no.
     """
+    if _SUPPORTED_EXPORT.search(lower):
+        return False
+    # "write to Excel Online" contains the substring "to excel". That is a
+    # destination-capability ask, not a file export.
+    if re.search(r"\bexcel\s+online\b|\bexcel\s+365\b", lower):
+        return False
+    if _EXPLANATORY_QUESTION.search(lower) and names_product_subject(lower):
+        return False
     if any(
         w in lower
         for w in (
             "export ", "export to", "download ", "download as",
-            "save as csv", "save as parquet", "to csv", "to parquet", "to excel",
+            "save as csv", "save as parquet", "to csv", "to parquet",
             "create a new schedule", "create schedule", "create a pipeline",
             "new nightly", "build a cron", "cron pipeline",
             "schedule this transfer", "schedule this nightly", "schedule it nightly",
             # Do NOT match bare "schedule nightly" / "nightly schedule" —
             # those collide with show/open schedule named "Nightly …".
         )
-    ):
+    ) or bool(re.search(r"\bto\s+excel\b(?!\s+(?:online|365))", lower)):
         return True
+    # Plurals are the natural way to ask for a bulk delete ("delete all my
+    # connectors"), and without them the request fell through to the inventory
+    # tool, which listed the connectors and never said that Pilot does not
+    # delete. A destructive ask answered with a listing reads like consent.
     if re.search(
-        r"\b(?:delete|drop|destroy|remove)\b.+\b(?:connector|connection|schedule|pipeline)\b",
+        r"\b(?:delete|drop|destroy|remove)\b.+"
+        r"\b(?:connectors?|connections?|schedules?|pipelines?|jobs?|contracts?)\b",
         lower,
     ):
         return True
-    if re.search(r"\b(?:delete|drop|destroy)\b.+\b(?:table|collection)\b", lower):
+    if re.search(r"\b(?:delete|drop|destroy|truncate)\b.+\b(?:tables?|collections?)\b", lower):
         return True
-    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connector\b", lower):
+    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connectors?\b", lower):
         return True
     # Create-schedule only — do not refuse show/run/open schedule <name>.
     if re.search(
@@ -2535,8 +5726,88 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         lower,
     ):
         return True
+    # ``by <column>`` may sit between the object and its scope: "orders by
+    # region on Audit SQLite" is the same read as "orders on Audit SQLite",
+    # grouped.
     if re.search(
-        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+(?:data\s+)?(?:from|on|in)\b",
+        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+"
+        r"(?:data\s+)?(?:by\s+\w+\s+)?(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    # "how many connectors do I have" is a read of the operator's own workspace,
+    # not a question about what a connector is. Without this it collected a
+    # documentation essay in front of the inventory it asked for.
+    #
+    # Kept to questions about *state*. A bare possessive is not enough: "can I
+    # keep my pipelines in git" says "my pipelines" and is asking about the
+    # GitOps export, not for a list of them.
+    if re.search(
+        r"\b(?:do|did|does)\s+(?:i|we)\s+(?:have|own|already\s+have)\b"
+        r"|\bhow\s+many\s+(?:\w+\s+){0,2}(?:do|did)\s+(?:i|we)\b"
+        r"|\b(?:status|state|result|outcome)\s+of\s+(?:my|our|the)\b"
+        r"|\b(?:my|our)\s+(?:last|latest|most\s+recent|current)\s+"
+        r"(?:job|run|transfer|pipeline|schedule|sync)\b",
+        lower,
+    ):
+        return True
+    # A count scoped to a named object is a read of that object, not a question
+    # about what the noun means: "how many tables on sales" counts the
+    # operator's own schema. The scope is what makes it safe — "how many
+    # connectors do you support" names no object of theirs and is a catalog
+    # question, and it is the one the documentation now answers with a number.
+    if re.search(
+        r"\bhow\s+many\s+(?:\w+\s+){0,2}"
+        r"(?:tables?|columns?|fields?|schemas?|datasets?|objects?|rows?|records?|"
+        r"jobs?|runs?|connections?|pipelines?|schedules?)\b"
+        r"[\w\s]{0,12}?\b(?:on|in|from|under|for)\b\s+\S",
+        lower,
+    ):
+        return True
+    # The declarative form of an inventory read. "list tables on Audit SQLite"
+    # already routed; "what tables are on Audit SQLite" is the same request
+    # phrased as a question, and it answered with a passage about how a datetime
+    # column is created on each engine. The scope preposition followed by a
+    # *named* object is what keeps this off "what tables does the product
+    # support", which names nothing of the operator's, and the article guard
+    # keeps it off "what fields are in an audit event".
+    if re.search(
+        r"\b(?:what|which)\s+(?:\w+\s+){0,2}"
+        r"(?:tables?|columns?|fields?|objects?|collections?|schemas?|views?|"
+        r"datasets?|streams?|topics?)\s+"
+        r"(?:are|is|live|lives|exist|exists|do|does|did|have|has)\b"
+        r"[\w\s']{0,20}?\b(?:on|in|from|under|inside)\b\s+(?!a\s|an\s)\S",
+        lower,
+    ):
+        return True
+    # A grouped aggregate over the operator's own table. "count orders by region
+    # on Audit SQLite" routed because ``orders on`` is a business object with a
+    # scope, but "break down orders by region on Audit SQLite" put the
+    # aggregation verb too far from either for any rule above to see it, and the
+    # turn answered with a passage about snapshot resume. The ``by`` clause and
+    # the scope are both required: "how do you break down a large table" has
+    # neither and stays a documentation question.
+    if re.search(
+        r"\b(?:break\s*(?:down)?|group|bucket|split|segment|count|sum|total|"
+        r"average|avg|tally|roll\s*up)\b[\w\s']{0,40}?\bby\b\s+\w+"
+        r"[\w\s']{0,30}?\b(?:on|in|from)\b\s+(?!a\s|an\s)\S",
+        lower,
+    ):
+        return True
+    # An imperative aimed at the operator's own objects is a read, whatever the
+    # ask classifier makes of it. "List my connectors" is graded an
+    # *enumeration* — true of "what are the sync modes", not of this — so the
+    # how-to branch led the reply with a documentation essay about audit logs
+    # and BYOK and put the inventory the operator asked for underneath it.
+    #
+    # The leading imperative is what makes this safe where a bare possessive is
+    # not: "can I keep my pipelines in git" asks about the GitOps export.
+    if re.search(
+        r"^(?:please\s+)?(?:list|show|display|give\s+me|fetch|get)\s+"
+        r"(?:me\s+)?(?:all\s+(?:of\s+)?|the\s+)?(?:my|our\s+)?\s*"
+        r"(?:saved\s+|existing\s+|current\s+)?"
+        r"(?:connectors?|connections?|jobs?|transfers?|runs?|pipelines?|"
+        r"schedules?|contracts?|datasets?|tables?|collections?)\b",
         lower,
     ):
         return True
@@ -2589,6 +5860,10 @@ _TOOL_PRIORITY: dict[str, int] = {
     # A named source→destination move is the most specific thing an operator can
     # ask for, so it outranks the schema tools it is built from.
     "start_transfer": 110,
+    # An uploaded file is as concrete as a connector route — without a
+    # priority, a bare plan_transfer_route companion outranked it and the
+    # operator got a sketch instead of the staged plan (QA DS04).
+    "start_dataset_transfer": 109,
     "plan_transfer": 108,
     "map_connector_schemas": 100,
     "diff_schemas": 95,
@@ -2603,6 +5878,8 @@ _TOOL_PRIORITY: dict[str, int] = {
     "list_connector_objects": 84,
     "create_connector": 82,
     "remediate_validation": 80,
+    # A cadence names a standing instruction, so it outranks a one-off run.
+    "create_schedule": 109,
     "run_schedule_now": 78,
     "get_job": 75,
     "get_preflight_run": 74,
@@ -2611,6 +5888,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "get_schedule": 70,
     "list_schedules": 60,
     "list_contracts": 58,
+    "brief_workspace": 56,
     "list_jobs": 55,
     "list_connectors": 52,
     "search_connectors": 50,
@@ -2628,8 +5906,21 @@ _TOOL_PRIORITY: dict[str, int] = {
     "analyze_dataset": 20,
     "search_data": 15,
     "describe_pilot": 5,
+    "describe_connector_transforms": 5,
     "explain_product": 6,
 }
+
+def looks_like_index_dump_name(name: str) -> bool:
+    """Hash-prefixed upload / synonym shards — never speak these as dataset names."""
+    label = str(name or "").strip()
+    if not label:
+        return True
+    low = label.lower()
+    if "synonym" in low or "industry schema" in low:
+        return True
+    head = label.replace("-", "").replace("_", "")[:16]
+    return len(label) >= 16 and all(c in "0123456789abcdef" for c in head.lower())
+
 
 _LIVE_SCHEMA_TOOLS = frozenset({
     "map_connector_schemas",
@@ -2641,10 +5932,124 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "analyze_result",
     "filter_result",
     "list_connector_objects",
+    "rank_connector_tables",
+    "compare_connectors",
+})
+
+# Tools that answer from the documentation rather than from workspace state.
+_KNOWLEDGE_TOOLS = frozenset({
+    "explain_product",
+    "search_knowledge",
+    "describe_pilot",
+    "describe_connector_transforms",
+    "explain_mapping_assurance",
 })
 
 
-def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+def _reads_workspace(planned: list[tuple[str, dict]]) -> bool:
+    """Whether the plan reads live state rather than only the documentation."""
+    return any(n not in _KNOWLEDGE_TOOLS for n, _ in planned)
+
+
+def _plans_lookup_on(planned: list[tuple[str, dict]], token: str) -> bool:
+    """Whether a misspelled word became the subject of a named-object lookup.
+
+    ``how many pipelins do i have`` planned COUNT(*) over a table called
+    `pipelins`, which no connector can hold — the tool was always going to fail,
+    so the spelling retry is strictly better than the plan it replaces.
+    """
+    for name, args in planned:
+        if name not in _NAMED_OBJECT_LOOKUP_TOOLS:
+            continue
+        for value in (args or {}).values():
+            if isinstance(value, str) and token in value.lower():
+                return True
+    return False
+
+
+def plan_tools_tolerant(message: str) -> list[tuple[str, dict]]:
+    """Plan tools, retrying once with workspace-noun typos corrected.
+
+    ``conenctors?`` and ``shcedules`` reached no tool at all and were refused as
+    undocumented. The retry is only ever allowed to *upgrade* a plan that either
+    read nothing live or was about to look up the misspelling itself, so a
+    correction can never change the meaning of a question the router already
+    understood — see ``spelling`` for why the vocabulary is deliberately small.
+    """
+    planned = infer_tools_from_message(message)
+    from .spelling import correct_workspace_typos, corrected_tokens
+
+    fixes = corrected_tokens(message)
+    if not fixes:
+        return planned
+    if _reads_workspace(planned) and not any(
+        _plans_lookup_on(planned, bad) for bad in fixes
+    ):
+        return planned
+    retry = infer_tools_from_message(correct_workspace_typos(message))
+    return retry if _reads_workspace(retry) else planned
+
+# Tools that need the operator to have named a specific object, and that report
+# "not found" when they were planned off a generic question instead.
+_NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
+    "open_schedule",
+    "get_schedule",
+    "run_schedule_now",
+    "open_job",
+    "get_job",
+    "get_preflight_run",
+    "sample_connector_object",
+    "list_connector_objects",
+    "rank_connector_tables",
+    "compare_connectors",
+    "introspect_connector_schema",
+    "aggregate_data",
+    "analyze_dataset",
+})
+
+_DATASET_NOUN = (
+    r"(?:data\s?sets?|datasets?|uploads?|files?|csvs?|"
+    r"spreadsheets?|extracts?|feeds?)"
+)
+
+# A dataset is the *subject* of "tell me about the employees dataset" and of
+# "analyze my HR upload". It is only vocabulary in "how does Datawrap mask
+# employee PII", which the fuzzy industry-word hint in
+# ``CopilotDataAnalyst.extract_dataset_hint`` cannot tell apart. Only a
+# syntactic subject may outrank the documentation.
+_DATASET_SUBJECT = re.compile(
+    r"\b(?:analy[sz]e|profile|preview|summari[sz]e)\s+"
+    r"(?:the\s+|my\s+|this\s+|our\s+)?"
+    r"(?P<verb_name>[A-Za-z0-9_][A-Za-z0-9_\- ]{0,40}?)"
+    rf"(?:\s+{_DATASET_NOUN})?\s*[.?!]*$"
+    r"|"
+    r"\b(?:tell\s+me\s+(?:everything\s+)?about|what(?:'s|s| is)\s+in|"
+    r"describe|show\s+me)\s+(?:the\s+|my\s+|our\s+)?"
+    rf"(?P<about_name>[A-Za-z0-9_][A-Za-z0-9_\- ]{{0,40}}?)\s+{_DATASET_NOUN}\b",
+    re.I,
+)
+
+_DATASET_SUBJECT_STOPWORDS = frozenset({
+    "this", "that", "it", "my", "our", "the", "a", "an", "them", "these",
+    "those", "data", "everything", "something", "anything", "result",
+    "results", "here", "again", "more",
+})
+
+
+def dataset_subject(message: str) -> str | None:
+    """Name of the dataset the message is *about*, or None if it names none."""
+    match = _DATASET_SUBJECT.search((message or "").strip())
+    if not match:
+        return None
+    name = (match.group("verb_name") or match.group("about_name") or "").strip(" \"'")
+    if not name or name.lower() in _DATASET_SUBJECT_STOPWORDS:
+        return None
+    return name
+
+
+def prune_planned_tools(
+    planned: list[tuple[str, dict]], message: str = ""
+) -> list[tuple[str, dict]]:
     """Keep a coherent primary intent — don't stack conflicting tool dumps."""
     if not planned:
         return planned
@@ -2689,9 +6094,73 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "list_jobs" in names or "list_connectors" in names:
         planned = [(n, a) for n, a in planned if n != "aggregate_data"]
         names = {n for n, _ in planned}
+    # "did anything fail in the last 24 hours" is answered by the ledger. Pairing
+    # it with a Help passage put the Daily-cadence-preset paragraph in front of
+    # the runs, which reads as though the question about last night was declined.
+    if "list_jobs" in names and (
+        asks_what_failed_recently(message)
+        # "why did the transfer fail" is a job-ledger triage question — the
+        # RAG essay beside it was a doc dump in front of the run's own error
+        # (QA Q02).
+        or re.search(
+            r"\bwhy\b.+\b(?:fail|error|went\s+wrong|broke|problem|issue)\b"
+            r"|\bwhat\b.+\b(?:went\s+wrong|broke|failed)\b",
+            message or "",
+            re.I,
+        )
+    ):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n not in ("explain_product", "search_knowledge", "brief_workspace")
+        ]
+        names = {n for n, _ in planned}
+    # Throughput and limits are product capability, not a count over live rows.
+    # Guarded here as well as at the parse site because the telegraphic
+    # "how many rows <table> <connector>" pattern plans its own aggregate later,
+    # and read "how many rows can you move per second" as table `can` on a
+    # connector named "you move per second".
+    if (
+        "aggregate_data" in names
+        and asks_about_product_capacity(message)
+        and not _has_explicit_workspace_subject((message or "").lower())
+    ):
+        planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+        names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
-    if names & {"start_transfer", "plan_transfer"}:
+    # A product FAQ already answers from Help. Companion quality/dataset dumps
+    # (156 hashed uploads next to "what are the preflight gates") are noise.
+    #
+    # The reverse is true when the operator named a dataset as the subject:
+    # "tell me about the employees dataset" is a profile request, and answering
+    # it with the Lineage help card is the noise. The dataset tool then keeps
+    # the turn and reports honestly when nothing by that name is indexed.
+    if "explain_product" in names:
+        # "tell me about my datasets" is an inventory read, and the possessive is
+        # what says so. Read as documentation it dropped ``list_datasets`` and
+        # answered with a Help card about datasets in general.
+        _own_inventory = names & {
+            "list_datasets", "list_jobs", "list_schedules", "list_connectors",
+        } and _asks_to_count_workspace_objects(
+            (message or "").lower()
+        )
+        # "which of my connectors are sqlite" is a filter on saved rows. The
+        # engine name also heads a Help article, and leading with it answered
+        # with the whole transfer-ready driver list instead of their two rows.
+        if "list_connectors" in names and connector_engine_filter(message)[0]:
+            _own_inventory = True
+        if _own_inventory or (
+            dataset_subject(message) and names & {"analyze_dataset", "list_datasets"}
+        ):
+            planned = [(n, a) for n, a in planned if n != "explain_product"]
+        else:
+            planned = [
+                (n, a) for n, a in planned
+                if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
+            ]
+        names = {n for n, _ in planned}
+    if names & {"start_transfer", "plan_transfer", "create_schedule", "start_dataset_transfer"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -2706,7 +6175,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
     # Job / remediate: keep inventory lists for triage ("why did validate fail").
-    if "run_schedule_now" in names or "create_connector" in names:
+    if names & {"run_schedule_now", "create_connector", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -2748,6 +6217,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
                 "navigate",
                 "start_transfer_studio",
                 "list_jobs",
+                "brief_workspace",
                 "list_datasets",
                 "describe_pilot",
                 "explain_product",
@@ -2813,6 +6283,43 @@ _TRANSFER_TO_FROM_RE = re.compile(
     rf"{_TRANSFER_TRAIL}",
     re.IGNORECASE,
 )
+# "sync orders on Demo Orders to Warehouse" — the source connector qualified with
+# ``on``, which is how every read in this product is phrased ("count rows in orders
+# *on* Demo Orders"). Only the ``from`` form was parsed, so a request that named
+# the table, both endpoints and a cadence resolved to nothing and was answered with
+# the pause-a-schedule procedure.
+_TRANSFER_ON_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS})\b"
+    r"(?:\s+(?:a|an|the|all|my|our|these|those))?"
+    r"(?:\s+(?:transfer|copy|sync|data|rows|records|everything))?"
+    r"(?:\s+(?:of|for))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+(?:table|collection|dataset))?"
+    r"\s+(?:on|in)\s+(?P<src>.+?)"
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
+    re.IGNORECASE,
+)
+
+# ``schedule`` is not a transfer verb: it also names the *object* ("open schedule
+# Nightly Load"), so putting it in _TRANSFER_VERBS would change how every route
+# regex reads a sentence. When it is unmistakably the verb of a route — a table
+# and an endpoint follow it — swap in a verb the route parser already knows and
+# let the cadence parser keep the rest.
+_SCHEDULE_AS_TRANSFER_VERB = re.compile(
+    r"^(?P<lead>\s*(?:(?:hey|hi|ok|okay|so|please|pls)\s+|"
+    r"(?:can|could|would|will)\s+(?:you|u)\s+(?:please\s+)?|"
+    r"(?:i|we)\s+(?:want|need|would\s+like)\s+to\s+)*)"
+    r"schedule\b(?=\s+(?:a|an|the|all|my|our)?\s*[A-Za-z_][\w.$]*\s+"
+    r"(?:from|on|in|to|into)\b)",
+    re.IGNORECASE,
+)
+
+
+def _schedule_verb_as_transfer(text: str) -> str:
+    return _SCHEDULE_AS_TRANSFER_VERB.sub(lambda m: f"{m.group('lead')}sync", text or "")
+
+
 # "transfer orders to Warehouse" (source omitted — plan route / clarify later)
 _TRANSFER_TO_ONLY_RE = re.compile(
     rf"\b(?:{_TRANSFER_VERBS})\b"
@@ -2836,6 +6343,34 @@ _PLAN_ONLY_WORDS = (
     "plan", "would", "dry run", "dry-run", "preview", "what happens",
     "check", "simulate", "estimate", "before i", "safe", "should i",
     "is it ok", "risk",
+)
+# Explicit bind only — never invent a contract from "data contract" / "open contracts".
+_CONTRACT_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|under|using|against|bind(?:ing)?|enforce(?:ing)?)\s+"
+    r"(?:the\s+)?(?:signed\s+)?(?:data\s+)?contract(?:\s+id)?\s*[:=]?\s*"
+    r"(?P<cid>[A-Za-z][A-Za-z0-9_.:-]{1,63})",
+    re.IGNORECASE,
+)
+_CONTRACT_ID_BARE_RE = re.compile(
+    r"\bcontract(?:\s+id)?\s*[:=]?\s*"
+    r"(?P<cid>[A-Za-z]{2,}[-_][A-Za-z0-9_.:-]+|[0-9a-fA-F]{8,})\s*$",
+    re.IGNORECASE,
+)
+_CONTRACT_ID_STOP = frozenset({
+    "id", "the", "a", "an", "my", "our", "this", "that", "data", "signed",
+})
+_VALIDATION_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|using|in)?\s*(?:strict|balanced|lenient)\s+validation\b",
+    re.IGNORECASE,
+)
+_RULES_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:following|per|under|obey(?:ing)?)\s+(?:the\s+)?(?:data|migration)\s+rules\b",
+    re.IGNORECASE,
+)
+_SCHEMA_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|using)?\s*(?:type-locked|type locked|lock types|lock type)\s+schema\b"
+    r"|(?:,\s*)?(?:with|using)?\s*pause\s+on\s+(?:schema\s+)?change\b",
+    re.IGNORECASE,
 )
 
 
@@ -2862,17 +6397,335 @@ def _strip_transfer_tail(dest: str) -> tuple[str, str]:
     return dest[: tail.start()].strip(), mode
 
 
+def parse_transfer_bind_and_rules(message: str) -> tuple[str, dict[str, Any]]:
+    """Pull explicit contract / validation / schema posture from NL.
+
+    Never invents a contract id. Never parses skip_preflight. Selecting a
+    contract defaults require-signed. ``migrate`` / data-or-migration-rules
+    language selects strict validation — the Studio fail-fast bar — without
+    relaxing schema_policy.
+    """
+    extras: dict[str, Any] = {}
+    original = str(message or "")
+    extras.update(parse_transfer_rule_posture(original.lower()))
+    extras.update(parse_transfer_schema_posture(original.lower()))
+    text = original
+    hit = _CONTRACT_CLAUSE_RE.search(text) or _CONTRACT_ID_BARE_RE.search(text)
+    if hit:
+        cid = str(hit.group("cid") or "").strip()
+        if cid and cid.lower() not in _CONTRACT_ID_STOP:
+            extras["contract_id"] = cid
+            extras["require_signed_contract"] = True
+            text = f"{text[:hit.start()]} {text[hit.end():]}"
+    text = _VALIDATION_CLAUSE_RE.sub(" ", text)
+    text = _RULES_CLAUSE_RE.sub(" ", text)
+    text = _SCHEMA_CLAUSE_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text, extras
+
+
+def resolve_transfer_bind_kwargs(
+    *texts: str,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+    validation_mode: str = "",
+    schema_policy: str = "",
+) -> dict[str, Any]:
+    """Merge spoken + explicit bind / data-rule posture. Never invents a bind.
+
+    Explicit kwargs win when set. Unbound leaves the dict without
+    ``contract_id`` so ``enforce_contract`` stays unset. ``skip_preflight``
+    and ``propagate_all`` are never returned.
+    """
+    parsed: dict[str, Any] = {}
+    for blob in texts:
+        if blob:
+            parsed.update(parse_transfer_bind_and_rules(str(blob))[1])
+    out: dict[str, Any] = {}
+    cid = str(contract_id or parsed.get("contract_id") or "").strip()
+    if cid:
+        out["contract_id"] = cid
+        if require_signed_contract is None:
+            out["require_signed_contract"] = bool(parsed.get("require_signed_contract", True))
+        else:
+            out["require_signed_contract"] = bool(require_signed_contract)
+    mode = str(validation_mode or parsed.get("validation_mode") or "").strip()
+    if mode in {"strict", "balanced", "lenient"}:
+        out["validation_mode"] = mode
+    policy = str(schema_policy or parsed.get("schema_policy") or "").strip()
+    if policy in {"manual_review", "type_locked", "pause_on_change", "propagate_columns"}:
+        out["schema_policy"] = policy
+    return out
+
+
+def parse_transfer_rule_posture(lowered: str) -> dict[str, Any]:
+    """Explicit validation posture. Empty when the tool default should stand."""
+    if any(w in lowered for w in ("lenient", "permissive", "best effort", "best-effort")):
+        return {"validation_mode": "lenient"}
+    if any(w in lowered for w in (
+        "strict", "zero loss", "zero-loss", "fail fast", "fail-fast",
+        "data rules", "migration rules", "migrate", "migration",
+    )):
+        return {"validation_mode": "strict"}
+    if "balanced" in lowered:
+        return {"validation_mode": "balanced"}
+    return {}
+
+
+def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
+    """Explicit schema policy only — never invent propagate_all from chat."""
+    if "pause on" in lowered and "change" in lowered:
+        return {"schema_policy": "pause_on_change"}
+    if any(w in lowered for w in ("type-locked", "type locked", "lock types", "lock type")):
+        return {"schema_policy": "type_locked"}
+    # propagate_columns is opt-in by name: "propagate (the) columns",
+    # "accept additive drift", "auto-add new columns". propagate_all stays
+    # unreachable from chat — it silently rewrites dest types (D20 fix).
+    if any(w in lowered for w in (
+        "propagate column", "propagate the column", "propagate new column",
+        "propagate additive", "accept additive", "accept additive drift",
+        "auto-add column", "auto add column", "add new columns automatically",
+    )):
+        return {"schema_policy": "propagate_columns"}
+    return {}
+
+
+# An object named explicitly: "table users" / "the users table" / "collection events".
+_TABLE_PREFIX_RE = re.compile(
+    r"\b(?:from\s+|of\s+|in\s+|for\s+)?(?:the\s+)?(?:table|collection|dataset)\s+"
+    r"[`\"']?(?P<named>[A-Za-z_][\w.$]*)[`\"']?",
+    re.IGNORECASE,
+)
+_TABLE_SUFFIX_RE = re.compile(
+    r"\b(?:the\s+)?[`\"']?(?P<named>[A-Za-z_][\w.$]*)[`\"']?\s+(?:table|collection)\b",
+    re.IGNORECASE,
+)
+_ALL_TABLES_RE = re.compile(
+    r"\b(?:all|every|each)\s+(?:the\s+)?(?:tables?|collections?)\b"
+    r"|\b(?:whole|entire|full)\s+(?:database|schema|db)\b",
+    re.IGNORECASE,
+)
+_ROUTE_FROM_TO_RE = re.compile(
+    r"\b(?:from|out\s+of)\s+(?P<src>.+?)\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    r"(?=[,;?]|$)",
+    re.IGNORECASE,
+)
+_ROUTE_TO_FROM_RE = re.compile(
+    r"\b(?:to|into|onto)\s+(?P<dst>.+?)\s+(?:from|out\s+of)\s+(?P<src>.+?)(?=[,;?]|$)",
+    re.IGNORECASE,
+)
+_ROUTE_ARROW_RE = re.compile(
+    r"(?P<src>[A-Za-z0-9_][\w .\-]{0,48}?)\s*->\s*(?P<dst>[A-Za-z0-9_][\w .\-]{0,48})",
+    re.IGNORECASE,
+)
+_TRANSFER_VERB_RE = re.compile(rf"\b(?:{_TRANSFER_VERBS}|moving)\b", re.IGNORECASE)
+_BARE_OBJECT_WORDS = frozenset({
+    "data", "rows", "records", "everything", "all", "it", "them", "tables",
+    "table", "stuff", "things", "dataset", "datasets", "file", "files",
+    "upload", "uploads",
+})
+
+
+def _extract_named_table(text: str) -> tuple[str, str]:
+    """Pull an explicitly named object out of the route text.
+
+    "transfer data from sql to postgres from table users" states the table
+    after the destination — reading the tail as part of the destination's name
+    is why that phrasing used to resolve to nothing at all.
+    """
+    for pattern in (_TABLE_PREFIX_RE, _TABLE_SUFFIX_RE):
+        for match in pattern.finditer(text or ""):
+            name = match.group("named").strip()
+            # "transfer table users" — the verb is not the object being moved.
+            if name.lower() in _BARE_OBJECT_WORDS or _TRANSFER_VERB_RE.fullmatch(
+                name.lower()
+            ):
+                continue
+            stripped = f"{text[:match.start()]} {text[match.end():]}"
+            return name, re.sub(r"\s+", " ", stripped).strip().strip(",;").strip()
+    return "", (text or "").strip()
+
+
+def _extract_route_endpoints(text: str) -> tuple[str, str, str]:
+    """Return ``(source, destination, sync_mode)`` from route-only text."""
+    route = (
+        _ROUTE_FROM_TO_RE.search(text or "")
+        or _ROUTE_TO_FROM_RE.search(text or "")
+        or _ROUTE_ARROW_RE.search(text or "")
+    )
+    if not route:
+        return "", "", ""
+    src = _capture_connector_name(route.group("src"))
+    dst, mode = _strip_transfer_tail(route.group("dst").strip().strip("\"'"))
+    return src, _capture_connector_name(dst), mode
+
+
+# How an operator names a table out loud: "the orders table", "orders". The
+# introspection patterns read the identifier itself, so without allowing the
+# article and the trailing noun the match landed on the word "the" — "show me
+# the schema of the orders table" parsed no table at all and fell through to a
+# documentation answer about schema *policy*.
+_TABLE_REF = r"(?:the\s+|a\s+|this\s+)?([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection))?"
+
+# The word before "rows" is usually the table — but not when it describes the
+# state of the rows. "Replay the quarantined rows on my last job" was planned as
+# a sample of a table named ``quarantined`` on a connector named "my last job",
+# and answered with a refusal to guess which database that was, stacked on top
+# of the real answer. These are the product's own words for a row's state, so
+# the list is bounded by the domain rather than by English.
+_ROW_STATE_WORDS = frozenset(
+    """
+    quarantined rejected refused failed failing bad invalid
+    written read skipped dropped duplicate duplicated missing
+    unaccounted rolled_back replayed changed new stale affected
+    """.split()
+)
+
+def _comparative_words() -> frozenset[str]:
+    from .aggregate_tools import COMPARATIVE_WORDS
+
+    return COMPARATIVE_WORDS
+
+
+# A comparison word is never the name of the thing being compared, so the
+# planners fail closed on the canonical set rather than each keeping a copy.
+_NOT_A_TABLE_NAME = (
+    frozenset({"data", "rows", "me", "some", "the", "my", "all"})
+    | _ROW_STATE_WORDS
+    | _comparative_words()
+)
+
+
+# A row preview always puts the quantity between the verb and the table:
+# "show me 3 rows from orders", "preview the first 5 rows of orders", "sample
+# some rows from orders". The sample planner grew one literal alternative per
+# phrasing it had seen, so any unlisted combination read the count as the table
+# name and the remainder of the sentence as the connector — "show me 3 rows
+# from orders on Audit SQLite" sampled a table called ``3``. One pattern with
+# an optional count covers the whole family, and the count becomes the limit.
+_SAMPLE_ROWS_RE = re.compile(
+    r"\b(?:show|give\s+me|get|fetch|pull|sample|preview|peek\s+at|display|read)\s+"
+    r"(?:me\s+)?(?:the\s+)?"
+    r"(?:(?:first|top|last)\s+)?"
+    r"(?:(?P<count>\d{1,4})\s+|some\s+|a\s+few\s+)?"
+    r"(?:rows?|records?|documents?|data)\s+(?:of|from|in)\s+"
+    r"(?P<table>[a-zA-Z0-9_.-]+)"
+    r"(?:\s+(?:table|collection))?"
+    r"(?:\s+(?:on|in|from|using)\s+(?P<connector>.+))?$",
+    re.IGNORECASE,
+)
+
+
+# A question *about* something, as opposed to a request to do something.
+# "Can you pause the nightly sync" is a request; "what happens to duplicate
+# primary keys" is not, and the schedule-management verbs include words that are
+# also ordinary adjectives — so that question was planned as "clone the pipeline
+# named primary keys" and answered with "Schedule not found" before the
+# documentation it actually wanted.
+_ASKS_ABOUT_SOMETHING = re.compile(
+    r"^\s*(?:so\s+|and\s+|ok(?:ay)?\s+|but\s+)?"
+    r"(?:what|why|when|where|which|who|whose|how)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_whether_any_exist(lower: str, *objects: str) -> bool:
+    """"Do I have any contracts", "are there any pipelines" — an inventory ask.
+
+    Every listing pattern keyed on an imperative verb (list / show) or on a
+    possessive, so the most natural way to ask whether something exists at all
+    reached no tool and got the generic capability list back instead.
+    """
+    nouns = "|".join(objects)
+    return bool(
+        re.search(
+            rf"\b(?:do|did|have)\s+(?:i|we)\s+(?:have\s+|got\s+|set\s+up\s+)?"
+            rf"(?:any|some)\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b"
+            rf"|\b(?:are|is)\s+there\s+(?:any|some)\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b"
+            rf"|\bhave\s+(?:i|we)\s+got\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b",
+            lower,
+        )
+    )
+
+
+def _asks_for_schema(lower: str) -> bool:
+    """True when the operator actually asked to see a schema, not just a transfer."""
+    return bool(
+        re.search(r"\b(?:schema|columns|column list|describe|ddl|data ?types)\b", lower)
+        and re.search(r"\b(?:show|list|what|describe|see|get|print|introspect)\b", lower)
+    )
+
+
+# Wording that turns a transfer request into a standing one. Only consulted when
+# a transfer route was already parsed, so "show my schedules" cannot reach it.
+_SCHEDULE_INTENT_RE = re.compile(
+    r"\b(?:schedule|scheduled|scheduling|automate|automated|recurring|"
+    r"repeat|repeatedly|on\s+a\s+schedule)\b",
+    re.IGNORECASE,
+)
+
+
 def parse_transfer_intent(message: str) -> dict | None:
-    """Extract source/destination/table from a transfer request, or None."""
-    text = (message or "").strip()
+    """Extract source/destination/table/data rules from a transfer request.
+
+    Rule clauses are parsed and removed *before* the route is read, so
+    "…to Warehouse, only rows where status = active, upsert on id" resolves to
+    the connector **Warehouse** and a filter — not to a connector whose name is
+    the rest of the sentence. Rules the engine cannot apply come back as
+    questions on the intent; the caller must refuse rather than move data the
+    operator did not ask for.
+    """
+    cleaned, extras = parse_transfer_bind_and_rules(normalize_operator_typos(message))
+    cleaned, rules = parse_transfer_data_rules(cleaned)
+    extras.update(rules.as_intent_fields())
+    text = _schedule_verb_as_transfer(cleaned.strip())
     if not text:
         return None
     match = (
         _TRANSFER_RE.search(text)
         or _TRANSFER_TO_FROM_RE.search(text)
         or _TRANSFER_ARROW_RE.search(text)
+        or _TRANSFER_ON_RE.search(text)
     )
+    _matched_table = match.group("table").strip().lower() if match else ""
+    if match and (
+        _matched_table in _BARE_OBJECT_WORDS
+        or _TRANSFER_VERB_RE.fullmatch(_matched_table)
+    ):
+        # "transfer data from A to B from table users" — the object is named
+        # elsewhere in the sentence, so re-read the route without it.
+        match = None
     if not match:
+        named, route_text = _extract_named_table(text)
+        if named and _TRANSFER_VERB_RE.search(text):
+            src, dst, mode = _extract_route_endpoints(route_text)
+            if dst:
+                lowered = text.lower()
+                return {
+                    "source_table": named,
+                    "source_connector_name": src[:80],
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": mode or normalize_sync_mode_for_message(lowered),
+                    # No source named, or a rule we could not apply: plan, never mutate.
+                    "plan_only": (
+                        not src
+                        or rules.blocking
+                        or any(w in lowered for w in _PLAN_ONLY_WORDS)
+                    ),
+                    **extras,
+                }
+        if _ALL_TABLES_RE.search(text) and _TRANSFER_VERB_RE.search(text):
+            src, dst, mode = _extract_route_endpoints(text)
+            if src or dst:
+                return {
+                    "source_table": "",
+                    "source_connector_name": src[:80],
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": mode,
+                    "all_tables": True,
+                    "plan_only": True,
+                    **extras,
+                }
         # Table + destination only — still stage a plan so Confirm/clarify can ask source.
         soft = _TRANSFER_TO_ONLY_RE.search(text)
         if soft and not re.search(r"\bfrom\b|\bout\s+of\b", text, re.I):
@@ -2890,6 +6743,7 @@ def parse_transfer_intent(message: str) -> dict | None:
                     "dest_connector_name": dest[:80],
                     "sync_mode": mode,
                     "plan_only": True,  # missing source → plan/clarify, never mutate
+                    **extras,
                 }
         return None
     table = match.group("table").strip()
@@ -2898,7 +6752,7 @@ def parse_transfer_intent(message: str) -> dict | None:
     if not table or not source or not dest:
         return None
     # Bare "data/rows/records" is not a real table — ask or plan the route instead.
-    if table.lower() in {"data", "rows", "records", "everything", "all", "it", "them"}:
+    if table.lower() in _BARE_OBJECT_WORDS:
         return None
     lowered = text.lower()
     if not mode:
@@ -2908,8 +6762,10 @@ def parse_transfer_intent(message: str) -> dict | None:
         "source_connector_name": source[:80],
         "dest_connector_name": dest[:80],
         "sync_mode": mode,
-        # Asking what a transfer *would* do must never stage a mutation.
-        "plan_only": any(w in lowered for w in _PLAN_ONLY_WORDS),
+        # Asking what a transfer *would* do must never stage a mutation, and
+        # neither may a request carrying a rule we could not apply.
+        "plan_only": rules.blocking or any(w in lowered for w in _PLAN_ONLY_WORDS),
+        **extras,
     }
 
 
@@ -2922,18 +6778,29 @@ def normalize_sync_mode_for_message(lowered: str) -> str:
     return ""
 
 
+def normalize_operator_typos(message: str) -> str:
+    """Repair slang and misspellings before any intent parsing.
+
+    One rewrite owns both retrieval and routing. Adding a second typo table
+    here is how "gotta have logical wal" reached tools cleaned and RAG raw.
+    """
+    from ..rag.query_analysis import rewrite_operator_question
+
+    return rewrite_operator_question(message)
+
+
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     """Local tool routing when no LLM tool-use is available."""
-    # Light typo normalization for high-frequency operator misspellings.
-    message = re.sub(r"\btrasfer\b", "transfer", message or "", flags=re.I)
-    message = re.sub(r"\bschdule\b", "schedule", message or "", flags=re.I)
-    message = re.sub(r"\bmny\b", "many", message or "", flags=re.I)
-    message = re.sub(r"\btbls\b", "tables", message or "", flags=re.I)
-    message = re.sub(r"\bcnt\b", "count", message or "", flags=re.I)
-    message = re.sub(r"\bconnectorz\b", "connectors", message or "", flags=re.I)
-    message = re.sub(r"\bdbs\b", "databases", message or "", flags=re.I)
+    message = normalize_operator_typos(message)
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
+
+    # Job / connector / schedule lifecycle verbs are staged operations, and they
+    # are recognised before the unsupported-mutation refusal so "delete the
+    # staging connector" becomes a Confirm card rather than a wall.
+    lifecycle = plan_lifecycle_operation(message)
+    if lifecycle:
+        return lifecycle
 
     # Delete/export/schedule paraphrases must not plan list/search tools —
     # "Warehouse connector" otherwise matches connector inventory routing.
@@ -2943,6 +6810,74 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if _is_meta_pilot_question(lower):
         planned.append(("describe_pilot", {}))
         return planned
+
+    # An operator pasting our own connector bullet back is naming that
+    # connector. Resolve it, then route the question they glued on.
+    # An operator pasting a row whose name is *not* saved still deserves the
+    # not-found recovery ("no connector matched X; saved connectors are …")
+    # rather than a documentation refuse that hides the real reason.
+    pasted_name, pasted_rest = split_pasted_connector_row(message)
+    if pasted_name:
+        inner = infer_tools_from_message(f"{pasted_rest} on {pasted_name}")
+        if inner and (
+            _saved_connector_exists(pasted_name)
+            or any(n in _NAMED_OBJECT_LOOKUP_TOOLS for n, _ in inner)
+        ):
+            return inner
+
+    from .dialogue_acts import (
+        classify_dialogue_act,
+        is_calendar_question,
+        is_create_connection_capability_ask,
+        is_route_plan_capability_paste,
+        is_schedule_health_question,
+        is_schedule_setup_capability_ask,
+        is_transfer_capability_ask,
+    )
+
+    # Clock asks must not retrieve DATE-type / transform docs.
+    if is_calendar_question(message):
+        return []
+    # Creative writing has no documentation to cite, and retrieving one anyway
+    # presented an Iceberg passage as the answer to "write me a poem about data".
+    if asks_for_creative_writing(message):
+        return []
+    # Price, licence and SLA are not engineering facts, so no tool here can
+    # answer them and every one that tried answered something else: "how many
+    # seats do we get" reached ``aggregate_data`` and replied "connector not
+    # found". ``explain_product`` owns the refusal that names what is missing.
+    if asks_a_commercial_question(message):
+        return [("explain_product", {"query": message})]
+    if is_schedule_setup_capability_ask(message):
+        return []
+    if is_create_connection_capability_ask(message) or is_route_plan_capability_paste(message):
+        return []
+
+    _act = classify_dialogue_act(message)
+    # "any failures today" reads as a sitrep, but the operator asked for the run
+    # that broke, not a workspace summary — a briefing answers around the
+    # question. The jobs ledger is where the failure and its reason are recorded.
+    if _act == "briefing" and asks_what_failed_recently(message):
+        _act = ""
+    # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
+    # named objects (job_/pf_) keep their existing routers.
+    if _act == "briefing" and not re.search(
+        r"\b(?:job_|pf_)[a-z0-9]"
+        r"|(?:show|list|open)\s+(?:my\s+)?(?:jobs?|pipelines?|schedules?|connectors?)\b"
+        r"|(?:plan|start|stage)\s+transfer\b"
+        r"|\bsample\b|\bcount\s+rows\b|\bfix\s+(?:my\s+)?mapping\b",
+        lower,
+    ):
+        planned.append(("brief_workspace", {}))
+        return planned
+
+    # A plain row count is one intent → COUNT(*) on the resolved connector,
+    # ahead of the sample route that answered it with 25 rows (QA, r7).
+    from .row_count_intent import plan_row_count
+
+    row_count = plan_row_count(message)
+    if row_count:
+        return row_count
 
     nav_map = {
         "pilot": ["data pilot", "go to pilot", "open pilot"],
@@ -3054,8 +6989,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         q = setup.group(1).strip()
         role = "destination" if "destination" in lower else "source"
         planned.append(("search_connectors", {"query": q[:40], "role": role}))
-    elif re.search(r"\bconnectors?\b|\bconnections?\b", lower) and not any(
-        v in lower for v in ("go to", "take me", "navigate to")
+    elif (
+        re.search(r"\bconnectors?\b|\bconnections?\b", lower)
+        and not any(v in lower for v in ("go to", "take me", "navigate to"))
+        and not _IS_A_CONNECTOR_ASK.search(lower)
     ):
         # "open connectors" is navigate; "find my postgres connector" is search.
         bare_open_connectors = bool(
@@ -3091,8 +7028,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")
             ]
-        elif not bare_open_connectors:
-            planned.append(("list_connectors", {}))
+        elif not bare_open_connectors and not re.search(
+            r"\bgreen\s+(?:connector\s+)?test\b|\btest\s+passed\b|"
+            r"\bskip\s+(?:validat\w*|preflight)\b|"
+            r"\benough\s+to\s+skip\b",
+            lower,
+        ):
+            _health = connector_health_filter(message)
+            _engine, _engine_not = connector_engine_filter(message)
+            _list_args: dict[str, Any] = {}
+            if _health != "any":
+                _list_args["health"] = _health
+            if _engine:
+                _list_args["engine"] = _engine
+                _list_args["engine_excluded"] = _engine_not
+            planned.append(("list_connectors", _list_args))
             planned = [
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")
@@ -3125,7 +7075,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
-    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")):
+    if is_schedule_health_question(message):
+        planned.append(("list_schedules", {"limit": 20}))
+        planned = [
+            (n, a) for n, a in planned
+            if n != "explain_product"
+            and not (n == "navigate" and (a or {}).get("screen") == "schedules")
+        ]
+    elif any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")) or _asks_whether_any_exist(lower, "schedules?", "pipelines?"):
         planned.append(("list_schedules", {"limit": 20}))
         planned = [
             (n, a) for n, a in planned
@@ -3191,6 +7148,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             flags=re.I,
         ).strip()
         sched_name = re.sub(r"\s+(?:schedule|pipeline)$", "", sched_name, flags=re.I).strip()
+        # "open job_abc123" is a run, not a pipeline — routing it through the
+        # short-title matcher staged open_schedule beside open_job and the
+        # Jobs screen showed two CTAs for one object (QA Q04).
+        if re.fullmatch(r"job_[a-z0-9_-]{3,}|[a-f0-9]{12,24}", sched_name or ""):
+            sched_name = ""
         if sched_name and sched_name not in {"now", "it", "this", "that", "list", "all"}:
             sched_name = re.sub(r"^(?:the|my|a|an)\s+", "", sched_name, flags=re.I).strip()
             tool = "open_schedule" if any(w in lower for w in ("open", "view")) else "get_schedule"
@@ -3289,7 +7251,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if not re.search(
         r"\b(?:change\s+data\s+capture|cdc|sync\s+mode|write\s+mode|upsert|append)\b",
         lower,
-    ):
+    ) and not _ASKS_ABOUT_SOMETHING.match(lower):
         manage_sched = re.search(
             r"\b(?:pause|stop|disable|resume|clone|duplicate)\s+"
             r"(?:the\s+)?(?:schedule|pipeline)\s+(.+?)\s*$",
@@ -3311,8 +7273,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "schedules"}))
             planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
-    if any(w in lower for w in ("contracts", "data contract")) and any(w in lower for w in ("list", "show", "what")):
-        # "show contracts" may also navigate — prefer list when asking for contents.
+    # Inventory of signed contracts — not "what is a data contract" (definition).
+    if (
+        re.search(
+            r"\b(?:list|show|my)\s+(?:data\s+)?contracts?\b"
+            r"|\b(?:what|which)\s+(?:data\s+)?contracts?\s+(?:do\s+i|do\s+we|are\s+(?:there|mine|signed))\b"
+            r"|\b(?:data\s+)?contracts?\s+(?:i\s+have|we\s+have|in\s+(?:the|this)\s+workspace)\b",
+            lower,
+        )
+        or _asks_whether_any_exist(lower, "contracts?")
+    ) and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower):
         if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_contracts", {"limit": 50}))
             planned = [
@@ -3327,9 +7297,25 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     _platform_job_inventory = bool(
         re.search(
             r"\b(?:how many\s+jobs|jobs?\s+(?:that\s+)?failed|failed\s+jobs|job\s+failures|"
-            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b",
+            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b"
+            # Rows *moved* is job telemetry, not a table to aggregate. Without
+            # this, "how many rows did we move yesterday" hunted for a saved
+            # connector named "we move yesterday".
+            r"|\bhow\s+many\s+rows?\s+(?:did|have|has)\s+(?:we|i|you|it)\s+"
+            r"(?:moved?|transferr?ed?|synced?|loaded?|copied|copy|written|wrote)\b"
+            # Quarantine and rejection counts are recorded on the job, not in a
+            # table. "how many rows got quarantined" hunted for a saved connector
+            # named "quarantined" and stacked a clarification, a Help passage and
+            # the connector list into one answer.
+            r"|\bhow\s+many\s+rows?\s+(?:got|were|was|are|have\s+been)\s+"
+            r"(?:quarantined|rejected|refused|dropped|skipped|lost)\b"
+            # "did anything run last night" is job history. The word "night"
+            # retrieved the nightly-cadence procedure instead.
+            r"|\b(?:did|has|have)\s+(?:anything|any\s+\w+|something|it|we|they)\s+"
+            r"(?:run|ran|execute[d]?|sync(?:ed)?|transferred?|move[d]?)\b",
             lower,
         )
+        or asks_what_failed_recently(lower)
     ) and not re.search(r"\bon\s+[a-z0-9]", lower)
     if (not _nav_only) and (
         _platform_job_inventory
@@ -3351,12 +7337,37 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and any(w in lower for w in ("list", "show", "recent", "my"))
             and "dataset" not in lower
         )
+        or _asks_whether_any_exist(lower, "jobs?", "transfers?")
     ):
-        planned.append(("list_jobs", {"limit": 10}))
+        # "show last 3 transfers" named a count — returning the default 10
+        # (or 20 rows rendered) silently widened it (QA C08).
+        _n_m = re.search(
+            r"\b(?:last|recent|top|first)\s+(\d{1,3})\b"
+            r"(?!\s*(?:minutes?|mins?|min|m|hours?|hrs?|hr|h|days?|d|weeks?|wks?|wk|w)\b)",
+            lower,
+        )
+        _n = max(1, min(int(_n_m.group(1)), 100)) if _n_m else 10
+        planned.append(("list_jobs", {"limit": _n}))
         planned = [
             (n, a) for n, a in planned
             if not (n == "navigate" and (a or {}).get("screen") == "jobs")
         ]
+
+    # "How many X do I have" is a read of the operator's own workspace for
+    # every inventory noun, not only the two that had hand-written branches.
+    # "how many schedules do i have" fell through to the documentation and
+    # answered a count with the CDC-delete-drops-the-slot passage.
+    if _asks_to_count_workspace_objects(lower):
+        for pattern, tool in _WORKSPACE_INVENTORY_TOOLS:
+            if pattern.search(lower):
+                planned.append(tool)
+                planned = [
+                    (n, a) for n, a in planned
+                    if n != "explain_product"
+                    and not (n == "aggregate_data")
+                    and not (n == "navigate")
+                ]
+                break
 
     _platform_connector_inventory = bool(
         re.search(r"\b(?:how many\s+connectors|connector\s+count)\b", lower)
@@ -3391,8 +7402,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("list_jobs", {"limit": 8}))
             planned.append(("remediate_validation", {"kind": "open_bad_data_fix"}))
 
-    job_match = re.search(r"\b([a-f0-9]{24})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
-    if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)):
+    job_match = re.search(r"\b([a-f0-9]{20,26})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
+    if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)) and not re.search(
+        r"\b(?:delete|drop|remove|cancel|stop|pause|truncate)\b", lower
+    ):
         jid = job_match.group(1)
         if any(w in lower for w in ("open", "show", "go to", "take me")):
             planned.append(("open_job", {"job_id": jid}))
@@ -3420,16 +7433,31 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "get job details",
             "job details",
             "last transfer status",
+            "went wrong with the transfer",
+            "went wrong with the job",
+            "went wrong with my transfer",
+            "wrong with the last transfer",
         )
     ) or re.search(r"\bwhy\s+did\s+(?:the\s+)?(?:last\s+)?(?:transfer|job)\s+fail\b", lower) or re.search(
         r"\b(?:status|details?)\s+of\s+(?:my\s+|the\s+)?(?:last\s+)?(?:transfer|job)\b",
         lower,
-    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower):
+    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower) or re.search(
+        # Whatever is wanted *from* the operator's last run, the run has to be
+        # fetched first. The literal list above grew a phrase at a time and
+        # still missed "prove the row counts matched on my last transfer" and
+        # "give me the proof for my last transfer": both were recognised as
+        # reads of the workspace and then reached no tool at all, so the reply
+        # asked which table they meant.
+        # "my last successful transfer" — an adjective between `last` and the
+        # noun dropped it to documentation (QA N09).
+        r"\b(?:my|our|the)\s+(?:last|latest|most\s+recent|previous)\s+"
+        r"(?:[a-z]+\s+){0,2}?(?:job|run|transfer|sync|load|migration)\b",
+        lower,
+    ):
+        # The inventory block above may already have queued a bare limit-10
+        # list_jobs; the last-run read is the more specific ask.
+        planned = [(n, a) for n, a in planned if n != "list_jobs"]
         planned.append(("list_jobs", {"limit": 5}))
-        planned = [
-            (n, a) for n, a in planned
-            if not (n == "navigate" and (a or {}).get("screen") == "jobs")
-        ]
 
     if any(w in lower for w in (
         "strip control", "strip controls", "fix bad data", "format-control",
@@ -3462,21 +7490,141 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "transfer"}))
 
     if any(w in lower for w in (
-        "new transfer", "start a transfer", "open transfer studio",
+        "new transfer", "open transfer studio",
         "start transfer studio", "open the transfer studio", "launch transfer studio",
     )) and not any(p[0] == "navigate" for p in planned):
+        planned.append(("start_transfer_studio", {}))
+    elif (
+        "start a transfer" in lower
+        and not re.search(
+            r"\bwho\b|\ballowed\b|\bpermission\b|\brole\b"
+            r"|\bviewer\b|\beditor\b|\badmin\b|\boperator\b|\bapprover\b",
+            lower,
+        )
+        and not any(p[0] == "navigate" for p in planned)
+    ):
+        # "who is allowed to start a transfer" names the verb and is a
+        # roles question. Opening Studio there answered the wrong ask.
         planned.append(("start_transfer_studio", {}))
 
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
         planned.append(("get_transfer_capabilities", {}))
 
+    # "transfer datasets from customers_staging to Snowflake" /
+    # "move the sales dataset into Snowflake" — the noun is an uploaded file,
+    # not a connector table. parse_transfer_intent reads it as connector SQL
+    # and the turn answered with a connector list instead of a plan (QA DS04).
+    if not any(n == "start_dataset_transfer" for n, _ in planned):
+        ds_route = re.search(
+            r"(?:transfer|move|copy|send|push|load)\s+datasets?\s+from\s+"
+            r"(?P<ds>.+?)\s+(?:to|into)\s+(?P<dst>.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"(?:transfer|move|copy|send|push|load)\s+"
+            r"(?:(?:the|my|uploaded|an|a)\s+)*"
+            r"(?P<ds>[\w .-]{2,80}?)\s+datasets?\s+(?:to|into)\s+(?P<dst>.+?)\s*$",
+            lower,
+        )
+        if ds_route:
+            cand = ds_route.group("ds").strip()
+            dst = ds_route.group("dst").strip()
+            try:
+                schema = get_data_analyst().resolve_dataset(cand)
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "dataset-transfer resolve skipped: %s", exc, exc_info=exc
+                )
+                schema = None
+            if (
+                schema is not None
+                and getattr(schema, "source", "") == "upload"
+                and getattr(schema, "path", "")
+            ):
+                planned.append(("start_dataset_transfer", {
+                    "dataset_name": getattr(schema, "name", "") or cand,
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": normalize_sync_mode_for_message(lower),
+                }))
+
     transfer_intent = parse_transfer_intent(message)
     if transfer_intent:
         plan_only = transfer_intent.pop("plan_only", False)
         transfer_intent = {k: v for k, v in transfer_intent.items() if v}
-        planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
+        # A cadence ("nightly at 2am") or an explicit "schedule this" is a
+        # standing instruction, not a single run — staging one run instead would
+        # move the data once and quietly never again.
+        recurring = bool(transfer_intent.get("cadence")) or (
+            bool(_SCHEDULE_INTENT_RE.search(lower))
+            and "run_schedule_now" not in {n for n, _ in planned}
+        )
+        if recurring and not plan_only:
+            planned.append(("create_schedule", {
+                k: v for k, v in transfer_intent.items() if k != "all_tables"
+            }))
+        else:
+            # "transfer datasets from customers_staging to Snowflake" names an
+            # uploaded file, not a table on a connector — planning start_transfer
+            # answered with a connector lookup and never a real plan (QA DS04).
+            # start_dataset_transfer parses the file, runs the same mapping +
+            # 9-gate preflight, and still stops at Confirm.
+            ds_name = ""
+            # A literal filename wins over fuzzy dataset matching — resolving
+            # "customers.csv" to a different upload named *customers* would
+            # stage the wrong file (QA DS05).
+            st = str(transfer_intent.get("source_table") or "").strip()
+            if re.search(
+                r"\.(?:csv|tsv|jsonl?|ndjson|parquet|xlsx?|ods|txt|avro|orc)$",
+                st,
+                re.I,
+            ):
+                ds_name = st
+            explicit_source_connector = str(
+                transfer_intent.get("source_connector_name") or ""
+            ).strip()
+            if not ds_name and not explicit_source_connector:
+                try:
+                    for cand in (
+                        st,
+                        explicit_source_connector,
+                    ):
+                        if not cand or cand.lower() in _BARE_OBJECT_WORDS:
+                            continue
+                        schema = get_data_analyst().resolve_dataset(cand)
+                        if (
+                            schema is not None
+                            and getattr(schema, "source", "") == "upload"
+                            and getattr(schema, "path", "")
+                        ):
+                            ds_name = getattr(schema, "name", "") or cand
+                            break
+                except Exception as exc:
+                    logging.getLogger(__name__).debug(
+                        "dataset-source resolution skipped: %s", exc, exc_info=exc
+                    )
+            if ds_name:
+                planned.append(("start_dataset_transfer", {
+                    "dataset_name": ds_name,
+                    "dest_connector_name": transfer_intent.get("dest_connector_name") or "",
+                    "dest_table": transfer_intent.get("dest_table") or "",
+                    "sync_mode": transfer_intent.get("sync_mode") or "",
+                    "schema_policy": transfer_intent.get("schema_policy") or "manual_review",
+                    "validation_mode": transfer_intent.get("validation_mode") or "balanced",
+                    "contract_id": transfer_intent.get("contract_id") or "",
+                    "require_signed_contract": transfer_intent.get("require_signed_contract"),
+                    "source_timezone": transfer_intent.get("source_timezone") or "",
+                }))
+            else:
+                planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
-    if not transfer_intent and any(
+    if not transfer_intent and is_transfer_capability_ask(message):
+        # No endpoints named yet, so the sketch is the answer: it states the next
+        # correct action and the gate sequence the route will run.
+        planned.append(("plan_transfer_route", {"source": "", "destination": ""}))
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("recommend_sync_mode", "explain_product")
+        ]
+    elif not transfer_intent and any(
         w in lower
         for w in (
             "plan transfer", "transfer plan", "route plan", "plan a route", "plan route",
@@ -3486,33 +7634,39 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "into mysql", "into warehouse",
         )
     ):
+        cleaned, extras = parse_transfer_bind_and_rules(message)
+        route_text = cleaned.lower()
         src, dst = "", ""
         route = re.search(
             r"(?:from|source|out of)\s+(.+?)\s+(?:to|into|->|destination)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"move\s+(?:data|rows|records)?\s*(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:cdc|copy|sync|replicate)\s+(?:data\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:plan|route)\s+(?:a\s+|the\s+)?(?:route\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:moving|move)\s+(?:data\s+)?(?:out\s+of\s+)?(.+?)\s+(?:into|to)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"go\s+from\s+(.+?)\s+into\s+(.+?)\s*$",
-            lower,
+            route_text,
         )
         if route:
             src = _capture_connector_name(route.group(1))
             dst = _capture_connector_name(route.group(2))
+        # Only pass endpoints the route actually named. Falling back to a slice
+        # of the sentence made "how fast can you move data" render as a route
+        # whose source *and* destination were that whole question.
         planned.append(("plan_transfer_route", {
-            "source": src or message[:80],
-            "destination": dst or message[-80:],
+            "source": src,
+            "destination": dst,
             "workload": "cdc" if "cdc" in lower else "unknown",
+            **{k: v for k, v in extras.items() if v},
         }))
         # Prefer route planning over a bare sync-mode recommendation.
         planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
@@ -3561,13 +7715,31 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "switch to cdc",
                 "switch to upsert",
                 "switch to append",
-                "use upsert",
-                "use cdc",
-                "use append",
             )
         ) or (
             any(w in lower for w in ("sync mode", "write mode", "cdc", "incremental", "dedupe", "full refresh", "upsert", "merge"))
-            and any(w in lower for w in ("recommend", "suggest", "choose", "which", "best for", "should", "enable", "use", "make it", "switch"))
+            and (
+                any(
+                    w in lower
+                    for w in (
+                        "recommend",
+                        "suggest",
+                        "choose",
+                        "which",
+                        "best for",
+                        "should",
+                        "enable",
+                        "make it",
+                        "switch",
+                    )
+                )
+                or bool(
+                    re.search(
+                        r"\buse\s+(?:cdc|upsert|append|incremental|overwrite)\b",
+                        lower,
+                    )
+                )
+            )
         )
     ):
         planned.append(("recommend_sync_mode", {
@@ -3597,34 +7769,34 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Skip when we already scheduled schema-policy inspection.
     _policy_planned = any(n == "inspect_schema_policy" for n, _ in planned)
     schema_of = None if _policy_planned else re.search(
-        r"(?:schema|columns|structure)\s+(?:of|for|on)\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:schema|columns|structure)\s+(?:of|for|on)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     )
     columns_on = None if _policy_planned else re.search(
-        r"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"break\s+down\s+the\s+columns?\s+for\s+([a-zA-Z0-9_.-]+)"
+        rf"break\s+down\s+the\s+columns?\s+for\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
         # "what columns does orders have on sales"
-        r"(?:what\s+)?columns\s+does\s+([a-zA-Z0-9_.-]+)\s+have"
+        rf"(?:what\s+)?columns\s+does\s+{_TABLE_REF}\s+have"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+([a-zA-Z0-9_.-]+)"
+        rf"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
     describe_table = None if _policy_planned else re.search(
-        r"describe\s+(?:table\s+)?([a-zA-Z0-9_.-]+)"
+        rf"describe\s+(?:table\s+)?{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
@@ -3646,12 +7818,36 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             lower,
         )
     )
-    if schema_of or columns_on or describe_table or table_look:
-        m = schema_of or columns_on or describe_table or table_look
+    # A schema *property* of a named table is a live read, never a Help topic.
+    # "what is the primary key of orders on Demo Orders" and "are there nulls in
+    # orders on Demo Orders" both answered from documentation, which cannot know
+    # either fact — the introspect tool already reports keys and nullability.
+    _SCHEMA_PROPERTY_WORD = (
+        r"(?:primary\s+keys?|pk|unique\s+keys?|foreign\s+keys?|"
+        r"indexe?s?|nullable|not\s+null|nulls?|"
+        r"data\s+types?|column\s+types?|dtypes?)"
+    )
+    schema_property = None if _policy_planned else (
+        re.search(
+            rf"\b{_SCHEMA_PROPERTY_WORD}\b"
+            r"[^.?!]*?\b(?:of|for|in|on|from)\s+"
+            rf"{_TABLE_REF}"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+        or re.search(
+            rf"\b{_SCHEMA_PROPERTY_WORD}\s+does\s+{_TABLE_REF}\s+have"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+    )
+    if schema_of or columns_on or describe_table or table_look or schema_property:
+        m = schema_of or columns_on or describe_table or table_look or schema_property
         table = (m.group(1) or "").strip()
         # Reject inventory / policy nouns mistaken as table names
         if table.lower() not in {
             "drift", "change", "policy", "tables", "collections", "list", "schema", "schemas",
+            "table", "collection",
         }:
             connector_name = ""
             if m.lastindex and m.lastindex >= 2 and m.group(2):
@@ -3670,6 +7866,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         lower,
     ) or re.search(
         r"(?:tables|tbls|collections|objects|schemas)\s+(?:from|on|in|for|of)\s+(.+)$",
+        lower,
+    ) or re.search(
+        # The copula may sit between the object and its scope: "what tables are
+        # on Audit SQLite" is "tables on Audit SQLite" asked as a question.
+        # Without this the alternatives below had to enumerate every way of
+        # saying it — "do we have", "exist", "are there", "are available" — and
+        # plain "are" is the one they missed, so the turn answered with how a
+        # datetime column is created on each engine.
+        r"(?:tables|tbls|collections|objects|schemas)\s+"
+        r"(?:are|is|live|lives|exist|exists)\s+"
+        r"(?:from|on|in|for|of)\s+(.+)$",
         lower,
     ) or re.search(
         r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
@@ -3696,7 +7903,71 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
         lower,
     )
-    if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
+    # Two of the operator's own connectors, named side by side. Both names had to
+    # resolve against the store to get here, so this is not a documentation
+    # question — which is what it used to become: the shipped examples use these
+    # very names, so "compare Demo Orders and Quarantine SQLite" retrieved the
+    # destination-type table and answered about six logical types instead.
+    comparison = connector_comparison(message)
+    if comparison:
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "explain_product",
+                "search_knowledge",
+                "list_connectors",
+                "sample_connector_object",
+                "aggregate_data",
+                "list_connector_objects",
+                "introspect_connector_schema",
+                "plan_transfer_route",
+                "get_transfer_capabilities",
+            )
+        ]
+        planned.append(("compare_connectors", dict(comparison)))
+        return planned
+    # A size question about the tables on a connector is a ranking, not a read of
+    # one table. Claimed before the inventory and sample parsers, because both
+    # used to take the superlative for the table name.
+    if asks_to_rank_connector_tables(message) and not _CAPABILITY_TABLE_LANDING.search(
+        lower
+    ):
+        # The connector name ends where the ranking clause begins: anchored only
+        # at end-of-string, "which table on Demo Orders has the most rows" bound
+        # a connector literally named "Demo Orders has the most rows".
+        rank_on = re.search(
+            r"\b(?:on|in|for|from|of)\s+(?:the\s+|my\s+)?"
+            r"(?P<connector>[A-Za-z0-9_][\w\-. ]{0,48}?)"
+            r"(?:\s+(?:connector|database|db|warehouse))?"
+            r"(?:\s*[?.!]*$|\s+(?:has|have|had|holds?|contains?|with|that|which|"
+            r"is|are|was|were|by|and|or|ranked|sorted|ordered)\b)",
+            message,
+            re.I,
+        )
+        cname = _capture_connector_name(rank_on.group("connector")) if rank_on else ""
+        args: dict[str, Any] = {"order": table_rank_order(message)}
+        if cname:
+            args["connector_name"] = cname
+        planned.append(("rank_connector_tables", args))
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "sample_connector_object",
+                "aggregate_data",
+                "list_connector_objects",
+                "explain_product",
+                "search_knowledge",
+            )
+        ]
+    elif (
+        tables_on
+        and "introspect_connector_schema" not in [p[0] for p in planned]
+        and not _CAPABILITY_TABLE_LANDING.search(lower)
+    ):
         cname = _capture_connector_name(tables_on.group(1))
         if cname:
             planned.append(("list_connector_objects", {"connector_name": cname}))
@@ -3753,6 +8024,24 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         or re.search(r":\s*select\b", lower)
     )
     agg = parse_aggregation_request(message)
+    # "How many gates are there before a write" parses as COUNT(*) over a table
+    # named ``gates``, and the tool then answers a documented question with
+    # "Connector not found". A product question with no connector and no named
+    # workspace object is not a warehouse aggregation.
+    if (
+        agg is not None
+        and not (agg.connector_name or "").strip()
+        and _looks_like_product_howto(lower)
+        and not _has_explicit_workspace_subject(lower)
+    ):
+        agg = None
+    # Throughput and limits are product capability, not a row count.
+    if (
+        agg is not None
+        and asks_about_product_capacity(lower)
+        and not _has_explicit_workspace_subject(lower)
+    ):
+        agg = None
     if (
         agg is not None
         and not _explicit_sql_intent
@@ -3781,14 +8070,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Sample / analyze live table data
     # Prefer "show the data from <table>" before the generic "show …" pattern —
     # otherwise "show the data from countries" captures table=`data`.
-    sample_m = re.search(
+    rows_m = _SAMPLE_ROWS_RE.search(lower)
+    sample_m = rows_m or re.search(
         r"(?:show|give\s+me|get|fetch|pull)\s+(?:me\s+)?(?:the\s+)?(?:data|rows|records)\s+"
         r"(?:from|in|on)\s+([a-zA-Z0-9_.-]+)"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
+        # "query orders on Demo Orders" and "run a query on orders on Demo
+        # Orders" are reads. Without the verb they matched nothing at all and the
+        # turn was refused as undocumented, which is the one thing an operator
+        # never accepts from a data tool.
         r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
-        r"analyze|profile|peek(?:\s+at)?|(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
+        r"run\s+(?:a\s+)?quer(?:y|ies)\s+(?:on|against|over)|quer(?:y|ies)|"
+        r"analyze|profile|peek(?:\s+at)?|see|look(?:\s+at)?|check(?:\s+out)?|"
+        r"(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
         r"([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection|rows))?"
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
@@ -3810,7 +8106,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
     ) or re.search(
-        r"(?:data|rows)\s+(?:in|from)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:data|rows|records)\s+(?:in|from|of)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))$",
+        lower,
+    ) or re.search(
+        # "give me a sample of the orders table in X" — `sample of` missed
+        # every phrasing above and planned nothing, leaving the turn to a
+        # later guess (QA T04: silent connector substitution).
+        r"(?:a\s+)?(?:sample|preview)\s+of\s+(?:the\s+)?([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:table|collection|rows))?"
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
     ) or re.search(
@@ -3833,26 +8137,42 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and "columns" not in lower
             and "describe" not in lower
             and "list_connector_objects" not in [p[0] for p in planned]
+            and "list_jobs" not in [p[0] for p in planned]
             and not any(w in lower for w in (" to ", " into ", "->"))
             and not re.search(r"\b(?:move|transfer|migrate|sync|copy|replicate)\b.+\b(?:from|to)\b", lower)
         ):
-            table = (sample_m.group(1) or "").strip()
-            cname = ""
-            if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
-                cname = _capture_connector_name(sample_m.group(2))
+            row_limit = 0
+            if rows_m:
+                table = (rows_m.group("table") or "").strip()
+                cname = _capture_connector_name(rows_m.group("connector") or "")
+                row_limit = int(rows_m.group("count") or 0)
+            else:
+                table = (sample_m.group(1) or "").strip()
+                cname = ""
+                if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
+                    cname = _capture_connector_name(sample_m.group(2))
             # "get tables from X" is inventory, not a table named "tables".
             if table.lower() in {"tables", "collections", "objects", "schemas", "databases"}:
                 if cname and "list_connector_objects" not in [p[0] for p in planned]:
                     planned.append(("list_connector_objects", {"connector_name": cname}))
-            elif table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
+            elif table and table not in _NOT_A_TABLE_NAME:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
+                # "show me 3 rows" asked for three, not the default page.
+                if row_limit:
+                    args["limit"] = max(1, min(row_limit, 500))
                 planned.append(("sample_connector_object", args))
                 planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Schedule tools always beat accidental sample parses ("details on schedule X").
-    if any(n in {"open_schedule", "get_schedule", "run_schedule_now", "list_schedules"} for n, _ in planned):
+    if any(
+        n in {
+            "open_schedule", "get_schedule", "run_schedule_now",
+            "list_schedules", "create_schedule",
+        }
+        for n, _ in planned
+    ):
         planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
     # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
@@ -3903,7 +8223,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:of|for|on)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*$",
         lower,
     )
-    if analyze_follow and "analyze_result" not in [p[0] for p in planned]:
+    # Bare "summarize that" is a recap of the last answer, not a result profile.
+    _last_answer_recap = bool(
+        re.match(
+            r"^\s*(?:summarize\s+(?:that|this|it|what\s+you\s+(?:just\s+)?said)"
+            r"|tl;?dr|in\s+(?:a\s+)?(?:sentence|nutshell)|short\s+version|recap(?:\s+that)?)"
+            r"\s*[.!?]*$",
+            lower,
+        )
+    )
+    if analyze_follow and not _last_answer_recap and "analyze_result" not in [p[0] for p in planned]:
         # Don't steal fresh table sample intents
         if "sample_connector_object" not in [p[0] for p in planned]:
             args = {}
@@ -3963,15 +8292,69 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             elif "contain" in op_raw or "like" in op_raw:
                 op = "contains"
             args = {"column": col, "op": op, "value": val}
-            # Strip a trailing "on <connector>" accidentally captured in value.
-            if args.get("value"):
-                args["value"] = re.sub(
-                    r"\s+on\s+[A-Za-z0-9_\- ]+$",
-                    "",
-                    str(args["value"]),
-                    flags=re.I,
-                ).strip()
-            if col:
+            # "filter orders where status = paid on PilotSQLite" — the value
+            # regex swallows the object clause ("paid in orders"), and
+            # filter_result then ran the stale last result or, with none,
+            # answered zero/all rows of the wrong table (QA R21). Read the
+            # trailing "in/from/on <object>" out of the predicate first.
+            obj_m = re.search(
+                r"\s+(?:from|in)\s+([A-Za-z0-9_.\-]+)"
+                r"(?:\s+on\s+([A-Za-z0-9_\- ]+))?\s*$"
+                r"|\s+on\s+([A-Za-z0-9_\- ]+)\s*$",
+                str(args.get("value") or ""),
+                flags=re.I,
+            )
+            obj_table, obj_conn = "", ""
+            if obj_m:
+                obj_table = (obj_m.group(1) or "").strip()
+                obj_conn = (obj_m.group(2) or obj_m.group(3) or "").strip()
+                args["value"] = str(args["value"])[: obj_m.start()].strip()
+            if not obj_table:
+                # "filter orders where status = paid" — the object precedes
+                # `where`; the predicate must still bind that table.
+                lead_m = re.search(
+                    r"(?:filter|show|rows?\s+in|rows?\s+from|from)\s+"
+                    r"([A-Za-z0-9_.\-]+)\s+where\b",
+                    lower,
+                )
+                if lead_m:
+                    _obj = (lead_m.group(1) or "").strip()
+                    # "filter result where …" — `result` is the tool noun,
+                    # not a table name.
+                    if _obj not in {
+                        "result", "results", "row", "rows", "data",
+                        "it", "them", "this", "that", "output",
+                    }:
+                        obj_table = _obj
+            if obj_table and not obj_conn:
+                conn_m = re.search(r"\bon\s+([A-Za-z0-9_\- ]+?)\s*$", lower)
+                if conn_m:
+                    obj_conn = (conn_m.group(1) or "").strip()
+            if col and obj_table:
+                # Named a live object — the predicate must bind THAT table.
+                # filter_result only sees the last stored sample; silently
+                # filtering a different result (or a broad unfiltered read)
+                # is the wrong-data class R21 flagged. A bounded read-only
+                # SELECT applies the predicate where it was named.
+                lit = str(args.get("value") or "")
+                lit_sql = lit.replace("'", "''")
+                sql_op = {
+                    "eq": "=", "ne": "!=", "gt": ">", "gte": ">=",
+                    "lt": "<", "lte": "<=",
+                }.get(op, "=")
+                if op in {"is_null", "not_null"}:
+                    clause = f'{col} IS {"NOT " if op == "not_null" else ""}NULL'
+                elif op == "contains":
+                    clause = f"{col} LIKE '%{lit_sql}%'"
+                else:
+                    clause = f"{col} {sql_op} '{lit_sql}'"
+                q_args = {
+                    "query": f"SELECT * FROM {obj_table} WHERE {clause} LIMIT 50",
+                }
+                if obj_conn:
+                    q_args["connector_name"] = obj_conn
+                planned.append(("run_query", q_args))
+            elif col:
                 planned.append(("filter_result", args))
 
     diff_m = re.search(
@@ -4197,7 +8580,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:connector\s+)?([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
         lower,
     ) or re.search(
-        r"\b(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
+        # Anchored to the start of the message, because bare ``test <rest of
+        # line>`` is a noun as often as a verb: "is a green test on connectors
+        # enough to skip validation" was read as a command to test a connector
+        # literally named "on connectors enough to skip validation".
+        r"^(?:please\s+|can\s+you\s+|could\s+you\s+)?"
+        r"(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
         r"([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
         lower,
     )
@@ -4218,7 +8606,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     analyst = get_data_analyst()
     hint = analyst.extract_dataset_hint(message)
     data_signals = [
-        "analyze", "what's in", "what is in", "tell me about", "pii",
+        "analyze", "what's in", "what is in", "tell me about", "tell me everything about", "pii",
         "preview", "sample", "quality", "how many rows",
     ]
     # "columns"/"schema" alone often mean live DB — only analyze uploaded data
@@ -4226,16 +8614,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if any(s in lower for s in data_signals) and not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
         if hint:
             planned.append(("analyze_dataset", {"dataset_name": hint}))
-        elif re.search(r"\banalyze\b", lower) and "analyze_dataset" not in [p[0] for p in planned]:
+        elif "analyze_dataset" not in [p[0] for p in planned]:
             # Named dataset that the index doesn't know yet — still invoke so
             # recovery can list indexed uploads instead of a dead-end reply.
-            m = re.search(
-                r"analyze\s+(?:the\s+)?(.+?)(?:\s+data(?:set)?)?\s*$",
-                lower,
-            )
-            name = (m.group(1) if m else "").strip(" \"'")
-            if name and name not in {"this", "that", "it", "my", "the"}:
-                planned.append(("analyze_dataset", {"dataset_name": name}))
+            subject = dataset_subject(message)
+            if subject:
+                planned.append(("analyze_dataset", {"dataset_name": subject}))
 
     if _looks_like_product_howto(lower) and not _has_explicit_workspace_subject(lower):
         # Curated local FAQ — don't wipe stronger product/ops tools already planned.
@@ -4243,10 +8627,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "profile_quality_rules", "describe_pilot", "explain_product",
             "explain_mapping_assurance", "remediate_validation", "navigate",
             "inspect_schema_policy", "get_transfer_capabilities", "list_jobs",
+            "brief_workspace",
             "list_connectors", "list_schedules", "aggregate_data",
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
-            "run_schedule_now", "introspect_connector_schema",
+            "run_schedule_now", "create_schedule", "introspect_connector_schema",
+            # Advisory tools answer in one line with no citation. "which sync
+            # mode should I pick for a nightly load" got the recommendation and
+            # nothing else — the documentation that justifies it was dropped
+            # because the tool was not on this list.
+            "recommend_sync_mode",
+            # "tell me about the employees dataset" names an uploaded dataset.
+            # Dropping the profile turned it into a Lineage documentation dump.
+            "analyze_dataset", "list_datasets", "compare_datasets", "search_data",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -4266,6 +8659,174 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned = [(n, a) for n, a in planned if n != "explain_product"]
     elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
+    elif not planned and _asks_about_the_product(message):
+        # Last resort for a question about a documented subject that matched no
+        # verb pattern: "what happens to bad rows" and "who can approve a PII
+        # gate" planned nothing at all and were answered with "I'm not sure how
+        # to do that yet", while the documentation covered both. Reaching the
+        # knowledge tool is always better than an empty plan — the tool refuses
+        # on its own evidence if the retrieval turns out not to cover it.
+        planned.append(("explain_product", {"query": message[:240]}))
+
+    # A live tool answering alone is only half the answer to a question. This
+    # adds the documentation beside it rather than instead of it, so an empty
+    # workspace cannot turn a documented question into "nothing here yet".
+    if (
+        planned
+        and not ({n for n, _ in planned} & _KNOWLEDGE_TOOLS)
+        and _wants_documentation_companion(message)
+    ):
+        planned.insert(0, ("explain_product", {"query": message[:240]}))
+
+    # "How do I pause a schedule" is a question about the procedure, not a
+    # request to pause a particular schedule. Object-lookup tools ran anyway,
+    # found nothing to look up, and led the reply with "Schedule not found. Ask
+    # for the pipeline name from Pipelines." — error noise in front of a
+    # perfectly good documented answer. Drop them when the ask is explanatory
+    # and names no live object; keep them the moment one is named.
+    if (
+        _EXPLANATORY_QUESTION.search(lower)
+        and not _has_explicit_workspace_subject(lower)
+        and not _looks_like_live_data_fetch(lower)
+        and any(n in _KNOWLEDGE_TOOLS for n, _ in planned)
+    ):
+        drop = set(_NAMED_OBJECT_LOOKUP_TOOLS)
+        if not is_schedule_health_question(message):
+            drop.add("list_schedules")
+        planned = [
+            (n, a) for n, a in planned if n not in drop
+        ]
+
+    # A stated transfer is the request; inventory/advice tools that merely share
+    # its vocabulary ("jobs", "upsert", "schema") must not answer in its place.
+    _staged = {n for n, _ in planned} & {
+        "start_transfer", "plan_transfer", "create_schedule"
+    }
+    if _staged:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in {
+                "list_jobs", "recommend_sync_mode", "list_connectors",
+                "search_knowledge", "get_transfer_capabilities",
+            }
+            and not (n == "introspect_connector_schema" and not _asks_for_schema(lower))
+        ]
+
+    # Off-topic / general-web asks must not become product RAG. Vocabulary
+    # overlap ("capital") is not evidence — only a Help hit, a pasted id, or
+    # an explicit knowledge search is.
+    #
+    # Scoped to a plan that is *only* knowledge: when another tool recognised
+    # the message ("suggest improvements for my data" plans quality profiling),
+    # the message is not an off-topic general-web ask and the knowledge search
+    # is a companion to it, not the answer standing alone.
+    if _act == "general" and {n for n, _ in planned} <= _KNOWLEDGE_TOOLS:
+        from ..rag.evidence import names_identifier
+
+        explicit_knowledge = bool(
+            re.search(
+                r"\b(?:search\s+knowledge|knowledge\s+for|semantic\s+types?|ontology)\b",
+                lower,
+            )
+        )
+        keep_rag = (
+            explicit_knowledge
+            or names_identifier(message)
+            or bool(product_doc_search(message, limit=1))
+        )
+        if not keep_rag:
+            planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+
+    # A CDC redelivery / exactly-once question is knowledge. "If I run the
+    # same CDC change twice" used to plan list_jobs because it says "run",
+    # and the empty-history sentence then became the lead.
+    if is_cdc_delivery_question(message):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in {
+                "list_jobs",
+                "start_transfer",
+                "plan_transfer",
+                "start_transfer_studio",
+            }
+        ]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # "what plugin does postgres CDC use" used to recommend a sync mode
+    # because it contains both ``cdc`` and the verb ``use``.
+    if re.search(
+        r"\b(?:pgoutput|wal[\s_]?level|replication\s+slot|output\s+plugin|"
+        r"cdc\s+lag|toast|replica\s+identity|binlog[\s_]?format|"
+        r"binlog[\s_]?row[\s_]?image|publication|max[\s_]?replication[\s_]?slots|"
+        r"pre[\s-]?images?|merge[\s-]?on[\s-]?read|copy[\s-]?on[\s-]?write|gtid)\b",
+        lower,
+    ):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # "pause CDC" contains the substring "use cdc", so the advisory tool
+    # recommended incremental CDC instead of the keep-slot fact.
+    if PAUSE_CDC_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Incremental-by-updated_at is a shipped cursor mode. ``use incremental``
+    # otherwise recommends a workload instead of speaking the card.
+    if INCREMENTAL_UPDATED_AT_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Custom slot name is derived. The slot-definition expansion would
+    # otherwise recommend a CDC mode.
+    if CUSTOM_SLOT_NAME_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    if re.search(
+        r"\bgreen\s+(?:connector\s+)?test\b|\btest\s+passed\b.+\bskip\b|"
+        r"\bskip\s+(?:validat\w*|preflight)\b",
+        lower,
+    ):
+        planned = [(n, a) for n, a in planned if n != "list_connectors"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    if _IS_A_CONNECTOR_ASK.search(lower):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "list_connectors",
+                "list_connector_objects",
+                "search_connectors",
+            )
+        ]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Live schedule health is an inventory read. CDC-delete / GitOps docs
+    # must not steal "is schedules working".
+    if is_schedule_health_question(message):
+        planned = [(n, a) for n, a in planned if n != "explain_product"]
+        if not any(n == "list_schedules" for n, _ in planned):
+            planned.append(("list_schedules", {"limit": 20}))
+
+    # A question about something this product documents must never leave here
+    # with nothing planned. "What string type is created on postgres" named an
+    # engine, so the workspace-subject guard kept the documentation branch from
+    # firing — and no live tool claimed it either, so an answerable question
+    # got the generic capability list. The guard is right to protect ops tools;
+    # it is only wrong when nothing else took the turn.
+    if not planned and _INTERROGATIVE.search(message or "") and names_product_subject(message):
+        planned = [("explain_product", {"query": message[:240]})]
 
     # Deduplicate while preserving order
     seen: set[str] = set()
@@ -4276,7 +8837,33 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             continue
         seen.add(key)
         unique.append((name, args))
-    return prune_planned_tools(unique)
+    return prune_planned_tools(_collapse_underspecified(unique), message)
+
+
+def _collapse_underspecified(
+    planned: list[tuple[str, dict]],
+) -> list[tuple[str, dict]]:
+    """Drop a call whose arguments are a subset of another call of the same tool.
+
+    "how many connectors do i have the failed ones" planned ``list_connectors``
+    twice — once with ``health=failed`` from the correction and once bare from the
+    count — so the failed bucket was answered and then contradicted by the full
+    list underneath it. Two calls where one is strictly less specified are the
+    same question asked twice; a genuinely different subject is not a subset and
+    still runs.
+    """
+    keep: list[tuple[str, dict]] = []
+    for i, (name, args) in enumerate(planned):
+        redundant = any(
+            other_name == name
+            and j != i
+            and (args or {}).items() <= (other_args or {}).items()
+            and len(other_args or {}) > len(args or {})
+            for j, (other_name, other_args) in enumerate(planned)
+        )
+        if not redundant:
+            keep.append((name, args))
+    return keep
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:

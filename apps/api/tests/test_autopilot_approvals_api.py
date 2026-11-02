@@ -1,0 +1,556 @@
+"""The approval inbox over HTTP, and who is allowed to delegate authority.
+
+A parked schedule is only actionable if the control that clears it exists, names
+the decider, refuses to cross a workspace boundary, and separates the ordinary
+"approve this one run" from the far more powerful "sign for every later run".
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+from fastapi.testclient import TestClient
+
+import services.schedule_store as store
+from services.schedule_approvals import build_approval_request, open_approval_request
+from services.standing_authorization import (
+    SCOPE_NET_ADDITIVE_DRIFT,
+    SCOPE_SCHEMA_DRIFT,
+    binding_from_schedule,
+)
+
+ACTOR = "dana.architect@example.com"
+REASON = "Nightly finance load is signed off for the current mapping."
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch) -> TestClient:
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules_api.json")
+    monkeypatch.setattr(store, "_mongo_backend", lambda: None)
+    from src.main import app
+
+    return TestClient(app)
+
+
+@pytest.fixture
+def parked(client) -> Any:
+    sched = store.create_schedule({
+        "name": "Excel to Snowflake",
+        "source_connector_id": "src-xlsx",
+        "source_table": "revenue",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "FINANCE.REVENUE",
+        "interval": "daily",
+        "mappings": [{"source": "amount", "target": "AMOUNT"}],
+    })
+    request = build_approval_request(
+        kind="source_drift",
+        code="SOURCE_SCHEMA_DRIFT",
+        finding="Source schema drift: column region was renamed",
+        corrective_action="Confirm the mapping, then accept the new shape.",
+        binding=binding_from_schedule(sched),
+        requested_scopes=[SCOPE_NET_ADDITIVE_DRIFT, SCOPE_SCHEMA_DRIFT],
+    )
+    open_approval_request(sched.id, request)
+    return sched, request
+
+
+def test_every_control_the_refusal_points_at_is_registered():
+    from src.routers.schedules_router import router
+
+    paths = {getattr(r, "path", "") for r in router.routes}
+    for expected in (
+        "/schedules/approvals/open",
+        "/schedules/{schedule_id}/approval",
+        "/schedules/{schedule_id}/approvals/{approval_id}/approve",
+        "/schedules/{schedule_id}/approvals/{approval_id}/reject",
+        "/schedules/{schedule_id}/authorization",
+    ):
+        assert expected in paths, f"{expected} is not registered"
+
+
+def test_a_parked_schedule_is_visible_without_opening_it(client, parked):
+    sched, request = parked
+    row = next(
+        s for s in client.get("/api/v1/schedules/").json() if s["id"] == sched.id
+    )
+    assert row["needs_approval"] is True
+    assert row["approval_id"] == request["id"]
+    assert row["approval_code"] == "SOURCE_SCHEMA_DRIFT"
+    assert row["approvable"] is True
+    assert row["authorized"] is False
+
+    inbox = client.get("/api/v1/schedules/approvals/open").json()
+    assert inbox["count"] == 1
+    assert [r["approval"]["id"] for r in inbox["approvals"]] == [request["id"]]
+    assert inbox["approvals"][0]["schedule_name"] == "Excel to Snowflake"
+
+    detail = client.get(f"/api/v1/schedules/{sched.id}/approval")
+    assert detail.status_code == 200
+    assert detail.json()["approval"]["corrective_action"]
+
+
+def test_approving_names_the_decider_and_re_arms_the_run(client, parked):
+    sched, request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/approve",
+        json={"reason": REASON, "schema_drift": True},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["approval"]["resolved_by"] == ACTOR
+    assert body["approval"]["status"] == "approved"
+    assert body["authorization"]["max_uses"] == 1, "approve-once must not be standing"
+    assert body["schedule"]["approval_request"]["status"] == "approved"
+    row = next(
+        s for s in client.get("/api/v1/schedules/").json() if s["id"] == sched.id
+    )
+    assert row["needs_approval"] is False
+
+
+def test_a_decision_without_a_recorded_reason_is_rejected(client, parked):
+    sched, request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/approve",
+        json={"reason": "ok"},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 422
+
+
+def test_an_anonymous_decision_is_refused(client, parked):
+    """An audit trail with no name on it is not an audit trail."""
+    sched, request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/approve",
+        json={"reason": REASON, "schema_drift": True},
+    )
+    assert res.status_code == 400
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.approval_request["status"] == "open"
+
+
+def test_a_signed_in_operator_decides_without_naming_themselves_twice(client, parked):
+    """The shipped client sends a session, not a hand-typed actor.
+
+    With enforcement off the browser still signs in, so the verified identity is
+    the decider — requiring ``X-Actor`` as well made the shipped approval control
+    unusable in the default single-operator configuration.
+    """
+    sched, request = parked
+    from src.routers import schedules_router
+
+    class _State:
+        user = {"email": "sam.operator@example.com", "role": "admin"}
+
+    class _Req:
+        state = _State()
+        headers: dict[str, str] = {}
+
+    assert schedules_router._decider(_Req()) == "sam.operator@example.com"
+    assert schedules_router._decider(_Req(), authorize=True) == "sam.operator@example.com"
+    assert sched.id and request["id"]
+
+
+def test_a_session_role_still_binds_when_enforcement_is_off(client, monkeypatch):
+    """Auth off is not authority on: a viewer session cannot decide."""
+    from src.routers import schedules_router
+    from src.services import auth_service
+
+    monkeypatch.setattr(auth_service, "auth_required", lambda: False)
+
+    class _State:
+        user = {"email": "vic.viewer@example.com", "role": "viewer"}
+
+    class _Req:
+        state = _State()
+        # Even a hand-typed actor cannot re-open a door the role closed.
+        headers = {"X-Actor": ACTOR}
+
+    with pytest.raises(Exception) as excinfo:
+        schedules_router._decider(_Req())
+    assert "403" in str(excinfo.value) or "denied" in str(excinfo.value).lower()
+
+
+def test_an_unauthenticated_single_operator_may_still_name_themselves(client, parked):
+    sched, request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/approve",
+        json={"reason": REASON, "schema_drift": True},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["approval"]["resolved_by"] == ACTOR
+
+
+def test_approving_after_the_plan_moved_is_a_conflict_not_a_silent_sign_off(
+    client, parked
+):
+    sched, request = parked
+    store.update_schedule(sched.id, {"mappings": [{"source": "amount", "target": "NET"}]})
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/approve",
+        json={"reason": REASON, "schema_drift": True},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 409
+    assert "AUTH_BINDING_CHANGED" in res.text
+
+
+def test_an_unknown_decision_is_not_found(client, parked):
+    sched, _request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/appr-nope/approve",
+        json={"reason": REASON},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 404
+
+
+def test_rejecting_pauses_the_schedule(client, parked):
+    sched, request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/reject",
+        json={"reason": "The upstream change is wrong."},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["approval"]["status"] == "rejected"
+    assert client.get("/api/v1/schedules/approvals/open").json()["count"] == 0
+
+
+def test_standing_authority_can_be_granted_then_revoked(client, parked):
+    sched, _request = parked
+    granted = client.post(
+        f"/api/v1/schedules/{sched.id}/authorization",
+        json={
+            "reason": REASON,
+            "scopes": [SCOPE_SCHEMA_DRIFT],
+            "schema_drift": True,
+            "expires_in_days": 14,
+        },
+        headers={"X-Actor": ACTOR},
+    )
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["authorization"]["actor"] == ACTOR
+
+    row = next(s for s in client.get("/api/v1/schedules/").json() if s["id"] == sched.id)
+    assert row["authorized"] is True
+
+    revoked = client.delete(
+        f"/api/v1/schedules/{sched.id}/authorization",
+        headers={"X-Actor": ACTOR},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["authorization"]["revoked_by"] == ACTOR
+    row = next(s for s in client.get("/api/v1/schedules/").json() if s["id"] == sched.id)
+    assert row["authorized"] is False
+
+
+def test_a_scope_nobody_may_delegate_is_refused_at_the_edge(client, parked):
+    sched, _request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/authorization",
+        json={"reason": REASON, "scopes": ["narrow_type"]},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 422
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None and not reloaded.standing_authorization
+
+
+def test_delegating_authority_needs_more_than_permission_to_run_schedules(
+    client, parked, monkeypatch
+):
+    """`schedule.manage` decides one run; minting standing authority is admin work."""
+    from services.rbac import Permission, role_permissions
+    from src.services import auth_service
+
+    sched, request = parked
+    monkeypatch.setattr(auth_service, "auth_required", lambda: True)
+    editor = {"email": "eve.editor@example.com", "role": "editor"}
+
+    perms = role_permissions("editor")
+    assert Permission.SCHEDULE_MANAGE in perms
+    assert Permission.SCHEDULE_AUTHORIZE not in perms, (
+        "an editor must not be able to sign for every future run"
+    )
+    assert Permission.SCHEDULE_AUTHORIZE in role_permissions("admin")
+
+    # And the endpoint enforces exactly that distinction.
+    from src.routers import schedules_router
+
+    class _State:
+        user = editor
+
+    class _Req:
+        state = _State()
+        headers: dict[str, str] = {}
+
+    assert schedules_router._decider(_Req()) == editor["email"]
+    with pytest.raises(Exception) as excinfo:
+        schedules_router._decider(_Req(), authorize=True)
+    assert "403" in str(excinfo.value) or "denied" in str(excinfo.value).lower()
+    assert sched.id and request["id"]
+
+
+def test_accept_records_finding_schema_without_a_live_probe(client, tmp_path, monkeypatch):
+    """Accept must not hang on Snowflake. The finding already has the shape."""
+    ntz = {"joining_date": "TIMESTAMP_NTZ", "emp_id": "NUMBER"}
+    sched = store.create_schedule({
+        "name": "venky_schedule1",
+        "source_connector_id": "src-sf",
+        "source_table": "EMPLOYEE_EXCELDATA",
+        "dest_connector_id": "dst-mysql",
+        "dest_table": "SUNDAY0816",
+        "interval": "hourly",
+        "mappings": [{"source": c, "target": c} for c in ntz],
+        "source_schema": ntz,
+    })
+    request = build_approval_request(
+        kind="source_drift",
+        code="SOURCE_SCHEMA_DRIFT",
+        finding=(
+            "Source schema changed since the last run in a way this transfer reads: "
+            "joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)"
+        ),
+        corrective_action="Accept the new source shape as the baseline.",
+        binding=binding_from_schedule(sched),
+        evidence={
+            "breaking": [{
+                "kind": "narrow_type",
+                "column": "joining_date",
+                "old_type": "TIMESTAMP_NTZ",
+                "new_type": "TIMESTAMP_NTZ",
+            }],
+            "current_schema": ntz,
+            "current_columns": list(ntz),
+        },
+    )
+    open_approval_request(sched.id, request)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("Accept must not re-probe the warehouse")
+
+    monkeypatch.setattr(
+        "services.schedule_runner.probe_schedule_source_schema",
+        _boom,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.routers.schedules_router._probe_source_schema_timed",
+        _boom,
+        raising=False,
+    )
+
+    res = client.post(f"/api/v1/schedules/{sched.id}/accept-source-schema")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    assert body["recorded_from"] == "finding"
+    assert body["approval_closed"] is True
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.approval_request["status"] == "approved"
+    assert reloaded.last_status != "needs_approval"
+    assert reloaded.source_schema["joining_date"] == "TIMESTAMP_NTZ"
+
+
+def test_same_declaration_park_is_released_for_the_next_beat(client):
+    """The hourly cadence must not stay suppressed after a false NTZ narrow."""
+    from datetime import datetime, timedelta, timezone
+
+    from services.schedule_approvals import release_same_declaration_source_drift
+
+    sched = store.create_schedule({
+        "name": "venky_schedule1",
+        "source_connector_id": "src-sf",
+        "source_table": "EMPLOYEE_EXCELDATA",
+        "dest_connector_id": "dst-mysql",
+        "dest_table": "SUNDAY0816",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": [{"source": "joining_date", "target": "joining_date"}],
+    })
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    store.update_schedule(sched.id, {"next_run_at": past, "enabled": True})
+    parked = open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="source_drift",
+            code="SOURCE_SCHEMA_DRIFT",
+            finding="joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)",
+            corrective_action="Accept the new source shape.",
+            binding=binding_from_schedule(sched),
+            evidence={
+                "breaking": [{
+                    "kind": "narrow_type",
+                    "column": "joining_date",
+                    "old_type": "TIMESTAMP_NTZ",
+                    "new_type": "TIMESTAMP_NTZ",
+                }],
+            },
+        ),
+    )
+    assert parked is not None
+    assert sched.id not in {s.id for s in store.due_schedules()}
+    assert release_same_declaration_source_drift() == 1
+    assert sched.id in {s.id for s in store.due_schedules()}
+
+
+def _create_new_maps():
+    return [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+        }
+    ]
+
+
+def test_create_new_dest_exists_park_is_released_when_stamp_holds(client):
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    maps = _create_new_maps()
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    sched = store.create_schedule({
+        "name": "MySQL connectionCrown → newtable",
+        "source_connector_id": "src-mysql",
+        "source_table": "sample",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "newtable",
+        "interval": "hourly",
+        "sync_mode": "full_refresh_append",
+        "enabled": True,
+        "mappings": maps,
+        "approved_decision_artifact_hash": stamped.content_hash,
+    })
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    store.update_schedule(sched.id, {"next_run_at": past, "enabled": True})
+    parked = open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="run_refused",
+            code="RUN_REFUSED",
+            finding=(
+                "Decision Artifact DDL identity diverged from current Map — "
+                "re-run Validate before Execute."
+            ),
+            corrective_action="Open Validate for this job.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+    assert parked is not None
+    assert sched.id not in {s.id for s in store.due_schedules()}
+    assert release_create_new_dest_exists_false_refuse(dest_db="snowflake") == 1
+    assert sched.id in {s.id for s in store.due_schedules()}
+
+
+def test_create_new_dest_exists_park_stays_when_map_edited(client):
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    maps = _create_new_maps()
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_overwrite",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    edited = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "VARCHAR(8)",
+        }
+    ]
+    sched = store.create_schedule({
+        "name": "edited map",
+        "source_connector_id": "src-mysql",
+        "source_table": "sample",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "newtable",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": edited,
+        "approved_decision_artifact_hash": stamped.content_hash,
+    })
+    open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="run_refused",
+            code="RUN_REFUSED",
+            finding=(
+                "Decision Artifact DDL identity diverged from current Map — "
+                "re-run Validate before Execute."
+            ),
+            corrective_action="Open Validate for this job.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+    assert release_create_new_dest_exists_false_refuse(dest_db="snowflake") == 0
+    assert store.has_open_approval(store.get_schedule(sched.id))
+
+
+def test_zero_retry_budget_park_releases_when_create_new_stamp_holds(client):
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    maps = _create_new_maps()
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_overwrite",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    sched = store.create_schedule({
+        "name": "budget mask",
+        "source_connector_id": "src-mysql",
+        "source_table": "sample",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "newtable",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": maps,
+        "approved_decision_artifact_hash": stamped.content_hash,
+    })
+    open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="run_refused",
+            code="RUN_REFUSED",
+            finding="Retry budget exhausted after 0 attempt(s).",
+            corrective_action="Open Validate for this job and resolve the blocking check.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+    assert release_create_new_dest_exists_false_refuse(dest_db="snowflake") == 1

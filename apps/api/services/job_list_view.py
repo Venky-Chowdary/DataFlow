@@ -25,6 +25,7 @@ _LIST_KEEP_KEYS = frozenset({
     "rejected_rows",
     "coerced_null_rows",
     "progress_pct",
+    "reconcile_pct",
     "progress_indeterminate",
     "phase",
     "message",
@@ -38,6 +39,7 @@ _LIST_KEEP_KEYS = frozenset({
     "completed_at",
     "workspace_id",
     "sync_mode",
+    "source_read_mode",
     "records_per_second",
     "chunk_current",
     "chunk_total",
@@ -46,8 +48,79 @@ _LIST_KEEP_KEYS = frozenset({
     "triggered_by",
     "created_by",
     "retry_of",
+    "rerun_of",
+    "parent_job_id",
+    "last_sync_job_id",
     "cdc_lag_seconds",
+    # Independent dest COUNT(*) ledger — small dict, required so Overview /
+    # Jobs list never fall dest population back to records_processed.
+    "row_accounting",
+    "trust_score",
+    # Join keys for Connectors "last used" — never the full transfer_request.
+    "source_connector_id",
+    "dest_connector_id",
 })
+
+
+def connector_ids_from_job(job: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    """Return source/dest saved-connector ids, recovering them from old job docs.
+
+    Historic jobs stored the table name in ``source_name`` and stripped
+    ``transfer_request`` from list payloads, so the Connectors page could not
+    join 50 jobs to 11 profiles and showed every tile as Not used.
+    """
+    if not job:
+        return None, None
+    src = str(job.get("source_connector_id") or "").strip() or None
+    dst = str(job.get("dest_connector_id") or "").strip() or None
+    if src and dst:
+        return src, dst
+    req = job.get("transfer_request")
+    if isinstance(req, dict):
+        src_ep = req.get("source") if isinstance(req.get("source"), dict) else {}
+        dst_ep = req.get("destination") if isinstance(req.get("destination"), dict) else {}
+        src = src or str(src_ep.get("connector_id") or "").strip() or None
+        dst = dst or str(dst_ep.get("connector_id") or "").strip() or None
+    return src, dst
+
+
+def _names_from_stream_rows(raw: list[Any] | None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("stream") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _stream_names_for_list(job: dict[str, Any]) -> list[str]:
+    """Named streams, same precedence as the detail reader.
+
+    Two measured health rows win. Until that list exists, the selected
+    contracts on the request name the job. One stamped table must not hide
+    the rest of the selection. The list still ships names only.
+    """
+    from services.batch_progress import selected_contract_names
+    from src.transfer.job_failure import summary_streams
+
+    summary = job.get("destination_summary")
+    raw = summary_streams(summary) if isinstance(summary, dict) else None
+    if raw is None:
+        raw = summary_streams(job)
+    names = _names_from_stream_rows(raw)
+    if len(names) >= 2:
+        return names
+    request = job.get("transfer_request")
+    contracts = request.get("stream_contracts") if isinstance(request, dict) else None
+    selected = selected_contract_names(contracts if isinstance(contracts, list) else None)
+    if len(selected) >= 2:
+        return selected
+    return names
 
 
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
@@ -58,6 +131,16 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     for key, value in job.items():
         if key in _LIST_KEEP_KEYS:
             out[key] = value
+    src_id, dst_id = connector_ids_from_job(job)
+    if src_id:
+        out["source_connector_id"] = src_id
+    if dst_id:
+        out["dest_connector_id"] = dst_id
+    # Names only. The list must not ship per-stream ledgers, and a job whose
+    # stored source_name is the last table must still show the other tables.
+    stream_names = _stream_names_for_list(job)
+    if len(stream_names) >= 2:
+        out["stream_names"] = stream_names
     # Preserve reject count if only nested under destination_summary.
     if "rejected_rows" not in out and isinstance(job.get("destination_summary"), dict):
         ds = job["destination_summary"]
@@ -65,6 +148,20 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
             out["rejected_rows"] = ds.get("rejected_rows")
         if "coerced_null_rows" in ds and "coerced_null_rows" not in out:
             out["coerced_null_rows"] = ds.get("coerced_null_rows")
+    # A live job that has not written a progress update past the stall window
+    # is surfaced as stalled — the pg→Mongo run that sat at 0 records for
+    # ~49 minutes had no signal at all (QA hang report). The per-step watchdog
+    # stamps stalled/stall_seconds/stall_step on the document itself (D10);
+    # prefer those over the whole-job estimate when present.
+    from services.job_status import job_stall_seconds
+
+    stall = job_stall_seconds(job)
+    persisted = int(job.get("stall_seconds") or 0)
+    if job.get("stalled") or stall or persisted:
+        out["stalled"] = True
+        out["stall_seconds"] = max(int(stall), persisted)
+        if job.get("stall_step"):
+            out["stall_step"] = str(job.get("stall_step"))
     # Tiny checkpoint summary for Resume affordance (no row samples).
     cp = job.get("checkpoint")
     if isinstance(cp, dict):

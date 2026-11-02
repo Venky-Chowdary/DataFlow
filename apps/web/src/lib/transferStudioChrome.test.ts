@@ -14,6 +14,7 @@ import {
   findDuplicateKeyRoot,
   isDuplicateIdentitySignal,
 } from "./validateIssueGrouping.js";
+import { totalPages } from "./columnWorkbench.js";
 import type { PreflightResult } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,15 +39,27 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(src, /shortLabel/);
   });
 
-  it("enterprise CSS enables short labels ≤1440px (overrides hide)", () => {
+  it("enterprise CSS keeps the compact short labels and the validate rail", () => {
     const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
-    assert.match(css, /@media \(max-width: 1440px\)/);
+    assert.match(css, /@media \(max-width: 1439px\)/);
     assert.match(css, /wizard-label-short \{\s*display: inline !important;/s);
     assert.match(css, /validate-rail-primary-fix[\s\S]*width: 100% !important/);
     assert.match(
       css,
       /validate-rail-actions \{\s*[\s\S]*flex-direction: column !important/,
     );
+  });
+
+  it("studio stepper shows full names from 768px in accessible ink", () => {
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const fullNames = css.slice(css.lastIndexOf("Full step names from 768px."));
+    assert.match(fullNames, /@media \(min-width: 768px\)/);
+    assert.match(fullNames, /max-width: 150px/);
+    assert.match(fullNames, /\.df2-wizard-label \{\s*display: inline !important;/);
+    assert.match(fullNames, /\.df2-wizard-label-short \{\s*display: none !important;/);
+    assert.match(fullNames, /color: var\(--df-text-primary\) !important/);
+    assert.match(fullNames, /color: var\(--df-brand-strong\) !important/);
+    assert.match(fullNames, /font-weight: var\(--df-fw-bold\)/);
   });
 
   it("laptop density uses tokens at 100% browser zoom — never CSS zoom", () => {
@@ -64,6 +77,253 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /\.df2-app \.df2-main \{[\s\S]*margin-left:\s*0\s*!important/);
   });
 
+  it("the pre-load step is named for the operator, never 'Shape'", () => {
+    const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
+    const inspector = readFileSync(join(webRoot, "components/transfer/TransferStudioInspector.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+
+    assert.match(constants, /label: "Transform", shortLabel: "Xform"/);
+    assert.doesNotMatch(constants, /label: "Shape"/);
+    assert.match(inspector, /title: "Transform \(pre-load\)"/);
+    assert.match(page, /Continue to Transform/);
+    assert.doesNotMatch(page, /Continue to Shape/);
+  });
+
+  it("Validate is asked about the transformed rows, not the raw source", () => {
+    // The run shapes on the read, so a Validate that scores the source refuses
+    // values the write never carries (a stripped control character, a rounded
+    // decimal). Both calls must carry the same recipe.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+
+    const preflightCall = page.slice(page.indexOf("pf = await runPreflight("));
+    assert.match(
+      preflightCall.slice(0, preflightCall.indexOf("});")),
+      /shape_recipe: recipePayload\(shapeSteps\)/,
+      "runPreflight must send the approved recipe",
+    );
+    assert.match(api, /shape_recipe\?: ShapeRecipeWire/);
+  });
+
+  it("Validate renders the transformed image it was judged on", () => {
+    // The backend already returned `transform_image`; an operator who cannot see
+    // it has no way to know which rows the verdict covers, or that the rows the
+    // recipe removed are absent by instruction rather than lost.
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+
+    assert.match(types, /transform_image\?: \{/);
+    assert.match(dash, /preflight\?\.transform_image \?\? null/);
+    assert.match(dash, /Gates judged the transformed rows, not the raw source/);
+    assert.match(dash, /recipe \{transformImage\.recipe_hash/);
+    assert.match(dash, /removed by\s*\n?\s*transform/);
+    assert.match(dash, /diverted by\s*\n?\s*transform/);
+    assert.match(dash, /Re-read carrier\(s\) after transform/);
+    // Sample counts are not population proof, and the panel must say so.
+    assert.match(dash, /never the whole\s*\n?\s*population/);
+    assert.ok(css.includes(".df2-vd-xform {"), ".df2-vd-xform has no rule");
+  });
+
+  it("Map decides carriers from the transformed image, and the plan keeps source truth", () => {
+    // Transform runs before Map by design: a column rounded to whole numbers is
+    // no longer a lossy decimal, so mapping it against the raw carrier explains
+    // a narrowing the write will never perform. The persisted plan must stay raw
+    // — the engine applies the recipe once, on the read.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    const router = readFileSync(
+      join(webRoot, "../../api/src/routers/shape_router.py"),
+      "utf8",
+    );
+
+    const mapCalls = page.slice(page.indexOf("const useDirect ="));
+    const mapBody = mapCalls.slice(0, mapCalls.indexOf("// Do NOT create an empty draft plan"));
+    assert.match(mapBody, /source_columns: mapSourceCols/);
+    assert.match(mapBody, /source_schema: mapSourceSchema/);
+    // The plan override keeps declared truth so the recipe is not applied twice.
+    assert.match(mapBody, /source_schema: declaredSchema/);
+    assert.doesNotMatch(mapBody, /source_schema: mapSourceSchema,\s*\n\s*target_columns: mapTargetCols,/);
+    // Sampled values shown to the mapping engine follow the transform too.
+    assert.match(page, /image\.sampleRows\s*\n?\s*\.slice\(0, 8\)/);
+    // Declared carriers of the table on screen. Another table must not be
+    // previewed with the primary schema. Untouched columns keep this
+    // declaration; the server re-reads columns the recipe wrote.
+    assert.match(step, /const previewSchema = usingStreamSample && focusedSample && Object\.keys\(focusedSample\.schema \|\| \{\}\)\.length/);
+    assert.match(step, /\? focusedSample\.schema/);
+    assert.match(step, /: sourceSchema;/);
+    assert.match(step, /column_types: previewSchema/);
+    assert.match(router, /out_types, retyped = shaped_column_types\(/);
+  });
+
+  it("the cell-level preview scans the transformed values, not the raw cell", () => {
+    // `/preflight/run` carried the recipe while `/preflight/preview-cells` did
+    // not, so the quarantine table cited `Invalid integer: '22.43'` on a column
+    // the approved recipe rounds to 22 — a finding no writer would ever raise.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    const router = readFileSync(
+      join(webRoot, "../../api/src/routers/preflight_router.py"),
+      "utf8",
+    );
+
+    const cellCall = page.slice(page.indexOf("previewQuarantineCells({"));
+    const cellBody = cellCall.slice(0, cellCall.indexOf("});"));
+    assert.match(cellBody, /shape_recipe: recipePayload\(shapeSteps\)/);
+    // A changed recipe is different evidence, so the effect must re-run on it.
+    const deps = cellCall.slice(cellCall.indexOf("}, ["), cellCall.indexOf("]);") + 3);
+    assert.match(deps, /shapeSteps/);
+    assert.match(api, /shape_recipe\?: ShapeRecipeWire \| null;/);
+    // The backend applies the same pre-load image before it scans a cell.
+    assert.match(router, /shape_recipe: dict\[str, Any\] \| None = None/);
+    assert.match(router, /image = shaped_preflight_image\(/);
+    assert.match(router, /if image\.applied:/);
+  });
+
+  it("a refused row is not reported as an accounting defect", () => {
+    const step = readFileSync(
+      join(webRoot, "pages/transfer/TransferTransformStep.tsx"),
+      "utf8",
+    );
+    const ledger = step.slice(step.indexOf("df2-xform-ledger"));
+    const block = ledger.slice(0, ledger.indexOf("</p>"));
+    assert.match(block, /preview\?\.refusal/);
+    assert.match(block, /the preview stopped at the refused row above/);
+    // The defect wording survives, but only for an imbalance with no refusal.
+    assert.match(block, /: " · ledger does not balance/);
+  });
+
+  it("required Transform fields have a visible invalid state", () => {
+    const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+    assert.ok(css.includes(".df2-xform-required {"), ".df2-xform-required has no rule");
+    assert.ok(
+      css.includes(".df2-field.is-invalid > .df2-input"),
+      "invalid required inputs are not marked",
+    );
+  });
+
+  it("transform panels keep a stable accessible name when the canvas replaces the tabs", () => {
+    const step = readFileSync(
+      join(webRoot, "pages/transfer/TransferTransformStep.tsx"),
+      "utf8",
+    );
+    assert.match(step, /id="xform-prepare-label"/);
+    assert.match(step, /id="xform-result-label"/);
+    assert.match(step, /aria-labelledby="xform-prepare-label"/);
+    assert.match(step, /aria-labelledby="xform-result-label"/);
+    assert.match(step, /className="df2-sr-only">Rules and transforms/);
+    assert.match(step, /className="df2-sr-only">Transform result/);
+    assert.doesNotMatch(step, /aria-labelledby=\{canvasEnabled/);
+    assert.doesNotMatch(step, /aria-label=\{canvasEnabled/);
+  });
+
+  it("the Transform step ships the stylesheet its own namespace needs", () => {
+    const entry = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+
+    // Every class the step used was previously undefined, so the panel laid out
+    // in default flow. The stylesheet must be reachable from the one entrypoint.
+    assert.match(entry, /@import "\.\/transform-prep\.css";/);
+    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll", ".df2-xform .df2-rule-import"]) {
+      assert.ok(css.includes(rule), `${rule} has no rule`);
+    }
+    assert.match(css, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
+    assert.match(css, /@media \(max-width: 1180px\)/);
+    // Studio cards must outrank the post-load Transforms page sheet.
+    assert.match(css, /\.df2-xform \.df2-xform-card/);
+    assert.match(css, /\.df2-xform \.df2-xform-preview/);
+    assert.match(css, /\.df2-xform > \.df2-alert/);
+    assert.match(css, /\.df2-xform \.df2-xform-card[\s\S]{0,180}flex:\s*0 0 auto/);
+  });
+
+  it("post-load Transforms CSS cannot overlap Studio Transform cards", () => {
+    const enterprise = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransformsPage.tsx"), "utf8");
+    const studio = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    assert.match(page, /className="df2-page-transforms"/);
+    assert.match(enterprise, /\.df2-page-transforms \.df2-xform-card \{/);
+    assert.match(enterprise, /\.df2-page-transforms \.df2-xform-preview \{/);
+    assert.doesNotMatch(
+      enterprise.replace(/\.df2-page-transforms \.df2-xform-card \{[\s\S]*?\n\}/, ""),
+      /^\.df2-xform-card \{/m,
+    );
+    const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
+    assert.match(studio, /df2-xform-step/);
+    assert.match(step, /isTransportTimeout/);
+    assert.match(step, /role="tablist"/);
+    assert.match(step, /Rules & transforms/);
+    assert.match(step, /Review result/);
+    assert.match(step, /importBusinessRules/);
+    assert.match(step, /destTypes/);
+    assert.match(step, /syncMode/);
+    const cards = readFileSync(join(webRoot, "components/transfer/TransformPrepCards.tsx"), "utf8");
+    assert.match(step, /RulesImportCard/);
+    assert.match(cards, /Upload rules/);
+    assert.match(cards, /Headers are\s+inferred from the file/);
+    assert.match(cards, /pre-load image/);
+    assert.match(cards, /Destination names land on Map/);
+    const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
+    const map = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
+    assert.match(ledger, /header_roles/);
+    assert.match(ledger, /How this file was read/);
+    assert.match(ledger, /Accept as Direct/);
+    assert.match(ledger, /canAcceptAsDirect/);
+    assert.match(ledger, /sheet_kinds/);
+    assert.match(ledger, /Rule analysis/);
+    assert.match(ledger, /interpretation/);
+    assert.match(ledger, /ruleConfidenceLabel/);
+    assert.match(ledger, /ruleActionLabel/);
+    assert.match(ledger, />Line</);
+    assert.match(ledger, />Interpretation</);
+    assert.match(ledger, /matcher/);
+    assert.match(ledger, /lookup_coverage/);
+    assert.match(ledger, /ruleMixSummary\(report\)/);
+    assert.match(map, /ruleMixSummary\(ruleReport\)/);
+    assert.match(ledger, /namedRuleDisplay/);
+    assert.match(ledger, /proofRuleClaim/);
+    assert.match(ledger, /rule coverage/);
+    assert.match(ledger, /pre-load image/);
+    assert.match(ledger, /df2-rule-tag/);
+    assert.match(ledger, /df2-rule-provenance/);
+    assert.match(ledger, /resolved_rule/);
+    assert.match(ledger, /unknown_code_policy/);
+    assert.match(ledger, /G20 still refuses/);
+    assert.match(step, /Retry preview/);
+    assert.match(step, /disabled=\{!continueState\.enabled\}/);
+    // A hung preview of an empty recipe must not lock Continue — only a recipe
+    // with steps is gated on previewError. The owner is continueTransformState.
+    assert.match(shape, /const hasRecipe = enabledShapeSteps\(input\.steps\)\.length > 0/);
+    assert.match(shape, /if \(hasRecipe && input\.previewError\)/);
+    assert.doesNotMatch(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
+  });
+
+  it("the Transform step states its own rules on screen", () => {
+    const guide = readFileSync(join(webRoot, "components/transfer/TransformGuidePanel.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+
+    const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
+    assert.match(guide, /runs on the read, before anything is written/);
+    assert.match(guide, /hash_identity/);
+    assert.match(guide, /never modified/);
+    assert.match(guide, /not as loss/);
+    assert.match(guide, /post-load transform/);
+    assert.match(guide, /re-checks[\s\S]{0,80}every row of the[\s\S]{0,40}population/);
+    assert.match(step, /id="xform-title">Transform</);
+    assert.doesNotMatch(step, />Transform \(pre-load\)</);
+    assert.match(step, /How it works/);
+    assert.match(step, /<Dialog/);
+    assert.match(step, /df2-xform-guide-dialog/);
+    assert.doesNotMatch(step, /showGuide/);
+    assert.doesNotMatch(step, /df2-xform-eyebrow/);
+    assert.match(step, /Transform ID \{preview\.recipe\.recipe_hash\}/);
+    assert.doesNotMatch(step, /recipe \{preview\.recipe\.recipe_hash\}/);
+    // A refused recipe still has no identity — Map stays locked. A transport
+    // timeout on an empty recipe does not (hasRecipe && previewError only).
+    assert.match(shape, /if \(input\.preview\?\.refusal\)/);
+    assert.match(shape, /if \(hasRecipe && input\.previewError\)/);
+  });
+
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {
     const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     assert.match(css, /container-type:\s*inline-size/);
@@ -71,6 +331,18 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /@media \(max-width: 1280px\)/);
     assert.match(css, /df2-transfer-studio-chrome-row[\s\S]*flex-direction: column/);
     assert.match(css, /validate-rail-primary-fix[\s\S]*width:\s*100%/);
+  });
+
+  it("keeps the Map sort label readable at phone widths", () => {
+    const css = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+    assert.match(css, /df2-column-workbench-sort\s*\{\s*min-width:\s*128px/);
+  });
+
+  it("keeps held workbook rules separate from mapping approval", () => {
+    const panel = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
+    assert.match(panel, /Approve mapping/);
+    assert.match(panel, /held workbook rule[\s\S]{0,80}not applied/i);
+    assert.match(panel, /businessRule\.status === "needs_confirmation"/);
   });
 
   it("ValidateActionsRail labels review-grade passes as Review-grade, not ready", () => {
@@ -84,9 +356,119 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(src, /span>\{passed \? "ready" : "blocked"\}/);
   });
 
+  it("ValidateActionsRail offers Re-run Validate in every state, not only when blocked", () => {
+    const src = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    assert.match(src, /Re-run Validate/);
+    // Gating the control on `blocked` stranded a green verdict: re-validating
+    // meant Back ▸ Continue to Validate.
+    assert.doesNotMatch(src, /\{\(blocked \|\| \(!preflight && !preflighting\)\) && \(/);
+    assert.match(src, /onClick=\{onRunPreflight\}/);
+  });
+
+  it("Validate rail shows Failed + Re-run after a transport timeout, not Not run", () => {
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(rail, /preflightError/);
+    assert.match(rail, /transportFailed/);
+    assert.match(rail, /\? "Failed"/);
+    assert.match(rail, /!preflight && !transportFailed \? "Run preflight" : "Re-run Validate"/);
+    assert.match(dash, /preflightError = ""/);
+    assert.match(dash, /transportFailed/);
+    assert.match(dash, /"FAILED"/);
+    assert.match(dash, /Validate did not finish — Re-run from the rail/);
+    // Dashboard diagnoses; rail owns the teal Re-run.
+    assert.doesNotMatch(
+      dash,
+      /transportFailed[\s\S]{0,400}variant="primary"/,
+    );
+    assert.match(page, /preflightError=\{preflightError\}/);
+    assert.match(page, /setPreflightError\(message\)/);
+    assert.match(page, /validateTransportMessage/);
+  });
+
+  it("Studio Validate posts async_run and polls GET /preflight off the event loop", () => {
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const router = readFileSync(join(webRoot, "../../api/src/routers/transfer_router.py"), "utf8");
+    const job = readFileSync(join(webRoot, "../../api/services/plan_preflight_job.py"), "utf8");
+    const nginx = readFileSync(join(webRoot, "../../../deploy/nginx.conf"), "utf8");
+    assert.match(api, /async_run:\s*true/);
+    assert.match(api, /pollPlanPreflight/);
+    assert.match(api, /\/transfer\/plans\/\$\{planId\}\/preflight/);
+    assert.match(api, /isTransportFailure/);
+    assert.match(api, /Control plane timed out \(HTTP \$\{res\.status\}\)/);
+    // Studio estimates are `number | null`. tsc -b fails if the helper only
+    // accepts `number | undefined` (Railway web image).
+    assert.match(api, /rowCount\?: number \| null/);
+    assert.match(page, /rowCount > 0 \? rowCount : sourceRowEstimate/);
+    assert.match(router, /async_run:\s*bool\s*=\s*False/);
+    assert.match(router, /status_code=202/);
+    assert.match(router, /await asyncio\.to_thread/);
+    assert.match(job, /run_plan_preflight/);
+    assert.match(job, /threading\.Thread/);
+    assert.match(job, /accepted = job_public_view\(job\)/);
+    // Health fails fast; transfer /api/ stays at 300s for the 1M scan.
+    assert.match(nginx, /location \/health-api \{[\s\S]*proxy_read_timeout 8s/);
+    assert.match(nginx, /location \/api\/ \{[\s\S]*proxy_read_timeout 300s/);
+  });
+
   it("ValidateDashboard surfaces review subtitle when passed", () => {
     const src = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);
+  });
+
+  it("Map step keeps Continue in the wizard footer and pages columns when needed", () => {
+    const mapStep = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
+    const review = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const workbench = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+    const ledgerCss = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+
+    assert.match(mapStep, /\{continueToValidate\}/);
+    assert.match(mapStep, /Continue to Validate →/);
+    assert.match(mapStep, /df2-rule-map-body/);
+    assert.match(mapStep, /df2-rule-honesty/);
+    assert.match(mapStep, /embedded/);
+    // Closed until the operator expands. An open rules ledger hid the mapping table.
+    assert.doesNotMatch(mapStep, /df2-rule-map-banner[\s\S]{0,240}open=\{/);
+    assert.match(mapStep, /<details className="df2-rule-map-banner">/);
+    assert.match(studio, /\.df2-rule-map-banner \{[\s\S]*width:\s*100%/);
+    assert.match(studio, /\.df2-rule-map-banner \{[\s\S]*margin:\s*0 0 8px/);
+    assert.doesNotMatch(studio, /\.df2-rule-map-banner \{[\s\S]*margin:\s*0\.75rem 1\.25rem/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*max-height:\s*min\(58vh, 560px\)/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*scroll/);
+    assert.match(studio, /df2-rule-map-banner\[open\]::-webkit-scrollbar/);
+    assert.match(ledgerCss, /df2-rule-line-tags[\s\S]*display:\s*flex/);
+    assert.match(ledgerCss, /df2-rule-tag[\s\S]*width:\s*auto/);
+    assert.doesNotMatch(mapStep, /footerAction=/);
+    assert.doesNotMatch(review, /footerAction/);
+    assert.match(review, /pages > 1 &&/);
+    assert.match(review, /df2-column-review-pager/);
+    assert.match(review, /Mapping column pages/);
+    assert.doesNotMatch(review, /compact && sampleRows && sampleRows\.length > 0 \? "is-split"/);
+
+    assert.match(
+      studio,
+      /df2-map-step-panel > \.df2-card-footer\.df2-wizard-footer\.df2-map-footer \{[\s\S]*max-height:\s*none !important/,
+    );
+    assert.match(studio, /df2-map-step-panel \.df2-card-body,[\s\S]*padding:\s*4px 8px 0 !important/);
+    assert.match(studio, /grid-template-rows:\s*minmax\(0, 1fr\) !important/);
+    assert.match(
+      workbench,
+      /df2-map-step-workspace\.is-full-editor \{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\) !important/,
+    );
+    assert.doesNotMatch(workbench, /minmax\(0, min\(42vh, 380px\)\)/);
+    assert.doesNotMatch(workbench, /header-height, 60px\) - 40px/);
+    assert.equal(totalPages(8, 50), 1);
+    assert.equal(totalPages(51, 50), 2);
+    assert.equal(totalPages(100, 25), 4);
+
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(page, /businessRuleReportRef\.current/);
+    assert.match(page, /mergeBusinessRules\(prev, businessRuleReportRef\.current/);
+    assert.match(page, /stampCompiledWorkbookMappings/);
+    assert.match(page, /const carried = stampCompiledWorkbookMappings\(carryOperatorDecisions\(next, prior\)\)/);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {
@@ -116,5 +498,625 @@ describe("Transfer Studio chrome contracts", () => {
     assert.ok(root);
     assert.equal(root!.primaryKey, "id");
     assert.match(root!.fixHint, /Primary key|unique column|dedupe/i);
+  });
+
+  it("workspace list rows share compact density — Connectors match Contracts/Schedules", () => {
+    const tokens = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
+    const consistency = readFileSync(join(webRoot, "styles/ui-consistency.css"), "utf8");
+    const connectors = readFileSync(join(webRoot, "styles/connectors-page.css"), "utf8");
+    const enterprise = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const card = readFileSync(join(webRoot, "components/ui/ConnectorCard.tsx"), "utf8");
+
+    assert.match(tokens, /--df-list-row-min-h:\s*48px/);
+    assert.match(tokens, /--df-list-row-pad-y:\s*8px/);
+    assert.match(tokens, /--df-list-row-title:\s*13px/);
+    assert.match(tokens, /@media \(min-width: 1920px\)/);
+    // Row density is keyed on width alone. A `max-height` rule used to shrink
+    // rows again on short viewports, on top of the width rules, which is how a
+    // 1280x800 laptop ended up with a 38px row. The full ladder — no overlaps,
+    // no value below the floor — is asserted in styles/listRowDensity.test.ts.
+    assert.doesNotMatch(
+      tokens,
+      /@media \(max-height:[^)]*\)\s*\{[^}]*--df-list-row-/,
+      'list-row density must not depend on viewport height',
+    );
+    assert.doesNotMatch(consistency, /min-height:\s*196px/);
+    assert.match(connectors, /\.df2-connector-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-contract-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-pipeline-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-connector-row,\s*\n\s*\.df2-contract-row,\s*\n\s*\.df2-pipeline-row/);
+    assert.match(card, /df2-btn-label/);
+    assert.match(card, /size=\{16\}/);
+  });
+
+  it("Source/Dest studio panes share one 50/50 owner and stack only at 1100px", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const lock = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
+    assert.match(
+      lock,
+      /\.df2-app \.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
+    );
+    assert.match(lock, /@media \(max-width: 1099px\)/);
+    assert.doesNotMatch(
+      css,
+      /@media \(max-width: 1280px\) \{[\s\S]{0,400}?\.df2-source-step \.df2-transfer-step-split \{[\s\S]{0,80}?grid-template-columns:\s*1fr/,
+      "1280 laptop must keep the two-pane grid; stack only at 1100",
+    );
+    assert.match(
+      lock,
+      /\.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-dest-step > \.df2-wizard-footer[\s\S]*max-height:\s*none/,
+    );
+  });
+
+  it("Destination Advanced matches the 36px button ladder and dest-exists is not create-new", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*max-height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-mode-toggle \{[\s\S]*box-sizing:\s*border-box/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*box-sizing:\s*border-box/);
+    assert.match(
+      css,
+      /\.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-dest-step > \.df2-wizard-footer \.df2-btn,[\s\S]*height:\s*var\(--df-btn-height/,
+    );
+    assert.doesNotMatch(page, /size="sm"[\s\S]{0,80}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}size="sm"/);
+    assert.match(page, /variant="secondary"[\s\S]{0,120}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}variant="secondary"/);
+    assert.match(page, /schemaPolicyHonestyLine\(schemaPolicy\)/);
+    assert.match(page, /composeValidateContractKey/);
+    assert.match(page, /studioValidateIdentity/);
+    assert.match(page, /Existing table detected/);
+    assert.match(page, /This is not create-new/);
+    assert.match(page, /empty leftover|even if a prior run wrote 0 rows/);
+    assert.match(page, /syncModeHonestyLine\(syncMode, destTableExists, destType\)/);
+    assert.doesNotMatch(page, /Full append inserts into/);
+    assert.match(constants, /does not CREATE a new table and does not ALTER/);
+    assert.match(dash, /populationRowsScanned/);
+    assert.match(dash, /populationExact \? "population" : "scanned"/);
+    assert.doesNotMatch(
+      css,
+      /\.df2-dest-step \.df2-card-footer\.df2-wizard-footer \.df2-btn,[\s\S]{0,200}height:\s*32px !important/,
+    );
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    assert.match(drawer, /exactly_once" disabled=\{!exactlyOnceWired\}/);
+    assert.match(page, /row_limit: rowLimit > 0 \? rowLimit : undefined/);
+  });
+
+  it("Destination saved/new lists nest-scroll above the wizard footer", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const landing = readFileSync(join(webRoot, "styles/landing.css"), "utf8");
+    const destOwner = css.slice(css.lastIndexOf("Destination rail — last owner"));
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]*overflow:\s*hidden !important/,
+    );
+    assert.doesNotMatch(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]*overflow:\s*visible/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-connector-list \{[\s\S]*overflow-y:\s*auto !important/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-picker\.is-new-connection \.df2-dest-engine-panel \{[\s\S]*overflow-y:\s*auto !important/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-dest-step > \.df2-wizard-footer \{[\s\S]*flex:\s*0 0 auto !important/,
+    );
+    const afterSourceOwner = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
+    assert.doesNotMatch(
+      afterSourceOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]{0,160}overflow:\s*visible/,
+      "Source natural-height must not unlock Destination overflow",
+    );
+    assert.doesNotMatch(
+      destOwner,
+      /\.df2-dest-connector-list \{[\s\S]{0,120}overflow:\s*visible/,
+      "1100px must not disable dest list scroll after the last dest owner",
+    );
+    assert.match(landing, /Marketing cards — last owner/);
+    assert.match(landing, /overflow-wrap:\s*anywhere/);
+  });
+
+  it("every Transfer step owns a visible primary CTA and does not reuse Shape", () => {
+    const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const mapStep = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
+    const xform = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+
+    assert.match(constants, /label: "Source".*label: "Destination".*label: "Transform".*label: "Map".*label: "Validate".*label: "Run"/s);
+    assert.match(page, /Continue to Destination/);
+    assert.match(page, /Analyze Route/);
+    assert.match(page, /Continue to Transform/);
+    assert.match(page, /DtIcon name="arrow-left"[\s\S]{0,40}Back to source/);
+    assert.match(xform, /Back to Destination/);
+    const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
+    assert.match(shape, /Continue without transforming/);
+    // Rules loaded but no shape steps → CTA is "Continue to Map".
+    assert.match(shape, /Continue to Map/);
+    assert.match(xform, /ruleCount: ruleReport\?\.rule_count/);
+    assert.match(shape, /Continue with this transform/);
+    assert.match(xform, /continueState\.label/);
+    assert.match(mapStep, /Continue to Validate →/);
+    assert.match(mapStep, /← Back/);
+    assert.match(rail, /"Execute"/);
+    assert.match(page, /Execute Transfer/);
+    assert.doesNotMatch(page, /Continue to Shape/);
+    // One primary exit per step — dest Analyze is ghost, not a second primary.
+    assert.match(page, /className="df2-btn df2-btn-ghost"[\s\S]{0,500}Analyze Route/);
+    assert.match(page, /className="df2-btn df2-btn-primary"[\s\S]{0,400}Continue to Transform/);
+  });
+
+  it("laptop density does not hide Dest/Transform/Validate primary actions behind 48px", () => {
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const xform = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+    const lock = studio.slice(studio.lastIndexOf("Studio source / destination — one owner"));
+    assert.match(lock, /max-height:\s*none !important/);
+    assert.match(
+      studio,
+      /df2-map-step-panel > \.df2-card-footer\.df2-wizard-footer\.df2-map-footer \{[\s\S]*max-height:\s*none/,
+    );
+    assert.match(xform, /\.df2-xform-actions \{/);
+    assert.match(xform, /flex-wrap:\s*wrap/);
+    // Rank-19 48px lock must not be the last Dest/Validate footer owner.
+    const afterRank19 = studio.slice(studio.lastIndexOf("Rank 19: never clip Studio primary actions"));
+    assert.match(afterRank19, /df2-dest-step[\s\S]*max-height:\s*none/);
+    assert.match(afterRank19, /df2-validate-footer[\s\S]*max-height:\s*none/);
+    assert.match(studio, /df2-validate-rail-actions/);
+  });
+
+  it("Transform kitchen stays 5fr/6fr until 1180; Map intel hides only at 1280", () => {
+    const xform = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    assert.match(xform, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
+    assert.match(xform, /@media \(max-width: 1180px\) \{\s*\n\s*\.df2-xform-grid \{ grid-template-columns: minmax\(0, 1fr\)/);
+    assert.match(
+      studio,
+      /@media \(max-width: 1280px\) \{[\s\S]*\.df2-map-intel-aside \{\s*\n\s*display: none !important/,
+    );
+  });
+
+  it("Validate owns one studio primary — dashboard Map CTAs are not teal", () => {
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const help = readFileSync(join(webRoot, "lib/helpDocs.ts"), "utf8");
+
+    assert.match(rail, /resolveValidateStudioPrimary/);
+    assert.match(rail, /data-studio-primary/);
+    assert.match(rail, /df2-validate-studio-primary-label/);
+    assert.doesNotMatch(rail, /slice\(0,\s*26\)/);
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    assert.match(
+      studio,
+      /df2-validate-footer-actions \.df2-btn\[data-studio-primary="true"\][\s\S]*min-width:\s*max-content/,
+    );
+    assert.match(dash, /dashboardCtaVariant/);
+    assert.match(dash, /dashCta\("map_open"\)/);
+    assert.doesNotMatch(
+      dash,
+      /variant="primary"[\s\S]{0,200}Open Map to fix|Open Map to fix[\s\S]{0,80}variant="primary"/,
+    );
+    assert.match(page, /studioPrimary=\{studioPrimary\}/);
+    assert.match(page, /promoteBlockedPrimaryFix/);
+    assert.match(
+      help,
+      /Source → Destination → Transform → Map → Validate → Run/,
+    );
+    assert.doesNotMatch(
+      help,
+      /five-step rail: \*\*Src → Dest → Map → Validate → Run\*\*/,
+    );
+  });
+
+  it("Destination Advanced owns a number locale contract next to date locale", () => {
+    const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+
+    assert.match(constants, /export type NumberLocaleId = "" \| "US" \| "EU"/);
+    assert.match(constants, /label: "US \(1,234\.56\)"/);
+    assert.match(constants, /label: "EU \(1\.234,56\)"/);
+    assert.match(drawer, /Number locale/);
+    assert.match(drawer, /onNumberLocaleChange/);
+    assert.match(page, /numberLocales=\{NUMBER_LOCALES\}/);
+    assert.match(page, /number_locale: numberLocale/);
+    assert.match(api, /formData.append\("number_locale"/);
+  });
+
+  it("Validate surfaces number locale set_locale with one Advanced CTA", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
+    const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    assert.match(honesty, /export function numberLocaleValidateAction/);
+    assert.match(dash, /NumberLocalePanel/);
+    assert.match(dash, /numberLocaleValidateAction\(preflight\)/);
+    assert.match(panel, /Set number locale/);
+    assert.match(panel, /onOpenAdvanced/);
+    assert.doesNotMatch(panel, /Set number locale[\s\S]*Set number locale/);
+  });
+
+  it("Validate surfaces date locale set_locale with one Advanced CTA", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
+    const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(honesty, /export function dateLocaleValidateAction/);
+    assert.match(dash, /DateLocalePanel/);
+    assert.match(dash, /dateLocaleValidateAction\(preflight\)/);
+    assert.match(panel, /Set date locale/);
+    assert.match(panel, /Change date locale/);
+    assert.match(panel, /is-settled/);
+    assert.doesNotMatch(panel, /Set date locale[\s\S]*Set date locale/);
+    assert.match(drawer, /id="df2-adv-date-locale"/);
+    assert.match(drawer, /id="df2-adv-number-locale"/);
+    assert.match(drawer, /localeFocus/);
+    assert.match(drawer, /scrollAdvancedLocaleIntoView/);
+    assert.match(dash, /onOpenLocaleSettings/);
+    assert.match(page, /openLocaleSettings/);
+    assert.match(honesty, /export function scrollAdvancedLocaleIntoView/);
+  });
+
+  it("Source, Schedules, and Gate8 pick files through one sr-only input + label", () => {
+    const hidden = readFileSync(join(webRoot, "components/ui/HiddenFileInput.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const schedules = readFileSync(join(webRoot, "pages/SchedulesPage.tsx"), "utf8");
+    const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+
+    assert.match(hidden, /className="df2-sr-only"/);
+    assert.match(hidden, /type="file"/);
+    assert.doesNotMatch(hidden, /<input[\s\S]*\bhidden(?:\s|=|>)/);
+    const srOnly = css.match(/\.df2-sr-only \{([^}]+)\}/);
+    assert.ok(srOnly, ".df2-sr-only rule is missing");
+    assert.match(srOnly[1], /clip: rect\(0, 0, 0, 0\)/);
+    assert.doesNotMatch(srOnly[1], /display:\s*none/);
+
+    assert.match(page, /id="df2-source-file"/);
+    assert.match(page, /htmlFor="df2-source-file"/);
+    assert.match(page, /<label\s+htmlFor="df2-source-file"[\s\S]*className=\{`df2-upload/);
+    assert.doesNotMatch(page, /<input[\s\S]{0,80}type="file"/);
+    assert.doesNotMatch(page, /fileInputRef\.current\?\.click/);
+
+    assert.match(schedules, /id="df2-schedule-import"/);
+    assert.match(schedules, /htmlFor="df2-schedule-import"/);
+    assert.doesNotMatch(schedules, /importInputRef\.current\?\.click/);
+
+    assert.match(gate8, /id="df2-gate8-verify-proof"/);
+    assert.match(gate8, /htmlFor="df2-gate8-verify-proof"/);
+    assert.doesNotMatch(gate8, /verifyInputRef\.current\?\.click/);
+  });
+
+  it("local preflight and file export use the write-path number locale parser", () => {
+    const localPf = readFileSync(join(webRoot, "lib/localPreflight.ts"), "utf8");
+    const localEx = readFileSync(join(webRoot, "lib/localFileExport.ts"), "utf8");
+    const localTx = readFileSync(join(webRoot, "lib/localTransform.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(localTx, /parseLocaleNumber/);
+    assert.match(localPf, /applyLocalTransform/);
+    assert.match(localEx, /applyLocalTransform/);
+    assert.match(page, /numberLocale,/);
+    assert.match(page, /dateLocale,/);
+    assert.match(localPf, /date_locale_report/);
+    assert.doesNotMatch(localPf, /replace\(\/,\/g/);
+    assert.doesNotMatch(localEx, /replace\(\/,\/g/);
+    assert.doesNotMatch(localTx, /replace\(\/,\/g/);
+  });
+
+  it("Validate Remap reads kernel findings; population-fit honesty names the dest widen", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const fit = readFileSync(join(webRoot, "lib/populationFit.ts"), "utf8");
+    assert.match(dash, /Prefer Decision Kernel validation_findings/);
+    assert.match(dash, /suggestedTargetType/);
+    assert.match(dash, /widen \$\{o\.column\} to \$\{o\.suggestedTargetType\}/);
+    assert.match(fit, /suggestedTargetType: String\(f\.suggested_target_type/);
+    assert.match(types, /suggested_target_type\?: string;/);
+    assert.match(types, /suggested_fix\?: string;/);
+    // Existing Remap CTA is the only primary — do not add a second teal for fit.
+    assert.doesNotMatch(dash, /dashCta\("population/);
+    assert.doesNotMatch(dash, /variant="primary"[\s\S]{0,120}widen to NUMBER/);
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(page, /isNumericWiden/);
+    assert.match(page, /must not dump clock\/money values into/);
+    // Existing dest: Remap must ADD *_wide, not rewrite live NUMBER/DECIMAL.
+    assert.match(page, /isNumericWiden \? "_wide"/);
+    assert.match(page, /Destination \$\{m\.target\} is typed/);
+    // Studio Validate must send the persisted upload so the scan is not preview-only.
+    assert.match(page, /source_file_id: parsed\??\.file_id/);
+    // Table Validate must send connector + table so the shared walk can run.
+    assert.match(page, /sourceKind === "cloud"/);
+    assert.match(page, /cloudPath\.trim\(\)/);
+    assert.match(page, /source_config: isConnectorSource && \(sourceKind === "database" \|\| sourceKind === "cloud"\)/);
+    assert.match(page, /file_id: parsed\??\.file_id/);
+    assert.match(page, /!file && !parsed\?\.file_id/);
+    assert.match(page, /file_id: parsed\.file_id/);
+    assert.match(api, /source_file_id/);
+    assert.match(api, /source_file_id\?: string/);
+    assert.match(types, /file_id\?: string;/);
+    // Third overflowing column must still light a Remap control.
+    assert.match(dash, /\.slice\(0, 8\)/);
+    const quarantine = readFileSync(join(webRoot, "components/transfer/QuarantinePanel.tsx"), "utf8");
+    assert.match(quarantine, /suggested_fix/);
+    assert.match(quarantine, /suggested_target_type/);
+  });
+
+  it("Studio Schedule persists the same Validate identity Execute sends", () => {
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const start = page.indexOf("const handleScheduleRoute");
+    assert.ok(start >= 0, "handleScheduleRoute must exist");
+    const chunk = page.slice(start, start + 9000);
+    assert.match(chunk, /stream_contracts: streamContracts/);
+    assert.match(chunk, /shape_recipe: recipePayload\(shapeSteps\)/);
+    assert.match(chunk, /dateLocale,/);
+    assert.match(chunk, /numberLocale,/);
+    assert.match(chunk, /approved_shape_recipe_hash/);
+    assert.match(chunk, /studioScheduleValidateIdentity\(preflight\)/);
+    assert.match(chunk, /mergeSignedRiskContracts/);
+    assert.match(chunk, /buildPreflightMappings/);
+    assert.match(chunk, /writeViaStaging/);
+    assert.match(chunk, /priorityColumn/);
+    assert.match(chunk, /rowLimit/);
+    assert.match(chunk, /dateLocale/);
+    assert.match(chunk, /numberLocale/);
+    assert.match(chunk, /persistedMappingRows/);
+    assert.match(chunk, /Validate a mapping first/);
+    assert.match(chunk, /replayScheduleId/);
+    assert.match(chunk, /updateSchedule\(replayId/);
+  });
+
+  it("Schedules form submits Studio Advanced write knobs so an edit cannot drop them", () => {
+    const form = readFileSync(join(webRoot, "components/schedules/ScheduleForm.tsx"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/PipelineDetailDrawer.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(form, /studioSchedulePolicies/);
+    assert.match(form, /writeViaStagingSupported/);
+    assert.match(form, /write_via_staging: writeKnobs.write_via_staging/);
+    assert.match(form, /priority_column: writeKnobs.priority_column/);
+    assert.match(form, /row_limit: writeKnobs.row_limit/);
+    assert.match(form, /id="sched-priority-col"/);
+    assert.match(form, /id="sched-row-limit"/);
+    assert.match(form, /id="sched-date-locale"/);
+    assert.match(form, /id="sched-number-locale"/);
+    assert.match(form, /date_locale: writeKnobs.date_locale/);
+    assert.match(form, /Write via staging/);
+    assert.match(drawer, /Write via staging/);
+    assert.match(drawer, /sched.row_limit/);
+    assert.match(drawer, /Validate identity/);
+    assert.match(drawer, /formatValidateIdentitySummary/);
+    assert.match(drawer, /formatSchemaPolicyLabel/);
+    assert.doesNotMatch(drawer, /Use Edit to set the schema map/);
+    assert.match(drawer, /create from Transfer Studio after Validate/);
+    assert.match(form, /formatValidateIdentitySummary/);
+    assert.match(form, /Save does not resubmit these hashes/);
+    assert.doesNotMatch(form, /approved_shape_recipe_hash:/);
+    assert.doesNotMatch(form, /approved_ddl_identity_hash:/);
+    assert.match(types, /interface PipelineSchedule \{[\s\S]*write_via_staging\?: boolean;/);
+    assert.match(types, /approved_ddl_identity_hash\?: string;/);
+    assert.match(page, /destSupportsWriteViaStaging\(destDriverType\)/);
+    assert.doesNotMatch(
+      page,
+      /const writeViaStagingSupported = \[\s*"postgresql", "mysql"/,
+    );
+  });
+});
+
+describe("GitOps Advanced allowlist", () => {
+  it("dataflow.yaml allowlists write knobs and strips observed source shape", () => {
+    const manifest = readFileSync(
+      join(webRoot, "..", "..", "api", "services", "gitops_manifest.py"),
+      "utf8",
+    );
+    assert.match(manifest, /_SCHEDULE_DECLARATIVE_KEYS/);
+    assert.match(manifest, /"write_via_staging"/);
+    assert.match(manifest, /"priority_column"/);
+    assert.match(manifest, /"row_limit"/);
+    assert.match(manifest, /"snapshot_mode"/);
+    assert.match(manifest, /_SCHEDULE_OBSERVED_KEYS/);
+    assert.match(manifest, /"source_schema"/);
+    assert.match(manifest, /def apply_schedule_spec/);
+    assert.match(manifest, /apply_spec = apply_schedule_spec\(spec\)/);
+  });
+});
+
+describe("Overview parked-decision attention", () => {
+  it("surfaces inbox parked count and does not treat parked as failed or paused", () => {
+    const dash = readFileSync(join(webRoot, "pages/DashboardPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(dash, /fetchOpenScheduleApprovals/);
+    assert.match(dash, /parked on a decision/);
+    assert.match(dash, /Open Pipelines inbox/);
+    assert.match(dash, /setParkedCount\(null\)/);
+    assert.doesNotMatch(dash, /parked on a failed/);
+    assert.match(app, /onOpenSchedules=\{\(\) => setScreen\("schedules"\)\}/);
+    assert.match(dash, /Open Transfer Studio/);
+    assert.match(dash, /onStartTransfer/);
+    assert.match(app, /onStartTransfer=\{\(\) => \{/);
+  });
+
+  it("counts whole-history totals and waits for the named workspace before the first read", () => {
+    const dash = readFileSync(join(webRoot, "pages/DashboardPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(dash, /buildOverviewJobStats/);
+    assert.match(dash, /buildStatusDistributionFromHistory/);
+    assert.match(dash, /stats\.total\.toLocaleString\(\)/);
+    assert.doesNotMatch(dash, /\{jobs\.length\} jobs/);
+    assert.match(app, /history=\{jobHistory\}/);
+    assert.match(app, /WORKSPACE_CHANGED_EVENT/);
+    assert.match(app, /getActiveWorkspaceId\(\)/);
+    assert.match(app, /isStaleGeneration/);
+    assert.match(app, /if \(!getActiveWorkspaceId\(\)\) return;/);
+    assert.match(dash, /overviewRecentMigrationsState/);
+    assert.match(dash, /d\.total \?\? d\.count/);
+    assert.match(dash, /WORKSPACE_CHANGED_EVENT/);
+  });
+
+  it("keep-alive Studio drops a deleted connection and remounts on workspace change", () => {
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const workspace = app.slice(app.indexOf("const onWorkspaceChanged"));
+    assert.match(workspace, /setTransferStudioKey/);
+    assert.match(workspace, /setTransferSeedSource\(null\)/);
+    assert.match(app, /setTransferSeedSource\(\(seed\) => \(seed\?\.connectorId === id \? null : seed\)\)/);
+    assert.match(page, /connectorsLoading\) return;/);
+    assert.match(page, /!connectors\.some\(\(c\) => c\.id === sourceConnectorId\)/);
+    assert.match(page, /!connectors\.some\(\(c\) => c\.id === connectorId\)/);
+    assert.match(page, /studioSourceLabel/);
+    assert.match(page, /sourceLabel=\{sourceLabel\}/);
+    assert.doesNotMatch(page, /sourceLabel=\{file\?\.name \|\| sourceConnector\?\.name\}/);
+    const jobs = readFileSync(join(webRoot, "pages/JobsPage.tsx"), "utf8");
+    assert.match(jobs, /uniqueListKey\(job\._id, index, "job"\)/);
+  });
+});
+
+describe("signed-in Help stays in the app chrome", () => {
+  it("hash sync maps help routes to docs when a session exists", () => {
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(app, /signedInScreenFromHash/);
+    assert.match(app, /signedInHelpArticleFromHash/);
+    assert.match(app, /helpArticle=\{helpArticle\}/);
+    assert.match(app, /isSignedInHelpHash\(window\.location\.hash\)/);
+    const docs = readFileSync(join(webRoot, "pages/DocsPage.tsx"), "utf8");
+    assert.match(docs, /WorkspaceHelp/);
+    assert.match(docs, /hideMarketingCta/);
+  });
+});
+
+describe("operator surface geometry and honest empty export", () => {
+  it("connector icon is a token-square, not a stretch rectangle", () => {
+    const css = readFileSync(join(webRoot, "styles/shell-polish.css"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const icon = css.match(/\.df2-connector-select-icon \{([^}]+)\}/);
+    assert.ok(icon, ".df2-connector-select-icon rule missing");
+    assert.match(icon[1], /width:\s*var\(--df-control-height/);
+    assert.match(icon[1], /height:\s*var\(--df-control-height/);
+    assert.match(icon[1], /flex:\s*0 0 var\(--df-control-height/);
+    assert.doesNotMatch(icon[1], /width:\s*auto/);
+    assert.match(studio, /\.df2-source-endpoint-fields \.df2-source-read-mode \.df2-filter-tabs \{[\s\S]*?height:\s*var\(--df-control-height/);
+  });
+
+  it("jobs overview metrics and footer buttons share the control ladder", () => {
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    assert.match(css, /\.df2-page-jobs \.df2-conservation-ledger-count strong[\s\S]*?font-size:\s*13px/);
+    assert.match(css, /\.df2-jobs-evidence-chip \{[\s\S]*?min-height:\s*var\(--df-btn-height-sm/);
+    assert.match(css, /\.df2-jobs-detail-footer \.df2-btn \{[\s\S]*?height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-app \.df2-empty-action \{[\s\S]*?display:\s*flex/);
+  });
+
+  it("empty YAML export is a named empty fleet, not an unexpected error", () => {
+    const page = readFileSync(join(webRoot, "pages/SchedulesPage.tsx"), "utf8");
+    assert.match(page, /fleetExportBlockedReason/);
+    assert.match(page, /Nothing to export/);
+    assert.match(page, /disabled=\{gitopsBusy \|\| schedules\.length === 0\}/);
+  });
+});
+
+describe("enterprise wedge proof surfaces", () => {
+  it("Theater Cancel posts to /jobs/{id}/cancel and only while running", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(theater, /await cancelJob\(jobId\)/);
+    assert.match(theater, /\{isRunning && onCancel && \(/);
+    assert.match(api, /connectors\/jobs\/\$\{jobId\}\/cancel/);
+  });
+
+  it("completed Theater keeps the job id so Gate-8 is not a transient card", () => {
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    assert.match(page, /keepTheaterMountedOnStatus/);
+    assert.match(page, /routeBarLiveWhileWriting\(transferring\)/);
+    assert.match(page, /showStudioResultDashboard/);
+    const completeFn = page.match(
+      /const handleJobComplete = \(job: JobProgress\) => \{([\s\S]*?)^\s*\/\*\* Explicit leave only/m,
+    );
+    assert.ok(completeFn, "handleJobComplete body not found");
+    assert.match(completeFn[1], /if \(!keepTheaterMountedOnStatus\(job\.status\)\)/);
+    assert.match(completeFn[1], /setTransferring\(false\)/);
+    assert.doesNotMatch(completeFn[1], /setActiveJobId\(null\);\s*const success/);
+    assert.match(theater, /isComplete && job\.reconciliation/);
+    assert.match(theater, /<Gate8ProofCard/);
+    assert.match(theater, /onSchedule/);
+    assert.match(theater, /Schedule/);
+    assert.match(theater, /onCompleteRef\.current/);
+    assert.match(theater, /return stop;\s*\}, \[jobId\]/);
+    assert.match(theater, /completedLoggedRef/);
+    assert.match(theater, /alreadyTerminal/);
+    assert.match(theater, /theaterElapsedMs/);
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(api, /closedTerminal/);
+    assert.match(api, /if \(stopped \|\| closedTerminal\) return/);
+    const liveLog = readFileSync(join(webRoot, "components/ui/LiveEventLog.tsx"), "utf8");
+    assert.match(liveLog, /isNewLiveLogTail/);
+    assert.match(liveLog, /i === entries\.length - 1 && enterNewest/);
+    assert.match(page, /canPersistStudioSchedule/);
+    assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
+    assert.match(page, /studioSchedulePersistable && \(/);
+    assert.match(app, /Gate-8 proof stays on Job Theater/);
+  });
+
+  it("Settings API keys own one Generate control; tenant placeholders are not a bank", () => {
+    const settings = readFileSync(join(webRoot, "pages/SettingsPage.tsx"), "utf8");
+    assert.match(settings, /data-testid="settings-appearance"/);
+    assert.match(settings, /setTheme/);
+    assert.doesNotMatch(settings, /df2-theme-toggle-v2/);
+    const tenant = readFileSync(join(webRoot, "pages/settings/TenantSettings.tsx"), "utf8");
+    const generateHits = settings.match(/\{apiKeyGenerating \? "Generating…" : "Generate key"\}/g) || [];
+    assert.equal(generateHits.length, 1, "empty-state Generate key duplicates the toolbar");
+    assert.match(settings, /Use the toolbar above/);
+    assert.doesNotMatch(settings, /EmptyState[\s\S]{0,400}Generate key/);
+    assert.doesNotMatch(tenant, /Wells Fargo/);
+    assert.doesNotMatch(tenant, /wellsfargo\.com/);
+    assert.doesNotMatch(tenant, /10\.0\.0\.0\/8/);
+    assert.match(tenant, /placeholder="Legal entity name"/);
+    assert.match(tenant, /placeholder="transfers\.example\.com"/);
+    const team = readFileSync(join(webRoot, "pages/settings/TeamSettings.tsx"), "utf8");
+    assert.match(team, /isLastWorkspaceAdmin\(members, m\.email\)/);
+    assert.match(team, /LAST_ADMIN_PROTECTED/);
+    assert.match(team, /disabled=\{removingEmail === m\.email \|\| !membership\.allowed \|\| lastAdmin\}/);
+  });
+
+  it("Theater shows dest COUNT, Validate run_id, and run lineage", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
+    assert.match(theater, /label="Validate"/);
+    assert.match(theater, /df2-theater-pop-strip/);
+    assert.match(theater, /Dest COUNT/);
+    assert.match(theater, /Run lineage/);
+    assert.match(theater, /readGate8Population/);
+    assert.doesNotMatch(theater, /population_proof:\s*true/);
+    assert.match(gate8, /Proof scope/);
+    assert.doesNotMatch(gate8, /population_proof:\s*true/);
+  });
+
+  it("Schedules Overview mounts LoadHistoryPanel from the last job", () => {
+    const drawer = readFileSync(join(webRoot, "components/PipelineDetailDrawer.tsx"), "utf8");
+    assert.match(drawer, /LoadHistoryPanel/);
+    assert.match(drawer, /lastJob\?\.load_history_report/);
+  });
+
+  it("Transform last-run ledger and quarantine CTA share the transfer DLQ", () => {
+    const drawer = readFileSync(join(webRoot, "components/TransformDetailDrawer.tsx"), "utf8");
+    assert.match(drawer, /df2-xform-ledger/);
+    assert.match(drawer, /View quarantine/);
+    assert.match(drawer, /writeJobsDeepLink\(`xform-\$\{project\.id\}`, "quarantine"\)/);
+  });
+
+  it("Theater names snapshot+LSN handoff and dest-owned window without platform EOS", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    assert.match(theater, /Handoff · \{job\.snapshot_plan\.kind\}/);
+    assert.match(theater, /Window · \{job\.eos_window_id\}/);
+    assert.match(theater, /not platform exactly-once/);
+    assert.match(theater, /not platform-wide/);
+    assert.doesNotMatch(theater, /exactly-once for every route/);
   });
 });

@@ -4,9 +4,13 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach } from "node:test";
 import {
+  deletePilotSession,
   extractPilotResultId,
+  loadPilotWorkspace,
+  loadRailChat,
   promoteRailChatToPilotSession,
   redactSecrets,
+  savePilotWorkspace,
   saveRailChat,
 } from "./pilotChatStore.js";
 
@@ -88,5 +92,38 @@ describe("promoteRailChatToPilotSession", () => {
     assert.ok(active);
     assert.equal(active!.lastResultId, "pr_rail01");
     assert.ok(active!.messages.some((m) => m.text.includes("how many orders")));
+  });
+
+  it("delete stays gone after refresh — rail must not resurrect the chat", () => {
+    const sessionId = "pilot-delete-persist";
+    const session = {
+      id: sessionId,
+      title: "Orders chart",
+      messages: [
+        { role: "user" as const, text: "show orders" },
+        { role: "assistant" as const, text: "Here is a chart of **orders**." },
+      ],
+      history: [
+        { role: "user" as const, content: "show orders" },
+        { role: "assistant" as const, content: "Here is a chart of orders." },
+      ],
+      toolLog: [],
+      updatedAt: Date.now(),
+    };
+    savePilotWorkspace([session], sessionId);
+    saveRailChat({
+      sessionId,
+      lastResultId: "pr_chart01",
+      history: session.history,
+      messages: session.messages,
+    });
+    const afterDelete = deletePilotSession([session], sessionId, sessionId);
+    assert.ok(afterDelete.sessions.every((s) => s.id !== sessionId));
+    assert.equal(loadRailChat(), null);
+
+    const resurrected = promoteRailChatToPilotSession();
+    assert.equal(resurrected, null);
+    const workspace = loadPilotWorkspace();
+    assert.ok(workspace.sessions.every((s) => s.id !== sessionId));
   });
 });

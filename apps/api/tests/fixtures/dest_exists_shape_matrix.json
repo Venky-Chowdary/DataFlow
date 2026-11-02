@@ -1,0 +1,369 @@
+{
+  "metric": "dest_exists_shape_contract",
+  "honesty": "Named dest-exists fixture. Not a claim we beat Fivetran/Airbyte/DMS on catalog breadth. CDC remains at-least-once upsert.",
+  "competitor_holes": [
+    "airbyte#74892 all-or-nothing schema approve",
+    "airbyte#78427 silent stream fail on column removal",
+    "Fivetran rename = new column + stale old",
+    "AWS DMS dest-exists Do-nothing does not refresh extra columns",
+    "dbt-databricks#1289 positional INSERT misalignment",
+    "Informatica CDI rename = delete+add; Snowflake jumble without column_mapping=name"
+  ],
+  "cases": [
+    {
+      "id": "same_schema_insert_more",
+      "note": "Existing warehouse table, same columns, load more rows — bind only.",
+      "table_exists": true,
+      "source": ["id", "email"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99}
+      ],
+      "expect_shape": "equal",
+      "expect_unaccounted": 0,
+      "expect_unfilled": 0
+    },
+    {
+      "id": "source_extra_unmapped",
+      "note": "CRM export grew a loyalty_tier column the dest table does not have.",
+      "table_exists": true,
+      "source": ["id", "email", "loyalty_tier"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99}
+      ],
+      "expect_shape": "source_superset",
+      "expect_unaccounted": 1,
+      "expect_unfilled": 0
+    },
+    {
+      "id": "source_extra_create_new",
+      "note": "Operator proposed ADD COLUMN for the extra source field.",
+      "table_exists": true,
+      "source": ["id", "email", "loyalty_tier"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99},
+        {"source": "loyalty_tier", "target": "loyalty_tier", "create_new": true, "assignment_strategy": "create_compatible_new", "requires_review": true}
+      ],
+      "expect_shape": "source_superset",
+      "expect_unaccounted": 0,
+      "expect_add": 1
+    },
+    {
+      "id": "source_extra_omit",
+      "note": "Operator recorded Omit — extra source is a decision, not a silent drop.",
+      "table_exists": true,
+      "source": ["id", "email", "ssn"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99},
+        {"source": "ssn", "target": "", "intentional_omit": true}
+      ],
+      "expect_shape": "equal",
+      "expect_unaccounted": 0,
+      "expect_omit": 1
+    },
+    {
+      "id": "dest_only_nullable",
+      "note": "Dest has updated_at the source does not send — preserve, do not NULL-wipe.",
+      "table_exists": true,
+      "source": ["id", "email"],
+      "dest": ["id", "email", "updated_at"],
+      "nullability": {"id": false, "email": true, "updated_at": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99}
+      ],
+      "expect_shape": "dest_superset",
+      "expect_dest_preserve": 1,
+      "expect_unfilled": 0
+    },
+    {
+      "id": "dest_only_not_null_no_default",
+      "note": "Dest tenant_id is NOT NULL with no default — G14 class dest_only_required.",
+      "table_exists": true,
+      "source": ["id", "email"],
+      "dest": ["id", "email", "tenant_id"],
+      "nullability": {"id": false, "email": true, "tenant_id": false},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99}
+      ],
+      "expect_shape": "dest_superset",
+      "expect_unfilled": 1
+    },
+    {
+      "id": "dest_only_identity",
+      "note": "Dest serial id is engine-filled — not an unfilled required column.",
+      "table_exists": true,
+      "source": ["email"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "identity": ["id"],
+      "mappings": [{"source": "email", "target": "email", "confidence": 0.99}],
+      "expect_shape": "dest_superset",
+      "expect_unfilled": 0
+    },
+    {
+      "id": "dest_only_default",
+      "note": "Dest status DEFAULT 'active' — insert more without mapping status.",
+      "table_exists": true,
+      "source": ["id", "email"],
+      "dest": ["id", "email", "status"],
+      "nullability": {"id": false, "email": true, "status": false},
+      "defaults": {"status": "'active'"},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99}
+      ],
+      "expect_shape": "dest_superset",
+      "expect_unfilled": 0
+    },
+    {
+      "id": "names_only_pending",
+      "note": "Table exists, types did not load — DMS-class hole. Never invent ADD.",
+      "table_exists": true,
+      "source": ["id", "orphan_metric"],
+      "dest": [],
+      "nullability": {},
+      "mappings": [
+        {"source": "id", "target": "id", "assignment_strategy": "pending_dest_schema", "create_new": false, "requires_review": true},
+        {"source": "orphan_metric", "target": "orphan_metric", "assignment_strategy": "pending_dest_schema", "create_new": false, "requires_review": true}
+      ],
+      "expect_shape": "pending_schema",
+      "expect_pending": 2
+    },
+    {
+      "id": "column_reorder_name_write",
+      "note": "Source order note,id,extra vs dest id,name,updated_at — dbt positional trap.",
+      "table_exists": true,
+      "source": ["note", "id", "extra"],
+      "dest": ["id", "name", "updated_at"],
+      "nullability": {"id": false, "name": true, "updated_at": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "note", "target": "name", "confidence": 0.9}
+      ],
+      "source_row": {"note": "hello", "id": 7, "extra": "DROP-ME"},
+      "expect_projection": {"id": 7, "name": "hello"},
+      "expect_shape": "overlap",
+      "expect_unaccounted": 1
+    },
+    {
+      "id": "false_friend_qty_amt",
+      "note": "order_qty must not auto-bind order_amt on an existing fact table.",
+      "table_exists": true,
+      "source": ["order_id", "order_qty"],
+      "dest": ["order_id", "order_amt"],
+      "nullability": {"order_id": false, "order_amt": true},
+      "mappings": [
+        {"source": "order_id", "target": "order_id", "confidence": 0.99},
+        {"source": "order_qty", "target": "order_amt", "confidence": 0.78, "requires_review": true, "review_kind": "measure_kind"}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 1
+    },
+    {
+      "id": "false_friend_qty_amt_confirmed",
+      "note": "Per-row Confirm this pair clears G15. review_kind stays for honesty.",
+      "table_exists": true,
+      "source": ["order_id", "order_qty"],
+      "dest": ["order_id", "order_amt"],
+      "nullability": {"order_id": false, "order_amt": true},
+      "mappings": [
+        {"source": "order_id", "target": "order_id", "confidence": 0.99},
+        {"source": "order_qty", "target": "order_amt", "confidence": 0.78, "review_kind": "measure_kind", "false_friend_confirmed": true, "user_override": true}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 0
+    },
+    {
+      "id": "false_friend_qty_amt_approve_does_not_clear",
+      "note": "Approve eligible / user_override must not clear qty≠amt.",
+      "table_exists": true,
+      "source": ["order_id", "order_qty"],
+      "dest": ["order_id", "order_amt"],
+      "nullability": {"order_id": false, "order_amt": true},
+      "mappings": [
+        {"source": "order_id", "target": "order_id", "confidence": 0.99},
+        {"source": "order_qty", "target": "order_amt", "confidence": 0.78, "requires_review": false, "review_kind": "measure_kind", "user_override": true, "approved": true}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 1
+    },
+    {
+      "id": "false_friend_user_customer",
+      "note": "CRM user_id is not dest customer_id.",
+      "table_exists": true,
+      "source": ["user_id"],
+      "dest": ["customer_id"],
+      "nullability": {"customer_id": false},
+      "mappings": [
+        {"source": "user_id", "target": "customer_id", "confidence": 0.78, "requires_review": true, "review_kind": "entity_identity"}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 1
+    },
+    {
+      "id": "dest_collision_casefold",
+      "note": "UserID vs userid fold — dest collision stays review.",
+      "table_exists": true,
+      "source": ["user_id"],
+      "dest": ["UserID", "userid"],
+      "nullability": {"UserID": true, "userid": true},
+      "mappings": [
+        {"source": "user_id", "target": "UserID", "confidence": 0.71, "requires_review": true, "review_kind": "dest_collision"}
+      ],
+      "expect_shape": "dest_superset",
+      "expect_false_friend": 1,
+      "expect_dest_preserve": 1
+    },
+    {
+      "id": "create_new_table",
+      "note": "Confirmed missing dest — identity CREATE, not dest-exists.",
+      "table_exists": false,
+      "source": ["id", "email"],
+      "dest": [],
+      "nullability": {},
+      "mappings": [
+        {"source": "id", "target": "id", "create_new": true, "assignment_strategy": "identity_passthrough"},
+        {"source": "email", "target": "email", "create_new": true, "assignment_strategy": "identity_passthrough"}
+      ],
+      "expect_shape": "create_new_table",
+      "expect_add": 2
+    },
+    {
+      "id": "dest_unknown",
+      "note": "table_exists is None — never invent create-new.",
+      "table_exists": null,
+      "source": ["id"],
+      "dest": [],
+      "nullability": {},
+      "mappings": [{"source": "id", "target": "id", "assignment_strategy": "pending_dest_schema", "create_new": false}],
+      "expect_shape": "dest_unknown"
+    },
+    {
+      "id": "both_extras",
+      "note": "Source grew a note; dest keeps updated_at — overlap shape.",
+      "table_exists": true,
+      "source": ["id", "note"],
+      "dest": ["id", "updated_at"],
+      "nullability": {"id": false, "updated_at": true},
+      "mappings": [{"source": "id", "target": "id", "confidence": 0.99}],
+      "expect_shape": "overlap",
+      "expect_unaccounted": 1,
+      "expect_dest_preserve": 1
+    },
+    {
+      "id": "generated_dest_col",
+      "note": "Dest row_hash is generated — dest-only preserve, not required unfilled.",
+      "table_exists": true,
+      "source": ["id"],
+      "dest": ["id", "row_hash"],
+      "nullability": {"id": false, "row_hash": false},
+      "generated": ["row_hash"],
+      "mappings": [{"source": "id", "target": "id", "confidence": 0.99}],
+      "expect_shape": "dest_superset",
+      "expect_unfilled": 0
+    },
+    {
+      "id": "pk_unmapped",
+      "note": "Existing dest PK not mapped and not identity — required unfilled.",
+      "table_exists": true,
+      "source": ["email"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "mappings": [{"source": "email", "target": "email", "confidence": 0.99}],
+      "expect_shape": "dest_superset",
+      "expect_unfilled": 1
+    },
+    {
+      "id": "create_new_and_required_unfilled",
+      "note": "ADD one source extra while dest tenant_id is still unfilled.",
+      "table_exists": true,
+      "source": ["id", "loyalty_tier"],
+      "dest": ["id", "tenant_id"],
+      "nullability": {"id": false, "tenant_id": false},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "loyalty_tier", "target": "loyalty_tier", "create_new": true, "assignment_strategy": "create_compatible_new"}
+      ],
+      "expect_shape": "overlap",
+      "expect_add": 1,
+      "expect_unfilled": 1
+    },
+    {
+      "id": "case_fold_bind",
+      "note": "Source CustomerID binds dest customer_id — name-addressed, not a new column.",
+      "table_exists": true,
+      "source": ["CustomerID"],
+      "dest": ["customer_id"],
+      "nullability": {"customer_id": false},
+      "mappings": [{"source": "CustomerID", "target": "customer_id", "confidence": 0.99}],
+      "source_row": {"CustomerID": 42},
+      "expect_projection": {"customer_id": 42},
+      "expect_shape": "equal"
+    },
+    {
+      "id": "empty_mappings_existing",
+      "note": "Existing dest, no maps — every source unaccounted.",
+      "table_exists": true,
+      "source": ["id", "email"],
+      "dest": ["id", "email"],
+      "nullability": {"id": false, "email": true},
+      "mappings": [],
+      "expect_shape": "overlap",
+      "expect_unaccounted": 2,
+      "expect_unfilled": 1
+    },
+    {
+      "id": "lossy_overlap_review",
+      "note": "DECIMAL dest vs source text amount — false-friend/lossy stays review.",
+      "table_exists": true,
+      "source": ["id", "amount"],
+      "dest": ["id", "amount"],
+      "nullability": {"id": false, "amount": true},
+      "mappings": [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "amount", "target": "amount", "confidence": 0.8, "requires_review": true, "review_kind": "lossy"}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 0
+    },
+    {
+      "id": "sku_identity_leaf",
+      "note": "sku onto product_id on existing catalog table.",
+      "table_exists": true,
+      "source": ["sku"],
+      "dest": ["product_id"],
+      "nullability": {"product_id": false},
+      "mappings": [
+        {"source": "sku", "target": "product_id", "confidence": 0.78, "requires_review": true, "review_kind": "identity_leaf"}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 1
+    },
+    {
+      "id": "temporal_polarity_existing",
+      "note": "created_at must not land on dest updated_at.",
+      "table_exists": true,
+      "source": ["created_at"],
+      "dest": ["updated_at"],
+      "nullability": {"updated_at": true},
+      "mappings": [
+        {"source": "created_at", "target": "updated_at", "confidence": 0.78, "requires_review": true, "review_kind": "temporal_polarity"}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 1
+    }
+  ]
+}

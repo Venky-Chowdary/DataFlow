@@ -7,10 +7,12 @@ from evidence that already exists (Gate-8 reconciliation, the quarantine DLQ,
 risk contracts, Map→DDL hashes) — it derives no new correctness facts.
 
 The one judgement it *does* add is **row conservation**: every source row must
-be accounted for as written, quarantined, or intentionally skipped. An
-unexplained shortfall is the definition of silent data loss, so the certificate
-refuses to claim proof when the arithmetic does not close, even if Gate-8 was
-otherwise happy.
+be accounted for as on the destination (independent COUNT(*)), quarantined, or
+intentionally skipped. Writer ``records_processed`` is diagnostic only — using
+it to close the ledger is how DMS reports Full Load success and later
+``MISSING_TARGET``. An unexplained shortfall is silent data loss, so the
+certificate refuses to claim proof when the identity does not close, even if
+Gate-8 checksums of *accepted* rows were green.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
+from services.row_conservation import account_job
 from services.signed_proof_pack import export_proof_pack_for_job, sign_body, verify_body
 
 logger = logging.getLogger(__name__)
@@ -114,64 +117,12 @@ def quarantine_burndown(job_id: str, *, limit: int = 500) -> dict[str, Any]:
 
 
 def row_accounting(job: dict[str, Any]) -> dict[str, Any]:
-    """Conservation ledger: read = written + quarantined + skipped.
+    """Conservation ledger: read = dest COUNT(*) + hold-outs + skipped.
 
-    ``rows_read`` comes from Gate-8's source count, which is the only figure
-    measured against the source rather than reported by the writer. When it is
-    absent the ledger is marked unbalanced-unknown: an unmeasured source count
-    cannot be used to prove nothing was lost.
+    ``rows_written`` is the independent destination population, never the
+    writer's ``records_processed``. See ``services.row_conservation``.
     """
-    recon = _dict(job.get("reconciliation"))
-    dest = _dict(job.get("destination_summary"))
-
-    rows_written = _as_int(job.get("records_processed") or dest.get("rows"))
-    rows_quarantined = _as_int(
-        recon.get("rejected_rows") or job.get("rejected_rows") or dest.get("rejected")
-    )
-    rows_skipped = _as_int(recon.get("rows_skipped") or dest.get("rows_skipped"))
-    coerced_null_rows = _as_int(
-        recon.get("coerced_null_rows") or job.get("coerced_null_rows")
-    )
-
-    raw_read = recon.get("source_rows")
-    rows_read = _as_int(raw_read) if raw_read is not None else None
-
-    ledger: dict[str, Any] = {
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "rows_quarantined": rows_quarantined,
-        "rows_skipped": rows_skipped,
-        "rows_coerced_null": coerced_null_rows,
-        "rows_read_source": "gate8_source_count" if rows_read is not None else "unmeasured",
-    }
-
-    if rows_read is None:
-        ledger["balanced"] = False
-        ledger["unaccounted"] = None
-        ledger["note"] = (
-            "Source row count was not measured for this run, so no conservation "
-            "check is possible. Rows written cannot be compared against rows read."
-        )
-        return ledger
-
-    unaccounted = rows_read - (rows_written + rows_quarantined + rows_skipped)
-    ledger["unaccounted"] = unaccounted
-    ledger["balanced"] = unaccounted == 0
-    if unaccounted > 0:
-        ledger["note"] = (
-            f"{unaccounted} source row(s) are neither written, quarantined, nor "
-            "skipped. Treat as potential silent loss and investigate before "
-            "accepting this run."
-        )
-    elif unaccounted < 0:
-        ledger["note"] = (
-            f"{abs(unaccounted)} more row(s) are accounted for than were read — "
-            "duplicate writes or double-counted rejects. Investigate before "
-            "accepting this run."
-        )
-    else:
-        ledger["note"] = "Every source row is written, quarantined, or skipped."
-    return ledger
+    return account_job(job).to_dict()
 
 
 def _rejected_details(
@@ -196,7 +147,12 @@ def _rejected_details(
     return hydrated if len(hydrated) > len(rows) else rows
 
 
-def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
+def physical_state_findings(
+    recon: dict[str, Any],
+    *,
+    source_schema: str = "",
+    dest_schema: str = "",
+) -> dict[str, Any]:
     """Destination state a row checksum cannot prove, as certificate evidence.
 
     Today that is generator watermarks: keys can be byte-identical while the
@@ -212,6 +168,14 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
         "verified": False,
         "reason": "constraints and indexes were not compared for this run",
     }
+    if source_schema and dest_schema:
+        from services.physical_state_diff import requalify_schema_move_foreign_keys
+
+        schema_objects = requalify_schema_move_foreign_keys(
+            schema_objects,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
     referential = _dict(state.get("referential_integrity")) or {
         "verified": False,
         "reason": "destination referential integrity was not scanned for this run",
@@ -222,9 +186,11 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "verified": bool(schema_objects.get("verified")),
             "reason": str(schema_objects.get("reason") or ""),
             "absent": list(schema_objects.get("absent") or []),
+            "unchecked": list(schema_objects.get("unchecked") or []),
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
             "advisory": _dict(schema_objects.get("advisory")),
+            "cutover_recreate": list(schema_objects.get("cutover_recreate") or []),
         },
         "referential_integrity": {
             "verified": bool(referential.get("verified")),
@@ -265,24 +231,96 @@ _SCHEMA_ASPECT_LABEL = {
 
 
 def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
-    """Structure the source enforced and the destination demonstrably lacks.
+    """Structure the source enforced and the destination did not prove.
 
     Matching checksums prove the rows, not the database around them: a load
     that lands every byte into a table whose foreign keys, uniqueness or CHECK
     constraints were never created leaves the destination accepting data the
-    source would have rejected. Only *absent* aspects block — an aspect the
-    catalog could not be read for stays unknown, and unknown is reported as
-    unproven rather than as a violation.
+    source would have rejected. Absent aspects block. A foreign key that is
+    stored and does not prove existing rows also blocks, and that sentence
+    does not call the object missing. An aspect the catalog could not be read
+    for stays unknown, and unknown is reported as unproven rather than as a
+    violation.
     """
     schema_objects = _dict(physical.get("schema_objects"))
     absent = [str(a) for a in schema_objects.get("absent") or []]
-    if not absent:
-        return []
-    named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
-    return [
-        f"Source {named} did not survive the move - the destination accepts "
-        "rows the source would have rejected."
-    ]
+    out: list[str] = []
+    if absent:
+        named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
+        out.append(
+            f"Source {named} did not survive the move - the destination accepts "
+            "rows the source would have rejected."
+        )
+    aspects = _dict(schema_objects.get("aspects"))
+    unchecked = [str(a) for a in schema_objects.get("unchecked") or []]
+    proof_lines = {
+        "foreign_keys": (
+            "Destination foreign key is present and is not proof existing "
+            "rows were checked",
+            "the relationship is stored and the catalog does not prove "
+            "existing rows were checked",
+        ),
+        "primary_key": (
+            "Destination primary key is present and is not proof the loaded "
+            "rows are unique",
+            "the primary key is stored and the catalog does not prove the "
+            "rows are unique",
+        ),
+        "unique_constraints": (
+            "Destination unique constraint is present and is not proof the "
+            "loaded rows are unique",
+            "the unique constraint is stored and the catalog does not prove "
+            "the rows are unique",
+        ),
+    }
+    for aspect, (headline, fallback) in proof_lines.items():
+        info = _dict(aspects.get(aspect))
+        if aspect not in unchecked and not info.get("unchecked") and info.get("status") != "unchecked":
+            continue
+        if aspect == "foreign_keys" and (
+            "proof_reasons" in info
+            or "match_reasons" in info
+            or "action_reasons" in info
+            or "deferral_reasons" in info
+        ):
+            proof_reasons = [
+                str(reason) for reason in (info.get("proof_reasons") or []) if reason
+            ]
+            match_reasons = [
+                str(reason) for reason in (info.get("match_reasons") or []) if reason
+            ]
+            action_reasons = [
+                str(reason) for reason in (info.get("action_reasons") or []) if reason
+            ]
+            deferral_reasons = [
+                str(reason) for reason in (info.get("deferral_reasons") or []) if reason
+            ]
+            if proof_reasons:
+                out.append(f"{headline}: {'; '.join(proof_reasons)}")
+            elif not match_reasons and not action_reasons and not deferral_reasons:
+                out.append(f"{headline}: {fallback}")
+            if match_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    f"source match rule: {'; '.join(match_reasons)}"
+                )
+            if action_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    "source referential action: "
+                    f"{'; '.join(action_reasons)}"
+                )
+            if deferral_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    "source deferral mode: "
+                    f"{'; '.join(deferral_reasons)}"
+                )
+            continue
+        reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
+        detail = "; ".join(reasons) if reasons else fallback
+        out.append(f"{headline}: {detail}")
+    return out
 
 
 def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
@@ -310,12 +348,12 @@ def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
             f"Foreign key carry did not complete ({detail}) - the destination is "
             "missing relationships the source enforced."
         )
-    if summary.get("cycle"):
+    if summary.get("cycle") and not summary.get("cycle_resolved"):
         out.append(
             "Foreign keys form a cycle ("
             + ", ".join(str(t) for t in summary.get("cycle") or [])
-            + ") - deferred-constraint creation is not supported, so the cycle was "
-            "not recreated."
+            + ") — post-load ALTER did not recreate every edge, so the cycle "
+            "is not enforced on the destination."
         )
     return out
 
@@ -415,6 +453,13 @@ def _verdict(
     }
 
 
+def _governance_operations(job: dict[str, Any]) -> dict[str, Any]:
+    """Declared mask / hash / redact — never original PII values."""
+    from services.governance_ops import collect_governance_operations
+
+    return collect_governance_operations(job)
+
+
 def build_migration_certificate(
     job: dict[str, Any], *, actor: str = "system"
 ) -> dict[str, Any]:
@@ -432,7 +477,16 @@ def build_migration_certificate(
         expected=_as_int(ledger.get("rows_quarantined")),
     )
     recon = _dict(job.get("reconciliation"))
-    physical = physical_state_findings(recon)
+    request = _dict(job.get("transfer_request"))
+    source_schema = str(_dict(request.get("source")).get("schema") or "")
+    dest_schema = str(
+        dest.get("schema") or _dict(request.get("destination")).get("schema") or ""
+    )
+    physical = physical_state_findings(
+        recon,
+        source_schema=source_schema,
+        dest_schema=dest_schema,
+    )
     status = str(job.get("status") or "")
 
     body: dict[str, Any] = {
@@ -484,6 +538,7 @@ def build_migration_certificate(
             ),
         },
         "physical_state": physical,
+        "governance_operations": _governance_operations(job),
         "accepted_risks": pack.get("accepted_risks") or [],
         "hashes": pack.get("hashes") or {},
         "connector_versions": pack.get("connector_versions") or {},
@@ -506,6 +561,10 @@ def build_migration_certificate(
             "foreign keys, trigger timing/events, indexes, "
             "nullability and defaults.",
             "Any claim about rows this job did not read.",
+            "That source PII is unrecoverable — hashed, masked, or redacted "
+            "destination cells do not hold the original, but this certificate "
+            "does not prove the source was deleted or that an HMAC key is "
+            "unavailable to someone who already has it.",
         ],
     }
     return sign_body(body, subject=job_id)
@@ -540,6 +599,21 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
     def _n(value: Any) -> str:
         return f"{value:,}" if isinstance(value, int) else "unmeasured"
 
+    shaped_out = ledger.get("rows_shaped_out")
+    source_filtered = ledger.get("rows_source_filtered")
+    removal_rows = [
+        row
+        for row in (
+            f"| Removed by the declared source filter | {_n(source_filtered)} |"
+            if isinstance(source_filtered, int) and source_filtered > 0
+            else "",
+            f"| Removed by the approved transform recipe | {_n(shaped_out)} |"
+            if isinstance(shaped_out, int) and shaped_out > 0
+            else "",
+        )
+        if row
+    ]
+
     lines = [
         "# Migration Certificate",
         "",
@@ -555,10 +629,26 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
         "| | Rows |",
         "|---|---:|",
         f"| Read from source | {_n(ledger.get('rows_read'))} |",
-        f"| Written to destination | {_n(ledger.get('rows_written'))} |",
-        f"| Quarantined | {_n(ledger.get('rows_quarantined'))} |",
+        f"| On destination (COUNT(*)) | {_n(ledger.get('rows_written'))} |",
+        f"| Quarantined (did not land) | {_n(ledger.get('rows_quarantined'))} |",
         f"| Skipped (stale / duplicate) | {_n(ledger.get('rows_skipped'))} |",
+        *removal_rows,
         f"| Unaccounted | {_n(ledger.get('unaccounted'))} |",
+        "",
+        (
+            f"Transform recipe `{ledger.get('shape_recipe_hash')}` ran on the read — "
+            "removed rows were counted by the reader and are absent from the "
+            "destination by instruction, not by loss or quarantine."
+            if ledger.get("shape_recipe_hash")
+            else ""
+        ),
+        f"Written figure is `{ledger.get('rows_written_source') or 'unmeasured'}`"
+        f" ({ledger.get('conservation_kind') or 'n/a'})."
+        + (
+            f" Writer acknowledged {_n(ledger.get('writer_ack'))}."
+            if ledger.get("writer_ack") is not None
+            else ""
+        ),
         "",
         f"{ledger.get('note', '')}",
         "",
@@ -644,8 +734,54 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
             lines.append("")
             for aspect, detail in aspects.items():
                 info = _dict(detail)
+                reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
+                if info.get("status") != "unchecked" and not reasons:
+                    continue
+                for reason in reasons:
+                    lines.append(f"- {aspect.replace('_', ' ')}: {reason}")
+            if any(
+                _dict(detail).get("reasons")
+                for detail in aspects.values()
+            ):
+                lines.append("")
+            recreate = list(objects.get("cutover_recreate") or [])
+            if not recreate:
+                for aspect, detail in aspects.items():
+                    info = _dict(detail)
+                    if info.get("advisory") and info.get("status") == "absent":
+                        for name in info.get("missing") or []:
+                            recreate.append(
+                                {
+                                    "kind": {
+                                        "views": "view",
+                                        "triggers": "trigger",
+                                        "routines": "routine",
+                                    }.get(aspect, aspect),
+                                    "name": name,
+                                    "action": "recreate_before_cutover",
+                                }
+                            )
+            if recreate:
+                lines += ["## Recreate before cutover", ""]
+                for item in recreate:
+                    info = _dict(item)
+                    kind = str(info.get("kind") or "object")
+                    name = str(info.get("name") or "")
+                    if info.get("action") == "catalog_unreadable":
+                        lines.append(
+                            f"- {kind} catalog could not be read — not proven absent."
+                        )
+                    else:
+                        lines.append(
+                            f"- Recreate {kind} `{name}` on the destination "
+                            "(body was not migrated)."
+                        )
+                lines.append("")
+            for aspect, detail in aspects.items():
+                info = _dict(detail)
                 if info.get("advisory") and info.get("status") != "carried":
-                    lines += [f"- {info.get('note', '')}", ""]
+                    if info.get("note"):
+                        lines += [f"- {info.get('note', '')}", ""]
         else:
             lines += [
                 f"- Constraints and indexes not compared — {objects.get('reason', '')}",
@@ -685,6 +821,29 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                 f"{risk.get('reason') or risk.get('description') or ''}"
             )
         lines.append("")
+
+        lines.append("")
+
+    gov = _dict(cert.get("governance_operations"))
+    gov_rows = [row for row in (gov.get("applied") or []) if isinstance(row, dict)]
+    lines += ["## Governance operations", ""]
+    if gov_rows:
+        lines += [
+            "| Source | Destination | Operation | Transform | Write path |",
+            "|---|---|---|---|---|",
+        ]
+        for row in gov_rows:
+            applied = "applied" if row.get("write_path_applied") else "declared only"
+            lines.append(
+                f"| `{row.get('source', '')}` | `{row.get('target', '')}` | "
+                f"{row.get('operation', '')} | `{row.get('transform', '')}` | "
+                f"{applied} |"
+            )
+        lines.append("")
+        lines.append(str(gov.get("note") or ""))
+        lines.append("")
+    else:
+        lines += [str(gov.get("note") or ""), ""]
 
     lines += [
         "## Not proven by this certificate",

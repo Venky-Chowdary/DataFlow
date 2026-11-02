@@ -11,9 +11,13 @@ recovery, quarantine, rollback, and documentation — not just an error string.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from services.brand import PRODUCT_NAME
+
+_logger = logging.getLogger(__name__)
 
 _FIDELITY_RE = re.compile(
     r"fidelity.?collapse|lossy|precision.?loss|scale.?truncat|"
@@ -34,6 +38,15 @@ _TYPE_ARROW_RE = re.compile(
 
 _DUP_RE = re.compile(
     r"duplicate|primary.?key|identity.?key|unique.?constraint|not.?unique",
+    re.I,
+)
+
+_ENCODING_RE = re.compile(
+    r"format-control character|control character|invisible character|"
+    r"bidi(?:rectional)? (?:control|override)|zero.?width|"
+    r"lone surrogate|unpaired surrogate|invalid (?:utf-?8|byte sequence|encoding)|"
+    r"mojibake|replacement character|byte order mark|\bBOM\b|"
+    r"mixed encodings|undecodable",
     re.I,
 )
 
@@ -65,6 +78,16 @@ _DUP_GATE_IDS = frozenset(
         "g9_data_integrity",
     }
 )
+
+
+# One root cause, one primary action — the label has to be the action the
+# operator actually needs, not the fidelity remap for every kind of block.
+_PRIMARY_ACTION_LABELS: dict[str, str] = {
+    "encoding_normalization": "Open Map · normalize text",
+    "duplicate_identity": "Open Sync · choose identity key",
+    "mapping_confidence": "Open Map · confirm mapping",
+    "uniqueness_probe_unavailable": "Re-read the source table",
+}
 
 
 @dataclass
@@ -128,8 +151,14 @@ class MigrationRootCause:
                 "examples": self.alternative_fixes[:4],
                 "suggested_actions": [
                     {
-                        "kind": "open_map",
-                        "label": "Open Map · remap / Risk Contract",
+                        "kind": (
+                            "recheck_source"
+                            if self.kind == "uniqueness_probe_unavailable"
+                            else "open_map"
+                        ),
+                        "label": _PRIMARY_ACTION_LABELS.get(
+                            self.kind, "Open Map · remap / Risk Contract"
+                        ),
                     }
                 ],
             },
@@ -206,6 +235,108 @@ def _is_risk_contract_incomplete_signal(
     )
 
 
+def _is_sample_cast_not_declared_collapse(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """G3 sample cast / empty-cell blocks are not a declared type collapse.
+
+    The gate summary always says "type coercion issue(s)". That phrase used to
+    pull INTEGER→BIGINT widening, and blank spreadsheet cells, into
+    "Lossy / fidelity collapse" even when ``is_lossy_coercion`` was false.
+    """
+    gid = str(gate_id or "")
+    if gid not in {
+        "g3_schema_contract",
+        "g3_type_compat",
+        "g3_type_compatibility",
+    }:
+        return False
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    rows = [r for r in (details.get("issues_detail") or []) if isinstance(r, dict)]
+    if any(
+        r.get("fidelity_collapse")
+        or r.get("nested_shape_collapse")
+        or r.get("nested_document_collapse")
+        or r.get("declared_lossy")
+        for r in rows
+    ):
+        return False
+    issues = details.get("issues") or []
+    issue_text = " ".join(str(i) for i in issues).lower()
+    if re.search(r"lossy coercion|precision|fidelity|collapse|truncat", issue_text):
+        return False
+    if rows and all(
+        r.get("probe_cast_only") or r.get("not_null_contract")
+        for r in rows
+    ):
+        return True
+    if "empty value cannot coerce" in issue_text or "nullability" in issue_text:
+        return True
+    if "sample value does not fit" in issue_text:
+        return True
+    return False
+
+
+def _non_narrowing_decimal_cast(details: dict[str, Any] | None) -> bool:
+    """True when every typed issue is DECIMAL→DECIMAL and the scale still fits.
+
+    One narrowed pair keeps the gate a fidelity signal. A gate with no typed
+    rows is not this exemption.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        decimal_params_would_narrow,
+        normalize_logical_type,
+    )
+
+    rows = [
+        row
+        for row in ((details or {}).get("issues_detail") or [])
+        if isinstance(row, dict)
+    ]
+    if not rows:
+        return False
+    saw = False
+    for row in rows:
+        src = str(row.get("source_type") or "").strip()
+        tgt = str(row.get("target_type") or "").strip()
+        if not src or not tgt:
+            return False
+        if (
+            normalize_logical_type(src) != LOGICAL_DECIMAL
+            or normalize_logical_type(tgt) != LOGICAL_DECIMAL
+        ):
+            return False
+        if decimal_params_would_narrow(src, tgt):
+            return False
+        saw = True
+    return saw
+
+
+_MISSING_VALUE_RE = re.compile(
+    r"null/empty|null upsert key|null (?:primary |upsert |merge )?key|empty "
+    r"(?:string )?(?:primary |upsert |merge )?key|expect_column_not_null|"
+    r"expect_column_values_to_not_be_null",
+    re.I,
+)
+
+
+def _is_missing_value_signal(message: str, details: dict[str, Any]) -> bool:
+    """Every finding the gate reports is a NULL / empty value, none a type."""
+    issues = [
+        str(i)
+        for i in (details.get("issue_texts") or details.get("issues") or [])
+        if str(i or "").strip()
+    ]
+    if not issues:
+        issues = [message or ""]
+    return all(_MISSING_VALUE_RE.search(i) for i in issues)
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -248,7 +379,28 @@ def _is_fidelity_signal(
             return False
         if framing_kind in {"transform_errors"}:
             return False
+        # A uniqueness-probe skip/error is an identity/probe root. The G9
+        # summary still says "integrity failed", which used to trip the
+        # fidelity matcher and send operators to Map with Accept risk.
+        if _is_uniqueness_probe_signal(message, details, gate_id):
+            return False
+        # NULL / empty values in a required or key column are a data finding
+        # on the source rows, not a type path. Titling them "fidelity
+        # collapse" sent operators to Map to remap a column whose type is fine
+        # (D191); the g9 gate keeps its own headline.
+        if _is_missing_value_signal(message, details):
+            return False
         msg_l = (message or "").lower()
+        # A missing / NULL-stored key value is a data finding on the key, not a
+        # type-path collapse: labelling it "Lossy / fidelity collapse" hid why
+        # Oracle refuses a '' upsert key (it stores '' as NULL — D53).
+        if (
+            "required field" in msg_l
+            and ("null/empty" in msg_l or "stores '' as null" in msg_l)
+            and details.get("fidelity_collapse") is not True
+            and not details.get("issues_detail")
+        ):
+            return False
         # Transform dry-run / empty-url integrity copy — not declared type collapse.
         if (
             "cannot coerce to" in msg_l
@@ -261,8 +413,25 @@ def _is_fidelity_signal(
             # Still allow true fidelity stamps on G9.
             if not details.get("issues_detail") and not details.get("fidelity_collapse"):
                 return False
+    # DECIMAL(10,2) → DECIMAL(18,2) is a cast, not a collapse. The gate text
+    # still says "cast" / "coercion", which used to title the root "Lossy /
+    # fidelity collapse" on a first MySQL → SQL Server load. A real narrowing
+    # stays a fidelity signal.
+    if _non_narrowing_decimal_cast(details):
+        return False
     if details.get("fidelity_collapse") is True:
         return True
+    # Blank cells and bad casts on a safe widening are not fidelity collapse.
+    # The gate title still contains the word "coercion".
+    if _is_sample_cast_not_declared_collapse(message, details, gate_id):
+        return False
+    # Invisible / undecodable characters are an encoding root with its own fix
+    # (normalize or quarantine the rows). Absorbing them into fidelity collapse
+    # told operators to remap a type path that is not the problem — a TEXT→TEXT
+    # column was reported as collapsing fidelity because the G9 message says
+    # "integrity failed".
+    if _is_encoding_signal(message, details, gate_id):
+        return False
     kind = framing_kind or kind
     if kind in {
         "fidelity_collapse",
@@ -275,6 +444,15 @@ def _is_fidelity_signal(
     # "Data integrity failed: id duplicate key…" into fidelity collapse.
     if _is_duplicate_signal(message, details, gate_id):
         return False
+    if _is_uniqueness_probe_signal(message, details, gate_id):
+        return False
+    if _is_expectation_signal(message, details, gate_id):
+        # expect_column_not_null:order_id & friends are data-quality
+        # expectation findings on sampled values. The g9 summary still says
+        # "integrity failed", which used to absorb them into "Lossy /
+        # fidelity collapse" — pointing operators at a type-path remap when
+        # the failing gate is the expectation suite (M16).
+        return False
     if _FIDELITY_RE.search(blob):
         return True
     if _TYPE_ARROW_RE.search(blob) and gate_id in _FIDELITY_GATE_IDS:
@@ -284,6 +462,85 @@ def _is_fidelity_signal(
     ):
         return True
     return False
+
+
+def _is_uniqueness_probe_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True when G9 blocked because the uniqueness probe did not run.
+
+    A missing relation (``public."public.case_a_src"``) or a probe ``status=error``
+    is not a type-path fidelity collapse. Operators were sent to Map with
+    Accept risk because the G9 summary still contains ``integrity failed``.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    blob = _blob(message, details).lower()
+    if "uniqueness probe" in blob:
+        return True
+    probe = details.get("source_uniqueness_probe")
+    probe_status = ""
+    if isinstance(probe, dict):
+        probe_status = str(probe.get("status") or "")
+    status = str(
+        details.get("status") or details.get("probe_status") or probe_status or ""
+    ).lower()
+    if status == "error" and "probe" in blob:
+        return True
+    return False
+
+
+_EXPECTATION_ISSUE_RE = re.compile(r"^expect_[a-z0-9_]+", re.I)
+#: G9 ``null_keys`` finding (D46): population rows with a NULL upsert key.
+_NULL_KEY_ISSUE_RE = re.compile(
+    r"source row\(s\) have a NULL upsert key"
+    r"|source row\(s\) share a key only after the key's transform",
+    re.I,
+)
+
+
+def _is_expectation_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True when G9 blocked on expectation-suite findings only.
+
+    Issues read ``expect_column_not_null:order_id: 3 failures`` — sampled
+    data-quality findings, not a declared type-path collapse. The probe's
+    NULL-upsert-key count is the same kind of data finding. Any real
+    fidelity stamp or another issue keeps the gate a fidelity signal.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    if str(gate_id or "") != "g9_data_integrity":
+        return False
+    issues = details.get("issue_texts") or details.get("issues") or []
+    texts = [str(i) for i in issues[:20] if str(i).strip()]
+    return bool(texts) and all(
+        bool(_EXPECTATION_ISSUE_RE.match(t.lstrip()) or _NULL_KEY_ISSUE_RE.search(t))
+        for t in texts
+    )
+
+
+def _is_encoding_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True for control-character / undecodable-byte findings on the sample."""
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    if details.get("encoding_issues"):
+        return True
+    if str(gate_id or "") not in {"g9_data_integrity", "g3_encoding", "g9_encoding"}:
+        return False
+    return bool(_ENCODING_RE.search(_blob(message, details)))
 
 
 def _is_transform_error_signal(
@@ -308,6 +565,8 @@ def _is_transform_error_signal(
     if kind == "transform_errors":
         return True
     msg_l = (message or "").lower()
+    if "unknown transform" in msg_l:
+        return True
     if "dry-run failed" in msg_l or "transform errors" in msg_l:
         return True
     if "cannot coerce to" in msg_l:
@@ -316,6 +575,31 @@ def _is_transform_error_signal(
         if "cannot coerce" in str(issue).lower():
             return True
     return False
+
+
+def _is_upsert_ddl_signal(details: dict[str, Any] | None) -> bool:
+    """D101 — upsert into an existing table that lacks a unique key on the
+    conflict columns. DataFlow disclosed the DDL it would run; it is not a
+    source-duplicate finding and must not fold into duplicate_identity."""
+    details = details or {}
+    return str(details.get("rule_id") or "") == "g_upsert_dest_key"
+
+
+def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
+    """True for a key the destination already stores, not a duplicate in the source.
+
+    The append collision probe stamps ``sample_collisions`` with its own rule id.
+    Only the probe's own evidence counts: matching on prose would relabel a real
+    source duplicate as a destination collision and send the operator to change
+    the sync mode instead of deduplicating.
+    """
+    details = details or {}
+    rule_id = str(details.get("rule_id") or "")
+    if rule_id.startswith("g6_target_ddl.append_key_collision"):
+        return True
+    return bool(details.get("sample_collisions")) and (
+        details.get("remediation_kind") == "change_sync_mode"
+    )
 
 
 def _is_duplicate_signal(
@@ -333,12 +617,54 @@ def _is_duplicate_signal(
         or re.search(r"identity key required", str(message or ""), re.I)
     ):
         return False
+    # g9_sync_contract "Missing primary key / Missing cursor" is an *incomplete
+    # contract*, not a duplicate finding — ``Missing primary key`` matches
+    # ``primary.?key`` in ``_DUP_RE`` and minted a phantom "Duplicate identity
+    # keys" root that hid the real missing-key/cursor message (QA T11/T08).
+    if str(gate_id or "") == "g9_sync_contract":
+        return False
+    if re.search(r"sync mode contract incomplete", str(message or ""), re.I):
+        return False
+    if re.search(r"missing (?:primary key|cursor)", str(message or ""), re.I):
+        return False
+    # wal_level=replica and the query-CDC refusal both mention "primary key"
+    # without any duplicate row. Those are capture failures (R3-H1).
+    blob_early = _blob(message, details)
+    if re.search(r"wal_level|logical decoding", blob_early, re.I):
+        return False
+    if re.search(r"poll cursor .+ is the primary key", blob_early, re.I):
+        return False
     if details.get("duplicate_keys") or details.get("identity_duplicates"):
         return True
     blob = _blob(message, details)
     if _DUP_RE.search(blob):
         return True
     return gate_id in _DUP_GATE_IDS and bool(_DUP_RE.search(blob))
+
+
+def _raw_signal_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Blockers that are evidence, not a previous pass's conclusions.
+
+    Preflight collapses roots twice (file preflight, then policy gates). The
+    second pass sees the first pass's ``rc-*`` blockers and their ``proof_N``
+    echoes; their remediation prose ("needs an identity key") matched the
+    duplicate regex and minted a duplicate_identity root no data produced
+    (QA T1: constant rc-duplicate-identity-87d820160a90 on unique keys).
+    """
+    prior_roots = {
+        str(b.get("message") or "")
+        for b in blockers
+        if (b.get("details") or {}).get("root_cause")
+    }
+    return [
+        b
+        for b in blockers
+        if not (b.get("details") or {}).get("root_cause")
+        and not (
+            str(b.get("id") or "").startswith("proof_")
+            and str(b.get("message") or "") in prior_roots
+        )
+    ]
 
 
 def _source_from_pair_label(label: str) -> str:
@@ -412,6 +738,120 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
     return out
 
 
+#: Separator in a ``SOURCE_TYPE → TARGET_TYPE`` label. One owner, because the
+#: label is both printed to the operator and read back to resolve the pair.
+_TYPE_PATH_ARROW = " → "
+
+
+def _collect_type_paths(
+    entries: list[dict[str, Any]],
+    coercion_report: dict[str, Any],
+) -> dict[str, str]:
+    """Map column → ``SOURCE_TYPE → TARGET_TYPE`` from every evidence shape.
+
+    Gates carry the pair on ``issues_detail`` rows; the coercion probe carries it
+    on its per-column report. Either one is enough to name the path.
+    """
+    paths: dict[str, str] = {}
+
+    def _record(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        col = row.get("source") or row.get("column")
+        src_type = str(row.get("source_type") or "").strip()
+        tgt_type = str(row.get("target_type") or "").strip()
+        if col and src_type and tgt_type:
+            paths.setdefault(str(col), f"{src_type}{_TYPE_PATH_ARROW}{tgt_type}")
+
+    for entry in entries:
+        details = (entry or {}).get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        for row in details.get("issues_detail") or details.get("issues") or []:
+            _record(row)
+    for row in coercion_report.get("columns") or []:
+        _record(row)
+    return paths
+
+
+def _type_path_display(src_type: str, tgt_type: str, dest_db: str) -> str:
+    """``SOURCE → TARGET`` with a document store's instant carrier named as one.
+
+    A BSON / Elasticsearch ``date`` printed as ``DATE`` told the operator their
+    timestamps were being cut to a calendar day (D136), when the real finding
+    is the zone or the sub-millisecond digits.
+    """
+    from services.carrier_instant import temporal_carrier_display_label
+
+    return f"{src_type}{_TYPE_PATH_ARROW}{temporal_carrier_display_label(tgt_type, dest_db)}"
+
+
+def _column_type_path_label(
+    column: str, type_paths: dict[str, str], dest_db: str = ""
+) -> str:
+    """``name SOURCE_TYPE → TARGET_TYPE`` when the pair is known, else the name.
+
+    A bare column name sends the operator hunting through Map for what is wrong
+    with it. The type path is the finding itself, and it is what lets them judge
+    whether the verdict is even right.
+    """
+    path = type_paths.get(column)
+    if not path:
+        return column
+    src_type, _, tgt_type = path.partition(_TYPE_PATH_ARROW)
+    return f"{column} {_type_path_display(src_type.strip(), tgt_type.strip(), dest_db)}"
+
+
+def _destination_db(preflight: dict[str, Any]) -> str:
+    """The destination engine the gates ran against, or ``""`` when unstamped.
+
+    Carrier semantics are engine-specific — a bare ``date`` token is a
+    wall-clock day in SQL and an instant in BSON — so a remediation resolved
+    without the engine would be advice about a different database.
+    """
+    for key in ("destination_db_type", "dest_db_type"):
+        val = preflight.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    dest = preflight.get("destination")
+    if isinstance(dest, dict):
+        for key in ("db_type", "format", "type"):
+            val = dest.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _zoneless_instant_remedies(
+    columns: list[str],
+    type_paths: dict[str, str],
+    dest_db: str,
+) -> list[str]:
+    """Per-column remediation for a zoneless source landing on an instant carrier.
+
+    The generic fidelity fix ("remap to a preserving type, or sign
+    CAST_AND_CONTINUE") is a dead end for this path: a destination whose only
+    temporal carrier is an instant has nothing zoneless to remap to, and casting
+    on regardless is precisely the guessed-UTC shift the block exists to prevent.
+    The exit is the operator declaring the zone the source recorded, and the
+    wording comes from ``services.timezone_policy`` so Map, Validate and this
+    summary cannot describe the same policy differently.
+    """
+    from services.timezone_policy import POLICY_UTC_INVENT, resolve_timezone_policy
+
+    out: list[str] = []
+    for col in columns:
+        path = type_paths.get(col) or ""
+        if _TYPE_PATH_ARROW not in path:
+            continue
+        src_type, tgt_type = (p.strip() for p in path.split(_TYPE_PATH_ARROW, 1))
+        policy = resolve_timezone_policy(src_type, tgt_type, dest_db=dest_db)
+        if policy is None or policy.policy != POLICY_UTC_INVENT or not policy.remediation:
+            continue
+        out.append(f"{col} ({_type_path_display(src_type, tgt_type, dest_db)}): {policy.remediation}")
+    return out
+
+
 def _sample_rows(preflight: dict[str, Any]) -> int | None:
     cr = preflight.get("coercion_report") or {}
     if isinstance(cr.get("sampled_rows"), int):
@@ -444,6 +884,108 @@ def _root_id(kind: str, columns: list[str], gate_ids: list[str]) -> str:
     return f"rc-{kind.replace('_', '-')}-{digest}"
 
 
+#: Title of the root cause the engine raises for sample cast / transform failures.
+CAST_FAILURE_ROOT_TITLE = "Sample transform / cast failures"
+
+#: The way out that keeps the valid rows: load them and hold the failing ones out
+#: in quarantine instead of refusing the whole run (D170).
+QUARANTINE_REPLAN_FIX = (
+    "Re-plan with quarantine: pass risk_acceptance {execution_policy: "
+    "CAST_AND_CONTINUE, on_cast_failure: quarantine, approved_by, reason} to "
+    "plan_transfer / start_transfer, or to rerun_job, so the failing rows are held "
+    "out for review and the valid rows load"
+)
+
+
+def _pending_widen_paths(preflight: dict[str, Any]) -> dict[str, str]:
+    """``column -> "OLD → NEW"`` for every approvable destination widen.
+
+    Read from the drift report Validate already produced (``widen_type``
+    entries: a source column that widened past an existing destination carrier
+    of the same family), so the headline and the approval decision share one
+    source.
+    """
+    drift = preflight.get("schema_drift") if isinstance(preflight.get("schema_drift"), dict) else {}
+    evolution = drift.get("schema_evolution") if isinstance(drift.get("schema_evolution"), dict) else {}
+    out: dict[str, str] = {}
+    for item in evolution.get("additive") or []:
+        if not isinstance(item, dict) or str(item.get("kind") or "") != "widen_type":
+            continue
+        col = str(item.get("column") or item.get("source") or "").strip()
+        if col:
+            out[col.lower()] = f"{item.get('old_type')} → {item.get('new_type')}"
+    return out
+
+
+#: Blockers that restate an approvable widen in their own words.
+_WIDEN_RESTATING_BLOCKERS = frozenset({"schema_mismatch", "schema_drift", "g3f_population_fit"})
+
+
+def _type_widening_root(
+    cols: list[str],
+    widening: dict[str, str],
+    *,
+    gate_ids: list[str],
+    absorbed: list[str],
+    sample_n: int | None,
+    est_n: int | None,
+) -> MigrationRootCause:
+    """Root for source columns that widened past the destination (D191)."""
+    label = ", ".join(f"{c} {widening[c.lower()]}" for c in cols[:5]) + (
+        f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+    )
+    absorbed_ids = sorted({*absorbed, *_WIDEN_RESTATING_BLOCKERS})
+    return MigrationRootCause(
+        root_id=_root_id("type_widening", cols, gate_ids),
+        kind="type_widening_approval",
+        title="Source type widening needs approval",
+        summary=(
+            f"{len(cols)} source column(s) widened past the existing destination "
+            f"column ({label}) — impacts {len(absorbed)} gate check(s)"
+        ),
+        business_impact=(
+            "The destination column is narrower than the source until it is "
+            "ALTERed. Nothing is lost or written until the widen is approved."
+        ),
+        affected_columns=list(cols),
+        affected_rows_sample=sample_n,
+        estimated_total_rows=est_n,
+        risk_level="medium",
+        recommended_fix=(
+            "Approve the widen: pass schema_drift_acknowledged=true to "
+            "plan_transfer / start_transfer (or use schema_policy="
+            "propagate_columns); Execute ALTERs the destination column to the "
+            "source's size before it writes"
+        ),
+        alternative_fixes=[
+            "Acknowledge drift for this run in Studio",
+            "Map the column to a new, wider destination column",
+        ],
+        recovery_strategy="Re-plan with the approval; the same decision runs at Execute.",
+        expected_runtime_impact="One ALTER COLUMN per widened column before the write.",
+        quarantine_policy="none",
+        documentation="docs/MIGRATION_RISK_CONTRACT.md",
+        impacted_gates=list(gate_ids),
+        absorbed_blocker_ids=absorbed_ids,
+        severity="block",
+    )
+
+
+#: Gates that answer "could the endpoint be reached / read at all".
+ENDPOINT_GATE_IDS = frozenset({"g1_source", "g2_destination"})
+
+
+def endpoint_unavailable_blockers(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Blocking G1/G2 results: the source could not be read or the destination reached."""
+    return [
+        g
+        for g in ((preflight or {}).get("gates") or [])
+        if isinstance(g, dict)
+        and str(g.get("id") or "") in ENDPOINT_GATE_IDS
+        and str(g.get("status") or "").lower() == "block"
+    ]
+
+
 def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCause]:
     """Collapse multi-gate failures into operator-facing migration roots."""
     if not preflight:
@@ -470,7 +1012,14 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
 
     # Fidelity: collapse even a single fidelity-facing block into one root so
     # operators never see N duplicate CTAs for one lossy mapping path.
-    if len(fidelity_gates) + len(fidelity_blockers) >= 1:
+    # An endpoint that could not be reached or read leaves the type gates
+    # judging nothing: no destination types, no sample. Their blocks are
+    # consequences, and titling them "fidelity collapse" hid the real cause
+    # (D191). The endpoint gate leads instead.
+    if (
+        len(fidelity_gates) + len(fidelity_blockers) >= 1
+        and not endpoint_unavailable_blockers(preflight)
+    ):
         gate_ids = sorted(
             {
                 *[str(g.get("id")) for g in fidelity_gates if g.get("id")],
@@ -497,6 +1046,19 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 sev = str(col.get("severity") or "").lower()
                 if sev != "block":
                     continue
+                # Empty cells and ordinary cast misses are a sample-transform
+                # root. Folding them in here labeled INTEGER→BIGINT as collapse.
+                if not col.get("fidelity_collapse") and str(
+                    col.get("failure_class") or ""
+                ) in {
+                    "EMPTY_VALUE_NOT_NULLABLE",
+                    "TYPE_CAST_FAILURE",
+                    "INVALID_TIMESTAMP",
+                    "INVALID_BOOLEAN",
+                    "INVALID_NUMERIC",
+                    "SEMANTIC_TRANSFORM_FAILURE",
+                }:
+                    continue
                 src = col.get("source") or col.get("column")
                 if src:
                     cols.append(str(src))
@@ -507,9 +1069,12 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     *[str(b.get("id")) for b in fidelity_blockers if b.get("id")],
                 }
             )
-            col_label = ", ".join(cols[:5]) + (
-                f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
-            )
+            type_paths = _collect_type_paths(fidelity_gates + fidelity_blockers, cr)
+            dest_db = _destination_db(preflight)
+            zone_remedies = _zoneless_instant_remedies(cols, type_paths, dest_db)
+            col_label = ", ".join(
+                _column_type_path_label(c, type_paths, dest_db) for c in cols[:5]
+            ) + (f" (+{len(cols) - 5} more)" if len(cols) > 5 else "")
             if cols:
                 summary = (
                     f"{len(cols)} column(s) collapse fidelity on write"
@@ -521,52 +1086,82 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     f"Fidelity risk across type path — impacts "
                     f"{len(absorbed)} gate check(s); open Map for column detail"
                 )
-            roots.append(
-                MigrationRootCause(
-                    root_id=_root_id("fidelity_collapse", cols, gate_ids or absorbed),
-                    kind="fidelity_collapse",
-                    title="Lossy / fidelity collapse across type path",
-                    summary=summary,
-                    business_impact=(
-                        "Declared source→destination types (or nested shapes) lose "
-                        "precision or domain on write. Execute stays locked until Map "
-                        "remaps carriers or a Migration Risk Contract with an explicit "
-                        "continue policy is signed."
-                    ),
-                    affected_columns=cols,
-                    affected_rows_sample=sample_n,
-                    estimated_total_rows=est_n,
-                    risk_level="high",
-                    recommended_fix=(
-                        "Open Map → Remap to a fidelity-preserving type, or "
-                        "Accept · cast & continue (Migration Risk Contract with "
-                        "CAST_AND_CONTINUE) → re-run Validate."
-                    ),
-                    alternative_fixes=[
-                        "Remap destination column to TEXT/VARCHAR/STRING",
-                        "Sign QUARANTINE_ROW contract for cast failures",
-                        "Widen DECIMAL/INTEGER capacity when narrowing is the only issue",
-                    ],
-                    recovery_strategy=(
-                        "After remap or Risk Contract, re-Validate. Failed casts under "
-                        "CAST_AND_CONTINUE hold out to quarantine/DLQ — primary table "
-                        "must not invent NULL unless the contract says so."
-                    ),
-                    expected_runtime_impact=(
-                        "Re-Validate is sample-scoped; changing destination DDL requires "
-                        "a new Map revision and full rewrite of already-written tables."
-                    ),
-                    quarantine_policy=(
-                        "holdout_rejected_rows under CAST_AND_CONTINUE "
-                        "(see docs/MIGRATION_RISK_CONTRACT.md)"
-                    ),
-                    rollback_policy="DOCUMENT_ONLY",
-                    documentation="docs/MIGRATION_RISK_CONTRACT.md",
-                    impacted_gates=gate_ids or absorbed,
-                    absorbed_blocker_ids=absorbed,
-                    severity="block",
+            widening = _pending_widen_paths(preflight)
+            if cols and all(c.lower() in widening for c in cols):
+                # Every "collapse" is a source column that widened past an
+                # existing destination carrier: an approvable ALTER, not a
+                # lossy type path. Name that class of change and its one
+                # approval (D191).
+                roots.append(
+                    _type_widening_root(
+                        cols,
+                        widening,
+                        gate_ids=gate_ids or absorbed,
+                        absorbed=absorbed,
+                        sample_n=sample_n,
+                        est_n=est_n,
+                    )
                 )
-            )
+            else:
+                roots.append(
+                    MigrationRootCause(
+                        root_id=_root_id("fidelity_collapse", cols, gate_ids or absorbed),
+                        kind="fidelity_collapse",
+                        title="Lossy / fidelity collapse across type path",
+                        summary=summary,
+                        business_impact=(
+                            "Declared source→destination types (or nested shapes) lose "
+                            "precision or domain on write. Execute stays locked until Map "
+                            "remaps carriers or a Migration Risk Contract with an explicit "
+                            "continue policy is signed."
+                        ),
+                        affected_columns=cols,
+                        affected_rows_sample=sample_n,
+                        estimated_total_rows=est_n,
+                        risk_level="high",
+                        recommended_fix=(
+                            # A zone the source never recorded cannot be remapped
+                            # into existence, so that exit leads the fix when this
+                            # is the path — the generic remap advice follows it.
+                            "; ".join(r.rstrip(". ") for r in zone_remedies)
+                            + ". Otherwise: open Map → Remap to a fidelity-preserving type."
+                            if zone_remedies
+                            else (
+                                "Open Map → Remap to a fidelity-preserving type, or "
+                                "Accept · cast & continue (Migration Risk Contract with "
+                                "CAST_AND_CONTINUE) → re-run Validate."
+                            )
+                        ),
+                        alternative_fixes=[
+                            *(
+                                ["Declare the source zone (assume_timezone:<IANA zone>) on Map"]
+                                if zone_remedies
+                                else []
+                            ),
+                            "Remap destination column to TEXT/VARCHAR/STRING",
+                            "Sign QUARANTINE_ROW contract for cast failures",
+                            "Widen DECIMAL/INTEGER capacity when narrowing is the only issue",
+                        ],
+                        recovery_strategy=(
+                            "After remap or Risk Contract, re-Validate. Failed casts under "
+                            "CAST_AND_CONTINUE hold out to quarantine/DLQ — primary table "
+                            "must not invent NULL unless the contract says so."
+                        ),
+                        expected_runtime_impact=(
+                            "Re-Validate is sample-scoped; changing destination DDL requires "
+                            "a new Map revision and full rewrite of already-written tables."
+                        ),
+                        quarantine_policy=(
+                            "holdout_rejected_rows under CAST_AND_CONTINUE "
+                            "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                        ),
+                        rollback_policy="DOCUMENT_ONLY",
+                        documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                        impacted_gates=gate_ids or absorbed,
+                        absorbed_blocker_ids=absorbed,
+                        severity="block",
+                    )
+                )
 
     # Incomplete Migration Risk Contract — only a standalone root when there is
     # no fidelity collapse. Same lossy path with G3/G6/G9 + missing contract
@@ -597,17 +1192,30 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         for src in risk_gates + risk_blockers:
             risk_cols.extend(_columns_from_details(src.get("details") or {}))
         risk_cols = list(dict.fromkeys(risk_cols))
+        widen_root = next((r for r in roots if r.kind == "type_widening_approval"), None)
         fidelity_root = next((r for r in roots if r.kind == "fidelity_collapse"), None)
-        if fidelity_root is not None:
+        if widen_root is not None and all(
+            c in widen_root.affected_columns for c in risk_cols
+        ):
+            # The contract G4 asks for is the widen's own lossy pair; the
+            # approval clears both (stamp_approved_widens), so one CTA.
+            widen_root.absorbed_blocker_ids = sorted(
+                set(widen_root.absorbed_blocker_ids) | set(risk_absorbed)
+            )
+        elif fidelity_root is not None:
             merged_cols = list(
                 dict.fromkeys([*fidelity_root.affected_columns, *risk_cols])
             )
             merged_absorbed = sorted(
                 set(fidelity_root.absorbed_blocker_ids) | set(risk_absorbed)
             )
-            col_label = ", ".join(merged_cols[:5]) + (
-                f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else ""
+            merged_paths = _collect_type_paths(
+                [*gates, *blockers], preflight.get("coercion_report") or {}
             )
+            col_label = ", ".join(
+                _column_type_path_label(c, merged_paths, _destination_db(preflight))
+                for c in merged_cols[:5]
+            ) + (f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else "")
             fidelity_root.affected_columns = merged_cols
             fidelity_root.absorbed_blocker_ids = merged_absorbed
             fidelity_root.impacted_gates = sorted(
@@ -683,6 +1291,64 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 )
             )
 
+    # A source type change (text → int) is schema drift. Reporting it as
+    # mapping confidence sent the operator to Map approve (QA R2-078).
+    type_changes: list[dict[str, Any]] = []
+    for item in [*blockers, *[g for g in gates if g.get("status") == "block"]]:
+        if str(item.get("id") or "") != "schema_drift":
+            continue
+        evolution = (item.get("details") or {}).get("schema_evolution") or {}
+        for change in evolution.get("breaking") or []:
+            if isinstance(change, dict) and change.get("kind") == "type_change":
+                type_changes.append(change)
+    type_change_columns = {
+        str(change.get("column") or "")
+        for change in type_changes
+        if change.get("column")
+    }
+    if type_changes:
+        described = "; ".join(
+            f"{c.get('column')} {c.get('old_type')} → {c.get('new_type')}"
+            for c in type_changes[:5]
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id(
+                    "schema_type_drift",
+                    sorted(type_change_columns),
+                    ["schema_drift"],
+                ),
+                kind="schema_type_drift",
+                title="Schema type change",
+                summary=f"Type drift: {described}.",
+                business_impact=(
+                    "The source column's type changed. Execute stays locked until "
+                    "the mapping is remapped or the drift is acknowledged."
+                ),
+                affected_columns=sorted(type_change_columns),
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    "Use Acknowledge drift for this run if the new type should "
+                    "load as-is, or remap the column to a carrier that preserves "
+                    "the new type, then re-Validate."
+                ),
+                alternative_fixes=[
+                    "Revert the source column to the previous type",
+                    "Set schema_policy to pause_on_change and fix the source first",
+                ],
+                recovery_strategy="Acknowledge or remap, then re-Validate. Nothing was written.",
+                expected_runtime_impact="Re-Validate only",
+                quarantine_policy="n/a — no rows moved",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                impacted_gates=["schema_drift"],
+                absorbed_blocker_ids=["schema_drift"],
+                severity="block",
+            )
+        )
+
     # Module 3: mapping confidence — G4 is sole hard authority (not proof/G9).
     conf_gates = [
         g
@@ -717,14 +1383,21 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         cols.append(left)
             cols.extend(_columns_from_details(details))
         cols = list(dict.fromkeys(cols))
+        named = ", ".join(cols[:8])
+        more = f" (+{len(cols) - 8} more)" if len(cols) > 8 else ""
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("mapping_confidence", cols, absorbed),
                 kind="mapping_confidence",
                 title="Mapping confidence below floor",
                 summary=(
-                    f"{len(cols) or 'Some'} mapping(s) below the Map confidence floor "
-                    f"— owned by g4_mapping_confidence (not re-blocked by proof/G9)"
+                    (
+                        f"{len(cols)} mapping(s) below the Map confidence floor: "
+                        f"{named}{more}"
+                        if cols
+                        else "Some mapping(s) below the Map confidence floor"
+                    )
+                    + " — owned by g4_mapping_confidence (not re-blocked by proof/G9)"
                 ),
                 business_impact=(
                     "Low semantic confidence increases wrong-column risk. Execute stays "
@@ -757,6 +1430,8 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 severity="block",
             )
         )
+        if type_change_columns and (not cols or set(cols) <= type_change_columns):
+            roots.pop()
 
     # Sample transform / cast failures (empty url, bad decimal, …) — own root.
     # Must not be framed as Lossy / fidelity collapse after TEXT→INTEGER contracts.
@@ -872,13 +1547,58 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             biz = (
                 f"Failure class(es): {', '.join(failure_classes)}. " + biz
             )
+        unknown_name = ""
+        for src in xf_gates + xf_blockers:
+            blob = " ".join(
+                str(part)
+                for part in (
+                    src.get("message"),
+                    src.get("details"),
+                )
+            )
+            named = re.search(r"unknown transform:\s*'([^']+)'", blob, re.I)
+            if named:
+                unknown_name = named.group(1)
+                break
+        title = (
+            f"Unknown transform: {unknown_name}"
+            if unknown_name
+            else CAST_FAILURE_ROOT_TITLE
+        )
+        alternative_fixes = [
+            QUARANTINE_REPLAN_FIX,
+            "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
+            "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
+            "Remap image/url columns off the url semantic transform",
+            "Sign CAST_AND_CONTINUE only for intentional lossy casts",
+        ]
+        if any(
+            "hash_pii could not load this workspace" in str(src.get("message") or "")
+            for src in xf_gates + xf_blockers
+        ):
+            # D8: the cells fail because the HMAC key is missing, not because
+            # of the data. "Transform to identity" would write PII in clear and
+            # a continue contract would hold out every row — name the setup.
+            from services.preflight_rules import PREFLIGHT_GATE_RULES
+
+            key_rule = PREFLIGHT_GATE_RULES["g_pii_hash_key"]
+            title = key_rule["title"]
+            rec_fix = key_rule["fix"]
+            alternative_fixes = ["Switch the column to mask_pii or redact (no key needed)"]
+            absorbed = sorted({*absorbed, "g_pii_hash_key"})
+        summary_head = (
+            f"Unknown transform: {unknown_name}. "
+            if unknown_name
+            else ""
+        )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("sample_transform", cols, absorbed),
                 kind="sample_transform",
-                title="Sample transform / cast failures",
+                title=title,
                 summary=(
-                    (
+                    summary_head
+                    + (
                         f"{len(cols)} column(s) fail write-path transforms on the "
                         f"Validate sample ({col_label})"
                         if cols
@@ -897,12 +1617,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="high",
                 recommended_fix=rec_fix,
-                alternative_fixes=[
-                    "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
-                    "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
-                    "Remap image/url columns off the url semantic transform",
-                    "Sign CAST_AND_CONTINUE only for intentional lossy casts",
-                ],
+                alternative_fixes=alternative_fixes,
                 recovery_strategy=(
                     "After remap or Risk Contract, re-Validate. Contracted holdouts "
                     "quarantine at write — primary table must not invent NULL unless "
@@ -921,16 +1636,399 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             )
         )
 
+    enc_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_encoding_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    enc_blockers = [
+        b
+        for b in blockers
+        if _is_encoding_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if enc_gates or enc_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in enc_gates if g.get("id")],
+                *[str(b.get("id")) for b in enc_blockers if b.get("id")],
+            }
+        )
+        cols = []
+        chars: list[str] = []
+        transforms: list[str] = []
+        for src in enc_gates + enc_blockers:
+            details = src.get("details") or {}
+            cols.extend(_columns_from_details(details))
+            for issue in details.get("encoding_issues") or details.get("issues") or []:
+                if not isinstance(issue, dict):
+                    continue
+                col = issue.get("column") or issue.get("source")
+                if col:
+                    cols.append(str(col))
+                chars.extend(str(c) for c in (issue.get("chars") or []) if c)
+                sug = issue.get("suggested_transform")
+                if sug:
+                    transforms.append(str(sug))
+        cols = list(dict.fromkeys(cols))
+        chars = list(dict.fromkeys(chars))
+        transform = next(iter(dict.fromkeys(transforms)), "strip_controls")
+        char_label = f" ({', '.join(chars[:4])})" if chars else ""
+        col_label = ", ".join(cols[:5]) + (
+            f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("encoding_normalization", cols, absorbed),
+                kind="encoding_normalization",
+                title="Invisible / undecodable characters in source text",
+                summary=(
+                    (
+                        f"{len(cols)} column(s) carry characters that do not "
+                        f"survive as data{char_label}: {col_label}"
+                    )
+                    if cols
+                    else f"Undecodable or invisible characters{char_label} on the Validate sample"
+                ),
+                business_impact=(
+                    "Zero-width, bidi and control characters silently break joins, "
+                    "lookups and exact-match search in the destination — the value "
+                    "looks identical to a human and compares unequal to a machine. "
+                    "The type path is not the problem, so remapping it fixes nothing."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    f"Open Map → apply the '{transform}' transform to "
+                    f"{col_label or 'the affected column(s)'} → re-run Validate."
+                ),
+                alternative_fixes=[
+                    "Sign QUARANTINE_ROW to hold out affected rows instead of normalizing",
+                    "Normalize at the source (Unicode NFC + control strip) and re-read",
+                    "Accept the characters explicitly if the destination is a text archive",
+                ],
+                recovery_strategy=(
+                    "Normalization is applied on read, so already-written rows keep "
+                    "the original characters — rewrite the affected table after the "
+                    "transform is in place."
+                ),
+                expected_runtime_impact=(
+                    "Re-Validate is sample-scoped; the transform costs one pass per cell"
+                ),
+                quarantine_policy=(
+                    "holdout_rejected_rows under QUARANTINE_ROW when normalization is refused"
+                ),
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    # Keys the destination already stores are not duplicates *in the source* —
+    # the source can be perfectly unique. Naming it "duplicate identity keys on
+    # the Validate sample" and prescribing "dedupe the source" sends the operator
+    # to fix data that is already correct, so this collision owns its own root.
+    collision_findings = [
+        item
+        for item in (
+            *[g for g in gates if g.get("status") == "block"],
+            *blockers,
+        )
+        if _is_destination_collision_signal(item.get("details") or {})
+    ]
+    if collision_findings:
+        absorbed = sorted({str(i.get("id")) for i in collision_findings if i.get("id")})
+        details = collision_findings[0].get("details") or {}
+        key = str((details.get("primary_key") or {}).get("target") or "") or "the identity key"
+        if details.get("collision_count") is not None:
+            stored = int(details.get("collision_count") or 0)
+        else:
+            stored = len(details.get("sample_collisions") or [])
+        sync_mode = str(details.get("sync_mode") or "append")
+        enforced = bool(details.get("key_enforced", True))
+        if enforced:
+            summary = (
+                f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                f"in the destination on {key}, which enforces uniqueness — "
+                f"a {sync_mode} insert aborts on the first one"
+            )
+        else:
+            summary = (
+                f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                f"in the destination on {key}. That table does not enforce the key, "
+                f"so a {sync_mode} insert would store a second copy"
+            )
+        # D104: another enabled pipeline owns this destination — name it as
+        # the cause instead of leaving "the table already has the keys".
+        owner_names = [
+            str(n) for n in (details.get("conflicting_pipelines") or []) if n
+        ]
+        if owner_names:
+            summary += (
+                ". The destination is already written by enabled pipeline(s): "
+                + "; ".join(owner_names[:3])
+            )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("destination_key_collision", [key], absorbed),
+                kind="destination_key_collision",
+                title="Destination already stores these keys",
+                summary=summary,
+                business_impact=(
+                    "The write fails outright, so no rows land. Nothing is "
+                    "duplicated and nothing at the destination is damaged."
+                ),
+                affected_columns=[key] if key != "the identity key" else [],
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    f"Use sync mode incremental_deduped / incremental_upsert (or upsert) on {key} so an "
+                    "updated row replaces the stored one, or set the duplicate "
+                    "policy to dedupe_skip to keep the stored row and load only the "
+                    "new keys. Use overwrite instead if this load should replace "
+                    "the existing table."
+                ),
+                alternative_fixes=[
+                    "Full refresh · overwrite to replace the destination generation",
+                    "Append only the rows the destination does not have yet",
+                    "Load into a new destination table if both generations must be kept",
+                ],
+                recovery_strategy=(
+                    "Nothing was written, so no cleanup is needed — change the sync "
+                    "mode and re-run Validate."
+                ),
+                expected_runtime_impact=(
+                    "Upsert costs a key-resolved write per row; overwrite rewrites "
+                    "the whole destination table"
+                ),
+                quarantine_policy="n/a — the batch is refused before any write",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    upsert_ddl_findings = [
+        item
+        for item in (
+            *[g for g in gates if g.get("status") == "block"],
+            *blockers,
+        )
+        if _is_upsert_ddl_signal(item.get("details") or {})
+    ]
+    if upsert_ddl_findings:
+        absorbed = sorted(
+            {str(i.get("id")) for i in upsert_ddl_findings if i.get("id")}
+        )
+        details = upsert_ddl_findings[0].get("details") or {}
+        cols = list(details.get("upsert_key_columns") or [])
+        planned_ddl = str(details.get("planned_ddl") or "")
+        dup_keys = details.get("duplicate_key_count")
+        impossible = str(details.get("impossible_reason") or "")
+        # MERGE engines (Snowflake, SQL Server, ...) key the write without an
+        # index: there is no DDL to approve, and a unique constraint created
+        # by hand is not what keys the merge (Snowflake does not enforce it).
+        no_index = not planned_ddl
+        if impossible:
+            summary = impossible
+        elif dup_keys:
+            summary = (
+                f"Upsert into this existing table keys on "
+                f"({', '.join(cols)}), but the destination holds "
+                f"{dup_keys} duplicate key value(s) "
+                f"({details.get('duplicate_row_count') or 0} rows) and has no "
+                f"unique constraint — the merge cannot be keyed safely"
+            )
+        else:
+            summary = (
+                f"Upsert into this existing table keys on "
+                f"({', '.join(cols)}) but the destination has no unique "
+                f"constraint on those columns — {PRODUCT_NAME} would need to run: "
+                f"{planned_ddl}"
+            )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("upsert_dest_ddl", cols, absorbed),
+                kind="upsert_dest_ddl",
+                title=(
+                    "Upsert key cannot be enforced on the destination"
+                    if impossible
+                    else "Duplicate upsert keys in destination"
+                    if dup_keys
+                    else "Upsert needs destination unique key"
+                ),
+                summary=summary,
+                business_impact=(
+                    "Without the unique constraint the merge cannot land "
+                    "deterministically — the run fails, or rows land "
+                    "duplicated."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    "Pick an upsert key the destination can enforce on its "
+                    "full value, then re-validate"
+                    if impossible
+                    else "Deduplicate the destination on the upsert key, then "
+                    "re-validate"
+                    if dup_keys and no_index
+                    else "Deduplicate the destination on the upsert key, then "
+                    "approve the disclosed DDL at Validate"
+                    if dup_keys
+                    else "Approve the disclosed destination DDL at Validate "
+                    "and re-run"
+                ),
+                alternative_fixes=(
+                    [
+                        "Pick different upsert key columns",
+                        "Run full refresh overwrite instead of upsert",
+                    ]
+                    if impossible or no_index
+                    else [
+                        "Create a unique constraint on the upsert key yourself, then re-validate",
+                        "Pick different upsert key columns",
+                        "Run full refresh overwrite instead of upsert",
+                    ]
+                ),
+                recovery_strategy=(
+                    "Nothing was written, so no cleanup is needed — resolve "
+                    "the key and re-run Validate."
+                ),
+                expected_runtime_impact=(
+                    "None — the merge keys the write without an index"
+                    if no_index
+                    else "Creating the disclosed unique index is a one-time DDL "
+                    "on the destination table"
+                ),
+                quarantine_policy="n/a — the batch is refused before any write",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    probe_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_uniqueness_probe_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    probe_blockers = [
+        b
+        for b in blockers
+        if _is_uniqueness_probe_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if probe_gates or probe_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in probe_gates if g.get("id")],
+                *[str(b.get("id")) for b in probe_blockers if b.get("id")],
+            }
+        )
+        if absorbed:
+            # Surface the probe's own reason (relation not found, driver error,
+            # wrong object) — the canned "did not address the source table"
+            # erased the real failure and sent operators to re-Validate instead
+            # of fixing the actual addressing bug (QA schema_mismatch extra).
+            probe_detail = ""
+            for g in probe_gates:
+                probe = (g.get("details") or {}).get("source_uniqueness_probe")
+                if isinstance(probe, dict) and probe.get("message"):
+                    probe_detail = str(probe["message"])[:240]
+                    break
+            if not probe_detail:
+                for g in probe_gates:
+                    msg = str(g.get("message") or "").strip()
+                    if msg:
+                        probe_detail = msg[:240]
+                        break
+            if not probe_detail:
+                for b in probe_blockers:
+                    msg = str(b.get("message") or "").strip()
+                    if msg:
+                        probe_detail = msg[:240]
+                        break
+            roots.append(
+                MigrationRootCause(
+                    root_id=_root_id("uniqueness_probe_unavailable", [], absorbed),
+                    kind="uniqueness_probe_unavailable",
+                    title="Source uniqueness probe could not run",
+                    summary=(
+                        "Validate could not prove source identity uniqueness — "
+                        "the probe did not address the source table"
+                        + (f" ({probe_detail})" if probe_detail else "")
+                    ),
+                    business_impact=(
+                        "A uniqueness-required sync cannot be approved from the sample "
+                        "alone. This is not a type-path fidelity loss and Accept risk "
+                        "on Map will not make the probe run."
+                    ),
+                    affected_columns=[],
+                    affected_rows_sample=sample_n,
+                    estimated_total_rows=est_n,
+                    risk_level="high",
+                    recommended_fix=(
+                        "Re-run Validate so the uniqueness probe addresses the "
+                        "real source relation. Do not Approve eligible or Accept "
+                        "risk — a missing table is not a type-path."
+                    ),
+                    alternative_fixes=[
+                        "Re-select the source table from the catalog dropdown",
+                        "Switch to append only when the destination has no covering UNIQUE",
+                    ],
+                    recovery_strategy=(
+                        "After the probe runs against the real table, re-Validate. "
+                        "No write occurs until G9 can prove or refuse uniqueness."
+                    ),
+                    expected_runtime_impact="Re-Validate only — no destination rewrite",
+                    quarantine_policy="n/a — the probe must run, rows are not quarantined",
+                    rollback_policy="DOCUMENT_ONLY",
+                    documentation="docs/MIGRATION_ROLLBACK.md",
+                    impacted_gates=absorbed,
+                    absorbed_blocker_ids=absorbed,
+                    severity="block",
+                )
+            )
+
     dup_gates = [
         g
         for g in gates
         if g.get("status") == "block"
+        and not _is_destination_collision_signal(g.get("details") or {})
+        and not _is_upsert_ddl_signal(g.get("details") or {})
+        and not _is_uniqueness_probe_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
         and _is_duplicate_signal(str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or ""))
     ]
     dup_blockers = [
         b
-        for b in blockers
-        if _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
+        for b in _raw_signal_blockers(blockers)
+        if not _is_destination_collision_signal(b.get("details") or {})
+        and not _is_upsert_ddl_signal(b.get("details") or {})
+        and not _is_uniqueness_probe_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+        and _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
     ]
     if len(dup_gates) + len(dup_blockers) >= 1:
         absorbed = sorted(
@@ -946,12 +2044,33 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             for b in dup_blockers:
                 cols.extend(_columns_from_details(b.get("details") or {}))
             cols = list(dict.fromkeys(cols))
+            _logger.info(
+                "root_cause: duplicate_identity from gates=%s blockers=%s columns=%s",
+                [g.get("id") for g in dup_gates],
+                [b.get("id") for b in dup_blockers],
+                cols,
+            )
+            # D205: name the colliding keys and the destination rule, not a
+            # generic "failed on the sample" (the probe walked the population).
+            _eq_msg = next(
+                (
+                    str(x.get("message") or "").split("Data integrity failed: ", 1)[-1]
+                    for x in [*dup_gates, *dup_blockers]
+                    if "equal under the destination's comparison" in str(x.get("message") or "")
+                ),
+                "",
+            )
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
                     kind="duplicate_identity",
-                    title="Duplicate identity keys",
-                    summary=(
+                    title=(
+                        "Duplicate identity keys: distinct source keys collide "
+                        "on the destination key"
+                        if _eq_msg
+                        else "Duplicate identity keys"
+                    ),
+                    summary=_eq_msg or (
                         "Identity / uniqueness checks failed on the Validate sample "
                         f"— impacts {len(absorbed)} gate check(s)"
                     ),
@@ -985,6 +2104,108 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     severity="block",
                 )
             )
+
+    # g9_sync_contract blockers are an *incomplete contract* — missing identity
+    # key / cursor — never a duplicate finding. Until now they produced no root
+    # at all: earlier code minted a phantom "Duplicate identity keys" root that
+    # hid the real message (QA T11/T08); removing that left a bare blocker with
+    # no remediation. Give the operator the contract root with the actual fix.
+    def _g9_contract_blocker(blocker: dict) -> bool:
+        if str(blocker.get("id") or "") != "g9_sync_contract":
+            return False
+        if re.search(
+            r"missing (?:primary key|cursor)|sync mode contract incomplete",
+            str(blocker.get("message") or ""),
+            re.I,
+        ):
+            return True
+        # A cursor that cannot capture updates is the same incomplete contract.
+        # Matching only "missing cursor" left that block with no root (the
+        # operator saw the gate and no fix).
+        details = blocker.get("details") if isinstance(blocker.get("details"), dict) else {}
+        return any(
+            isinstance(verdict, dict) and verdict.get("status") == "block"
+            for verdict in details.get("cursor_semantics") or []
+        )
+
+    contract_blockers = [
+        b
+        for b in [*blockers, *[g for g in gates if g.get("status") == "block"]]
+        if _g9_contract_blocker(b)
+    ]
+    if contract_blockers:
+        absorbed = sorted(
+            {str(b.get("id")) for b in contract_blockers if b.get("id")}
+        )
+        # The gate names *which* part of the contract failed (a missing key, an
+        # unknown cursor, a cursor whose meaning cannot capture updates). The
+        # generic "needs an identity key" prose sent operators who had set both
+        # to the wrong control.
+        contract_issues: list[str] = []
+        contract_fixes: list[str] = []
+        for b in contract_blockers:
+            details = b.get("details") or {}
+            for issue in details.get("issues") or []:
+                if str(issue) and str(issue) not in contract_issues:
+                    contract_issues.append(str(issue))
+            for verdict in details.get("cursor_semantics") or []:
+                verdict = verdict if isinstance(verdict, dict) else {}
+                action = str(verdict.get("primary_action") or "").strip()
+                if verdict.get("status") == "block" and action and action not in contract_fixes:
+                    contract_fixes.append(action)
+        contract_summary = (
+            "; ".join(contract_issues[:3]) + " — the run refused before any rows moved."
+            if contract_issues
+            else (
+                "The selected sync mode needs an identity key and/or a "
+                "cursor column that was not provided — the run refused "
+                "before any rows moved."
+            )
+        )
+        # The issue text is part of the id. Empty columns made every g9
+        # failure share rc-sync-contract-incomplete-c29ba4643b58, including
+        # "CDC is not supported on sqlite" (QA RT5-11 / TC41).
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id(
+                    "sync_contract_incomplete", contract_issues[:3], absorbed
+                ),
+                kind="sync_contract_incomplete",
+                title="Sync contract incomplete",
+                summary=contract_summary,
+                business_impact=(
+                    "Incremental/upsert routes cannot checkpoint or dedupe "
+                    "without the key the contract requires."
+                ),
+                affected_columns=[],
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="medium",
+                recommended_fix=(
+                    contract_fixes[0]
+                    if contract_fixes
+                    else (
+                        contract_issues[0]
+                        if contract_issues
+                        else "Open Sync → identity settings → choose the primary key "
+                        "(and cursor column for incremental), then re-Validate."
+                    )
+                ),
+                alternative_fixes=[
+                    *contract_fixes[1:3],
+                    "Switch to full_refresh_append/overwrite — no key required",
+                    "Re-run with the same upsert key contract as the prior run",
+                ],
+                recovery_strategy="Set the key/cursor and re-Validate; nothing was written.",
+                expected_runtime_impact="Re-Validate only — no destination rewrite",
+                quarantine_policy="n/a — no rows moved",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
 
     return roots
 
@@ -1035,9 +2256,24 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
             ):
                 continue
         remaining.append(b)
-    # Roots first — operator sees cause before residual issues.
-    collapsed = [r.as_operator_blocker() for r in roots] + remaining
+    # Roots first — operator sees cause before residual issues. An endpoint
+    # that could not be reached or read is the cause of everything after it,
+    # so it leads even the roots (D191).
+    endpoint = [b for b in remaining if str(b.get("id") or "") in ENDPOINT_GATE_IDS]
+    remaining = [b for b in remaining if b not in endpoint]
+    collapsed = endpoint + [r.as_operator_blocker() for r in roots] + remaining
     preflight["blockers"] = collapsed
+
+    # The verdict was stamped before roots were injected. A severity=block
+    # blocker must never coexist with decision=approve / passed=true — that
+    # produced the internally contradictory "No blocking issues detected"
+    # next to a block-severity rc-* (QA T04/T12).
+    block_roots = [r for r in roots if (r.severity or "").lower() == "block"]
+    has_blocking = bool(block_roots) or any(
+        str(b.get("severity") or "").lower() == "block" for b in remaining
+    )
+    if has_blocking:
+        preflight["passed"] = False
 
     pb = preflight.get("proof_bundle")
     if isinstance(pb, dict):
@@ -1052,6 +2288,21 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
                 ],
                 "root_causes": [r.to_dict() for r in roots],
             }
+            if has_blocking:
+                # Name the element, not just the title — a bare "Sync contract
+                # incomplete" reason told the operator nothing was missing
+                # (QA X-29). The summary carries the named issue and fix.
+                titles = [
+                    f"{r.title}: {r.summary}"
+                    if str(r.summary or "").strip()
+                    else str(r.title or "")
+                    for r in block_roots
+                ] or [
+                    str(b.get("title") or b.get("message") or b.get("id") or "blocking issue")
+                    for b in collapsed[:3]
+                ]
+                td["decision"] = "block"
+                td["reason"] = "Blocking issues detected: " + "; ".join(titles[:3])
             preflight["proof_bundle"] = {**pb, "transfer_decision": td}
 
     return preflight

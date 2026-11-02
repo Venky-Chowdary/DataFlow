@@ -33,10 +33,15 @@ PHASE_TRANSFORM_WRITE = "transform_write"
 PHASE_CHECKSUM = "checksum"
 PHASE_INTROSPECT = "introspect"
 PHASE_DDL = "ddl"
+#: Engine-side COPY / ATTACH-INSERT-SELECT: the source read and the destination
+#: write are one statement, so they are one phase — splitting them would be a
+#: guess, not a measurement.
+PHASE_BULK_COPY = "bulk_copy"
 
 _PHASE_LABELS = {
     PHASE_READ: "Reading source",
     PHASE_TRANSFORM_WRITE: "Transforming and writing",
+    PHASE_BULK_COPY: "Engine-side bulk copy (read + write)",
     PHASE_CHECKSUM: "Verifying checksum",
     PHASE_INTROSPECT: "Inspecting schema",
     PHASE_DDL: "Applying DDL",
@@ -145,6 +150,75 @@ class PhaseProfile:
             for p in snap["phases"]
         ]
         return " · ".join(parts)
+
+
+#: Operator stages over the canonical phases. Transform and write run per chunk
+#: on one pool, so they are measured — and reported — as one phase.
+_STAGE_PHASES = {
+    "extract_seconds": (PHASE_READ,),
+    "transform_write_seconds": (PHASE_TRANSFORM_WRITE,),
+    "bulk_copy_seconds": (PHASE_BULK_COPY,),
+    "setup_seconds": (PHASE_INTROSPECT, PHASE_DDL),
+}
+
+
+def job_phase_timings(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Per-stage timings of a finished job, from the run's own PhaseProfile.
+
+    Reads what the run already recorded: ``destination_summary.phase_profile``
+    for extract / transform+write / bulk copy / setup, and the Gate-8 wall time
+    (``reconciliation.verify_seconds``, the same timer behind the
+    ``gate8.verify.completed`` event) plus the checksum re-read for verify.
+    The per-phase rows stay on ``destination_summary.phase_profile``; this is the
+    compact view. ``None`` when the job recorded no timings (older job).
+    """
+    doc = job if isinstance(job, dict) else {}
+    summary = doc.get("destination_summary")
+    profile = summary.get("phase_profile") if isinstance(summary, dict) else None
+    if not isinstance(profile, dict):
+        profile = doc.get("phase_profile") if isinstance(doc.get("phase_profile"), dict) else None
+    recon = doc.get("reconciliation") if isinstance(doc.get("reconciliation"), dict) else {}
+    gate8 = recon.get("verify_seconds")
+    if not profile and gate8 is None:
+        return None
+    seconds = {
+        str(p.get("phase")): float(p.get("seconds") or 0.0)
+        for p in (profile or {}).get("phases") or []
+        if isinstance(p, dict)
+    }
+    stages: dict[str, float] = {
+        stage: round(sum(seconds.get(ph, 0.0) for ph in phases), 3)
+        for stage, phases in _STAGE_PHASES.items()
+    }
+    stages["verify_seconds"] = round(
+        seconds.get(PHASE_CHECKSUM, 0.0) + float(gate8 or 0.0), 3
+    )
+    return {
+        **stages,
+        "dominant_phase": (profile or {}).get("dominant_phase") or "",
+        "elapsed_seconds": (profile or {}).get("elapsed_seconds"),
+        "note": (
+            "Phases overlap (the reader fetches ahead of the writer pool), so "
+            "stage seconds can sum to more than elapsed. Transform and write are "
+            "measured as one phase; an engine-side COPY is one bulk_copy phase."
+        ),
+    }
+
+
+def attach_phase_timings_to_updates(
+    status: str, updates: dict[str, Any], *, previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Stamp ``phase_timings`` on a terminal job write (mutates ``updates``)."""
+    from services.job_status import is_terminal
+
+    if not is_terminal(status):
+        return updates
+    merged = dict(previous or {})
+    merged.update(updates)
+    timings = job_phase_timings(merged)
+    if timings is not None:
+        updates["phase_timings"] = timings
+    return updates
 
 
 def _null_cm():

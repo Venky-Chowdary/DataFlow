@@ -18,6 +18,7 @@ from services.timezone_policy import (
     MYSQL_TIMESTAMP_MIN,
     POLICY_NATIVE_INSTANT,
     POLICY_OFFSET_PRESERVED,
+    POLICY_OFFSET_TEXT,
     POLICY_UTC_INVENT,
     POLICY_UTC_NORMALIZED,
     POLICY_WALL_CLOCK_LOCAL,
@@ -73,6 +74,16 @@ def test_offset_pinned_pair_preserves_the_label() -> None:
     assert policy.offset_label_preserved is True
 
 
+def test_datetimeoffset_onto_pg_with_time_zone_does_not_preserve_the_label() -> None:
+    """SQL-standard WITH TIME ZONE on PostgreSQL is TIMESTAMPTZ — UTC only."""
+    policy = resolve_timezone_policy(
+        "DATETIMEOFFSET", "TIMESTAMP WITH TIME ZONE", dest_db="postgresql"
+    )
+    assert policy is not None
+    assert policy.offset_label_preserved is False
+    assert policy.instant_preserved is True
+
+
 def test_non_temporal_pairs_raise_no_timezone_question() -> None:
     assert resolve_timezone_policy("VARCHAR(10)", "TEXT", dest_db="mysql") is None
 
@@ -83,6 +94,25 @@ def test_policy_is_identical_for_validate_and_execute_call_shapes() -> None:
     b = resolve_timezone_policy("TIMESTAMPTZ", "TIMESTAMP(6)", dest_db="mariadb")
     assert a is not None and b is not None
     assert a.as_dict() == b.as_dict()
+
+
+def test_pg_timestamptz_into_redis_text_is_not_a_contract() -> None:
+    """Redis has one carrier — RFC 3339 text — so the wire is the instant."""
+    policy = resolve_timezone_policy("TIMESTAMPTZ", "string", dest_db="redis")
+    assert policy is not None
+    assert policy.policy == POLICY_OFFSET_TEXT
+    assert policy.instant_preserved is True
+    assert policy.offset_label_preserved is True
+    assert policy.requires_contract is False
+    assert policy.remediation == ""
+
+
+def test_pg_timestamptz_into_postgres_text_still_needs_a_contract() -> None:
+    policy = resolve_timezone_policy("TIMESTAMPTZ", "TEXT", dest_db="postgresql")
+    assert policy is not None
+    assert policy.policy == POLICY_OFFSET_TEXT
+    assert policy.requires_contract is True
+    assert policy.remediation
 
 
 # --- bind semantics ---------------------------------------------------------
@@ -114,6 +144,21 @@ def test_mysql_timestamp_bind_survives_a_dst_spring_forward_boundary() -> None:
         "2024-03-10T03:00:00-04:00", "TIMESTAMP(6)", engine="mysql"
     )
     assert after - before == timedelta(seconds=1)
+
+
+def test_mysql_datetime_bind_normalizes_an_offset_to_utc() -> None:
+    """TIMESTAMPTZ landing in Maria/MySQL DATETIME keeps the instant, not the civil clock."""
+    out = coerce_sql_temporal(
+        "2024-03-01T12:00:00+05:30", "DATETIME(6)", engine="mariadb"
+    )
+    assert out == datetime(2024, 3, 1, 6, 30)
+    assert out.tzinfo is None
+
+
+def test_mysql_datetime_bind_does_not_invent_utc_for_a_naive_value() -> None:
+    out = coerce_sql_temporal("2024-03-01T12:00:00", "DATETIME(6)", engine="mysql")
+    assert out.hour == 12
+    assert out.tzinfo is None
 
 
 def test_non_mysql_timestamp_bind_stays_wall_clock() -> None:
@@ -198,7 +243,7 @@ def test_aware_wire_into_mysql_timestamp_is_not_an_offset_strip_quarantine() -> 
     assert rejected == []
 
 
-def test_aware_wire_into_mysql_datetime_still_quarantines_the_offset_strip() -> None:
+def test_aware_wire_into_mysql_datetime_is_utc_normalized_not_quarantined() -> None:
     from connectors.writer_common import quarantine_unfit_temporals
 
     rejected: list[dict] = []
@@ -210,5 +255,5 @@ def test_aware_wire_into_mysql_datetime_still_quarantines_the_offset_strip() -> 
         "quarantine",
         dest_db="mysql",
     )
-    assert rows == []
-    assert len(rejected) == 1
+    assert len(rows) == 1
+    assert rejected == []

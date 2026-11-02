@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import json_default, json_loads_exact
 
 from connectors.base import ReadBatch
 
@@ -59,20 +60,135 @@ class RedisScanState:
         return cls()
 
 
-def _redis_client(cfg: dict[str, Any]):
+def redis_dial_endpoint(host: str, port: int | None) -> tuple[str, int]:
+    """Host and port for ``redis.Redis``.
+
+    A connector form stores the tunnel as ``http://bore.pub:20988`` in host
+    and the driver default ``443`` in port. Passing that string as the Redis
+    host never dials the tunnel.
+    """
+    from urllib.parse import urlparse
+
+    text = (host or "").strip()
+    fallback = int(port or 6379)
+    if "://" in text:
+        from connectors.aws_common import normalize_service_endpoint
+
+        normalized = normalize_service_endpoint(text, port=port)
+        parsed = urlparse(normalized)
+        return parsed.hostname or "localhost", int(parsed.port or fallback)
+    if text.count(":") == 1:
+        name, _, raw_port = text.partition(":")
+        if raw_port.isdigit():
+            return name or "localhost", int(raw_port)
+    return text or "localhost", fallback
+
+
+# A TLS handshake against a plaintext server never completes. redis-py 8
+# retries a timed-out connect ten times with backoff, so one PING held a
+# staging call for ~90 s (MX2-09). Connect is bounded and retried once.
+REDIS_CONNECT_TIMEOUT_SEC = 5.0
+REDIS_CONNECT_RETRIES = 1
+
+
+def _redis_client(cfg: dict[str, Any], *, socket_timeout: float = 30):
     import redis
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+
+    from services.egress_guard import assert_cfg_dial_allowed
+
+    assert_cfg_dial_allowed(cfg, db_type="redis", point="redis_client")
+    bounded = {
+        "socket_timeout": socket_timeout,
+        "socket_connect_timeout": min(REDIS_CONNECT_TIMEOUT_SEC, float(socket_timeout)),
+        "retry": Retry(NoBackoff(), REDIS_CONNECT_RETRIES),
+    }
 
     if cfg.get("connection_string"):
-        return redis.from_url(cfg["connection_string"], socket_timeout=30)
+        from connectors.url_authority import parse_url_authority, rebuild_url
+
+        raw = str(cfg["connection_string"]).strip()
+        parsed = parse_url_authority(raw)
+        if parsed.host and (cfg.get("username") or cfg.get("password")):
+            raw = rebuild_url(
+                parsed,
+                user=str(cfg.get("username") or parsed.user),
+                password=str(cfg.get("password") or parsed.password),
+            )
+        return redis.from_url(raw, **bounded)
+    host, port = redis_dial_endpoint(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 6379),
+    )
     return redis.Redis(
-        host=cfg.get("host") or "localhost",
-        port=int(cfg.get("port") or 6379),
-        db=int(cfg["database"]) if str(cfg.get("database") or "0").isdigit() else 0,
+        host=host,
+        port=port,
+        db=int(cfg.get("database") or 0) if str(cfg.get("database") or "0").isdigit() else 0,
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,
         ssl=bool(cfg.get("ssl")),
-        socket_timeout=30,
+        **bounded,
     )
+
+
+def redis_zset_score_carrier(score: Any) -> float:
+    """Bind a Redis zset score through the write-path float carrier.
+
+    Redis scores are IEEE doubles. ``float(text)`` invented Auto ``1.234``
+    and collapsed ``2**53+1``. Native Python floats pass through (already
+    IEEE). Locale money the write path stores still binds.
+    """
+    from connectors.sql_bind import coerce_float_wire
+
+    try:
+        bound = coerce_float_wire(score, ddl_type="FLOAT")
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Redis zset score cannot bind {score!r} — refuse invent"
+        ) from exc
+    if not isinstance(bound, float):
+        raise ValueError(
+            f"Redis zset score cannot bind {score!r} — refuse invent"
+        )
+    return bound
+
+
+def redis_json_row(raw: Any) -> dict[str, Any]:
+    """One Redis value as a sample / Gate-8 row.
+
+    JSON objects keep ``json_loads_exact`` numbers. Invalid or non-object
+    values stay under ``value`` — never invent an empty object.
+    """
+    parsed = load_redis_json_doc(raw)
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = _decode(raw)
+    else:
+        text = "" if raw is None else str(raw)
+    if parsed is None:
+        return {"value": text}
+    return {"value": parsed}
+
+
+def load_redis_json_doc(raw: Any) -> Any:
+    """Parse a Redis JSON document. Numbers match ``json_loads_exact``.
+
+    Invalid UTF-8, non-JSON, or non-text payloads return ``None`` — callers
+    must not invent an empty object.
+    """
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        if not isinstance(raw, str):
+            return None
+        return json_loads_exact(raw)
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def _decode(value: Any) -> str:
@@ -104,6 +220,11 @@ def _decode(value: Any) -> str:
 _REDIS_COLLECTION_CAP = 10_000
 
 
+#: Fields the reader adds around every key. They describe the key, not the
+#: stored document, so nothing a write maps is ever expected to fill them.
+REDIS_ENVELOPE_COLUMNS: tuple[str, ...] = ("redis_key", "redis_value", "redis_type")
+
+
 def redis_key_for(prefix: str, identity: Any) -> str:
     """Canonical ``prefix:identity`` key layout shared by write and read-back.
 
@@ -113,8 +234,13 @@ def redis_key_for(prefix: str, identity: Any) -> str:
     the moment either side changed.
     """
     from connectors.sql_identifiers import sanitize_identifier
+    from services.value_serializer import present_cell_text
 
-    return f"{prefix}:{sanitize_identifier(str(identity), preserve_case=True)}"
+    text = present_cell_text(identity)
+    return f"{prefix}:{sanitize_identifier(text or '', preserve_case=True)}"
+
+
+_DB_INDEX_RE = re.compile(r"^db\d+$", re.I)
 
 
 def resolve_key_pattern(name: str | None) -> str:
@@ -124,11 +250,80 @@ def resolve_key_pattern(name: str | None) -> str:
     ``prefix:something`` — so scanning for the bare prefix matches only a key of
     exactly that name, which is almost never what exists. Callers that skipped
     this saw an empty keyspace and concluded the destination had no fields.
+
+    ``db0`` / ``db12`` is the INFO keyspace label, not a key prefix. Scanning
+    ``db0:*`` reads nothing while the hashes in that database sit under other
+    names. That label means the whole selected database.
     """
     pattern = (name or "").strip() or "*"
+    if _DB_INDEX_RE.match(pattern):
+        return "*"
     if pattern != "*" and "*" not in pattern and "?" not in pattern:
         return f"{pattern}:*"
     return pattern
+
+
+def keys_for_prefix(keys: list[str], prefix: str) -> list[str]:
+    """Keys this destination owns. Other prefixes in the same database are not rows.
+
+    SCAN MATCH is a hint the server may not apply the way a caller assumes.
+    A count of every key in db0 reported pre-existing hashes as rows of an
+    empty prefix. The writer's address is ``prefix:identity``; nothing else counts.
+    """
+    head = f"{(prefix or '').strip()}:"
+    if head == ":":
+        return []
+    return [key for key in keys if key.startswith(head)]
+
+
+def redis_prefix_inventory(client: Any, *, limit: int = 2000, max_prefixes: int = 100) -> list[str]:
+    """Distinct key prefixes in this database, in scan order.
+
+    INFO keyspace only names ``db0``. Operators then sampled ``db0`` and read
+    zero rows. The objects they can open are the prefixes the keys actually use.
+    A key with no colon is its own object name.
+    """
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    cursor = 0
+    scanned = 0
+    cap = max(int(limit or 0), 1)
+    while scanned < cap and len(prefixes) < max_prefixes:
+        cursor, batch = client.scan(cursor=cursor, count=min(500, cap))
+        for raw in batch:
+            key = raw.decode() if isinstance(raw, bytes) else str(raw)
+            scanned += 1
+            prefix = key.split(":", 1)[0] if ":" in key else key
+            if prefix and prefix not in seen:
+                seen.add(prefix)
+                prefixes.append(prefix)
+            if scanned >= cap or len(prefixes) >= max_prefixes:
+                break
+        if cursor == 0:
+            break
+    return prefixes
+
+
+def scan_all_keys(client: Any, pattern: str, *, page: int = 1000) -> list[str]:
+    """Every key matching ``pattern`` — one full SCAN, deduped.
+
+    Redis SCAN gives no cardinality and may repeat a key across pages, so the
+    only honest population figure is the deduped walk. One owner for it: the
+    reader's page total, introspection's row estimate and reconcile's key list
+    must agree or an operator sees three different Redis row counts.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    cursor = 0
+    while True:
+        cursor, batch = client.scan(cursor=cursor, match=pattern or "*", count=page)
+        for raw in batch:
+            key = raw.decode() if isinstance(raw, bytes) else str(raw)
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if cursor == 0:
+            return keys
 
 
 def _read_redis_value(client: Any, key: str, ktype: str) -> str:
@@ -164,7 +359,7 @@ def _read_redis_value(client: Any, key: str, ktype: str) -> str:
                 f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
             )
         pairs = client.zrange(key, 0, _REDIS_COLLECTION_CAP - 1, withscores=True)
-        vals = [[_decode(m), float(s)] for m, s in pairs]
+        vals = [[_decode(m), redis_zset_score_carrier(s)] for m, s in pairs]
         return json.dumps(vals, default=json_default)
     if ktype == "stream":
         xlen = int(client.xlen(key) or 0)
@@ -196,9 +391,10 @@ def read_keys_batch(
     from connectors.header_union import union_attribute_keys
 
     state = RedisScanState.from_any(scan_state)
+    first_page = not state.keys_seen and not state.cursor and not state.pending_keys
     client = _redis_client(cfg)
     try:
-        identity_headers = ["redis_key", "redis_value", "redis_type"]
+        identity_headers = list(REDIS_ENVELOPE_COLUMNS)
         rows: list[list[str]] = []
 
         while len(rows) < limit and not state.exhausted:
@@ -235,10 +431,7 @@ def read_keys_batch(
         # redis_type so upsert identity is never silently dropped.
         object_values: list[dict] = []
         for row in rows:
-            try:
-                parsed = json.loads(row[1])
-            except Exception:
-                parsed = None
+            parsed = load_redis_json_doc(row[1])
             if not isinstance(parsed, dict):
                 object_values = []
                 break
@@ -278,7 +471,47 @@ def read_keys_batch(
         else:
             headers = identity_headers
 
-        total = known_total_rows if known_total_rows is not None else state.keys_seen
-        return ReadBatch(headers=headers, rows=rows, offset=state.keys_seen, total_rows=total), state
+        # ``keys_seen`` is how far this scan has walked, not how many keys exist.
+        # Reported as the total it told the stream engine "source drained" at the
+        # end of the first page: a 100k-key namespace landed 20k rows and the run
+        # still reported success. The population is counted once, on the first
+        # page, and carried by the caller as ``known_total_rows`` after that.
+        if known_total_rows is not None:
+            total = known_total_rows
+        elif first_page:
+            total = len(scan_all_keys(client, pattern or "*"))
+        else:
+            total = None
+        # Flattened JSON numbers are ``cell_to_string`` text. Stamp sampled
+        # native_types so endpoint introspect cannot pose the string placeholder
+        # as a Redis declaration (that overlay made Execute invent TEXT while
+        # Validate hashed NUMERIC/BIGINT).
+        meta: dict[str, Any] = {}
+        if headers and rows:
+            try:
+                from services.dest_schema_authority import CARRIER_SAMPLED
+                from services.object_store_introspect import (
+                    profile_schemaless_source_schema,
+                )
+
+                types = profile_schemaless_source_schema(
+                    headers, rows, source_format="redis"
+                )
+                if types:
+                    meta = {
+                        "native_types": types,
+                        "native_types_authority": {
+                            name: CARRIER_SAMPLED for name in types
+                        },
+                    }
+            except Exception:
+                meta = {}
+        return ReadBatch(
+            headers=headers,
+            rows=rows,
+            offset=state.keys_seen,
+            total_rows=total,
+            meta=meta or None,
+        ), state
     finally:
         client.close()

@@ -11,10 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import ssl
 from typing import Any, Callable
 
-from services.value_serializer import is_missing_sentinel, json_default
+from services.value_serializer import json_default
 
 from connectors.writer_common import (
     reject_on_strict_policy,
@@ -22,12 +21,44 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
-    resolve_mapping_dest_types,
+    mapped_row_to_json_record,
     resolve_target_columns,
     transform_error_policy,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def kafka_produce_key(raw_key: Any) -> str | None:
+    """Dest-canonical Kafka message key, or None when identity is absent.
+
+    ``str(True)`` is ``True``; dest and compaction use ``true``. Reader-null
+    / blank must not become ``__DF_SQL_NULL__`` or DuckDB-null keys.
+    """
+    from services.cdc_identity import is_present_cdc_row_key
+    from services.value_serializer import present_cell_text
+
+    if not is_present_cdc_row_key(raw_key):
+        return None
+    return present_cell_text(raw_key)
+
+
+def kafka_json_payload(
+    row: Any,
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """JSON produce body. Reader-null is JSON null, not the extract token.
+
+    The produce loop only dropped ``Missing``. After extract emits
+    ``SQL_NULL_SENTINEL``, that spelling was a JSON string. ``to_json_value``
+    already binds reader-null to ``None``. 0 / false stay present.
+    """
+    if isinstance(row, dict):
+        cells = tuple(row.get(c) for c in target_cols)
+    else:
+        cells = tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
+    return mapped_row_to_json_record(cells, target_cols, dest_types)
 
 
 def _fetch_kafka_physical_types(
@@ -197,35 +228,25 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
 
     from connectors.confluent_schema_registry import encode_confluent_json
 
-    bootstrap = _bootstrap(
-        str(cfg.get("host") or ""),
-        int(cfg.get("port") or 9092),
-        str(cfg.get("connection_string") or ""),
-    )
-
     def _serialize_value(v: Any) -> bytes:
         if schema_id is not None and schema_id > 0:
             return encode_confluent_json(schema_id, v)
         return json.dumps(v, default=json_default).encode("utf-8")
 
+    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_client_kwargs
+
     kwargs: dict[str, Any] = {
-        "bootstrap_servers": bootstrap.split(","),
+        **kafka_client_kwargs(cfg),
         "value_serializer": _serialize_value,
         "key_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
         "acks": "all",
         "retries": 3,
+        # Idempotent producer: broker dedupes retried batches per partition, so
+        # a produce retry cannot publish the same record twice (C26/D90).
+        "enable_idempotence": True,
     }
-    security = str(cfg.get("schema") or cfg.get("security_protocol") or "").upper()
-    username = str(cfg.get("username") or "")
-    password = str(cfg.get("password") or cfg.get("api_key") or "")
-    if username and password:
-        kwargs["security_protocol"] = security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL"
-        kwargs["sasl_mechanism"] = str(cfg.get("database") or "PLAIN")  # PLAIN | SCRAM-SHA-256
-        kwargs["sasl_plain_username"] = username
-        kwargs["sasl_plain_password"] = password
-        if kwargs["security_protocol"] == "SASL_SSL":
-            kwargs["ssl_context"] = ssl.create_default_context()
-    return KafkaProducer(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        return KafkaProducer(**kwargs)
 
 
 def test_kafka(
@@ -242,19 +263,30 @@ def test_kafka(
     schema: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
+    cfg = {
+        "host": host,
+        "port": port or 9092,
+        "connection_string": connection_string,
+        "username": username,
+        "password": password or api_key,
+        "api_key": api_key,
+        "schema": schema or ("SASL_SSL" if ssl else ""),
+        "database": database,
+        "security_protocol": str(_kwargs.get("security_protocol") or ""),
+        "sasl_mechanism": str(_kwargs.get("sasl_mechanism") or ""),
+        "extra": _kwargs.get("extra") if isinstance(_kwargs.get("extra"), dict) else {},
+    }
+    from services import copy_kafka_common
+
+    check = copy_kafka_common.kafka_sasl_check(cfg)
+    if check is not None and check.outcome not in {"ok", "inconclusive"}:
+        return False, check.message
     try:
-        producer = _producer({
-            "host": host,
-            "port": port or 9092,
-            "connection_string": connection_string,
-            "username": username,
-            "password": password or api_key,
-            "api_key": api_key,
-            "schema": schema or ("SASL_SSL" if ssl else ""),
-            "database": database,
-        })
+        producer = _producer(cfg)
         producer.close()
-        return True, f"Kafka broker reachable at {_bootstrap(host, port or 9092, connection_string)}"
+        from connectors.kafka_reader import _bootstrap as _dial_bootstrap
+
+        return True, f"Kafka broker reachable at {_dial_bootstrap(cfg)}"
     except Exception as exc:
         return False, f"Kafka connection failed: {exc}"
 
@@ -622,6 +654,8 @@ def write_mapped_rows(
             rejected_details=rejected_details, driver="kafka",
         )
 
+    from services.copy_kafka_common import kafka_security_options
+
     try:
         producer = _producer(
             {
@@ -635,6 +669,8 @@ def write_mapped_rows(
                 "database": database if database and database.upper() in {
                     "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
                 } else "PLAIN",
+                # Declared protocol / mechanism outrank the form slots (D83).
+                **kafka_security_options(_kwargs),
             },
             schema_id=registered_schema_id,
         )
@@ -646,23 +682,19 @@ def write_mapped_rows(
 
     written = 0
     digest = hashlib.sha256()
-    key_col = (conflict_columns or [None])[0]
+    key_cols = (
+        list(conflict_columns or [])
+        or list(_kwargs.get("message_key_columns") or [])
+        or list(_kwargs.get("primary_key_columns") or [])
+    )
+    key_col = key_cols[0] if key_cols else None
     null_key_rejected = 0
     produced_sample: list[dict[str, Any]] = []
     try:
         for idx, row in enumerate(mapped_rows):
-            if isinstance(row, dict):
-                payload = {
-                    k: v for k, v in row.items() if not is_missing_sentinel(v)
-                }
-            else:
-                payload = {
-                    c: row[i]
-                    for i, c in enumerate(target_cols)
-                    if i < len(row) and not is_missing_sentinel(row[i])
-                }
+            payload = kafka_json_payload(row, target_cols, dest_types)
             raw_key = payload.get(key_col) if key_col else None
-            if key_col and (raw_key is None or str(raw_key).strip() == ""):
+            if key_col and kafka_produce_key(raw_key) is None:
                 null_key_rejected += 1
                 rejected_details.append({
                     "row": idx + 1,
@@ -690,7 +722,7 @@ def write_mapped_rows(
                         driver="kafka",
                     )
                 continue
-            key = str(raw_key) if key_col and raw_key is not None else None
+            key = kafka_produce_key(raw_key) if key_col else None
             fut = producer.send(topic, value=payload, key=key)
             fut.get(timeout=30)
             written += 1

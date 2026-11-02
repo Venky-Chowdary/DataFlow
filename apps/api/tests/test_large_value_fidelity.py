@@ -58,7 +58,7 @@ def _endpoint(table: str) -> EndpointConfig:
 @pytest.fixture()
 def seeded():
     psycopg2 = pytest.importorskip("psycopg2")
-    import psycopg2.extras
+    from psycopg2 import extras as psycopg2_extras
 
     conn = psycopg2.connect(
         host="127.0.0.1",
@@ -82,7 +82,7 @@ def seeded():
                     row_id,
                     "x" * size,
                     psycopg2.Binary(b"b" * size),
-                    psycopg2.extras.Json({"pad": "y" * size}),
+                    psycopg2_extras.Json({"pad": "y" * size}),
                 ),
             )
     try:

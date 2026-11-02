@@ -14,7 +14,9 @@ def test_integer_to_parametric_decimal_invents_capacity():
     from services.conversion_contract import invents_unproven_capacity
 
     assert invents_unproven_capacity("INTEGER", "DECIMAL(10,2)", dest_db="postgresql")
-    assert invents_unproven_capacity("BIGINT", "NUMBER(38,0)", dest_db="snowflake")
+    assert invents_unproven_capacity("BIGINT", "NUMBER(38,4)", dest_db="snowflake")
+    # Zero-scale NUMBER is Snowflake's integer carrier — widening, not invent.
+    assert not invents_unproven_capacity("BIGINT", "NUMBER(38,0)", dest_db="snowflake")
 
 
 def test_checkpoint_quarantine_delta_persists_and_fail_closes(monkeypatch):

@@ -19,7 +19,64 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.column_case import column_type_or_none
+
 logger = logging.getLogger("datawrap.preflight")
+
+
+#: ``EndpointConfig.extra`` key listing source columns introspected as a bare
+#: ``numeric`` whose DECIMAL(p,s) in the schema is measured, not declared.
+UNCONSTRAINED_DECIMALS_KEY = "unconstrained_decimal_columns"
+
+
+def declared_decimal_for_dest(
+    schema: dict[str, Any], source: Any, dest_format: str
+) -> dict[str, Any]:
+    """Source schema with measured-decimal columns restored to a bare DECIMAL.
+
+    A bare ``numeric`` is measured to a DECIMAL(p,s) so a comparison against a
+    bounded destination can be decided from the data (see
+    :mod:`services.decimal_capacity_probe`). That measurement describes the rows
+    present, so it must not become the DDL of an engine that has the same
+    unbounded type: create-new on PostgreSQL would invent NUMERIC(29,9) and the
+    next larger value would fail (D68).
+
+    Every destination with column DDL creates from the declaration: a bare
+    ``numeric`` becomes the engine's unbounded/widest exact decimal
+    (``invent_dest_type("DECIMAL")``), not the DECIMAL(9,6) run 1's rows
+    measured, which run 2's larger values then overflowed on MySQL and SQL
+    Server (D68).
+    """
+    measured = (getattr(source, "extra", None) or {}).get(UNCONSTRAINED_DECIMALS_KEY)
+    return declare_measured_decimals(schema, measured, dest_format)
+
+
+def declare_measured_decimals(
+    schema: dict[str, Any], measured: Any, dest_format: str
+) -> dict[str, Any]:
+    """``schema`` with each measured bare numeric restored to bare ``DECIMAL``.
+
+    One rule for every create-new typing path (Execute's auto-map, the
+    overwrite typed mapping, the MCP plan's Map).
+    """
+    from services.db_type_utils import dest_declares_column_ddl
+
+    if not measured or not dest_declares_column_ddl(str(dest_format or "")):
+        return schema
+    folded = {str(c).casefold() for c in measured}
+    return {
+        col: ("DECIMAL" if str(col).casefold() in folded else typ)
+        for col, typ in schema.items()
+    }
+
+
+def measured_decimal_columns(columns: Any) -> list[str]:
+    """Names of introspected columns whose DECIMAL(p,s) is a row measurement."""
+    return [
+        str(c.get("name"))
+        for c in (columns or [])
+        if isinstance(c, dict) and c.get("decimal_capacity_measured") and c.get("name")
+    ]
 
 
 def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
@@ -36,7 +93,7 @@ def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     try:
         from src.transfer.endpoint_intelligence import introspect_endpoint
 
-        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source"}
+        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
         info = introspect_endpoint(endpoint)
     except Exception:
         logger.debug("live source introspect failed for endpoint", exc_info=True)
@@ -44,7 +101,78 @@ def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     schema = info.get("schema") or {}
     if not isinstance(schema, dict):
         return {}
+    measured = [str(c) for c in (info.get("unconstrained_decimals") or [])]
+    if measured:
+        # Map reads these to keep a bare ``numeric`` bare on PostgreSQL (D68).
+        endpoint.extra = {**(endpoint.extra or {}), UNCONSTRAINED_DECIMALS_KEY: measured}
     return {str(k): str(v) for k, v in schema.items() if str(v or "").strip()}
+
+
+def endpoint_primary_key_columns(endpoint: Any) -> list[str]:
+    """Source-catalog primary key. Empty when the catalog has none or cannot be read.
+
+    A failed introspect is empty on purpose: CDC must not be approved on a
+    guessed ``id`` when the catalog could not be read.
+    """
+    if endpoint is None:
+        return []
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+
+        extra = dict(getattr(endpoint, "extra", None) or {})
+        extra["introspect_purpose"] = "source"
+        extra["introspect_strict"] = True
+        endpoint.extra = extra
+        info = introspect_endpoint(endpoint)
+    except Exception:  # noqa: BLE001 — unread catalog blocks CDC; it does not approve it
+        logger.debug("catalog primary key introspect failed", exc_info=True)
+        return []
+    if not isinstance(info, dict):
+        return []
+    return [
+        str(col).strip()
+        for col in (info.get("primary_key_columns") or [])
+        if str(col or "").strip()
+    ]
+
+
+def live_source_primary_key_columns(
+    *,
+    source_connector_id: str = "",
+    source_table: str = "",
+    source_collection: str = "",
+    source_schema: str = "",
+    source_database: str = "",
+    source_config: Any = None,
+) -> list[str]:
+    """Catalog primary key of a saved source, or empty when it has none.
+
+    A query / procedure result set has no catalog key: the stream label names
+    the extract's first relation, not the rows the extract returns.
+    """
+    connector_id = (source_connector_id or "").strip()
+    stream = (source_table or source_collection or "").strip()
+    if not connector_id or not stream:
+        return []
+    endpoint = _saved_source_endpoint(
+        connector_id,
+        source_table=source_table,
+        source_collection=source_collection,
+        stream=stream,
+        source_schema=source_schema,
+        source_database=source_database,
+        source_config=source_config,
+    )
+    if endpoint is None:
+        return []
+    try:
+        from services.procedure_source import is_callable_source
+
+        if is_callable_source(endpoint):
+            return []
+    except Exception:  # noqa: BLE001 — unread mode blocks, it does not approve
+        return []
+    return endpoint_primary_key_columns(endpoint)
 
 
 def live_source_column_types(
@@ -54,16 +182,49 @@ def live_source_column_types(
     source_collection: str = "",
     source_schema: str = "",
     source_database: str = "",
+    source_config: Any = None,
 ) -> dict[str, str]:
     """Introspect the saved source connector for its declared column types.
 
     Returns ``{}`` when there is no saved connector or introspection fails —
     Validate then keeps the posted declaration rather than inventing types.
+
+    A query / procedure source (``source_config`` carries the extract) is
+    described by its result set, the shape Execute reads. Its stream label is
+    the extract's first relation (``SELECT … FROM orders`` → ``orders``), so a
+    catalog lookup by that name described the base *table* and merged every
+    table column into the query's types: Validate then fingerprinted a schema
+    Execute never reads ("source schema drifted since Validate").
     """
     connector_id = (source_connector_id or "").strip()
     stream = (source_table or source_collection or "").strip()
     if not connector_id or not stream:
         return {}
+    endpoint = _saved_source_endpoint(
+        connector_id,
+        source_table=source_table,
+        source_collection=source_collection,
+        stream=stream,
+        source_schema=source_schema,
+        source_database=source_database,
+        source_config=source_config,
+    )
+    if endpoint is None:
+        return {}
+    return endpoint_source_column_types(endpoint)
+
+
+def _saved_source_endpoint(
+    connector_id: str,
+    *,
+    source_table: str,
+    source_collection: str,
+    stream: str,
+    source_schema: str,
+    source_database: str,
+    source_config: Any,
+):
+    """The saved source as Execute builds it, extract (query/CALL + binds) included."""
     try:
         from services.connector_probe import endpoint_from_saved_connector
 
@@ -74,12 +235,25 @@ def live_source_column_types(
             schema=source_schema or "",
             database=source_database or "",
         )
-        if endpoint is None:
-            return {}
     except Exception:
         logger.debug("live source introspect failed for %s", connector_id, exc_info=True)
-        return {}
-    return endpoint_source_column_types(endpoint)
+        return None
+    if endpoint is None or source_config is None:
+        return endpoint
+    try:
+        from services.procedure_source import (
+            is_callable_source,
+            merge_callable_source_extra,
+        )
+
+        if is_callable_source(source_config):
+            endpoint.extra = merge_callable_source_extra(
+                endpoint.extra, source_config
+            )
+    except Exception:
+        logger.debug("callable source extract merge failed", exc_info=True)
+        return None
+    return endpoint
 
 
 def reconcile_source_types(
@@ -136,8 +310,42 @@ def restamp_mapping_source_types(
     out: list[dict[str, Any]] = []
     for m in mappings or []:
         row = dict(m)
-        live = str(types.get(str(row.get("source") or "")) or "").strip()
+        live = str(column_type_or_none(types, str(row.get("source") or "")) or "").strip()
         if live:
             row["source_type"] = live
         out.append(row)
+    return out
+
+
+def empty_source_column_types(
+    column_types: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None,
+    *,
+    declared: dict[str, str] | None = None,
+    previous: dict[str, str] | None = None,
+    destination: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Column types for a measured-empty source whose types were only inferred.
+
+    A header-only file has names and no values, so ``string`` on every column
+    is a placeholder, not evidence. Judging it as evidence paused the route for
+    a ``type_change`` and refused ``string → INTEGER`` into the table it loads
+    every day. With no value to contradict it, the known contract stands: the
+    declared type, else the last run's, else the live destination column the
+    mapping writes by name. A column none of them knows keeps its placeholder.
+    """
+    out = dict(column_types or {})
+    targets = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    for col in list(out):
+        known = (
+            column_type_or_none(declared or {}, col)
+            or column_type_or_none(previous or {}, col)
+            or column_type_or_none(destination or {}, targets.get(col) or col)
+        )
+        if known and str(known).strip():
+            out[col] = str(known).strip()
     return out

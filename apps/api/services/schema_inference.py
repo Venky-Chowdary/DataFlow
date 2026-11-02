@@ -7,8 +7,10 @@ this module before Map / preflight / CREATE TABLE. Rules are fail-safe:
 
 1. **Values beat name guesses.** A typed logical type is emitted only when
    every non-empty sample parses as that type.
-2. **Booleans are true/false family only** (true/false/yes/no/0/1/t/f/y/n/on/off).
-   Words like ``active`` / ``inactive`` / ``pending`` / ``invalidated`` are
+2. **Booleans are write-path tokens only** (true/false/t/f/1/0 — the same
+   set ``transform_engine.CANONICAL_BOOLEAN_TOKENS`` binds). Informal
+   yes/no/y/n/on/off stay VARCHAR: inventing BOOLEAN dest quarantines every
+   informal row. Words like ``active`` / ``inactive`` / ``pending`` are
    **string enums**, never booleans.
 3. **Name heuristics only disambiguate** (e.g. 0/1 on ``is_active`` → BOOLEAN;
    epoch digits on ``created_at`` → TIMESTAMP). Names never invent a type that
@@ -16,7 +18,8 @@ this module before Map / preflight / CREATE TABLE. Rules are fail-safe:
 4. **Widen to VARCHAR/TEXT** on mixed or ambiguous columns — never invent a
    tight type that will fail dry-run on the next unseen value.
 
-Public API: ``infer_type``, ``infer_column``, ``infer_columns_from_rows``.
+Public API: ``classify_value``, ``infer_type``, ``infer_column``,
+``infer_columns_from_rows``.
 """
 
 from __future__ import annotations
@@ -28,15 +31,22 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
-from services.decimal_observe import observe_numeric_samples
+from services.decimal_observe import observe_source_numeric_samples
+from services.type_lattice import join_logical_types
 from services.transform_engine import (
+    CANONICAL_BOOLEAN_TOKENS,
     NULL_SENTINELS,
     _active_date_locale,
     _parse_date,
     _parse_datetime,
     _parse_decimal,
+    vector_component_carrier,
 )
-from services.value_serializer import evidence_samples, is_null_evidence
+from services.value_serializer import (
+    evidence_samples,
+    is_null_evidence,
+    is_reader_null_cell,
+)
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
@@ -44,12 +54,6 @@ LOGICAL_TYPES = frozenset({
     "VARCHAR", "TEXT", "UUID", "JSON", "ARRAY", "BINARY",
     "INTERVAL", "GEOGRAPHY", "VECTOR",
 })
-
-# Informal tokens for *type detection* on flag-shaped names only.
-# Write path (transform_engine / sql_bind) stays canonical — yes/on do not invent TRUE.
-_INFORMAL_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
-_INFORMAL_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
-_BOOLEAN_STRINGS = _INFORMAL_BOOL_TRUE | _INFORMAL_BOOL_FALSE
 
 # Status / lifecycle vocabulary — never treat as boolean literals.
 _STATUS_ENUM_TOKENS = frozenset({
@@ -61,6 +65,25 @@ _STATUS_ENUM_TOKENS = frozenset({
     "ok", "error", "warning", "info", "unknown", "n/a", "na", "none",
     "positive", "negative", "aye", "nope",
 })
+
+
+def _is_leading_zero_code_name(name: str) -> bool:
+    """Zip, postal, account, routing, and SSN names stay text.
+
+    A single ``0`` or an id sequence ``0..49`` is still an integer. This only
+    matches the code-shaped names Excel coerces before the zero can be seen.
+    """
+    raw = (name or "").strip()
+    if not raw or _is_boolean_field_name(raw):
+        return False
+    folded = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw).lower()
+    return bool(
+        re.search(
+            r"(?:^|_)(zip_?code|postal_?code|post_?code|postcode|zip|postal|"
+            r"account_?number|routing_?number|ssn)(?:_|$)",
+            folded,
+        )
+    )
 
 
 def _is_boolean_field_name(name: str) -> bool:
@@ -145,22 +168,16 @@ def _is_base64(value: str) -> bool:
 
 
 def _looks_like_binary_payload(value: str, *, field_name: str | None = None) -> bool:
-    """Promote to BINARY only with name evidence or strong payload evidence.
+    """Promote to BINARY only when the field name says the value is a payload.
 
-    Short base64-looking tokens (session ids, opaque keys) must stay VARCHAR —
-    never invent BINARY DDL from a single 12–20 char sample (Airbyte trap).
+    Letters, digits, and the base64 alphabet are ordinary text. A long note,
+    a token, or a code that happens to decode is not a binary column, and
+    decoding it into bytes is not a preserve. Short base64-looking tokens
+    stay VARCHAR for the same reason.
     """
-    if not _is_base64(value):
+    if not _is_binary_field_name(field_name or ""):
         return False
-    if _is_binary_field_name(field_name or ""):
-        return True
-    s = value.strip()
-    # Strong evidence without a binary-ish name: longer payload + padding or high entropy.
-    if len(s) < 32:
-        return False
-    if s.endswith("=") or s.endswith("=="):
-        return True
-    return len(set(s)) >= 12
+    return _is_base64(value)
 
 
 # Binary payloads only — not generic "data"/"key"/"token" (those are often IDs/JWTs).
@@ -217,7 +234,7 @@ def _looks_like_string_enum(samples: list[str]) -> bool:
     distinct = {v.lower() for v in vals}
     if not distinct:
         return False
-    if distinct <= _BOOLEAN_STRINGS:
+    if distinct <= CANONICAL_BOOLEAN_TOKENS:
         return False
     if len(distinct) > 32:
         return False
@@ -243,16 +260,23 @@ def _parse_vector_array(value: str) -> list[float] | None:
     if not (s.startswith("[") and s.endswith("]")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, list) or len(parsed) < 2:
         return None
     out: list[float] = []
     for item in parsed:
+        # JSON numbers only — string components are ARRAY / write-path, not
+        # inferred VECTOR. bool ⊂ int must not invent a 1.0 dimension.
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return None
-        out.append(float(item))
+        bound = vector_component_carrier(item)
+        if bound is None:
+            return None
+        out.append(bound)
     return out
 
 
@@ -296,7 +320,7 @@ def is_geography_wire(value: Any) -> bool:
     Rejects empty / clearly non-spatial strings so writers can quarantine fail-closed
     instead of letting the driver invent NULLs or abort mid-batch.
     """
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, (bytes, bytearray, memoryview)):
         return len(value) > 0
@@ -323,7 +347,7 @@ def is_geography_wire(value: Any) -> bool:
 
 def is_interval_wire(value: Any) -> bool:
     """True when a cell looks like an INTERVAL identity payload (ISO-8601 / SQL)."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, (int, float)):
         # Raw numeric seconds/days is ambiguous — refuse inventing INTERVAL.
@@ -342,13 +366,45 @@ def is_interval_wire(value: Any) -> bool:
     return _looks_like_interval(text)
 
 
+def is_zero_duration_interval_bind(value: Any) -> bool:
+    """Dest-typed INTERVAL zero duration — not a global invent of INTERVAL.
+
+    ``is_interval_wire`` refuses raw numeric / TIME-shaped ``00:00:00`` so a
+    midnight TIME cell does not become INTERVAL. When the destination column
+    is already INTERVAL, PG ``INTERVAL '0'`` / ``timedelta(0)`` serializes as
+    ``0`` or ``00:00:00`` and must bind. Non-zero integers stay refused.
+    """
+    if is_reader_null_cell(value):
+        return False
+    if isinstance(value, bool):
+        return False
+    try:
+        from datetime import timedelta
+
+        if isinstance(value, timedelta):
+            return value.total_seconds() == 0
+    except Exception:
+        pass
+    if isinstance(value, (int, float)) and float(value) == 0:
+        return True
+    text = str(value).strip()
+    if not text:
+        return False
+    folded = text.lower()
+    if folded in {"0", "0.0", "+0", "-0", "pt0s", "p0d", "p0y", "p0dt0h0m0s"}:
+        return True
+    if folded in {"0 seconds", "0 second", "0 days", "0 day"}:
+        return True
+    return bool(re.fullmatch(r"[+-]?0+:0{2}:0{2}(?:\.0+)?", text))
+
+
 def interval_wire_family(value: Any) -> str | None:
     """Return ``ym`` / ``ds`` when the wire payload is family-specific, else None.
 
     Used by write quarantine so YEAR-MONTH values never bind into DAY-SECOND DDL
     (and vice versa) — ANSI/Oracle/Snowflake family polarity.
     """
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     try:
         from datetime import timedelta
@@ -394,7 +450,9 @@ def interval_wire_family(value: Any) -> str | None:
 
 def geography_wire_srid(value: Any) -> int | None:
     """Extract SRID from EWKT (``SRID=4326;POINT(...)``) when present."""
-    if value is None or isinstance(value, (bytes, bytearray, memoryview, dict)):
+    if is_reader_null_cell(value) or isinstance(
+        value, (bytes, bytearray, memoryview, dict)
+    ):
         return None
     text = str(value).strip()
     m = re.match(r"^\s*SRID\s*=\s*(\d+)\s*;", text, re.I)
@@ -409,7 +467,9 @@ def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | Non
     if not ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
 
@@ -429,7 +489,32 @@ def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | Non
     return "JSON"
 
 
-def _classify_value(value: str, *, field_name: str | None = None) -> str:
+def _has_explicit_timezone_suffix(value: str) -> bool:
+    return bool(
+        re.search(r"(Z|[+-]\d{2}:?\d{2})$", value, re.I)
+        or re.search(r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", value)
+    )
+
+
+def _refuses_numeric_inference(text: str) -> bool:
+    """True when a token must stay text instead of INTEGER/DECIMAL.
+
+    Leading ``+``, internal whitespace, parentheses, and currency markers are
+    identity data (phone, money text). Stripping them and inferring a number
+    drops the marker and then fails or corrupts the column.
+    """
+    if any(ch.isspace() for ch in text):
+        return True
+    if text[:1] in "+(":
+        return True
+    if "%" in text:
+        return True
+    from services.transform_engine import _CURRENCY_RE
+
+    return _CURRENCY_RE.search(text) is not None
+
+
+def classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
         return "VARCHAR"
@@ -455,7 +540,7 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         return "BINARY"
 
     low = s.strip().lower()
-    if low in _BOOLEAN_STRINGS:
+    if low in CANONICAL_BOOLEAN_TOKENS:
         # Defer 0/1 disambiguation to infer_type (field name known).
         if low in {"0", "1"}:
             return "INTEGER"
@@ -478,8 +563,18 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
 
     if _parse_datetime(s, date_locale=active_locale) is not None:
         # Preserve TZ awareness when the sample carries Z / offset — never invent SRID/cast.
-        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I):
+        # pgoutput and some CSV exports use a hours-only offset (``+00``, ``+05``).
+        # Requiring four digits classified those instants as text, and the plan
+        # then blocked the real timestamptz column as a conversion to TEXT.
+        if _has_explicit_timezone_suffix(s):
             return "TIMESTAMPTZ"
+        # Excel stores a date-only cell as midnight and serializes it with
+        # T00:00:00. That is a DATE. A SQL timestamp that happens to be
+        # midnight uses a space (``2026-10-01 00:00:00``). Treating that as
+        # DATE dropped the time and then blocked a later non-midnight row
+        # as lossy (QA R2-018). Only the Excel ``T`` form is a date.
+        if re.search(r"T00:00:00(?:\.0+)?$", s):
+            return "DATE"
         return "TIMESTAMP"
 
     for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
@@ -489,8 +584,30 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         except ValueError:
             continue
 
-    decimal_parsed = _parse_decimal(s)
+    # '45%' is a percentage token. Stripping the marker and inferring INTEGER
+    # then blocks the same value as a lossy cast (QA R2-017). Keep the text.
+    if s.rstrip().endswith("%"):
+        return "VARCHAR"
+
+    # Phone numbers, accounting parentheses, and currency are not integers.
+    # ``+1 555 010 0001`` and ``(555) 123-4567`` used to survive marker
+    # stripping and land as BIGINT, which then failed the whole job (R4-D01).
+    # A plain ``42`` (outer whitespace already removed) stays numeric. Long
+    # prose still falls through to TEXT — whitespace only blocks the numeric
+    # carrier, it does not shorten a narrative.
+    if not _refuses_numeric_inference(s):
+        decimal_parsed = _parse_decimal(s)
+    else:
+        decimal_parsed = None
     if decimal_parsed is not None:
+        from services.transform_engine import numeric_text_without_markers
+
+        marked = numeric_text_without_markers(s) or s
+        digits_only = marked[1:] if marked[:1] in "+-" else marked
+        # "0" and "0.5" are numbers. "02115" and "007" are codes: a numeric
+        # carrier drops the zero and the later VARCHAR check then blocks.
+        if len(digits_only) > 1 and digits_only[:1] == "0" and digits_only[1:2] != ".":
+            return "VARCHAR"
         if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
         try:
@@ -506,6 +623,9 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if _EMAIL_RE.match(s):
         return "VARCHAR"
     return "VARCHAR"
+
+
+_classify_value = classify_value
 
 
 @contextmanager
@@ -558,11 +678,122 @@ def infer_schema_map(
     """
     schema: dict[str, str] = {}
     intel: dict[str, dict[str, Any]] = {}
-    for field, samples in samples_by_field.items():
-        rec = infer_column(samples, field_name=field)
-        schema[field] = str(rec["logical_type"])
-        intel[field] = rec
+    token = _settled_number_locale(samples_by_field)
+    try:
+        for field, samples in samples_by_field.items():
+            rec = infer_column(samples, field_name=field)
+            schema[field] = str(rec["logical_type"])
+            intel[field] = rec
+    finally:
+        if token is not None:
+            from services.transform_engine import reset_active_number_locale
+
+            reset_active_number_locale(token)
     return schema, intel
+
+
+def _settled_number_locale(samples_by_field: dict[str, list[str]]) -> Any:
+    """Infer under the grouping contract the transfer itself will read under.
+
+    Auto refuses ``10.129`` as US-decimal-vs-EU-grouping ambiguous, so the
+    column inferred VARCHAR while preflight and the writer read it as US and
+    landed a DECIMAL — Map then billed the difference as a VARCHAR→DECIMAL
+    fidelity collapse and the route dead-ended.
+    """
+    from services.transform_engine import pin_settled_number_locale
+
+    if not samples_by_field:
+        return None
+    columns = list(samples_by_field)
+    width = max((len(v) for v in samples_by_field.values()), default=0)
+    rows = [
+        {c: (samples_by_field[c][i] if i < len(samples_by_field[c]) else None)
+         for c in columns}
+        for i in range(width)
+    ]
+    return pin_settled_number_locale(rows, columns)
+
+
+def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool | None:
+    """Do the samples fit a declared exact-numeric carrier?
+
+    ``None`` when the declared type is not an exact numeric one with a known
+    width, so the caller falls back to inference. Otherwise the verdict is
+    arithmetic: every sample must parse and fit the declared precision/scale,
+    with no rounding invented (a value needing more scale than the column keeps
+    does not fit — the write path refuses to quantize silently).
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from services.numeric_fit import integer_storage_bounds
+    from services.transform_engine import apply_transform, numeric_text_without_markers
+    from services.type_system import (
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    logical = normalize_logical_type(logical_type)
+    if logical not in {"integer", "decimal"}:
+        return None
+    precision, scale = parse_numeric_precision_scale(logical_type)
+    bounds = integer_storage_bounds(logical_type) if logical == "integer" else None
+    if precision is None and bounds is None:
+        if logical != "decimal":
+            # Unqualified INTEGER: the physical width is engine-dependent, so
+            # only the destination-resolved carrier can answer.
+            return None
+        # Unqualified DECIMAL asks one question — are these numbers? — and
+        # arithmetic answers it. Deferring to ``infer_type`` said "no" for long
+        # digit runs, which is how a value the destination stores exactly ended
+        # up diverted into a text column.
+        precision, scale = None, None
+    for raw in samples[:200]:
+        text = str(raw).strip()
+        if not text:
+            continue
+        # A leading zero is judged on the number itself, after the markers a
+        # numeric read removes (percent sign, currency, accounting negative).
+        # Judging the raw text called "0%" a zip code and diverted a percentage
+        # column into TEXT, where the writer then stored "12.5%" verbatim.
+        marked = numeric_text_without_markers(text) or text
+        digits_only = marked[1:] if marked[:1] in "+-" else marked
+        if len(digits_only) > 1 and digits_only[:1] == "0" and digits_only[1:2] != ".":
+            # A leading zero is data (zip codes, account numbers) and no numeric
+            # carrier keeps it — this is a text column, whatever it parses as.
+            return False
+        # The carrier decision judges the number under the marker. The write
+        # path still refuses a bare decimal/integer transform on "$" or "%",
+        # so a currency cell is not silently stored; it is only kept off a
+        # text twin when the destination column is already numeric.
+        probe = marked if marked else text
+        coerced, err = apply_transform(probe, "decimal")
+        if err:
+            return False
+        try:
+            value = Decimal(str(coerced))
+        except (InvalidOperation, ValueError, ArithmeticError):
+            return False
+        if not value.is_finite():
+            return False
+        if bounds is not None:
+            if value != value.to_integral_value():
+                return False
+            if not (bounds[0] <= int(value) <= bounds[1]):
+                return False
+            continue
+        if precision is None:
+            # Width unknown — the value being a finite number is the verdict.
+            continue
+        exponent = value.as_tuple().exponent
+        used_scale = -int(exponent) if isinstance(exponent, int) and exponent < 0 else 0
+        declared_scale = int(scale or 0)
+        if used_scale > declared_scale:
+            return False
+        digits = len(value.as_tuple().digits)
+        integral_digits = max(digits - used_scale, 1)
+        if integral_digits > int(precision or 0) - declared_scale:
+            return False
+    return True
 
 
 def samples_fit_logical_type(samples: list[str], logical_type: str, *, field_name: str | None = None) -> bool:
@@ -575,6 +806,15 @@ def samples_fit_logical_type(samples: list[str], logical_type: str, *, field_nam
     lt = (logical_type or "VARCHAR").upper()
     if lt in {"VARCHAR", "TEXT", "STRING", "CHAR"}:
         return True
+    # A declared numeric carrier is answered by arithmetic, not by inference.
+    # ``infer_type`` keeps long digit runs as VARCHAR so account numbers and zip
+    # codes are not turned into integers; taking that as "does not fit
+    # DECIMAL(38,0)" made Map invent a shadow ``wide_num_text`` column beside a
+    # destination DECIMAL(38,0) that plainly holds the value — and the real
+    # column stayed NULL for every row.
+    numeric_verdict = _samples_fit_declared_numeric(non_empty, lt)
+    if numeric_verdict is not None:
+        return numeric_verdict
     # Re-infer; if engine widens away from proposed type, samples do not fit.
     inferred = infer_type(non_empty, field_name=field_name)
     if inferred in {"VARCHAR", "TEXT"} and lt not in {"VARCHAR", "TEXT", "STRING"}:
@@ -648,11 +888,10 @@ def safe_ddl_logical_type(
     carrier_src = ddl_carrier_type(proposed or source_type or "VARCHAR")
     if normalize_logical_type(carrier_src) == LOGICAL_DECIMAL:
         precision, _scale = parse_numeric_precision_scale(carrier_src)
+        # Declared DECIMAL(p,s) is the carrier. A sample that does not fit
+        # quarantines on write — it must not rewrite the column as text.
         if precision is not None:
-            if not samples or samples_fit_logical_type(
-                samples, "DECIMAL", field_name=field_name
-            ):
-                return carrier_src
+            return carrier_src
     if normalize_logical_type(carrier_src) == "vector":
         dim = parse_vector_dimension(carrier_src)
         # Keep declared width even when samples are opaque float arrays as text.
@@ -744,12 +983,14 @@ def infer_column(
             "samples": non_empty[:8],
         }
 
-    # true/false/yes/no mixed with 0/1 must stay BOOLEAN — classifying "1" as
-    # INTEGER alone would widen the column to VARCHAR and skip bool coercion.
-    if all(v.lower() in _BOOLEAN_STRINGS for v in non_empty):
+    # Write-path tokens only. Informal yes/on mixed with true/1 must stay
+    # VARCHAR — classifying them BOOLEAN invents a dest Execute cannot bind.
+    # Canonical true/false mixed with 0/1 must stay BOOLEAN (classifying "1"
+    # as INTEGER alone would widen and skip bool coercion).
+    if all(v.lower() in CANONICAL_BOOLEAN_TOKENS for v in non_empty):
         only_01 = all(v.strip() in {"0", "1"} for v in non_empty)
         if (not only_01) or _is_boolean_field_name(field_name or ""):
-            notes.append("boolean token family (true/false/0/1) → BOOLEAN")
+            notes.append("canonical boolean wire (true/false/t/f/0/1) → BOOLEAN")
             return {
                 "name": field_name or "",
                 "logical_type": "BOOLEAN",
@@ -759,21 +1000,62 @@ def infer_column(
                 "samples": non_empty[:8],
             }
 
+    # A column the decimal write path can bind is a decimal. Every sample must
+    # parse (so a stray word stays text) and at least one must carry a currency
+    # or percent marker (so a plain integer column is not relabeled). A mixed
+    # money column still qualifies: ``$1,000.00`` next to ``1,234,567`` and
+    # ``1 000 000.89``. classify_value still reports one token as VARCHAR so a
+    # phone or a stray marker is not inferred as an integer (R4-D07). A lone
+    # ``1,234`` does not parse, so it cannot pull the column into DECIMAL.
+    from services.transform_engine import (
+        _numeric_text_has_markers,
+        decimal_wire_value,
+    )
+
+    parsed_decimals = [decimal_wire_value(sample) for sample in non_empty]
+    if all(value is not None for value in parsed_decimals) and any(
+        _numeric_text_has_markers(sample) for sample in non_empty
+    ):
+        notes.append(
+            "every sample is a currency or percent literal the decimal write path binds"
+        )
+        return {
+            "name": field_name or "",
+            "logical_type": "DECIMAL",
+            "semantic_role": "currency",
+            "confidence": 0.9,
+            "notes": notes,
+            "samples": non_empty[:8],
+        }
+
     with _column_date_locale(non_empty):
         counts: Counter[str] = Counter(
-            _classify_value(s, field_name=field_name) for s in non_empty
+            _classify_value(sample, field_name=field_name) for sample in non_empty
         )
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:
         # Sample-aware DECIMAL(p,s) / FLOAT invent — never bare DECIMAL → (38,15).
-        obs = observe_numeric_samples(non_empty)
+        obs = observe_source_numeric_samples(non_empty)
         inferred = str(obs.get("carrier") or ("DECIMAL" if "DECIMAL" in types else "INTEGER"))
         role = "numeric"
         if obs.get("kind") == "ieee_float":
-            notes.append(
-                "IEEE/Excel float residue — invent FLOAT (not fake money DECIMAL)"
-            )
+            from services.decimal_observe import exact_residue_carrier
+
+            exact = exact_residue_carrier(obs)
+            if exact:
+                # The cells are text: ``0.30000000000000004`` is that decimal.
+                # An exact DECIMAL sized from the written scale holds it as is;
+                # FLOAT would re-round the ordinary cells beside it (D161).
+                inferred = exact
+                notes.append(
+                    f"IEEE/Excel-looking residue kept exact as {exact} "
+                    "(text cells are the value)"
+                )
+            else:
+                notes.append(
+                    "IEEE/Excel float residue — invent FLOAT (not fake money DECIMAL)"
+                )
         elif obs.get("kind") == "fixed_decimal":
             notes.append(
                 f"observed DECIMAL({obs.get('precision')},{obs.get('scale')}) "
@@ -787,8 +1069,13 @@ def infer_column(
         # or when a temporal field name has at least one TZ sample.
         if tz_count > 0 and (tz_count == len(non_empty) or (field_name and _is_timestamp_field_name(field_name))):
             inferred = "TIMESTAMPTZ"
-        elif counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
-            inferred = "TIMESTAMP"
+        elif counts.get("TIMESTAMP", 0) and (
+            counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) >= counts.get("TIME", 0)
+        ):
+            # DATE and TIMESTAMP join on the lattice; they are not a vote.
+            # Midnight cells classify as DATE, so two of them outvoted one
+            # 14:30 stamp and the column landed as DATE with the time dropped.
+            inferred = join_logical_types("DATE" if counts.get("DATE") else None, "TIMESTAMP")
         elif counts.get("DATE", 0) >= counts.get("TIME", 0):
             inferred = "DATE"
         else:
@@ -856,16 +1143,28 @@ def infer_column(
     if inferred in {"GEOGRAPHY", "INTERVAL"}:
         notes.append(f"{inferred} — identity payload (no invented cast)")
 
-    # 0/1 → BOOLEAN only on flag-shaped names
+    # 0/1 → BOOLEAN only on flag-shaped names (canonical wire, not yes/no).
     if (
         inferred in {"INTEGER", "VARCHAR"}
         and field_name
         and _is_boolean_field_name(field_name)
-        and all(v.lower() in _BOOLEAN_STRINGS for v in non_empty)
+        and all(v.strip() in {"0", "1"} for v in non_empty)
     ):
         inferred = "BOOLEAN"
         role = "boolean_flag"
         notes.append("0/1 on flag-shaped field name → BOOLEAN")
+
+    # Excel already dropped the leading zero (2115 in a zip_code column).
+    # The name is the remaining evidence. Bare id/code stay numeric.
+    if (
+        field_name
+        and inferred != "BOOLEAN"
+        and (inferred in {"INTEGER", "DECIMAL"} or str(inferred).startswith("DECIMAL"))
+        and _is_leading_zero_code_name(field_name)
+    ):
+        inferred = "VARCHAR"
+        role = "text"
+        notes.append("code-shaped name keeps leading zeros — VARCHAR")
 
     # Never keep BOOLEAN if any sample is status vocabulary
     if inferred == "BOOLEAN" and any(v.lower() in _STATUS_ENUM_TOKENS for v in non_empty):
@@ -874,18 +1173,28 @@ def infer_column(
         notes.append("status vocabulary present — demoted BOOLEAN → VARCHAR")
 
     if field_name and _is_binary_field_name(field_name):
+        # A name like ``payload`` is not a license to decode. Hex digests are
+        # valid base64 and were written as BYTEA labelled preserve (DEF-C-033).
+        # Pure hex stays text. Real base64, including a short token in the
+        # same column, still promotes.
         valid = 0
         for v in non_empty:
             s = v.strip()
-            if len(s) >= 4 and len(s) % 4 == 0 and _BASE64_RE.match(s):
-                try:
-                    import base64
+            if len(s) < 4 or len(s) % 4 != 0 or not _BASE64_RE.match(s):
+                continue
+            if all(c in "0123456789abcdefABCDEF" for c in s):
+                continue
+            if len(s) > 64 and len(set(s)) <= 3:
+                continue
+            if s.isalpha() and len(s) > 32:
+                continue
+            try:
+                import base64
 
-                    base64.b64decode(s, validate=True)
-                    valid += 1
-                except (ValueError, TypeError):
-                    # Invalid base64 padding/alphabet — treat as non-binary below.
-                    continue
+                base64.b64decode(s, validate=True)
+                valid += 1
+            except (ValueError, TypeError):
+                continue
         if valid == len(non_empty):
             inferred = "BINARY"
             role = "binary"
@@ -910,7 +1219,7 @@ def infer_column(
                     int(v)
                 # Re-observe so a value beyond int64 still widens to DECIMAL
                 # rather than being forced into INTEGER.
-                obs = observe_numeric_samples(non_empty)
+                obs = observe_source_numeric_samples(non_empty)
                 inferred = str(obs.get("carrier") or "INTEGER")
                 role = "numeric"
                 notes.append("long digits without temporal name — numeric not TIMESTAMP")
@@ -925,6 +1234,16 @@ def infer_column(
             role = "numeric"
             notes.append("8-digit values without date-ish name — not DATE")
 
+    # A present empty string is a text value. Dropping it as "no evidence"
+    # left a JSON/ARRAY vote, and the write then rejected ``""`` (CSV/TSV
+    # cannot spell NULL). Widen so the empty cell and the JSON text both land.
+    if inferred in {"JSON", "ARRAY"} and any(
+        isinstance(sample, str) and sample.strip() == "" for sample in (samples or [])
+    ):
+        inferred = "VARCHAR"
+        role = "text"
+        notes.append("empty string is a stored text value — not a JSON/ARRAY column")
+
     confidence = 0.99 if len(types) == 1 and not notes else 0.85
     if role == "string_enum":
         confidence = 0.95
@@ -937,6 +1256,91 @@ def infer_column(
         "notes": notes,
         "samples": non_empty[:8],
     }
+
+
+# A self-describing source (BSON, JSON on a Kafka topic, DynamoDB attribute
+# values) spells numbers and booleans natively. A value it sent as a *string*
+# was declared a string, so typing it INTEGER / BOOLEAN from what the text looks
+# like re-types the declaration: Mongo 't'/'f' read as BOOLEAN (D194), a Kafka
+# JSON "20240101" read as TIMESTAMP and then blocked as a lossy BIGINT (D190).
+# CSV and other untyped text declare nothing and keep :func:`infer_column`.
+_SELF_DESCRIBING_SCALARS = frozenset({
+    "INTEGER", "BIGINT", "SMALLINT", "INT", "DECIMAL", "NUMERIC",
+    "FLOAT", "DOUBLE", "REAL", "BOOLEAN",
+})
+_TEMPORAL_LOGICALS = frozenset({"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"})
+_DIGITS_RE = re.compile(r"^[+\-]?\d+$")
+
+
+def declared_string_logical_type(
+    samples: list[str],
+    *,
+    field_name: str | None = None,
+) -> str:
+    """Logical type of a field whose source declared each sampled value a string.
+
+    The declaration wins over the look of the value:
+
+    * never a number or boolean — the source would have sent one;
+    * never a temporal type from bare digits — ``20240101`` / ``1700000000``
+      are text the source chose not to send as a number or a date.
+
+    Formatted literals the value-side has always recognised (an ISO instant,
+    a UUID, JSON text) are kept. Returns ``VARCHAR`` for text.
+    """
+    logical = str(
+        infer_column(list(samples or []), field_name=field_name).get("logical_type")
+        or "VARCHAR"
+    )
+    base = logical.split("(", 1)[0].strip().upper()
+    if base in _SELF_DESCRIBING_SCALARS:
+        return "VARCHAR"
+    if base in _TEMPORAL_LOGICALS and any(
+        _DIGITS_RE.match(str(s).strip()) for s in evidence_samples(samples)
+    ):
+        return "VARCHAR"
+    return logical
+
+
+# Engines whose every sampled value carries its own type, so a textual carrier
+# is the source's declaration rather than a header placeholder. Files / CSV
+# are absent on purpose: a header declares nothing.
+_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb"})
+_UNTYPED_TEXT_TOKENS = frozenset({"TEXT", "VARCHAR", "STRING", "S"})
+
+
+def is_self_describing_source(source_db: str) -> bool:
+    """True when the engine's text carrier is a per-value string declaration."""
+    return str(source_db or "").strip().lower() in _SELF_DESCRIBING_ENGINES
+
+
+def honor_declared_strings(
+    schema: dict[str, str],
+    declared: dict[str, str] | None,
+    samples_by_field: dict[str, list[Any]] | None,
+    source_db: str,
+) -> dict[str, str]:
+    """Undo sample re-typing of fields a self-describing source declared text.
+
+    ``merge_profiler_schema`` lets a profile replace a declared TEXT because a
+    CSV header declares nothing. A Mongo / Kafka / DynamoDB text carrier is a
+    per-value declaration, so the profile may only refine it as far as
+    :func:`declared_string_logical_type` allows (D190 / D194).
+    """
+    if not is_self_describing_source(source_db) or not declared:
+        return dict(schema)
+    out = dict(schema)
+    for col, decl in declared.items():
+        if col not in out or str(decl or "").strip().upper() not in _UNTYPED_TEXT_TOKENS:
+            continue
+        current = str(out.get(col) or "").split("(", 1)[0].strip().upper()
+        if current in _UNTYPED_TEXT_TOKENS:
+            continue
+        samples = [str(v) for v in ((samples_by_field or {}).get(col) or []) if v is not None]
+        out[col] = declared_string_logical_type(samples, field_name=col)
+        if out[col] == "VARCHAR" and str(decl).strip().upper() == "TEXT":
+            out[col] = "TEXT"
+    return out
 
 
 def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_samples: int = 50) -> list[dict]:

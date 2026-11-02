@@ -53,6 +53,10 @@ SEMANTIC_ROLES: dict[str, list[str]] = {
     "reference_number": ["reference_number", "ref_no", "ref", "reference", "txn_ref", "reference_num"],
     "description": ["description", "desc", "descr", "memo", "narrative", "details", "notes"],
     "status": ["status", "sts", "stat", "state", "payment_status", "order_status"],
+    "market_segment": [
+        "mktsegment", "mkt_segment", "market_segment", "marketsegment",
+        "segment", "cust_segment", "customer_segment",
+    ],
     "quantity": ["quantity", "qty", "units", "count", "quantity_ordered", "qty_ordered"],
     "quantity_ordered": ["quantity_ordered", "qty_ordered", "order_qty", "qty_ord"],
     "unit_price": ["unit_price", "unit_cost", "unit_prc", "price", "cost", "list_price", "sale_price"],
@@ -132,20 +136,25 @@ def _role_from_samples(samples: list[Any], inferred_type: str) -> tuple[str | No
     if not non_empty:
         return None, 0.0
 
+    from services.transform_engine import decimal_wire_value
+
     numeric = 0
     date_like = 0
     currency_like = 0
     id_like = 0
 
     for s in non_empty[:20]:
-        cleaned = s.replace(",", "").replace("$", "").strip()
-        if re.match(r"^-?\d+(\.\d+)?$", cleaned):
+        if decimal_wire_value(s) is not None:
             numeric += 1
         if re.match(r"^\d{4}-\d{2}-\d{2}", s) or re.match(r"^\d{8}$", s):
             date_like += 1
         if re.match(r"^[A-Z]{3}$", s.upper()) and len(s) == 3:
             currency_like += 1
-        if re.match(r"^(ACC|TXN|CUST|INV|REF)[-_]?\w+", s.upper()) or re.match(r"^[A-Z0-9]{8,}$", s):
+        # Identifiers need a prefix or a digit — all-alpha tokens like BUILDING
+        # are categorical, not generic record ids.
+        prefix_id = re.match(r"^(ACC|TXN|CUST|INV|REF)[-_]?\w+", s.upper())
+        mixed_id = bool(re.match(r"^[A-Z0-9]{8,}$", s) and re.search(r"\d", s))
+        if prefix_id or mixed_id:
             id_like += 1
 
     n = len(non_empty)
@@ -163,6 +172,23 @@ def _role_from_samples(samples: list[Any], inferred_type: str) -> tuple[str | No
         return "currency_code", 0.8
     if numeric / n >= 0.7 and inferred_type.upper() in {"INTEGER", "DECIMAL", "NUMBER", "FLOAT", "NUMERIC"}:
         return "numeric_value", 0.66
+    stringish = inferred_type.upper() in {"VARCHAR", "TEXT", "STRING", "NVARCHAR", "CHAR", "NCHAR"}
+    distinct = {s.upper() for s in non_empty[:40]}
+    alpha_tokens = [
+        s for s in non_empty[:20]
+        if re.match(r"^[A-Za-z][A-Za-z_-]{1,20}$", s)
+    ]
+    if (
+        stringish
+        and alpha_tokens
+        and len(alpha_tokens) / n >= 0.7
+        and all(len(s) <= 24 for s in distinct)
+        and (
+            (n >= 3 and len(distinct) <= 12 and len(distinct) / n <= 0.55)
+            or (n < 3 and not any(re.search(r"\d", s) for s in distinct))
+        )
+    ):
+        return "categorical", 0.74
     if id_like / n >= 0.5:
         return "identifier", 0.66
     # Full names (Somalia, California) — not ISO codes — beat *_code lexicon.
@@ -237,6 +263,8 @@ def _role_description(role: str) -> str:
         "numeric_value": "Generic numeric value",
         "proper_name_text": "Proper name / label text (not an ISO code)",
         "identifier": "Generic record identifier",
+        "categorical": "Categorical / enumeration-like attribute",
+        "market_segment": "Market or customer segment category",
         "order_number": "Order number or purchase order identifier",
         "invoice_number": "Invoice number or billing identifier",
         "transaction_id": "Transaction identifier",
@@ -333,12 +361,16 @@ def role_match_boost(source_role: str, target_role: str) -> float | None:
     if source_role in id_roles and target_role in id_roles:
         return 0.88
 
-    # Name / contact roles are interchangeable.
-    name_roles = {
-        "name", "full_name", "first_name", "last_name", "email_address",
-        "phone_number", "mobile_number",
-    }
+    # Person-name roles are interchangeable with other person names, and
+    # contact channels with each other — never across the boundary. Lumping
+    # them together scored ``phone_number -> full_name`` at 0.87 and
+    # auto-pinned phone digits into a name column (QA M02 false friend); a
+    # cross-role guess must reach the operator as review, not an auto-pin.
+    name_roles = {"name", "full_name", "first_name", "last_name"}
+    contact_roles = {"email_address", "phone_number", "mobile_number"}
     if source_role in name_roles and target_role in name_roles:
+        return 0.87
+    if source_role in contact_roles and target_role in contact_roles:
         return 0.87
 
     # Location / address roles are interchangeable.

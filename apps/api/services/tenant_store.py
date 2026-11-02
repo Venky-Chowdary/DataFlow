@@ -11,7 +11,6 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 import re
 import uuid
@@ -48,15 +47,24 @@ def _now() -> str:
 
 
 def _load_raw() -> dict[str, Any]:
+    """The store as a dict that always carries a ``tenants`` list.
+
+    Callers append to ``data["tenants"]`` directly, so a file written by an
+    older shape — or one missing the key — must not turn a tenant write into a
+    KeyError the caller reports as a server fault.
+    """
     if not STORE_PATH.exists():
         return {"tenants": []}
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return {"tenants": []}
-        return raw
     except Exception:
+        logger.warning("Tenant store at %s is unreadable; starting from empty", STORE_PATH)
         return {"tenants": []}
+    if not isinstance(raw, dict):
+        return {"tenants": []}
+    if not isinstance(raw.get("tenants"), list):
+        raw["tenants"] = []
+    return raw
 
 
 def _save(data: dict[str, Any]) -> None:
@@ -71,7 +79,7 @@ def _normalize_domain(domain: str) -> str:
     d = re.sub(r"^https?://", "", d)
     d = d.split("/")[0]
     d = d.split(":")[0]
-    d = re.sub(r"^www\\.", "", d)
+    d = re.sub(r"^www\.", "", d)
     return d
 
 
@@ -86,7 +94,15 @@ class Tenant:
     security_contact_email: str = ""
     mfa_required: bool = False
     session_timeout_hours: int = 8
+    # QA round 11: a saved session_timeout_hours is enforced. On by default;
+    # an admin can still record the hours without enforcing them (explicit
+    # False). Tenants saved before round 11 keep the False they were stored
+    # with until the hours are saved again (docs/DEPLOYMENT.md, backfill note).
+    enforce_session_timeout: bool = True
     ip_allowlist: list[str] = field(default_factory=list)
+    # Connector egress. Empty means private ranges stay refused. This is not
+    # the inbound API allowlist, and it is not a deploy setting.
+    egress_allowlist: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -105,7 +121,9 @@ class Tenant:
             security_contact_email=data.get("security_contact_email", ""),
             mfa_required=bool(data.get("mfa_required", False)),
             session_timeout_hours=int(data.get("session_timeout_hours", 8)),
+            enforce_session_timeout=bool(data.get("enforce_session_timeout", True)),
             ip_allowlist=list(data.get("ip_allowlist", []) or []),
+            egress_allowlist=list(data.get("egress_allowlist", []) or []),
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
         )
@@ -129,7 +147,9 @@ def create_tenant(
     security_contact_email: str = "",
     mfa_required: bool = False,
     session_timeout_hours: int = 8,
+    enforce_session_timeout: bool = True,
     ip_allowlist: list[str] | None = None,
+    egress_allowlist: list[str] | None = None,
 ) -> Tenant:
     """Create a new tenant bound to a workspace."""
     if custom_domain and get_tenant_by_domain(custom_domain):
@@ -149,7 +169,9 @@ def create_tenant(
         security_contact_email=security_contact_email.strip()[:128],
         mfa_required=mfa_required,
         session_timeout_hours=max(1, min(24, int(session_timeout_hours))),
+        enforce_session_timeout=bool(enforce_session_timeout),
         ip_allowlist=_validate_allowlist(ip_allowlist or []),
+        egress_allowlist=_validate_egress_allowlist(egress_allowlist or []),
     )
     data["tenants"].append(tenant.to_dict())
     _save(data)
@@ -171,7 +193,10 @@ def get_tenant_by_domain(domain: str) -> Tenant | None:
     if not target:
         return None
     for t in _tenants():
-        if t.normalized_domain == target:
+        # A record written before tenants were workspace-scoped belongs to no
+        # workspace, so host routing cannot decide what data it would serve:
+        # resolving it would answer a client domain out of an empty scope.
+        if t.normalized_domain == target and t.workspace_id:
             return t
     return None
 
@@ -183,6 +208,14 @@ def get_tenant_for_workspace(workspace_id: str) -> Tenant | None:
         if t.workspace_id == workspace_id:
             return t
     return None
+
+
+def tenants_for_workspaces(workspace_ids: list[str] | set[str] | frozenset[str]) -> list[Tenant]:
+    """The tenants of these workspaces, from one read of the store."""
+    wanted = {w for w in workspace_ids if w}
+    if not wanted:
+        return []
+    return [t for t in _tenants() if t.workspace_id in wanted]
 
 
 def list_tenants() -> list[Tenant]:
@@ -211,8 +244,15 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                 raw["mfa_required"] = bool(kwargs["mfa_required"])
             if "session_timeout_hours" in kwargs:
                 raw["session_timeout_hours"] = max(1, min(24, int(kwargs["session_timeout_hours"])))
+                # Saving the hours means "enforce them", unless the same save
+                # explicitly records them as policy only.
+                raw["enforce_session_timeout"] = bool(kwargs.get("enforce_session_timeout", True))
+            elif "enforce_session_timeout" in kwargs:
+                raw["enforce_session_timeout"] = bool(kwargs["enforce_session_timeout"])
             if "ip_allowlist" in kwargs:
                 raw["ip_allowlist"] = _validate_allowlist(kwargs["ip_allowlist"])
+            if "egress_allowlist" in kwargs:
+                raw["egress_allowlist"] = _validate_egress_allowlist(kwargs["egress_allowlist"])
             raw["updated_at"] = _now()
             _save(data)
             return Tenant.from_dict(raw)
@@ -239,6 +279,20 @@ def _validate_region(region: str) -> str:
     if re.match(r"^[a-z0-9-]{2,32}$", r):
         return r
     raise ValueError(f"Unsupported data region: {region}")
+
+
+def _validate_egress_allowlist(entries: list[str]) -> list[str]:
+    """CIDRs a workspace may dial. Metadata and link-local cannot be listed."""
+    from services.egress_guard import egress_allowlist_error
+
+    cleaned = [str(e or "").strip() for e in entries if str(e or "").strip()]
+    reason = egress_allowlist_error(cleaned)
+    if reason:
+        raise ValueError(reason)
+    out: list[str] = []
+    for entry in cleaned:
+        out.append(str(ipaddress.ip_network(entry, strict=False)))
+    return out
 
 
 def _validate_allowlist(entries: list[str]) -> list[str]:

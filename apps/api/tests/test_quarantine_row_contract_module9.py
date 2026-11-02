@@ -61,6 +61,39 @@ def test_normalize_fills_contract_without_inventing_pk():
     assert quarantine_row_missing_fields(row) == []
 
 
+def test_normalize_resolves_primary_key_column_names_to_values():
+    """Writer stamps primary_key=["id"]. That is not the row identity."""
+    from services.quarantine_dlq import replay_row_identity
+
+    a = normalize_quarantine_row(
+        {
+            "row": 2,
+            "column": "age",
+            "value": "not-a-number",
+            "primary_key": ["id"],
+            "pk_value": {"id": "2"},
+            "values": {"id": "2", "age": "not-a-number"},
+            "source_values": {"id": "2", "age": "not-a-number"},
+        }
+    )
+    b = normalize_quarantine_row(
+        {
+            "row": 4,
+            "column": "age",
+            "value": "also-bad",
+            "primary_key": ["id"],
+            "pk_value": {"id": "4"},
+            "values": {"id": "4", "age": "also-bad"},
+            "source_values": {"id": "4", "age": "also-bad"},
+        }
+    )
+    assert a["source_pk"] == "2"
+    assert b["source_pk"] == "4"
+    assert replay_row_identity(a) != replay_row_identity(b)
+    assert replay_row_identity(a) == "pk:2"
+    assert replay_row_identity(b) == "pk:4"
+
+
 def test_normalize_does_not_invent_pk_when_absent():
     row = normalize_quarantine_row(
         {"reason": "bad", "column": "x", "value": "1"},

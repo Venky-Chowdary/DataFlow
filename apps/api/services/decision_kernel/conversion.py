@@ -11,6 +11,7 @@ from services.conversion_contract import (
     ConversionClass,
     classify_conversion,
     classify_mapping,
+    create_new_mapping_reason,
 )
 
 # Stable alias — call sites should prefer kernel.classify_mapping.
@@ -22,4 +23,5 @@ __all__ = [
     "classify_conversion",
     "classify_mapping",
     "classify_mapping_conversion",
+    "create_new_mapping_reason",
 ]

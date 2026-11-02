@@ -1,0 +1,307 @@
+# Enterprise-2026 delivery status — what the research asked for, what exists
+
+Companion to the research report *"Datawrap — the future of enterprise data
+migration (2026)"* (written to the engineering host, deliberately not committed:
+it cites external sources and is a point-in-time analysis, not product doctrine).
+
+This file answers one question honestly: **of the capabilities that report says
+Datawrap must own, which are built and proved, and which are still words.**
+
+Three states are kept apart, because collapsing them is how a product gets
+called ready when it is not:
+
+* **Delivered** — merged, with tests, and exercised on a live engine or in the
+  browser. The evidence is named.
+* **In progress** — reproduced/designed, not merged.
+* **Not started** — no code exists. Saying so is the point of this file.
+
+Integration branch: `feature/Venkat-Analysis`. Last updated 2026-09-01.
+
+---
+
+## 1. The thesis being built against
+
+The report's conclusion was that the movement of bytes is commoditised
+(Fivetran, Airbyte, Debezium, LakeFlow, Openflow all move data), and the
+defensible position is **proof of movement**: a migration that can prove, months
+later and to somebody who does not trust the UI, what was moved, what was
+transformed, what was deliberately *not* moved, what was rejected, and that
+none of that record has been altered since.
+
+Everything below is scored against that thesis, not against feature count.
+
+---
+
+## 2. NOW tier — delivered
+
+### N1 · Field Reduction Ledger (gate **G16**) — **Delivered**
+
+PR [#125](https://github.com/Venky-Chowdary/DataFlow/pull/125).
+
+* **What it is.** Every source field carries a typed *disposition*: mapped,
+  transformed, consolidated, derived, or deliberately dropped. A drop is no
+  longer a boolean `intentional_omit`; it carries a reason code, an optional
+  note, an archive reference, a retention statement and a named approver.
+* **User surface.** Map shows a reduction control on every omitted row (reason
+  select + note + archive reference + retention + approver). Validate runs gate
+  **G16**, which fails closed on unaccounted fields — a field that is neither
+  mapped nor classified stops the run instead of vanishing.
+* **Evidence emitted.** The ledger is written into the signed proof pack, so the
+  export answers "which of the mainframe screen's 10 fields did not reach the
+  new 7, who decided that, and on what grounds".
+* **Strictness.** `FIELD_REDUCTION_STRICT` (reason code *and* named approver
+  mandatory) is **off by default** — turning it on retroactively fails existing
+  approved jobs. Product-owner decision still open: default it on for regulated
+  tenants.
+* **Regulatory driver.** SOX / BCBS 239 completeness of a field-reducing
+  migration; GDPR Art. 30 records of processing; general audit demand for
+  "prove the omission was a decision, not a loss".
+* **Proof.** 21 new tests; full API suite 6,911 passed; web `tsc -b` clean;
+  browser-verified on five paths (pass / warn / block / Execute refusal / real
+  execution with the ledger inside the exported proof pack). Two message
+  defects and one state-loss defect (returning to Map erased the recorded
+  reduction) were found *by* that browser run and fixed in the same PR.
+
+### N2 · AI egress manifest + metadata-only mapper — **Delivered**
+
+Canonical owner `apps/api/services/ai_egress.py`. Choke point:
+`Provider.generate` / `generate_agent` in `apps/api/src/ai/llm/provider.py`.
+
+* **What it is.** A per-job, hash-chained record of exactly what left the
+  customer boundary toward any model, plus an **enforced** mapper mode in which
+  the model sees column names, declared types, and aggregate profiles
+  (`n` / `non_empty` / `max_len` / `looks_numeric`) — never cell values. A
+  prompt that already interpolated samples is stripped before any provider
+  sees it; residual cells after strip replace the whole user prompt with a
+  refusal stub (fail closed). Each outbound `generate` / `generate_agent`
+  appends one `action=ai.egress` event committing to `payload_sha256` of the
+  bytes actually handed to the provider. **Cell values are never stored.**
+  Cloud providers (`openai`, `anthropic`) set
+  `crossed_customer_boundary=true`; local / Ollama are recorded as not
+  crossing. ITEM 1 is unchanged: the LLM still suggests only.
+* **Default.** **On.** `DATAWRAP_AI_METADATA_ONLY` /
+  `DATAFLOW_AI_METADATA_ONLY` unset = metadata-only. Opt out with `false`.
+  This is the opposite of `FIELD_REDUCTION_STRICT` (which stays off): security
+  review asked what left the boundary, and an unset flag that quietly sends
+  cells is a promise, not a gate.
+* **User surface.** Mapping API `engine.llm.metadata_only` +
+  `engine.llm.ai_egress`; signed proof pack field `ai_egress`; chain action
+  `ai.egress`. Studio Map before a job exists records `map:unscoped`; plan
+  mapping binds `plan_id`; `/map` accepts optional `job_id`. No Map chrome
+  was added — the auditor-visible proof is the pack and the chain.
+* **Honesty.** No cloud LLM key on this box, so live OpenAI/Anthropic egress
+  is not claimed. Independent reread is a file-backed audit JSONL, not
+  `last_manifest()`.
+* **Proof.** 52 targeted tests passed on this branch
+  (`test_ai_egress_n2` 10 + `test_llm_mapping` 14 + ITEM-1 + signed proof pack
+  + evidence chain). Independent JSONL reread of `action=ai.egress` (not
+  `last_manifest()`). No cloud LLM key — live OpenAI/Anthropic not claimed.
+
+### N4 · Population-level code-system crosswalk coverage (gate **G20**) — **Delivered**
+
+Owner: `apps/api/services/code_crosswalk.py`. Merged
+[#134](https://github.com/Venky-Chowdary/DataFlow/pull/134).
+
+* **What it is.** When a mapping **declares** a `code_crosswalk` (opt-in — the
+  gate does not invent coded fields from names), every distinct non-empty
+  source value in the *population* must have a target. Coverage is proven by a
+  SQL `GROUP BY` (or a replayable file scan), not by the Validate sample. A
+  covered sample is a block (`g20_code_crosswalk.unproven`). One unmapped code
+  is a block (`.unmapped`). There is no implicit identity: `A→A` is an explicit
+  entry. The write path applies the same map and refuses unmapped codes into
+  quarantine / fail — never silent passthrough. A signed continue-policy Risk
+  Contract does **not** demote G20 (unlike G19).
+* **User surface.** Map shows a code-crosswalk textarea on enum / `string_enum`
+  rows (and any row that already has a map). Validate lists G20. The signed
+  proof pack carries `preflight_summary.code_crosswalk` (`code_crosswalk_coverage_v1`).
+  CTA: "Open Map to complete the crosswalk".
+* **Honesty.** Empty `{}` is a declaration that covers nothing. Missing/null is
+  undeclared → skip. Browser-local preflight skips G20 (a browser sample is
+  not population proof). Hitting 100,000 distinct values is unproven, fail closed.
+* **Proof.** `tests/test_code_crosswalk.py` + `tests/test_code_crosswalk_live.py`:
+  **26 passed** (24 unit/sqlite including SQL `GROUP BY` seeing the rare code a
+  sample missed, write-path quarantine, MappingItem round-trip, Gate-8 sample
+  compare through the same map; **2 live PostgreSQL** — unmapped `Z` blocks with
+  independent dest `COUNT(*)=0` and source `Z` still present; covered map
+  rewrites `A/B/C/Z` to `active/blocked/closed/archived` with dest reread and
+  no identity `Z`). Broader related selection
+  (`test_e2e_pipeline` / `test_reconciliation` / `test_signed_proof_pack` /
+  `test_field_reduction_ledger`) **122 passed**. Web G20-related suites
+  **83 passed, 0 failed**. CI mypy Decision Kernel **17 files clean**. A
+  passing unit test is not live closure; the two Postgres cases are.
+
+### N3 · Durable, tamper-evident evidence chain — **Delivered**
+
+PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
+
+* **What it is.** Evidence records (field-reduction ledger, mapping proof,
+  Gate-8 reconciliation, write ledger) previously lived in a bounded in-memory
+  deque: restart the API and older jobs' evidence was gone, and nothing could
+  detect an altered record. Records are now append-only, each hashing its
+  predecessor, with a signed chain head per job, durable storage and a stated
+  retention policy.
+* **User surface.** Proof packs reference their chain head; a standalone
+  verifier re-walks the chain and names the exact record if one was modified or
+  removed.
+* **Why it matters commercially.** It is the difference between "a JSON
+  Datawrap generated about itself" and "evidence a third party can verify".
+  N2 writes `ai.egress` attestations here. N5 writes control-total and dest-RI
+  attestations here.
+* **Regulatory driver.** GDPR Art. 30, SOX, BCBS 239, DORA — retained,
+  verifiable records rather than a live dashboard.
+* **Proof.** Targeted suites green, web `tsc -b` clean. One Mongo CDC failure
+  seen during the run was reproduced on the base commit in a clean worktree with
+  the identical error (local Mongo has no change-stream pre-images), so it is
+  pre-existing, not caused by this change.
+
+### N5 · Control-total + dest-side referential-integrity proof (gates **G21**, **G22**) — **Delivered**
+
+Branch `feature/n5-control-totals-ri`.
+
+* **What it is.** Gate-8 extensions a bank examiner asks for. **G21** independently
+  recomputes `SUM` of operator-declared monetary columns on source and
+  destination (separate connections, exact `Decimal`, no 0.01 slop). **G22**
+  fails the job when dest-side FK enforcement or anti-join scan finds orphans
+  or cannot run. A matching row count is not a ledger balance and is not dest RI.
+* **Opt-in honesty.** G21 does not invent money columns from names (`amount`)
+  and does not auto-SUM every `MONEY` carrier. A mapping is in G21 only when
+  `control_total: true`. Map defaults the checkbox on for `MONEY` /
+  `CURRENCY` / `SMALLMONEY` so the declaration is one click, not a hidden
+  SUM. Identity mappings only. Quarantine without a quarantined-amount SUM is
+  unproven, fail closed. A signed risk contract does **not** demote G21.
+* **User surface.** Map checkbox on monetary rows. Validate states G21/G22
+  every run and skips — population SUM and dest RI are post-write proofs. A
+  browser sample SUM is not that proof.
+* **Proof pack.** `referential_integrity_proven` is true only on dest
+  enforced/scanned clean relations. Empty relationships stay false ("nothing
+  to prove"). Control totals travel as column names + SUMs, never full rows.
+
+### Governance operations on the signed certificate — **Delivered**
+
+PR [#139](https://github.com/Venky-Chowdary/DataFlow/pull/139).
+
+* **What it is.** Declared `mask` / `hash` / `redact` harvests into
+  `governance_operations` on the job at execute. The signed migration
+  certificate and proof pack render the ledger. Empty list means no
+  governance transform was declared — it is not proof that no PII moved.
+* **Write path.** `redact` writes `"<redacted>"`. `hash_pii` stays fail-closed
+  without `DATAFLOW_PII_HASH_KEY`.
+* **Proof.** `tests/test_governance_ops_certificate.py` live sqlite→sqlite
+  2-row: `ssn` mask, `email` hash, `name` redact; independent `COUNT(*)=2`;
+  originals absent from dest; certificate lists all three.
+
+### YAML dest export — **Delivered**
+
+This PR. Canonical owner `apps/api/services/yaml_tabular.py` (`dump_yaml_records`).
+
+* **What it is.** YAML as a file destination: a sequence of flat mappings,
+  every scalar double-quoted so YAML 1.1 cannot coerce `yes` / `NO` / `007`.
+  Empty population is `[]`, still YAML — never JSON bytes under a `.yaml`
+  name (D11). Dest COUNT is `iter_yaml_dicts` on disk (`artifact_readback`).
+* **Honesty.** Fixed-width dest export stays refused (needs a declared
+  layout). YAML dest at 100K is unproven. Append into an existing YAML
+  document is refused (container, same as JSON/XML).
+* **Proof.** `tests/test_yaml_dest_export.py`: dump round-trip, PyYAML
+  `safe_load` keeps `yes` as text, sqlite→yaml→sqlite dest COUNT=2 with
+  amounts `1000.00`/`2000.50`, csv→yaml artifact_readback. Postgres→yaml
+  dest COUNT is skip-gated (`pg_up()`); not in PRODUCTION_SKU until that
+  cell is green.
+
+---
+
+## 3. NOW tier — not started
+
+Named precisely so nobody reads §2 as "the tier is done".
+
+The NOW-tier capabilities N2, N4 and N5 have left this table (merged
+[#133](https://github.com/Venky-Chowdary/DataFlow/pull/133),
+[#134](https://github.com/Venky-Chowdary/DataFlow/pull/134),
+[#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)). Remaining work is
+the never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6.
+
+---
+
+## 4. Correctness defects fixed in the same wave
+
+These are not features; they are the difference between a proof and a false
+proof. Full detail and live evidence in `docs/OPEN_DEFECT_REGISTER.md`.
+
+| Defect | PR | What was actually wrong |
+|--------|----|--------------------------|
+| D19 | [#127](https://github.com/Venky-Chowdary/DataFlow/pull/127) | A full-refresh recreate could discard a declared destination carrier the source overflows, silently. New gate **G19** keeps the doomed schema on the probe and blocks the replacement; a continue-policy risk contract demotes it to a warning and records the replacement in the proof pack |
+| D20 | [#128](https://github.com/Venky-Chowdary/DataFlow/pull/128) | MySQL CDC without the `RELOAD` grant read binlog coordinates *after* the fallback table locks were released by `START TRANSACTION` — a commit in that window was in neither the snapshot nor the stream. Silent data loss; the new test fails on the merged connector and passes after |
+| D18 | [#129](https://github.com/Venky-Chowdary/DataFlow/pull/129) | Iceberg refused Windows drive-letter warehouses, and — worse, only visible once the catalog worked — the writer reported the warehouse *directory* as the schema, so reconciliation re-read an empty path and graded a correct write as total data loss |
+| D16 | [#130](https://github.com/Venky-Chowdary/DataFlow/pull/130) | The Elasticsearch reader reported no types, so an index read back as `string` placeholders and Map demoted an exact `id → id` identity to 0.63 on a route that is not lossy. An index *declares* its fields; the reader now reports the mapping (0.99 measured live). CI mypy baseline also cleaned |
+| D1 | [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132) | A schemaless dest shape inferred from a sample was compared as declared DDL, so run 2 refused run 1. Authority now leaves the probe: sampled profiles widen; declared catalogs stay enforced; `NoSuchKey` stays unread. Live Postgres→MinIO 2026-09-01: probe still measured `DECIMAL(4,1)`, Map `preserve` @ 0.99 origin `sampled_profile`, run 2 transferred 2 rows, independent boto3 reread matched |
+
+This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
+
+### 4b. What driving the product then found (pre-handover sweep, 2026-09-07)
+
+Implemented is not the same as proven, and the sweep exists to keep the two
+apart. Every item below was found by using the application, and each is closed
+with a test that fails on the previous code.
+
+| Defect | What was actually wrong | Where it lives now |
+|--------|-------------------------|--------------------|
+| D25 | The signed proof pack failed the product's own Verify control twice: first because it was signed over in-memory objects rather than the shipped bytes, then — on the export → download → re-upload path an operator actually walks — because JSON has one number type, so the signer hashed `100.0` and the browser handed back `100`. A verifier that rejects its own evidence is worse than no verifier: a reviewer reads it as tamper detection firing | `services/signed_proof_pack.py` |
+| D36 | The approval inbox rendered another tenant's parked schedule and both connector ids, because the route read `workspace_id` as a query parameter and ignored the `X-Workspace-Id` header. Execution had failed closed independently, so it was disclosure, not cross-tenant execution | `src/routers/schedules_router.py` |
+| D37 | Promote / Replay was offered on quarantine findings with no row payload to rewrite, so every click refused into a toast that faded | `components/transfer/QuarantinePanel.tsx` |
+| D38 | Editing a schedule's destination kept the Decision Artifact stamp taken for the old one, so the tick and the "Run now" offered as recovery refused forever with nothing able to clear it | `services/schedule_store.py` |
+| D39 | Verify chain reported 28 broken links and forks on an untampered store: the chain was linked and re-walked by timestamp, and records written in one clock tick sort arbitrarily | `services/audit_log.py`, `services/evidence_chain.py` |
+| D40 | A reachable hard block (`TEXT → DECIMAL(38,15)`, and again `DECIMAL(12,2) → DATE`) offered no risk-policy selector and no signing path — a dead end where Validate itself named the contract to sign. Two causes: Map graded carrier *domains* while the engine refuses on carrier *shape*, and G9's financial check then blocked Validate for a destination-rejected value even under a signed continue-policy contract. Now: shape-aware classification, a per-row policy selector with no hidden default, and a contracted holdout instead of a block. Browser-proved end to end on a live PG→PG route through quarantine and Replay, with independent SQL reads; fail-closed policies and tampered signatures still block | `lib/typeCarrierFidelity.ts`, `lib/mapBlockers.ts`, `components/ColumnReviewPanel.tsx`, `services/data_integrity.py` |
+| **D41 (open)** | On a **SQLite** destination a non-castable value is written anyway: nothing is rejected, `rejected_rows` is `0`, and `strict` / `maximum` do not fail. Reproduces identically on merged base `66dadc93`, so it predates D40 — and it is why earlier QA passes never reached quarantine on a file/SQLite route | SQLite write path |
+| **D42 (open)** | The destination-side DLQ write fails because the destination table lacks the `_df_*` quarantine columns, so a held-out row is durable on the control plane only, with no destination-side SQL evidence and a warning the client also sees | writer DLQ provisioning (product decision) |
+
+The honest reading of this section: the 2026 capabilities are implemented and
+unit-proven, and the surfaces that *present* them to an operator are where the
+defects keep being found. That is the argument against handover today, and the
+work that would change it is UI-driven measurement, not more features.
+
+---
+
+## 5. Deliberately not built (yet), with the reason
+
+* **BYOC / in-VPC runner and confidential-computing tier.** The report says
+  these are what actually convince security review boards. They are also a
+  deployment-model decision with real operational cost, not an afternoon's code.
+  Needs a product-owner decision before any of it is written.
+* **Copybook / EBCDIC / COMP-3 mainframe adapter.** The field-reduction
+  governance case is now supported (G16); reading the mainframe's physical
+  formats is a separate, large body of work and should not be started until a
+  first mainframe customer defines the dialect subset.
+* **LLM-mediated data transfer** (moving rows *through* natural language). The
+  report found the evidence against this strong: non-determinism, cost, and no
+  reproducibility. Datawrap should use models for *schema and profile*
+  reasoning, never as a data path.
+
+---
+
+## 6. Open product-owner decisions
+
+1. Should `FIELD_REDUCTION_STRICT` default **on** for regulated tenants?
+   (Recommendation: not until an operator has driven a real migration through
+   the new Map control.)
+2. **Resolved (overwrite recreate only).** Map now lets an unsigned
+   dest-exists overwrite reach Validate when the live carrier will be dropped
+   and recreated. G19 is the hard block; a signed continue-policy contract
+   still demotes it to a warning. Append / upsert / CDC / CRM overwrite still
+   hold on Map's lossy review — those dest types are the write carrier.
+3. Should G19 warning cards carry an "Open Map to fix the carrier" action?
+4. Which vertical is first (healthcare / financial services / public sector)?
+   It changes the order of N2, N4 and N5.
+5. Is BYOC in scope within 12 months? It changes the architecture, not just the
+   roadmap.
+
+---
+
+## 7. How to continue
+
+1. Remaining connector-matrix cells.
+2. MySQL yaml/fwf 100K twins were not run; YAML dest 100K, FWF dest 100K,
+   and 100K SFTP Excel were not measured. Fixed-width dest export is closed
+   (declared layout or CHAR(n)/VARCHAR(n); overflow refuses). SFTP daily
+   Excel ingest/dest is closed (real workbook; overwrite / append / upsert;
+   hashed trim; incremental append; file-backed 2-minute cron replay).
+   Mongo schedule store remains unmeasured.
+3. Local fleet / 10k–1M throughput work.

@@ -1,0 +1,130 @@
+{
+  "name": "pipedrive",
+  "docs": "https://developers.pipedrive.com/docs/api/v1",
+  "base_url": "https://{domain}.pipedrive.com/api/v1",
+  "auth": {
+    "type": "api_key",
+    "location": "query",
+    "name": "api_token"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "deals",
+      "path": "deals",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "sort": "id asc",
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "page_size_param": "limit",
+        "cursor_param": "start",
+        "cursor_path": "additional_data.pagination.next_start"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "title": {"type": "string"},
+          "value": {"type": ["number", "null"]},
+          "currency": {"type": ["string", "null"]},
+          "status": {"type": "string"},
+          "stage_id": {"type": ["integer", "null"]},
+          "add_time": {"type": ["string", "null"]},
+          "update_time": {"type": ["string", "null"]}
+        }
+      }
+    },
+    {
+      "name": "persons",
+      "path": "persons",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "sort": "id asc",
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "page_size_param": "limit",
+        "cursor_param": "start",
+        "cursor_path": "additional_data.pagination.next_start"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "org_id": {"type": ["integer", "object", "null"]},
+          "add_time": {"type": ["string", "null"]},
+          "update_time": {"type": ["string", "null"]}
+        }
+      }
+    },
+    {
+      "name": "organizations",
+      "path": "organizations",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "page_size_param": "limit",
+        "cursor_param": "start",
+        "cursor_path": "additional_data.pagination.next_start"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "add_time": {"type": ["string", "null"]},
+          "update_time": {"type": ["string", "null"]}
+        }
+      }
+    },
+    {
+      "name": "activities",
+      "path": "activities",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "page_size_param": "limit",
+        "cursor_param": "start",
+        "cursor_path": "additional_data.pagination.next_start"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "subject": {"type": ["string", "null"]},
+          "type": {"type": ["string", "null"]},
+          "done": {"type": ["boolean", "integer", "null"]},
+          "due_date": {"type": ["string", "null"]},
+          "add_time": {"type": ["string", "null"]},
+          "update_time": {"type": ["string", "null"]}
+        }
+      }
+    }
+  ]
+}

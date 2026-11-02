@@ -146,7 +146,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "overview",
         title: "What is Datawrap?",
-        body: "Datawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs eight preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows.",
+        body: "Datawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs nine preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows.",
       },
       {
         id: "surfaces",
@@ -156,7 +156,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "Platform — Overview, Transfer Studio, Connectors, Contracts",
           "Operations — Jobs (Job Theater), Pipelines, Transforms, Query, Pilot",
           "System — Settings (SSO/Team), MCP, Help, Proofs",
-          "Governed path — Source → Destination → Map → Validate → Run → Jobs proof",
+          "Governed path — Source → Destination → Transform → Map → Validate → Run → Jobs proof",
         ],
         figure: {
           src: "/docs/screenshots/app-overview.png",
@@ -173,7 +173,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Confirm the workspace is healthy",
             pin: "Sidebar → Overview",
-            body: "Open **Overview** and confirm connection health, recent jobs, and throughput for your tenant. If metrics fail to load, fix connectivity with your Owner before creating connectors.\n\nYou should see live **rows moved**, success rate, and connection status cards before you continue.",
+            body: "Open **Overview** and confirm connection health, recent jobs, and throughput for your tenant. If metrics fail to load, fix connectivity with a workspace admin before creating connectors.\n\nYou should see live **rows moved**, success rate, and connection status cards before you continue.",
             figure: {
               src: "/docs/screenshots/app-overview.png",
               alt: "Workspace Overview with live metrics and connection health",
@@ -199,9 +199,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             },
           },
           {
-            title: "Run Transfer Studio Source → Destination → Map → Validate → Run",
+            title: "Run Transfer Studio Source → Destination → Transform → Map → Validate → Run",
             pin: "Platform → Transfer  ·  or New transfer",
-            body: "Open **Platform → Transfer** (or **New transfer**). On **Source**, upload a sample file such as `sample-orders.csv` or pick a **Database** connector. Review **Detected structure**, then continue through **Destination**, **Map**, and **Validate**.\n\nFix every blocked gate before **Run**. Execute stays locked until Validate passes.",
+            body: "Open **Platform → Transfer** (or **New transfer**). On **Source**, upload a sample file such as `sample-orders.csv` or pick a **Database** connector. Review **Detected structure**, then continue through **Destination**, **Transform** (skip with **Continue without transforming** when the recipe is empty), **Map**, and **Validate**.\n\nFix every blocked gate before **Run**. Execute stays locked until Validate passes. On Validate, the footer owns the one primary action — Open Map to fix destination DDL, or Execute when the API decision is approve.",
             figure: {
               src: "/docs/screenshots/app-transfer-source.png",
               alt: "Transfer Studio Source with profiled CSV",
@@ -273,12 +273,12 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Receive your tenant URL and role",
             pin: "IT / Datawrap admin → invite email",
-            body: "A workspace **Owner** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, and open **Job Theater**.\n\n**Owner** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team**, and API keys.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
+            body: "A workspace **admin** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, add non-admin members, and open **Job Theater**.\n\n**Admin** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team** roles, and API keys. There is no Owner role in the product.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
           },
           {
             title: "Sign in with SSO",
             pin: "Login → Continue with SSO",
-            body: "On the login screen choose **Continue with SSO** (or your company's branded SSO button). Authenticate with your work account. Datawrap issues a workspace session that inherits your RBAC role from the invite or from IdP group claims.\n\nA successful sign-in lands on **Overview**. Confirm the top bar shows your tenant name and that the left sidebar lists **Platform** surfaces (Connectors, Transfer, Pipelines) and **Operations → Jobs**. If you only see a blank or permission error, stop and ask an Owner to verify your role under **Settings → Team**.",
+            body: "On the login screen choose **Continue with SSO** (or your company's branded SSO button). Authenticate with your work account. Datawrap issues a workspace session that inherits your RBAC role from the invite or from IdP group claims.\n\nA successful sign-in lands on **Overview**. Confirm the top bar shows your **workspace** name (switcher, when you belong to more than one) and that the left sidebar lists **Platform** surfaces (Connectors, Transfer, Pipelines) and **Operations → Jobs**. If you only see a blank or permission error, stop and ask a workspace admin to verify your role under **Settings → Team**.",
             figure: {
               src: "/docs/screenshots/app-overview.png",
               alt: "Workspace after successful enterprise sign-in",
@@ -291,30 +291,30 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Confirm you can reach Connectors and Transfer",
             pin: "Sidebar → Platform → Connectors  ·  Transfer",
-            body: "In the left sidebar open **Platform → Connectors**. You should see health cards and either an empty Connections table or existing rows. Then open **Platform → Transfer** (Transfer Studio) or click **New transfer** if shown.\n\nYou are ready for day-one work when:\n\n**1.** **New connection** is visible on Connectors (Editors and Owners).\n\n**2.** Transfer Studio opens the **Source → Destination → Map → Validate → Run** wizard.\n\n**3.** **Operations → Jobs** opens Job Theater for past and live runs.\n\nIf Connectors or Transfer is missing from the sidebar, your role is likely **Viewer** — ask an Owner to raise it to **Editor** under **Settings → Team**.",
+            body: "In the left sidebar open **Platform → Connectors**. You should see health cards and either an empty Connections table or existing rows. Then open **Platform → Transfer** (Transfer Studio) or click **New transfer** if shown.\n\nYou are ready for day-one work when:\n\n**1.** **New connection** is visible on Connectors (Editors and Admins).\n\n**2.** Transfer Studio opens the **Source → Destination → Transform → Map → Validate → Run** wizard.\n\n**3.** **Operations → Jobs** opens Job Theater for past and live runs.\n\nIf Connectors or Transfer is missing from the sidebar, your role is likely **Viewer** — ask a workspace admin to raise it to **Editor** under **Settings → Team**.",
             figure: {
               src: "/docs/screenshots/app-connectors.png",
               alt: "Connectors available in the enterprise sidebar",
-              caption: "Marker 1 = Connectors · Marker 2 = New connection (Editor and Owner).",
+              caption: "Marker 1 = Connectors · Marker 2 = New connection (Editor and Admin).",
               markers: [
                 { n: 1, label: "Connectors", x: "8%", y: "32%" },
                 { n: 2, label: "New connection", x: "90%", y: "28%" },
               ],
             },
-            tip: "**Viewer** — inspect Jobs and proof only. **Editor** — run transfers and manage connectors. **Owner** — SSO, BYOK, Team invites, and enterprise controls under **Settings**.",
+            tip: "**Viewer** — inspect Jobs and proof only. **Editor** — run transfers, manage connectors, and invite non-admin members. **Admin** — SSO, BYOK, Team roles, and enterprise controls under **Settings**. Switching workspace in the top bar (or on Team) is live for every Settings tab.",
           },
         ],
       },
       {
         id: "admin-setup",
-        title: "Admin checklist (Owners)",
-        body: "Tenant **Owners** complete these once per workspace. Operators do not need this checklist to run day-to-day transfers — it is for IT and security readiness.",
+        title: "Admin checklist (workspace admins)",
+        body: "Workspace **admins** complete these once per workspace. Operators do not need this checklist to run day-to-day transfers — it is for IT and security readiness.",
         steps: [
           "**Settings → SSO** — choose SAML or OIDC, paste IdP metadata URL (or upload XML), map roles if your IdP sends group claims, then click **Test login** and **Save**.",
-          "**Settings → Enterprise** — set tenant display name, data **region**, MFA policy, session timeout, and optional IP allowlist.",
+          "**Settings → Enterprise** — set tenant display name, data **region**, session timeout, and (for a tenant custom domain) an optional IP allowlist. The workspace picker here is the same live workspace as Team.",
           "**Settings → Enterprise → BYOK** — upload your customer KMS key when procurement requires customer-managed encryption for connector secrets.",
-          "**Settings → Team** — invite Editors and Viewers with least privilege; re-check IdP group → role mapping after SSO enforce.",
-          "**Settings → Security** — download the **Security posture report** for SOC 2 / GDPR / HIPAA questionnaires.",
+          "**Settings → Team** — invite Viewers, Editors, and Admins with least privilege; re-check IdP group → role mapping after SSO setup. Member and login lists refresh while the tab is open.",
+          "**Settings → Security** — download the **Security posture report** for SOC 2 / GDPR / HIPAA questionnaires. Controls are implemented; no third-party certificate is claimed.",
         ],
         tip: "If your tenant URL is not live yet, email **sales@datawrap.io**. Provisioning is handled by Datawrap — operators never install or run a local API.",
       },
@@ -331,25 +331,25 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
     slug: "transfer-studio",
     category: "Transfer Studio",
     title: "Transfer Studio guide",
-    description: "Complete 5-step example: sample-orders.csv → File Export CSV through Source, Destination, Map, Validate, and Run — with real workspace screenshots.",
+    description: "Complete 6-step example: sample-orders.csv → File Export CSV through Source, Destination, Transform, Map, Validate, and Run — with real workspace screenshots.",
     readTime: "18 min",
     icon: "transfer",
     sections: [
       {
         id: "example",
         title: "Example transfer used in this guide",
-        body: "Every screenshot below is from a real Transfer Studio session using the built-in demo file.\n\n**Source:** `sample-orders.csv` (5 rows · 5 columns: `order_id`, `customer_email`, `order_amt`, `order_date`, `status`)\n\n**Destination:** **File Export** → **CSV** → `exports/sample-orders.csv`\n\n**Path:** **Source → Destination → Map → Validate → Run** — the same rail Pipelines, Pilot, and MCP reuse. There is no silent shortcut around gates or checksum proof.\n\nFor production warehouse loads, swap Destination to **Database / Warehouse** and pick a saved connector (for example PostgreSQL `public.orders`). Map, Validate, and Run stay identical.",
+        body: "Every screenshot below is from a real Transfer Studio session using the built-in demo file.\n\n**Source:** `sample-orders.csv` (5 rows · 5 columns: `order_id`, `customer_email`, `order_amt`, `order_date`, `status`)\n\n**Destination:** **File Export** → **CSV** → `exports/sample-orders.csv`\n\n**Path:** **Source → Destination → Transform → Map → Validate → Run** — the same rail Pipelines, Pilot, and MCP reuse. There is no silent shortcut around gates or checksum proof.\n\nFor production warehouse loads, swap Destination to **Database / Warehouse** and pick a saved connector (for example PostgreSQL `public.orders`). Transform, Map, Validate, and Run stay identical.",
       },
       {
         id: "procedure",
         title: "Procedure: run the sample-orders transfer",
         procedure: true,
-        body: "Follow all five steps in order. Markers on each screenshot match the live product UI.",
+        body: "Follow all six steps in order. Markers on each screenshot match the live product UI.",
         workflow: [
           {
             title: "Step 1 — Source: load sample-orders.csv",
             pin: "Platform → Transfer  ·  or New transfer  →  Load sample orders CSV",
-            body: "Open **Transfer Studio** from the sidebar (**Transfer**) or click **New transfer**. The wizard lands on **Source** with the five-step rail: **Src → Dest → Map → Validate → Run**.\n\nUnder **Where is your data?**, keep **File** selected. Click **Load sample orders CSV** (or upload your own CSV). Wait until the file chip shows **Sample-Orders.csv** with row/column counts and the right panel shows **Detected structure** with typed columns (`INTEGER`, `VARCHAR`, `DECIMAL`, `DATE`).\n\nClick **Continue to Destination →** only after Detected structure is populated — that profile feeds Map and Validate.",
+            body: "Open **Transfer Studio** from the sidebar (**Transfer**) or click **New transfer**. The wizard lands on **Source** with the six-step rail: **Src → Dest → Xform → Map → Gate → Run**.\n\nUnder **Where is your data?**, keep **File** selected. Click **Load sample orders CSV** (or upload your own CSV). Wait until the file chip shows **Sample-Orders.csv** with row/column counts and the right panel shows **Detected structure** with typed columns (`INTEGER`, `VARCHAR`, `DECIMAL`, `DATE`).\n\nClick **Continue to Destination →** only after Detected structure is populated — that profile feeds Transform, Map, and Validate.",
             figure: {
               src: "/docs/screenshots/app-transfer-source.png",
               alt: "Transfer Studio Source with sample-orders.csv loaded and Detected structure",
@@ -366,7 +366,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Step 2 — Destination: File Export CSV",
             pin: "Destination Mode → File Export  ·  format CSV  ·  path exports/sample-orders.csv",
-            body: "On **Destination**, choose **Destination Mode**:\n\n**Database / Warehouse** — pick a saved connector (or **Custom connection**) and set schema/table.\n\n**File Export** — used in this example. Select format **CSV** (JSON, Parquet, Excel, and more are available). Optionally set **Output path** to `exports/sample-orders.csv`.\n\nConfirm **Sync defaults** (this example uses **Full append** · Manual approval · Strict validation). Open **Advanced** for overwrite, CDC, SCD2, mirror, cursors, and drift policy.\n\nWhen the route shows ready, click **Continue to Map**.",
+            body: "On **Destination**, choose **Destination Mode**:\n\n**Database / Warehouse** — pick a saved connector (or **Custom connection**) and set schema/table.\n\n**File Export** — used in this example. Select format **CSV** (JSON, Parquet, Excel, and more are available). Optionally set **Output path** to `exports/sample-orders.csv`.\n\nConfirm **Sync defaults** (this example uses **Full append** · Manual approval · Strict validation). Open **Advanced** for overwrite, CDC, SCD2, mirror, cursors, and drift policy.\n\nWhen the route shows ready, click **Continue to Transform**.",
             figure: {
               src: "/docs/screenshots/app-transfer-destination.png",
               alt: "Transfer Studio Destination with File Export CSV and output path",
@@ -378,12 +378,17 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
                 { n: 4, label: "Output path", x: "78%", y: "42%" },
               ],
             },
-            tip: "Enterprise warehouse path: **Database / Warehouse** → PostgreSQL (or Snowflake / BigQuery) → table such as `public.orders`. The next three steps do not change.",
+            tip: "Enterprise warehouse path: **Database / Warehouse** → PostgreSQL (or Snowflake / BigQuery) → table such as `public.orders`. Transform, Map, Validate, and Run do not change.",
           },
           {
-            title: "Step 3 — Map: align columns and Accept risk",
+            title: "Step 3 — Transform: optional pre-load recipe",
+            pin: "Transform → Continue without transforming  ·  or add steps → Continue with this transform",
+            body: "Transform is the pre-load recipe. File-export walks can click **Continue without transforming**. Warehouse loads that round, filter, or strip characters add steps here — Validate then judges the **transformed** rows, not the raw source.\n\nAn empty recipe is honest: skip it. Do not treat Transform as optional marketing — it is step 3 on the rail.",
+          },
+          {
+            title: "Step 4 — Map: align columns and Accept risk",
             pin: "Map columns → review edges → Accept risk / Approve → Continue to Validate",
-            body: "Map opens **Map columns** with every source field paired to a destination name and type. For `sample-orders.csv` you should see five edges — for example `order_id` → `order_id`, `order_amt` → `order_amount`, with transforms such as **Cast integer**, **Normalize email**, **Cast decimal**, and **Date → ISO**.\n\nUse the filter tabs (**All**, **Review**, **Critical**, **PII**, **Ready**) to focus issues. When a type cast is lossy (for example DECIMAL → TEXT on a file export), click **Accept risk** on that row (or **Approve eligible** when shown).\n\n**Continue to Validate →** stays locked until every blocking map issue is approved or remapped. Then continue.",
+            body: "Map opens **Map columns** with every source field paired to a destination name and type. For `sample-orders.csv` you should see five edges — for example `order_id` → `order_id`, `order_amt` → `order_amount`, with transforms such as **Cast integer**, **Normalize email**, **Cast decimal**, and **Date → ISO**.\n\nUse the filter tabs (**All**, **Review**, **Critical**, **PII**, **Ready**) to focus issues. False-friends stay named: **qty≠amt**, **user≠customer**, **dest collision**. **Approve eligible** will not clear those — Remap dest, or Confirm this pair on the row. When a type cast is lossy (for example DECIMAL → TEXT on a file export), click **Accept risk** on that row.\n\n**Continue to Validate →** stays locked until every blocking map issue is approved or remapped. Then continue.",
             figure: {
               src: "/docs/screenshots/app-transfer-map.png",
               alt: "Transfer Studio Map columns with sample-orders field mappings",
@@ -398,9 +403,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             tip: "Open **Proof** on Map anytime to see confidence and fidelity evidence before Validate.",
           },
           {
-            title: "Step 4 — Validate: clear every blocking gate",
-            pin: "Validate dashboard → fix suggested remediations → Re-run until Execute unlocks",
-            body: "Validate runs the full gate set (source readable, destination write access, schema contract, mappings, sample dry-run, data integrity, DDL, capacity, reconcile simulation, plus sync/policy gates).\n\nIf a gate blocks — as in this example when `order_amt` (DECIMAL) collapses to TEXT — the dashboard shows **Validation blocked**, which checks failed, and **Suggested fixes** (for example **Remap order_amt → VARCHAR**). Apply the fix, click **Re-run**, and wait until the API decision is **approve**.\n\n**Execute** stays locked while any gate is blocked. That is intentional — do not skip Validate.",
+            title: "Step 5 — Validate: clear every blocking gate",
+            pin: "Validate footer → one primary: Open Map to fix  ·  or Execute when approved",
+            body: "Validate runs the full gate set (source readable, destination write access, schema contract, mappings, sample dry-run, data integrity, DDL, capacity, reconcile simulation, plus sync/policy gates).\n\nIf a gate blocks — as in this example when `order_amt` (DECIMAL) collapses to TEXT — the dashboard names the root cause. The **footer** owns the one primary action (Open Map to fix target DDL, Acknowledge drift, or Execute). Cards may repeat that destination as a ghost control — they are not a second teal.\n\n**Execute** stays locked while any gate is blocked, or while the API decision is still **review**. Unlock requires `passed` and `decision=approve`. That is intentional — do not skip Validate.",
             figure: {
               src: "/docs/screenshots/app-transfer-validate.png",
               alt: "Transfer Studio Validate dashboard with pending gates and Run preflight",
@@ -415,7 +420,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             tip: "Use **Explain & fix with AI** on Validate for plain-language why/fix, then **Re-run**. See the Preflight gates article for every gate ID.",
           },
           {
-            title: "Step 5 — Run: Execute Transfer and prove in Job Theater",
+            title: "Step 6 — Run: Execute Transfer and prove in Job Theater",
             pin: "Run → Execute Transfer  ·  then Operations → Jobs",
             body: "When Validate approves, the **Run** step shows readiness (**Preflight approved**) and unlocks **Execute Transfer**.\n\nIf you open Run while Validate is still incomplete, you see **Confirm Validate before write** and Execute stays locked — return to Validate, clear blockers, then come back.\n\nClick **Execute Transfer**. The engine submits the governed job, locks the approved mapping, and opens live telemetry. Then open **Operations → Jobs** (Job Theater): confirm quarantine is empty (or review reasons) and wait for checksum **MATCH** / row fidelity. That MATCH artifact is the archiveable proof of the load.",
             figure: {
@@ -442,7 +447,10 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Full overwrite** — replace the target, then load.",
           "**Incremental append** — cursor-based new rows only.",
           "**Incremental deduped** — cursor + primary-key upserts.",
-          "**CDC / SCD Type 2 / Mirror** — advanced identity modes (PK required where noted).",
+          "**CDC** — log-based changes when the source supports it. Default is at-least-once upsert until a named route proves dest-owned exactly-once.",
+          "**SCD Type 2 / Mirror** — advanced identity modes (primary key required where noted).",
+          "**Destination write → Query** — one INSERT/MERGE/UPDATE with `:binds` mapped to source columns. Failed rows quarantine. Not CDC.",
+          "**Destination write → Stored procedure** — one CALL/EXEC per row (Informatica connected SQL). SQLite has no dest procedures; dest query INSERT is allowed.",
         ],
       },
       {
@@ -487,10 +495,10 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "G3 Schema contract — source and target schemas are compatible",
           "G4 Column mappings — every column maps above the confidence threshold",
           "G5 Sample dry-run — sample rows pass the same transforms writers use",
-          "G9 Data integrity — encoding, required nulls, identity duplicates, precision on the sample",
           "G6 Target DDL — required CREATE / ALTER statements are valid",
           "G7 Staging capacity — destination has headroom for the volume",
           "G8 Sample reconciliation — pre-write sample identity and uniqueness hold (post-load checksum runs after Execute)",
+          "G9 Data integrity — encoding, required nulls, identity duplicates, precision on the sample",
         ],
         figure: {
           src: "/docs/screenshots/app-transfer-validate.png",
@@ -698,16 +706,16 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         title: "Honest transfer-ready labels",
         body: "Catalog tiles are not the same as production drivers. Each connector shows one of these readiness states. Only routes with transfer-ready evidence get the production badge — everything else stays labelled honestly.",
         steps: [
-          "**Live** — governed transfer path proven; safe for production schedules after Test passed.",
-          "**Beta** — works with known limits; review before production Pipelines.",
+          "**Certified** — governed transfer path proven (`transfer_ready`); safe for production schedules after Test passed.",
+          "**Source only** — readable; no transfer-ready write path.",
+          "**Test only** — auth works; write path is not transfer-ready.",
           "**Planned** — catalog presence only; do not schedule yet.",
-          "**Connect-only** — auth works; write path is not transfer-ready.",
         ],
       },
       {
         id: "native",
         title: "Native drivers & SQLAlchemy",
-        body: "**PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **Redshift**, **S3**, **CSV**, **JSON**, and more ship with upsert and incremental where supported. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers.",
+        body: "**PostgreSQL**, **MySQL**, and **MongoDB** are certified full transfer. **Snowflake**, **BigQuery**, **S3**, **CSV**, and **JSON** are TRANSFER_READY when their packages are installed. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live. Proofs → Integrity ledger has **Run desktop lab**: 80 catalog slots exercised as source and destination when the desktop backend is up. **Run unique-engine matrix** is the live src×dst cartesian (Postgres, MySQL, Mongo, SQL Server, Oracle, object stores, warehouses on emulators). Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a driver — that option is real, it is not 80 unique engines.",
       },
     ],
   },
@@ -871,9 +879,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Full append** — keep existing rows; append the full snapshot",
           "**Incremental append** — cursor/watermark new rows only",
           "**Incremental deduped** — cursor + primary-key upserts",
-          "**CDC** — log-based changes (when the source supports it)",
+          "**CDC** — log-based changes (when the source supports it). Default is at-least-once upsert until a named route proves dest-owned exactly-once.",
           "**SCD Type 2** — versioned history (primary key required)",
-          "**Mirror** — soft-delete rows missing from source (primary key required)",
+          "**Mirror** — soft-delete dest keys missing from source (`_deleted`; physical COUNT(*) stays; primary key required)",
         ],
         tip: "Failed cells quarantine without silently dropping the rest of the batch — same engine as ad-hoc Transfer Studio runs.",
       },
@@ -931,7 +939,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Inspect contract detail",
             pin: "Contract card → detail drawer",
-            body: "Click a contract card/row to open its **detail drawer** (right side). Confirm field types, version, and signature state (**Draft** vs **Signed**). Sign when Owners are ready for production schedules.",
+            body: "Click a contract card/row to open its **detail drawer** (right side). Confirm field types, version, and signature state (**Draft** vs **Signed**). Sign when workspace admins are ready for production schedules.",
             figure: {
               src: "/docs/screenshots/app-contracts.png",
               alt: "Contracts page used to open contract detail",
@@ -1015,7 +1023,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "handoff",
         title: "Hand off to Transfer Studio",
-        body: "When you need the full wizard, open **Transfer** from Pilot suggestions — maps and gates carry into Source → Destination → Map → Validate → Run.",
+        body: "When you need the full wizard, open **Transfer** from Pilot suggestions — maps and gates carry into Source → Destination → Transform → Map → Validate → Run.",
       },
       {
         id: "examples",
@@ -1024,7 +1032,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         steps: [
           "Why did preflight gate Data integrity fail on my last transfer?",
           "Which connectors are transfer-ready for Snowflake upsert?",
-          "Suggest a map for order_amt → payment_amount",
+          "Why did order_amt map to total_amount instead of payment_amount?",
           "Show quarantined rows from last night's pipeline",
         ],
       },
@@ -1062,15 +1070,15 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Copy the MCP server URL",
             pin: "System → MCP → Cursor",
-            body: "Expand the **Cursor** integration card. Copy the `mcpServers.dataflow.url` value shown for your tenant.",
+            body: "Expand the **Cursor** integration card. Copy the `mcpServers.datawrap.url` value shown for your tenant.",
           },
           {
             title: "Paste into Cursor Settings → MCP",
             pin: "Cursor → Settings → MCP",
-            body: "Add the server entry, restart MCP if prompted, then call governed tools (connectors, preflight, jobs). Every agent-initiated transfer appears in **Job Theater** with an audit trail.",
+            body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until `confirm_action`. Every confirmed transfer appears in **Job Theater** with an audit trail. The key's role is the same gate as the UI: an editor key can create connectors, transfers, and schedules.",
           },
         ],
-        code: '{\n  "mcpServers": {\n    "dataflow": {\n      "url": "https://api.datawrap.io/api/v1/mcp"\n    }\n  }\n}',
+        code: '{\n  "mcpServers": {\n    "datawrap": {\n      "url": "https://<tenant-host>/api/v1/mcp",\n      "headers": { "Authorization": "Bearer <workspace-api-key>" }\n    }\n  }\n}',
       },
       {
         id: "security",
@@ -1105,12 +1113,12 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "tips",
         title: "Tips",
-        body: "Use Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Prefer read-only statements — governed writes still go through Transfer Studio / Pipelines.",
+        body: "Use Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Playground is **read-only** — it refuses CALL/EXEC and DML. Governed writes still go through Transfer Studio / Pipelines.",
       },
       {
         id: "transfer-bridge",
         title: "Bridge to Transfer Studio",
-        body: "When the shape looks right, open **Transfer** and reuse the same connector on Source or Destination. Validated queries inform filters and preflight sample expectations; they do not skip Validate.",
+        body: "When the shape looks right, open **Transfer** and reuse the same connector. On **Source**, choose **Query** (read-only SELECT) or **Stored procedure** (one CALL/EXEC, spooled once). On **Destination**, choose **Query** (one INSERT/MERGE/UPDATE with binds) or **Stored procedure** (one CALL per row). Failed dest statements quarantine — they never silently drop. CDC / SCD2 / mirror refuse callable dest writes. Validated playground queries do not skip Validate.",
       },
     ],
   },
@@ -1188,18 +1196,18 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
     slug: "enterprise",
     category: "Enterprise",
     title: "Enterprise controls",
-    description: "SSO, Team RBAC, BYOK, region pinning, audit — configured in Settings by Owners.",
+    description: "SSO, Team RBAC, BYOK, region pinning, audit — configured in Settings by workspace admins.",
     readTime: "12 min",
     icon: "shield",
     sections: [
       {
         id: "where",
         title: "Where enterprise settings live",
-        body: "Signed-in Owners open **System → Settings**. Tabs typically include General, Security, Enterprise, SSO, Team, Notifications, AI Models, API Keys, and Audit Logs. Day-to-day operators usually stay on Connectors, Transfer, Pipelines, and Jobs.",
+        body: "Signed-in **admins** open **System → Settings**. Tabs include General, Security, Enterprise, SSO, Team, Notifications, AI Models, API Keys, and Audit Logs. The top-bar workspace switcher (and the picker on Team / Enterprise / Notifications) is one live workspace — switching it reloads each tab. Day-to-day operators usually stay on Connectors, Transfer, Pipelines, and Jobs.",
         figure: {
           src: "/docs/screenshots/app-settings.png",
           alt: "Settings page in the workspace",
-          caption: "System → Settings — Owners configure SSO, Team, Enterprise, and API keys here.",
+          caption: "System → Settings — admins configure SSO, Team, Enterprise, and API keys here.",
           markers: [
             { n: 1, label: "Settings nav", x: "8%", y: "68%" },
             { n: 2, label: "Settings tabs", x: "40%", y: "20%" },
@@ -1226,29 +1234,29 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             title: "Test, then Save",
             pin: "SSO → Test · Save",
             body: "Run Test login with a pilot user. On success you see SSO ready. Save to enforce SSO for the tenant.",
-            tip: "Keep a break-glass Owner account path documented with IT before enforcing SSO-only.",
+            tip: "Keep a break-glass admin account path documented with IT before enforcing SSO-only.",
           },
         ],
       },
       {
         id: "team",
         title: "Team roles",
-        body: "Open **Settings → Team** to invite members by email and assign roles.",
+        body: "Open **Settings → Team** to invite members by email and assign roles. The workspace picker on this tab is the same live workspace as the top bar — member lists refresh while the tab is open.",
         steps: [
           "Viewer — inspect Jobs, proof, and connectors (no execute)",
-          "Editor — create connectors, run Transfer Studio and Pipelines",
-          "Owner — SSO, BYOK, Enterprise tab, API keys, Team admin",
+          "Editor — create connectors, run Transfer Studio and Pipelines, invite non-admin members",
+          "Admin — SSO, BYOK, Enterprise tab, API keys, grant Admin roles",
         ],
         figure: {
           src: "/docs/screenshots/app-settings-team.png",
           alt: "Settings Team tab",
-          caption: "Team — invite members and assign Viewer / Editor / Owner.",
+          caption: "Team — invite members and assign Viewer / Editor / Admin.",
         },
       },
       {
         id: "byok-region",
         title: "BYOK, region, and audit",
-        body: "Settings → Enterprise sets tenant name, custom domain, data region, MFA, session timeout, and IP allowlist. Optional BYOK wraps connector secrets with your KMS key. Settings → Audit Logs lists mapping decisions, job runs, quarantine events, and MCP calls for SOC 2 / GDPR / HIPAA review. Settings → Security downloads the Security posture report for procurement.",
+        body: "Settings → Enterprise sets tenant name, custom domain, data region, session timeout, and an IP allowlist for the custom domain. Optional BYOK wraps connector secrets with your KMS key. Settings → Audit Logs lists mapping decisions, job runs, quarantine events, and MCP calls for SOC 2 / GDPR / HIPAA review. Settings → Security downloads the Security posture report for procurement.",
       },
     ],
   },
@@ -1265,8 +1273,8 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "auth",
         title: "Authentication",
-        body: "Bearer tokens scoped to workspace. Enterprise uses SSO-backed service accounts.",
-        code: 'curl -H "Authorization: Bearer $TOKEN" https://api.datawrap.io/api/v1/connectors',
+        body: "Bearer tokens scoped to workspace. `$TENANT_ORIGIN` is the host in the browser address bar (the path is `/api/v1`). A workspace API key from **Settings → API Keys** is the same credential MCP uses. Its role decides what it may change. Enterprise uses SSO-backed service accounts.",
+        code: 'curl -H "Authorization: Bearer $TOKEN" "$TENANT_ORIGIN/api/v1/connectors"',
       },
       {
         id: "endpoints",
@@ -1289,7 +1297,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         id: "webhooks",
         title: "Webhooks",
         body: "Subscribe to job.completed, job.failed, and pipeline.quarantine_threshold events. Payloads include job ID, gate results, and reconciliation summary — no row payloads unless explicitly configured.",
-        code: 'POST /api/v1/webhooks\n{ "url": "https://your.app/hooks/dataflow", "events": ["job.completed"] }',
+        code: 'POST /api/v1/webhooks\n{ "url": "https://your.app/hooks/datawrap", "events": ["job.completed"] }',
       },
     ],
   },
@@ -1315,7 +1323,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "q2",
         title: "Who can run transfers?",
-        body: "Editors and Owners can create connectors and execute Transfer Studio / Pipelines. Viewers can open Jobs and review MATCH / quarantine proof. Roles are assigned under Settings → Team (and can come from IdP group claims when SSO is configured).",
+        body: "Editors and Admins can create connectors and execute Transfer Studio / Pipelines. Viewers can open Jobs and review MATCH / quarantine proof. Roles are assigned under Settings → Team (Viewer, Editor, Admin — there is no Owner role) and can come from IdP group claims when SSO is configured.",
       },
       {
         id: "q3",

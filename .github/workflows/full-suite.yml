@@ -1,0 +1,369 @@
+name: Full Suite
+
+# Runs the ENTIRE apps/api pytest suite plus the web checks against live
+# service containers, so every leg runs for real at least once a day —
+# not only the exact-SHA gate slices. Normal pushes keep ci.yml; this runs
+# nightly and on demand (and should be dispatched before any batch push).
+
+on:
+  schedule:
+    # 03:00 ET / 07:00 UTC nightly
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+# One full-suite run at a time — a newer dispatch supersedes the previous one.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  engine-suite:
+    name: Full pytest suite (live engines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        ports:
+          - 1433:1433
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: Dataflow_CI_2026!
+          MSSQL_PID: Developer
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 10
+
+    env:
+      PYTHONPATH: apps/api:packages/preflight/src:apps/api/src:apps/api/tests
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_ENGINE_DIGEST: "1"
+      DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+      # Engine credentials come only from env / CI secrets — never literals
+      # in test code (CI-2).
+      MSSQL_SA_PASSWORD: "Dataflow_CI_2026!"
+      KAFKA_SASL_CI_PASSWORD: "dataflow-ci-secret"
+      # Postgres (libpq standard — tests/helpers/live_env resolves these first)
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: dataflow
+      PGPASSWORD: dataflow
+      PGDATABASE: dataflow
+      DATAFLOW_PG_HOST: 127.0.0.1
+      # MySQL
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: dataflow
+      MYSQL_USER: dataflow
+      MYSQL_PASSWORD: dataflow
+      DATAFLOW_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_MYSQL_PORT: "3306"
+      DATAFLOW_MYSQL_DB: dataflow
+      DATAFLOW_MYSQL_USER: dataflow
+      DATAFLOW_MYSQL_PASSWORD: dataflow
+      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MYSQL_PORT: "3306"
+      DATAFLOW_TEST_MYSQL_DB: dataflow
+      DATAFLOW_TEST_MYSQL_USER: dataflow
+      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
+      # SQL Server
+      DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_USER: sa
+      DATAFLOW_TEST_MSSQL_PASSWORD: Dataflow_CI_2026!
+      DATAFLOW_SQLSERVER_USER: sa
+      DATAFLOW_SQLSERVER_PASSWORD: Dataflow_CI_2026!
+      # Mongo — replica-set URI so sessions/change streams work
+      MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
+      DATAFLOW_TEST_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
+      DATAFLOW_LIVE_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
+      P2_MONGO_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
+      # Redis
+      REDIS_URL: redis://127.0.0.1:6379
+      DATAFLOW_REDIS_URL: redis://127.0.0.1:6379
+      DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379
+      # Kafka — KRaft broker started below; PLAINTEXT on 9092, SASL_PLAINTEXT
+      # (PLAIN mechanism) on 9094.
+      DATAFLOW_LIVE_KAFKA_SASL_BOOTSTRAP: 127.0.0.1:9094
+      DATAFLOW_LIVE_KAFKA_SASL_USER: admin
+      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD: dataflow-ci-secret
+      DATAFLOW_LIVE_KAFKA_SASL_MECHANISMS: PLAIN
+      DATAFLOW_LIVE_KAFKA_SASL_USER_PLAIN: admin
+      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD_PLAIN: dataflow-ci-secret
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API + preflight deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -e packages/preflight
+          # pymssql is optional in requirements but one driver-fallback test
+          # asserts the import works.
+          python -m pip install pymssql
+          # CI-3: nightly order shuffling so order-dependent tests surface.
+          python -m pip install pytest-randomly
+          python -m pip install hypothesis
+
+      - name: Start Postgres / MySQL / Mongo (server args need docker run)
+        # GH service 'options' go to docker create BEFORE the image — server
+        # flags like --binlog-format or -c wal_level are not docker flags and
+        # the container dies at init (exit 125). docker run accepts the full
+        # command line, so engines needing server args are started here.
+        run: |
+          docker run -d --name pg -p 5432:5432 \
+            -e POSTGRES_USER=dataflow -e POSTGRES_PASSWORD=dataflow \
+            -e POSTGRES_DB=dataflow \
+            postgres:16 \
+            postgres -c wal_level=logical -c max_replication_slots=8 \
+                     -c max_wal_senders=8
+          docker run -d --name mysql -p 3306:3306 \
+            -e MYSQL_ROOT_PASSWORD=root_ci -e MYSQL_DATABASE=dataflow \
+            -e MYSQL_USER=dataflow -e MYSQL_PASSWORD=dataflow \
+            mysql:8.0 --binlog-format=ROW --binlog-row-image=FULL
+          docker run -d --name mongo -p 27017:27017 mongo:7 \
+            --replSet rs0 --bind_ip_all
+
+      - name: Initiate Mongo replica set
+        run: |
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval \
+              'try { rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]}) } catch(e) { print(e) }' 2>/dev/null && break
+            sleep 2
+          done
+          for i in $(seq 1 30); do
+            st=$(docker exec mongo mongosh --quiet --eval 'rs.status().myState' 2>/dev/null || true)
+            [ "$st" = "1" ] && echo "mongo rs PRIMARY" && break
+            sleep 2
+          done
+
+      - name: Wait for SQL Server
+        run: |
+          cid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+          sqlcmd=""
+          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
+            docker exec "$cid" test -x "$c" && sqlcmd="$c" && break
+          done
+          [ -n "$sqlcmd" ] || { echo "no sqlcmd in image"; exit 1; }
+          for i in $(seq 1 60); do
+            if docker exec "$cid" "$sqlcmd" -S 127.0.0.1 -U sa -P 'Dataflow_CI_2026!' -C -Q 'SELECT 1' >/dev/null 2>&1; then
+              echo "mssql ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "mssql did not become ready" && exit 1
+
+      - name: Start Kafka (KRaft, PLAINTEXT + SASL_PLAINTEXT)
+        # apache/kafka maps KAFKA_* env to server.properties; the SASL
+        # listener JAAS is supplied inline (services can't mount files).
+        run: |
+          docker run -d --name kafka --network host \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,SASL://0.0.0.0:9094,CONTROLLER://127.0.0.1:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092,SASL://127.0.0.1:9094 \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL:SASL_PLAINTEXT \
+            -e KAFKA_SASL_ENABLED_MECHANISMS=PLAIN \
+            -e "KAFKA_LISTENER_NAME_SASL_PLAIN_SASL_JAAS_CONFIG=org.apache.kafka.common.security.plain.PlainLoginModule required username=\"admin\" password=\"$KAFKA_SASL_CI_PASSWORD\" user_admin=\"$KAFKA_SASL_CI_PASSWORD\" user_dataflow=\"$KAFKA_SASL_CI_PASSWORD\";" \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+            -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
+            apache/kafka:3.9.0
+          # Fail fast: a broker that exits during startup must kill this
+          # step (and dump its logs), not slip through to the presence gate.
+          for i in $(seq 1 60); do
+            state=$(docker inspect -f '{{.State.Status}}' kafka 2>/dev/null || echo missing)
+            if [ "$state" = "exited" ] || [ "$state" = "missing" ]; then
+              echo "kafka container $state — docker logs:"
+              docker logs kafka 2>&1 | tail -50 || true
+              exit 1
+            fi
+            docker exec kafka /opt/kafka/bin/kafka-broker-api-versions.sh \
+              --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1 && break
+            sleep 2
+          done
+          state=$(docker inspect -f '{{.State.Status}}' kafka)
+          [ "$state" = "running" ] || { docker logs kafka 2>&1 | tail -50; exit 1; }
+          # Broker must answer on PLAINTEXT; SASL leg is proven in the
+          # presence gate below (needs the JAAS file written there).
+          docker exec kafka /opt/kafka/bin/kafka-broker-api-versions.sh \
+            --bootstrap-server 127.0.0.1:9092
+
+      - name: Engine presence gate (a missing engine is a failure, not a skip)
+        run: |
+          fail=0
+          say() { printf '%-12s %s\n' "$1" "$2"; }
+          pg_isready -h 127.0.0.1 -p 5432 -U dataflow >/dev/null 2>&1 \
+            && say postgres ok || { say postgres MISS; fail=1; }
+          docker exec mysql \
+            mysqladmin ping -h 127.0.0.1 -udataflow -pdataflow >/dev/null 2>&1 \
+            && say mysql ok || { say mysql MISS; fail=1; }
+          scid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+          mssqlok=0
+          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
+            if docker exec "$scid" "$c" -S 127.0.0.1 -U sa -P "$MSSQL_SA_PASSWORD" \
+                 -C -Q 'SELECT 1' >/dev/null 2>&1; then mssqlok=1; break; fi
+          done
+          [ "$mssqlok" = 1 ] && say mssql ok || { say mssql MISS; fail=1; }
+          docker exec mongo \
+            mongosh --quiet --eval 'exit(db.runCommand({ping:1}).ok ? 0 : 1)' \
+            >/dev/null 2>&1 && say mongo ok || { say mongo MISS; fail=1; }
+          docker exec "$(docker ps -qf ancestor=redis:7)" redis-cli ping \
+            >/dev/null 2>&1 && say redis ok || { say redis MISS; fail=1; }
+          docker exec kafka /opt/kafka/bin/kafka-broker-api-versions.sh \
+            --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1 \
+            && say kafka ok || { say kafka MISS; fail=1; }
+          printf 'security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\nsasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="%s";\n' \
+            "$KAFKA_SASL_CI_PASSWORD" \
+            | docker exec -i kafka sh -c 'cat > /tmp/sasl.properties'
+          docker exec kafka /opt/kafka/bin/kafka-broker-api-versions.sh \
+            --bootstrap-server 127.0.0.1:9094 --command-config /tmp/sasl.properties \
+            >/dev/null 2>&1 && say kafka-sasl ok || { say kafka-sasl MISS; fail=1; }
+          exit $fail
+
+      - name: Grant MySQL CDC privileges
+        run: |
+          cid=mysql
+          for i in $(seq 1 30); do
+            docker exec "$cid" mysql -udataflow -pdataflow -e 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec "$cid" mysql -uroot -proot_ci -e \
+            "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
+
+      - name: Full suite
+        working-directory: apps/api
+        run: |
+          python -m pytest tests -q -rfEs -p no:cacheprovider -p randomly \
+            --junitxml=/tmp/pytest-junit.xml
+
+      - name: Upload pytest junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-junit-${{ github.run_id }}
+          path: /tmp/pytest-junit.xml
+          if-no-files-found: error
+
+  web:
+    name: Web lint + tests + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Dependency audit (report only, non-blocking)
+        run: npm audit --omit=dev --audit-level=high || true
+
+      - name: Lint (no browser dialogs)
+        run: npm --workspace apps/web run lint
+
+      - name: Unit tests (web only — the API suite is the engine job's)
+        run: npm --workspace apps/web run test
+
+      - name: Web tests
+        run: npm run test:web
+
+      - name: Build
+        run: npm run build
+
+  e2e:
+    name: Playwright e2e (hermetic stubs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Set up Python + API deps
+        # Vite proxies /api to 127.0.0.1:8001 — the specs stub some endpoints
+        # but NOT the shape catalog, so without the API the transform palette
+        # never mounts ("Shape catalog unavailable") and every studio-next
+        # spec times out clicking ops. Run the real API hermetically.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -e packages/preflight
+
+      - name: Install Playwright browsers
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Serve API (:8001) + app (:5173)
+        run: |
+          env DATAFLOW_JOB_STORE=memory DATAFLOW_DISABLE_OBJECT_STORE=1 \
+              PYTHONPATH=apps/api:packages/preflight/src:apps/api/src \
+              python -m uvicorn src.main:app --host 127.0.0.1 --port 8001 \
+              --app-dir apps/api > /tmp/api.log 2>&1 &
+          npm run dev --workspace=@dataflow/web -- --host 127.0.0.1 --port 5173 \
+              > /tmp/vite.log 2>&1 &
+          for i in $(seq 1 90); do
+            api=0; web=0
+            curl -fsS http://127.0.0.1:8001/api/v1/health >/dev/null && api=1
+            curl -fsS http://127.0.0.1:5173/ >/dev/null && web=1
+            [ "$api" = 1 ] && [ "$web" = 1 ] && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8001/api/v1/health >/dev/null
+          curl -fsS http://127.0.0.1:5173/ >/dev/null
+
+      - name: Playwright specs (a11y suite lands with UI-4)
+        working-directory: apps/web
+        run: npx playwright test --grep-invert "production build loads"
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
+
+      - name: Build + preview for prod-smoke
+        # prod-smoke asserts the production bundle (/assets/vendor-*.js) —
+        # it must run against `vite preview` (4173), not the dev server.
+        working-directory: apps/web
+        run: |
+          npm run build
+          npm run preview -- --host 127.0.0.1 --port 4173 > /tmp/preview.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:4173/ >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4173/ >/dev/null
+          npx playwright test --grep "production build loads"
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173

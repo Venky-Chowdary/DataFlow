@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
+from services.acknowledgment_contract import (
+    Acknowledgments,
+    acknowledgments_from_policies,
+    audit_acknowledgments,
+)
 from services.audit_log import append_audit_event
+from services.file_parser import iter_stored_upload_rows
+from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
+from services.shape_preflight import shaped_population_rows, shaped_preflight_image
 from services.transfer_plan_store import (
     TransferPlanRecord,
     add_mapping_revision,
@@ -21,8 +30,6 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from src.transfer.adapters import read_source_database
-from src.transfer.models import EndpointConfig
 
 
 def _preflight():
@@ -50,6 +57,7 @@ def run_plan_mapping(
     source_samples: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     from services.mapping_pipeline import run_mapping_pipeline
+    from services.value_serializer import evidence_text
 
     _, confidence_threshold_for_mode, _, _, _ = _preflight()
 
@@ -63,7 +71,7 @@ def run_plan_mapping(
         {
             "name": c,
             "inferred_type": plan.source_schema.get(c, "VARCHAR"),
-            "samples": [str(x) for x in samples.get(c, [])[:8]],
+            "samples": [evidence_text(x) for x in samples.get(c, [])[:8]],
         }
         for c in plan.source_columns
     ]
@@ -92,6 +100,9 @@ def run_plan_mapping(
         source_samples=source_samples,
         validation_mode=validation_mode,
         destination_db_type=(plan.destination.get("format") or plan.destination.get("type") or "").lower(),
+        # The source engine decides whether a text carrier promotion invents a
+        # repertoire (code-page VARCHAR) or keeps one (UTF-8 file text) - D204.
+        source_db_type=str(src.get("format") or src.get("type") or "").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
         sync_mode=str(policies.get("sync_mode") or ""),
         destination_table_exists=table_exists,
@@ -99,8 +110,18 @@ def run_plan_mapping(
             str(src.get("kind") or ""),
             str(src.get("format") or ""),
         ),
+        job_id=str(plan_id or "").strip(),
     )
 
+    from services.schema_drift_map_review import flag_rename_suggestions
+
+    flag_rename_suggestions(
+        list(result.get("mappings") or []),
+        source_columns=list(plan.source_columns),
+        target_columns=list(plan.target_columns),
+        schema_policy=str(policies.get("schema_policy", "manual_review")),
+        table_exists=table_exists,
+    )
     updated = add_mapping_revision(plan_id, result)
     append_audit_event(
         action="transfer_plan.mapped",
@@ -143,7 +164,49 @@ def sync_plan_mappings(plan_id: str, mappings: list[dict[str, Any]]) -> Transfer
     return plan
 
 
-def run_plan_preflight(plan_id: str) -> dict[str, Any]:
+def _plan_fit_progress(plan_id: str, rows_estimate: int):
+    """Heartbeat into the in-memory job so GET /preflight is live, not a hang."""
+
+    def _on_progress(scanned: int) -> None:
+        from services.plan_preflight_job import report_plan_preflight_progress
+
+        report_plan_preflight_progress(
+            plan_id,
+            rows_scanned=scanned,
+            rows_estimate=rows_estimate,
+            phase="scanning_population_fit",
+        )
+
+    return _on_progress
+
+
+from services.fk_parent_preflight import with_fk_route_option  # noqa: E402
+
+
+def run_plan_preflight(
+    plan_id: str,
+    *,
+    acknowledgments: Acknowledgments | None = None,
+    shape_recipe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run preflight for a persisted plan, honouring operator acknowledgments.
+
+    ``acknowledgments`` is what the operator just attested on Validate. It is
+    recorded on the plan (stamped with the mapping revision it was granted for)
+    so Execute and a page reload see the same attestation, and so a remap cannot
+    inherit a green from the shape it replaced.
+
+    ``shape_recipe`` is the approved pre-load transform. Execute shapes rows on
+    the read, so the gates must judge that image: without it Validate blocks on
+    values — a control character, an unrounded decimal — that the writer never
+    sees. Raises :class:`ShapePreflightRefused` when the recipe cannot run.
+    """
+    try:
+        from services.plan_preflight_job import report_plan_preflight_progress
+
+        report_plan_preflight_progress(plan_id, phase="running_gates")
+    except Exception:
+        pass
     (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -179,6 +242,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         dest_api_key=dest.get("api_key"),
         dest_service_account=dest.get("service_account"),
         dest_kind=dest.get("kind", "database"),
+        dest_extra=dest.get("extra") if isinstance(dest.get("extra"), dict) else {},
     )
 
     live_target_schema = dest_meta.get("column_types") or {}
@@ -196,7 +260,26 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     )
     if not live_target_schema and table_exists is True:
         live_target_schema = {}
-    live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
+
+    ack = acknowledgments or Acknowledgments()
+    if ack.any_claimed:
+        updated = update_plan(
+            plan_id,
+            {"policies": ack.as_policies(mapping_version=plan.active_version)},
+        )
+        plan = updated or plan
+        audit_acknowledgments(
+            ack,
+            resource=f"plan/{plan_id}",
+            details={
+                "mapping_version": plan.active_version,
+                "destination_table": dest.get("table") or dest.get("collection") or "",
+            },
+        )
+    else:
+        ack = acknowledgments_from_policies(
+            plan.policies, mapping_version=plan.active_version
+        )
 
     policies = plan.policies
     validation_mode = policies.get("validation_mode", "balanced")
@@ -214,22 +297,23 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         and plan.source_columns
         and (not sample_rows or len(sample_rows) < PREFLIGHT_SAMPLE_LIMIT)
     ):
-        try:
-            source_endpoint = EndpointConfig.from_dict(
-                plan.source.get("kind", "database"), plan.source
-            )
-            records, _headers, _schema = read_source_database(
-                source_endpoint,
-                limit=PREFLIGHT_SAMPLE_LIMIT,
-                raise_on_truncate=False,
-            )
-            fetched = records[:PREFLIGHT_SAMPLE_LIMIT] if records else None
-            if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
-                sample_rows = fetched
-        except Exception:
-            pass
+        from services.preflight_sample import engine_sample_rows
+
+        source_cfg = dict(plan.source)
+        fetched = engine_sample_rows(
+            source_kind="database",
+            source_format=str(source_cfg.get("format") or source_cfg.get("type") or ""),
+            source_connector_id=str(source_cfg.get("connector_id") or ""),
+            source_config=source_cfg,
+            source_table=str(source_cfg.get("table") or source_cfg.get("collection") or ""),
+            limit=PREFLIGHT_SAMPLE_LIMIT,
+        ).rows
+        if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
+            sample_rows = fetched
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
-        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
+        from services.sample_strategy import position_reservoir_sample
+
+        sample_rows = position_reservoir_sample(sample_rows, PREFLIGHT_SAMPLE_LIMIT)
 
     # Previous = revision snapshot (or empty for legacy revisions without snapshot).
     prev_cols = list(rev.source_columns or [])
@@ -257,26 +341,104 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     ).lower()
     source_kind = str(source.get("kind") or "file")
     source_format = str(source.get("format") or source.get("kind") or "file")
+    source_file_id = str(
+        source.get("file_id")
+        or (source.get("extra") or {}).get("file_id")
+        or ""
+    ).strip()
+
+    # Validate must score against the schema Execute will read. Live source
+    # introspection wins over the plan's Map-time snapshot; anything it cannot
+    # answer keeps the declared type. Revision ``declared_source_*`` stays the
+    # signed snapshot so an approved transform is not source drift.
+    from services.source_schema_authority import (
+        live_source_column_types,
+        reconcile_source_types,
+        restamp_mapping_source_types,
+    )
+
+    source_column_types, source_type_drift = reconcile_source_types(
+        plan.source_schema,
+        live_source_column_types(
+            source_connector_id=source_connector_id,
+            source_table=str(source.get("table") or ""),
+            source_collection=str(source.get("collection") or ""),
+            source_schema=str(source.get("schema") or ""),
+            source_database=str(source.get("database") or ""),
+            source_config=source,
+        ),
+    )
 
     # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
     # Source connector/table/config + stream_contracts required for uniqueness probe
     # (Studio plan Validate must not skip the probe Execute will run).
-    pf = run_file_preflight(
+    shaped_image = shaped_preflight_image(
+        shape_recipe,
         columns=plan.source_columns,
-        column_types=plan.source_schema,
+        column_types=source_column_types,
+        sample_rows=sample_rows,
+    )
+    plan_mappings = restamp_mapping_source_types(
+        list(rev.mappings or []),
+        shaped_image.column_types,
+    )
+
+    stored_population = iter_stored_upload_rows(source_file_id) if source_file_id else None
+    if stored_population is not None and shaped_image.applied:
+        stored_population = shaped_population_rows(
+            shape_recipe,
+            stored_population,
+            source_columns=shaped_image.columns,
+        )
+
+    plan_priority = str(policies.get("priority_column") or "").strip()
+    plan_limit = max(0, int(policies.get("row_limit") or 0))
+    plan_sample_rows = list(shaped_image.sample_rows or [])
+    if plan_limit > 0 or plan_priority:
+        try:
+            from src.transfer.engine import _apply_priority_and_limit
+        except ImportError:
+            from transfer.engine import _apply_priority_and_limit
+
+        plan_sample_rows = _apply_priority_and_limit(
+            plan_sample_rows,
+            plan_priority,
+            str(policies.get("priority_direction") or "desc"),
+            plan_limit,
+        )
+
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
+
+    dest_recreated = is_overwrite_sync(
+        policies.get("sync_mode", "full_refresh_overwrite")
+    ) and dest_schema_is_recreated_on_overwrite(dest_db_type)
+    destination_live_column_types = (
+        dict(live_target_schema) if dest_recreated and live_target_schema else None
+    )
+
+    pf = run_file_preflight(
+        columns=shaped_image.columns,
+        column_types=shaped_image.column_types,
         row_count=plan.row_count_estimate,
-        mappings=rev.mappings,
+        mappings=plan_mappings,
         destination_connected=bool(dest_meta.get("connected")),
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
         source_kind=source_kind,
         source_format=source_format,
         sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
-        sample_rows=sample_rows,
+        sample_rows=plan_sample_rows,
+        source_file_id=source_file_id,
+        population_rows=stored_population,
+        rows_are_population=stored_population is not None,
+        shape_recipe=shape_recipe,
         confidence_threshold=threshold,
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),
+        number_locale=policies.get("number_locale", ""),
         destination_column_types=live_target_schema,
+        destination_live_column_types=destination_live_column_types,
         destination_column_nullability=dest_meta.get("column_nullability") or {},
         destination_column_defaults=dest_meta.get("column_defaults") or {},
         destination_identity_columns=dest_meta.get("identity_columns") or [],
@@ -285,6 +447,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
         privilege_probe=dest_meta.get("privilege_probe"),
+        redshift_staging_probe=dest_meta.get("redshift_staging_probe"),
         destination_db_type=dest_db_type,
         source_connector_id=source_connector_id,
         source_config=dict(source) if source else None,
@@ -292,21 +455,41 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_table=dest_table,
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
+        # Drift compares against the revision's declared-source fingerprint, so
+        # it must see the declared source — an approved transform is not drift.
+        declared_source_columns=list(plan.source_columns),
+        declared_source_schema=dict(plan.source_schema or {}),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
         previous_source_columns=prev_cols or None,
         previous_source_schema=prev_schema or None,
         contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+        destination_dynamo_key_schema=dest_meta.get("dynamo_key_schema") or [],
+        destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
         destination_unique_keys=dest_meta.get("unique_keys") or [],
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+        destination_check_constraints=dest_meta.get("check_constraints") or [],
+        # Without the destination connection the append key-collision probe cannot
+        # run, and Validate greens a batch Execute then refuses on the same key.
+        destination_config=with_fk_route_option(
+            dest_meta.get("_probe_cfg"),
+            (dest.get("extra") if isinstance(dest.get("extra"), dict) else {}).get("foreign_keys_mode")
+            or dest.get("foreign_keys_mode"),
+        ),
         stream_contracts=stream_contracts,
-        compliance_acknowledged=bool(policies.get("compliance_acknowledged")),
-        schema_drift_acknowledged=bool(policies.get("schema_drift_acknowledged")),
-        fk_risk_acknowledged=bool(policies.get("fk_risk_acknowledged")),
-        acknowledgment_actor=str(policies.get("acknowledgment_actor") or "").strip(),
-        acknowledgment_reason=str(policies.get("acknowledgment_reason") or "").strip(),
+        compliance_acknowledged=ack.compliance,
+        schema_drift_acknowledged=ack.schema_drift,
+        fk_risk_acknowledged=ack.fk_risk,
+        ddl_changes_acknowledged=ack.ddl_changes,
+        acknowledgment_actor=ack.actor,
+        acknowledgment_reason=ack.reason,
+        fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
+        on_fit_progress=_plan_fit_progress(plan_id, int(plan.row_count_estimate or 0)),
     )
+    from services.mirror_delete_notice import attach_mirror_delete_notice
+
+    attach_mirror_delete_notice(pf, str(policies.get("sync_mode") or ""), stream_contracts)
     pf = apply_policy_gates(
         pf,
         run_transfer_policy_gates(
@@ -315,11 +498,23 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             validation_mode=validation_mode,
             stream_contracts=stream_contracts,
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
-            source_columns=plan.source_columns,
+            source_columns=shaped_image.columns,
             dest_type=dest_db_type,
             source_type=source_format,
             source_kind=source_kind,
             write_via_staging=bool(policies.get("write_via_staging")),
+            priority_column=str(policies.get("priority_column") or ""),
+            priority_direction=str(policies.get("priority_direction") or "desc"),
+            row_limit=max(0, int(policies.get("row_limit") or 0)),
+            source_read_mode=str(
+                (source.get("source_read_mode") or (source.get("extra") or {}).get("source_read_mode") or "")
+            ),
+            source_endpoint=source,
+            source_config=dict(source) if source else None,
+            source_table=source_table,
+            mappings=plan_mappings,
+            catalog_primary_key_columns=list(contract_pk_cols or []) or None,
+            destination_endpoint=dest,
         ),
         validation_mode=validation_mode,
         destination_db_type=dest_db_type,
@@ -327,6 +522,34 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
 
     if pf.get("effective_mappings"):
         pf["mappings"] = pf["effective_mappings"]
+    if shaped_image.applied:
+        # Name the image the gates judged. A verdict on transformed rows that
+        # reads as a verdict on the source is how an operator loses the thread.
+        pf["transform_image"] = {
+            "recipe_hash": shaped_image.recipe_hash,
+            "columns": shaped_image.columns,
+            "sample_rows_in": shaped_image.rows_in,
+            "sample_rows_out": shaped_image.rows_out,
+            "sample_rows_removed": shaped_image.rows_removed,
+            "sample_rows_diverted": shaped_image.rows_diverted,
+            "retyped_columns": shaped_image.retyped_columns,
+        }
+        note = shaped_image.note()
+        if note:
+            bucket = pf.setdefault("warnings", [])
+            if note not in bucket:
+                bucket.append(note)
+    if source_type_drift:
+        # Gates already ran on live truth — say so instead of silently rescoring.
+        pf["source_schema_drift"] = source_type_drift
+        bucket = pf.setdefault("warnings", [])
+        for d in source_type_drift:
+            note = (
+                f"Source type re-read from live connector: {d['column']} "
+                f"{d['declared']} → {d['live']} (Map stamp was stale)"
+            )
+            if note not in bucket:
+                bucket.append(note)
     # Surface destination catalog honesty (BQ/Redshift/SF NOT ENFORCED) warn-only.
     for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
         note = str(w).strip()
@@ -335,6 +558,10 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         bucket = pf.setdefault("warnings", [])
         if note not in bucket:
             bucket.append(note)
+    # Every preflight verdict must be citable: the persisted run id is the handle
+    # Execute is unlocked against, so it travels back with the result instead of
+    # leaving the caller to infer a run that has no identity.
+    pf["run_id"] = str(pf.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
     add_preflight_run(plan_id, pf)
     drift = pf.get("schema_drift") or {}
     append_audit_event(
@@ -344,6 +571,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         details={
             "passed": pf.get("passed"),
             "readiness_score": pf.get("readiness_score"),
+            "run_id": pf["run_id"],
             "mapping_version": rev.version,
             "mapping_hash": rev.mapping_hash,
             "drift_detected": drift.get("drift_detected"),
@@ -380,11 +608,15 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         target_columns=plan.target_columns,
         destination_db_type=str(dest.get("format") or dest.get("type") or ""),
         source_kind=str(src.get("kind") or ""),
+        source_db_type=str(src.get("format") or src.get("type") or ""),
         dest_kind=str(dest.get("kind") or ""),
         sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
     )
 
-    return {
+    from src.transfer.contract_engine import resolve_bound_contract
+
+    cid, require = resolve_bound_contract(policies=plan.policies)
+    payload = {
         "plan_id": plan_id,
         "mapping_version": rev.version,
         "mapping_hash": rev.mapping_hash,
@@ -395,6 +627,10 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         "column_types": plan.source_schema,
         "policies": plan.policies,
     }
+    if cid:
+        payload["contract_id"] = cid
+        payload["require_signed_contract"] = require
+    return payload
 
 
 def merge_plan_into_run(
@@ -439,6 +675,7 @@ def merge_plan_into_run(
         target_columns=plan.target_columns,
         destination_db_type=str(dest.get("format") or dest.get("type") or ""),
         source_kind=str(src.get("kind") or ""),
+        source_db_type=str(src.get("format") or src.get("type") or ""),
         dest_kind=str(dest.get("kind") or ""),
         sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
     )

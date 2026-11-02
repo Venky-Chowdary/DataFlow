@@ -13,10 +13,23 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from services.transfer_scheduler import submit as _submit_transfer
 
-from .engine import get_transfer_engine
 from .models import TransferRequest, transfer_request_from_dict
 
 logger = logging.getLogger(__name__)
+
+
+def get_transfer_engine():
+    """Resolve the engine factory at call time.
+
+    A module-level ``from .engine import get_transfer_engine`` binds whatever
+    the factory is at import time — if this module is first imported inside a
+    test's monkeypatch window, the stub stays bound for the whole process.
+    Keeping the name as a delegate preserves the patch contract for tests
+    that stub either this module's or the engine module's attribute.
+    """
+    from .engine import get_transfer_engine as _factory
+
+    return _factory()
 
 
 def _log_transfer_exception(fut: Any) -> None:
@@ -86,6 +99,9 @@ def _run_transfer(
 def run_fleet_job(job_id: str) -> None:
     """Worker-fleet handler: reconstruct TransferRequest from the Mongo job and execute."""
     mongo = get_mongodb_service()
+    if mongo.is_cancel_requested(job_id):
+        logger.info("Skipping job %s — cancelled before the worker started it", job_id)
+        return
     job = mongo.get_job(job_id)
     if not job:
         raise ValueError(f"Unknown job {job_id}")
@@ -93,6 +109,25 @@ def run_fleet_job(job_id: str) -> None:
     if not isinstance(payload, dict) or not payload:
         raise ValueError(f"Job {job_id} has no transfer_request — cannot execute on worker")
     request = transfer_request_from_dict(payload)
+    from services.confirmed_transfer import apply_stored_schema_drift_ack
+
+    nested_was_missing = apply_stored_schema_drift_ack(request, job)
+    if request.schema_drift_acknowledged and (
+        nested_was_missing or not job.get("schema_drift_acknowledged")
+    ):
+        repaired = dict(payload)
+        repaired["schema_drift_acknowledged"] = True
+        repaired["acknowledgment_actor"] = request.acknowledgment_actor
+        repaired["acknowledgment_reason"] = request.acknowledgment_reason
+        mongo.update_job_fields(
+            job_id,
+            {
+                "schema_drift_acknowledged": True,
+                "acknowledgment_actor": request.acknowledgment_actor,
+                "acknowledgment_reason": request.acknowledgment_reason,
+                "transfer_request": repaired,
+            },
+        )
     from services.transfer_file_staging import (
         file_source_bytes_available,
         hydrate_file_source,
@@ -144,9 +179,15 @@ def run_transfer_async(
         from services.worker_leases import requires_distributed_backend
 
         if fleet_enabled():
+            from services.process_role import workload_for_sync_mode
+
             ok = enqueue_job(
                 job_id,
-                payload={"resume": resume, "resume_from_job_id": resume_from_job_id or ""},
+                payload={
+                    "resume": resume,
+                    "resume_from_job_id": resume_from_job_id or "",
+                    "workload": workload_for_sync_mode(request.sync_mode),
+                },
             )
             if ok:
                 logger.info(

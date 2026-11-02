@@ -26,6 +26,7 @@ from services.cursor_semantics import (  # noqa: E402
 from services.destination_key_collision_probe import (  # noqa: E402
     rows_a_cursor_read_will_deliver,
 )
+from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 from services.keyset_pagination import KEYSET_SEP  # noqa: E402
 from services.sync_cursor import SyncContract, max_cursor_value  # noqa: E402
 
@@ -161,6 +162,19 @@ class TestPreWriteChecksSeeTheDelta:
             rows, cursor_column="updated_at", watermark="2024-01-02T00:00:00"
         )
         assert len(delta) == 2
+
+    def test_reader_null_cursor_does_not_shrink_the_batch(self):
+        """SQL_NULL_SENTINEL is missing, not a present cursor token."""
+        rows = [
+            {"id": 1, "updated_at": SQL_NULL_SENTINEL},
+            {"id": 2, "updated_at": ""},
+            {"id": 3, "updated_at": "   "},
+            {"id": 4, "updated_at": "2024-01-01T00:00:00"},
+        ]
+        delta = rows_a_cursor_read_will_deliver(
+            rows, cursor_column="updated_at", watermark="2024-01-02T00:00:00"
+        )
+        assert [r["id"] for r in delta] == [1, 2, 3]
 
     def test_the_watermark_written_is_the_watermark_the_delta_is_measured_against(self):
         """One encoding on both sides, or the second run reads the wrong window."""

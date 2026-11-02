@@ -175,9 +175,9 @@ function FlowCanvas({
       <svg className="df2-flow-svg" viewBox="0 0 400 120" preserveAspectRatio="xMidYMid meet">
         <defs>
           <linearGradient id="df-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#0f766e" stopOpacity="0.35" />
-            <stop offset="50%" stopColor="#14b8a6" stopOpacity="0.9" />
-            <stop offset="100%" stopColor="#6366f1" stopOpacity="0.5" />
+            <stop offset="0%" stopColor="var(--df-logo-tile)" stopOpacity="0.45" />
+            <stop offset="55%" stopColor="var(--df-logo-ink)" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="var(--df-logo-arrow)" stopOpacity="0.85" />
           </linearGradient>
         </defs>
         {[36, 60, 84].map((y, idx) => {
@@ -194,7 +194,7 @@ function FlowCanvas({
                 style={{ animationDelay: `${idx * 0.35}s` }}
               />
               {animated && (
-                <circle r="3.5" fill="#14b8a6" className="df2-flow-packet">
+                <circle r="3.5" fill="var(--df-logo-arrow)" className="df2-flow-packet">
                   <animateMotion
                     dur={`${2.2 + idx * 0.4}s`}
                     repeatCount="indefinite"

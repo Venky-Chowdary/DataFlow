@@ -60,9 +60,9 @@ export const AUTOMATION_IDEAS: AutomationIdea[] = [
   {
     id: "job_audit",
     category: "data_ops",
-    title: "Transfer job audit",
-    prompt: "Show my recent transfer jobs and flag any failures",
-    description: "Job history with record counts and status.",
+    title: "Workspace briefing",
+    prompt: "Give me a workspace briefing",
+    description: "Live sitrep of connectors, jobs, and parked pipelines — counts from stores, not a demo.",
   },
   {
     id: "quality_report",

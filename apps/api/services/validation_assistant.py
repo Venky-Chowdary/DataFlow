@@ -19,7 +19,134 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from services.blocker_titles import blocker_title, is_internal_blocker_id, is_schema_drift_echo
 from services.preflight_rules import explain_gate, explain_issue
+
+# POST /preflight/explain used to echo the full Validate result (gates, 1M-scan
+# findings, sample rows). Nginx then spilled the body to client_temp — a warn,
+# not a 413. Explain only reads blockers / coercion / population_fit / decision.
+_EXPLAIN_FINDING_CAP = 20
+_EXPLAIN_EXAMPLE_CAP = 3
+
+
+def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only the fields ``explain_validation`` reads.
+
+    A 1M-row Validate result can be megabytes. The assistant never iterates
+    gates or sample rows — sending them is wasted I/O and a production warn.
+    """
+    pf = preflight if isinstance(preflight, dict) else {}
+    proof = pf.get("proof_bundle") if isinstance(pf.get("proof_bundle"), dict) else {}
+    decision = proof.get("transfer_decision") if isinstance(proof.get("transfer_decision"), dict) else {}
+    pop = pf.get("population_fit") if isinstance(pf.get("population_fit"), dict) else {}
+    findings: list[dict[str, Any]] = []
+    for raw in (pop.get("findings") or [])[:_EXPLAIN_FINDING_CAP]:
+        if not isinstance(raw, dict):
+            continue
+        findings.append({
+            "source": raw.get("source"),
+            "target": raw.get("target"),
+            "source_type": raw.get("source_type"),
+            "target_type": raw.get("target_type"),
+            "unfit_rows": raw.get("unfit_rows"),
+            "example_values": list(raw.get("example_values") or [])[:_EXPLAIN_EXAMPLE_CAP],
+            "example_rows": list(raw.get("example_rows") or [])[:_EXPLAIN_EXAMPLE_CAP],
+            "suggested_target_type": raw.get("suggested_target_type"),
+            "apply_proven": raw.get("apply_proven"),
+            "apply_proven_scope": raw.get("apply_proven_scope"),
+            "suggested_fix": raw.get("suggested_fix"),
+            "reason": raw.get("reason") or raw.get("unfit_reason"),
+            "unfit_reason": raw.get("unfit_reason"),
+        })
+    coercion = pf.get("coercion_report") if isinstance(pf.get("coercion_report"), dict) else {}
+    coercion_cols: list[dict[str, Any]] = []
+    for col in (coercion.get("columns") or [])[:_EXPLAIN_FINDING_CAP]:
+        if not isinstance(col, dict) or col.get("severity") == "ok":
+            continue
+        coercion_cols.append({
+            "source": col.get("source"),
+            "target": col.get("target"),
+            "source_type": col.get("source_type"),
+            "target_type": col.get("target_type"),
+            "severity": col.get("severity"),
+            "failed": col.get("failed", 0),
+            "sentinel_nulls": col.get("sentinel_nulls", 0),
+            "sampled": col.get("sampled", 0),
+            "sample_failures": (col.get("sample_failures") or [])[:3],
+            "suggested_fix": col.get("suggested_fix"),
+            "suggested_target_type": col.get("suggested_target_type"),
+            "suggested_transform": col.get("suggested_transform"),
+            "destination_exists": col.get("destination_exists"),
+            "table_exists": col.get("table_exists"),
+        })
+    blockers: list[dict[str, Any]] = []
+    mapping_review_columns: set[str] = set()
+    for raw in pf.get("blockers") or []:
+        if not isinstance(raw, dict):
+            continue
+        gate_id = str(raw.get("id") or raw.get("gate") or "")
+        details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        issues_detail = details.get("issues_detail") if isinstance(details.get("issues_detail"), list) else []
+        if gate_id in {"g4_mapping_confidence", "g4_mapping"}:
+            for key in ("affected_columns", "columns"):
+                mapping_review_columns.update(
+                    str(value).strip()
+                    for value in details.get(key, [])
+                    if isinstance(value, str) and value.strip()
+                )
+            mapping_review_columns.update(
+                str(column).strip()
+                for detail in issues_detail
+                if isinstance(detail, dict)
+                for column in (detail.get("source"), detail.get("column"))
+                if isinstance(column, str) and column.strip()
+            )
+        blockers.append({
+            "id": gate_id or None,
+            "gate": raw.get("gate") or raw.get("id"),
+            "message": raw.get("message", ""),
+            "guidance": raw.get("guidance") or {},
+            "details": {
+                "issues": (details.get("issues") or [])[:10],
+                "errors": (details.get("errors") or [])[:10],
+                "issues_detail": [
+                    {"source": d.get("source"), "column": d.get("column")}
+                    for d in issues_detail[:20]
+                    if isinstance(d, dict)
+                ],
+            },
+        })
+    for root in pf.get("root_causes") or []:
+        if not isinstance(root, dict):
+            continue
+        impacted = root.get("impacted_gates") or []
+        if root.get("kind") != "mapping_confidence" and not any(
+            gate in {"g4_mapping_confidence", "g4_mapping"} for gate in impacted
+        ):
+            continue
+        mapping_review_columns.update(
+            str(column).strip()
+            for column in root.get("affected_columns") or []
+            if isinstance(column, str) and column.strip()
+        )
+    return {
+        "passed": bool(pf.get("passed")),
+        "run_id": pf.get("run_id"),
+        "blockers": blockers,
+        "mapping_review_columns": sorted(mapping_review_columns),
+        "coercion_report": {"columns": coercion_cols} if coercion_cols else {},
+        "population_fit": {
+            "evidence": pop.get("evidence"),
+            "rows_scanned": pop.get("rows_scanned"),
+            "rows_total": pop.get("rows_total"),
+            "unfit_rows": pop.get("unfit_rows"),
+            "findings": findings,
+        } if pop else {},
+        "proof_bundle": {"transfer_decision": {"decision": decision.get("decision")}} if decision else {},
+        "destination_table_exists": bool(
+            pf.get("destination_table_exists") or proof.get("destination_table_exists")
+        ),
+    }
 
 
 def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -44,6 +171,93 @@ def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
             "destination_exists": bool(col.get("destination_exists")),
             "table_exists": bool(col.get("table_exists")),
         })
+    return out
+
+
+def _population_fit_column_fixes(
+    fit: dict[str, Any] | None,
+    *,
+    table_exists: bool = False,
+) -> list[dict[str, Any]]:
+    """Promote g3f_population_fit overflows into the same column-fix SSOT."""
+    if not isinstance(fit, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for col in fit.get("findings") or []:
+        if not isinstance(col, dict):
+            continue
+        # A widen the scan never re-checked against every overflow witness is
+        # unproven, not merely unknown: Approve & apply must not stamp it.
+        proven = col.get("apply_proven") is True
+        try:
+            unfit = int(col.get("unfit_rows") or 0)
+        except (TypeError, ValueError):
+            unfit = 0
+        if unfit <= 0:
+            continue
+        examples = col.get("example_values") if isinstance(col.get("example_values"), list) else []
+        rows = col.get("example_rows") if isinstance(col.get("example_rows"), list) else []
+        sample_failures = []
+        if examples:
+            sample_failures.append({
+                "row": rows[0] if rows else None,
+                "value": examples[0],
+                "reason": col.get("unfit_reason") or col.get("reason") or "",
+            })
+        out.append({
+            "column": col.get("source"),
+            "target": col.get("target") or col.get("source"),
+            "source_type": col.get("source_type") or "",
+            "target_type": col.get("target_type") or "",
+            "severity": "block",
+            "failed": unfit,
+            "sentinel_nulls": 0,
+            "sampled": unfit,
+            "sample_failures": sample_failures,
+            "suggested_fix": col.get("suggested_fix") or "",
+            "suggested_target_type": col.get("suggested_target_type") or "",
+            "suggested_transform": None,
+            "destination_exists": table_exists,
+            "table_exists": table_exists,
+            "apply_proven": proven,
+            "apply_proven_scope": str(col.get("apply_proven_scope") or ""),
+        })
+    return out
+
+
+def _merge_column_fixes(
+    coercion: list[dict[str, Any]],
+    population: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One row per source+target. Population-fit dest widen wins.
+
+    Population fit only proves numeric widens; when a column fails because
+    values are not numbers at all (``Invalid decimal: 'abc'``) it has no
+    target type to offer, so the coercion probe's text fallback is kept.
+    """
+
+    def _key(row: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(row.get("column") or "").strip().lower(),
+            str(row.get("target") or "").strip().lower(),
+        )
+
+    by_key = {_key(r): r for r in coercion}
+    out = [r for r in coercion if _key(r) not in {_key(p) for p in population}]
+    for pop in population:
+        base = by_key.get(_key(pop))
+        if base and base.get("suggested_target_type") and not pop.get("suggested_target_type"):
+            pop = {
+                **pop,
+                "suggested_target_type": base["suggested_target_type"],
+                "suggested_fix": base.get("suggested_fix") or pop.get("suggested_fix"),
+                "apply_proven": base.get("apply_proven"),
+                "apply_proven_scope": base.get("apply_proven_scope") or "",
+                "source_type": pop.get("source_type") or base.get("source_type") or "",
+                "destination_exists": bool(pop.get("destination_exists") or base.get("destination_exists")),
+                "table_exists": bool(pop.get("table_exists") or base.get("table_exists")),
+            }
+        out.append(pop)
     return out
 
 
@@ -180,6 +394,9 @@ def _suggested_actions(
                     "to_type": to_type,
                     "label": label,
                     "requires_ddl": existing,
+                    "mapping_applyable": (not existing)
+                    and cf.get("apply_proven") is not False,
+                    "apply_proven": cf.get("apply_proven"),
                 })
         if cf.get("suggested_transform"):
             key = ("add_transform", cf["column"], cf["suggested_transform"])
@@ -322,6 +539,14 @@ def _suggested_actions(
             "kind": "check_connection",
             "label": "Open Connectors — fix credentials / Auth source, then Test",
         })
+    if "g3f_population_fit" in gate_ids and any(
+        a.get("kind") == "change_target_type"
+        and a.get("to_type")
+        and a.get("apply_proven") is not False
+        and a.get("requires_ddl") is not True
+        for a in actions
+    ):
+        actions = [a for a in actions if a.get("kind") != "review_mappings"]
     return actions
 
 
@@ -458,6 +683,7 @@ def explain_validation(
         ``apply_policy_gates`` (contains ``passed``, ``gates``, ``blockers``,
         and optionally ``coercion_report``).
     """
+    preflight = slim_preflight_for_explain(preflight)
     passed = bool(preflight.get("passed"))
     proof = preflight.get("proof_bundle") or {}
     transfer_decision = proof.get("transfer_decision") or {}
@@ -468,6 +694,16 @@ def explain_validation(
     issues: list[dict[str, Any]] = []
     for b in blockers:
         gate_id = b.get("id") or b.get("gate") or "general"
+        message = str(b.get("message") or "")
+        # One schema change is one analysis card. A proof echo of the same
+        # sentence must not become a second "blocking gate".
+        if message and any(str(existing.get("what") or "").strip() == message.strip() for existing in issues):
+            continue
+        if is_internal_blocker_id(str(gate_id)) and is_schema_drift_echo(message) and any(
+            existing.get("gate") == "schema_drift" or is_schema_drift_echo(existing.get("what"))
+            for existing in issues
+        ):
+            continue
         guidance = b.get("guidance") or explain_gate(gate_id, b.get("message", ""), b.get("details"))
         details = b.get("details") or {}
         nested = details.get("issues") or details.get("errors") or []
@@ -478,7 +714,11 @@ def explain_validation(
         ]
         issues.append({
             "gate": gate_id,
-            "title": guidance.get("title", gate_id),
+            "title": blocker_title(
+                gate_id,
+                b.get("message", ""),
+                catalog_title=guidance.get("title", ""),
+            ),
             "severity": "block",
             "what": b.get("message", ""),
             "why": guidance.get("why", ""),
@@ -488,7 +728,16 @@ def explain_validation(
             "detail_messages": [str(n) for n in nested][:10],
         })
 
-    column_fixes = _coercion_column_fixes(coercion_report)
+    column_fixes = _merge_column_fixes(
+        _coercion_column_fixes(coercion_report),
+        _population_fit_column_fixes(
+            preflight.get("population_fit") if isinstance(preflight.get("population_fit"), dict) else {},
+            table_exists=bool(
+                preflight.get("destination_table_exists")
+                or (preflight.get("proof_bundle") or {}).get("destination_table_exists")
+            ),
+        ),
+    )
     # Surface warn-only columns as advisory issues even when nothing blocks.
     for c in column_fixes:
         if c["severity"] == "warn":
@@ -526,7 +775,29 @@ def explain_validation(
     if not passed and use_llm:
         narrative, provider = _llm_narrative(deterministic, issues)
 
-    hard_count = sum(1 for i in issues if i["severity"] != "warning")
+    blocking_gate_ids = {
+        str(issue.get("gate") or "").strip() or "general"
+        for issue in issues
+        if issue["severity"] != "warning"
+    }
+    hard_count = len(blocking_gate_ids)
+    attention_columns = {
+        str(column).strip()
+        for column in preflight.get("mapping_review_columns") or []
+        if isinstance(column, str) and column.strip()
+    }
+    attention_columns.update(
+        str(fix.get("column") or "").strip()
+        for fix in column_fixes
+        if str(fix.get("column") or "").strip()
+    )
+    for issue in issues:
+        if issue.get("gate") in {"g4_mapping_confidence", "g4_mapping"}:
+            attention_columns.update(
+                str(column).strip()
+                for column in issue.get("columns") or []
+                if isinstance(column, str) and column.strip()
+            )
     approved = passed and decision == "approve"
     summary = (
         "Validation passed — safe to run."
@@ -534,7 +805,10 @@ def explain_validation(
         else (
             "Validation review-grade — not safe to run until decision is approve."
             if passed
-            else f"Validation blocked: {hard_count} issue(s), {len(column_fixes)} column(s) need attention."
+            else (
+                f"Validation blocked: {hard_count} blocking gate(s), "
+                f"{len(attention_columns)} column(s) need attention."
+            )
         )
     )
 

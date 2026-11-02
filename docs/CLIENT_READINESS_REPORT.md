@@ -1,5 +1,11 @@
 # Datawrap — Client Readiness Report
 
+> **2026-08-27 Validate≡Execute wave:** use
+> [`docs/CLIENT_HANDOVER_VALIDATE_EXECUTE.md`](CLIENT_HANDOVER_VALIDATE_EXECUTE.md)
+> for the `flights-1m.csv` → Snowflake incident, operator runbook, and measured
+> population-fit proof. This file remains the prior relational-assurance pack.
+> Do not mix those live-engine counts with the 2026-08-27 scan matrices.
+
 Measured state of the product for a client handover decision. Every claim below
 is backed by a named artifact (live run JSON, pytest node ids, or a file in this
 repository). Where something is unproven or unmeasured it says so; there are no
@@ -223,9 +229,19 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
    (`ORA-00054`). The refused writer fails loudly with the lock named and
    nothing is written, so no column is silently lost, but two writers evolving
    the same table concurrently need a retry policy.
-4. **FK cycles are refused, not resolved.** No deferred-constraint strategy.
-5. **Triggers, stored procedures and views are not migrated.** Reported as
-   advisory in the physical-state section; recreate them before cutover.
+4. **FK cycles are recreated after load**, not refused. PostgreSQL and Oracle
+   emit `DEFERRABLE INITIALLY DEFERRED` on cycle and self-referential edges;
+   the certificate blocks only when a cycle is present and `cycle_resolved`
+   is not true. Proven on the named live matrix in
+   `apps/api/tests/test_fk_cycle_post_load.py` (PR #94). SQL Server / MySQL
+   use the portable post-load `ALTER` path without deferred constraints.
+5. **Triggers, stored procedures and views are not migrated.** They are named
+   on the certificate as advisory physical-state aspects
+   (`cutover_recreate`) so cutover recreates them. Name presence is not a
+   body-carried claim; advisory never vetoes `migration_proven`. Views and
+   named triggers: PR #95. Dependent procedures / functions: this wave
+   (`apps/api/tests/test_routine_cutover_matrix.py`). SQL Server and Oracle
+   catalog queries exist; they are not live-proven on this VM.
 6. **SQL Server partition functions/schemes, Oracle partitioned tables and
    PostgreSQL CLUSTER ordering are not carried** — refused honestly rather than
    invented.
@@ -309,7 +325,7 @@ credentials.
 | 5 | UI/UX audit against the engine: one primary action per root cause, no claim the engine does not support. Cursor contract done (cursor + declared meaning + verdict in Studio, `cursor_semantics_live_results.json` 18/18); remaining: the other panels | 1 | — |
 | 6 | Warehouse certification (Snowflake, BigQuery, S3) | 1–2 | credentials |
 | 7 | SaaS certification starting with Salesforce | 1–2 | integration user / Connected App |
-| 8 | FK cycles via deferred constraints, plus trigger/view reporting in the certificate | 1 | — |
+| 8 | ~~FK cycles via deferred constraints, plus trigger/view/routine reporting in the certificate~~ — done: cycles post-load (PR #94), views+triggers named (PR #95), dependent routines named (this wave). SQL Server / Oracle routine catalogs are not live here | — | SQL Server / Oracle credentials for a live routine matrix |
 | 9 | Final handover pack: signed proof bundle per certified route, runbook, rollback plan | 1 | items 1–8 |
 
 The critical path to a defensible client handover of the **relational** product
@@ -321,7 +337,122 @@ is items 1, 2, 3 and 9 — the rest widens the certified surface.
 
 - No overall readiness percentage. A single number over unaudited surfaces would
   be invented.
-- No "N connectors live". 44 drivers carry PRODUCTION_SKU evidence; the catalog
-  is larger and the difference is not capability.
+- No "N connectors live". Unique TRANSFER_READY drivers are 46 when optional
+  packages are present (`transfer_live_driver_types` /
+  `TRANSFER_LIVE_WHEN_PACKAGES_PRESENT`). PRODUCTION_SKU is 86 routes. Catalog
+  tiles are larger and the difference is not capability.
 - No claim that any Snowflake, BigQuery, S3 or Salesforce route works in a
   client environment. They have not been run against a real account here.
+
+---
+
+## 9. Handover verdict — 2026-09-07 pre-handover sweep
+
+Asked directly whether the product can be handed to a client as "46+ connectors
+and every feature working, schedules and pilot, 100% robust": **no.** The
+migration-assurance core has got materially stronger in this sweep — twelve
+defects that were green-and-wrong are closed with measurements (register §5–§6),
+including two that refused *correct* migrations at Gate-8 and one that made the
+product's own proof-pack verify control report tampering on a pack it had just
+signed. But readiness is an evidence claim, and four categories of evidence do
+not exist yet.
+
+**Proven (live engine, independent destination reread, named artifact):**
+relational source → relational destination on Postgres / MySQL / SQL Server /
+Oracle / SQLite / DuckDB for create-new, append, incremental, upsert and
+overwrite; Gate-8 count and checksum proof; G21 control totals per dialect; G20
+population crosswalk coverage; G22 referential integrity; the field-reduction
+ledger; the hash-chained evidence store and proof-pack export/verify.
+
+**Tested but not live-proven:** schedules and their retry / overlap / missed
+window / DST / ownership / cancellation semantics — 173 automated tests pass, no
+operator has driven one through the UI here.
+
+**Now browser-proved (second QA pass, 2026-09-07):** the proof-pack export →
+download → re-upload round trip verifies and a one-byte mutation still fails all
+three checks (D25); a schedule survives a destination edit and runs, while a
+rename or cadence change preserves its approval byte-identically (D38); records
+written after the chain fix carry a monotonic `chain_seq` and none of them draws
+a finding (D39); and a hand-declared `VARCHAR(255)` survives Map → Validate →
+Map and drives the DDL (D26).
+
+**Implemented but not measured:** D39's
+tie-break under two writes in one clock tick (no natural tie could be forced);
+D31's locale money behaviour at this tip; a schedule driven end
+to end by an operator; the Operations, Contracts and Proofs pages; workspace
+roles and member removal. These are **untested**, not passing. Job cancel is
+a measured status fence (PR #187): final status stays `cancelled`, not
+rewritten to `completed`. COPY is still not interruptible mid-wire.
+
+**One thing a client will see immediately:** the Verify chain screen reads
+`Chain verification failed — 36 record(s)`. Every one of those findings is on a
+record written before the ordering fix went live; the fix stops new ones and
+cannot un-cross history without rewriting an append-only audit log. Either those
+records get checkpointed or the screen distinguishes legacy findings — shipping
+a red chain verdict to a regulated client is not an option.
+
+A later browser pass in the same sweep did reach the application and closed four
+more defects the automated suites could not have found — the approval inbox
+showing another tenant's parked schedule (D36), a Replay control offered on
+findings with no row to replay (D37), a schedule permanently bricked by editing
+its destination (D38), and Verify chain accusing an untampered store of 28
+broken links (D39). It left **D40** open at the time — a blocked route with no
+release path, reproduced on two unrelated type pairs (`TEXT → DECIMAL(38,15)`
+and `DECIMAL(12,2) → DATE`), the second of which had Validate *name* the
+contract an operator was supposed to sign and Map then offer no way to sign it.
+
+**D40 is now closed and browser-proved** (PR
+[#171](https://github.com/Venky-Chowdary/DataFlow/pull/171)), and closing it
+also proved D37's positive Replay path, which nothing had ever reached. Map
+classifies by carrier *shape* (the basis on which the engine actually refuses),
+offers a per-row execution-policy selector with no hidden default, and a
+destination-rejected value under a signed continue policy is a **contracted
+holdout** rather than a Validate block. Measured on a live PG→PG route: the run
+completed with quarantine (2 appended, 1 held out) with a payload-bearing
+finding; an independent psycopg2 read — a connection the engine never touched —
+measured `count(*) = 2` and `SUM(amount) = 30.50` exactly; Replay refused the
+unchanged payload without mutating the destination and accepted the edited one
+(`count(*) = 3`, `SUM = 56.25`, keyed upsert, no duplicate ids). No policy,
+`FAIL_JOB`, `STOP_TABLE`, `ABORT_TRANSACTION` and a tampered signature all
+still block.
+
+Closing it opened two items a client would meet. **D41:** on a **SQLite**
+destination a non-castable value is written anyway — nothing rejected,
+`rejected_rows` `0`, and `strict` / `maximum` do not fail; it reproduces on
+merged base `66dadc93`, so it predates D40 and is the reason earlier QA passes
+never reached quarantine on a file route. **D42:** the destination-side DLQ
+write fails because the destination table has none of the `_df_*` quarantine
+columns, so a held-out row is durable on the control plane only, with no
+destination-side SQL evidence and a warning the client sees too. Not yet
+measured on this tip: the proof-pack export → download → re-upload round trip,
+and the guard that keeps a *silent magnitude shift* blocking even with a
+contract.
+
+The pattern is worth naming for the handover conversation: the assurance
+machinery is sound under test, and almost every defect found by *using* the
+product is in the surface that presents that machinery to an operator. A client
+pilot exercises exactly those surfaces.
+
+**Environment-blocked (needs credentials the client or you must provide):**
+hosted Snowflake, hosted BigQuery, Databricks, real S3 / GCS / ADLS, every SaaS
+connector, SFTP, and a real IdP for SSO/SAML. Locally emulated stand-ins
+(MinIO, Azurite, fake-GCS, the BigQuery emulator, DynamoDB Local, Iceberg REST,
+Redpanda, Qdrant, Weaviate) prove the route's code path, not the vendor's.
+
+**Open defects:** D41 and D42 are closed (register §8 / §8a). ~~D33~~ is
+closed (COPY MERGE + row-path keyed census; register §6). Remaining are
+environment: D34 (`kafka-python` absent, 47 matrix cells unmeasured), D35
+(Qdrant host resolution in the matrix fixtures, 24 cells unmeasured), plus the
+never-measured rows carried forward in §5.
+
+The honest per-connector position: **46 unique TRANSFER_READY drivers exist in
+code; the ones with live proof on this box are the ~18 local engines listed in
+the register §4 and §6b.** The remainder are unmeasured — not broken, not
+proven. Any handover pack must carry that distinction, connector by connector,
+rather than a tile count.
+
+What would close it, in order: get the browser harness working and drive the UI
+sweep above; install `kafka-python` and fix the Qdrant fixture host so those 71
+cells report a real verdict (do not change product semantics to silence them);
+then provision one hosted warehouse account and one IdP so the two remaining
+evidence categories stop being theoretical.

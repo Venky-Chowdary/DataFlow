@@ -263,7 +263,9 @@ def test_normalize_cell_equates_decimal_representations():
     assert normalize_cell("9.5") == normalize_cell("9.5000000000")
     assert normalize_cell(Decimal("9.5")) == normalize_cell("9.5000000000")
     assert normalize_cell("1000") == normalize_cell("1E+3")
-    assert normalize_cell("0.000") == "0"
+    # Leading-zero 0.000 is dest-canonical zero, not Auto thousands.
+    assert normalize_cell("0.000") == normalize_cell("0")
+    assert normalize_cell("0.00") == "0"
 
 
 def test_normalize_cell_uuid_case_fold_with_ddl():
@@ -363,7 +365,11 @@ def test_normalize_cell_utc_wall_clock_equates_aware_and_ntz():
 
 
 def test_reconcile_extra_rows_checksum_mismatch_always_fails():
-    """GA: allow_extra_rows + sample proof still cannot override checksum mismatch."""
+    """Incomparable append is dest-before delta, not a checksum. Sample never upgrades it.
+
+    Without dest-before the delta is unverified (fail). Overwrite-shaped
+    checksum mismatch (equal row counts) still fails even with a sample.
+    """
     r = reconcile(
         source_rows=10,
         target_rows=15,
@@ -373,7 +379,8 @@ def test_reconcile_extra_rows_checksum_mismatch_always_fails():
         strict_checksum=True,
     )
     assert not r.passed
-    assert "checksum mismatch" in r.message.lower()
+    assert "unverified" in r.message.lower()
+    assert "checksum mismatch" not in r.message.lower()
 
     r2 = reconcile(
         source_rows=10,
@@ -391,10 +398,28 @@ def test_reconcile_extra_rows_checksum_mismatch_always_fails():
         source_checksum="abc",
         target_checksum="xyz",
         allow_extra_rows=True,
+        target_rows_before=5,
         sample_compare={"passed": True, "compared": 10, "mismatches": []},
     )
-    assert not r3.passed
-    assert "cannot override" in r3.message.lower() or "diagnostic" in r3.message.lower()
+    assert r3.passed is True
+    stamped = r3.to_dict()
+    assert stamped["passed"] is True
+    assert stamped["assurance_level"] == "row_count"
+    assert stamped["migration_proven"] is False
+    assert stamped["checksum_match"] is False
+    assert stamped.get("target_rows_before") == 5
+
+    overwrite = reconcile(
+        source_rows=10,
+        target_rows=10,
+        source_checksum="abc",
+        target_checksum="xyz",
+        allow_extra_rows=False,
+        sample_compare={"passed": True, "compared": 10, "mismatches": []},
+    )
+    assert not overwrite.passed
+    assert "checksum mismatch" in overwrite.message.lower()
+    assert "cannot override" in overwrite.message.lower() or "diagnostic" in overwrite.message.lower()
 
 
 def test_sample_compare_aligns_renamed_primary_key():
@@ -460,3 +485,46 @@ def test_mysql_boolean_false_binds_as_zero():
         _to_mysql_value("", "JSON")
     assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
     assert _to_mysql_value("not-json", "JSON") == '"not-json"'
+
+
+def test_all_rows_held_out_is_an_empty_population_not_a_mismatch():
+    """Nothing to write is a provable outcome, not a checksum failure."""
+    from services.reconciliation import EMPTY_POPULATION_DIGEST
+
+    r = reconcile(
+        source_rows=1,
+        target_rows=0,
+        source_checksum="",
+        target_checksum=EMPTY_POPULATION_DIGEST,
+        rejected_rows=1,
+    )
+    assert r.passed
+    assert r.rejected_rows == 1
+
+
+def test_empty_digest_is_not_a_match_when_the_census_still_expects_rows():
+    """Hold-outs can prove an empty projection. A census that still expects
+    inserts cannot share that proof — rows_written stayed 0."""
+    from services.reconciliation import EMPTY_POPULATION_DIGEST
+
+    report = reconcile(
+        source_rows=2,
+        target_rows=0,
+        source_checksum="",
+        target_checksum=EMPTY_POPULATION_DIGEST,
+        rejected_rows=2,
+        keyed_expected_delta=2,
+    )
+    assert report.passed is False
+    assert report.checksum_match is False
+
+
+def test_missing_source_digest_still_fails_when_rows_landed():
+    r = reconcile(
+        source_rows=2,
+        target_rows=2,
+        source_checksum="",
+        target_checksum="abc",
+    )
+    assert not r.passed
+    assert "Checksum mismatch" in r.message

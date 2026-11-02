@@ -8,8 +8,9 @@ instead of from Validate. The outcome was safe — no rows land — but the fail
 arrives as a driver error with no remediation, after the operator approved.
 
 Honesty: nullability comes from the destination catalog. When the catalog was
-not read, the gate reports *unmeasured* rather than pass — an unread catalog is
-not evidence that every required column is filled.
+not read, or was only partly read versus the live dest column list, the gate
+reports *unmeasured* rather than pass — a partial catalog is not evidence that
+every required column is filled.
 """
 
 from __future__ import annotations
@@ -54,6 +55,18 @@ def unfilled_required_columns(
     ]
 
 
+def _nullability_covers_dest(
+    column_nullability: dict[str, bool] | None,
+    dest_columns: list[str] | None,
+) -> bool:
+    """False when live dest columns exist that have no nullability entry."""
+    if not dest_columns:
+        return True
+    measured = _lower_set(list((column_nullability or {}).keys()))
+    dest = _lower_set(dest_columns)
+    return dest <= measured
+
+
 def build_destination_requirements_gate(
     *,
     destination_table_exists: bool | None,
@@ -62,9 +75,16 @@ def build_destination_requirements_gate(
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
     mappings: list[dict[str, Any]] | None,
+    dest_columns: list[str] | None = None,
+    dest_recreated: bool = False,
 ) -> dict[str, Any] | None:
-    """Return the G14 gate, or ``None`` when there is no existing table to check."""
-    if destination_table_exists is not True:
+    """Return the G14 gate, or ``None`` when there is no existing table to check.
+
+    An overwrite/full-refresh run (``dest_recreated``) drops the listed table
+    first, so its NOT NULL columns are not the contract this run writes into —
+    the recreated table is, and its required columns come from the mappings.
+    """
+    if destination_table_exists is not True or dest_recreated:
         return None
 
     if not (column_nullability or {}):
@@ -88,6 +108,28 @@ def build_destination_requirements_gate(
                 "reason": "nullability_metadata_unavailable",
                 "unmeasured": True,
                 "rule_id": f"{GATE_ID}.unmeasured",
+                "remediation_kind": "retry_validate",
+            },
+        }
+
+    if not _nullability_covers_dest(column_nullability, dest_columns):
+        missing = sorted(
+            _lower_set(dest_columns) - _lower_set(list((column_nullability or {}).keys()))
+        )
+        return {
+            "id": GATE_ID,
+            "status": "skip",
+            "message": (
+                "Destination nullability catalog is partial — required-column "
+                "coverage is unmeasured for dest columns with no nullability "
+                "entry (not proven). The NOT NULL contract is still enforced at write."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "reason": "nullability_metadata_partial",
+                "unmeasured": True,
+                "unmeasured_columns": missing[:_NAMED_LIMIT],
+                "rule_id": f"{GATE_ID}.unmeasured_partial",
                 "remediation_kind": "retry_validate",
             },
         }
@@ -150,11 +192,19 @@ def build_mapping_contract_gates(
     column_defaults: dict[str, str] | None,
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
+    dest_columns: list[str] | None = None,
+    dest_recreated: bool = False,
+    dest_emptied: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Both halves of the mapping contract: every source accounted for (G13), every
-    required destination column filled (G14).
+    """Source coverage (G13), dest requirements (G14), dest-exists shape (G15).
 
-    Returns ``(source_coverage, gates, blockers)``.
+    ``dest_recreated`` (overwrite/full-refresh) means the listed table is
+    dropped and recreated from the source shape, so G15 reads its columns as a
+    CREATE rather than ADD COLUMN proposals on a live table. ``dest_emptied``
+    (overwrite that keeps the table) keeps the existing-table shape but makes
+    G15 say *replace*, not "insert more" (QA T21).
+
+    Returns ``(source_coverage, gates, blockers)``. G15 does not add blockers.
     """
     coverage, cov_gate = build_source_coverage_gate(
         source_columns=list(source_columns or []), mappings=list(mappings or [])
@@ -166,8 +216,26 @@ def build_mapping_contract_gates(
         identity_columns=identity_columns,
         generated_columns=generated_columns,
         mappings=list(mappings or []),
+        dest_columns=list(dest_columns or []),
+        dest_recreated=dest_recreated,
     )
-    gates = [g for g in (cov_gate, req_gate) if g]
+    from services.shape_contract import build_shape_gate, classify_dest_exists_shape
+
+    shape = classify_dest_exists_shape(
+        destination_table_exists=destination_table_exists,
+        source_columns=list(source_columns or []),
+        dest_columns=list(dest_columns or (column_nullability or {}).keys()),
+        mappings=list(mappings or []),
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+        dest_recreated=dest_recreated,
+        dest_emptied=dest_emptied,
+    )
+    coverage = {**coverage, "shape_contract": shape}
+    shape_gate = build_shape_gate(shape)
+    gates = [g for g in (cov_gate, req_gate, shape_gate) if g]
     blockers = [
         {"id": g["id"], "message": g["message"], "details": g["details"]}
         for g in gates

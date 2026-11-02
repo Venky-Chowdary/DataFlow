@@ -54,6 +54,45 @@ def auth_rate_limit_enabled() -> bool:
     return raw not in {"0", "false", "off", "no"}
 
 
+def public_rate_limit_enabled() -> bool:
+    """Unauthenticated catalog / SSO discovery / MCP handshake.
+
+    Off unless ``DATAFLOW_PUBLIC_RATE_LIMIT=1``. Production must set that on
+    the API service — it is not implied by ``ENV=production``, so a shared
+    test IP and a health fleet are not throttled by a code deploy alone.
+    ``/health`` is excluded even when the limiter is on.
+    """
+    raw = os.getenv("DATAFLOW_PUBLIC_RATE_LIMIT", "").strip().lower()
+    return raw in {"1", "true", "on", "yes"}
+
+
+def check_public_rate_limit(ip: str, path: str = "") -> dict[str, float | bool | str]:
+    """Per-IP bucket for unauthenticated routes. Health probes are not counted."""
+    if not public_rate_limit_enabled():
+        return {"allowed": True, "disabled": True}
+    route = (path or "").split("?", 1)[0]
+    if route in {"/", "/health"} or route.startswith("/api/v1/health") or route.startswith("/health"):
+        return {"allowed": True, "health": True}
+    capacity = max(1.0, _env_float("DATAFLOW_PUBLIC_RATE_BURST", 120.0))
+    refill = max(0.05, _env_float("DATAFLOW_PUBLIC_RATE_QPS", 2.0))
+    max_keys = _env_int("DATAFLOW_PUBLIC_RATE_MAX_KEYS", 5000)
+    ip_k = _norm_ip(ip)
+    result = _RATE_STORE.consume(
+        f"public:{ip_k}",
+        capacity=capacity,
+        refill_per_sec=refill,
+        max_keys=max_keys,
+    )
+    if not result.get("allowed"):
+        return {
+            "allowed": False,
+            "locked": False,
+            "retry_after_sec": result.get("retry_after_sec", 60),
+            "principal": f"public:{ip_k}",
+        }
+    return {"allowed": True, "principal": f"public:{ip_k}"}
+
+
 def reset_auth_rate_limits() -> None:
     """Test helper — clear rate buckets and lockout state."""
     _RATE_STORE.clear()
@@ -117,6 +156,7 @@ def _maybe_engage_lockout(key: str, *, now: float) -> dict[str, float | bool | s
             "locked": True,
             "retry_after_sec": float(lock_sec),
             "principal": key,
+            "newly_locked": True,
         }
 
 
@@ -213,6 +253,8 @@ def record_login_success(*, ip: str, email: str) -> None:
 __all__ = [
     "auth_rate_limit_enabled",
     "check_login_rate_limit",
+    "check_public_rate_limit",
+    "public_rate_limit_enabled",
     "record_login_failure",
     "record_login_success",
     "reset_auth_rate_limits",

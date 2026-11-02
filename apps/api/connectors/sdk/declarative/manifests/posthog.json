@@ -1,0 +1,78 @@
+{
+ "name": "posthog",
+ "base_url": "https://{domain}",
+ "auth": {
+  "type": "bearer"
+ },
+ "defaults": {
+  "page_size": 100,
+  "max_pages": 10000
+ },
+ "streams": [
+  {
+   "name": "events",
+   "method": "GET",
+   "path": "api/projects/{project_id}/events",
+   "records_path": "results",
+   "primary_key": [
+    "uuid"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   },
+   "cursor": {
+    "field": "timestamp",
+    "request_param": "after",
+    "format": "iso8601"
+   }
+  },
+  {
+   "name": "persons",
+   "method": "GET",
+   "path": "api/projects/{project_id}/persons",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   }
+  },
+  {
+   "name": "cohorts",
+   "method": "GET",
+   "path": "api/projects/{project_id}/cohorts",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   }
+  },
+  {
+   "name": "feature_flags",
+   "method": "GET",
+   "path": "api/projects/{project_id}/feature_flags",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   }
+  }
+ ]
+}

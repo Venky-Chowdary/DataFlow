@@ -607,6 +607,35 @@ def shopify_metafield_type_to_carrier(
     return ""
 
 
+def shopify_max_validation(value: Any) -> int | None:
+    """Parse Shopify metafield ``max`` through the write-path integer binder.
+
+    ``int(float(text))`` invented Auto ``1.234`` → ``VARCHAR(1)`` and
+    collapsed ``2**53+1``. Locale money the write path stores still binds.
+    Auto ``1,234`` / fractional ``80.9`` stay unset (no invented width).
+    """
+    if isinstance(value, bool):
+        # bool ⊂ int — True must not invent VARCHAR(1).
+        return None
+    from connectors.sql_bind import coerce_integer_wire
+
+    try:
+        # Width is not a SQL INTEGER column. BIGINT keeps 2**53+1 exact
+        # (int(float()) collapsed it). Out-of-BIGINT stays unset.
+        parsed = coerce_integer_wire(value, ddl_type="BIGINT")
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if parsed is None or isinstance(parsed, bool):
+        return None
+    try:
+        n = int(parsed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if n <= 0:
+        return None
+    return n
+
+
 def shopify_live_types_for_columns(
     object_type: str,
     target_cols: list[str],
@@ -637,10 +666,7 @@ def shopify_live_types_for_columns(
             if not isinstance(v, dict):
                 continue
             if str(v.get("name") or "").lower() == "max":
-                try:
-                    max_v = int(float(str(v.get("value"))))
-                except (TypeError, ValueError):
-                    max_v = None
+                max_v = shopify_max_validation(v.get("value"))
         if not typ.strip():
             # Empty metafield type from Describe — do not invent VARCHAR(2048).
             continue

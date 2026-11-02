@@ -65,8 +65,12 @@ def test_classify_oracle_primary_and_standby():
     assert standby.topology == "data_guard"
 
 
-def test_mssql_url_includes_multisubnet_failover():
+def test_mssql_url_includes_multisubnet_failover(monkeypatch):
+    import connectors.generic_sql as gs
     from connectors.generic_sql import _build_url
+
+    # ApplicationIntent is ODBC vocabulary; a pymssql-only host refuses it.
+    monkeypatch.setattr(gs, "_mssql_odbc_driver", lambda: "ODBC Driver 18 for SQL Server")
 
     url = _build_url({
         "type": "sqlserver",
@@ -97,6 +101,22 @@ def test_job_trust_caps_on_cursor_gap():
     assert trust["score"] <= 28
     assert trust["cursor_gap"] is True
     assert trust["next_action"]["code"] == "cursor_gap"
+    assert "Reset" in trust["next_action"]["label"]
+
+
+def test_job_trust_when_needed_gap_says_resume_will_snapshot():
+    from services.job_trust import compute_job_trust
+
+    trust = compute_job_trust({
+        "status": "failed",
+        "records_processed": 10,
+        "cdc_cursor_gap": True,
+        "snapshot_mode": "when_needed",
+        "reconciliation": {"passed": False},
+    })
+    assert trust["next_action"]["code"] == "cursor_gap"
+    assert "Resume" in trust["next_action"]["label"]
+    assert "migration_proven" in trust["next_action"]["detail"]
 
 
 def test_job_trust_exposes_source_ha_role():

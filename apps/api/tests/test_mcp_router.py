@@ -26,7 +26,7 @@ def test_mcp_manifest_is_reachable(client: TestClient):
     response = client.get("/api/v1/mcp/manifest")
     assert response.status_code == 200
     data = response.json()
-    assert data["name"] == "dataflow"
+    assert data["name"] == "datawrap"  # presentation: the product is Datawrap
     assert data["protocol"] == "streamable-http"
     assert data["endpoints"]["manifest"].startswith("http://testserver/api/v1/mcp")
     assert data["tools"]
@@ -44,8 +44,6 @@ def test_mcp_tools_list_is_reachable(client: TestClient):
 def test_mcp_tool_call_get_transfer_capabilities(client: TestClient, monkeypatch):
     # When platform auth is off (local), tools/call remains usable for DX.
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)
-    monkeypatch.setattr("src.middleware.auth_middleware.auth_required", lambda: False)
-    monkeypatch.setattr("services.rbac.auth_required", lambda: False)
     response = client.post(
         "/api/v1/mcp/tools/call",
         json={"name": "get_transfer_capabilities", "arguments": {}},
@@ -58,8 +56,6 @@ def test_mcp_tool_call_get_transfer_capabilities(client: TestClient, monkeypatch
 
 def test_mcp_tool_call_rejected_without_bearer_when_auth_on(client: TestClient, monkeypatch):
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: True)
-    monkeypatch.setattr("src.middleware.auth_middleware.auth_required", lambda: True)
-    monkeypatch.setattr("services.rbac.auth_required", lambda: True)
     response = client.post(
         "/api/v1/mcp/tools/call",
         json={"name": "get_transfer_capabilities", "arguments": {}},
@@ -93,7 +89,7 @@ def test_mcp_streamable_initialize(client: TestClient):
     )
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["result"]["protocolVersion"]
+    assert data["result"]["protocolVersion"] == "2024-11-05"
     assert data["result"]["capabilities"]["tools"] is not None
     assert response.headers.get("mcp-session-id")
 
@@ -140,3 +136,59 @@ def test_mcp_streamable_initialized_notification(client: TestClient):
         json={"jsonrpc": "2.0", "method": "notifications/initialized"},
     )
     assert response.status_code == 202
+
+
+def test_streamable_ping_returns_while_a_tool_is_still_running(monkeypatch):
+    """DEF-MCP-OUTAGE: a long tools/call must not freeze ping on the listener.
+
+    The client timeout is JSON-RPC -32001. The server auth error uses the
+    same code and is a different failure. This proves the listener stays
+    free. A process restart during deploy still drops the in-flight call.
+    """
+    import asyncio
+    import time
+
+    import httpx
+
+    from src.ai.copilot.tools import ToolResult
+
+    class _Slow:
+        def execute(self, name, arguments):
+            time.sleep(0.3)
+            return ToolResult(name=name, success=True, output={"ok": True})
+
+    monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)
+    monkeypatch.setattr("src.ai.copilot.tools.get_pilot_tools", lambda: _Slow())
+
+    async def _main():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            tool_task = asyncio.create_task(
+                client.post(
+                    "/api/v1/mcp",
+                    headers={"Accept": "application/json"},
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "list_datasets", "arguments": {}},
+                    },
+                )
+            )
+            await asyncio.sleep(0.05)
+            started = time.perf_counter()
+            ping = await client.post(
+                "/api/v1/mcp",
+                headers={"Accept": "application/json"},
+                json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            )
+            elapsed = time.perf_counter() - started
+            tool = await tool_task
+            return elapsed, ping, tool
+
+    elapsed, ping, tool = asyncio.run(_main())
+    assert elapsed < 0.2, elapsed
+    assert ping.status_code == 200
+    assert ping.json()["result"] == {}
+    assert tool.status_code == 200
+    assert tool.json()["result"]["isError"] is False

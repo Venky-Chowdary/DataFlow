@@ -79,7 +79,7 @@ export function Dialog({
             </div>
             <button
               type="button"
-              className="df2-btn df2-btn-ghost df2-btn-sm"
+              className="df2-close-btn"
               onClick={onClose}
               aria-label="Close"
             >

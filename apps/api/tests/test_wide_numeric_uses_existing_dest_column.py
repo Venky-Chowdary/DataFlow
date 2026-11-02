@@ -1,0 +1,207 @@
+"""A wide number belongs in the destination's DECIMAL column, not a text twin.
+
+Live reproduction: the destination already declared ``wide_num DECIMAL(38,0)``
+and the writer inserted into an invented ``wide_num_text LONGTEXT`` instead —
+``COUNT(*) = 20000`` with ``COUNT(wide_num) = 0``. The cause was upstream of the
+writer: ``infer_type`` keeps a 31-digit run as VARCHAR (so account numbers stay
+text), Map read that as "samples do not fit DECIMAL(38,0)", and the ObjectId /
+hex repair invented a text column beside a column that holds the value exactly.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+from services.mapping_pipeline import (  # noqa: E402
+    _repair_unparseable_numeric_targets as repair_unparseable_numeric_targets,
+)
+from services.schema_inference import samples_fit_logical_type  # noqa: E402
+
+_WIDE = [
+    "1000000000000000000000000000001",
+    "1000000000000000000000000000002",
+    "1000000000000000000000000000003",
+]
+
+
+def test_wide_numbers_fit_a_declared_decimal_38_0() -> None:
+    assert samples_fit_logical_type(_WIDE, "DECIMAL(38,0)") is True
+    assert samples_fit_logical_type(_WIDE, "NUMBER(38,0)") is True
+
+
+def test_wide_numbers_do_not_fit_a_narrower_carrier() -> None:
+    # Fail-closed stays fail-closed: these do not fit and must not be claimed to.
+    assert samples_fit_logical_type(_WIDE, "DECIMAL(18,0)") is False
+    assert samples_fit_logical_type(_WIDE, "BIGINT") is False
+
+
+def test_scale_and_leading_zeros_are_not_silently_dropped() -> None:
+    assert samples_fit_logical_type(["1.005", "2.001"], "DECIMAL(10,2)") is False
+    # A leading zero is data — no numeric carrier keeps it.
+    assert samples_fit_logical_type(["01234", "98765"], "INT4") is False
+    assert samples_fit_logical_type(["1.00", "3.14"], "DECIMAL(10,2)") is True
+
+
+def test_a_marker_does_not_decide_the_carrier() -> None:
+    # "0%" is one zero followed by a marker the numeric read removes, not a
+    # zip code: judging the raw text sent a percentage column into TEXT, where
+    # the writer stored "12.5%" verbatim instead of 12.5.
+    assert samples_fit_logical_type(["12.5%", "0%"], "DECIMAL(3,1)") is True
+    assert samples_fit_logical_type(["$0.50", "$12.75"], "DECIMAL(5,2)") is True
+    assert samples_fit_logical_type(["(0.50)", "1.25"], "DECIMAL(5,2)") is True
+    # And the marker never widens what the carrier can hold.
+    assert samples_fit_logical_type(["12.55%", "0%"], "DECIMAL(3,1)") is False
+    # A genuine leading-zero digit run is still text, marker or not.
+    assert samples_fit_logical_type(["012345%", "098765%"], "DECIMAL(10,2)") is False
+
+
+def _mapping(target_type: str) -> list[dict]:
+    return [
+        {
+            "source": "wide_num",
+            "target": "wide_num",
+            "target_type": target_type,
+            "source_type": "NUMERIC(38,0)",
+        }
+    ]
+
+
+def _source_schemas() -> list[dict]:
+    return [{"name": "wide_num", "inferred_type": "NUMERIC(38,0)", "samples": _WIDE}]
+
+
+def _target_schemas(target_type: str) -> list[dict]:
+    return [{"name": "wide_num", "inferred_type": target_type}]
+
+
+def test_existing_decimal_column_is_written_not_shadowed() -> None:
+    out = repair_unparseable_numeric_targets(
+        _mapping("DECIMAL(38,0)"),
+        source_schemas=_source_schemas(),
+        target_schemas=_target_schemas("DECIMAL(38,0)"),
+        destination_db_type="mysql",
+    )
+    assert [m["target"] for m in out] == ["wide_num"]
+    assert not any(str(m.get("target", "")).endswith("_text") for m in out)
+    assert not any(m.get("create_new") for m in out)
+
+
+def test_overflowing_numbers_are_not_diverted_to_a_text_twin() -> None:
+    # DECIMAL(18,0) genuinely cannot hold these, but the remedy is widen /
+    # refuse — not a silent text column beside a NULL numeric column.
+    out = repair_unparseable_numeric_targets(
+        _mapping("DECIMAL(18,0)"),
+        source_schemas=_source_schemas(),
+        target_schemas=_target_schemas("DECIMAL(18,0)"),
+        destination_db_type="mysql",
+    )
+    assert [m["target"] for m in out] == ["wide_num"]
+
+
+def test_non_numeric_samples_still_get_a_compatible_new_column() -> None:
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "_id",
+                "target": "id",
+                "target_type": "NUMBER(38,0)",
+                "source_type": "VARCHAR",
+            }
+        ],
+        source_schemas=[
+            {
+                "name": "_id",
+                "inferred_type": "VARCHAR",
+                "samples": ["507f1f77bcf86cd799439011", "507f191e810c19729de860ea"],
+            }
+        ],
+        target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
+        destination_db_type="mysql",
+    )
+    assert out[0]["target"] != "id"
+    assert out[0]["create_new"] is True
+
+
+_SCALE3 = ["150.345", "1.250", "99.001", "1234.567"]
+
+
+def test_scale3_numeric_source_column_keeps_decimal_stamp() -> None:
+    """ACC-03 / DEF-C-009 — NUMERIC(10,3) wire samples are not ambiguous text.
+
+    A typed catalog column renders ``150.345``; Auto's lone-3-digit-group
+    rule reads that as a possible EU-thousands group and the repair diverted
+    ``score`` into TEXT/LONGTEXT on every route, then preflight blocked the
+    same divergence it invented. A numeric-declared source column can never
+    emit non-numeric samples, so the repair must not consult the fit probe.
+    """
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "score",
+                "target": "score",
+                "target_type": "NUMERIC(10,3)",
+                "source_type": "NUMERIC(10,3)",
+                "create_new": True,
+            }
+        ],
+        source_schemas=[
+            {"name": "score", "inferred_type": "NUMERIC(10,3)", "samples": _SCALE3}
+        ],
+        target_schemas=[],
+        destination_db_type="mariadb",
+        destination_table_exists=False,
+        source_db_type="postgresql",
+    )
+    assert out[0]["target"] == "score"
+    assert out[0]["target_type"] == "NUMERIC(10,3)"
+    assert out[0].get("assignment_strategy") != "create_compatible_new"
+
+
+def test_scale3_existing_numeric_dest_column_is_not_shadowed() -> None:
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "score",
+                "target": "score",
+                "target_type": "NUMERIC(10,3)",
+                "source_type": "NUMERIC(10,3)",
+            }
+        ],
+        source_schemas=[
+            {"name": "score", "inferred_type": "NUMERIC(10,3)", "samples": _SCALE3}
+        ],
+        target_schemas=[{"name": "score", "inferred_type": "NUMERIC(10,3)"}],
+        destination_db_type="postgresql",
+        destination_table_exists=True,
+        source_db_type="postgresql",
+    )
+    assert out[0]["target"] == "score"
+    assert not out[0].get("create_new")
+
+
+def test_untyped_non_numeric_samples_still_divert() -> None:
+    """The repair's real purpose survives: text samples on a numeric target."""
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "code",
+                "target": "code",
+                "target_type": "NUMERIC(10,3)",
+                "source_type": "VARCHAR",
+            }
+        ],
+        source_schemas=[
+            {"name": "code", "inferred_type": "VARCHAR", "samples": ["abc", "def"]}
+        ],
+        target_schemas=[],
+        destination_db_type="postgresql",
+        destination_table_exists=False,
+        source_db_type="postgresql",
+    )
+    assert out[0]["create_new"] is True
+    assert out[0].get("assignment_strategy") == "create_compatible_new"

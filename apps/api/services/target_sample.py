@@ -13,19 +13,102 @@ lost write.
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 import json
 import logging
 from typing import Any
 
+from connectors.postgresql_reader import text_carry_select_sql
 from services.reconciliation import (
     TargetSampleUnavailable,
-    _object_store_target_sample,
-    _rows_from_object_bytes,
 )
+from services.value_serializer import load_http_json, reader_wire_cell
 
 logger = logging.getLogger(__name__)
 
 from services.keyed_read import execute_keyed_read  # noqa: E402
+
+
+def numeric_sample_key_variants(key: Any) -> set[Any]:
+    """Widen one Gate-8 sample key the way the writer may have stored it.
+
+    Always includes the original. Write-path integer/decimal bind locale
+    money (``$1,234`` → 1234). Dest-canonical ``1.234`` stays identity.
+    Auto ``1,234`` stays the original token only. IEEE-lossy ``2**53+1``
+    does not add ``float(2**53)``. Bool is not a magnitude.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from connectors.sql_bind import coerce_integer_wire
+    from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
+
+    if isinstance(key, bool):
+        return {key}
+
+    out: set[Any] = {key}
+    try:
+        parsed_int = coerce_integer_wire(key, ddl_type="INTEGER")
+        if parsed_int is not None and not isinstance(parsed_int, bool):
+            out.add(int(parsed_int))
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    parsed_dec: Decimal | None = None
+    if isinstance(key, Decimal):
+        parsed_dec = key if key.is_finite() else None
+    elif isinstance(key, int):
+        parsed_dec = Decimal(key)
+    elif isinstance(key, float):
+        if key == key and key not in (float("inf"), float("-inf")):
+            try:
+                parsed_dec = Decimal(str(key))
+            except (InvalidOperation, ValueError, OverflowError):
+                parsed_dec = None
+    else:
+        text = str(key).strip()
+        if text:
+            try:
+                dest = Decimal(text)
+                if dest.is_finite():
+                    parsed_dec = dest
+            except (InvalidOperation, ValueError, ArithmeticError):
+                parsed_dec = None
+            if parsed_dec is None:
+                parsed_dec = decimal_wire_value(text)
+    if parsed_dec is not None and parsed_dec.is_finite():
+        out.add(parsed_dec)
+        try:
+            out.add(float_carrier_or_refuse(parsed_dec))
+        except ValueError:
+            pass
+    return out
+
+
+from services.mongo_key_variants import mongo_instant_key_variants  # noqa: E402
+
+
+def mongo_query_key_variants(key: Any) -> set[Any]:
+    """Mongo ``$in`` variants: write-path numbers plus ObjectId hex.
+
+    LSN fetch and Gate-8 dest-sample share this. ``isdigit()`` missed
+    locale money and did not refuse Auto grouping.
+    """
+    out = set(numeric_sample_key_variants(key))
+    out.update(mongo_instant_key_variants(key))
+    try:
+        from bson import ObjectId
+
+        if (
+            isinstance(key, str)
+            and len(key) == 24
+            and all(c in "0123456789abcdefABCDEF" for c in key)
+        ):
+            out.add(ObjectId(key))
+    except Exception:
+        pass
+    return out
+
+
 from services.target_sample_vector import (  # noqa: E402
     read_pgvector_target_sample,
 )
@@ -51,7 +134,37 @@ def read_target_sample(
     Returns an empty list only when the destination is genuinely empty (or the
     keyed ``IN`` matched nothing). Read failures raise
     :class:`TargetSampleUnavailable` — never ``[]``.
+
+    Rows come back on the transfer wire, as a source reader's do: the Gate-8
+    fingerprint decodes wire, so a stored ``__DF_ESC__x`` text must reach it
+    escaped or it compares as ``x`` (D121).
     """
+    from services.value_serializer import payload_record_wire
+
+    rows = _read_destination_sample(
+        db_type,
+        dest,
+        schema=schema,
+        table_name=table_name,
+        columns=columns,
+        limit=limit,
+        sort_key=sort_key,
+        key_values=key_values,
+    )
+    return [payload_record_wire(row) if isinstance(row, dict) else row for row in rows]
+
+
+def _read_destination_sample(
+    db_type: str,
+    dest: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    columns: list[str] | None = None,
+    limit: int = 50,
+    sort_key: str | None = None,
+    key_values: list[Any] | None = None,
+) -> list[dict[str, Any]]:
     from connectors.sql_identifiers import (
         quote_column_list,
         quote_sql_identifier,
@@ -60,9 +173,30 @@ def read_target_sample(
     )
 
     cols = columns or ["*"]
-    keys = [k for k in (key_values or []) if k is not None and k != ""][
-        : max(1, int(limit or 50))
-    ]
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    _raw_keys = list(key_values or [])
+    # D86 — a NULL key is a first-class key: a destination NULL key must match
+    # a source NULL key. The sentinel string is metadata, never a bind value —
+    # strip it here so it can never reach an IN (...) clause.
+    _keys_has_null = any(
+        k is None or k == "" or str(k).lower() == SQL_NULL_SENTINEL.lower()
+        for k in _raw_keys
+    )
+    keys = [
+        k
+        for k in _raw_keys
+        if k is not None and k != "" and str(k).lower() != SQL_NULL_SENTINEL.lower()
+    ][: max(1, int(limit or 50))]
+    if _keys_has_null and not keys:
+        # IN (NULL) never matches; the OR IS NULL branch does the matching and
+        # the existing `if keys and sort_key` guards stay satisfied.
+        keys = [None]
+
+    def _nk(key_col: str) -> str:
+        # IN (...) never matches NULL — keyed reads need an explicit IS NULL
+        # branch so a destination NULL key matches a source NULL key (D86).
+        return f" OR {key_col} IS NULL" if _keys_has_null else ""
 
     def _row_names(description: Any) -> list[str]:
         # When explicit columns were requested, trust the caller's keys so
@@ -110,8 +244,11 @@ def read_target_sample(
                 else "1"
             )
             ssl_flag = _ssl_flag(False)
+            # Upgrade-only retry: a non-TLS connector may retry with TLS, but a
+            # connector that requested TLS never falls back to plaintext.
+            ssl_attempts = (True,) if ssl_flag else (False, True)
             last_exc: Exception | None = None
-            for attempt_ssl in (ssl_flag, not ssl_flag):
+            for attempt_ssl in ssl_attempts:
                 try:
                     conn = get_connection(
                         host=dest.get("host", ""),
@@ -123,6 +260,7 @@ def read_target_sample(
                         ssl=attempt_ssl,
                     )
                     with conn.cursor() as cur:
+                        read_sql = text_carry_select_sql(cur, schema, table_name, cols) or col_sql
                         if keys and sort_key:
                             key_col = quote_sql_identifier(
                                 require_safe_identifier(sort_key, preserve_case=True)
@@ -131,8 +269,8 @@ def read_target_sample(
                             execute_keyed_read(
                                 conn,
                                 cur,
-                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {{key}} IN ({placeholders}) "
+                                f"SELECT {read_sql} FROM {table_ref} "  # nosec B608
+                                f"WHERE {{key}} IN ({placeholders}){_nk(key_col)} "
                                 f"ORDER BY {order_sql} LIMIT %s",
                                 key_col,
                                 keys,
@@ -140,7 +278,7 @@ def read_target_sample(
                             )
                         else:
                             cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
+                                f"SELECT {read_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
                                 (limit,),
                             )
                         names = _row_names(cur.description)
@@ -148,16 +286,18 @@ def read_target_sample(
                     conn.close()
                     return [dict(zip(names, row)) for row in rows]
                 except Exception as exc:
-                    last_exc = exc
+                    # Report the configured mode's failure, not the upgrade probe's.
+                    last_exc = last_exc or exc
                     continue
-            if last_exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
-                ) from last_exc
+            tls_note = (
+                " (SSL is required by the connector; plaintext fallback is not attempted)"
+                if ssl_flag
+                else ""
+            )
             raise TargetSampleUnavailable(
                 f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                "postgresql connection failed for both SSL modes"
-            )
+                f"{last_exc or 'postgresql connection failed'}{tls_note}"
+            ) from last_exc
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
@@ -195,7 +335,7 @@ def read_target_sample(
                     placeholders = ",".join(["%s"] * len(keys))
                     cur.execute(
                         f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {mysql_order} LIMIT %s",
                         (*keys, int(limit)),
                     )
@@ -238,6 +378,12 @@ def read_target_sample(
             )
             cur = conn.cursor()
             try:
+                from connectors.sqlserver_tick import full_precision_select_list
+
+                # DATETIME2(7): pymssql keeps six digits; read the seventh as text.
+                ss_col_sql = full_precision_select_list(
+                    cur, table_ref, None if cols == ["*"] else list(cols)
+                )
                 if keys and sort_key:
                     key_col = (
                         f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
@@ -245,7 +391,7 @@ def read_target_sample(
                     placeholders = ",".join(["%s"] * len(keys))
                     cur.execute(
                         f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {ss_order}",
                         tuple(keys),
                     )
@@ -261,14 +407,9 @@ def read_target_sample(
                 conn.close()
             return [dict(zip(names, row)) for row in rows]
 
-        if db_type in {
-            "oracle",
-            "oracledb",
-            "oracle_db",
-            "oracle_autonomous",
-            "oracle_autonomous_warehouse",
-            "amazon_rds_oracle",
-        } or (
+        from src.transfer.engine_family import family_or_kind
+
+        if family_or_kind(db_type) == "oracle" or (
             db_type == "generic_sql"
             and (dest.get("connection_string") or "").lower().startswith("oracle")
         ):
@@ -338,7 +479,7 @@ def read_target_sample(
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))
                     sql = (
                         f"SELECT {duckdb_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {duckdb_order} LIMIT :lim"
                     )
                 else:
@@ -390,28 +531,7 @@ def read_target_sample(
                     # integers, and decimals that the writer may have produced.
                     widened: set[Any] = set()
                     for k in keys:
-                        widened.add(k)
-                        try:
-                            if str(k).isdigit():
-                                widened.add(int(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        try:
-                            widened.add(float(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        # ObjectId keys from schemaless sources are serialized as hex strings.
-                        try:
-                            from bson import ObjectId
-
-                            if (
-                                isinstance(k, str)
-                                and len(k) == 24
-                                and all(c in "0123456789abcdefABCDEF" for c in k)
-                            ):
-                                widened.add(ObjectId(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                        widened.update(mongo_query_key_variants(k))
                     query_filter = {sort_key: {"$in": list(widened)}}
                 cursor = coll.find(query_filter)
                 if sort_key:
@@ -481,7 +601,7 @@ def read_target_sample(
                         require_safe_identifier(sort_key, preserve_case=True)
                     )
                     placeholders = ",".join(["?"] * len(keys))
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}){_nk(key_col)} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
                     cur = conn.execute(sql, [*keys, int(limit)])
                 else:
                     sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
@@ -499,7 +619,7 @@ def read_target_sample(
                 conn.close()
 
         if db_type == "redis":
-            from connectors.redis_reader import _decode, _redis_client
+            from connectors.redis_reader import _decode, _redis_client, redis_json_row
             from connectors.sql_identifiers import sanitize_identifier
 
             prefix = table_name or "dataflow"
@@ -525,14 +645,7 @@ def read_target_sample(
                         text = _decode(raw)
                         if not text:
                             continue
-                        try:
-                            payload = json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            payload = {"value": text}
-                        if isinstance(payload, dict):
-                            rows_out.append(payload)
-                        else:
-                            rows_out.append({"value": payload})
+                        rows_out.append(redis_json_row(text))
                         if len(rows_out) >= limit:
                             break
                 else:
@@ -550,18 +663,7 @@ def read_target_sample(
                             )
                             raw = client.get(key)
                             text = _decode(raw)
-                            try:
-                                payload = (
-                                    json.loads(text)
-                                    if text.startswith("{")
-                                    else {"value": text}
-                                )
-                            except (json.JSONDecodeError, TypeError):
-                                payload = {"value": text}
-                            if isinstance(payload, dict):
-                                rows_out.append(payload)
-                            else:
-                                rows_out.append({"value": payload})
+                            rows_out.append(redis_json_row(text))
                             if len(rows_out) >= limit:
                                 break
                         if cursor == 0 or len(rows_out) >= limit:
@@ -605,7 +707,7 @@ def read_target_sample(
                         payload = row
                     elif headers:
                         payload = {
-                            headers[i]: row[i] if i < len(row) else None
+                            headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                             for i in range(len(headers))
                         }
                     else:
@@ -635,7 +737,10 @@ def read_target_sample(
                 get_connection,
                 normalize_account,
                 resolve_or_fold_snowflake_table,
+                snowflake_column_ref,
+                snowflake_physical_name_map,
                 snowflake_qualified_table,
+                snowflake_select_list,
             )
 
             try:
@@ -648,10 +753,7 @@ def read_target_sample(
                     warehouse=dest.get("warehouse", ""),
                     connection_string=dest.get("connection_string", ""),
                 )
-                from connectors.sql_identifiers import (
-                    quote_sql_identifier,
-                    require_safe_identifier,
-                )
+                from connectors.sql_identifiers import require_safe_identifier
 
                 with conn.cursor() as cur:
                     resolved = resolve_or_fold_snowflake_table(
@@ -660,44 +762,38 @@ def read_target_sample(
                     qualified_name = snowflake_qualified_table(
                         schema or "PUBLIC", resolved
                     )
+                    physical = snowflake_physical_name_map(
+                        cur, schema or "PUBLIC", resolved
+                    )
                     sf_col_sql = (
                         "*"
                         if cols == ["*"]
-                        else quote_column_list(
+                        else snowflake_select_list(
                             [
                                 require_safe_identifier(c, preserve_case=True)
                                 for c in cols
-                            ]
+                            ],
+                            physical,
                         )
                     )
                     sf_order = (
-                        quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
+                        snowflake_column_ref(
+                            require_safe_identifier(sort_key, preserve_case=True),
+                            physical,
                         )
                         if sort_key
                         else "1"
                     )
                     if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
+                        key_col = sf_order
+                        # Snowflake IN is type-sensitive; widen via write-path variants.
                         widened: set[Any] = set()
                         for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                            widened.update(numeric_sample_key_variants(k))
                         placeholders = ",".join(["%s"] * len(widened))
                         cur.execute(
                             f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                             f"ORDER BY {sf_order} LIMIT %s",
                             (*widened, int(limit)),
                         )
@@ -721,7 +817,7 @@ def read_target_sample(
             from connectors.bigquery_conn import get_client, _is_local_endpoint
 
             project_id = dest.get("database", "")
-            dataset_id = schema or "dataflow"
+            dataset_id = schema or bigquery_default_dataset()
             is_local, _ = _is_local_endpoint(
                 dest.get("host", ""), dest.get("connection_string", "")
             )
@@ -734,74 +830,88 @@ def read_target_sample(
                     port=int(dest.get("port") or 0),
                     connection_string=dest.get("connection_string", ""),
                 )
-                table_id = f"{project_id}.{dataset_id}.{table_name}"
-                if is_local:
-                    # Emulator path: scan rows and filter in-process; avoids
-                    # query().result() hangs on the goccy emulator for some jobs.
-                    out: list[dict[str, Any]] = []
-                    scan_limit = (limit or 50) * 10 if (keys and sort_key) else (limit or 50)
-                    widened = set()
-                    if keys and sort_key:
-                        for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to int: %s", k, exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to float: %s", k, exc)
-                    for row in client.list_rows(table_id, max_results=scan_limit):
-                        d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
-                        if cols and cols != ["*"]:
-                            d = {k: v for k, v in d.items() if k in cols}
-                        if keys and sort_key:
-                            if d.get(sort_key) in widened:
-                                out.append(d)
-                        else:
-                            out.append(d)
-                        if len(out) >= (limit or 50):
-                            break
-                    return out
-                # Production: use a real BigQuery query with a bounded timeout.
+                from google.cloud import bigquery as _bq
+
+                from services.copy_bigquery_common import (
+                    bigquery_ident,
+                    bigquery_table_ref,
+                )
+
+                table_ref = bigquery_table_ref(project_id, dataset_id, table_name)
+                table_id = ".".join(p for p in (project_id, dataset_id, table_name) if p)
                 col_sql = (
                     "*"
                     if cols == ["*"]
-                    else quote_column_list(
-                        [require_safe_identifier(c, preserve_case=True) for c in cols]
-                    )
+                    else ", ".join(bigquery_ident(c) for c in cols)
                 )
-                bq_order = (
-                    quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    if sort_key
-                    else "1"
-                )
+                bq_order = bigquery_ident(sort_key) if sort_key else "1"
+                bq_params: list[Any] = []
+                widened_keys: set[str] = set()
                 if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
+                    key_col = bq_order
+                    # BigQuery IN is type-strict (INT64 vs STRING has no
+                    # signature); compare on the STRING carrier so one keyed
+                    # read serves INT64/NUMERIC/STRING keys, widened the way
+                    # the writer may have stored them.
+                    for k in keys:
+                        widened_keys.update(
+                            str(v) for v in numeric_sample_key_variants(k)
+                        )
+                    widened_sorted = sorted(widened_keys)
+                    placeholders = ",".join(["?"] * len(widened_sorted))
                     sql = (
-                        f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {bq_order} LIMIT %s"
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                        f"WHERE CAST({key_col} AS STRING) IN ({placeholders}){_nk(key_col)} "
+                        f"ORDER BY {bq_order} LIMIT ?"
                     )
-                    params = (*keys, int(limit))
+                    bq_params = [
+                        _bq.ScalarQueryParameter(None, "STRING", v) for v in widened_sorted
+                    ]
                 else:
-                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT %s"  # nosec B608
-                    params = (int(limit),)
-                res = client.query(sql, timeout=60).result()
-                names = list(res.schema) if res.schema else cols
-                if names and names[0] and not isinstance(names[0], str):
-                    names = [f.name for f in names]
-                return [
-                    {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
-                    for row in res
-                ]
+                    sql = f"SELECT {col_sql} FROM {table_ref} ORDER BY {bq_order} LIMIT ?"  # nosec B608
+                bq_params.append(_bq.ScalarQueryParameter(None, "INT64", int(limit)))
+                job_config = _bq.QueryJobConfig(query_parameters=bq_params)
+                try:
+                    res = client.query(sql, job_config=job_config).result(timeout=60)
+                    rows_out = [dict(row.items()) for row in res]
+                except Exception as query_exc:
+                    from concurrent.futures import TimeoutError as _FutTimeout
+
+                    from google.api_core import exceptions as _gexc
+
+                    server_side = isinstance(query_exc, (_FutTimeout, _gexc.RetryError)) or (
+                        isinstance(query_exc, _gexc.GoogleAPICallError)
+                        and (query_exc.code or 0) >= 500
+                    )
+                    if not (is_local and server_side):
+                        raise
+                    # goccy emulator: a query job can wedge behind another
+                    # session's DDL lock, and every SQL refusal is a 500. Only
+                    # fall back to a full table scan (every page, so a duplicate
+                    # or later version of a key is never missed) when the table
+                    # really carries the requested columns — an unknown column
+                    # stays a refusal, never an empty sample.
+                    table_obj = client.get_table(table_id)
+                    present = {f.name for f in table_obj.schema}
+                    wanted = [c for c in cols if c != "*"] + ([sort_key] if sort_key else [])
+                    missing = [c for c in wanted if c not in present]
+                    if missing:
+                        raise TargetSampleUnavailable(
+                            f"Destination {table_name!r} has no column(s) {missing}; "
+                            f"query refused: {query_exc}"
+                        ) from query_exc
+                    rows_out = []
+                    for row in client.list_rows(table_id):
+                        d = dict(row.items())
+                        if widened_keys and str(d.get(sort_key)) not in widened_keys:
+                            continue
+                        rows_out.append(d)
+                    if sort_key:
+                        rows_out.sort(key=lambda r: (r.get(sort_key) is None, str(r.get(sort_key))))
+                    rows_out = rows_out[: int(limit)]
+                if cols and cols != ["*"]:
+                    rows_out = [{k: v for k, v in d.items() if k in cols} for d in rows_out]
+                return rows_out
             except TargetSampleUnavailable:
                 raise
             except Exception as exc:
@@ -809,103 +919,36 @@ def read_target_sample(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
                 ) from exc
 
-        if db_type in {
-            "adls",
-            "azure_blob_storage",
-            "azure_data_lake",
-            "azure_data_lake_storage",
-        }:
-            from connectors.adls_common import blob_service_client
-            from connectors.adls_reader import list_objects
+        from services.dest_precount import (
+            UnmeasuredArtifact,
+            _object_store_kind,
+            sample_artifact_records,
+            sample_object_store,
+        )
 
-            container = (dest.get("database") or schema or "").strip()
-            if not container or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "ADLS container or blob path missing"
-                )
-            cfg_adls = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "database": container,
-            }
-            client = blob_service_client(cfg_adls)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_adls, container, prefix),
-                fetch_bytes=lambda k: (
-                    client.get_blob_client(container, k).download_blob().readall()
-                ),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"s3", "minio", "s3_compatible", "aws_s3"}:
-            from connectors.aws_common import boto3_client
-            from connectors.s3_reader import list_objects
-
+        if _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
             bucket = (dest.get("database") or schema or "").strip()
             if not bucket or not table_name:
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "S3 bucket or object key missing"
+                    "object-store bucket or key missing"
                 )
-            cfg_s3 = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-                "database": bucket,
-                "endpoint_url": dest.get("endpoint_url", "") or "",
-                "path_style": bool(dest.get("path_style", False)),
-                "region": dest.get("region", "") or "",
-            }
-            client = boto3_client("s3", cfg_s3)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_s3, bucket, prefix),
-                fetch_bytes=lambda k: client.get_object(Bucket=bucket, Key=k)["Body"].read(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"gcs", "google_cloud_storage"}:
-            from connectors.gcs_common import gcs_client
-            from connectors.gcs_reader import list_objects
-
-            bucket = (dest.get("database") or schema or "").strip()
-            if not bucket or not table_name:
+            cfg = dict(dest)
+            cfg["database"] = bucket
+            try:
+                return sample_object_store(
+                    db_type,
+                    cfg,
+                    table_name=table_name,
+                    limit=limit,
+                    sort_key=sort_key or "",
+                    keys=keys,
+                    columns=None if cols == ["*"] else cols,
+                )
+            except UnmeasuredArtifact as exc:
                 raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "GCS bucket or object key missing"
-                )
-            cfg_gcs = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "password": dest.get("password", ""),
-            }
-            bucket_obj = gcs_client(cfg_gcs).bucket(bucket)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_gcs, bucket, prefix),
-                fetch_bytes=lambda k: bucket_obj.blob(k).download_as_bytes(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type in {
             "databricks",
@@ -959,7 +1002,7 @@ def read_target_sample(
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))
                     sql = (
                         f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {db_order} LIMIT :lim"
                     )
                 else:
@@ -994,7 +1037,7 @@ def read_target_sample(
                     d = dict(row)
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1031,7 +1074,7 @@ def read_target_sample(
                     d = {k: v for k, v in row.items() if k != "attributes"}
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1070,7 +1113,7 @@ def read_target_sample(
                 elif batch.headers:
                     headers = list(batch.headers)
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1121,7 +1164,7 @@ def read_target_sample(
                     d = dict(row)
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1137,9 +1180,12 @@ def read_target_sample(
 
         if db_type == "kafka":
             from connectors.kafka_reader import read_topic_batch
+            from services.copy_kafka_common import kafka_security_options
 
             batch, _ = read_topic_batch(
                 cfg={
+                    # The destination's SASL listener (D83).
+                    **kafka_security_options(dest),
                     "host": dest.get("host", ""),
                     "port": int(dest.get("port") or 9092),
                     "username": dest.get("username", ""),
@@ -1164,7 +1210,7 @@ def read_target_sample(
                     d = dict(row)
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1210,7 +1256,7 @@ def read_target_sample(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
                     f"pinecone fetch HTTP {fetch.status_code}"
                 )
-            vectors = (fetch.json() or {}).get("vectors") or {}
+            vectors = (load_http_json(fetch) or {}).get("vectors") or {}
             out_rows = []
             for vid, payload in vectors.items():
                 meta = payload.get("metadata") if isinstance(payload, dict) else {}
@@ -1253,7 +1299,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 points = (
-                    (retrieve.json() or {}).get("result") or []
+                    (load_http_json(retrieve) or {}).get("result") or []
                     if retrieve.status_code in {200, 201}
                     else []
                 )
@@ -1269,7 +1315,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 points = (
-                    ((scroll.json() or {}).get("result") or {}).get("points") or []
+                    ((load_http_json(scroll) or {}).get("result") or {}).get("points") or []
                     if scroll.status_code in {200, 201}
                     else []
                 )
@@ -1321,7 +1367,7 @@ def read_target_sample(
                         )
                     if resp.status_code not in {200, 201}:
                         continue
-                    obj = resp.json() or {}
+                    obj = load_http_json(resp) or {}
                     if not isinstance(obj, dict):
                         continue
                     props = (
@@ -1341,7 +1387,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 if agg.status_code in {200, 201}:
-                    for obj in (agg.json() or {}).get("objects") or []:
+                    for obj in (load_http_json(agg) or {}).get("objects") or []:
                         if not isinstance(obj, dict):
                             continue
                         props = (
@@ -1402,7 +1448,7 @@ def read_target_sample(
                 headers=hdrs,
                 timeout=30,
             )
-            qbody = query.json() if query.content else {}
+            qbody = load_http_json(query) if query.content else {}
             out_rows = []
             if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
                 for row in (qbody.get("data") if isinstance(qbody, dict) else []) or []:
@@ -1473,7 +1519,7 @@ def read_target_sample(
                     result = conn.execute(
                         sa.text(
                             f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                             f"LIMIT {int(limit or 50)}"
                         ),
                         params,
@@ -1490,6 +1536,24 @@ def read_target_sample(
                 )
                 return [dict(zip(names, row)) for row in result.fetchall()]
 
+        if db_type in {"iceberg", "apache_iceberg"}:
+            from services.dest_precount import iceberg_target_sample
+
+            sampled = iceberg_target_sample(
+                dest,
+                schema=schema,
+                table_name=table_name,
+                columns=None if cols == ["*"] else list(cols),
+                limit=int(limit or 50),
+                sort_key=sort_key,
+                key_values=keys or None,
+            )
+            if sampled is None:
+                raise TargetSampleUnavailable(
+                    f"Could not read Iceberg snapshot sample from {table_name!r}"
+                )
+            return sampled
+
         if db_type == "pgvector":
             return read_pgvector_target_sample(
                 dest,
@@ -1502,55 +1566,45 @@ def read_target_sample(
             )
 
         if db_type == "sftp":
-            from connectors.sftp_common import (
-                connect_sftp,
-                host_key_settings,
-                parse_sftp_config,
-            )
+            from connectors.sftp_common import sftp_dest_path
+            from services.object_streaming import open_sftp_binary
 
-            cfg = parse_sftp_config(
-                connection_string=dest.get("connection_string", ""),
-                host=dest.get("host", ""),
-                port=int(dest.get("port") or 22),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                database=dest.get("database", "") or schema or "",
-                table=table_name,
-                **host_key_settings(dest),
-            )
-            if not cfg.host or not cfg.path:
+            cfg = dict(dest)
+            if table_name:
+                cfg["table"] = table_name
+            if schema and not str(cfg.get("database") or "").strip():
+                cfg["database"] = schema
+            opened = open_sftp_binary(cfg)
+            if opened is False:
+                return []
+            if opened is None:
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "sftp host or path missing"
+                    "sftp host, path, or GET unavailable"
                 )
-            transport, sftp = connect_sftp(cfg)
+            stream, closer = opened
             try:
-                with sftp.file(cfg.path, "rb") as fh:
-                    body = fh.read()
+                return sample_artifact_records(
+                    stream,
+                    name=sftp_dest_path(
+                        str(table_name or cfg.get("path") or ""),
+                        cfg.get("file_format"),
+                    ),
+                    limit=limit,
+                    sort_key=sort_key or "",
+                    keys=keys,
+                    columns=None if cols == ["*"] else cols,
+                )
+            except UnmeasuredArtifact as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
             finally:
-                sftp.close()
-                transport.close()
-            rows, headers = _rows_from_object_bytes(
-                body, cfg.path, None if cols == ["*"] else cols
-            )
-            out_rows: list[dict[str, Any]] = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    if headers:
-                        row = {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                    else:
-                        continue
-                if keys and sort_key and row.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
+                if closer is not None:
+                    try:
+                        closer()
+                    except Exception:
+                        pass
 
     except TargetSampleUnavailable:
         raise

@@ -15,6 +15,7 @@ Execute-ready (Validate `decision=approve`) is **not** migration proven.
 | `writer_ack` | false | false | Writer said OK — not independent proof |
 | `sample` | true | **false** | Keyed sample matched; not population |
 | `full_checksum` | true | **true** | Row-count + checksum match |
+| `coerced` | true | **false** | Rows landed, but cells were coerced to NULL — checksums can match the coerced image; not migration-proven |
 | `failed` | false | false | Gate-8 failed |
 
 `population_proof` and `referential_integrity_proven` remain **false** even for
@@ -24,6 +25,7 @@ Execute-ready (Validate `decision=approve`) is **not** migration proven.
 
 - `apps/api/services/signed_proof_pack.py`
   - `classify_post_write_assurance`
+  - `fidelity_veto` / `apply_fidelity_veto` (`failed` ladder, `coerced` NULL write)
   - `assert_pack_may_claim_migration_proven`
   - `build_signed_proof_pack` always stamps `assurance`
 - `apps/api/services/preflight_proof_bundle.py`
@@ -52,4 +54,5 @@ Execute-ready (Validate `decision=approve`) is **not** migration proven.
 - Sample post-write is assurance, not population proof
 - Writer-ack is never migration proven
 - Checksum mismatch never greens Gate-8 via sample (Enterprise GA)
+- `claim_level=coerced` is operational success with altered cells — never `migration_proven`
 - Format/kind connector labels are not package version proof

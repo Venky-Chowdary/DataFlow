@@ -33,7 +33,10 @@ def _fetch_es_physical_types(
     Returns ``(physical, None)`` on success or ``({}, exc)`` on probe failure
     so callers can fail-closed on auth (never soft-empty → Map invent).
     """
-    from services.schema_introspect import _es_mapping_type
+    from connectors.elasticsearch_mapping import (
+        carrier_for_es_field_type,
+        carrier_from_es_property,
+    )
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
@@ -44,6 +47,11 @@ def _fetch_es_physical_types(
         logger.debug("Elasticsearch get_mapping failed for %s", index, exc_info=True)
         return {}, exc
     props: dict = {}
+    body_attr = getattr(mapping, "body", None)
+    if isinstance(body_attr, dict):
+        # The live client answers with ObjectApiResponse, which is not a dict:
+        # treating it as one read every existing field as undeclared.
+        mapping = body_attr
     if isinstance(mapping, dict):
         # Prefer exact name, then any concrete index body (alias → real index).
         body = mapping.get(index)
@@ -64,12 +72,17 @@ def _fetch_es_physical_types(
         if not isinstance(info, dict):
             info = {"type": "text"}
         es_type = str(info.get("type") or "text")
-        if es_type == "nested":
+        declared = carrier_from_es_property(info)
+        if declared:
+            # A previous run of this route declared the carrier — an ES field type
+            # cannot express DECIMAL(12,4) vs DECIMAL, so prefer the declaration.
+            carrier = declared
+        elif es_type == "nested":
             carrier = "ARRAY<JSON>"
         elif es_type == "object" or (not es_type and info.get("properties")):
             carrier = "JSON"
         else:
-            carrier = _es_mapping_type(es_type)
+            carrier = carrier_for_es_field_type(es_type)
         physical[name] = carrier
         physical.setdefault(name.lower(), carrier)
         physical.setdefault(name.upper(), carrier)
@@ -132,6 +145,42 @@ def _es_rematerialize_if_physical_differs(
     )
 
 
+def _mapped_source_carriers(
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+    target_cols: list[str],
+    logical_types: list[str],
+) -> dict[str, str]:
+    """Carrier each mapped field holds, by target field name.
+
+    Map stamps an Elasticsearch *field type* as the target (``keyword`` for a
+    DECIMAL), which cannot express precision, scale or temporal polarity. The
+    source carrier can, so the declared mapping is built from it.
+    """
+    from services.mapping_constraints import write_mappings
+
+    ctypes = column_types or {}
+    carriers: dict[str, str] = {}
+    for mapping in write_mappings(list(mappings or [])):
+        tgt = str(mapping.get("target") or "").strip()
+        if not tgt or tgt in carriers:
+            continue
+        src = str(mapping.get("source") or "").strip()
+        carrier = str(
+            ctypes.get(src) or mapping.get("source_type") or ""
+        ).strip()
+        if carrier:
+            carriers[tgt] = carrier
+    for i, col in enumerate(target_cols or []):
+        name = str(col or "")
+        if not name or carriers.get(name):
+            continue
+        logical = str(logical_types[i] if i < len(logical_types) else "").strip()
+        if logical:
+            carriers[name] = logical
+    return carriers
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "elasticsearch-py"
@@ -144,15 +193,44 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     ValueError so the writer can quarantine — never invent UTF-8 bytes or a
     random UUID (Airbyte/Fivetran fail-closed class).
     """
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind, is_missing_sentinel
+
+    from connectors.elasticsearch_mapping import (
+        carrier_for_es_field_type,
+        is_es_field_type,
+    )
 
     # STOP_COLUMN / coerce_null omit — callers must skip projecting this cell.
     # Returning None here would write JSON null and wipe prior _source fields.
     if is_missing_sentinel(value):
         raise ValueError("DF_MISSING must be omitted from Elasticsearch _source")
-    if value is None:
-        return None
-    upper = source_type.upper()
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
+    from services.value_serializer import document_bind_value
+
+    value = document_bind_value(value)
+    # A carrier arrives parameterised (``DECIMAL(12,4)``, ``ARRAY<JSON>``) when it
+    # comes from Studio/Map stamps rather than a live ES field type. Dispatch on
+    # the base token so the value is coerced by its family instead of falling
+    # through uncoerced (a raw Decimal, an integer left as text); the coercions
+    # keep the full declaration so precision and scale still bind.
+    from connectors.sql_temporal import sql_base_type
+
+    declared = str(source_type or "").strip()
+    if is_es_field_type(declared):
+        # An Elasticsearch field type is not a SQL carrier: ``date`` holds an
+        # instant, so binding it as SQL DATE truncates the time of day.
+        declared = carrier_for_es_field_type(declared)
+        if declared == "TIMESTAMP":
+            from services.type_system import temporal_value_has_timezone
+
+            if temporal_value_has_timezone(value):
+                # A date field is UTC-normalised by Elasticsearch, so an offset
+                # must bind as an instant — dropping it into a wall clock would
+                # store a value hours away from the source's.
+                declared = "TIMESTAMPTZ"
+    upper = sql_base_type(declared).split("<", 1)[0].strip()
     if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
         from connectors.sql_bind import coerce_decimal_wire
 
@@ -162,8 +240,22 @@ def _to_es_value(value: Any, source_type: str) -> Any:
                 "(refuse silent null invent / field wipe)"
             )
         # Keep as string — float64 would silently lose precision (no quarantine).
-        return str(coerce_decimal_wire(value, ddl_type=upper))
-    if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
+        # Fixed-point wire (this engine's DECIMAL policy) so an exact-text field
+        # reconciles against the source digits instead of Decimal's ``-1E-10``.
+        from decimal import Decimal
+
+        from services.value_serializer import safe_decimal_text
+
+        bound_dec = coerce_decimal_wire(value, ddl_type=declared)
+        if isinstance(bound_dec, Decimal):
+            # Fixed-point text, never float: ``10.5000`` is a scale-4 value and
+            # float drops the scale. scaled_float / double mappings coerce the
+            # string on index, so aggregations still see a number.
+            text = safe_decimal_text(bound_dec)
+            if text is not None:
+                return text
+        return str(bound_dec)
+    if upper in {"FLOAT", "DOUBLE", "DOUBLE PRECISION", "FLOAT64", "REAL"}:
         from connectors.sql_bind import coerce_float_wire
 
         if isinstance(value, str) and not str(value).strip():
@@ -171,7 +263,7 @@ def _to_es_value(value: Any, source_type: str) -> Any:
                 f"Elasticsearch FLOAT refused empty string {value!r} "
                 "(refuse silent null invent / field wipe)"
             )
-        return coerce_float_wire(value, ddl_type=upper)
+        return coerce_float_wire(value, ddl_type=declared)
     if upper in {
         "INTEGER",
         "INT",
@@ -191,7 +283,7 @@ def _to_es_value(value: Any, source_type: str) -> Any:
                 f"Elasticsearch {upper} refused empty string {value!r} "
                 "(refuse silent null invent / field wipe)"
             )
-        return coerce_integer_wire(value, ddl_type=upper)
+        return coerce_integer_wire(value, ddl_type=declared)
     if upper in {"BOOLEAN", "BOOL"}:
         from connectors.sql_bind import coerce_boolean_wire
 
@@ -217,7 +309,7 @@ def _to_es_value(value: Any, source_type: str) -> Any:
                 f"Elasticsearch {upper} refused empty string {value!r} "
                 "(refuse silent null invent / field wipe)"
             )
-        return coerce_sql_temporal(value, upper)
+        return coerce_sql_temporal(value, declared)
     if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
         from connectors.sql_bind import coerce_uuid_wire
 
@@ -229,7 +321,7 @@ def _to_es_value(value: Any, source_type: str) -> Any:
 
         raw = coerce_binary_wire(value)
         return base64.b64encode(raw).decode("ascii") if raw is not None else None
-    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
+    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT", "STRUCT", "MAP", "ROW", "RECORD"}:
         # ES dynamic mapping can only assign one JSON kind per field; storing the
         # JSON as a string keeps the transfer lossless and avoids object/array
         # collisions when the same logical column contains mixed JSON shapes.
@@ -250,8 +342,12 @@ def _resolve_doc_id(
     Prefer explicit ``_id``, then configured conflict/PK columns (including
     composite keys), then a single ``id`` field when present.
     """
-    if "_id" in source and source.get("_id") is not None and str(source.get("_id")).strip() != "":
-        return str(source["_id"])
+    from services.value_serializer import present_cell_text
+
+    if "_id" in source:
+        text = present_cell_text(source.get("_id"))
+        if text is not None:
+            return text
     configured = [c for c in conflict_columns if c]
     if configured:
         # Fail closed on partial composite identity: every configured PK part must
@@ -265,19 +361,21 @@ def _resolve_doc_id(
             return None
         parts: list[str] = []
         for col in keys:
-            val = source.get(col)
-            if val is None or str(val).strip() == "":
+            text = present_cell_text(source.get(col))
+            if text is None:
                 return None
-            parts.append(str(val).strip())
+            parts.append(text)
         return "|".join(parts) if len(parts) > 1 else parts[0]
     for alias in ("id", "ID", "Id", "pk", "PK"):
-        if alias in source and source.get(alias) is not None and str(source.get(alias)).strip() != "":
-            return str(source[alias])
+        if alias in source:
+            text = present_cell_text(source.get(alias))
+            if text is not None:
+                return text
     for col in target_cols:
         if col.lower() in {"id", "pk", "doc_id", "document_id"} and col in source:
-            val = source.get(col)
-            if val is not None and str(val).strip() != "":
-                return str(val)
+            text = present_cell_text(source.get(col))
+            if text is not None:
+                return text
     return None
 
 
@@ -313,6 +411,13 @@ def write_mapped_rows(
         "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    source_carriers = _mapped_source_carriers(
+        list(mappings or []), column_types, target_cols, logical_types
+    )
+    from connectors.elasticsearch_mapping import (
+        carrier_from_es_property,
+        es_index_properties,
+    )
     from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
@@ -366,12 +471,27 @@ def write_mapped_rows(
                 error=studio_err,
             )
         if create_table and not index_exists:
-            # Use one shard and zero replicas for predictable test/CI behavior
-            # and to avoid blowing through small cluster shard limits.
-            client.indices.create(
-                index=index,
-                body={"settings": {"number_of_shards": 1, "number_of_replicas": 0}},
+            # Declare the fields this transfer writes. Dynamic mapping would let
+            # the first document decide — a DECIMAL wired as a precision-safe
+            # string becomes `text`, and the next run reads that back as the
+            # destination carrier and refuses its own output.
+            body: dict[str, Any] = {
+                # Use one shard and zero replicas for predictable test/CI behavior
+                # and to avoid blowing through small cluster shard limits.
+                "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+            }
+            declared_props = es_index_properties(
+                target_cols, source_carriers, dest_types
             )
+            if declared_props:
+                body["mappings"] = {"properties": declared_props}
+            client.indices.create(index=index, body=body)
+            for name, prop in declared_props.items():
+                # Bind values through the carrier the field now declares, so the
+                # write and the next run's reread agree on one carrier.
+                carrier = carrier_from_es_property(prop)
+                if carrier:
+                    dest_types[name] = carrier
 
         if index_exists:
             from connectors.saas_common import is_auth_error
@@ -394,6 +514,56 @@ def write_mapped_rows(
                     ),
                 )
             mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+            if create_table and not studio_err:
+                # A field this index has never seen would otherwise be
+                # dynamic-mapped by its first document (a decimal string → text).
+                undeclared = [
+                    c
+                    for c in mapped_data_cols
+                    if not (
+                        physical.get(c)
+                        or physical.get(str(c).lower())
+                        or physical.get(str(c).upper())
+                    )
+                ]
+                new_props = es_index_properties(
+                    undeclared, source_carriers, dest_types
+                )
+                if new_props:
+                    try:
+                        client.indices.put_mapping(
+                            index=index, body={"properties": new_props}
+                        )
+                    except Exception as put_exc:
+                        # Left undeclared, the first document decides the field
+                        # type — a decimal string becomes `text`, and the next
+                        # run reads that back as this route's own destination
+                        # carrier. Refuse instead of writing an unprovable shape.
+                        logger.warning(
+                            "Elasticsearch put_mapping declined for %s fields %s",
+                            index,
+                            list(new_props),
+                            exc_info=True,
+                        )
+                        fields = ", ".join(repr(c) for c in list(new_props)[:12])
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=index,
+                            target_schema=host or "localhost",
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"Elasticsearch could not declare field(s) {fields} "
+                                f"on index {index!r}: {put_exc} — refuse dynamic "
+                                "mapping invent (first document would decide the "
+                                "field type)."
+                            ),
+                        )
+                    for name, prop in new_props.items():
+                        carrier = carrier_from_es_property(prop)
+                        if carrier:
+                            physical[name] = carrier
             # ES/OpenSearch is not relational: empty/partial properties mean
             # dynamic mapping, not SQL empty→NULL invent. Overlay Studio + live
             # props when present; unmapped fields keep Map stamps. Partial Studio
@@ -567,6 +737,8 @@ def write_mapped_rows(
                     target_cols=target_cols,
                     rejected_details=rejected_details,
                     policy=policy,
+                    # An empty string is not a valid Elasticsearch ``_id``.
+                    empty_is_null=True,
                 )
 
         from elasticsearch.helpers import bulk
@@ -576,12 +748,18 @@ def write_mapped_rows(
         from services.value_serializer import is_missing_sentinel
 
         for row_idx, row in enumerate(mapped_rows):
+            failed_column = ""
+            failed_value: Any = ""
             try:
                 # Omit DF_MISSING — never project JSON null (would wipe prior fields).
                 source: dict[str, Any] = {}
                 for i, value in enumerate(row):
                     if is_missing_sentinel(value):
                         continue
+                    failed_column = (
+                        target_cols[i] if i < len(target_cols) else ""
+                    )
+                    failed_value = value
                     wire = (
                         tgt_types[i]
                         if i < len(tgt_types) and str(tgt_types[i] or "").strip()
@@ -603,14 +781,19 @@ def write_mapped_rows(
             except (ValueError, TypeError) as cell_exc:
                 rejected_details.append({
                     "row": row_idx + 1,
-                    "column": "",
+                    # Name the cell: a refusal the operator cannot locate is a
+                    # dead end on a wide index.
+                    "column": failed_column,
                     "target": index,
-                    "value": "",
+                    "value": "" if failed_value is None else str(failed_value)[:200],
                     "reason": str(cell_exc)[:500],
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
                     "chars": [],
                 })
                 if policy == "fail":
+                    abort = reject_on_strict_policy(
+                        policy, rejected_details, "Elasticsearch"
+                    )
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -618,7 +801,7 @@ def write_mapped_rows(
                         target_schema=host or "localhost",
                         checksum="",
                         chunks_completed=0,
-                        error=str(cell_exc)[:500],
+                        error=abort or str(cell_exc)[:500],
                         rejected_details=list(rejected_details),
                     )
                 continue

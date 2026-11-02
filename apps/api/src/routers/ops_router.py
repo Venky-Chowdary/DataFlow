@@ -12,44 +12,75 @@ router = APIRouter(prefix="/ops", tags=["Ops"])
 
 @router.get("/freshness")
 async def get_freshness(
+    request: Request,
     warn_seconds: float = Query(60.0, ge=1.0, le=86400.0),
     critical_seconds: float | None = Query(None, ge=1.0, le=86400.0),
     heartbeat_stale_seconds: float = Query(300.0, ge=30.0, le=86400.0),
 ):
-    """Pipeline CDC lag / heartbeat summary for Overview and Pipelines."""
-    from services.ops_metrics import freshness_summary
+    """Pipeline CDC lag / heartbeat summary for Overview and Pipelines.
 
+    ``stale_count`` / ``alerts`` / ``worst_lag_seconds`` are one workspace's:
+    the ``X-Workspace-Id`` workspace, else the caller's own. Only a platform
+    admin without a header gets the process-wide view (D154).
+    """
+    from services.ops_metrics import freshness_summary
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request)
     return freshness_summary(
         max_lag_warn_seconds=warn_seconds,
         max_lag_critical_seconds=critical_seconds,
         heartbeat_stale_seconds=heartbeat_stale_seconds,
+        workspace_id=scope.workspace_id,
+        workspace_filter=scope.single_workspace_filter(),
     )
 
 
 @router.get("/metrics/json")
-async def get_metrics_json():
-    """JSON mirror of in-process Prometheus metrics (UI-friendly)."""
-    from services.ops_metrics import snapshot
+async def get_metrics_json(request: Request):
+    """JSON mirror of in-process Prometheus metrics (UI-friendly).
 
-    return snapshot()
+    Process counters and gauges are platform-wide, so only a platform admin
+    sees them; anyone else gets the per-pipeline series of their own
+    workspace (D154).
+    """
+    from services.ops_metrics import snapshot
+    from services.workspace_access import tenant_scope
+
+    return snapshot(workspace_filter=tenant_scope(request).single_workspace_filter())
 
 
 @router.get("/dlq")
 async def get_dlq(
+    request: Request,
     job_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ):
-    """Quarantine dead-letter queue events (newest first)."""
-    from services.quarantine_dlq import list_dlq_events
+    """Quarantine dead-letter queue events (newest first).
 
-    events = list_dlq_events(job_id=job_id, limit=limit)
+    ``count`` / ``total`` are one workspace's queue — the ``X-Workspace-Id``
+    workspace, else the caller's own; only a platform admin without a header
+    gets the platform queue (D154). ``returned`` is the page.
+    """
+    from services.quarantine_dlq import count_dlq_events, list_dlq_events
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request)
+    workspace_filter = scope.single_workspace_filter()
+    workspace_id = scope.workspace_id
+    events = list_dlq_events(job_id=job_id, workspace_filter=workspace_filter, limit=limit)
+    total = count_dlq_events(job_id=job_id, workspace_filter=workspace_filter)
     by_action: dict[str, int] = {}
     for ev in events:
         action = str(ev.get("action") or "unknown")
         by_action[action] = by_action.get(action, 0) + 1
     return {
         "events": events,
-        "count": len(events),
+        "count": total,
+        "total": total,
+        "returned": len(events),
+        "limit": limit,
+        "workspace_id": workspace_id or None,
         "by_action": by_action,
         "open_rows": sum(int(ev.get("rows") or 0) for ev in events if "fail" in str(ev.get("action") or "")),
     }
@@ -75,6 +106,28 @@ async def get_cdc_lease(cursor_key: str = Query(..., min_length=1, max_length=51
         "lease": view,
         "holder_job_id": parse_holder_job_id(holder) or meta.get("job_id"),
         "backend": view.get("backend") or lease_backend_name(),
+    }
+
+
+@router.get("/cdc-leases/list")
+async def list_cdc_leases(
+    resource: str = Query("", max_length=512),
+    job_id: str = Query("", max_length=128),
+    stale_only: bool = Query(False),
+) -> dict[str, Any]:
+    """Held CDC leases, newest heartbeat first.
+
+    A refused run names the resource it collided on; force-release needs the
+    cursor key. This is how an operator gets from one to the other.
+    """
+    from services.cdc_lease import lease_backend_name, list_lease_views
+
+    leases = list_lease_views(resource=resource, job_id=job_id, stale_only=stale_only)
+    return {
+        "leases": leases,
+        "count": len(leases),
+        "stale_count": sum(1 for lease in leases if lease.get("stale")),
+        "backend": lease_backend_name(),
     }
 
 
@@ -120,6 +173,15 @@ async def get_cdc_cursor(cursor_key: str = Query(..., min_length=1, max_length=5
         "found": wm is not None,
         "watermark": wm,
     }
+
+
+@router.get("/cdc-cursors/keys")
+async def list_cdc_cursor_keys() -> dict[str, Any]:
+    """List persisted cursor keys so a reset can name one instead of guessing."""
+    from services.sync_cursor import list_cursor_keys
+
+    keys = sorted(list_cursor_keys())
+    return {"count": len(keys), "cursor_keys": keys}
 
 
 class ClearCursorBody(BaseModel):
@@ -213,8 +275,10 @@ class CdcRetentionProbeBody(BaseModel):
 async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any]:
     """Probe watermark vs live CDC retention (SQL Server min_lsn / Oracle oldest SCN).
 
-    Honesty: ``gap`` means reset watermark + re-snapshot. Continuous CDC across
-    the retention window is not claimed.
+    Honesty: ``gap`` means reset watermark + re-snapshot (or ``when_needed``).
+    PostgreSQL ``wal_status=lost`` / dropped slot is the same class — recreating
+    the slot at current WAL skips the lost window. Continuous CDC across the
+    retention window is not claimed.
     """
     from services.cdc_retention_probe import probe_cdc_retention
 

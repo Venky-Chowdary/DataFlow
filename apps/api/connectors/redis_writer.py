@@ -16,14 +16,13 @@ from services.primary_key import (
 from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
-from connectors.redis_reader import _redis_client, redis_key_for
+from connectors.redis_reader import _redis_client, load_redis_json_doc, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
     gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
-    sanitize_identifier,
     transform_error_policy,
 )
 
@@ -68,12 +67,7 @@ def _fetch_redis_physical_types(
                 raw = client.get(key)
                 if not raw:
                     continue
-                try:
-                    if isinstance(raw, (bytes, bytearray)):
-                        raw = raw.decode("utf-8")
-                    doc = json.loads(raw)
-                except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
+                doc = load_redis_json_doc(raw)
                 if not isinstance(doc, dict):
                     continue
                 sampled += 1
@@ -132,6 +126,13 @@ def _redis_rematerialize_if_physical_differs(
     )
     if live_dest_types is None:
         return None
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+    from services.transform_resolver import LiveDestTypes
+
+    widened = apply_sampled_profile_to_dest_types(
+        live_dest_types, mappings, dest_db="redis"
+    )
+    live_dest_types = LiveDestTypes(widened)
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
         != str(live_dest_types.get(c) or "").strip().upper()
@@ -230,8 +231,11 @@ def _normalize_redis_typed_doc(
 
     out = dict(doc)
     for col, typ in zip(target_cols, logical_types):
-        if col not in out or out[col] is None:
+        from services.value_serializer import is_reader_null_cell, unescape_wire_text
+
+        if col not in out or is_reader_null_cell(out[col]):
             continue
+        out[col] = unescape_wire_text(out[col])
         upper = (typ or "").upper()
         if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
             out[col] = coerce_uuid_wire(out[col])
@@ -285,7 +289,13 @@ def _normalize_redis_typed_doc(
             "INT4",
             "INT8",
         }:
-            out[col] = coerce_integer_wire(out[col], ddl_type=upper or "INTEGER")
+            # Name the engine for the same reason as DECIMAL above: a Redis JSON
+            # number has no int4/int8 width, and an ``INTEGER`` token here was
+            # inferred from whichever documents were sampled — an int4 bound
+            # would refuse ids beyond 2^31 that Redis stores natively.
+            out[col] = coerce_integer_wire(
+                out[col], ddl_type=upper or "INTEGER", engine="redis"
+            )
     return out
 
 
@@ -296,19 +306,11 @@ def _redis_row_to_doc(
     """Build Redis JSON doc with null-polarity honesty.
 
     * ``DF_MISSING`` / STOP_COLUMN → omit key (sparse merge keeps prior JSON)
-    * ``None`` / ``SQL_NULL_SENTINEL`` → JSON ``null`` (explicit wipe)
+    * ``None`` / reader-null → JSON ``null`` (explicit wipe)
     """
-    from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+    from connectors.writer_common import present_field_bindings
 
-    doc: dict[str, Any] = {}
-    for c, v in zip(target_cols, row):
-        if is_missing_sentinel(v):
-            continue
-        if v is None or v == SQL_NULL_SENTINEL:
-            doc[c] = None
-        else:
-            doc[c] = v
-    return doc
+    return present_field_bindings(dict(zip(target_cols, row)))
 
 
 # Thin aliases — tests/engine may import these names from the writer module.
@@ -342,7 +344,9 @@ def _resolve_redis_key_id(
 
         if not is_present_cdc_row_key(val):
             return None, col
-        parts.append(str(val))
+        from services.value_serializer import present_cell_text
+
+        parts.append(present_cell_text(val) or "")
     return "|".join(parts), cols[0]
 
 
@@ -399,7 +403,21 @@ def write_mapped_rows(
         "connection_string": connection_string,
         "ssl": ssl,
     }
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # Redis has no column catalog. A pending_dest_schema stamp means Studio
+    # never loaded dest DDL — dropping those mappings removed `id` and every
+    # row was quarantined as "no id-like column". An empty document is
+    # create-new: the mapping targets, including id, are the JSON fields.
+    pending_doc = any(
+        isinstance(m, dict)
+        and str(m.get("assignment_strategy") or "") == "pending_dest_schema"
+        for m in (mappings or [])
+    )
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=False if pending_doc else None,
+    )
     from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
@@ -794,10 +812,7 @@ def write_mapped_rows(
                 if needs_merge:
                     existing_raw = client.get(key)
                     if existing_raw:
-                        try:
-                            existing = json.loads(existing_raw)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            existing = None
+                        existing = load_redis_json_doc(existing_raw)
                         if isinstance(existing, dict):
                             doc = {**existing, **doc}
                 safe_doc = sanitize_json_value(doc)

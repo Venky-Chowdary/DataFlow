@@ -68,7 +68,7 @@ def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | No
     Empty conflict_columns must not invent a default ``id`` lookup — callers
     quarantine when this returns None under upsert.
     """
-    from services.value_serializer import is_missing_sentinel
+    from connectors.saas_common import saas_record_id
 
     candidates = [c for c in (conflict_columns or []) if c]
     if not candidates:
@@ -79,11 +79,9 @@ def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | No
     if not id_cols:
         return None
     for c in id_cols:
-        val = row.get(c)
-        if val is None or is_missing_sentinel(val):
-            continue
-        if val:
-            return str(val).strip() or None
+        token = saas_record_id(row.get(c))
+        if token:
+            return token
     return None
 
 

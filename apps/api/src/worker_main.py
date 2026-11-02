@@ -17,7 +17,20 @@ from services.brand_env import getenv_brand
 import sys
 
 
+def _force_worker_env() -> None:
+    """This command claims jobs. It does not own cadence or the API claim loop.
+
+    ``WORKER_MODE`` is left alone so the chart can run one batch Deployment
+    and one CDC Deployment from the same module.
+    """
+    os.environ["DATAFLOW_PROCESS_ROLE"] = "worker"
+    os.environ["DATAFLOW_WORKER_FLEET"] = "1"
+    os.environ["DATAFLOW_SCHEDULE_LOOP"] = "0"
+    os.environ["DATAFLOW_API_CLAIM_LOOP"] = "0"
+
+
 def main() -> int:
+    _force_worker_env()
     # Same structured configuration as the API process, so a job that starts in
     # the API and executes in the worker fleet produces one correlatable log
     # stream instead of two differently-shaped ones.
@@ -32,19 +45,24 @@ def main() -> int:
         )
     log = logging.getLogger("dataflow.worker")
 
-    # Ensure fleet mode is on for worker processes.
-    os.environ.setdefault("DATAFLOW_WORKER_FLEET", "1")
-
+    from services.process_role import topology_errors, worker_workloads
     from services.worker_fleet import fleet_enabled, run_fleet_loop
     from src.transfer.background import run_fleet_job
+
+    errors = topology_errors()
+    if errors:
+        for msg in errors:
+            log.error("topology: %s", msg)
+        return 2
 
     if not fleet_enabled():
         log.error("DATAFLOW_WORKER_FLEET must be enabled for the worker process")
         return 2
 
     log.info(
-        "Datawrap worker starting (worker_id=%s)",
+        "Datawrap worker starting (worker_id=%s workloads=%s)",
         os.getenv("HOSTNAME") or os.getenv("RAILWAY_REPLICA_ID") or "local",
+        ",".join(sorted(worker_workloads())),
     )
     try:
         run_fleet_loop(run_fleet_job, poll_seconds=float(getenv_brand("WORKER_POLL", "2")))

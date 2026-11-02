@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from connectors.merge_registry import MERGE_STRATEGIES, merge_strategy_for
 from connectors.writer_common_api import WriteResult, transform_error_policy
-from services.reconciliation_api import FingerprintAccumulator, canonical_checksum
+from services.reconciliation_api import FingerprintAccumulator, canonical_checksum, stream_select_checksum
 
 
 def test_module_size_budgets_script_ok():
@@ -26,3 +26,4 @@ def test_facades_export_callable_surfaces():
     assert callable(transform_error_policy)
     assert FingerprintAccumulator is not None
     assert callable(canonical_checksum)
+    assert callable(stream_select_checksum)

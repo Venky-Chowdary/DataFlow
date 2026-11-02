@@ -15,24 +15,56 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from services.tracing import submit_in_context
 from services.value_serializer import json_default
+from services.workspace_filter import current_actor
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
+from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
+from .job_narration import narrate_jobs
+from .tool_permissions import (
+    MUTATE,
+    bind_current_context,
+    is_permission_denial,
+    tool_requirement,
+)
+from .lifecycle_tools import LIFECYCLE_TOOL_NAMES, short_job_id
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
+    _has_explicit_workspace_subject,
+    _looks_like_product_howto,
     format_tool_results_for_llm,
     get_pilot_tools,
-    infer_tools_from_message,
+    asks_about_product_capacity,
+    plan_tools_tolerant,
 )
 
 logger = logging.getLogger(__name__)
 # Per-provider hard cap. Client abort is 120s — keep native LLM attempts under that
 # so the local agent can always answer before the browser times out.
 _LLM_TURN_TIMEOUT_S = 20
+# Tools whose result is a screen change the client performs; their acknowledgement
+# is not prose to narrate.
+_NAVIGATION_TOOLS = frozenset({"navigate", "open_job", "open_schedule", "start_transfer_studio"})
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
+# Bounds on what a provider model may do inside one native tool loop.
+_NATIVE_MAX_TOOL_CALLS = 8
+_NATIVE_MAX_CALLS_PER_ROUND = 4
+_NATIVE_TOOL_OUTPUT_CHARS = 12_000
+
+_NATIVE_MUTATION_REFUSED = (
+    "Refused: “{name}” changes workspace state and is staged only by the deterministic "
+    "planner, never from a model-chosen call. Tell the operator to state the operation "
+    "plainly (for example “cancel job 1a2b” or “pause pipeline nightly-orders”) so the "
+    "planner can stage it with a Confirm step."
+)
+_NATIVE_BUDGET_REFUSED = (
+    "Refused: tool budget for this turn is spent ({limit} calls). Answer from the "
+    "results already returned, or say what is still unknown."
+)
 
 
 class _UnavailableAnthropic:
@@ -71,8 +103,16 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"{o.get('filtered', 0)} connectors"
     if tr.name == "search_knowledge":
         return f"{o.get('count', 0)} knowledge hits"
+    if tr.name == "brief_workspace":
+        facts = o.get("facts") if isinstance(o.get("facts"), dict) else o
+        return (
+            f"{int(facts.get('connector_count') or 0)} connectors, "
+            f"{int(facts.get('job_count') or 0)} jobs"
+        )
     if tr.name == "list_jobs":
-        return f"{o.get('count', 0)} jobs"
+        total = int(o.get("total") or 0) or int(o.get("count") or 0)
+        window = int(o.get("count") or 0)
+        return f"{total} jobs (latest {window})" if window < total else f"{total} jobs"
     if tr.name == "list_schedules":
         return f"{o.get('count', 0)} schedules"
     if tr.name == "list_contracts":
@@ -83,6 +123,15 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"run {o.get('name') or o.get('schedule_id')}"
     if tr.name == "list_connector_objects":
         return f"{o.get('count', 0)} objects on {o.get('connector_name')}"
+    if tr.name == "rank_connector_tables":
+        return (
+            f"{o.get('counted', 0)} tables counted on {o.get('connector_name')} "
+            f"({o.get('total_rows', 0)} rows)"
+        )
+    if tr.name == "compare_connectors":
+        left = (o.get("left") or {}).get("name") or "?"
+        right = (o.get("right") or {}).get("name") or "?"
+        return f"{left} vs {right} · {len(o.get('differs') or [])} field(s) differ"
     if tr.name == "sample_connector_object":
         rid = o.get("result_id") or ""
         base = f"{o.get('row_count', 0)} rows from {o.get('table')}"
@@ -134,6 +183,81 @@ def _fmt_metric_value(value: Any) -> str:
     return str(value)
 
 
+_IDISH_COLUMN = re.compile(
+    r"id|customer|name|email|key|code|user|region|status", re.I
+)
+
+
+def _clip_member(value: Any, *, limit: int = 40) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"true", "false"}:
+        return ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _including_clause(members: list[str], *, limit: int = 4) -> str:
+    """Name the values an inventory question asked to see, in the lead sentence.
+
+    Grouped counts and samples used to open on "3 groups" / "3 rows" and put
+    the actual keys in a markdown table the sentence splitter then skipped.
+    The operator asked for those values; they belong in the first sentence.
+    """
+    shown = [m for m in members if m][:limit]
+    if not shown:
+        return ""
+    return " including " + ", ".join(shown)
+
+
+def _group_preview_values(
+    rows: list[dict[str, Any]], dim_key: str, *, limit: int = 4
+) -> list[str]:
+    labels: list[str] = []
+    for row in rows[:limit]:
+        dim = row.get(dim_key) if isinstance(row, dict) else None
+        labels.append("∅" if dim is None else _clip_member(dim, limit=32) or str(dim))
+    return labels
+
+
+def _row_preview_values(
+    rows: list[dict[str, Any]], cols: list[str], *, limit: int = 2
+) -> list[str]:
+    if not rows or not cols:
+        return []
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    ranked = sorted(
+        cols,
+        key=lambda c: (0 if _IDISH_COLUMN.search(str(c)) else 1, cols.index(c)),
+    )
+    values: list[str] = []
+    for col in ranked:
+        text = _clip_member(row.get(col))
+        if text:
+            values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _live_rows_lead(o: dict[str, Any], *, sample: bool) -> str:
+    """First sentence of a sample or query — names a cell, then the table."""
+    cols = list(o.get("columns") or [])
+    rows = list(o.get("rows") or [])
+    title = (
+        f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
+        if sample
+        else f"Query on **{o.get('connector_name')}**"
+    )
+    preview = _including_clause(_row_preview_values(rows, [str(c) for c in cols]))
+    return (
+        f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
+        + (" (truncated)" if o.get("truncated") else "")
+        + f" · {len(cols)} columns · read-only"
+        + f"{preview}."
+    )
+
+
 _GATE_ICON = {"pass": "✓", "block": "✗", "warn": "!", "skip": "–"}
 
 
@@ -153,6 +277,14 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         f"**{dst.get('connector_name')}**.`{dst.get('table')}`"
     )
     lines = [f"{route} — sync `{plan.get('sync_mode')}`"]
+    read_mode = str(src.get("source_read_mode") or "table").strip().lower()
+    if read_mode in {"procedure", "query"}:
+        sql = str(src.get("procedure_call") or src.get("source_query") or "").strip()
+        lines.append(
+            f"• Source is a **{read_mode}** result-set snapshot"
+            + (f" (`{sql}`)" if sql else "")
+            + f", not table `{src.get('table')}`. CDC/SCD2/mirror stay refused."
+        )
 
     dest_exists = dst.get("table_exists")
     if dest_exists is True:
@@ -210,6 +342,35 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     if pf.get("run_id"):
         lines.append(f"• Preflight run `{pf.get('run_id')}`")
 
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    bound_id = str(
+        (preview or {}).get("contract_id") or plan.get("contract_id") or ""
+    ).strip()
+    if bound_id:
+        status = str(
+            (preview or {}).get("contract_status") or plan.get("contract_status") or ""
+        ).strip()
+        lines.append(
+            f"• Bound contract `{bound_id}`"
+            + (f" ({status})" if status else "")
+            + " — Confirm fails closed unless it is SIGNED."
+        )
+        if status.lower() == "not_found":
+            lines.append("  – Contract not found — Confirm will refuse.")
+        elif status and status.upper() != "SIGNED":
+            lines.append(f"  – Contract is {status} — Confirm will refuse until SIGNED.")
+        breaker = str(
+            (preview or {}).get("breaker_state") or plan.get("breaker_state") or ""
+        ).strip()
+        if breaker:
+            lines.append(f"• Circuit breaker is **{breaker}**.")
+            if breaker.lower() in {"open", "half_open"}:
+                lines.append("  – Confirm will refuse while the breaker is OPEN.")
+
+    rules = _render_live_data_rules(preview, plan)
+    if rules:
+        lines.append(rules)
+
     if tool == "start_transfer" and o.get("requires_confirm"):
         if o.get("destructive"):
             lines.append(
@@ -218,6 +379,422 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
             )
         else:
             lines.append("\nConfirm below to run it — nothing moves until you do.")
+    return "\n".join(lines)
+
+
+def _data_rules_bits(o: dict[str, Any] | None) -> list[str]:
+    """Named validation / schema posture only. Never invents skip_preflight."""
+    rec = o or {}
+    bits: list[str] = []
+    mode = str(rec.get("validation_mode") or "").strip()
+    if mode:
+        bits.append(f"{mode} validation")
+    policy = str(rec.get("schema_policy") or "").strip()
+    if policy:
+        bits.append(f"schema `{policy}`")
+    return bits
+
+
+def _render_live_data_rules(*records: dict[str, Any] | None) -> str:
+    """Operator-visible data / migration rules on a live plan or Confirm."""
+    merged: dict[str, Any] = {}
+    for rec in records:
+        if not rec:
+            continue
+        if rec.get("validation_mode"):
+            merged["validation_mode"] = rec.get("validation_mode")
+        if rec.get("schema_policy"):
+            merged["schema_policy"] = rec.get("schema_policy")
+    bits = _data_rules_bits(merged)
+    if not bits:
+        return ""
+    return f"• Data / migration rules: {', '.join(bits)}."
+
+
+def _render_requested_data_rules(o: dict[str, Any]) -> str:
+    """Name spoken bind / data rules on a generic route sketch.
+
+    This is not a live plan. Confirm still fail-closes on SIGNED / OPEN.
+    """
+    bits: list[str] = []
+    cid = str(o.get("contract_id") or "").strip()
+    if cid:
+        bits.append(f"contract `{cid}`")
+    bits.extend(_data_rules_bits(o))
+    if not bits:
+        return ""
+    return (
+        f"\nRequested data / migration rules: {', '.join(bits)} — "
+        "previewed on a real plan; Confirm stays fail-closed. "
+        "This sketch is not a plan for your data."
+    )
+
+
+def _schedule_bind_phrase(row: dict[str, Any] | None) -> str:
+    """One-line bind for list/get. Empty when the schedule is unbound."""
+    s = row or {}
+    cid = str(s.get("contract_id") or "").strip()
+    require = bool(s.get("require_signed_contract"))
+    breaker = str(s.get("breaker_state") or "").strip()
+    if not cid and not require:
+        return ""
+    if not cid:
+        return "require signed on, no contract"
+    bits = [f"contract `{cid}`"]
+    if require:
+        bits.append("SIGNED required")
+    if breaker:
+        bits.append(f"breaker {breaker}")
+    return " · ".join(bits)
+
+
+def _render_schedule_detail(s: dict[str, Any]) -> str:
+    """Answer “what’s on this pipeline?” — route, sync, bind, cadence."""
+    name = s.get("name") or "pipeline"
+    sid = str(s.get("id") or "").strip()
+    src = s.get("source_table") or "?"
+    dst = s.get("dest_table") or "?"
+    sync = str(s.get("sync_mode") or "").strip()
+    lines = [
+        f"Pipeline **{name}**"
+        + (f" (`{sid}`)" if sid else "")
+        + f" · {s.get('interval') or '—'}"
+        + f" · enabled={s.get('enabled')}."
+    ]
+    route = f"• Route `{src}` → `{dst}`"
+    if sync:
+        route += f" · sync `{sync}`"
+    lines.append(route)
+    bind = _schedule_bind_phrase(s)
+    if bind:
+        lines.append(f"• Bound {bind}.")
+    else:
+        lines.append("• No data contract bound — enforce stays unset.")
+    rules = _render_live_data_rules(s)
+    if rules:
+        lines.append(rules)
+    lines.append(
+        f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
+        f" ({s.get('run_count', 0)} runs)."
+    )
+    if s.get("needs_approval"):
+        park = (
+            f"• Parked on approval `{s.get('approval_id') or '?'}`"
+            + (f" ({s.get('approval_code')})" if s.get("approval_code") else "")
+            + f": {s.get('approval_finding') or 'finding not recorded'}."
+            + " Scheduled runs are skipped until it is "
+            + ("approved or rejected" if s.get("approvable") else "fixed and re-armed")
+            + " in the approvals inbox."
+        )
+        fix = str(s.get("approval_corrective_action") or "").strip()
+        lines.append(park + (f" Fix: {fix}" if fix else ""))
+    return "\n".join(lines)
+
+
+def _render_table_ranking(o: dict[str, Any]) -> str:
+    """Answer "which table is biggest" with the counts it was ranked on.
+
+    The winner leads because that is the question; the table of counts is the
+    evidence. Tables that refused a count are named rather than dropped — a
+    partial inventory presented as the whole one is the silent loss this product
+    exists to refuse.
+    """
+    ranked = [r for r in (o.get("ranked") or []) if isinstance(r, dict)]
+    cname = str(o.get("connector_name") or "connector")
+    ascending = str(o.get("order") or "desc").lower() == "asc"
+    counted = int(o.get("counted") or len(ranked))
+    if not ranked:
+        return f"No table on **{cname}** returned a row count."
+
+    top = ranked[0]
+    superlative = "smallest" if ascending else "largest"
+    objects = int(o.get("total_objects") or counted)
+    considered = int(o.get("considered") or counted)
+    estimated = {str(t) for t in (o.get("estimated_tables") or [])}
+
+    def _rows(row: dict[str, Any]) -> str:
+        n = f"{int(row.get('rows') or 0):,}"
+        return f"~{n} (estimate)" if row.get("table") in estimated else n
+
+    # ``exact`` is absent only on outputs that predate the flag.
+    partial = o.get("exact") is False
+    if estimated:
+        lines = [
+            f"By row count on **{cname}**, the {superlative} table is "
+            f"`{top.get('table')}` with **{_rows(top)} rows**."
+        ]
+    elif partial:
+        lines = [
+            f"Of the {counted} table(s) I counted on **{cname}**, the {superlative} "
+            f"is `{top.get('table')}` with **{int(top.get('rows') or 0):,} rows**."
+        ]
+    else:
+        lines = [
+            f"The {superlative} table on **{cname}** is `{top.get('table')}` with "
+            f"**{int(top.get('rows') or 0):,} rows**."
+        ]
+    lines.append("| table | rows |")
+    lines.append("| --- | ---: |")
+    for row in ranked:
+        lines.append(f"| `{row.get('table')}` | {_rows(row)} |")
+    total = int(o.get("total_rows") or 0)
+    if estimated:
+        tail = (
+            f"Ranked all {objects} table(s) by the catalog's row estimates; "
+            f"**{counted}** got an exact server-side `COUNT(*)` within the time "
+            f"budget and {len(estimated)} shown above are estimates (marked ~), "
+            "which can be stale."
+        )
+    else:
+        tail = (
+            f"Counted **{counted}** of {objects} table(s) — **{total:,} rows** in total. "
+            "Each count is an exact server-side `COUNT(*)`, not a sample."
+        )
+    if partial and not estimated:
+        basis = (
+            "shortlisted by catalog row estimates, which can be stale"
+            if o.get("shortlisted_by") == "catalog_estimate"
+            else f"the first {considered} in name order"
+        )
+        tail += (
+            f" The other {objects - considered} table(s) were not counted ({basis}), "
+            f"so this is not a ranking of all {objects}."
+        )
+    if len(ranked) < counted:
+        tail = f"Showing {len(ranked)} of {counted} counted. " + tail
+    lines.append(tail)
+    skipped = [s for s in (o.get("skipped") or []) if isinstance(s, dict)]
+    if skipped:
+        lines.append(
+            f"• **{len(skipped)} object(s) could not be counted** and are not in "
+            "the ranking: "
+            + "; ".join(
+                f"`{s.get('table')}` ({str(s.get('error') or '').strip()[:80]})"
+                for s in skipped[:4]
+            )
+            + ("…" if len(skipped) > 4 else "")
+        )
+    return "\n".join(lines)
+
+
+def _connector_side(f: dict[str, Any]) -> dict[str, str]:
+    """One connector's column of the comparison table, already formatted."""
+    endpoint = str(f.get("database") or "") or str(f.get("host") or "") or "—"
+    objects = f.get("objects")
+    tested = str(f.get("last_tested_at") or "")
+    return {
+        "engine": str(f.get("engine") or "—"),
+        "endpoint": f"`{endpoint}`" if endpoint != "—" else "—",
+        "health": str(f.get("health") or "untested")
+        + (f" ({tested[:10]})" if tested else ""),
+        "capability": str(f.get("capability") or "—"),
+        "objects": f"{int(objects):,}" if isinstance(objects, int) else "not read",
+        "reachable": "yes" if f.get("connected") else "no",
+    }
+
+
+def _render_connector_comparison(o: dict[str, Any]) -> str:
+    """Two saved connectors side by side, on facts the workspace actually holds.
+
+    A comparison has to say what differs, or the operator has to diff the table
+    themselves. It must also say what it *cannot* compare: this workspace records
+    no throughput or price per connector, so "which is faster" has no answer here
+    and inventing one from the engine name would be a benchmark we never ran.
+    """
+    left = o.get("left") or {}
+    right = o.get("right") or {}
+    a_name = str(left.get("name") or "A")
+    b_name = str(right.get("name") or "B")
+    a = _connector_side(left)
+    b = _connector_side(right)
+    rows = (
+        ("Engine", "engine"),
+        ("Endpoint", "endpoint"),
+        ("Connection test", "health"),
+        ("Transfer readiness", "capability"),
+        ("Tables / collections", "objects"),
+        ("Reachable now", "reachable"),
+    )
+    lines = [f"**{a_name}** vs **{b_name}** — what your workspace records:"]
+    lines.append(f"| | {a_name} | {b_name} |")
+    lines.append("| --- | --- | --- |")
+    for label, key in rows:
+        lines.append(f"| {label} | {a[key]} | {b[key]} |")
+
+    differs = [str(d) for d in (o.get("differs") or [])]
+    if differs:
+        spoken = {
+            "engine": "engine",
+            "database": "endpoint",
+            "host": "endpoint",
+            "health": "connection test",
+            "capability": "transfer readiness",
+            "objects": "object count",
+        }
+        named = []
+        for d in differs:
+            word = spoken.get(d, d)
+            if word not in named:
+                named.append(word)
+        lines.append(f"They differ on {_including_clause_words(named)}.")
+    else:
+        lines.append("Every field the workspace records is identical.")
+    if o.get("same_engine"):
+        lines.append(
+            "Same engine on both sides, so a transfer between them needs no type "
+            "coercion beyond the mapping."
+        )
+
+    unmeasured = str(o.get("unmeasured") or "")
+    if unmeasured:
+        lines.append(
+            f"I cannot rank them on {unmeasured} — this workspace does not record "
+            "it per connector, and reading it off the engine name would be a "
+            "benchmark nobody ran."
+        )
+    for side in (left, right):
+        note = str(side.get("message") or "")
+        if note and not side.get("connected"):
+            lines.append(f"• **{side.get('name')}** did not answer: {note[:140]}")
+    return "\n".join(lines)
+
+
+def _including_clause_words(words: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — the list read out loud."""
+    kept = [w for w in words if w]
+    if not kept:
+        return "nothing"
+    if len(kept) == 1:
+        return kept[0]
+    return ", ".join(kept[:-1]) + " and " + kept[-1]
+
+
+def _local_and_utc(instant: str, timezone_name: str) -> str:
+    """A due instant in the zone the operator named, with the UTC one after it.
+
+    The scheduler stores UTC, so "02:00 Asia/Kolkata" published as
+    ``2026-09-13T20:30:00+00:00`` looks like the cadence was misread. Lead with
+    the wall clock they asked for and keep UTC as the audit value.
+    """
+    text = (instant or "").strip()
+    zone = (timezone_name or "").strip()
+    if not text or not zone or zone.upper() == "UTC":
+        return f"`{text}`" if text else "—"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        local = datetime.fromisoformat(text).astimezone(ZoneInfo(zone))
+    except Exception:
+        return f"`{text}`"
+    return f"`{local.strftime('%Y-%m-%d %H:%M')}` **{zone}** (`{text}`)"
+
+
+def _render_schedule_stage(o: dict[str, Any]) -> str:
+    """Show the standing instruction an operator is about to sign off on.
+
+    A staged schedule had no renderer at all, so a fully resolved route with a
+    Confirm row already attached fell through to the “outside the documentation”
+    refusal — the operator was told their request was unanswerable underneath a
+    button that would have created it.
+    """
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    plan = o.get("plan") if isinstance(o.get("plan"), dict) else {}
+    name = str(preview.get("name") or "pipeline")
+    source = str(preview.get("source") or "?")
+    destination = str(preview.get("destination") or "?")
+    cadence = str(preview.get("cadence") or "").strip()
+    sync = str(preview.get("sync_mode") or "").strip()
+    lines = [
+        f"Staged pipeline **{name}** — `{source}` → `{destination}`"
+        + (f", {cadence}" if cadence else "")
+        + (f" · sync `{sync}`" if sync else "")
+        + "."
+    ]
+    cron = str(preview.get("cron") or "").strip()
+    zone = str(preview.get("timezone") or "").strip()
+    if cron and cron != "(preset interval)":
+        lines.append(f"• Cron `{cron}`" + (f" in **{zone}**" if zone else "") + ".")
+    elif zone:
+        lines.append(f"• Timezone **{zone}**.")
+    if preview.get("first_run_at"):
+        lines.append(f"• First run {_local_and_utc(str(preview['first_run_at']), zone)}.")
+    note = str(preview.get("timezone_note") or "").strip()
+    if note:
+        lines.append(f"• {note}")
+    mapped = preview.get("mapped_columns")
+    if mapped is not None:
+        unmapped = preview.get("unmapped_source_columns") or []
+        detail = f"• Mapping approved at stage time: **{mapped}** column(s)"
+        if unmapped:
+            detail += (
+                f", **{len(unmapped)} unmapped**: "
+                + ", ".join(f"`{c}`" for c in list(unmapped)[:6])
+                + ("…" if len(unmapped) > 6 else "")
+            )
+        lines.append(detail + ". Every run writes that mapping, not a re-derivation.")
+    if preview.get("cursor_column"):
+        lines.append(
+            f"• Advances on watermark `{preview['cursor_column']}` — "
+            "each run only reads rows past the last one."
+        )
+    if preview.get("upsert_key"):
+        lines.append(f"• Idempotent on key `{preview['upsert_key']}`.")
+    bound_id = str(preview.get("contract_id") or "").strip()
+    if bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — "
+            + (
+                "every run fails closed unless it is SIGNED."
+                if preview.get("require_signed_contract")
+                else "enforcement is advisory until you require SIGNED."
+            )
+        )
+    rules = _render_live_data_rules(preview, plan)
+    if rules:
+        lines.append(rules)
+    run_id = str(preview.get("preflight_run_id") or "").strip()
+    if run_id:
+        lines.append(f"• Cleared preflight run `{run_id}` before staging.")
+    if o.get("destructive"):
+        lines.append(
+            "• **Every run overwrites the destination table** — that is the "
+            "standing instruction, not a one-off."
+        )
+    lines.append(
+        "Nothing is scheduled until you Confirm below; it starts enabled once you do."
+    )
+    return "\n".join(lines)
+
+
+def _render_schedule_run(o: dict[str, Any]) -> str:
+    """Show the pipeline an operator has to sign off on: route, bind, breaker."""
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    name = o.get("name") or preview.get("name") or "pipeline"
+    src = preview.get("source_table") or "?"
+    dst = preview.get("dest_table") or "?"
+    sync = preview.get("sync_mode") or ""
+    lines = [
+        f"Ready to run pipeline **{name}** — `{src}` → `{dst}`"
+        + (f" · sync `{sync}`" if sync else "")
+        + "."
+    ]
+    bound_id = str(preview.get("contract_id") or "").strip()
+    if bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — Confirm fails closed unless it is SIGNED."
+        )
+        breaker = str(preview.get("breaker_state") or "").strip()
+        if breaker:
+            lines.append(f"• Circuit breaker is **{breaker}**.")
+    rules = _render_live_data_rules(preview, o)
+    if rules:
+        lines.append(rules)
+    if o.get("destructive") or sync == "full_refresh_overwrite":
+        lines.append("• **This overwrites the destination table.**")
+    lines.append(
+        "Confirm below to start an immediate run (does not change the regular cadence)."
+    )
     return "\n".join(lines)
 
 
@@ -247,19 +824,21 @@ def _render_aggregate(o: dict[str, Any]) -> str:
             lines.append(f"{measure.capitalize()} in {where}{scope}: **{value}**.")
     else:
         groups = int(o.get("group_count") or len(rows))
-        head = (
-            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
-            f"**{groups} group{'s' if groups != 1 else ''}**"
-        )
-        if o.get("truncated"):
-            head += f" (top {len(rows)} shown)"
-        lines.append(head)
         # Result columns come back as the generated aliases; some engines fold
         # case (Snowflake upper-cases), so match them case-insensitively.
         dim_key = cols[0] if cols else str(group_by)
         val_key = next((c for c in cols if c.lower() == alias.lower()), "")
         if not val_key:
             val_key = cols[-1] if len(cols) > 1 else alias
+        preview = _including_clause(_group_preview_values(rows, dim_key))
+        head = (
+            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
+            f"**{groups} group{'s' if groups != 1 else ''}**"
+        )
+        if o.get("truncated"):
+            head += f" (top {len(rows)} shown)"
+        head += f"{preview}."
+        lines.append(head)
         lines.append(f"| `{dim_key}` | `{val_key}` |")
         lines.append("| --- | ---: |")
         for row in rows[:15]:
@@ -284,6 +863,151 @@ def _render_aggregate(o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: A tool error that is really a request for the one input the operator left
+#: out. These sentences already read as an answer, so wrapping them in an
+#: apology makes Pilot look like it failed at something it simply has not been
+#: told yet.
+_ASKS_FOR_INPUT = re.compile(
+    r"^(?:i\s+need\b|which\b|name\s+(?:a|the)\b|give\s+(?:me\s+)?(?:a|the)\b|"
+    r"pick\b|tell\s+me\b|choose\b)",
+    re.I,
+)
+
+#: The same thing said as a question rather than an imperative — "What time
+#: should the nightly run start, and in which timezone?". Only the imperative
+#: openers were listed, so a cadence prompt was published under "I could not
+#: complete that", which reads as a failure the operator has to work around
+#: instead of one word they still owe.
+_ASKS_FOR_INPUT_QUESTION = re.compile(
+    r"^(?:what|when|where|who|how\s+often|how\s+many|how\s+should)\b",
+    re.I,
+)
+
+
+def _is_input_request(error: str) -> bool:
+    """Is this failure really Pilot asking for one missing input?"""
+    text = (error or "").strip()
+    if not text:
+        return False
+    if _ASKS_FOR_INPUT.match(text):
+        return True
+    # A question mark is what separates "What time should this run?" from
+    # "What went wrong: the host refused the connection."
+    return bool(_ASKS_FOR_INPUT_QUESTION.match(text) and "?" in text)
+
+#: Tools whose successful output is an offer the next turn can accept or drop.
+#: ``plan_transfer`` is the only rehearsal here — the rest already hold an ack.
+_PROPOSAL_TOOLS = frozenset(
+    {
+        "plan_transfer",
+        "start_transfer",
+        "create_schedule",
+        "run_schedule_now",
+        "create_connector",
+        "remediate_validation",
+        *(LIFECYCLE_TOOL_NAMES - {"test_connector"}),
+    }
+)
+
+#: Tools that *do* something. "Lookup" is the wrong word for a failed create.
+_ACTION_TOOL_NAMES = frozenset(
+    {
+        "create_connector",
+        "create_schedule",
+        "run_schedule_now",
+        "start_transfer",
+        "plan_transfer",
+        "plan_transfer_route",
+        "start_transfer_studio",
+        "remediate_validation",
+        *LIFECYCLE_TOOL_NAMES,
+    }
+)
+
+
+def _failure_reply(failed: list[Any]) -> str:
+    """What to say when every tool that ran failed, in the register of the ask."""
+    errors = [str(getattr(tr, "error", "") or "").strip() for tr in failed]
+    errors = [e for e in errors if e]
+    if not errors:
+        return "I could not complete that."
+    if all(_is_input_request(e) for e in errors):
+        # Nothing went wrong — Pilot is missing one input and is asking for it.
+        return errors[0] if len(errors) == 1 else "\n".join(f"• {e}" for e in errors)
+    head = (
+        "I could not complete that:"
+        if any(getattr(tr, "name", "") in _ACTION_TOOL_NAMES for tr in failed)
+        else "I couldn't complete that lookup:"
+    )
+    return "\n".join([head, *(f"• {e}" for e in errors)])
+
+
+def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
+    """Preview text for a staged lifecycle ack, or the live probe result."""
+    p = o.get("preview") or {}
+    if name == "test_connector":
+        verdict = "reachable" if o.get("ok") else "**not reachable**"
+        msg = str(o.get("message") or "").strip()
+        line = f"**{o.get('name')}** ({o.get('type') or 'connector'}) is {verdict}."
+        return f"{line} {msg}".strip() if msg else line
+    label = o.get("label") or "Confirm this change"
+    if name in ("cancel_job", "retry_job", "resume_job", "replay_quarantine"):
+        route = " → ".join(x for x in (p.get("source"), p.get("destination")) if x)
+        bits = [f"Job **{short_job_id(str(p.get('job_id') or ''))}** is **{p.get('status') or '—'}**"]
+        if route:
+            bits.append(route + (f" · `{p.get('table')}`" if p.get("table") else ""))
+        if p.get("rows_written") is not None:
+            bits.append(f"{p.get('rows_written')} rows written")
+        if p.get("rejected_rows"):
+            bits.append(f"{p.get('rejected_rows')} quarantined")
+        effect = {
+            "cancel_job": "Cancel asks the worker to stop after the current batch; rows already committed stay.",
+            "retry_job": "Retry starts a **new** job from zero with the same request; the failed job is kept for audit.",
+            "resume_job": "Resume continues from the last committed checkpoint — no rows are re-read before it.",
+            "replay_quarantine": "Replay re-sends the open quarantine rows. Staged transform overrides and edited cells replace the original cast; without them the original mapping is used.",
+        }[name]
+        return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
+    if name == "delete_connector":
+        bound = p.get("bound_schedules") or []
+        warn = (
+            f"\n⚠ {len(bound)} pipeline(s) reference it: {', '.join(f'**{b}**' for b in bound)} — they will fail on their next run."
+            if bound
+            else ""
+        )
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) will be removed from saved connectors. "
+            f"Data at the source is untouched.{warn}\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "update_connector":
+        changed = ", ".join(f"{k} → {v}" for k, v in (p.get("changes") or {}).items())
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) changes: {changed}. "
+            "Its id and bound pipelines stay the same; test it after saving."
+            f"\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "set_schedule_enabled":
+        after = "resume on its cadence" if p.get("enabled_after") else "stop firing until resumed"
+        return f"Pipeline **{p.get('name')}** will {after}.\n\nConfirm to proceed: **{label}**."
+    if name == "delete_schedule":
+        return (
+            f"Pipeline **{p.get('name')}** ({p.get('sync_mode') or 'sync'}, {p.get('runs_recorded', 0)} runs recorded) "
+            f"will be deleted; its jobs stay in Jobs.\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "update_schedule":
+        bits = []
+        if p.get("cadence"):
+            bits.append(f"cadence becomes **{p.get('cadence')}**")
+        if p.get("name_after"):
+            bits.append(f"name becomes **{p.get('name_after')}**")
+        change = " and ".join(bits) or "will be updated"
+        note = f"\n{p['timezone_note']}" if p.get("timezone_note") else ""
+        return (
+            f"Pipeline **{p.get('name')}** {change}. The route and the mapping stay as they are."
+            f"{note}\n\nConfirm to proceed: **{label}**."
+        )
+    return f"Confirm to proceed: **{label}**."
+
+
 def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     """Honest fallback when no tool matched — never pretend the question was answered.
 
@@ -304,79 +1028,88 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     src_ex = conn_names[0] if conn_names else example_connector_name(ctx)
     dst_ex = example_dest_connector_name(ctx, source_hint=src_ex)
 
-    suggestions: list[str] = []
+    # Each entry is (headline, what to do about it). The headline matters as
+    # much as the suggestion: "run a transfer from orders to orders_warehouse"
+    # is perfectly understood — the operator named tables where connectors go —
+    # and answering it with "I'm not sure how to do that yet" reads as a pilot
+    # that cannot do transfers at all. Name the missing input instead.
+    options: list[tuple[str, str]] = []
     if any(w in lower for w in ("export", "download", "csv", "parquet", "excel")):
-        suggestions.append(
-            f'I can\'t export files yet — sample the table and use **Query** to pull '
-            f'larger result sets: "sample orders on {src_ex}".'
-        )
+        options.append((
+            "Writing files out is not something I can do yet.",
+            f'Sample the table and use **Query** to pull larger result sets: '
+            f'"sample orders on {src_ex}".',
+        ))
     if _looks_like_live_data_fetch(lower) or re.search(
         r"\b(?:get|fetch|pull|show|sample)\b.+\b(?:from|on|in)\b",
         lower,
     ):
         on_conn = f" on {src_ex}"
-        suggestions.append(
-            f'To pull live rows, name the table and a saved connector: '
-            f'"sample users{on_conn}" or "show orders from {dst_ex}".'
-        )
-    if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
-        suggestions.append(
-            'I can plan a transfer and stage a start — nothing moves until you Confirm. '
-            f'Try: "plan transfer of orders from {src_ex} to {dst_ex}" or '
-            f'"transfer orders from {src_ex} to {dst_ex} as upsert".'
-        )
+        options.append((
+            "I can read that live — I need the table and which saved connector holds it.",
+            f'For example: "sample users{on_conn}" or "show orders from {dst_ex}".',
+        ))
+    if re.search(r"\b(?:transfer|sync|move|migrate|copy|replicate)\b", lower):
+        options.append((
+            "I can run that transfer once I know which saved connector is on each "
+            "side — those names are connectors, not tables.",
+            'Nothing moves until you Confirm. Try: "plan transfer of orders from '
+            f'{src_ex} to {dst_ex}" or "transfer orders from {src_ex} to {dst_ex} '
+            'as upsert".',
+        ))
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
-        suggestions.append(
-            "I only run read-only actions and confirmed connector creates — "
-            "deletes have to be done in the UI so they can't be triggered by a prompt."
-        )
+        options.append((
+            "I delete one named connector or pipeline at a time, and only after you Confirm.",
+            'Bulk deletes and table drops stay in the UI. Try: "delete the '
+            f'{src_ex} connector" or "delete pipeline <name>".',
+        ))
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
-        suggestions.append(
-            'I can list and trigger existing pipelines: "show my pipelines" or '
-            '"run schedule <name> now". Creating a new schedule still needs the UI.'
-        )
+        options.append((
+            "I can do that as a pipeline — I need the route and the cadence.",
+            'For example: "schedule users from Local PG to Warehouse daily at '
+            '02:00 UTC", "show my pipelines", or "run schedule <name> now".',
+        ))
     if any(w in lower for w in ("fix", "repair", "heal", "remediate", "quarantine")):
-        suggestions.append(
-            'For a failed run, paste the job id or say "fix bad data" and I\'ll open '
-            "the remediation path for that transfer."
-        )
-    if not suggestions and any(
+        options.append((
+            "I can open the remediation path — I need to know which run.",
+            'Paste the job id, or say "fix bad data" after selecting the job.',
+        ))
+    if not options and any(
         w in lower for w in ("count", "sum", "average", "avg", "total", "how many", "top ")
     ):
-        suggestions.append(
-            'For live totals name the table and connector: '
-            f'"count of orders by status on {src_ex}" or '
-            f'"average price in products on {src_ex}".'
-        )
-    if not suggestions:
+        options.append((
+            "I can compute that against the live table — name the table and the connector.",
+            f'For example: "count of orders by status on {src_ex}" or '
+            f'"average price in products on {src_ex}".',
+        ))
+    if not options:
         on_conn = f" on {src_ex}" if src_ex and src_ex != "your connector" else ""
-        suggestions.append(
+        options.append((
+            "I did not catch a specific action in that message.",
             "I can count / sum / average live tables, sample and profile rows, "
             "introspect schemas, map columns, list jobs and pipelines, and open "
-            "the right screen."
-        )
-        suggestions.append(
-            f'Try: "how many rows in airports{on_conn}", '
-            f'"schema of airports{on_conn}", '
-            '"show my jobs", or "what can you do?".'
-        )
+            "the right screen.",
+        ))
+        options.append((
+            "",
+            # The examples used to name a fixture table, so the suggestion was
+            # a command the operator's workspace could not run. Listing a
+            # connector's tables is the one live read that always works.
+            f'Try: "list tables{on_conn}", '
+            f'"how many rows in <your table>{on_conn}", '
+            '"show my jobs", or "what can you do?".',
+        ))
 
-    quoted = (message or "").strip()
-    if len(quoted) > 120:
-        quoted = quoted[:117] + "…"
-    head = (
-        f'I\'m not sure how to do “{quoted}” yet.'
-        if quoted
-        else "I didn't catch a specific action in that message."
-    )
-    return head + "\n\n" + "\n".join(f"• {s}" for s in suggestions[:3])
+    head = options[0][0] or "I did not catch a specific action in that message."
+    body = [text for _, text in options[:3] if text]
+    return head + "\n\n" + "\n".join(f"• {s}" for s in body)
 
 
 def _llm_unavailable_footnote(engine: str, method: str) -> str:
-    """Only when operator explicitly opted into hybrid/cloud polish."""
+    """Hybrid footnote only on greeting — never after every workspace answer."""
     if engine not in {"hybrid", "cloud"}:
         return ""
-    if method not in {"pilot_local_engine", "greeting"}:
+    if method != "greeting":
         return ""
     try:
         from ..llm.provider import _AUTH_FAILED_PROVIDERS, pick_narration_provider
@@ -464,6 +1197,67 @@ def _resolve_pilot_engine() -> str:
     return resolve_pilot_engine()
 
 
+_UNEVIDENCED_PRODUCT_TOOLS = frozenset({"explain_product", "describe_pilot", "search_knowledge"})
+
+
+def carries_evidence(response: CopilotResponse) -> bool:
+    """Whether an answer rests on something read: a citation or a live tool read.
+
+    Canonical for both the API's `grounded` flag and the narration gate — authored
+    prose and refusals must not be reported as grounded, and must not be handed to
+    an LLM to rewrite, because there is no evidence for it to restate.
+    """
+    if response.sources:
+        return True
+    return any(
+        tool.get("success") and str(tool.get("name") or "") not in _UNEVIDENCED_PRODUCT_TOOLS
+        for tool in response.tools_used or []
+    )
+
+
+def _sources_from_turn(turn: "PilotTurn") -> list[dict]:
+    """Citations the tools actually retrieved, de-duplicated by href."""
+    collected: list[dict] = []
+    seen: set[str] = set()
+    for tr in turn.tool_results:
+        if not tr.success or not isinstance(tr.output, dict):
+            continue
+        for src in tr.output.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            key = str(src.get("href") or src.get("title") or "")
+            if key and key in seen:
+                continue
+            seen.add(key)
+            collected.append(src)
+    return collected
+
+
+def _evidence_ceiling(turn: "PilotTurn") -> float:
+    """Highest confidence the evidence in this turn can carry.
+
+    A product answer with no citation is authored prose or a refusal, not a
+    measured result — reporting it at 0.96 next to a live count is what made the
+    assistant sound equally sure of everything.
+    """
+    successes = [tr for tr in turn.tool_results if tr.success]
+    if not successes:
+        # Nothing was read, nothing was retrieved: this is a clarify or a refusal.
+        return 0.4
+    if any(tr.name not in _UNEVIDENCED_PRODUCT_TOOLS for tr in successes):
+        return 1.0
+    if _sources_from_turn(turn):
+        return 1.0
+    bases = {
+        str(tr.output.get("source") or "")
+        for tr in successes
+        if isinstance(tr.output, dict)
+    }
+    if bases and bases <= {"unsupported_question"}:
+        return 0.2
+    return 0.7
+
+
 @dataclass
 class PilotTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
@@ -510,34 +1304,95 @@ class DataPilotAgent:
         history: list[dict] | None = None,
         data_context: dict | None = None,
     ) -> CopilotResponse:
+        """Answer one turn, honouring a length instruction the turn carried."""
+        response = self._chat(message, history, data_context)
+        from .dialogue_acts import wants_brief_answer
+
+        if response and response.answer and wants_brief_answer(message):
+            from .conversation_composer import condense_to_lead
+
+            response.answer = condense_to_lead(response.answer)
+        return response
+
+    def _chat(
+        self,
+        message: str,
+        history: list[dict] | None = None,
+        data_context: dict | None = None,
+    ) -> CopilotResponse:
         message = message.strip()
         lower_msg = message.lower()
         history = history or []
         data_context = self._ensure_data_context(data_context, history)
-        if not message or lower_msg in {
-            "hi",
-            "hello",
-            "hey",
-            "help",
-            "yo",
-            "good morning",
-            "good afternoon",
-            "good evening",
+        from .dialogue_acts import classify_dialogue_act, is_calendar_question
+        from .conversation_composer import compose_greeting_response
+
+        if not message or classify_dialogue_act(message) == "greeting":
+            ctx = self.context_builder.build(data_context, message or "hi")
+            greet = compose_greeting_response(ctx)
+            if not greet.suggested_prompts:
+                greet.suggested_prompts = self._starter_prompts()[:4]
+            # Hybrid/cloud key-rejection is said once on hello — not after every
+            # workspace answer. The greeting return used to skip this wrapper,
+            # so the footnote was dead (method==greeting never reached it).
+            return _with_llm_footnote(greet, _resolve_pilot_engine())
+
+        # Clock time is a host fact. Hybrid OpenAI must not retrieve DATE-type
+        # Help or refuse with "I can't provide the current date."
+        if is_calendar_question(message):
+            ctx = self.context_builder.build(data_context, message)
+            return self._local_agent(message, history, ctx, data_context)
+
+        # Recap / thanks / next-step over the last spoken answer — do this before
+        # tool routing so "summarize that" after a job list does not re-hit Mongo.
+        # A stored sample still wins: "summarize that" then profiles the result.
+        _hist_act = classify_dialogue_act(message, history=history)
+        if _hist_act in {
+            "summarize_last",
+            "explain_simpler",
+            "thanks",
+            "next_action",
+            "recall_ask",
+            "repair_unclear",
+            "trouble_vague",
         }:
-            return CopilotResponse(
-                answer=(
-                    "I'm **Datawrap Pilot** — ask me anything about your workspace. "
-                    "I can count and aggregate live tables, sample and profile rows, "
-                    "inspect schemas, plan or stage transfers (**Confirm** before anything moves), "
-                    "triage jobs, and open Fix bad data in Transfer Studio. "
-                    'Try: "how many rows in airports on Local Postgres", '
-                    '"plan transfer of orders from Local Postgres to Warehouse", '
-                    'or "fix bad data".'
-                ),
-                intent="greeting",
-                confidence=1.0,
-                method="greeting",
-                suggested_prompts=self._starter_prompts()[:4],
+            sid = str((data_context or {}).get("pilot_session_id") or "").strip()
+            focus = None
+            if sid:
+                try:
+                    from .working_memory import get_working_memory
+
+                    focus = get_working_memory().get_focus(sid)
+                except Exception:
+                    focus = None
+            if not (_hist_act == "summarize_last" and focus and focus.result_id):
+                from .conversation_composer import compose_history_turn
+
+                ctx = self.context_builder.build(data_context, message)
+                pending_labels = [
+                    str(a.get("label") or "")
+                    for a in (data_context or {}).get("pending_actions") or []
+                    if isinstance(a, dict) and a.get("label")
+                ]
+                return compose_history_turn(
+                    _hist_act,
+                    history=history,
+                    message=message,
+                    ctx=ctx,
+                    pending_labels=pending_labels or None,
+                )
+
+        # Transcript questions, injection, attributed claims, cross-tenant reads
+        # and gate bypasses are settled here, before Help retrieval or any LLM
+        # can narrate an answer to them. Routing + lexical cue must both agree.
+        from . import intent_policy
+
+        policy = intent_policy.decide(message)
+        if policy is not None:
+            ctx = self.context_builder.build(data_context, message)
+            return _with_llm_footnote(
+                intent_policy.answer(policy, history=history, ctx=ctx),
+                _resolve_pilot_engine(),
             )
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
@@ -555,11 +1410,18 @@ class DataPilotAgent:
 
         ctx = self.context_builder.build(data_context, message)
 
-        # Local always works offline. Hybrid/cloud when keys exist (auto detects).
+        # Local always works offline. Hybrid/cloud only after an explicit opt-in.
         engine = _resolve_pilot_engine()
         local = self._local_agent(message, history or [], ctx, data_context)
         if engine == "local":
             return local
+        # Composed conversation turns (calendar, create-connection, refuse) are
+        # already the answer. Native OpenAI must not race Help retrieval over them.
+        if (local.method or "") == "pilot_conversation":
+            return _with_llm_footnote(
+                self._polish_with_llm(message, history or [], local, system=""),
+                engine,
+            )
 
         system = self._build_system_prompt(ctx, data_context)
 
@@ -590,38 +1452,27 @@ class DataPilotAgent:
         ):
             return _with_llm_footnote(polished, engine)
 
+        # A local refusal is the knowledge answer. Racing a cloud model here
+        # invented general-web prose after "how do I cook rice".
+        if not carries_evidence(local) and float(local.confidence or 0) <= 0.25:
+            return _with_llm_footnote(polished, engine)
+
         # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
         llm_futs: list = []
-        # Self-hosted Ollama first, then cloud — OpenAI is optional.
-        if self._ollama_available_quick():
+        # A provider the operator configured in Settings goes first — that is the
+        # one they asked us to use; a self-hosted Ollama is the fallback.
+        native = self._first_available_native_agent()
+        if native is not None:
             llm_futs.append(
-                _executor.submit(
-                    self._ollama_agent, message, history or [], system, data_context
+                submit_in_context(
+                    _executor,
+                    bind_current_context(native),
+                    message, history or [], system, data_context,
                 )
             )
-        elif self.anthropic.is_available():
-            llm_futs.append(
-                _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system, data_context
-                )
-            )
-        else:
-            openai_ready = False
-            try:
-                from ..llm.provider import DataTransferOpenAIProvider
-
-                openai_ready = DataTransferOpenAIProvider().is_available()
-            except Exception:
-                openai_ready = False
-            if openai_ready:
-                llm_futs.append(
-                    _executor.submit(
-                        self._openai_agent, message, history or [], system, data_context
-                    )
-                )
 
         if not llm_futs:
             return _with_llm_footnote(polished, engine)
@@ -763,13 +1614,17 @@ class DataPilotAgent:
             break
 
         # Suggestions with no active dataset → list uploads so the operator can pick.
+        # Skip when a Help FAQ already answered (gates / quarantine / append).
         for tr in list(turn.tool_results):
             if tr.name != "profile_quality_rules" or not tr.success:
                 continue
             cols = int((tr.output or {}).get("column_count") or 0)
             if cols > 0:
                 continue
-            if "list_datasets" not in {t.name for t in turn.tool_results}:
+            names = {t.name for t in turn.tool_results}
+            if "explain_product" in names:
+                continue
+            if "list_datasets" not in names:
                 ds = self.tools.execute("list_datasets", {})
                 turn.tool_results.append(ds)
                 self._append_tool_actions(turn, ds)
@@ -846,18 +1701,50 @@ class DataPilotAgent:
         except Exception:
             return False
 
+    def _first_available_native_agent(self):
+        """The native tool-loop runner to use, honouring the operator's choice.
+
+        Providers configured with a key in Settings (or via env) are tried in the
+        order the store reports them; a reachable self-hosted Ollama is the last
+        resort. ``None`` means Pilot answers from the local engine alone.
+        """
+        try:
+            from services.integrations_store import configured_ai_providers
+
+            configured = list(configured_ai_providers())
+        except Exception:
+            configured = []
+
+        for name in configured:
+            if name == "openai":
+                try:
+                    from ..llm.provider import DataTransferOpenAIProvider
+
+                    if DataTransferOpenAIProvider().is_available():
+                        return self._openai_agent
+                except Exception:
+                    continue
+            elif name == "anthropic" and self.anthropic.is_available():
+                return self._anthropic_agent_loop
+
+        if self._ollama_available_quick():
+            return self._ollama_agent
+        return None
+
     @staticmethod
     def _append_tool_actions(turn: PilotTurn, tr: ToolResult) -> None:
         if not tr.success or not isinstance(tr.output, dict):
             err = (tr.error or "").strip()
             if err and (
-                err.startswith("Which ")
+                is_permission_denial(err)
+                or err.startswith("Which ")
                 or "did you mean" in err.lower()
                 or "no connector matched" in err.lower()
                 or "which connector" in err.lower()
                 or "connector not found" in err.lower()
                 or ("dataset" in err.lower() and "not found" in err.lower())
                 or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
+                or tr.name in LIFECYCLE_TOOL_NAMES
             ):
                 turn.needs_clarification = err
             return
@@ -900,6 +1787,16 @@ class DataPilotAgent:
             return
 
         if tr.name == "remediate_validation":
+            if out.get("ui_only") or out.get("requires_confirm") is False:
+                turn.actions.append({
+                    "type": "navigate",
+                    "screen": "transfer",
+                    "risk": "safe",
+                    "label": out.get("label") or "Open Transfer Studio",
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                })
+                return
             turn.pending_actions.append({
                 "id": f"studio:{out.get('kind')}:{out.get('run_id') or ''}",
                 "type": "studio",
@@ -907,7 +1804,12 @@ class DataPilotAgent:
                 "label": out.get("label"),
                 "run_id": out.get("run_id"),
                 "risk": "mutate",
-                "payload": {"kind": out.get("kind"), "run_id": out.get("run_id")},
+                "destructive": bool(out.get("destructive")),
+                "payload": {
+                    "ack_id": out.get("ack_id"),
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                },
             })
             # Ensure Transfer is ready; safe navigate can auto-apply.
             turn.actions.append({
@@ -943,6 +1845,7 @@ class DataPilotAgent:
                 "type": "run_schedule",
                 "label": out.get("label") or "Run pipeline now",
                 "risk": "mutate",
+                "destructive": bool(out.get("destructive")),
                 "payload": {
                     "ack_id": out.get("ack_id"),
                     "schedule_id": out.get("schedule_id"),
@@ -979,6 +1882,50 @@ class DataPilotAgent:
                 "payload": out,
             })
 
+    def _native_tool_call(
+        self,
+        turn: "PilotTurn",
+        name: str,
+        arguments: dict | None,
+        data_context: dict | None,
+    ) -> tuple[ToolResult, str]:
+        """Run one model-chosen tool call and return ``(result, payload_for_model)``.
+
+        The native loop is reached only after the deterministic planner found no
+        grounded answer, so it is a *read* loop: a mutating tool chosen by the
+        model is refused rather than staged, the per-turn call budget is
+        enforced here rather than trusted to the model, and the payload handed
+        back is clipped so one wide sample cannot blow the context window.
+        Permission checks stay inside :meth:`tools.execute`.
+        """
+        if len(turn.tool_results) >= _NATIVE_MAX_TOOL_CALLS:
+            tr = ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_NATIVE_BUDGET_REFUSED.format(limit=_NATIVE_MAX_TOOL_CALLS),
+            )
+        elif tool_requirement(name)[1] == MUTATE:
+            tr = ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_NATIVE_MUTATION_REFUSED.format(name=name),
+            )
+        else:
+            args = self._with_result_context(name, arguments or {}, data_context)
+            tr = self.tools.execute(name, args)
+        turn.tool_results.append(tr)
+        self._append_tool_actions(turn, tr)
+        payload = json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default)
+        if len(payload) > _NATIVE_TOOL_OUTPUT_CHARS:
+            payload = json.dumps({
+                "truncated": True,
+                "chars": len(payload),
+                "preview": payload[:_NATIVE_TOOL_OUTPUT_CHARS],
+            })
+        return tr, payload
+
     def _anthropic_agent_loop(
         self,
         message: str,
@@ -986,11 +1933,15 @@ class DataPilotAgent:
         system: str,
         data_context: dict | None = None,
     ) -> CopilotResponse | None:
+        from .dialogue_acts import turn_text
+
         messages: list[dict] = []
         for msg in history[-12:]:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
-                messages.append({"role": role, "content": msg.get("content", "")})
+                text = turn_text(msg)
+                if text:
+                    messages.append({"role": role, "content": text})
         messages.append({"role": "user", "content": message})
 
         turn = PilotTurn()
@@ -1027,6 +1978,7 @@ class DataPilotAgent:
                         needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
+                        sources=_sources_from_turn(turn),
                         tools_used=_tools_used(turn),
                     )
                 break
@@ -1036,21 +1988,18 @@ class DataPilotAgent:
             if response.get("content"):
                 assistant_content.append({"type": "text", "text": response["content"]})
             tool_results_content = []
-            for tc in tool_calls:
+            for tc in tool_calls[:_NATIVE_MAX_CALLS_PER_ROUND]:
                 assistant_content.append({
                     "type": "tool_use",
                     "id": tc["id"],
                     "name": tc["name"],
                     "input": tc["input"],
                 })
-                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
-                tr = self.tools.execute(tc["name"], args)
-                turn.tool_results.append(tr)
-                self._append_tool_actions(turn, tr)
+                _tr, payload = self._native_tool_call(turn, tc["name"], tc.get("input"), data_context)
                 tool_results_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
-                    "content": json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default),
+                    "content": payload,
                 })
 
             messages.append({"role": "assistant", "content": assistant_content})
@@ -1075,9 +2024,17 @@ class DataPilotAgent:
         ephemeral id so same-process multi-turn stays coherent.
         """
         ctx = dict(data_context or {})
-        if str(ctx.get("pilot_session_id") or "").strip():
+        # Working memory and stored result sets are keyed by session id. This
+        # agent is one process-wide instance, so the fallback id and any id a
+        # client sends are namespaced by the authenticated actor: another
+        # account can neither inherit nor guess a conversation's focus (the
+        # last connector, table and rows) (D162).
+        actor = current_actor()
+        sid = str(ctx.get("pilot_session_id") or "").strip()
+        if sid:
+            ctx["pilot_session_id"] = f"{actor}|{sid}" if actor else sid
             return ctx
-        ctx["pilot_session_id"] = self._ephemeral_session
+        ctx["pilot_session_id"] = f"{actor}|{self._ephemeral_session}" if actor else self._ephemeral_session
         # Keep a short transcript digest for LLM narration (not used for hashing).
         if history:
             ctx["_history_turns"] = len(history)
@@ -1099,6 +2056,17 @@ class DataPilotAgent:
         ok = sum(1 for t in tools if t.get("success"))
         if ok == 0 and not local.pending_actions:
             return local
+        # Refusals and uncited prose have no evidence to restate, so a rewrite can
+        # only add invention — that is how "how do I cook rice" came back narrated.
+        if not carries_evidence(local) and not local.pending_actions:
+            return local
+        # A navigation acknowledgement is the UI action, not prose to improve:
+        # "Opening Jobs for you" narrated as "I will open Jobs now" describes a
+        # future the client already performed.
+        if all(
+            t.get("name") in _NAVIGATION_TOOLS for t in tools if t.get("success")
+        ) and not local.pending_actions:
+            return local
 
         provider = None
         method = "llm_polish"
@@ -1116,19 +2084,23 @@ class DataPilotAgent:
             tool_bits.append(
                 f"- {t.get('name')}: {'ok' if t.get('success') else 'fail'} — {t.get('summary')}"
             )
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in (history or [])[-6:]
-            if (m.get("content") or "").strip()
+            if turn_text(m)
         )
         prompt = f"""Rewrite the Datawrap Pilot answer below in clear, natural product language.
 
 Rules:
 - Keep every fact from the draft answer and tool summaries — do not invent IDs, row counts, or connectors
+- Never add a claim the draft does not make; in particular never say something is not possible, not supported or cannot be done unless the draft says so
+- Keep product identifiers exactly as written (sync modes such as full_refresh_overwrite, gate IDs such as G7, flags, column and table names)
 - Do not mention tools, APIs, or method names
 - If the draft asks a clarification question, keep it
 - If Confirm is required, say so plainly
-- Be concise (2–8 short sentences or a short bullet list)
+- Be concise (2–8 short sentences or a short bullet list); end on the last fact — no offers of further help and no follow-up questions
 
 Tool evidence:
 {chr(10).join(tool_bits) or 'None'}
@@ -1147,23 +2119,98 @@ Draft answer:
             return local
         if not response.success or not (response.content or "").strip():
             return local
-        polished = response.content.strip()
+        polished = strip_chat_filler(response.content)
         # Guardrail: empty or tiny polish is useless; keep local.
         if len(polished) < 20:
+            return local
+        # A rewrite that dropped the draft's counts, IDs or subject is not a polish
+        # of a grounded answer — a provider ignoring the prompt must not replace it.
+        if not keeps_draft_facts(local.answer, polished):
+            logger.warning(
+                "%s narration dropped the draft's evidence — keeping the local answer",
+                method,
+            )
+            return local
+        if contradicts_draft(local.answer, polished):
+            logger.warning(
+                "%s narration denied something the draft did not — keeping the local answer",
+                method,
+            )
             return local
         return CopilotResponse(
             answer=polished,
             intent=local.intent,
-            confidence=min(0.96, float(local.confidence or 0.9) + 0.03),
+            # Narration never adds evidence, so it never adds confidence.
+            confidence=float(local.confidence or 0.9),
             method=method,
             reasoning=f"Local tools + {method.split('_')[0].title()} narration",
             suggested_actions=local.suggested_actions,
             pending_actions=local.pending_actions,
             needs_clarification=local.needs_clarification,
             suggested_prompts=local.suggested_prompts,
+            sources=local.sources,
             data_insight=local.data_insight,
             tools_used=local.tools_used,
         )
+
+    def _settle_last_proposal(
+        self,
+        message: str,
+        data_context: dict | None,
+    ) -> CopilotResponse | None:
+        """Answer "go ahead" / "never mind" against what was actually offered.
+
+        Only the conversational outcomes land here. Consent that can be carried
+        out — a rehearsed plan promoted to a real run — is a tool plan, so it is
+        resolved in :meth:`_plan_with_memory` instead and this returns ``None``.
+        """
+        from .conversation_composer import (
+            compose_abandon_response,
+            compose_confirm_is_yours_response,
+            compose_nothing_to_settle_response,
+        )
+        from .followup import (
+            looks_like_abandonment,
+            looks_like_consent,
+            promote_proposal,
+        )
+        from .working_memory import get_working_memory
+
+        consent = looks_like_consent(message)
+        abandon = looks_like_abandonment(message)
+        if not consent and not abandon:
+            return None
+
+        session_id = self._session_id(data_context)
+        if not session_id:
+            return None
+        memory = get_working_memory()
+        proposal = memory.get_proposal(session_id)
+        pending = memory.get_pending(session_id)
+
+        if abandon:
+            # Dropping the proposal is the whole point: a stale ack that outlives
+            # "never mind" is how an operator ends up confirming something they
+            # already withdrew.
+            memory.clear_proposal(session_id)
+            memory.clear_pending(session_id)
+            if not proposal and not pending:
+                return compose_nothing_to_settle_response()
+            return compose_abandon_response(
+                label=getattr(proposal, "label", "") or getattr(pending, "question", ""),
+                staged=bool(getattr(proposal, "staged", False)),
+            )
+
+        # An open clarification owns a bare "do it": it means "yes, go on" about
+        # the question just asked, and answering the older proposal instead would
+        # silently abandon the half-described request.
+        if pending:
+            return None
+        if not proposal:
+            return None
+        if promote_proposal(proposal):
+            return None
+        return compose_confirm_is_yours_response(proposal.label)
 
     def _plan_with_memory(
         self,
@@ -1180,28 +2227,61 @@ Draft answer:
         """
         from .followup import (
             inherit_focus_slots,
+            looks_like_consent,
             looks_like_elliptical_edit,
             looks_like_followup,
             looks_like_fresh_intent,
+            names_its_own_subject,
+            names_pending_candidate,
+            opens_a_row_predicate,
             pending_from_assistant_clarification,
+            promote_proposal,
             resolve_followup,
+            resolve_job_window_followup,
+            resolve_rank_followup,
+            resolve_knowledge_engine_followup,
+            resolve_ordinal_reference,
             resolve_pending_answer,
             resolve_platform_coreference,
+            resolve_repair,
             resolve_table_coreference_tools,
         )
         from .working_memory import get_working_memory
 
         session_id = self._session_id(data_context)
+        knowledge = resolve_knowledge_engine_followup(message, history)
+        if knowledge:
+            message = knowledge
+        # "no i meant the failed ones" is the previous question with one
+        # constraint replaced, not a new subject. Resolved before the pending and
+        # focus branches so the correction reaches normal routing intact.
+        repaired = resolve_repair(message, history)
+        if repaired:
+            message = repaired
+        # "the first one" is the name the previous list already printed. Resolved
+        # into the text so the rest of routing sees an ordinary named subject.
+        ordinal = resolve_ordinal_reference(message, history)
+        if ordinal:
+            message = ordinal
         if not session_id:
             platform = resolve_platform_coreference(message, history)
             if platform:
                 return platform
-            return infer_tools_from_message(message)
+            return plan_tools_tolerant(message)
 
         memory = get_working_memory()
         focus = memory.get_focus(session_id)
 
         pending = memory.get_pending(session_id)
+        # "run it" one turn after a plan is the plan, run for real. Parsed from
+        # scratch it named no route and was refused, so the operator had to retype
+        # the whole thing to execute what they had just approved on screen.
+        if not pending and looks_like_consent(message):
+            proposal = memory.get_proposal(session_id)
+            promoted = promote_proposal(proposal) if proposal else None
+            if promoted:
+                memory.clear_proposal(session_id)
+                return [promoted]
         if not pending:
             soft = pending_from_assistant_clarification(history)
             if soft:
@@ -1209,8 +2289,14 @@ Draft answer:
                 if answered:
                     return [answered]
                 # Typo / non-answer against a transcript clarification — promote
-                # to hard pending and re-ask (same as memory-backed slots).
-                if not looks_like_fresh_intent(message) and not looks_like_elliptical_edit(message):
+                # to hard pending and re-ask (same as memory-backed slots). A turn
+                # that names one of the offered connectors is not a non-answer:
+                # it settled the question and asked its own.
+                if (
+                    not looks_like_fresh_intent(message)
+                    and not looks_like_elliptical_edit(message)
+                    and not names_pending_candidate(message, soft)
+                ):
                     memory.remember_pending(session_id, soft)
                     return []
         if pending:
@@ -1218,11 +2304,26 @@ Draft answer:
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
-            # Fresh intents and elliptical edits clear the slot; typos keep it open.
-            if looks_like_fresh_intent(message) or looks_like_elliptical_edit(message):
+            # Fresh intents, elliptical edits and turns that name one of the
+            # offered candidates clear the slot; typos keep it open.
+            if (
+                looks_like_fresh_intent(message)
+                or looks_like_elliptical_edit(message)
+                or names_pending_candidate(message, pending)
+            ):
                 memory.clear_pending(session_id)
             else:
                 return []
+
+        # A bare superlative or time window edits the shape of the previous
+        # answer. Both used to reach no tool and be refused as undocumented one
+        # turn after the same question, spelled out, had been answered.
+        reranked = resolve_rank_followup(message, focus)
+        if reranked:
+            return reranked
+        rewindowed = resolve_job_window_followup(message, history)
+        if rewindowed:
+            return rewindowed
 
         platform = resolve_platform_coreference(message, history)
         if platform:
@@ -1232,10 +2333,20 @@ Draft answer:
         if table_coref:
             return table_coref
 
-        planned = infer_tools_from_message(message)
+        planned = plan_tools_tolerant(message)
+        # A remembered table must not be handed a question about the product. With
+        # `orders` in focus, "how many rows can you move per second" became
+        # COUNT(*) GROUP BY a column called `second` and answered "Column 'second'
+        # is not in orders" — the guard at the parse site cannot see the focus.
+        _capacity_ask = asks_about_product_capacity(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
         # amount" would otherwise lose the remembered WHERE / table).
-        if focus and looks_like_followup(message, focus):
+        if (
+            focus
+            and not _capacity_ask
+            and looks_like_followup(message, focus)
+            and not names_its_own_subject(planned)
+        ):
             low = message.lower().strip()
             # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
             for name, args in planned:
@@ -1247,7 +2358,7 @@ Draft answer:
                 if explicit_table and (args or {}).get("connector_name"):
                     return planned
             # Stored-sample row filters stay on filter_result, not a new aggregate.
-            if focus.result_id and re.match(r"^(?:filter|where)\b", low):
+            if focus.result_id and opens_a_row_predicate(low, focus.columns or ()):
                 if planned and any(n == "filter_result" for n, _ in planned):
                     return inherit_focus_slots(planned, focus)
                 return [("filter_result", {"result_id": focus.result_id})]
@@ -1257,7 +2368,7 @@ Draft answer:
             # Coreference with focus but no metric edit — still prefer table tools.
             if table_coref := resolve_table_coreference_tools(message, focus):
                 return table_coref
-        if not planned:
+        if not planned and not _capacity_ask:
             edit = resolve_followup(message, focus)
             if edit is not None:
                 # Known subject (even with missing measure) — let the tool ask
@@ -1270,7 +2381,7 @@ Draft answer:
                     "analyze that", "analyze this", "profile that", "summarize that",
                 }:
                     return [("analyze_result", {"result_id": focus.result_id})]
-                if re.match(r"^(?:filter|where)\b", low):
+                if opens_a_row_predicate(low, focus.columns or ()):
                     return [("filter_result", {"result_id": focus.result_id})]
         return inherit_focus_slots(planned, focus)
 
@@ -1290,6 +2401,17 @@ Draft answer:
         memory = get_working_memory()
         args_by_tool = {name: args for name, args in planned}
 
+        # A column the live schema rejected is not a subject to remember. "top 3
+        # customers by amount in orders" fails on `customer`, and remembering it
+        # made the *next* turn ("just tell me the number") fail on the same
+        # missing column instead of answering from the table still in focus.
+        rejected = {
+            m.group(1).strip().lower()
+            for tr in turn.tool_results
+            if tr.name == "aggregate_data" and not tr.success
+            for m in re.finditer(r"Column '([^']+)' is not in", tr.error or "")
+        }
+
         # Remember the asked subject even when the tool fails (missing connector)
         # so elliptical follow-ups like "only paid ones" still have a table/metric.
         for name, args in planned:
@@ -1299,6 +2421,10 @@ Draft answer:
                 k: args.get(k)
                 for k in ("table", "connector_name", "metric", "column", "group_by", "where")
                 if args.get(k)
+                and not (
+                    k in ("column", "group_by")
+                    and str(args.get(k)).strip().lower() in rejected
+                )
             }
             if update.get("table") or update.get("connector_name"):
                 memory.update_focus(session_id, **update)
@@ -1315,6 +2441,34 @@ Draft answer:
                     memory.remember_pending(session_id, slot)
                     if not turn.needs_clarification:
                         turn.needs_clarification = slot.question
+
+        self._remember_proposal(planned, turn, session_id, memory)
+
+    @staticmethod
+    def _remember_proposal(
+        planned: list[tuple[str, dict]],
+        turn: PilotTurn,
+        session_id: str,
+        memory: Any,
+    ) -> None:
+        """Keep the thing just offered, so consent and cancel have a referent."""
+        from .working_memory import PilotProposal
+
+        args_by_tool = {name: args for name, args in planned}
+        offered: PilotProposal | None = None
+        for tr in turn.tool_results:
+            if not tr.success or tr.name not in _PROPOSAL_TOOLS:
+                continue
+            out = tr.output if isinstance(tr.output, dict) else {}
+            offered = PilotProposal(
+                tool=tr.name,
+                args=dict(args_by_tool.get(tr.name) or {}),
+                label=str(out.get("label") or "").strip(),
+                ack_id=str(out.get("ack_id") or "").strip(),
+                staged=bool(out.get("requires_confirm") or out.get("ack_id")),
+            )
+        if offered:
+            memory.remember_proposal(session_id, offered)
 
     def _with_result_context(self, name: str, args: dict | None, data_context: dict | None) -> dict:
         """Inject session / last_result_id so follow-ups hit the real stored rows."""
@@ -1341,6 +2495,16 @@ Draft answer:
             out.setdefault("session_id", session_id)
         if last_result_id and name in ("analyze_result", "filter_result"):
             out.setdefault("result_id", last_result_id)
+        if name == "brief_workspace":
+            ws = str(ctx.get("workspace_id") or "").strip()
+            if ws:
+                out.setdefault("workspace_id", ws)
+        if name == "remediate_validation":
+            ws = str(ctx.get("workspace_id") or "").strip()
+            if ws:
+                out["workspace_id"] = ws
+            else:
+                out.pop("workspace_id", None)
         return out
 
     def _openai_agent(
@@ -1357,12 +2521,14 @@ Draft answer:
 
         intent = self._detect_intent(message)
         turn = PilotTurn()
+        from .dialogue_acts import turn_text
+
         messages: list[dict] = []
         for m in history[-10:]:
             role = m.get("role", "user")
             if role not in ("user", "assistant"):
                 continue
-            content = (m.get("content") or "").strip()
+            content = turn_text(m)
             if content:
                 messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": message})
@@ -1400,10 +2566,12 @@ Draft answer:
                         needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
+                        sources=_sources_from_turn(turn),
                         tools_used=_tools_used(turn),
                     )
                 break
 
+            tool_calls = tool_calls[:_NATIVE_MAX_CALLS_PER_ROUND]
             assistant_msg: dict = {
                 "role": "assistant",
                 "content": response.get("content") or None,
@@ -1421,17 +2589,11 @@ Draft answer:
             }
             messages.append(assistant_msg)
             for tc in tool_calls:
-                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
-                tr = self.tools.execute(tc["name"], args)
-                turn.tool_results.append(tr)
-                self._append_tool_actions(turn, tr)
+                _tr, payload = self._native_tool_call(turn, tc["name"], tc.get("input"), data_context)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": json.dumps(
-                        tr.output if tr.success else {"error": tr.error},
-                        default=json_default,
-                    ),
+                    "content": payload,
                 })
 
         if used_native and turn.tool_results:
@@ -1455,6 +2617,7 @@ Draft answer:
                 needs_clarification=turn.needs_clarification,
                 suggested_prompts=self._follow_ups(message, turn),
                 data_insight=insight,
+                sources=_sources_from_turn(turn),
                 tools_used=_tools_used(turn),
             )
 
@@ -1469,9 +2632,12 @@ Draft answer:
         self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in history[-8:]
+            if turn_text(m)
         )
         prompt = f"""{system}
 
@@ -1498,6 +2664,7 @@ Respond as Datawrap Pilot in natural language. Ground your answer in tool result
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
+            sources=_sources_from_turn(turn),
             tools_used=_tools_used(turn),
         )
 
@@ -1523,9 +2690,12 @@ Respond as Datawrap Pilot in natural language. Ground your answer in tool result
         self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in history[-6:]
+            if turn_text(m)
         )
         prompt = f"""{system}
 
@@ -1552,6 +2722,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
+            sources=_sources_from_turn(turn),
             tools_used=_tools_used(turn),
         )
 
@@ -1565,6 +2736,84 @@ Respond as Datawrap Pilot — grounded in tool results."""
         intent = self._detect_intent(message)
         turn = PilotTurn()
 
+        from .dialogue_acts import (
+            is_calendar_question,
+            is_create_connection_capability_ask,
+            is_route_plan_capability_paste,
+            is_schedule_health_question,
+            is_schedule_setup_capability_ask,
+        )
+
+        # Checked before anything that could read state: a secret request must not
+        # reach a tool, least of all the connector list that prints hosts.
+        from .dialogue_acts import asks_for_a_stored_secret
+
+        if asks_for_a_stored_secret(message):
+            from .conversation_composer import compose_secret_refusal_response
+
+            return compose_secret_refusal_response(ctx)
+
+        # Pressing on a boundary Pilot just stated must restate it, never fall
+        # through to a tool that looks like the first step of complying.
+        from .dialogue_acts import insists_after_refusal, refused_capability
+
+        if insists_after_refusal(message, history):
+            from .conversation_composer import compose_held_refusal_response
+
+            return compose_held_refusal_response(refused_capability(history))
+
+        # "run it" and "actually cancel that" are about the thing offered last
+        # turn, so they are settled against proposal memory before any parsing.
+        settled = self._settle_last_proposal(message, data_context)
+        if settled is not None:
+            return settled
+
+        if is_schedule_setup_capability_ask(message):
+            from .conversation_composer import compose_schedule_setup_response
+
+            return compose_schedule_setup_response(ctx)
+
+        if is_calendar_question(message):
+            from .conversation_composer import compose_calendar, compose_calendar_response
+            from src.ai.first_party.context_pack import pack_from_workspace
+            from src.ai.first_party.engine import speak_with_lm
+
+            draft = compose_calendar(ctx)
+            spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
+            if spoken:
+                resp = compose_calendar_response(ctx)
+                resp.answer = spoken
+                return resp
+            return compose_calendar_response(ctx)
+        if is_create_connection_capability_ask(message):
+            from .conversation_composer import (
+                compose_create_connection_capability,
+                compose_create_connection_response,
+            )
+            from src.ai.first_party.context_pack import pack_from_workspace
+            from src.ai.first_party.engine import speak_with_lm
+
+            draft = compose_create_connection_capability(ctx)
+            spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
+            resp = compose_create_connection_response(ctx)
+            if spoken:
+                resp.answer = spoken
+            return resp
+        if is_route_plan_capability_paste(message):
+            from .conversation_composer import (
+                compose_route_plan_capability,
+                compose_route_plan_capability_response,
+            )
+            from src.ai.first_party.context_pack import pack_from_workspace
+            from src.ai.first_party.engine import speak_with_lm
+
+            draft = compose_route_plan_capability()
+            spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
+            resp = compose_route_plan_capability_response()
+            if spoken:
+                resp.answer = spoken
+            return resp
+
         planned = self._plan_with_memory(message, data_context, history)
         if not planned:
             # Typo / non-answer while a clarification is open — re-ask, keep slot.
@@ -1574,13 +2823,23 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
                 pending = get_working_memory().get_pending(session_id)
                 if pending and pending.question:
+                    from .followup import looks_like_consent
+
                     turn.needs_clarification = pending.question
                     hint = ""
                     if pending.candidates:
                         shown = ", ".join(f"**{c}**" for c in pending.candidates[:6])
                         hint = f"\n\nAvailable: {shown}."
+                    # "do it" is consent, not a miss — and pointing at a list that
+                    # was never printed is worse than saying what is still owed.
+                    if looks_like_consent(message):
+                        tail = "I will, once you answer that — it is the one thing I still need."
+                    elif pending.candidates:
+                        tail = "I didn't match that reply — try a name from the list, or ask a new question."
+                    else:
+                        tail = "I didn't match that reply — answer that, or ask a new question."
                     return CopilotResponse(
-                        answer=f"{pending.question}{hint}\n\nI didn't match that reply — try a name from the list, or ask a new question.".strip(),
+                        answer=f"{pending.question}{hint}\n\n{tail}".strip(),
                         intent=intent,
                         confidence=0.78,
                         method="pilot_local_engine",
@@ -1589,6 +2848,47 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         suggested_prompts=list(pending.candidates or [])[:4] or self._starter_prompts()[:3],
                         tools_used=[],
                     )
+
+            from .conversation_composer import (
+                compose_general,
+                compose_greeting_response,
+                compose_history_turn,
+            )
+            from .dialogue_acts import classify_dialogue_act
+
+            act = classify_dialogue_act(message, history=history)
+            if act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+                pending_labels = [
+                    str(a.get("label") or "")
+                    for a in (data_context or {}).get("pending_actions") or []
+                    if isinstance(a, dict) and a.get("label")
+                ]
+                return compose_history_turn(
+                    act,
+                    history=history,
+                    message=message,
+                    ctx=ctx,
+                    pending_labels=pending_labels or None,
+                )
+            if act == "greeting":
+                return _with_llm_footnote(
+                    compose_greeting_response(ctx), _resolve_pilot_engine()
+                )
+            if act == "briefing":
+                planned = [("brief_workspace", {})]
+            elif act == "general":
+                return CopilotResponse(
+                    answer=compose_general(message, ctx),
+                    intent="product_help",
+                    confidence=0.2,
+                    method="pilot_conversation",
+                    reasoning="General ask — no workspace evidence; refused guesswork",
+                    suggested_prompts=[
+                        "Give me a workspace briefing",
+                        "Show my transfer jobs",
+                        "What can you do?",
+                    ],
+                )
 
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
@@ -1604,6 +2904,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
             w in lower
             for w in ("fail", "error", "blocked", "why", "status", "fix", "quarantine", "integrity")
         )
+        # "why schedules are not working" is pipeline health, not the last job.
+        if is_schedule_health_question(message):
+            wants_triage = False
         if data_context and wants_triage:
             have_job = any(tr.name == "get_job" for tr in turn.tool_results)
             have_pf = any(tr.name == "get_preflight_run" for tr in turn.tool_results)
@@ -1628,6 +2931,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
         live_schema = any(
             tr.name in (
                 "list_connector_objects",
+                "rank_connector_tables",
+                "compare_connectors",
                 "introspect_connector_schema",
                 "sample_connector_object",
                 "aggregate_data",
@@ -1678,12 +2983,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
             if labels and "Confirm" not in answer:
                 answer = f"{answer}\n\nConfirm to proceed: {labels}.".strip()
         ok_tools = sum(1 for tr in turn.tool_results if tr.success)
+        sources = _sources_from_turn(turn)
         if ok_tools:
             confidence = 0.96
         elif turn.needs_clarification:
             confidence = 0.78
         else:
             confidence = 0.84
+        confidence = min(confidence, _evidence_ceiling(turn))
         return CopilotResponse(
             answer=answer,
             intent=intent,
@@ -1694,6 +3001,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             pending_actions=turn.pending_actions,
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
+            sources=sources,
             data_insight=self._data_insight_from_turn(turn) or (
                 {
                     "dataset": insight.dataset_name,
@@ -1707,6 +3015,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
         )
 
     def _compose_local_answer(self, message, intent, turn, insight, ctx) -> str:
+        from .dialogue_acts import is_schedule_health_question
+
         parts: list[str] = []
 
         for tr in turn.tool_results:
@@ -1738,40 +3048,102 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_schedules" and tr.success:
                 rows = tr.output.get("schedules", [])
                 if rows:
-                    lines = [f"You have **{len(rows)} pipeline schedule(s)**:"]
+                    enabled = [
+                        s for s in rows
+                        if isinstance(s, dict) and s.get("enabled")
+                    ]
+                    failed_last = [
+                        s for s in rows
+                        if isinstance(s, dict)
+                        and str(s.get("last_status") or "").lower() in {"failed", "error"}
+                    ]
+                    parked = [
+                        s for s in rows
+                        if isinstance(s, dict)
+                        and (s.get("needs_approval") or s.get("approval_finding"))
+                    ]
+                    if is_schedule_health_question(message):
+                        lead = f"You have **{len(rows)}** pipeline(s)."
+                        if parked:
+                            names = ", ".join(
+                                f"**{s.get('name')}**" for s in parked[:4] if s.get("name")
+                            )
+                            lead += (
+                                f" **{len(parked)}** are parked on approval"
+                                + (f" ({names})" if names else "")
+                                + " — they will not tick until someone approves."
+                            )
+                        elif failed_last:
+                            lead += (
+                                f" **{len(failed_last)}** last run failed. "
+                                "Ask me for that pipeline and I'll open the finding."
+                            )
+                        elif not enabled:
+                            lead += " None are enabled, so they will not fire."
+                        else:
+                            nxt = next(
+                                (
+                                    str(s.get("next_run_at") or "").strip()
+                                    for s in enabled
+                                    if s.get("next_run_at")
+                                ),
+                                "",
+                            )
+                            lead += f" **{len(enabled)}** enabled."
+                            if nxt:
+                                lead += f" Next due: {nxt}."
+                        lines = [lead]
+                    else:
+                        lines = [f"You have **{len(rows)} pipeline schedule(s)**."]
                     for s in rows[:8]:
+                        bind = _schedule_bind_phrase(s)
                         lines.append(
                             f"• **{s.get('name')}** · {s.get('interval')}"
                             f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
-                            f" · next `{s.get('next_run_at') or '—'}`"
-                            f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
+                            + (f" · {bind}" if bind else "")
+                            + f" · next `{s.get('next_run_at') or '—'}`"
+                            + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
                         )
                     parts.append("\n".join(lines))
                 else:
-                    parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
+                    if is_schedule_health_question(message):
+                        parts.append(
+                            "No pipelines are scheduled yet, so nothing is running "
+                            "on a cadence. Create one on **Pipelines** after a transfer."
+                        )
+                    else:
+                        parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
             elif tr.name == "get_schedule" and tr.success:
-                s = tr.output or {}
-                parts.append(
-                    f"Pipeline **{s.get('name')}** (`{s.get('id')}`) · {s.get('interval')} · "
-                    f"enabled={s.get('enabled')} · next `{s.get('next_run_at') or '—'}` · "
-                    f"last **{s.get('last_status') or 'never'}**."
-                )
+                parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
-                parts.append(
-                    f"Ready to run pipeline **{tr.output.get('name')}**. "
-                    "Confirm below to start an immediate run (does not change the regular cadence)."
-                )
+                parts.append(_render_schedule_run(tr.output or {}))
+            elif tr.name in LIFECYCLE_TOOL_NAMES and tr.success:
+                parts.append(_render_lifecycle(tr.name, tr.output or {}))
+            elif tr.name == "create_schedule" and tr.success:
+                parts.append(_render_schedule_stage(tr.output or {}))
+            elif tr.name == "create_schedule" and isinstance(tr.output, dict) and tr.output.get(
+                "action"
+            ) == "plan_transfer":
+                # Preflight refused the cadence but the plan is real evidence:
+                # show the gates that blocked it, not just the sentence.
+                parts.append(f"{tr.error}\n\n{_render_transfer('plan_transfer', tr.output)}")
             elif tr.name == "list_contracts" and tr.success:
                 rows = tr.output.get("contracts", [])
                 if rows:
                     lines = [f"**{len(rows)} data contract(s):**"]
                     for c in rows[:8]:
-                        lines.append(f"• **{c.get('name') or c.get('id')}** ({c.get('status') or '—'})")
+                        lines.append(f"• **{c.get('name') or c.get('id')}** ({c.get('status_label') or c.get('status') or '—'})")
                     parts.append("\n".join(lines))
                 else:
                     parts.append("No data contracts yet. Open **Contracts** to define one.")
             elif tr.name == "list_datasets" and tr.success:
-                datasets = tr.output.get("datasets", [])
+                from .tools import looks_like_index_dump_name
+
+                datasets = [
+                    ds
+                    for ds in (tr.output.get("datasets") or [])
+                    if ds.get("name") and not looks_like_index_dump_name(str(ds.get("name")))
+                ]
                 if datasets:
                     lines = [f"I have **{len(datasets)} datasets** indexed:"]
                     for ds in datasets[:6]:
@@ -1781,55 +3153,15 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             + f" ({ds['source']})"
                         )
                     parts.append("\n".join(lines))
+            elif tr.name == "brief_workspace" and tr.success:
+                from .conversation_composer import compose_briefing
+
+                facts = (tr.output or {}).get("facts")
+                if not isinstance(facts, dict):
+                    facts = tr.output or {}
+                parts.append(compose_briefing(facts))
             elif tr.name == "list_jobs" and tr.success:
-                jobs = tr.output.get("jobs", [])
-                want_failures = any(
-                    w in (message or "").lower()
-                    for w in ("fail", "failed", "failure", "error", "broken")
-                )
-                failed = [
-                    j
-                    for j in jobs
-                    if str(j.get("status") or "").lower()
-                    in {"failed", "cancelled", "error"}
-                ]
-                if jobs:
-                    if want_failures:
-                        if failed:
-                            lines = [
-                                f"**{len(failed)}** of your last **{len(jobs)}** job(s) failed:"
-                            ]
-                            show = failed[:5]
-                        else:
-                            lines = [
-                                f"None of your last **{len(jobs)}** job(s) failed "
-                                "(in this window):"
-                            ]
-                            show = jobs[:5]
-                        for j in show:
-                            lines.append(
-                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                                f"{j.get('destination', '?')}: "
-                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                            )
-                        if not failed:
-                            lines.append(
-                                "Open **Jobs** for full history, or paste a job id."
-                            )
-                    else:
-                        lines = ["Here are your **recent transfer jobs**:"]
-                        for j in jobs[:5]:
-                            lines.append(
-                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                                f"{j.get('destination', '?')}: "
-                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                            )
-                    parts.append("\n".join(lines))
-                else:
-                    parts.append(
-                        "No transfer jobs yet. Ask me to **plan** or **start** a transfer "
-                        "(Confirm required), or open **Transfer Studio**."
-                    )
+                parts.append(narrate_jobs(tr.output or {}, message))
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
                 lines = [
@@ -1903,11 +3235,18 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
-                parts.append(
-                    f"Proposed Studio remediation: **{tr.output.get('label')}**.\n"
-                    "Confirm opens **Fix bad data** in Transfer Studio — "
-                    "it does not rewrite quarantine rows inside this chat."
-                )
+                label = (tr.output or {}).get("label")
+                if (tr.output or {}).get("ui_only"):
+                    parts.append(
+                        f"**{label}** opens in Transfer Studio. "
+                        "Nothing is written from this chat, and there is no confirm step."
+                    )
+                else:
+                    parts.append(
+                        f"Proposed Studio remediation: **{label}**.\n"
+                        "Confirm opens **Fix bad data** in Transfer Studio — "
+                        "it does not rewrite quarantine rows inside this chat."
+                    )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
             elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict):
@@ -1918,10 +3257,25 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if not o.get("generic"):
                     parts.append(_render_transfer("plan_transfer", o))
                 else:
-                    parts.append(
-                        f"**Standard gate sequence**: {', '.join(o.get('required_gates') or [])}\n"
-                        f"{o.get('note') or ''}\n{o.get('next') or ''}"
+                    posture = _render_requested_data_rules(o)
+                    gates = ", ".join(
+                        str(g) for g in (o.get("required_gates") or []) if g
                     )
+                    # The next correct action leads. A wall of gate ids in front
+                    # of "name two saved connectors and a table" buries the only
+                    # thing the operator can act on — and with no gates to list
+                    # it rendered as a bare heading with nothing after the colon.
+                    segments = [
+                        s
+                        for s in (
+                            str(o.get("note") or "").strip(),
+                            str(o.get("next") or "").strip(),
+                        )
+                        if s
+                    ]
+                    if gates:
+                        segments.append(f"**Standard gate sequence**: {gates}")
+                    parts.append("\n".join(segments) + posture)
             elif tr.name == "explain_mapping_assurance" and tr.success:
                 o = tr.output or {}
                 parts.append(
@@ -1946,7 +3300,17 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 rules = o.get("rules") or []
                 cols = int(o.get("column_count") or 0)
+                sibling_docs = any(
+                    t.name == "explain_product" and t.success
+                    for t in turn.tool_results
+                )
+                if sibling_docs and cols <= 0:
+                    continue
                 if cols <= 0:
+                    named = str(o.get("message") or "").strip()
+                    if named:
+                        parts.append(named)
+                        continue
                     gates = o.get("preflight_gates") or []
                     gate_line = (
                         f"\n\nValidate runs **{len(gates)} preflight gates**: "
@@ -1975,13 +3339,21 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         f"({cols} columns):{extra}\n"
                         + "\n".join(f"• {r}" for r in rules)
                     )
+            elif tr.name == "rank_connector_tables" and tr.success:
+                parts.append(_render_table_ranking(tr.output or {}))
+            elif tr.name == "compare_connectors" and tr.success:
+                parts.append(_render_connector_comparison(tr.output or {}))
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
+                preview = _including_clause(
+                    [f"`{name}`" for name in objs[:4] if name]
+                )
                 lines = [
                     f"**{o.get('connector_name')}** ({o.get('type')}) — "
                     f"{'connected' if o.get('connected') else 'probe returned'} · "
-                    f"**{o.get('count', len(objs))}** tables/collections:"
+                    f"**{o.get('count', len(objs))}** tables/collections"
+                    f"{preview}."
                 ]
                 for name in objs[:20]:
                     lines.append(f"• `{name}`")
@@ -1993,9 +3365,17 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "introspect_connector_schema" and tr.success:
                 o = tr.output or {}
                 cols = o.get("columns") or []
+                preview = _including_clause(
+                    [
+                        f"`{c.get('name')}`"
+                        for c in cols[:4]
+                        if isinstance(c, dict) and c.get("name")
+                    ]
+                )
                 lines = [
                     f"Live schema **{o.get('connector_name')}**.`{o.get('table')}` "
-                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**:"
+                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**"
+                    f"{preview}."
                 ]
                 for c in cols[:40]:
                     null = "NULL" if c.get("nullable", True) else "NOT NULL"
@@ -2013,15 +3393,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 cols = o.get("columns") or []
                 rows = o.get("rows") or []
-                title = (
-                    f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
-                    if tr.name == "sample_connector_object"
-                    else f"Query on **{o.get('connector_name')}**"
-                )
                 lines = [
-                    f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
-                    + (" (truncated)" if o.get("truncated") else "")
-                    + f" · {len(cols)} columns · read-only"
+                    _live_rows_lead(o, sample=tr.name == "sample_connector_object")
                 ]
                 if o.get("result_id"):
                     lines.append(f"Result ref `{o['result_id']}` (ask to analyze or filter this).")
@@ -2194,22 +3567,59 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"Ready to save connector **{prev.get('name') or 'connector'}** "
                     f"({prev.get('type')}) → `{prev.get('host')}:{prev.get('port')}` "
                     f"/ `{prev.get('database') or '—'}`.\n"
-                    f"Connection test: {prev.get('test') or 'ok'}.\n\n"
-                    "Confirm below to save it to **Connectors**."
+                    f"Connection test: {prev.get('test') or 'ok'}.\n"
+                    + (
+                        f"Pins SFTP host key {prev.get('host_key')}, confirm you "
+                        "verified it with the server admin.\n"
+                        if prev.get("host_key")
+                        else ""
+                    )
+                    + "\nConfirm below to save it to **Connectors**."
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
+                health = str(tr.output.get("health") or "any")
+                total = int(tr.output.get("total_saved") or len(conns))
+                engine = str(tr.output.get("engine") or "")
+                engine_not = bool(tr.output.get("engine_excluded"))
+                engine_label = ""
+                if engine:
+                    engine_label = (
+                        f"are not {engine}" if engine_not else f"are {engine}"
+                    )
                 ask_tables = any(
                     w in (message or "").lower()
                     for w in ("table", "tables", "collections", "objects")
                 )
                 if conns:
-                    lines = [f"You have **{len(conns)} saved connector(s)**:"]
+                    if health != "any":
+                        label = {
+                            "passed": "passed their last connection test",
+                            "failed": "failed their last connection test",
+                            "untested": "have never been tested",
+                        }[health]
+                        if engine_label:
+                            label = f"{engine_label} and {label}"
+                        lines = [
+                            f"**{len(conns)}** of **{total}** saved connector(s) "
+                            f"{label}."
+                        ]
+                    elif engine_label:
+                        lines = [
+                            f"**{len(conns)}** of **{total}** saved connector(s) "
+                            f"{engine_label}."
+                        ]
+                    else:
+                        lines = [f"You have **{len(conns)} saved connector(s)**."]
                     for c in conns:
-                        lines.append(
-                            f"• **{c.get('name')}** ({c.get('type')}) → "
-                            f"{c.get('database', c.get('host', ''))}"
-                        )
+                        # An arrow with nothing after it reads like a truncated
+                        # answer. A connector with neither database nor host
+                        # recorded simply has no target to point at.
+                        target = str(
+                            c.get("database") or c.get("host") or ""
+                        ).strip()
+                        row = f"• **{c.get('name')}** ({c.get('type')})"
+                        lines.append(f"{row} → {target}" if target else row)
                     if ask_tables:
                         names = [str(c.get("name") or "") for c in conns if c.get("name")]
                         sample = names[0] if names else "your connector"
@@ -2218,6 +3628,28 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             f'"list tables on {sample}".'
                         )
                     parts.append("\n".join(lines))
+                elif health != "any":
+                    # An empty bucket is a real finding, not an empty workspace.
+                    verb = {
+                        "passed": "has passed its last connection test",
+                        "failed": "failed its last connection test",
+                        "untested": "is untested",
+                    }[health]
+                    if engine:
+                        verb = f"{engine_label.replace('are', 'is')} and {verb}"
+                    parts.append(
+                        f"None of your **{total}** saved connector(s) {verb}. "
+                        "Open **Connectors** and press Test to record a result."
+                    )
+                elif engine:
+                    # An empty engine bucket is also a finding: the operator asked
+                    # which of their connectors run this engine, and none do.
+                    kinds = [str(k) for k in (tr.output.get("saved_engines") or []) if k]
+                    have = f" You run {', '.join(kinds)}." if kinds else ""
+                    parts.append(
+                        f"None of your **{total}** saved connector(s) "
+                        f"{engine_label.replace('are', 'is')}.{have}"
+                    )
                 else:
                     parts.append(
                         "No connectors saved yet. Go to **Connectors** to add "
@@ -2264,21 +3696,51 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• **{c['name']}** ({badge}) — {c.get('description', '')[:60]}")
                 parts.append("\n".join(lines))
             elif tr.name == "describe_pilot" and tr.success:
+                from .tools import asks_about_pilot_limits
+
                 o = tr.output or {}
+                cannot = o.get("cannot_yet") or []
+                # "what can't you do" is the same card read from the other end.
+                # Leading with the capability list answered the opposite question.
+                if asks_about_pilot_limits(message) and cannot:
+                    lines = [
+                        "Straight answer — here is what I will **not** do from "
+                        "chat, so you never have to find out the hard way:"
+                    ]
+                    for item in cannot[:6]:
+                        lines.append(f"• {item}")
+                    lines.append(
+                        "I also never invent a warehouse fact, and I never run a "
+                        "changing action without your Confirm."
+                    )
+                    if o.get("can"):
+                        lines.append(
+                            "Ask *what can you do* for the other side of the list."
+                        )
+                    parts.append("\n".join(lines))
+                    continue
                 lines = [
-                    "I'm **Datawrap Pilot** — I help with analytics, routes, schema "
-                    "risk, mappings, jobs, and fixes inside Datawrap. I answer from "
-                    "your workspace first; I never invent warehouse facts.",
+                    "I'm **Datawrap Pilot**. I speak on this host with Datawrap's "
+                    "own attention+copy GRU over retrieved evidence and live "
+                    "tools. I am not ChatGPT. Third-party LLMs stay off unless "
+                    "you explicitly pick Hybrid or Cloud in **Settings → AI** — "
+                    "this is a data product, so schemas and job evidence do not "
+                    "leave the box by default. I will not invent warehouse facts.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:
                     lines.append(f"• {item}")
-                cannot = o.get("cannot_yet") or []
                 if cannot:
                     lines.append("**Not yet from chat:**")
                     for item in cannot[:3]:
                         lines.append(f"• {item}")
-                ds = o.get("datasets") or []
+                from .tools import looks_like_index_dump_name
+
+                ds = [
+                    d
+                    for d in (o.get("datasets") or [])
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
+                ]
                 if ds:
                     lines.append(
                         "**Indexed datasets:** "
@@ -2286,7 +3748,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     )
                 else:
                     lines.append(
-                        "**Indexed datasets:** none yet — upload in **New Transfer** and I can profile them."
+                        "**Indexed datasets:** none named yet — upload in **New Transfer** "
+                        "and I can profile them."
                     )
                 conns = o.get("connectors") or []
                 if conns:
@@ -2322,14 +3785,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             "label": label,
                         })
             elif tr.name == "search_knowledge" and tr.success:
-                hits = tr.output.get("hits", [])
-                if hits:
-                    lines = ["Here's what matches your question:"]
-                    for h in hits[:3]:
-                        summary = (h.get("summary") or h.get("text") or "").strip()
-                        if summary:
-                            lines.append(f"• {summary[:400]}")
-                    parts.append("\n".join(lines))
+                documented = (tr.output.get("answer") or "").strip()
+                # Cited Help page or the single refusal owner. Vector shards
+                # are never the spoken answer, even if an older payload still
+                # carries uncited hits.
+                if documented:
+                    parts.append(documented)
                 else:
                     hint = (tr.output.get("hint") or "").strip()
                     parts.append(
@@ -2350,6 +3811,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     "analyze_result",
                     "filter_result",
                     "list_connector_objects",
+                    "rank_connector_tables",
+                    "compare_connectors",
                     "diff_schemas",
                     "map_connector_schemas",
                 )
@@ -2359,18 +3822,44 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
         # Surface failures in plain language — never name internal tools.
         failed = [tr for tr in turn.tool_results if not tr.success and tr.error]
+        product_answered = any(
+            tr.name == "explain_product"
+            and tr.success
+            and str((tr.output or {}).get("answer") or "").strip()
+            for tr in turn.tool_results
+        )
+        asked = (message or "").lower()
+        product_howto = _looks_like_product_howto(asked) and not _has_explicit_workspace_subject(
+            asked
+        )
+
+        def _connector_miss_noise(text: str) -> bool:
+            low = (text or "").lower()
+            return any(
+                needle in low
+                for needle in (
+                    "no connector matched",
+                    "which connector",
+                    "connector not found",
+                    "which saved connector",
+                    "no saved connectors",
+                    "name a saved connector",
+                )
+            )
+
         if failed and not parts:
-            lines = ["I couldn't complete that lookup:"]
-            for tr in failed[:4]:
-                lines.append(f"• {tr.error}")
-            parts.append("\n".join(lines))
+            parts.append(_failure_reply(failed[:4]))
         elif failed and parts:
-            # Mixed success+failure: keep connector/clarification errors visible.
+            # Mixed success+failure: keep connector/clarification errors visible
+            # unless a documented product answer already covers a capability ask
+            # that named no live workspace object.
             for tr in failed:
                 err = (tr.error or "").strip()
                 if not err:
                     continue
                 low = err.lower()
+                if product_answered and product_howto and _connector_miss_noise(err):
+                    continue
                 if (
                     err.startswith("Which ")
                     or "did you mean" in low
@@ -2384,12 +3873,31 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     break
 
         if turn.needs_clarification and turn.needs_clarification not in "\n".join(parts):
-            parts.insert(0, turn.needs_clarification)
+            if not (
+                product_answered
+                and product_howto
+                and _connector_miss_noise(turn.needs_clarification)
+            ):
+                parts.insert(0, turn.needs_clarification)
 
         if not parts:
-            parts.append(_unmapped_intent_reply(message, ctx))
+            from .dialogue_acts import classify_dialogue_act
+            from .conversation_composer import compose_general
 
-        return "\n\n".join(parts)
+            if classify_dialogue_act(message, history=None) == "general":
+                parts.append(compose_general(message, ctx))
+            else:
+                parts.append(_unmapped_intent_reply(message, ctx))
+
+        from .dialogue_acts import classify_dialogue_act
+        from .conversation_composer import weave_tool_answer
+
+        woven = weave_tool_answer(
+            message,
+            parts,
+            act=classify_dialogue_act(message),
+        )
+        return woven or "\n\n".join(parts)
 
     def _format_analysis(self, output: dict) -> str:
         name = output.get("dataset", "dataset").replace("sample_", "").replace("_", " ")
@@ -2457,7 +3965,7 @@ You are Datawrap Pilot for Datawrap only — data knowledge, product capabilitie
 Available tools (internal — never name these in user-facing answers): {tool_names}.
 Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
 Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.
-For mutating actions (remediate, run schedule), propose and wait for UI confirm — do not claim they already ran.
+You may only read. Mutations (start, create, cancel, retry, resume, replay, pause, delete) are staged by the planner from the operator's own words and go through Confirm — do not call them; tell the operator what to say, and never claim anything ran.
 Respect session focus and open clarifications above — do not invent a different connector or table.
 Navigate to any screen when asked (including schedules/pipelines, contracts, query, docs, proofs)."""
 
@@ -2534,8 +4042,10 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     break
             else:
                 prompts.append("Null rates on that result")
-        if not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
-            # Only suggest dataset analysis when indexed uploads actually exist.
+        tool_names = {tr.name for tr in turn.tool_results}
+        # Dataset chips only after a dataset turn — "Tell me about retail"
+        # on every CDC/product answer made the thread feel like a FAQ loop.
+        if "analyze_dataset" in tool_names or "list_datasets" in tool_names:
             try:
                 datasets = self.analyst.list_datasets()
             except Exception:
@@ -2555,18 +4065,43 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     if label and len(label) < 40:
                         prompts.append(f"Tell me about {label}")
                         break
-        prompts.extend([
-            "Show my pipelines",
-            "Show my transfer jobs",
-        ])
+        if "list_schedules" in tool_names or "get_schedule" in tool_names:
+            prompts.extend([
+                "Give me a workspace briefing",
+                "Show my transfer jobs",
+                "What should I do next?",
+            ])
+        elif "brief_workspace" in tool_names:
+            prompts.extend([
+                "Show my transfer jobs",
+                "Show my pipelines",
+                "What should I do next?",
+            ])
+        elif "explain_product" in tool_names:
+            prompts.extend([
+                "Give me a workspace briefing",
+                "Show my pipelines",
+                "What should I do next?",
+            ])
+        else:
+            prompts.extend([
+                "Give me a workspace briefing",
+                "Summarize that",
+                "What should I do next?",
+                "Show my pipelines",
+                "Show my transfer jobs",
+            ])
         try:
             from .example_phrases import example_connector_name
 
             ex = example_connector_name()
             if ex and ex != "your connector":
-                prompts.append(f"How many rows in airports on {ex}?")
+                # Naming a table here meant suggesting a command against an
+                # object the workspace may not hold. Listing a connector's
+                # tables works on every connector.
+                prompts.append(f"List tables on {ex}")
             else:
-                prompts.append("How many rows in airports on your connector?")
+                prompts.append("Show my connectors")
         except Exception:
             prompts.append("Show my connectors")
         prompts.append("What can you do?")
@@ -2585,15 +4120,11 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
     def _starter_prompts(self) -> list[str]:
         datasets = self.analyst.list_datasets()
         prompts = []
-        for d in datasets[:4]:
+        from .tools import looks_like_index_dump_name
+
+        for d in datasets[:8]:
             name = str(d.get("name") or "")
-            # Skip RAG/catalog junk that looks like hash ids or synonym dumps.
-            low = name.lower()
-            if (
-                "synonym" in low
-                or "industry schema" in low
-                or len(name) >= 20 and all(c in "0123456789abcdef" for c in name.replace("-", "").replace("_", "")[:16])
-            ):
+            if looks_like_index_dump_name(name):
                 continue
             label = name.replace("sample_", "").replace("_", " ")
             if label and len(label) < 40:
@@ -2606,8 +4137,8 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             ex = example_connector_name()
             if ex and ex != "your connector":
                 prompts.extend([
-                    f"How many rows in airports on {ex}?",
-                    f"Count of orders by status on {ex}",
+                    f"List tables on {ex}",
+                    "Give me a workspace briefing",
                 ])
             else:
                 prompts.extend([
@@ -2620,6 +4151,7 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                 "Show my recent jobs",
             ])
         prompts.extend([
+            "Give me a workspace briefing",
             "Show my recent jobs",
             "What can you do?",
         ])

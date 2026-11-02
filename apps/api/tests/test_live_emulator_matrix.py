@@ -7,8 +7,10 @@ has the containers) exercises the live connector surface.
 
 from __future__ import annotations
 
+import dataclasses
 import socket
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -69,7 +71,7 @@ CASES = [
             host="localhost",
             port=4443,
             database="dataflow-test",
-            table="payments_gcs.json",
+            extra={"storage_emulator": True, "anonymous": True, "endpoint": "http://localhost:4443"},
         ),
         id="gcs-fake-gcs-server",
     ),
@@ -95,6 +97,7 @@ CASES = [
             database="dataflow-test",
             schema="dataflow",
             table="payments_bigquery",
+            connection_string="http://127.0.0.1:9050",
         ),
         id="bigquery-emulator",
     ),
@@ -343,7 +346,7 @@ CASES = [
 
 
 @pytest.mark.parametrize("endpoint", CASES)
-def test_write_destination_database_local_emulator(endpoint: EndpointConfig):
+def test_write_destination_database_local_emulator(endpoint: EndpointConfig, request):
     if endpoint.format == "snowflake":
         # snowflake_conn auto-patches local accounts; do not nest fakesnow.patch().
         pytest.importorskip("fakesnow")
@@ -351,25 +354,12 @@ def test_write_destination_database_local_emulator(endpoint: EndpointConfig):
         if not _is_reachable(endpoint.host, endpoint.port):
             pytest.skip(f"{endpoint.format} emulator not reachable on {endpoint.host}:{endpoint.port}")
     if endpoint.format == "pgvector":
-        try:
-            import psycopg2
+        from tests.host_facts import drop_pg_table, require_pgvector
 
-            conn = psycopg2.connect(
-                host=endpoint.host or "127.0.0.1",
-                port=int(endpoint.port or 5432),
-                dbname=endpoint.database or "dataflow",
-                user=endpoint.username or "dataflow",
-                password=endpoint.password or "dataflow",
-                connect_timeout=2,
-            )
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            finally:
-                conn.close()
-        except Exception as exc:
-            pytest.skip(f"pgvector extension unavailable: {exc}")
+        table_name = f"payments_pgvector_{uuid.uuid4().hex[:10]}"
+        endpoint = dataclasses.replace(endpoint, table=table_name)
+        request.addfinalizer(lambda: drop_pg_table(table_name))
+        require_pgvector()
 
     rows, ddl_log, summary = write_destination_database(
         endpoint,

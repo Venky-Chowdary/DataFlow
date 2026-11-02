@@ -9,11 +9,9 @@ drift, Execute must still fail closed.
 from __future__ import annotations
 
 import os
-import tempfile
 import uuid
 from pathlib import Path
 
-import pytest
 from sqlalchemy import create_engine, text
 
 # Match apps/api/tests/conftest.py — durable checkpoint needs a job store.

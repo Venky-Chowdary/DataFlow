@@ -124,10 +124,56 @@ def test_create_schedule_persists_new_fields(temp_store):
     assert reloaded.primary_key == "id"
     assert reloaded.max_retries == 2
     assert reloaded.notify_on_success is True
-    # next_run is computed from cron in the schedule timezone.
-    assert reloaded.next_run_at is not None
-    parsed = datetime.fromisoformat(reloaded.next_run_at)
-    assert parsed.tzinfo is not None
+    # Created without mappings → force-disabled by the empty-mapping park,
+    # and a disabled schedule has no next run (M24).
+    assert reloaded.enabled is False
+    assert reloaded.next_run_at is None
+
+
+def test_create_schedule_persists_studio_data_and_migration_rules(temp_store):
+    sched = store.create_schedule({
+        "name": "Migrate orders type-locked",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "incremental",
+        "validation_mode": "strict",
+        "schema_policy": "type_locked",
+        "backfill_new_fields": False,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.validation_mode == "strict"
+    assert reloaded.schema_policy == "type_locked"
+    assert reloaded.backfill_new_fields is False
+    assert not hasattr(reloaded, "skip_preflight") or not getattr(reloaded, "skip_preflight", False)
+
+
+def test_create_schedule_persists_cdc_exactly_once_delivery(temp_store):
+    sched = store.create_schedule({
+        "name": "CDC EOS orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "delivery_guarantee": "exactly_once",
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.delivery_guarantee == "exactly_once"
+    legacy = store.PipelineSchedule.from_dict({
+        "id": "legacy-eos",
+        "name": "old",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "u",
+        "interval": "daily",
+    })
+    assert legacy.delivery_guarantee == "at_least_once"
 
 
 def test_create_schedule_rejects_bad_cron(temp_store):
@@ -169,6 +215,7 @@ def _make(store_mod, **overrides):
     data = {
         "name": "sched", "source_connector_id": "src", "source_table": "t",
         "dest_connector_id": "dst", "dest_table": "u", "interval": "hourly",
+        "mappings": [{"source": "id", "target": "id"}],
     }
     data.update(overrides)
     return store_mod.create_schedule(data)
@@ -197,9 +244,9 @@ def test_mark_run_advances_cursor(temp_store):
 
 def test_concurrency_guard_same_connector_pair(temp_store):
     a = _make(store, name="a")
-    b = _make(store, name="b")  # same src/dst connector pair
+    b = _make(store, name="b", shared_destination_acknowledged=True)  # same dest table
     assert store.mark_schedule_running(a.id, "inst-1") is not None
-    # Second schedule for the same connector pair is blocked while a is running.
+    # Same destination object is blocked while a is running.
     assert store.mark_schedule_running(b.id, "inst-2") is None
     store.clear_schedule_running(a.id)
     assert store.mark_schedule_running(b.id, "inst-2") is not None
@@ -211,6 +258,40 @@ def test_concurrency_guard_same_schedule(temp_store):
     assert store.mark_schedule_running(a.id, "inst-1") is None
 
 
+def test_concurrency_guard_same_dest_table_different_source(temp_store):
+    """Two sources writing one dest table must not overlap — pair lock is not enough."""
+    a = _make(store, name="a", source_connector_id="src-a", dest_table="shared_dest")
+    b = _make(
+        store, name="b", source_connector_id="src-b", dest_table="shared_dest",
+        shared_destination_acknowledged=True,
+    )
+    assert a.dest_connector_id == b.dest_connector_id
+    assert a.source_connector_id != b.source_connector_id
+    assert store.dest_object_busy("dst", "shared_dest") is False
+    assert store.mark_schedule_running(a.id, "inst-1") is not None
+    assert store.dest_object_busy("dst", "shared_dest") is True
+    assert store.mark_schedule_running(b.id, "inst-2") is None
+    store.clear_schedule_running(a.id)
+    assert store.mark_schedule_running(b.id, "inst-2") is not None
+
+
+def test_concurrency_guard_allows_same_dest_connector_different_tables(temp_store):
+    a = _make(
+        store,
+        name="a",
+        source_connector_id="src-a",
+        dest_table="orders",
+    )
+    b = _make(
+        store,
+        name="b",
+        source_connector_id="src-b",
+        dest_table="customers",
+    )
+    assert store.mark_schedule_running(a.id, "inst-1") is not None
+    assert store.mark_schedule_running(b.id, "inst-2") is not None
+
+
 # --------------------------------------------------------------------------- #
 # Runner: incremental/CDC request construction                                #
 # --------------------------------------------------------------------------- #
@@ -219,12 +300,14 @@ _SRC_CONN = {"_id": "src", "id": "src", "type": "postgresql", "host": "h", "port
              "database": "db", "schema": "public", "username": "u", "password": "p"}
 _DST_CONN = {"_id": "dst", "id": "dst", "type": "snowflake", "host": "h2", "database": "wh",
              "username": "u", "password": "p", "warehouse": "W"}
+_MAPPINGS = [{"source": "id", "target": "id"}]
 
 
 def test_build_request_full_refresh_default():
     sched = store.PipelineSchedule.from_dict({
         "id": "s1", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
+        "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "full_refresh_overwrite"
@@ -239,7 +322,7 @@ def test_build_request_incremental_with_primary_key():
         "id": "s2", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
         "sync_mode": "incremental", "cursor_column": "updated_at", "primary_key": "id",
-        "validation_mode": "balanced",
+        "validation_mode": "balanced", "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "incremental_deduped"
@@ -261,22 +344,66 @@ def test_build_request_incremental_append_without_pk():
     sched = store.PipelineSchedule.from_dict({
         "id": "s3", "name": "n", "source_connector_id": "src", "source_table": "events",
         "dest_connector_id": "dst", "dest_table": "events_wh", "interval": "hourly",
-        "sync_mode": "incremental", "cursor_column": "ts",
+        "sync_mode": "incremental", "cursor_column": "ts", "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "incremental_append"
     assert req.stream_contracts[0]["sync_mode"] == "incremental_append"
 
 
+def test_build_request_procedure_stamps_extra_and_refuses_cdc():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-proc", "name": "n", "source_connector_id": "src", "source_table": "get_orders",
+        "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders(:since)",
+        "procedure_params": {"since": "2024-01-01"},
+        "sync_mode": "full_refresh_append",
+        "mappings": _MAPPINGS,
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.source.extra.get("source_read_mode") == "procedure"
+    assert req.source.extra.get("procedure_call") == "CALL get_orders(:since)"
+    assert req.source.extra.get("procedure_params") == {"since": "2024-01-01"}
+    from services.procedure_source import is_callable_source
+
+    assert is_callable_source(req.source)
+
+    bad = store.PipelineSchedule.from_dict({
+        "id": "s-cdc", "name": "n", "source_connector_id": "src", "source_table": "get_orders",
+        "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders()",
+        "sync_mode": "cdc",
+    })
+    with pytest.raises(ValueError, match="snapshot|CDC"):
+        runner.build_schedule_request(bad, _SRC_CONN, _DST_CONN)
+
+
+def test_create_schedule_refuses_scd2_on_procedure(temp_store):
+    with pytest.raises(ValueError, match="table identity|snapshot|SCD2"):
+        store.create_schedule({
+            "name": "proc",
+            "source_connector_id": "a",
+            "source_table": "get_orders",
+            "dest_connector_id": "b",
+            "dest_table": "u",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+            "sync_mode": "scd2",
+        })
+
+
 def test_build_request_cdc():
     sched = store.PipelineSchedule.from_dict({
         "id": "s4", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
-        "sync_mode": "cdc", "primary_key": "id",
+        "sync_mode": "cdc", "primary_key": "id", "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "cdc"
     assert req.stream_contracts[0]["sync_mode"] == "cdc"
+    assert req.stream_contracts[0]["snapshot_mode"] == "initial"
 
 
 def test_build_request_explicit_contracts_preserved():
@@ -284,10 +411,12 @@ def test_build_request_explicit_contracts_preserved():
     sched = store.PipelineSchedule.from_dict({
         "id": "s5", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
-        "sync_mode": "cdc", "stream_contracts": explicit,
+        "sync_mode": "cdc", "stream_contracts": explicit, "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
-    assert req.stream_contracts == explicit
+    assert req.stream_contracts[0]["name"] == "orders"
+    assert req.stream_contracts[0]["sync_mode"] == "cdc"
+    assert req.stream_contracts[0]["snapshot_mode"] == "initial"
 
 
 # --------------------------------------------------------------------------- #
@@ -349,6 +478,180 @@ def test_finalize_run_success_records_and_notifies(temp_store, monkeypatch):
     assert notified["status"] == "completed"
 
 
+def test_committed_append_that_cannot_be_replayed_parks_the_cadence(temp_store, monkeypatch):
+    """The append that grew a destination 5 → 25 across four identical beats.
+
+    The attempt committed rows, the retry was refused because a from-zero run
+    would duplicate them — and the cadence, which also starts from zero, has to
+    be held on a decision rather than left to append the same rows again.
+    """
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0, sync_mode="full_refresh_append")
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "checksum mismatch after load",
+            "records_processed": 5,
+            "row_accounting": {"writer_ack": 5, "dest_count": 5},
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.run_history[-1].get("retry_refused")
+    assert store.has_open_approval(reloaded)
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_deterministic_gate_refusal_parks_on_the_first_beat(temp_store, monkeypatch):
+    """A gate verdict is not a cadence event: it parks at once, retry budget or not."""
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert store.has_open_approval(reloaded)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "deterministic_refusal"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_zero_retry_schedule_still_parks_a_gate_refusal(temp_store, monkeypatch):
+    """An exhausted budget is not an unclassified verdict — the gate refusal parks."""
+    sched = _make(store, max_retries=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "deterministic_refusal"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_parked_schedule_does_not_open_a_second_finding(temp_store, monkeypatch):
+    """One unresolved decision per schedule — a repeat must not fan out the inbox."""
+    sched = _make(store, max_retries=2)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    first = store.get_schedule(sched.id).approval_request
+    runner._finalize_run(sched.id, "job-1", attempt=0, started_at=datetime.now(timezone.utc))
+    again = store.get_schedule(sched.id).approval_request
+
+    assert first["id"] and first["id"] == again["id"]
+    assert int(again.get("occurrences") or 1) == 2
+    assert store.has_open_approval(store.get_schedule(sched.id))
+
+
+def test_second_identical_unrecognised_failure_parks_instead_of_repeating(temp_store, monkeypatch):
+    """One beat is the benefit of the doubt; the same verdict twice is evidence."""
+    sched = _make(store, max_retries=0, retry_backoff_seconds=0, sync_mode="full_refresh_overwrite")
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "source schema altered: column dep_time",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    assert not store.has_open_approval(store.get_schedule(sched.id))
+
+    runner._finalize_run(sched.id, "job-1", attempt=1, started_at=datetime.now(timezone.utc))
+    reloaded = store.get_schedule(sched.id)
+    assert store.has_open_approval(reloaded)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "identical_failure_repeated"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_transient_failure_is_still_retried_not_parked(temp_store, monkeypatch):
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "connection reset by peer",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    reloaded = store.get_schedule(sched.id)
+    assert not store.has_open_approval(reloaded)
+    assert reloaded.retry_attempt == 1
+
+
+def test_failure_signature_ignores_row_numbers_and_ids():
+    a = {"error": "Snowflake rejected 27 cell finding(s) — arr_time (row 431) does not fit"}
+    b = {"error": "Snowflake rejected 31 cell finding(s) — arr_time (row 902) does not fit"}
+    assert runner._failure_signature(a) == runner._failure_signature(b)
+    other = {"error": "connection reset by peer"}
+    assert runner._failure_signature(a) != runner._failure_signature(other)
+
+
+def test_run_entry_copies_dest_count_ledger_not_only_writer_ack():
+    started = datetime.now(timezone.utc)
+    entry = runner._run_entry(
+        "job-ledger",
+        "completed",
+        0,
+        started,
+        {
+            "records_processed": 10_000,
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "row_accounting": {
+                "dest_count": 4,
+                "writer_ack": 10_000,
+                "balanced": True,
+                "conservation_kind": "overwrite",
+                "rows_written_source": "gate8_dest_readback",
+            },
+        },
+    )
+    assert entry["records_transferred"] == 10_000
+    assert entry["row_accounting"]["dest_count"] == 4
+    assert entry["row_accounting"]["writer_ack"] == 10_000
+
+
 def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     sched = _make(store)
     before = sched.run_count
@@ -359,10 +662,471 @@ def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     assert job_id is None
     reloaded = store.get_schedule(sched.id)
     assert reloaded.run_count == before + 1
-    assert reloaded.last_status == "failed"
+    # The beat is recorded failed, and the schedule now additionally parks on a
+    # finding: a connector that no longer resolves does not come back on its own,
+    # and every later beat only added another identical failed row.
+    assert reloaded.run_history[-1].get("status") == "failed"
+    assert reloaded.last_status == "needs_approval"
+    assert (reloaded.approval_request or {}).get("status") == "open"
     assert reloaded.running is False
     assert "connector" in (reloaded.run_history[-1].get("error") or "").lower()
     assert reloaded.next_run_at is not None
+
+
+def test_paused_schedule_cadence_does_not_dispatch(temp_store, monkeypatch):
+    """Paused is a cadence switch — the hourly beat must not start a job."""
+    sched = _make(store, enabled=False)
+    called = {"n": 0}
+
+    def boom(*_a, **_k):
+        called["n"] += 1
+        return "job-should-not"
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", boom)
+    assert runner._run_schedule(sched.id) is None
+    assert called["n"] == 0
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_paused_schedule_manual_run_starts_without_activating(temp_store, monkeypatch):
+    """Run now on a paused schedule is a one-shot — cadence stays paused."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode="", triggered_by=""):
+        assert sid == sched.id
+        assert resync_mode == ""
+        return "job-manual" if allow_paused else None
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    job_id = runner._run_schedule(sched.id, manual=True)
+    assert job_id == "job-manual"
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_manual_run_forwards_resync_mode_without_activating(temp_store, monkeypatch):
+    """Sync now reaches dispatch as a one-shot. A paused cadence stays paused."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+    seen: dict[str, object] = {}
+
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode="", triggered_by=""):
+        seen["sid"] = sid
+        seen["allow_paused"] = allow_paused
+        seen["resync_mode"] = resync_mode
+        seen["triggered_by"] = triggered_by
+        return "job-sync"
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    assert runner._run_schedule(sched.id, manual=True, resync_mode="full") == "job-sync"
+    assert seen["sid"] == sched.id
+    assert seen["allow_paused"] is True
+    assert seen["resync_mode"] == "full"
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_manual_run_missing_connector_raises_honest_error(temp_store, monkeypatch):
+    """Paused + missing connector must not collapse to 'check connectors'."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_resolve_connector", lambda _id: None)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+    with pytest.raises(runner.ScheduleStartError) as exc:
+        runner._run_schedule(sched.id, manual=True)
+    msg = str(exc.value).lower()
+    assert "connector" in msg
+    assert "check connectors" not in msg
+    assert exc.value.http_status == 400
+
+
+def test_terminal_job_releases_the_claim_without_waiting(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-done") is not None
+    monkeypatch.setattr(store, "_job_is_live", lambda job_id: False if job_id else None)
+    reclaimed = store.mark_schedule_running(sched.id, "inst-2")
+    assert reclaimed is not None
+    assert reclaimed.running_instance == "inst-2"
+
+
+def test_lease_lookup_exception_keeps_a_silent_running_claim(temp_store, monkeypatch, caplog):
+    from datetime import timedelta
+
+    from services.schedule_store import CLAIM_MAX_RUNTIME, _is_running_stale
+
+    sched = _make(store)
+    started = datetime.now(timezone.utc) - timedelta(minutes=30)
+    sched.running = True
+    sched.running_job_id = "job-silent"
+    sched.running_started_at = started.isoformat()
+
+    class _Mongo:
+        @staticmethod
+        def get_job(_job_id):
+            return {
+                "status": "running",
+                "updated_at": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
+            }
+
+    class _Leases:
+        @staticmethod
+        def is_held(_job_id):
+            raise OSError("lease store unavailable")
+
+    monkeypatch.setattr("services.mongodb_service.get_mongodb_service", lambda: _Mongo())
+    monkeypatch.setattr("services.worker_leases.get_worker_lease_store", lambda: _Leases())
+    assert _is_running_stale(sched) is False
+    assert CLAIM_MAX_RUNTIME > datetime.now(timezone.utc) - started
+    assert "OSError" in caplog.text
+
+
+def test_missed_callback_is_recorded_on_the_next_beat(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-1") is not None
+    frozen = store.get_schedule(sched.id).next_run_at
+    monkeypatch.setattr(store, "_job_is_live", lambda _job_id: False)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda _job_id: {"status": "completed", "records_transferred": 10},
+    )
+    runner._finalize_finished_schedule_claims()
+    done = store.get_schedule(sched.id)
+    assert done.running is False
+    assert done.run_count == 1
+    assert done.last_job_id == "job-1"
+    assert done.next_run_at != frozen
+    runner._finalize_finished_schedule_claims()
+    assert store.get_schedule(sched.id).run_count == 1
+
+
+def test_enqueue_ack_does_not_close_the_schedule(temp_store, monkeypatch):
+    import concurrent.futures
+
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    monkeypatch.setattr(runner, "_resolve_connector", lambda cid: {"id": cid, "type": "postgresql"})
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        runner,
+        "build_schedule_request",
+        lambda *_a, **_k: SimpleNamespace(acknowledgment_actor=""),
+    )
+    monkeypatch.setattr(runner, "_guard_source_schema_drift", lambda *_a, **_k: False)
+
+    class _Engine:
+        def _create_pending_job(self, _request):
+            return "job-q"
+
+    monkeypatch.setattr("src.transfer.engine.get_transfer_engine", lambda: _Engine())
+    future = concurrent.futures.Future()
+    future.set_result(None)
+    monkeypatch.setattr("src.transfer.background.run_transfer_async", lambda *_a, **_k: future)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        runner,
+        "_finalize_run",
+        lambda *_a, **_k: calls.__setitem__("n", calls["n"] + 1),
+    )
+    assert runner._dispatch_transfer(sched.id) == "job-q"
+    assert calls["n"] == 0
+    assert store.get_schedule(sched.id).run_count == 0
+    assert store.get_schedule(sched.id).running is True
+
+
+def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store):
+    """A run that finishes after later */5 slots counts them and waits for the next boundary.
+
+    The finished run is the catch-up. Pinning next_run to the completion instant
+    left the schedule stuck on that clock time and every later tick was missed.
+    """
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({**store.get_schedule(sched.id).to_dict(), "next_run_at": past})
+    ])
+    store.mark_schedule_run(sched.id, "job-late", status="completed", run_entry={"status": "completed"})
+    done = store.get_schedule(sched.id)
+    assert done.missed_window_count >= 1
+    assert done.run_count == 1
+    nxt = store._parse_ts(done.next_run_at)
+    now = datetime.now(timezone.utc)
+    assert nxt is not None and nxt > now
+    assert nxt.second == 0
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypatch):
+    """DEF-B-013: a catch-up that stored next_run_at = last_run_at fired again.
+
+    The extra run was 23 seconds before the real */5 tick. The beat must move
+    that pin onto the next boundary and not start a load.
+    """
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    pinned = "2026-10-08T01:19:32.636921+00:00"
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "enabled": True,
+            "last_run_at": pinned,
+            "next_run_at": pinned,
+            "run_count": 1,
+            "last_job_id": "job-catchup",
+        })
+    ])
+    started: list[str] = []
+    monkeypatch.setattr(runner, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner, "_release_scheduler_lock", lambda: None)
+    monkeypatch.setattr(runner, "_run_schedule", lambda sid, manual=False: started.append(sid) or "job-extra")
+    assert runner._run_due_schedules() == 0
+    assert started == []
+    done = store.get_schedule(sched.id)
+    nxt = store._parse_ts(done.next_run_at)
+    last = store._parse_ts(done.last_run_at)
+    assert nxt is not None and last is not None
+    assert nxt > datetime.now(timezone.utc)
+    assert nxt.second == 0 and nxt.microsecond == 0
+    assert abs((nxt - last).total_seconds()) > 2
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
+    """Enabling a paused cron waits for the next slot. It does not fire the missed one."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = "2026-10-08T01:10:00+00:00"
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "enabled": False,
+            "next_run_at": past,
+        })
+    ])
+    resumed = store.update_schedule(sched.id, {"enabled": True})
+    assert resumed is not None
+    resumed_due = store._parse_ts(resumed.next_run_at)
+    assert resumed_due is not None
+    assert resumed_due > datetime.now(timezone.utc)
+    assert resumed.next_run_at != past
+    claimed = store.mark_schedule_running(sched.id, "beat")
+    assert claimed is not None
+    claimed_next = store._parse_ts(claimed.next_run_at)
+    assert claimed_next is not None
+    assert claimed_next > datetime.now(timezone.utc)
+    assert claimed_next.second == 0 and claimed_next.microsecond == 0
+    store.set_running_job(sched.id, "job-catchup")
+    done = store.mark_schedule_run(
+        sched.id, "job-catchup", status="completed", run_entry={"status": "completed"}
+    )
+    assert done is not None
+    final = store._parse_ts(done.next_run_at)
+    last = store._parse_ts(done.last_run_at)
+    assert final is not None and last is not None
+    assert final > datetime.now(timezone.utc)
+    assert final.second == 0 and final.microsecond == 0
+    assert 0 < (final - last).total_seconds() <= 300
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_queued_claim_is_kept_when_the_next_slot_is_due(temp_store, monkeypatch):
+    """A queued fire has not read yet. The next slot must not cancel it."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-q",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda job_id: "queued" if job_id == "job-q" else "unknown")
+    released = store.release_superseded_queued_claim(sched.id)
+    assert released is None
+    kept = store.get_schedule(sched.id)
+    assert kept.running is True
+    assert kept.running_job_id == "job-q"
+    assert kept.run_count == 0
+
+
+def test_fleet_queued_claims_are_not_cancelled(temp_store, monkeypatch):
+    """A beat behind a large job keeps every queued schedule fire."""
+    queued = _make(store, name="q", dest_table="q_tbl", cron="*/5 * * * *", interval="hourly")
+    other = _make(
+        store, name="q2", dest_table="q2_tbl", source_connector_id="src-2",
+        cron="*/5 * * * *", interval="hourly",
+    )
+    live = _make(
+        store, name="live", dest_table="live_tbl", source_connector_id="src-3",
+        cron="*/5 * * * *", interval="hourly",
+    )
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    parked = {
+        queued.id: "job-q1",
+        other.id: "job-q2",
+        live.id: "job-live",
+    }
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched_id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": job_id,
+            "running_started_at": past,
+        })
+        for sched_id, job_id in parked.items()
+    ])
+    loads = {"n": 0}
+    real_load = store._load_all
+
+    def _counting():
+        loads["n"] += 1
+        return real_load()
+
+    monkeypatch.setattr(store, "_load_all", _counting)
+    released = store.release_all_superseded_queued_claims()
+    assert released == 0
+    assert loads["n"] == 0
+    for sched_id, job_id in parked.items():
+        kept = store.get_schedule(sched_id)
+        assert kept.running is True
+        assert kept.running_job_id == job_id
+        assert kept.run_count == 0
+
+
+def test_a_future_slot_does_not_read_the_job(temp_store, monkeypatch):
+    """The beat must not round-trip the job store while the next slot is still ahead."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    future = datetime(2099, 1, 1, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": future,
+            "running": True,
+            "running_job_id": "job-future",
+            "running_started_at": future,
+        })
+    ])
+    calls = {"n": 0}
+
+    def _state(_job_id: str) -> str:
+        calls["n"] += 1
+        return "queued"
+
+    monkeypatch.setattr(store, "_job_dispatch_state", _state)
+    assert store.release_all_superseded_queued_claims() == 0
+    assert calls["n"] == 0
+    assert store.get_schedule(sched.id).running is True
+    assert store.get_schedule(sched.id).running_job_id == "job-future"
+
+
+def test_scheduler_beat_releases_the_fleet_once(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(
+        store,
+        "release_all_superseded_queued_claims",
+        lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
+    )
+    runner._release_superseded_queued_claims()
+    assert called["n"] == 1
+
+
+def test_running_claim_is_not_replaced_when_the_next_slot_is_due(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-live",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "running")
+    assert store.release_superseded_queued_claim(sched.id) is None
+    assert store.get_schedule(sched.id).running is True
+    assert store.get_schedule(sched.id).running_job_id == "job-live"
+
+
+def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-1",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_is_live", lambda _job: False)
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "completed", "records_transferred": 4})
+    monkeypatch.setattr(runner, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner, "_release_scheduler_lock", lambda: None)
+    started = {"ids": []}
+
+    def _fake_run(sid, manual=False):
+        started["ids"].append(sid)
+        return "job-2"
+
+    monkeypatch.setattr(runner, "_run_schedule", _fake_run)
+    # The finished run is the catch-up for the overdue slot. The same beat
+    # records it and waits for the next cron boundary instead of starting
+    # another load immediately.
+    assert runner._run_due_schedules() == 0
+    assert started["ids"] == []
+    recorded = store.get_schedule(sched.id)
+    assert recorded.run_count == 1
+    assert recorded.last_job_id == "job-1"
+    nxt = store._parse_ts(recorded.next_run_at)
+    assert nxt is not None and nxt > datetime.now(timezone.utc)
+
+
+def test_manual_run_records_a_finished_claim_before_starting(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-done") is not None
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "terminal")
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "completed", "records_transferred": 2})
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    monkeypatch.setattr(runner, "_dispatch_transfer", lambda *_a, **_k: "job-next")
+    assert runner._run_schedule(sched.id, manual=True) == "job-next"
+    done = store.get_schedule(sched.id)
+    assert done.run_count == 1
+    assert done.last_job_id == "job-done"
+    assert done.running is True
+
+
+def test_manual_run_after_an_orphaned_claim_with_a_naive_start(temp_store, monkeypatch):
+    """DEF-B2-011: Mongo returns the claim's start naive; Run now raised TypeError."""
+    sched = _make(store)
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "running": True,
+            "running_job_id": "job-orphan",
+            "running_started_at": datetime(2026, 10, 7, 23, 50),
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "terminal")
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "cancelled"})
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    monkeypatch.setattr(runner, "_dispatch_transfer", lambda *_a, **_k: "job-next")
+    assert runner._run_schedule(sched.id, manual=True) == "job-next"
+    assert store.get_schedule(sched.id).last_job_id == "job-orphan"
+
+
+def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    with pytest.raises(runner.ScheduleStartError) as exc:
+        runner._run_schedule(sched.id, manual=True)
+    assert exc.value.http_status == 409
+    assert "already in progress" in str(exc.value).lower()
 
 
 def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
@@ -411,6 +1175,13 @@ def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
             for k in list(mem):
                 if k not in keep:
                     del mem[k]
+
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
 
     class FakeDB:
         def __getitem__(self, name):
@@ -463,6 +1234,13 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
                 if k not in keep:
                     del mem[k]
 
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
+
         def find(self, *_a, **_k):
             return list(mem.values())
 
@@ -502,3 +1280,493 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
     assert "_id" not in (updates[0].get("$setOnInsert") or {})
     assert mem[sched.id]["running"] is True
     assert mem[sched.id]["id"] == sched.id
+
+
+def test_build_request_replays_studio_validate_identity():
+    """A scheduled run must carry the same recipe/locales/hashes as Studio Execute."""
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-studio",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+        "shape_recipe": {"version": 1, "steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+        "stream_contracts": [{"stream": "orders", "primary_key": "id"}],
+        "mappings": [
+            {
+                "source": "amt",
+                "target": "amt",
+                "target_type": "DECIMAL(18,4)",
+                "risk_contract": {"status": "signed"},
+            }
+        ],
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.date_locale == "DMY"
+    assert req.number_locale == "EU"
+    assert req.shape_recipe.get("version") == 1
+    assert req.approved_shape_recipe_hash == "a" * 64
+    assert req.approved_decision_artifact_hash == "b" * 64
+    assert req.approved_ddl_identity_hash == "c" * 64
+    assert req.mappings[0]["risk_contract"]["status"] == "signed"
+    assert req.stream_contracts[0]["primary_key"] == "id"
+    assert req.skip_preflight is False
+
+
+def test_create_schedule_persists_advanced_write_knobs(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_append",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.write_via_staging is True
+    assert reloaded.priority_column == "updated_at"
+    assert reloaded.priority_direction == "asc"
+    assert reloaded.row_limit == 2500
+    legacy = store.PipelineSchedule.from_dict({
+        "id": "legacy-adv",
+        "name": "old",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "u",
+        "interval": "daily",
+    })
+    assert legacy.write_via_staging is False
+    assert legacy.priority_column == ""
+    assert legacy.priority_direction == "desc"
+    assert legacy.row_limit == 0
+
+
+def test_build_request_replays_advanced_write_knobs():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-adv",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+        "mappings": _MAPPINGS,
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.write_via_staging is True
+    assert req.priority_column == "updated_at"
+    assert req.priority_direction == "asc"
+    assert req.limit == 2500
+    assert req.skip_preflight is False
+
+
+def test_create_schedule_persists_cdc_snapshot_mode(temp_store):
+    """Studio Advanced when_needed must survive onto the hourly beat."""
+    sched = store.create_schedule({
+        "name": "CDC when_needed orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "snapshot_mode": "when_needed",
+        "mappings": _MAPPINGS,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.snapshot_mode == "when_needed"
+    req = runner.build_schedule_request(reloaded, _SRC_CONN, _DST_CONN)
+    assert req.stream_contracts[0]["snapshot_mode"] == "when_needed"
+    overwrite = store.create_schedule({
+        "name": "Full overwrite",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_overwrite",
+        "snapshot_mode": "when_needed",
+        "shared_destination_acknowledged": True,
+    })
+    assert overwrite.snapshot_mode == ""
+
+
+def test_create_schedule_persists_cdc_advanced_extras(temp_store):
+    """Studio allow_append_only / row filter / MultiSubnetFailover survive the beat."""
+    sched = store.create_schedule({
+        "name": "CDC append-only orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+        "mappings": _MAPPINGS,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.allow_append_only is True
+    assert reloaded.cdc_row_filter == "net"
+    assert reloaded.multi_subnet_failover is True
+    sql_src = {**_SRC_CONN, "type": "sqlserver"}
+    req = runner.build_schedule_request(reloaded, sql_src, _DST_CONN)
+    assert req.destination.extra.get("allow_append_only") is True
+    assert req.source.extra.get("cdc_row_filter") == "net"
+    assert req.source.extra.get("multi_subnet_failover") is True
+    overwrite = store.create_schedule({
+        "name": "Full overwrite",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_overwrite",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+        "shared_destination_acknowledged": True,
+    })
+    assert overwrite.allow_append_only is False
+    assert overwrite.cdc_row_filter == ""
+    assert overwrite.multi_subnet_failover is False
+
+
+def test_build_request_replays_cdc_advanced_extras():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-cdc-x",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "allow_append_only": True,
+        "cdc_row_filter": "all update old",
+        "multi_subnet_failover": True,
+        "mappings": _MAPPINGS,
+    })
+    req = runner.build_schedule_request(sched, {**_SRC_CONN, "type": "sqlserver"}, _DST_CONN)
+    assert req.destination.extra.get("allow_append_only") is True
+    assert req.source.extra.get("cdc_row_filter") == "all update old"
+    assert req.source.extra.get("multi_subnet_failover") is True
+    assert req.skip_preflight is False
+
+
+def test_list_summary_exposes_cdc_advanced_extras():
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-cdc-sum",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.allow_append_only is True
+    assert summary.cdc_row_filter == "net"
+    assert summary.multi_subnet_failover is True
+
+
+def test_list_summary_exposes_validate_identity():
+    """List/drawer must see Studio hashes. Omitting them hid Validate≡Execute."""
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-ident",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.approved_shape_recipe_hash == "a" * 64
+    assert summary.approved_decision_artifact_hash == "b" * 64
+    assert summary.approved_ddl_identity_hash == "c" * 64
+    dumped = summary.model_dump()
+    assert "shape_recipe" not in dumped
+
+
+def test_list_summary_exposes_advanced_write_knobs():
+    """List/edit/drawer read the summary. Omitting knobs made Save wipe Studio values."""
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-sum",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+        "date_locale": "DMY",
+        "number_locale": "EU",
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.write_via_staging is True
+    assert summary.priority_column == "updated_at"
+    assert summary.priority_direction == "asc"
+    assert summary.row_limit == 2500
+    assert summary.date_locale == "DMY"
+    assert summary.number_locale == "EU"
+
+
+def test_five_minute_cron_is_the_interval_operators_read(temp_store):
+    """DEF-A-014 / DEF-B-006. GET says every 5 minutes; the stored token is cron.
+
+    Echoing the label on update must not raise Invalid interval and must not
+    retarget the preset. interval_preset is how an edit changes the token.
+    A cron is its own preset (QA round 11 SC8): ``daily`` beside ``*/5`` read
+    as a daily schedule on the status panel.
+    """
+    from src.routers.schedules_router import ScheduleResponse
+
+    sched = store.create_schedule({
+        "name": "Every five",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "cron": "*/5 * * * *",
+        "timezone": "UTC",
+        "mappings": _MAPPINGS,
+    })
+    body = ScheduleResponse.from_schedule(sched)
+    assert body.interval == "Every 5 minutes UTC"
+    assert body.interval_preset == "cron"
+    assert body.cadence_label == "Every 5 minutes UTC"
+    assert store.get_schedule(sched.id).interval == "cron"
+    echoed = store.update_schedule(
+        sched.id,
+        {"interval": "Every 5 minutes UTC", "cron": "*/5 * * * *"},
+    )
+    assert echoed is not None
+    assert echoed.interval == "cron"
+    assert echoed.cron == "*/5 * * * *"
+    # A preset edit needs the cron cleared — the form sends cron "" with it.
+    moved = store.update_schedule(
+        sched.id,
+        {"interval_preset": "hourly", "interval": "Every 5 minutes UTC", "cron": ""},
+    )
+    assert moved is not None
+    assert moved.interval == "hourly"
+    assert moved.cron == ""
+    with pytest.raises(ValueError, match="Invalid interval"):
+        store.update_schedule(sched.id, {"interval": "fortnightly"})
+
+
+def test_patch_empty_preserves_validate_identity_hashes(temp_store):
+    """Blank identity on PATCH is omit — not a wipe of Studio Validate stamps."""
+    sched = store.create_schedule({
+        "name": "Stamped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": _MAPPINGS,
+        "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+    })
+    updated = store.update_schedule(sched.id, {
+        "name": "renamed only",
+        "shape_recipe": {},
+        "approved_shape_recipe_hash": "",
+        "approved_decision_artifact_hash": "  ",
+        "approved_ddl_identity_hash": "",
+    })
+    assert updated is not None
+    assert updated.name == "renamed only"
+    assert updated.shape_recipe == {"steps": [{"op": "trim", "column": "name"}]}
+    assert updated.approved_shape_recipe_hash == "a" * 64
+    assert updated.approved_decision_artifact_hash == "b" * 64
+    assert updated.approved_ddl_identity_hash == "c" * 64
+
+
+def test_update_omitting_write_knobs_preserves_them(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    renamed = store.update_schedule(sched.id, {"name": "renamed only"})
+    assert renamed is not None
+    assert renamed.write_via_staging is True
+    assert renamed.priority_column == "updated_at"
+    assert renamed.priority_direction == "asc"
+    assert renamed.row_limit == 2500
+
+
+def test_update_explicit_false_clears_write_knobs(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    cleared = store.update_schedule(sched.id, {
+        "write_via_staging": False,
+        "priority_column": "",
+        "priority_direction": "desc",
+        "row_limit": 0,
+    })
+    assert cleared is not None
+    assert cleared.write_via_staging is False
+    assert cleared.priority_column == ""
+    assert cleared.row_limit == 0
+
+
+def test_create_schedule_persists_studio_locales(temp_store):
+    sched = store.create_schedule({
+        "name": "EU dates",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+        "mappings": _MAPPINGS,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.date_locale == "DMY"
+    assert reloaded.number_locale == "EU"
+    req = runner.build_schedule_request(reloaded, _SRC_CONN, _DST_CONN)
+    assert req.date_locale == "DMY"
+    assert req.number_locale == "EU"
+
+
+def test_update_explicit_empty_clears_locales(temp_store):
+    sched = store.create_schedule({
+        "name": "EU dates",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+    })
+    cleared = store.update_schedule(sched.id, {"date_locale": "", "number_locale": ""})
+    assert cleared is not None
+    assert cleared.date_locale == ""
+    assert cleared.number_locale == ""
+
+
+def test_build_schedule_request_refuses_empty_mappings():
+    """Unattended runs must not invent _auto_map when ScheduleForm omitted mappings."""
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-empty",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+    })
+    with pytest.raises(ValueError, match="no persisted column mappings"):
+        runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+
+
+def test_create_schedule_pauses_when_mappings_empty(temp_store):
+    sched = store.create_schedule({
+        "name": "No map",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "enabled": True,
+    })
+    assert sched.enabled is False
+    with pytest.raises(ValueError, match="no persisted column mappings"):
+        store.update_schedule(sched.id, {"enabled": True})
+
+
+def test_create_schedule_stays_enabled_when_mappings_present(temp_store):
+    sched = store.create_schedule({
+        "name": "Mapped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": _MAPPINGS,
+    })
+    assert sched.enabled is True
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.mappings[0]["source"] == "id"
+
+
+def test_due_schedules_skips_enabled_legacy_without_mappings(temp_store):
+    """A hand-edited enabled row still must not enter the due set."""
+    leaked = store.PipelineSchedule.from_dict({
+        "id": "legacy-empty",
+        "name": "legacy empty",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": [],
+        "next_run_at": "2000-01-01T00:00:00+00:00",
+    })
+    store._save_all([leaked])
+    assert leaked.id not in {s.id for s in store.due_schedules()}

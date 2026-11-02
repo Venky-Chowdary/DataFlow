@@ -5,6 +5,7 @@ import { fetchCdcLease, forceReleaseCdcLease } from "../../lib/api";
 import { JobProgress } from "../../lib/types";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 interface CdcLeaseConflictPanelProps {
   job: JobProgress;
@@ -35,6 +36,7 @@ export function CdcLeaseConflictPanel({
 }: CdcLeaseConflictPanelProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const forceReleaseGate = useWriteGate(PERMISSIONS.workspaceManage);
   const cursorKey = job.cdc_lease_cursor_key || "";
   const [busy, setBusy] = useState(false);
   const [liveGen, setLiveGen] = useState<number | null>(job.cdc_lease_generation ?? null);
@@ -44,7 +46,7 @@ export function CdcLeaseConflictPanel({
   const [released, setReleased] = useState(false);
 
   useEffect(() => {
-    if (!cursorKey) return;
+    if (!cursorKey || !forceReleaseGate.allowed) return;
     let cancelled = false;
     void fetchCdcLease(cursorKey)
       .then((snap) => {
@@ -59,7 +61,7 @@ export function CdcLeaseConflictPanel({
     return () => {
       cancelled = true;
     };
-  }, [cursorKey]);
+  }, [cursorKey, forceReleaseGate.allowed]);
 
   if (!job.cdc_lease_conflict) return null;
 
@@ -132,7 +134,7 @@ export function CdcLeaseConflictPanel({
         </span>
       </div>
       <div className="df2-theater-v3-next-actions">
-        {!released && cursorKey && (
+        {!released && cursorKey && forceReleaseGate.allowed && (
           <Button
             size="sm"
             variant="danger"

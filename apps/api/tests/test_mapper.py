@@ -21,9 +21,15 @@ def test_txn_dt_maps_to_transaction_date():
     assert mappings[0]["confidence"] >= 0.85
 
 
-def test_infers_target_when_no_targets():
+def test_create_new_keeps_the_source_name_and_suggests_the_semantic_one():
+    """CREATE TABLE lands ``PAY_AMT``, not a rename nobody approved.
+
+    Renaming here broke re-running the same route: the second pass scored
+    ``PAY_AMT`` → ``payment_amount`` as a rename and Execute refused it.
+    """
     mappings = map_columns(["PAY_AMT"], [], destination_table_exists=False)
-    assert mappings[0]["target"] == "payment_amount"
+    assert mappings[0]["target"] == "PAY_AMT"
+    assert mappings[0]["semantic_name"] == "payment_amount"
     # Create-new invent floor is 0.70 (lexical rename without live targets).
     assert mappings[0]["confidence"] >= 0.70
 

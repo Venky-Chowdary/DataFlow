@@ -17,6 +17,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Final
 
+from connectors.oracle_tstz import (
+    oracle_tz_kinds,
+    oracle_tz_positions,
+    oracle_tz_select_list,
+    oracle_tz_to_char,
+    parse_oracle_tz_row,
+)
 from services.readback_projection import project_readback
 from services.reconciliation import (
     canonical_checksum_from_iter,
@@ -28,16 +35,6 @@ from services.reconciliation import (
 logger = logging.getLogger(__name__)
 
 #: Destination type strings routed to this module.
-ORACLE_DB_TYPES: Final = frozenset(
-    {
-        "oracle",
-        "oracledb",
-        "oracle_db",
-        "oracle_autonomous",
-        "oracle_autonomous_warehouse",
-        "amazon_rds_oracle",
-    }
-)
 
 #: Oracle column types that cannot appear in ORDER BY / IN comparisons.
 _ORACLE_LOB_TYPES: Final = {"CLOB", "NCLOB", "BLOB", "LONG", "LONG RAW", "XMLTYPE"}
@@ -45,7 +42,9 @@ _ORACLE_LOB_TYPES: Final = {"CLOB", "NCLOB", "BLOB", "LONG", "LONG RAW", "XMLTYP
 
 def is_oracle_destination(db_type: str, dest: dict[str, Any]) -> bool:
     """True when this destination is Oracle, including generic SQL URLs."""
-    if db_type in ORACLE_DB_TYPES:
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(db_type) == "oracle":
         return True
     return db_type == "generic_sql" and str(
         dest.get("connection_string") or ""
@@ -114,6 +113,14 @@ def oracle_comparable_expr(
     return quoted
 
 
+def oracle_probe_description(conn: Any, table_ref: str) -> Any:
+    """Driver column description of ``table_ref`` (zero-row probe)."""
+    import sqlalchemy as sa
+
+    probe = conn.execute(sa.text(f"SELECT * FROM {table_ref} WHERE 1=0"))  # nosec B608
+    return getattr(getattr(probe, "cursor", None), "description", None)
+
+
 def verify_oracle_table(
     *,
     host: str,
@@ -172,14 +179,22 @@ def verify_oracle_table(
                 or 0
             )
             ids, pk = keyed_readback_scope(written_ids, pk_column)
-            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            # The driver reads TSTZ naive; read back the instant that landed (D155).
+            description = oracle_probe_description(conn, table_ref)
+            tz_positions = oracle_tz_positions(description)
+            select_list = oracle_tz_select_list(description)
+            select = sa.text(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
             if ids:
                 where, params = keyed_readback_sa_clause(pk, ids, dialect="oracle")
                 select = sa.text(
-                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                    f"SELECT {select_list} FROM {table_ref} {where}"  # nosec B608
                 ).bindparams(**params)
             names, result = sa_streaming_result(conn, select)
-            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
+            columns, projected = project_readback(
+                names,
+                target_columns,
+                (parse_oracle_tz_row(row, tz_positions) for row in result),
+            )
             checksum = canonical_checksum_from_iter(
                 projected,
                 columns,
@@ -207,7 +222,12 @@ def read_oracle_target_sample(
     import sqlalchemy as sa
 
     from connectors.generic_sql import get_sqlalchemy_engine
-    from connectors.sql_identifiers import quote_column_list, quote_table_ref, require_safe_identifier
+    from connectors.sql_identifiers import (
+        quote_column_list,
+        quote_sql_identifier,
+        quote_table_ref,
+        require_safe_identifier,
+    )
 
     lim = max(1, int(limit or 50))
     ora_col_sql = (
@@ -246,13 +266,32 @@ def read_oracle_target_sample(
             table_ref = quote_table_ref(
                 read_table, schema=read_owner, dialect="oracle", preserve_case=True
             )
-        if col_map and cols != ["*"]:
-            ora_col_sql = quote_column_list(
-                [
-                    require_safe_identifier(col_map.get(c, c), preserve_case=True)
-                    for c in cols
-                ]
-            )
+        description = oracle_probe_description(conn, table_ref)
+        if cols == ["*"]:
+            ora_col_sql = oracle_tz_select_list(description)
+            tz_positions = oracle_tz_positions(description)
+        else:
+            # Same TSTZ rule as the checksum read-back (D155), per named column.
+            kinds_by_name = {
+                str(description[i][0]).upper(): kind
+                for i, kind in oracle_tz_kinds(description).items()
+            }
+            stored = [
+                require_safe_identifier(col_map.get(c, c), preserve_case=True)
+                for c in cols
+            ]
+            col_kinds = {
+                i: kinds_by_name[name.upper()]
+                for i, name in enumerate(stored)
+                if name.upper() in kinds_by_name
+            }
+            tz_positions = frozenset(col_kinds)
+            if col_map or tz_positions:
+                quoted = [quote_sql_identifier(name) for name in stored]
+                ora_col_sql = ", ".join(
+                    f"{oracle_tz_to_char(q, col_kinds[i])} AS {q}" if i in col_kinds else q
+                    for i, q in enumerate(quoted)
+                )
         sort_key_stored = col_map.get(sort_key, sort_key) if sort_key else ""
         # Oracle rejects a LOB wherever it needs a comparison key (ORA-22848),
         # so ordering or ``IN``-filtering on a CLOB — what an unbounded source
@@ -283,4 +322,4 @@ def read_oracle_target_sample(
         result = conn.execute(sa.text(sql), params)
         names = list(cols) if cols and cols != ["*"] else list(result.keys())
         rows = result.fetchall()
-        return [dict(zip(names, tuple(row))) for row in rows]
+        return [dict(zip(names, parse_oracle_tz_row(row, tz_positions))) for row in rows]

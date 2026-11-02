@@ -14,14 +14,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import (
+    use_snowflake_namespace,
     _is_local_account,
     get_connection,
     normalize_account,
     resolve_snowflake_table_name,
+    snowflake_column_ref,
+    snowflake_physical_name_map,
 )
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
@@ -30,9 +34,6 @@ from connectors.writer_common import (
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     bind_sql_mapped_rows_with_quarantine,
-    build_mapped_rows_with_details,
-    dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
     materialize_missing_as_null_for_dense_write,
     null_safe_merge_on,
     quarantine_unfit_decimals,
@@ -40,19 +41,17 @@ from connectors.writer_common import (
     quarantine_unfit_strings,
     quote_sql_identifier,
     resolve_target_columns,
-    row_checksum,
-    sample_values_by_source_from_batch,
     sanitize_identifier,
     snowflake_lsn_match_predicate,
     sparse_present_bindings,
     reject_on_strict_policy,
     resolve_conflict_targets,
-    split_dense_sparse_rows,
     transform_error_policy,
 )
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
@@ -80,26 +79,17 @@ class _SfMaterializedBatch:
     target_types: list[str]
     dest_types: dict[str, str]
     rows_for_checksum: list[tuple]
+    source_row_count: int = 0
 
 
-def _sf_materialize_mapped_batch(
-    *,
-    headers: list[str],
-    data_rows: list,
-    mappings: list,
+def _sf_apply_specialty_quarantine(
+    mapped_rows: list[tuple],
     target_cols: list[str],
-    column_types: dict[str, str] | None,
-    dest_types: dict[str, str],
-    logical_types: list[str],
+    target_types: list[str],
+    rejected_details: list,
     policy: Any,
-    conflict_columns: list[str] | None,
-    write_mode: str,
-    live_dest_types: dict[str, str] | None = None,
-    destination_pk_columns: list[str] | None = None,
-    destination_column_nullability: Any = None,
-    allow_logical_fallback: bool = True,
-) -> _SfMaterializedBatch:
-    """Map + quarantine against ``dest_types`` (call again after live DDL overlay)."""
+) -> list[tuple]:
+    """Dialect specialty gates for one bundle. Shared by finish and retain concat."""
     from connectors.writer_common import (
         normalize_temporal_cells,
         quarantine_currency_markers_into_numeric,
@@ -110,39 +100,10 @@ def _sf_materialize_mapped_batch(
         quarantine_unfit_enum_set,
         quarantine_unfit_integers,
         quarantine_unfit_json,
-        quarantine_unfit_specialty_types,
-        quarantine_unfit_strings,
         quarantine_unfit_temporals,
         quarantine_unfit_years,
     )
 
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        error_policy=policy,
-        dest_kind="snowflake",
-        destination_pk_columns=list(destination_pk_columns or []) or None,
-        destination_column_nullability=destination_column_nullability,
-    )
-    sized_logical: list[str] = []
-    for i, c in enumerate(target_cols):
-        carrier = str(dest_types.get(c) or "").strip()
-        if not carrier and allow_logical_fallback:
-            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
-        sized_logical.append(carrier)
-    # Never invent VARCHAR for empty carriers (partial Studio / ADD gaps).
-    # resolve_snowflake_create_types preserves blanks — ADD gate stamps or refuses.
-    target_types = resolve_snowflake_create_types(sized_logical, mapped_rows)
-    if isinstance(live_dest_types, dict) and live_dest_types:
-        live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
-        for i, col in enumerate(target_cols):
-            hit = live_fold.get(str(col).lower())
-            if hit:
-                target_types[i] = sf_type(hit)
     mapped_rows = _quarantine_unfit_decimals(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
@@ -208,17 +169,86 @@ def _sf_materialize_mapped_batch(
         policy,
         dialect_label="Snowflake VARIANT",
     )
-    mapped_rows = normalize_temporal_cells(
+    return normalize_temporal_cells(
         mapped_rows, target_types, target_cols, engine="snowflake"
     )
+
+
+def _sf_materialize_mapped_batch(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    live_dest_types: dict[str, str] | None = None,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+    empty_cells_as_null: bool = False,
+) -> _SfMaterializedBatch:
+    """Retain-contract concat of finished bundles. Write loop must not use this."""
+    mapped_rows: list[tuple] = []
+    sparse_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list = []
+    rows_for_checksum: list[tuple] = []
+    source_row_count = 0
+    target_types = _sf_resolve_create_types(
+        target_cols,
+        dest_types,
+        logical_types,
+        allow_logical_fallback=allow_logical_fallback,
+        live_dest_types=live_dest_types,
+    )
+    for finished in iter_sf_finished_bundles(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=destination_pk_columns,
+        destination_column_nullability=destination_column_nullability,
+        allow_logical_fallback=allow_logical_fallback,
+        live_dest_types=live_dest_types,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        materialize_batch=materialize_batch,
+        target_types=target_types,
+        empty_cells_as_null=empty_cells_as_null,
+    ):
+        mapped_rows.extend(finished.dense_rows)
+        sparse_rows.extend(finished.sparse_rows)
+        rows_for_checksum.extend(finished.checksum_rows)
+        transform_errors.extend(finished.transform_errors)
+        rejected_details.extend(finished.rejected_details)
+        source_row_count = finished.source_row_count
+        target_types = finished.target_types or target_types
+        del finished
     return _SfMaterializedBatch(
         mapped_rows=mapped_rows,
-        sparse_rows=[],
+        sparse_rows=sparse_rows,
         transform_errors=list(transform_errors or []),
         rejected_details=rejected_details,
         target_types=target_types,
         dest_types=dict(dest_types),
-        rows_for_checksum=list(mapped_rows),
+        rows_for_checksum=rows_for_checksum,
+        source_row_count=source_row_count,
     )
 
 
@@ -237,6 +267,11 @@ def _sf_rematerialize_if_physical_differs(
     write_mode: str,
     destination_column_nullability: Any = None,
     force_remap: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+    empty_cells_as_null: bool = False,
 ) -> _SfMaterializedBatch | None:
     """Rebuild from source when live DDL carriers differ from Map stamps.
 
@@ -267,10 +302,185 @@ def _sf_rematerialize_if_physical_differs(
         policy=policy,
         conflict_columns=conflict_columns,
         write_mode=write_mode,
+        empty_cells_as_null=empty_cells_as_null,
         live_dest_types=physical,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        materialize_batch=materialize_batch,
     )
+
+
+def _sf_resolve_create_types(
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    *,
+    allow_logical_fallback: bool = True,
+    live_dest_types: dict[str, str] | None = None,
+) -> list[str]:
+    """CREATE/bind types from settled carriers — never sample the mapped image."""
+    sized_logical: list[str] = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and allow_logical_fallback:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        sized_logical.append(carrier)
+    target_types = resolve_snowflake_create_types(sized_logical, [])
+    if isinstance(live_dest_types, dict) and live_dest_types:
+        live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
+        for i, col in enumerate(target_cols):
+            hit = live_fold.get(str(col).lower())
+            if hit:
+                target_types[i] = sf_type(hit)
+    return target_types
+
+
+def _sf_finish_mapped_bundle(
+    bundle: Any,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    mappings: list,
+    allow_logical_fallback: bool = True,
+    live_dest_types: dict[str, str] | None = None,
+    target_types: list[str] | None = None,
+) -> Any:
+    from connectors.sql_write_materialize import finish_sql_mapped_bundle
+    from connectors.writer_common import (
+        combined_mapped_rows_for_checksum,
+        materialize_missing_as_null_for_dense_write,
+    )
+
+    if target_types is None:
+        target_types = _sf_resolve_create_types(
+            target_cols,
+            dest_types,
+            logical_types,
+            allow_logical_fallback=allow_logical_fallback,
+            live_dest_types=live_dest_types,
+        )
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=target_cols,
+        target_types=target_types,
+        policy=policy,
+        dialect_label="Snowflake",
+        dest_db="snowflake",
+        mappings=mappings,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
+    finished.dense_rows = _sf_apply_specialty_quarantine(
+        finished.dense_rows,
+        target_cols,
+        target_types,
+        finished.rejected_details,
+        policy,
+    )
+    finished.sparse_rows = _sf_apply_specialty_quarantine(
+        finished.sparse_rows,
+        target_cols,
+        target_types,
+        finished.rejected_details,
+        policy,
+    )
+    if not (write_mode == "upsert" and conflict_columns):
+        finished.dense_rows = materialize_missing_as_null_for_dense_write(
+            finished.dense_rows
+        )
+    finished.checksum_rows = combined_mapped_rows_for_checksum(
+        finished.dense_rows, finished.sparse_rows
+    )
+    finished.target_types = list(target_types)
+    return finished
+
+
+def iter_sf_finished_bundles(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
+    live_dest_types: dict[str, str] | None = None,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+    target_types: list[str] | None = None,
+    empty_cells_as_null: bool = False,
+) -> Any:
+    from connectors.sql_write_materialize import iter_finished_sql_bundles
+
+    def _finish(bundle):
+        return _sf_finish_mapped_bundle(
+            bundle,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            logical_types=logical_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            mappings=mappings,
+            allow_logical_fallback=allow_logical_fallback,
+            live_dest_types=live_dest_types,
+            target_types=target_types,
+        )
+
+    yield from iter_finished_sql_bundles(
+        finish=_finish,
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        error_policy=policy,
+        preserve_case=True,
+        dest_kind="snowflake",
+        destination_pk_columns=list(destination_pk_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+        empty_cells_as_null=empty_cells_as_null,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        batch_size=materialize_batch,
+    )
+
+
+def _sf_scan_finished_bundles(**kwargs: Any) -> Any:
+    from connectors.sql_write_materialize import SqlWriteAccumulator
+
+    acc = SqlWriteAccumulator(
+        target_cols=kwargs["target_cols"],
+        dest_db_type="snowflake",
+        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+        dialect_label="Snowflake",
+    )
+    source_row_count = 0
+    target_types: list[str] = []
+    for finished in iter_sf_finished_bundles(**kwargs):
+        acc.note_rejects(finished.rejected_details, finished.transform_errors)
+        source_row_count = finished.source_row_count
+        target_types = finished.target_types
+        del finished
+    acc.stop_writing()
+    return acc, source_row_count, target_types
 
 
 def _is_fakesnow_connection(conn: Any) -> bool:
@@ -288,9 +498,10 @@ def _parse_number_type(sf_type_str: str) -> tuple[int, int] | None:
 
 
 def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
-    from connectors.writer_common import decimal_int_digits_and_scale
+    # Create-new NUMBER(p,s) invent — keep money scale (1000.00 → 2).
+    from services.decimal_observe import cell_int_digits_and_scale
 
-    return decimal_int_digits_and_scale(value)
+    return cell_int_digits_and_scale(value)
 
 
 def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
@@ -303,9 +514,12 @@ def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
 def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
     """Pick a NUMBER(p,s) type wide enough for the actual data in this batch.
 
-    Snowflake requires p <= 38 and p >= s. Prefer preserving integer magnitude
-    over fractional digits when the value would otherwise overflow NUMBER(38,*).
+    Exact observed envelope — no +2 scale / +1 int. Extra dest scale is
+    what printed ``9.083333000000`` in Snowsight. Snowflake requires
+    p <= 38 and p >= s; prefer integer magnitude when the cap binds.
     """
+    from services.decimal_observe import exact_create_decimal_ps
+
     max_int = 0
     max_scale = 0
     for row in mapped_rows:
@@ -318,16 +532,15 @@ def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
     if max_scale == 0 and max_int == 0:
         return "NUMBER(38,10)"
 
-    # Prefer observed scale; keep a small buffer when data is modest.
-    scale = min(38, max_scale + (2 if max_scale > 0 else 0))
-    int_digits = max(1, max_int + (1 if max_int > 0 else 0))
-    if int_digits + scale > 38:
-        scale = max(0, 38 - int_digits)
-    if int_digits + scale > 38:
-        int_digits = 38 - scale
-    precision = max(scale, min(38, int_digits + scale))
+    precision, scale = exact_create_decimal_ps(max_int, max_scale, max_precision=38)
     if precision < 1:
         return "NUMBER(38,10)"
+    if precision > 38:
+        int_digits = max(1, max_int) if max_int else 0
+        scale = min(scale, max(0, 38 - max(int_digits, 0)))
+        precision = max(scale, min(38, int_digits + scale))
+        if precision < 1:
+            return "NUMBER(38,10)"
     return f"NUMBER({precision},{scale})"
 
 
@@ -341,8 +554,6 @@ def resolve_snowflake_create_types(
     unfit cells are quarantined instead. Bare DECIMAL rematerializes to
     ``NUMBER(38,10)`` via ``ddl_type`` — never batch-inferred invent.
     """
-    from services.decision_kernel import ddl_type, normalize_logical_type
-
     out: list[str] = []
     for i, t in enumerate(logical_types):
         if not str(t or "").strip():
@@ -403,8 +614,6 @@ def _quarantine_unfit_decimals(
     policy: str,
 ) -> list[tuple]:
     """Hold out / NULL cells that cannot fit NUMBER(p,s)."""
-    from connectors.writer_common import quarantine_unfit_decimals
-
     return quarantine_unfit_decimals(
         mapped_rows,
         target_cols,
@@ -464,10 +673,12 @@ def _widen_existing_number_columns(
             """,
             (schema.upper(), table_name.upper()),
         )
+        fetched = [tuple(r) for r in cur.fetchall()]
         existing = {
             str(row[0]).upper(): (int(row[1] or 0), int(row[2] or 0))
-            for row in cur.fetchall()
+            for row in fetched
         }
+        existing_names = {str(row[0]).upper(): str(row[0]) for row in fetched}
     except Exception as exc:
         logger.warning(
             "snowflake widen column introspection failed: %s", exc, exc_info=exc
@@ -488,7 +699,8 @@ def _widen_existing_number_columns(
             continue
         try:
             cur.execute(
-                f'ALTER TABLE "{table_name}" ALTER COLUMN "{col}" '
+                f'ALTER TABLE "{table_name}" ALTER COLUMN '
+                f"{snowflake_column_ref(col, existing_names)} "
                 f"SET DATA TYPE NUMBER({want_p},{want_s})"
             )
         except Exception as exc:
@@ -585,14 +797,14 @@ def _sf_apply_sparse_upsert(
     sparse_rows: list[tuple],
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
+    row_numbers: list[int] | None = None,
+    physical_names: dict[str, str] | None = None,
 ) -> tuple[int, int, list[tuple]]:
     """Per-row Snowflake upsert omitting DF_MISSING — never SET col=NULL for absent."""
     from connectors.sql_bind import normalize_sql_bind_value
     from connectors.writer_common import (
         DF_LSN_COL,
-        assert_sparse_upsert_has_pk,
         materialize_sparse_row_for_checksum,
-        sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
     from services.value_serializer import cell_to_string
@@ -604,8 +816,10 @@ def _sf_apply_sparse_upsert(
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
-    select_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
-    where_sql = " AND ".join(f"{quote_sql_identifier(c)} = %s" for c in conflict)
+    select_sql = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
+    where_sql = " AND ".join(
+        f"{snowflake_column_ref(c, physical_names)} = %s" for c in conflict
+    )
 
     for row_idx, row in enumerate(sparse_rows):
         raw_present = sparse_present_bindings(row, target_cols)
@@ -628,12 +842,15 @@ def _sf_apply_sparse_upsert(
                     )[:120]
                 except Exception:
                     sample = ""
-                from connectors.writer_common import append_write_quarantine_detail
+                from connectors.writer_common import (
+                    append_write_quarantine_detail,
+                    resolve_row_number,
+                )
 
                 append_write_quarantine_detail(
                     rejected_details,
                     {
-                        "row": row_idx,
+                        "row": resolve_row_number(row_numbers, row_idx),
                         "column": "*",
                         "value": sample,
                         "reason": str(exc)[:300],
@@ -667,7 +884,7 @@ def _sf_apply_sparse_upsert(
         if non_pk:
             set_cols = list(non_pk.keys())
             set_sql = ", ".join(
-                f"{quote_sql_identifier(c)} = %s" for c in set_cols
+                f"{snowflake_column_ref(c, physical_names)} = %s" for c in set_cols
             )
             cur.execute(
                 f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",  # nosec B608
@@ -680,7 +897,7 @@ def _sf_apply_sparse_upsert(
                 )
                 continue
         cols = list(present.keys())
-        col_sql = ", ".join(quote_sql_identifier(c) for c in cols)
+        col_sql = ", ".join(snowflake_column_ref(c, physical_names) for c in cols)
         ph = ", ".join(["%s"] * len(cols))
         try:
             cur.execute(
@@ -696,7 +913,7 @@ def _sf_apply_sparse_upsert(
                 raise
             set_cols = list(non_pk.keys())
             set_sql = ", ".join(
-                f"{quote_sql_identifier(c)} = %s" for c in set_cols
+                f"{snowflake_column_ref(c, physical_names)} = %s" for c in set_cols
             )
             cur.execute(
                 f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",  # nosec B608
@@ -707,6 +924,21 @@ def _sf_apply_sparse_upsert(
                 materialize_sparse_row_for_checksum(present, existing, target_cols)
             )
     return written, skipped, checksum_rows
+
+
+def _json_select_expr(sf_type: str, source: str) -> str:
+    """``PARSE_JSON(source)``, cast to the declared type when that is structured.
+
+    ``PARSE_JSON`` yields a VARIANT. Snowflake does not assign a VARIANT to a
+    structured ``ARRAY(NUMBER(38,0))`` / ``OBJECT(...)`` / ``MAP(...)`` column
+    without a cast ("Expression type does not match column data type"), and
+    DataFlow creates exactly those carriers for typed arrays (D77). Plain
+    VARIANT / ARRAY / OBJECT take the parsed value as is.
+    """
+    parsed = f"PARSE_JSON({source})"
+    if "(" in (sf_type or ""):
+        return f"{parsed}::{sf_type.strip()}"
+    return parsed
 
 
 def _is_json_type(sf_type: str) -> bool:
@@ -724,6 +956,8 @@ def _batch_insert_rows(
     target_cols: list[str],
     target_types: list[str],
     batch: list[tuple],
+    *,
+    physical_names: dict[str, str] | None = None,
 ) -> int:
     """Batch INSERT for rows below the COPY threshold, including VARIANT/JSON.
 
@@ -734,11 +968,11 @@ def _batch_insert_rows(
     sub-batch, stringify JSON-typed values so ``PARSE_JSON(columnN)`` can parse
     them, and bind all values as positional parameters.
     """
-    col_list = ", ".join(f'"{c}"' for c in target_cols)
+    col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
     select_items = []
     for i, t in enumerate(target_types, start=1):
         if _is_json_type(t):
-            select_items.append(f"PARSE_JSON(column{i})")
+            select_items.append(_json_select_expr(t, f"column{i}"))
         else:
             select_items.append(f"column{i}")
     select_sql = ", ".join(select_items)
@@ -777,6 +1011,25 @@ def _batch_insert_rows(
     return written
 
 
+def copy_into_written_or_raise(written: int, staged_rows: int, table: str) -> int:
+    """Fail closed when COPY INTO loads nothing or only part of the staged batch.
+
+    Treating ``written <= 0`` as ``staged_rows`` used to report a full write
+    after a 0-row COPY — silent data loss on the warehouse path.
+    """
+    if written <= 0:
+        raise RuntimeError(
+            f"Snowflake COPY INTO loaded 0 of {staged_rows} staged rows for {table}. "
+            "The batch was not written. Check file format, column mapping, and warehouse."
+        )
+    if written < staged_rows:
+        raise RuntimeError(
+            f"Snowflake COPY INTO loaded {written} of {staged_rows} staged rows for {table}. "
+            "Partial COPY is not success — remaining rows were not written."
+        )
+    return written
+
+
 def _load_rows_into_table(
     cur: Any,
     table_name: str,
@@ -789,6 +1042,7 @@ def _load_rows_into_table(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     mappings: list[dict[str, Any]] | None = None,
+    physical_names: dict[str, str] | None = None,
 ) -> str:
     """Load rows into ``table_name`` via COPY INTO when possible; else INSERT.
 
@@ -817,10 +1071,10 @@ def _load_rows_into_table(
         try:
             _write_temp_csv(tmp, target_cols, mapped_rows)
             written = _copy_into_table(
-                cur, table_name, str(tmp.resolve()), target_cols, target_types
+                cur, table_name, str(tmp.resolve()), target_cols, target_types,
+                physical_names=physical_names,
             )
-            if written <= 0:
-                written = total
+            copy_into_written_or_raise(written, total, table_name)
             return "copy_into"
         finally:
             tmp.unlink(missing_ok=True)
@@ -828,9 +1082,12 @@ def _load_rows_into_table(
     has_json = any(_is_json_type(t) for t in target_types)
     if has_json:
         # Already bound — _batch_insert_rows still stringifies VARIANT safely.
-        _batch_insert_rows(cur, table_name, target_cols, target_types, mapped_rows)
+        _batch_insert_rows(
+            cur, table_name, target_cols, target_types, mapped_rows,
+            physical_names=physical_names,
+        )
     else:
-        col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
+        col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
         value_placeholders = ", ".join(["%s"] * len(target_cols))
         insert_sql = (
             f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "  # nosec B608
@@ -840,6 +1097,56 @@ def _load_rows_into_table(
             sub = mapped_rows[offset : offset + MAX_BIND_INSERT_ROWS]
             cur.executemany(insert_sql, sub)
     return "insert"
+
+
+def build_snowflake_merge_sql(
+    target_table: str,
+    staging_table: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    *,
+    lsn_column: str | None = None,
+    physical_names: dict[str, str] | None = None,
+) -> str:
+    """Build a Snowflake MERGE for PK upsert with optional monotonic LSN guard."""
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
+        raise ValueError("Snowflake MERGE requires conflict_columns present in target_cols")
+    col_ref = lambda c: snowflake_column_ref(c, physical_names)  # noqa: E731
+    on_clause = null_safe_merge_on(
+        conflict,
+        left_alias="t",
+        right_alias="s",
+        quote_column=col_ref,
+    )
+    col_list = ", ".join(col_ref(c) for c in target_cols)
+    source_cols = ", ".join(f"s.{col_ref(c)}" for c in target_cols)
+    from services.mirror_engine import upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict)
+    lsn_guard = ""
+    if lsn_column and lsn_column in target_cols:
+        lsn_guard = f" AND {snowflake_lsn_match_predicate()}"
+    tgt_q = quote_sql_identifier(target_table)
+    tmp_q = quote_sql_identifier(staging_table)
+    if update_cols:
+        set_clause = ", ".join(
+            f"t.{col_ref(c)} = s.{col_ref(c)}"
+            for c in update_cols
+        )
+        return (
+            f"MERGE INTO {tgt_q} t "
+            f"USING {tmp_q} s "
+            f"ON {on_clause} "
+            f"WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} "
+            f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
+        )
+    return (
+        f"MERGE INTO {tgt_q} t "
+        f"USING {tmp_q} s "
+        f"ON {on_clause} "
+        f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
+    )
 
 
 def _merge_batch_via_temp(
@@ -855,6 +1162,7 @@ def _merge_batch_via_temp(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     mappings: list[dict[str, Any]] | None = None,
+    physical_names: dict[str, str] | None = None,
 ) -> int:
     """Stage the batch into a temp table, then run a single MERGE into the target."""
     if not mapped_rows:
@@ -871,8 +1179,12 @@ def _merge_batch_via_temp(
     if not mapped_rows:
         return 0
     temp = f"_DF_UPSERT_{uuid.uuid4().hex[:12]}"
+    # Temp columns take the SAME resolved names as the target so the MERGE's
+    # s."col" references line up (M5: resolved live-first / folded).
+    require_safe_type_stamps(target_types, context="snowflake MERGE staging column")
     col_defs = ", ".join(
-        f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)
+        f"{snowflake_column_ref(c, physical_names)} {t}"
+        for c, t in zip(target_cols, target_types)
     )
     cur.execute(f"CREATE TEMPORARY TABLE {quote_sql_identifier(temp)} ({col_defs})")
     try:
@@ -887,42 +1199,16 @@ def _merge_batch_via_temp(
             rejected_details=rejected_details,
             policy=policy,
             mappings=mappings,
+            physical_names=physical_names,
         )
-        on_clause = null_safe_merge_on(
+        merge_sql = build_snowflake_merge_sql(
+            table_name,
+            temp,
+            target_cols,
             conflict,
-            left_alias="t",
-            right_alias="s",
-            quote_column=quote_sql_identifier,
+            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+            physical_names=physical_names,
         )
-        col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
-        source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
-        update_cols = [c for c in target_cols if c not in conflict]
-        lsn_guard = (
-            f" AND {snowflake_lsn_match_predicate()}"
-            if DF_LSN_COL in target_cols
-            else ""
-        )
-        tgt_q = quote_sql_identifier(table_name)
-        tmp_q = quote_sql_identifier(temp)
-        if update_cols:
-            set_clause = ", ".join(
-                f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}"
-                for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {tgt_q} t "  # nosec B608
-                f"USING {tmp_q} s "
-                f"ON {on_clause} "
-                f"WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} "
-                f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {tgt_q} t "
-                f"USING {tmp_q} s "
-                f"ON {on_clause} "
-                f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
-            )
         cur.execute(merge_sql)
         return len(mapped_rows)
     finally:
@@ -938,6 +1224,8 @@ def _copy_into_table(
     local_path: str,
     target_cols: list[str],
     target_types: list[str],
+    *,
+    physical_names: dict[str, str] | None = None,
 ) -> int:
     # Use a unique stage per call so parallel threads/processes cannot overwrite
     # each other's staged files and load each other's data.
@@ -946,13 +1234,15 @@ def _copy_into_table(
     try:
         cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
         cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE")
-        col_list = ", ".join(f'"{c}"' for c in target_cols)
+        col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
         # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
-        # all other columns are loaded directly by position.
+        # all other columns are loaded directly by position. Binary cells are
+        # staged in the canonical base64 wire (cell_to_string), which the file
+        # format must name — Snowflake's CSV default is HEX (D76).
         select_items = []
         for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
             if _is_json_type(t):
-                select_items.append(f"PARSE_JSON(${i})")
+                select_items.append(_json_select_expr(t, f"${i}"))
             else:
                 select_items.append(f"${i}")
         select_sql = ", ".join(select_items)
@@ -965,6 +1255,7 @@ def _copy_into_table(
                 SKIP_HEADER = 1
                 FIELD_OPTIONALLY_ENCLOSED_BY = '"'
                 NULL_IF = ('\\\\N')
+                BINARY_FORMAT = BASE64
                 ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
             )
             ON_ERROR = 'ABORT_STATEMENT'
@@ -1023,6 +1314,15 @@ def write_mapped_rows(
 ) -> WriteResult:
     dest_nullability = _kwargs.get("destination_column_nullability")
     live_dest_types = _kwargs.get("destination_column_types")
+    private_key = str(_kwargs.get("private_key") or "")
+    auth_mode = str(_kwargs.get("auth_mode") or "")
+    empty_cells_as_null = bool(_kwargs.get("empty_cells_as_null"))
+    from connectors.sql_write_materialize import sql_source_from_writer
+
+    _sql_extra = (
+        _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    )
+    _sql_src = sql_source_from_writer(_kwargs, _sql_extra)
     del port, ssl, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -1079,13 +1379,18 @@ def write_mapped_rows(
             load_method="stub",
         )
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    from connectors.sql_write_materialize import sample_sql_source_values
+
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_sql_src["records"]
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="snowflake",
     )
     if not target_cols:
         return WriteResult(
@@ -1113,40 +1418,76 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest_types if isinstance(live_dest_types, dict) else None,
         product="Snowflake",
+        dest_db="snowflake",
     )
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
 
-    # Partial Studio: defer Map + strict abort until live DDL rematerialize.
-    mapped_rows: list = []
+    # Partial Studio: defer Map + strict abort until live DDL is settled.
+    # CREATE types come from settled carriers — never a mapped-image sample.
     transform_errors: list[str] = []
     rejected_details: list = []
-    target_types: list[str] = []
-    rows_for_checksum: list = []
-    sparse_rows: list[tuple] = []
-    if not studio_err:
-        _batch = _sf_materialize_mapped_batch(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            dest_types=dest_types,
-            logical_types=logical_types,
-            policy=policy,
-            conflict_columns=conflict_columns,
-            write_mode=write_mode,
-            live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=dest_nullability,
-            allow_logical_fallback=True,
-        )
-        mapped_rows = _batch.mapped_rows
-        transform_errors = _batch.transform_errors
-        rejected_details = _batch.rejected_details
-        target_types = _batch.target_types
-        dest_types = _batch.dest_types
-        rows_for_checksum = _batch.rows_for_checksum
+    target_types = _sf_resolve_create_types(
+        target_cols,
+        dest_types,
+        logical_types,
+        allow_logical_fallback=True,
+        live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+    )
+    from connectors.sql_write_materialize import (
+        SqlWriteAccumulator,
+        ensure_sql_source_spool,
+    )
+
+    spool, close_spool = ensure_sql_source_spool(
+        headers=headers,
+        data_rows=data_rows,
+        records=_sql_src["records"],
+        mappings=mappings,
+        extra=_sql_extra,
+        source_spool=_sql_src.get("source_spool"),
+        spill_max=_sql_src.get("source_spill_max"),
+    )
+    source_row_count = int(getattr(spool, "row_count", 0) or 0)
+
+    def _cleanup_spool() -> None:
+        nonlocal close_spool
+        if not close_spool:
+            return
+        close_spool = False
+        try:
+            spool.close()
+        except Exception:
+            logger.debug("snowflake source spool close skipped", exc_info=True)
+
+    write_acc = SqlWriteAccumulator(
+        target_cols=target_cols,
+        dest_db_type="snowflake",
+        dest_types=dest_types if isinstance(dest_types, dict) else {},
+        dialect_label="Snowflake",
+    )
+    _sf_finish_kwargs = dict(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=dest_nullability,
+        allow_logical_fallback=True,
+        live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+        records=None,
+        source_spool=spool,
+        extra=_sql_extra,
+        materialize_batch=_sql_src["materialize_batch"],
+        target_types=target_types,
+        empty_cells_as_null=empty_cells_as_null,
+    )
 
     try:
         conflict = resolve_conflict_targets(conflict_columns, target_cols)
@@ -1162,17 +1503,8 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             warnings=transform_errors,
         )
-    # Within a single batch, the last occurrence of an upsert key wins.
-    if write_mode == "upsert" and conflict and mapped_rows:
-        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-        if DF_LSN_COL in target_cols:
-            mapped_rows = dedupe_rows_by_pk_and_lsn(
-                mapped_rows, conflict, target_cols
-            )
-        else:
-            mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
-        # Sparse bind waits until physical DDL overlay (inside the write cursor).
-    elif write_mode == "upsert" and conflict_columns and not conflict:
+    if write_mode == "upsert" and conflict_columns and not conflict:
+        _cleanup_spool()
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -1189,40 +1521,20 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
 
-    rejected_rows = _rejected_row_count(
-        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
-    )
-    coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-
-    if not studio_err:
-        _map_abort = reject_on_strict_policy(
-            policy, rejected_details, "Snowflake", transform_errors
-        )
-        if _map_abort:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=table_name,
-                target_schema=schema,
-                checksum="",
-                chunks_completed=0,
-                error=_map_abort
-                or f"Transform errors: {'; '.join(transform_errors[:3])}",
-                rejected_rows=rejected_rows,
-                warnings=transform_errors,
-                rejected_details=rejected_details,
-            )
+    rejected_rows = 0
+    coerced_null_rows = 0
 
     # Never stub local/fakesnow accounts when snowflake.connector is installed —
     # stub writes skip real load and break strict reconciliation (no read-back).
-    # Under partial Studio defer, empty mapped_rows must hit live rematerialize —
+    # Under partial Studio defer, empty mapped image must hit live rematerialize —
     # never stub an empty invent batch.
     if (
         stub_writes_allowed()
         and not _is_local_account(str(account or ""))
-        and not (studio_err and not mapped_rows)
+        and not studio_err
     ):
         if not create_table:
+            _cleanup_spool()
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -1237,11 +1549,12 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
             )
         rows, checksum, chunks = simulate_stub_write(
-            data_rows=mapped_rows,
+            data_rows=data_rows,
             table_name=table_name,
             target_schema=schema,
             on_checkpoint=on_checkpoint,
         )
+        _cleanup_spool()
         return WriteResult(
             ok=True,
             rows_written=rows,
@@ -1273,6 +1586,9 @@ def write_mapped_rows(
                 warehouse=warehouse,
                 connection_string=connection_string,
                 role=role,
+                private_key=private_key,
+                private_key_passphrase=password if private_key else "",
+                auth_mode=auth_mode,
             )
 
         with conn.cursor() as cur:
@@ -1294,20 +1610,18 @@ def write_mapped_rows(
                     if database.upper() == "SNOWFLAKE":
                         raise RuntimeError(
                             "The SNOWFLAKE database is read-only system data. "
-                            "Please specify a user database (for example, DATAFLOW) in the connector."
+                            "Please specify a user database (for example, ANALYTICS) in the connector."
                         )
-                    db_q = quote_sql_identifier(
+                use_snowflake_namespace(
+                    cur,
+                    database_q=quote_sql_identifier(
                         sanitize_identifier(database, preserve_case=True)
-                    )
-                    if create_table:
-                        cur.execute(f"CREATE DATABASE IF NOT EXISTS {db_q}")
-                    cur.execute(f"USE DATABASE {db_q}")
-                sch_q = quote_sql_identifier(
-                    sanitize_identifier(schema, preserve_case=True)
+                    ) if database else "",
+                    schema_q=quote_sql_identifier(
+                        sanitize_identifier(schema, preserve_case=True)
+                    ),
+                    create=create_table,
                 )
-                if create_table:
-                    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
-                cur.execute(f"USE SCHEMA {sch_q}")
 
             # Bind to the real stored table name (case) before DDL/DML.
             from connectors.sql_identifiers import snowflake_fold_identifier
@@ -1341,10 +1655,17 @@ def write_mapped_rows(
             table_name = (
                 found if found is not None else snowflake_fold_identifier(table_name)
             )
+            # One DESC probe — every column projection below resolves through
+            # snowflake_column_ref (M5: live stored name first, folded on
+            # create-new so unquoted reads resolve; unprobed stays raw).
+            physical_names = snowflake_physical_name_map(cur, schema, table_name)
 
             if create_table:
+                require_safe_type_stamps(target_types, context="snowflake CREATE TABLE column")
+                conflict_keys = {str(c).upper() for c in (conflict or [])}
                 col_defs = ", ".join(
-                    f"{quote_sql_identifier(c)} {t}"
+                    f"{snowflake_column_ref(c, physical_names)} {t}"
+                    + (" NOT NULL" if str(c).upper() in conflict_keys else "")
                     for c, t in zip(target_cols, target_types)
                 )
                 cur.execute(
@@ -1401,6 +1722,8 @@ def write_mapped_rows(
                     product="Snowflake",
                     materialize_stamp=sf_type,
                     col_in_existing=lambda col, ex: str(col).upper() in ex,
+                    dest_db="snowflake",
+                    column_types=column_types,
                 )
                 if add_err:
                     return WriteResult(
@@ -1418,10 +1741,25 @@ def write_mapped_rows(
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:
                         col_q = quote_sql_identifier(col)
+                        typ = require_safe_type_stamp(
+                            typ, context="snowflake ALTER TABLE ADD COLUMN"
+                        )
                         cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
-            total = len(mapped_rows)
-            if sparse_rows and not (write_mode == "upsert" and conflict):
+            physical = _fetch_snowflake_column_types(cur, schema, table_name)
+            from connectors.writer_common import (
+                rematerialize_live_dest_types,
+                require_physical_types_for_existing_table,
+            )
+
+            overlay_err = require_physical_types_for_existing_table(
+                table_existed=table_existed,
+                physical=physical,
+                dialect_label="Snowflake",
+                target_cols=target_cols,
+            )
+            if overlay_err:
+                _cleanup_spool()
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -1429,74 +1767,16 @@ def write_mapped_rows(
                     target_schema=schema,
                     checksum="",
                     chunks_completed=0,
-                    error=(
-                        "Snowflake sparse CDC rows require upsert MERGE with "
-                        "resolvable conflict_columns — refuse silent drop of "
-                        "omit-from-SET updates"
-                    ),
+                    error=overlay_err,
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
-            if write_mode == "upsert" and conflict:
-                load_method = "merge_batch"
-                written = 0
-                # Map may stamp VARCHAR while live column is DATE/NUMBER —
-                # overlay physical DDL before bind so empty refuses quarantine.
-                physical = _fetch_snowflake_column_types(cur, schema, table_name)
-                from connectors.writer_common import require_physical_types_for_existing_table
-
-                overlay_err = require_physical_types_for_existing_table(
-                    table_existed=table_existed,
-                    physical=physical,
-                    dialect_label="Snowflake",
-                    target_cols=target_cols,
+            if physical:
+                live_dest = rematerialize_live_dest_types(
+                    physical, list(target_cols or []), product="Snowflake"
                 )
-                if overlay_err:
-                    return WriteResult(
-                        ok=False,
-                        rows_written=0,
-                        table_name=table_name,
-                        target_schema=schema,
-                        checksum="",
-                        chunks_completed=0,
-                        error=overlay_err,
-                        rejected_details=rejected_details,
-                        warnings=transform_errors,
-                    )
-                _force_remap = bool(studio_err) and not mapped_rows
-                _re = _sf_rematerialize_if_physical_differs(
-                    physical=physical,
-                    dest_types=dest_types,
-                    target_cols=target_cols,
-                    headers=headers,
-                    data_rows=data_rows,
-                    mappings=mappings,
-                    column_types=column_types,
-                    logical_types=logical_types,
-                    policy=policy,
-                    conflict_columns=conflict,
-                    write_mode=write_mode,
-                    destination_column_nullability=dest_nullability,
-                    force_remap=_force_remap,
-                )
-                if _re is not None:
-                    dest_types = _re.dest_types
-                    mapped_rows = _re.mapped_rows
-                    transform_errors = _re.transform_errors
-                    rejected_details = _re.rejected_details
-                    target_types = _re.target_types
-                    rows_for_checksum = _re.rows_for_checksum
-                    if write_mode == "upsert" and conflict:
-                        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-                        if DF_LSN_COL in target_cols:
-                            mapped_rows = dedupe_rows_by_pk_and_lsn(
-                                mapped_rows, conflict, target_cols
-                            )
-                        else:
-                            mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
-                elif _force_remap:
-                    # Deferred Map under partial Studio — refuse empty invent
-                    # success when live carriers cannot be rebuilt (PG/MySQL parity).
+                if live_dest is None and (studio_err or table_existed):
+                    _cleanup_spool()
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -1512,27 +1792,36 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
+                if live_dest:
+                    dest_types = live_dest
+                    target_types = _sf_resolve_create_types(
+                        target_cols,
+                        dest_types,
+                        logical_types,
+                        allow_logical_fallback=False,
+                        live_dest_types=physical,
+                    )
+                    _sf_finish_kwargs["dest_types"] = dest_types
+                    _sf_finish_kwargs["allow_logical_fallback"] = False
+                    _sf_finish_kwargs["live_dest_types"] = physical
+                    _sf_finish_kwargs["target_types"] = target_types
+                    write_acc.dest_types = dest_types
                 else:
                     target_types = _overlay_snowflake_physical_bind_types(
                         target_cols, target_types, physical
                     )
-
-                if sparse_rows:
-                    sparse_rows = bind_sql_mapped_rows_with_quarantine(
-                        sparse_rows,
-                        target_cols,
-                        target_types,
-                        rejected_details,
-                        policy,
-                        engine="snowflake",
-                        dialect_label="Snowflake",
-                        mappings=mappings,
-                    )
-                # Dense bind runs in _bind_rows_for_snowflake with overlaid types.
-                _late_abort = reject_on_strict_policy(
-                    policy, rejected_details, "Snowflake", transform_errors
+                    _sf_finish_kwargs["target_types"] = target_types
+            if policy == "fail":
+                scan_acc, source_row_count, scanned_types = _sf_scan_finished_bundles(
+                    **_sf_finish_kwargs
                 )
+                if scanned_types:
+                    target_types = scanned_types
+                rejected_details = list(scan_acc.rejected_details)
+                transform_errors = list(scan_acc.transform_errors)
+                _late_abort = scan_acc.abort_error(policy)
                 if _late_abort:
+                    _cleanup_spool()
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -1544,143 +1833,133 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
-                if sparse_rows:
-                    from connectors.writer_common import row_has_missing_sentinel
-
-                    sparse_written, sparse_skipped, sparse_checksum = (
-                        _sf_apply_sparse_upsert(
+            collect_map_details = policy != "fail"
+            writing = True
+            chunk_idx = 0
+            if write_mode == "upsert" and conflict:
+                load_method = "merge_batch"
+                write_acc.conflict_columns = [c for c in conflict if c in target_cols]
+            for finished in iter_sf_finished_bundles(**_sf_finish_kwargs):
+                if collect_map_details:
+                    rejected_details.extend(finished.rejected_details)
+                    transform_errors.extend(finished.transform_errors)
+                if writing and reject_on_strict_policy(
+                    policy, rejected_details, "Snowflake", transform_errors
+                ):
+                    writing = False
+                    write_acc.stop_writing()
+                if writing:
+                    if finished.sparse_rows and not (
+                        write_mode == "upsert" and conflict
+                    ):
+                        _cleanup_spool()
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=schema,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                "Snowflake sparse CDC rows require upsert MERGE with "
+                                "resolvable conflict_columns — refuse silent drop of "
+                                "omit-from-SET updates"
+                            ),
+                            rejected_details=rejected_details,
+                            warnings=transform_errors,
+                        )
+                    if finished.sparse_rows and write_mode == "upsert" and conflict:
+                        sparse_bound = bind_sql_mapped_rows_with_quarantine(
+                            finished.sparse_rows,
+                            target_cols,
+                            target_types,
+                            rejected_details,
+                            policy,
+                            engine="snowflake",
+                            dialect_label="Snowflake",
+                            mappings=mappings,
+                            row_numbers=finished.sparse_row_numbers or None,
+                        )
+                        sparse_written, sparse_skipped, sparse_checksum = (
+                            _sf_apply_sparse_upsert(
+                                cur,
+                                table_name,
+                                target_cols,
+                                target_types,
+                                conflict,
+                                sparse_bound,
+                                rejected_details=rejected_details,
+                                policy=policy,
+                                row_numbers=(
+                                    list(
+                                        getattr(
+                                            finished, "sparse_row_numbers", None
+                                        )
+                                        or []
+                                    )
+                                    or None
+                                ),
+                                physical_names=physical_names,
+                            )
+                        )
+                        written += sparse_written
+                        rows_skipped += sparse_skipped
+                        write_acc.add_accepted(list(sparse_checksum))
+                    if write_mode == "upsert" and conflict:
+                        written += _merge_batch_via_temp(
                             cur,
                             table_name,
                             target_cols,
                             target_types,
+                            finished.dense_rows,
                             conflict,
-                            sparse_rows,
+                            prefer_copy=True,
+                            conn=conn,
                             rejected_details=rejected_details,
                             policy=policy,
+                            mappings=mappings,
+                            physical_names=physical_names,
                         )
+                        load_method = "merge_batch"
+                    else:
+                        load_method = _load_rows_into_table(
+                            cur,
+                            table_name,
+                            target_cols,
+                            target_types,
+                            finished.dense_rows,
+                            prefer_copy=True,
+                            conn=conn,
+                            rejected_details=rejected_details,
+                            policy=policy,
+                            mappings=mappings,
+                            physical_names=physical_names,
+                        )
+                        written += len(finished.dense_rows)
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
                     )
-                    written += sparse_written
-                    rows_skipped += sparse_skipped
-                    rows_for_checksum = [
-                        r for r in rows_for_checksum if not row_has_missing_sentinel(r)
-                    ] + list(sparse_checksum)
-                # Stage once (COPY when large enough) and MERGE the dense batch.
-                written += _merge_batch_via_temp(
-                    cur,
-                    table_name,
-                    target_cols,
-                    target_types,
-                    mapped_rows,
-                    conflict,
-                    prefer_copy=True,
-                    conn=conn,
-                    rejected_details=rejected_details,
-                    policy=policy,
-                    mappings=mappings,
-                )
-                if on_checkpoint:
-                    on_checkpoint(1, 1, written)
-            else:
-                # Prefer COPY INTO for insert / full_refresh when the batch is large enough.
-                # fakesnow does not support PUT/COPY — falls back to INSERT.
-                physical = _fetch_snowflake_column_types(cur, schema, table_name)
-                from connectors.writer_common import require_physical_types_for_existing_table
+                    write_acc.add_accepted(finished.dense_rows)
+                    chunk_idx += 1
+                    if on_checkpoint:
+                        on_checkpoint(chunk_idx, max(chunk_idx, 1), written)
+                del finished
+            chunks = chunk_idx
 
-                overlay_err = require_physical_types_for_existing_table(
-                    table_existed=table_existed,
-                    physical=physical,
-                    dialect_label="Snowflake",
-                    target_cols=target_cols,
-                )
-                if overlay_err:
-                    return WriteResult(
-                        ok=False,
-                        rows_written=0,
-                        table_name=table_name,
-                        target_schema=schema,
-                        checksum="",
-                        chunks_completed=0,
-                        error=overlay_err,
-                        rejected_details=rejected_details,
-                        warnings=transform_errors,
-                    )
-                _force_remap = bool(studio_err) and not mapped_rows
-                _re = _sf_rematerialize_if_physical_differs(
-                    physical=physical,
-                    dest_types=dest_types,
-                    target_cols=target_cols,
-                    headers=headers,
-                    data_rows=data_rows,
-                    mappings=mappings,
-                    column_types=column_types,
-                    logical_types=logical_types,
-                    policy=policy,
-                    conflict_columns=conflict_columns,
-                    write_mode=write_mode,
-                    destination_column_nullability=dest_nullability,
-                    force_remap=_force_remap,
-                )
-                if _re is not None:
-                    dest_types = _re.dest_types
-                    mapped_rows = _re.mapped_rows
-                    transform_errors = _re.transform_errors
-                    rejected_details = _re.rejected_details
-                    target_types = _re.target_types
-                    rows_for_checksum = _re.rows_for_checksum
-                elif _force_remap:
-                    return WriteResult(
-                        ok=False,
-                        rows_written=0,
-                        table_name=table_name,
-                        target_schema=schema,
-                        checksum="",
-                        chunks_completed=0,
-                        error=(
-                            "Snowflake live DDL incomplete for mapped columns — "
-                            "refuse Map VARCHAR rematerialize invent. Re-run "
-                            "destination schema introspect and retry."
-                        ),
-                        rejected_details=rejected_details,
-                        warnings=transform_errors,
-                    )
-                else:
-                    target_types = _overlay_snowflake_physical_bind_types(
-                        target_cols, target_types, physical
-                    )
-                _late_abort = reject_on_strict_policy(
-                    policy, rejected_details, "Snowflake", transform_errors
-                )
-                if _late_abort:
-                    return WriteResult(
-                        ok=False,
-                        rows_written=0,
-                        table_name=table_name,
-                        target_schema=schema,
-                        checksum="",
-                        chunks_completed=0,
-                        error=_late_abort,
-                        rejected_details=rejected_details,
-                        warnings=transform_errors,
-                    )
-                total = len(mapped_rows)
-                load_method = _load_rows_into_table(
-                    cur,
-                    table_name,
-                    target_cols,
-                    target_types,
-                    mapped_rows,
-                    prefer_copy=True,
-                    conn=conn,
-                    rejected_details=rejected_details,
-                    policy=policy,
-                    mappings=mappings,
-                )
-                written = total
-                if on_checkpoint:
-                    on_checkpoint(1, 1, written)
+        from connectors.sql_write_materialize import accounted_rejected_rows
 
+        rejected_rows = _rejected_row_count(
+            data_rows,
+            [()] * write_acc.accepted_row_count,
+            rejected_details,
+            policy,
+            source_row_count=source_row_count or None,
+            collapsed_duplicates=write_acc.collapsed_duplicate_rows,
+        )
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         _final_abort = reject_on_strict_policy(policy, rejected_details, "Snowflake")
         if _final_abort:
+            _cleanup_spool()
             return WriteResult(
                 ok=False,
                 rows_written=written,
@@ -1689,7 +1968,12 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks,
                 error=_final_abort,
-                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=len(data_rows),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
                 warnings=transform_errors,
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
@@ -1697,43 +1981,37 @@ def write_mapped_rows(
                 rows_skipped=rows_skipped,
             )
 
+        _cleanup_spool()
         return WriteResult(
             ok=True,
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
-            checksum=row_checksum(
-                rows_for_checksum,
-                target_cols,
-                dest_db_type="snowflake",
-                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
-                if target_types
-                else None,
-            ),
+            checksum=write_acc.digest(),
             chunks_completed=chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+            rejected_rows=accounted_rejected_rows(
+                rejected_rows,
+                source_count=len(data_rows),
+                written=written,
+                rows_skipped=rows_skipped,
+            ),
             warnings=transform_errors,
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             load_method=load_method,
             rows_skipped=rows_skipped,
+            meta=writer_meta_with_source_rows(None, source_row_count),
         )
     except Exception as exc:
+        cleanup = locals().get("_cleanup_spool")
+        if callable(cleanup):
+            cleanup()
         return WriteResult(
             ok=False,
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
-            checksum=row_checksum(
-                rows_for_checksum[:written] if written else [],
-                target_cols,
-                dest_db_type="snowflake",
-                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
-                if target_types
-                else None,
-            )
-            if written
-            else "",
+            checksum=write_acc.digest() if write_acc.accepted_row_count else "",
             chunks_completed=chunks if written else 0,
             error=_format_write_error(exc),
             rejected_rows=rejected_rows,
@@ -1743,6 +2021,9 @@ def write_mapped_rows(
             load_method=load_method,
         )
     finally:
+        cleanup = locals().get("_cleanup_spool")
+        if callable(cleanup):
+            cleanup()
         if close_connection and conn is not None:
             try:
                 conn.close()

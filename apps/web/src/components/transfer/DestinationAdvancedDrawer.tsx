@@ -1,10 +1,26 @@
+import { useEffect } from "react";
 import { Drawer } from "../ui/Drawer";
+import {
+  type AdvancedLocaleKind,
+  scrollAdvancedLocaleIntoView,
+} from "../../lib/validateHonestyControls";
 import { Button } from "../ui/Button";
 import { FilterBar } from "../ui/FilterBar";
 import { FilterTabs } from "../ui/FilterTabs";
 import { DtIcon } from "../DtIcon";
 import type { StreamFieldContract } from "../../lib/streamContracts";
 import { resolveStreamFields } from "../../lib/streamContracts";
+import {
+  MIRROR_SOFT_DELETE_TEXT,
+  mirrorDeleteText,
+  type MirrorDeleteMode,
+} from "../../lib/mirrorDeleteMode";
+import { destStreamPlaceholder } from "../../lib/sourceReadMode";
+import {
+  FOREIGN_KEYS_MODE_OPTIONS,
+  normalizeForeignKeysMode,
+  type ForeignKeysMode,
+} from "../../lib/foreignKeysMode";
 import {
   CURSOR_SEMANTICS,
   CURSOR_SEMANTICS_LABELS,
@@ -25,7 +41,8 @@ export type DestSchemaPolicy =
   | "propagate_columns"
   | "propagate_all"
   | "pause_on_change"
-  | "type_locked";
+  | "type_locked"
+  | "block_all";
 
 export type DestValidationMode =
   | "balanced"
@@ -35,6 +52,7 @@ export type DestValidationMode =
   | "discovery"
   | "audit";
 export type DestDateLocale = "" | "DMY" | "MDY";
+export type DestNumberLocale = "" | "US" | "EU";
 
 export interface SyncModeOption {
   id: DestSyncMode;
@@ -61,6 +79,12 @@ export interface DateLocaleOption {
   detail: string;
 }
 
+export interface NumberLocaleOption {
+  id: DestNumberLocale;
+  label: string;
+  detail: string;
+}
+
 interface DestinationAdvancedDrawerProps {
   open: boolean;
   onClose: () => void;
@@ -68,10 +92,12 @@ interface DestinationAdvancedDrawerProps {
   schemaPolicies: SchemaPolicyOption[];
   validationModes: ValidationModeOption[];
   dateLocales: DateLocaleOption[];
+  numberLocales: NumberLocaleOption[];
   syncMode: DestSyncMode;
   schemaPolicy: DestSchemaPolicy;
   validationMode: DestValidationMode;
   dateLocale: DestDateLocale;
+  numberLocale: DestNumberLocale;
   backfillNewFields: boolean;
   /** Stream names (one row each when multi-stream). */
   streamNames: string[];
@@ -96,10 +122,13 @@ interface DestinationAdvancedDrawerProps {
   onSchemaPolicyChange: (policy: DestSchemaPolicy) => void;
   onValidationModeChange: (mode: DestValidationMode) => void;
   onDateLocaleChange: (locale: DestDateLocale) => void;
+  onNumberLocaleChange: (locale: DestNumberLocale) => void;
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
   onStreamCursorSemanticsChange: (stream: string, value: string) => void;
   onStreamPrimaryKeyChange: (stream: string, value: string) => void;
+  /** Per-stream destination CALL or INSERT/MERGE. Source extracts live on the Source step. */
+  onStreamDestProcedureChange?: (stream: string, value: string) => void;
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
   suggestedPrimaryKey?: string;
@@ -110,6 +139,12 @@ interface DestinationAdvancedDrawerProps {
   /** Debezium-compatible snapshot mode (CDC). */
   snapshotMode?: string;
   onSnapshotModeChange?: (mode: string) => void;
+  /** Mirror: soft delete (default) or an explicit hard DELETE of missing keys. */
+  mirrorDeleteMode?: MirrorDeleteMode;
+  onMirrorDeleteModeChange?: (mode: MirrorDeleteMode) => void;
+  /** Source foreign keys on this route (round 11): carry | guard | ignore. */
+  foreignKeysMode?: ForeignKeysMode;
+  onForeignKeysModeChange?: (mode: ForeignKeysMode) => void;
   /** Priority-first sync: sort source by this column before write. */
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
@@ -118,6 +153,11 @@ interface DestinationAdvancedDrawerProps {
   onPriorityColumnChange?: (value: string) => void;
   onPriorityDirectionChange?: (value: "asc" | "desc") => void;
   onRowLimitChange?: (value: number) => void;
+  /** CDC dest-owned watermark EOS (opt-in). Default at_least_once. */
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
+  onDeliveryGuaranteeChange?: (value: "at_least_once" | "exactly_once") => void;
+  /** True when the destination writer can share one dest transaction. */
+  exactlyOnceWired?: boolean;
   /** CDC → append-only dest opt-in (duplicates on redelivery). */
   allowAppendOnly?: boolean;
   onAllowAppendOnlyChange?: (value: boolean) => void;
@@ -132,22 +172,53 @@ interface DestinationAdvancedDrawerProps {
   /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
   writeViaStaging?: boolean;
   onWriteViaStagingChange?: (value: boolean) => void;
+  /**
+   * Destination-aware sync caption (SSOT: syncModeHonestyLine).
+   * Full append into a leftover empty table must not read as CREATE.
+   */
+  syncHonestyLine?: string;
+  /** Schema-policy caption (SSOT: schemaPolicyHonestyLine). */
+  schemaHonestyLine?: string;
   /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
   writeViaStagingSupported?: boolean;
+  /** Capture-once journal: keep the extracted source for replay to other destinations. */
+  captureJournal?: boolean;
+  onCaptureJournalChange?: (value: boolean) => void;
+  /** Empty when capture is available; otherwise why this run cannot be journaled. */
+  captureJournalBlockedReason?: string;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
   showVectorOptions?: boolean;
+  showPgvectorOptions?: boolean;
   vectorContentColumn?: string;
   vectorEmbeddingColumn?: string;
   vectorMetadataColumns?: string;
   vectorEmbeddingModel?: string;
   vectorChunkSize?: number;
   vectorChunkOverlap?: number;
+  vectorChunkStrategy?: "recursive" | "fixed" | "token" | "markdown";
+  vectorChunkUnit?: "chars" | "tokens";
+  vectorTextTemplate?: string;
+  vectorSkipUnchanged?: boolean;
+  vectorIndex?: "none" | "hnsw";
+  vectorStorage?: "vector" | "halfvec";
+  vectorEmbeddingApiKey?: string;
+  vectorEmbeddingBaseUrl?: string;
+  vectorEmbeddingEndpoint?: string;
   onVectorContentColumnChange?: (value: string) => void;
   onVectorEmbeddingColumnChange?: (value: string) => void;
   onVectorMetadataColumnsChange?: (value: string) => void;
   onVectorEmbeddingModelChange?: (value: string) => void;
   onVectorChunkSizeChange?: (value: number) => void;
   onVectorChunkOverlapChange?: (value: number) => void;
+  onVectorChunkStrategyChange?: (value: "recursive" | "fixed" | "token" | "markdown") => void;
+  onVectorChunkUnitChange?: (value: "chars" | "tokens") => void;
+  onVectorTextTemplateChange?: (value: string) => void;
+  onVectorSkipUnchangedChange?: (value: boolean) => void;
+  onVectorIndexChange?: (value: "none" | "hnsw") => void;
+  onVectorStorageChange?: (value: "vector" | "halfvec") => void;
+  onVectorEmbeddingApiKeyChange?: (value: string) => void;
+  onVectorEmbeddingBaseUrlChange?: (value: string) => void;
+  onVectorEmbeddingEndpointChange?: (value: string) => void;
   /** Semantic routing plan (embed / metadata / exclude_pii / skip). */
   vectorRoutingFields?: Array<{
     column: string;
@@ -174,6 +245,8 @@ interface DestinationAdvancedDrawerProps {
   embeddingCacheBusy?: boolean;
   onRefreshEmbeddingCache?: () => void;
   onClearEmbeddingCache?: () => void;
+  /** Validate Set date/number locale — scroll that control into view after open. */
+  localeFocus?: AdvancedLocaleKind | null;
 }
 
 /**
@@ -187,10 +260,12 @@ export function DestinationAdvancedDrawer({
   schemaPolicies,
   validationModes,
   dateLocales,
+  numberLocales,
   syncMode,
   schemaPolicy,
   validationMode,
   dateLocale,
+  numberLocale,
   backfillNewFields,
   streamNames,
   streamFields,
@@ -210,22 +285,31 @@ export function DestinationAdvancedDrawer({
   onSchemaPolicyChange,
   onValidationModeChange,
   onDateLocaleChange,
+  onNumberLocaleChange,
   onBackfillChange,
   onStreamCursorChange,
   onStreamCursorSemanticsChange,
   onStreamPrimaryKeyChange,
+  onStreamDestProcedureChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
   uniqueKeySuggestions = [],
   compositeKeySuggestions = [],
   snapshotMode = "initial",
   onSnapshotModeChange,
+  mirrorDeleteMode = "soft",
+  onMirrorDeleteModeChange,
+  foreignKeysMode = "carry",
+  onForeignKeysModeChange,
   priorityColumn = "",
   priorityDirection = "desc",
   rowLimit = 0,
   onPriorityColumnChange,
   onPriorityDirectionChange,
   onRowLimitChange,
+  deliveryGuarantee = "at_least_once",
+  onDeliveryGuaranteeChange,
+  exactlyOnceWired = false,
   allowAppendOnly = false,
   onAllowAppendOnlyChange,
   multiSubnetFailover = false,
@@ -237,19 +321,43 @@ export function DestinationAdvancedDrawer({
   writeViaStaging = false,
   onWriteViaStagingChange,
   writeViaStagingSupported = true,
+  captureJournal = false,
+  onCaptureJournalChange,
+  captureJournalBlockedReason = "",
+  syncHonestyLine = "",
+  schemaHonestyLine = "",
   showVectorOptions = false,
+  showPgvectorOptions = false,
   vectorContentColumn = "",
   vectorEmbeddingColumn = "",
   vectorMetadataColumns = "",
   vectorEmbeddingModel = "",
   vectorChunkSize = 512,
   vectorChunkOverlap = 50,
+  vectorChunkStrategy = "recursive",
+  vectorChunkUnit = "chars",
+  vectorTextTemplate = "",
+  vectorSkipUnchanged = true,
+  vectorIndex = "none",
+  vectorStorage = "vector",
+  vectorEmbeddingApiKey = "",
+  vectorEmbeddingBaseUrl = "",
+  vectorEmbeddingEndpoint = "",
   onVectorContentColumnChange,
   onVectorEmbeddingColumnChange,
   onVectorMetadataColumnsChange,
   onVectorEmbeddingModelChange,
   onVectorChunkSizeChange,
   onVectorChunkOverlapChange,
+  onVectorChunkStrategyChange,
+  onVectorChunkUnitChange,
+  onVectorTextTemplateChange,
+  onVectorSkipUnchangedChange,
+  onVectorIndexChange,
+  onVectorStorageChange,
+  onVectorEmbeddingApiKeyChange,
+  onVectorEmbeddingBaseUrlChange,
+  onVectorEmbeddingEndpointChange,
   vectorRoutingFields = [],
   vectorRoutingLoading = false,
   vectorExcludePiiColumns = "",
@@ -260,9 +368,18 @@ export function DestinationAdvancedDrawer({
   embeddingCacheBusy = false,
   onRefreshEmbeddingCache,
   onClearEmbeddingCache,
+  localeFocus = null,
 }: DestinationAdvancedDrawerProps) {
   const names = streamNames.length > 0 ? streamNames : ["source_stream"];
   const activeMode = syncModes.find((m) => m.id === syncMode);
+
+  useEffect(() => {
+    if (!open || !localeFocus) return;
+    const timer = window.setTimeout(() => {
+      scrollAdvancedLocaleIntoView(localeFocus);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [open, localeFocus]);
 
   return (
     <Drawer
@@ -303,10 +420,10 @@ export function DestinationAdvancedDrawer({
             )}
             {syncMode === "full_refresh_append" && (
               <p>
-                <strong>Load more into an existing table:</strong> keeps every destination row and
-                inserts the full source snapshot again (100k existing + 100k file → 200k). Duplicate
-                primary keys will fail or quarantine — use Incremental deduped / Upsert when keys
-                may collide.
+                <strong>Full append:</strong>{" "}
+                {syncHonestyLine
+                  || "Keep existing rows; insert the full snapshot again. Leftover empty tables still exist."}
+                {" "}Duplicate primary keys will fail or quarantine — use Incremental deduped when keys may collide.
               </p>
             )}
             {syncMode === "incremental_append" && (
@@ -326,7 +443,9 @@ export function DestinationAdvancedDrawer({
               <p>Change delivery is <strong>at-least-once upsert</strong>. Exactly-once and at-most-once are not claimed.</p>
             )}
             {syncMode === "mirror" && (
-              <p>Missing source keys are soft-deleted on the destination (not hard-deleted).</p>
+              <p>
+                {mirrorDeleteText(mirrorDeleteMode)} Writer acknowledgement is not active population.
+              </p>
             )}
           </aside>
         )}
@@ -364,6 +483,9 @@ export function DestinationAdvancedDrawer({
                 </button>
               ))}
             </div>
+            {schemaHonestyLine ? (
+              <p className="df2-label-hint" role="status">{schemaHonestyLine}</p>
+            ) : null}
           </div>
         </div>
 
@@ -422,6 +544,48 @@ export function DestinationAdvancedDrawer({
           </div>
         )}
 
+        {syncMode === "mirror" && (
+          <div className="df2-field df2-adv-mirror-delete-field">
+            <label className="df2-label" htmlFor="df2-adv-mirror-delete">Missing source keys</label>
+            <select
+              id="df2-adv-mirror-delete"
+              className="df2-input df2-select"
+              value={mirrorDeleteMode}
+              onChange={(e) => onMirrorDeleteModeChange?.(e.target.value === "hard" ? "hard" : "soft")}
+              disabled={!onMirrorDeleteModeChange}
+            >
+              <option value="soft">Soft delete — flag _deleted, keep the row (default)</option>
+              <option value="hard">Hard delete — physically DELETE the destination row</option>
+            </select>
+            {mirrorDeleteMode === "hard" ? (
+              <p className="df2-adv-mirror-delete-warning" role="alert">
+                {mirrorDeleteText("hard")}
+              </p>
+            ) : (
+              <p className="df2-label-hint">{MIRROR_SOFT_DELETE_TEXT}</p>
+            )}
+          </div>
+        )}
+
+        <div className="df2-field df2-adv-foreign-keys-field">
+          <label className="df2-label" htmlFor="df2-adv-foreign-keys">Foreign keys</label>
+          <select
+            id="df2-adv-foreign-keys"
+            className="df2-input df2-select"
+            value={foreignKeysMode}
+            onChange={(e) => onForeignKeysModeChange?.(normalizeForeignKeysMode(e.target.value))}
+            disabled={!onForeignKeysModeChange}
+            aria-describedby="df2-adv-foreign-keys-hint"
+          >
+            {FOREIGN_KEYS_MODE_OPTIONS.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
+            ))}
+          </select>
+          <p className="df2-label-hint" id="df2-adv-foreign-keys-hint">
+            {FOREIGN_KEYS_MODE_OPTIONS.find((o) => o.id === foreignKeysMode)?.detail}
+          </p>
+        </div>
+
         {syncMode === "cdc" && (
           <div className="df2-field df2-adv-snapshot-field">
             <label className="df2-label" htmlFor="df2-adv-snapshot-mode">CDC snapshot mode</label>
@@ -438,16 +602,45 @@ export function DestinationAdvancedDrawer({
               <option value="initial_only">initial_only — snapshot then stop</option>
               <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
             </select>
+            <label className="df2-label" htmlFor="df2-adv-delivery" style={{ marginTop: "0.75rem" }}>
+              CDC delivery guarantee
+            </label>
+            <select
+              id="df2-adv-delivery"
+              className="df2-input df2-select"
+              value={deliveryGuarantee}
+              onChange={(e) => {
+                const next = e.target.value === "exactly_once" && exactlyOnceWired
+                  ? "exactly_once"
+                  : "at_least_once";
+                onDeliveryGuaranteeChange?.(next);
+                if (next === "exactly_once" && allowAppendOnly) {
+                  onAllowAppendOnlyChange?.(false);
+                }
+              }}
+              disabled={!onDeliveryGuaranteeChange}
+            >
+              <option value="at_least_once">at_least_once — default upsert (primary key + change-log position)</option>
+              <option value="exactly_once" disabled={!exactlyOnceWired}>
+                {exactlyOnceWired
+                  ? "exactly_once — dest-owned watermark + shared-log bundle (opt-in)"
+                  : "exactly_once — not available (this destination is not transactional)"}
+              </option>
+            </select>
             <small className="df2-label-hint">
-              Delivery guarantee is fixed to <strong>at_least_once</strong> (API field{" "}
-              <code>delivery_guarantee</code>). Exactly-once and at-most-once are refused.
-              Prefer PK upsert / <code>_df_lsn</code> guards — append-only opt-in below allows duplicates on redelivery.
+              Default stays <strong>at_least_once</strong>. Exactly-once commits apply and a dest
+              watermark in one transaction
+              {exactlyOnceWired
+                ? " on this destination. Dest LSN is source of truth on resume; a stolen-lease writer cannot commit."
+                : " — this destination is not transactional and fails closed"}
+              {" "}At-most-once is not offered. Append-only below is incompatible with exactly-once.
             </small>
             {onAllowAppendOnlyChange && (
               <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>
                 <input
                   type="checkbox"
                   checked={allowAppendOnly}
+                  disabled={deliveryGuarantee === "exactly_once"}
                   onChange={(e) => onAllowAppendOnlyChange(e.target.checked)}
                 />
                 <span>
@@ -507,8 +700,9 @@ export function DestinationAdvancedDrawer({
 
         <div className="df2-policy-toolbar">
           <div className="df2-field">
-            <label className="df2-label">Date locale</label>
+            <label className="df2-label" htmlFor="df2-adv-date-locale">Date locale</label>
             <select
+              id="df2-adv-date-locale"
               className="df2-select"
               value={dateLocale}
               onChange={(e) => onDateLocaleChange(e.target.value as DestDateLocale)}
@@ -521,6 +715,23 @@ export function DestinationAdvancedDrawer({
               ))}
             </select>
             <small className="df2-label-hint">Auto infers from unambiguous rows. Set DMY or MDY for all-ambiguous samples.</small>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="df2-adv-number-locale">Number locale</label>
+            <select
+              id="df2-adv-number-locale"
+              className="df2-select"
+              value={numberLocale}
+              onChange={(e) => onNumberLocaleChange(e.target.value as DestNumberLocale)}
+              title="How to interpret 1,234 versus 1.234"
+            >
+              {numberLocales.map((loc) => (
+                <option key={loc.id || "auto"} value={loc.id} title={loc.detail}>
+                  {loc.label}
+                </option>
+              ))}
+            </select>
+            <small className="df2-label-hint">Auto will not guess a lone 1,234. Set US or EU, or use $ / € on the cell.</small>
           </div>
           <div className="df2-field">
             <label className="df2-label">Validation</label>
@@ -562,7 +773,24 @@ export function DestinationAdvancedDrawer({
                 <small>
                   {writeViaStagingSupported === false
                     ? "Unavailable for this destination — SQL engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."
-                    : "Load into {table}_df_staging first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
+                    : "Load into a staging table next to the destination first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
+                </small>
+              </span>
+            </label>
+          )}
+          {onCaptureJournalChange && (
+            <label className={`df2-policy-toggle${captureJournalBlockedReason ? " is-disabled" : ""}`}>
+              <input
+                type="checkbox"
+                checked={Boolean(captureJournal) && !captureJournalBlockedReason}
+                disabled={Boolean(captureJournalBlockedReason)}
+                onChange={(e) => onCaptureJournalChange(e.target.checked)}
+              />
+              <span>
+                <strong>Capture source journal</strong>
+                <small>
+                  {captureJournalBlockedReason
+                    || "Keep the rows this run extracts (SHA-256 pinned) so other destinations or a re-backfill replay them without reading the source again. Each replay is re-mapped, re-validated and re-verified."}
                 </small>
               </span>
             </label>
@@ -576,8 +804,7 @@ export function DestinationAdvancedDrawer({
               <span>Chunk → embed → upsert (at-least-once)</span>
             </div>
             <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
-              Requires <code>sentence-transformers</code> locally or an OpenAI model +{" "}
-              <code>OPENAI_API_KEY</code>. Precomputed vectors skip re-embedding when an embedding
+              Precomputed vectors skip re-embedding when an embedding
               column is set. PDF/DOCX/HTML uploads arrive as pre-chunked rows with{" "}
               <code>page</code>/<code>heading</code> provenance — content column should be{" "}
               <code>content</code>. Semantic routing excludes PII from embed content and metadata.
@@ -666,7 +893,7 @@ export function DestinationAdvancedDrawer({
               />
             </div>
             <div className="df2-field">
-              <label className="df2-label" htmlFor="df2-vector-model">Embedding model</label>
+              <label className="df2-label" htmlFor="df2-vector-model">Embedding provider / model</label>
               <input
                 id="df2-vector-model"
                 className="df2-input"
@@ -674,7 +901,47 @@ export function DestinationAdvancedDrawer({
                 value={vectorEmbeddingModel}
                 onChange={(e) => onVectorEmbeddingModelChange?.(e.target.value)}
               />
+              <small className="df2-label-hint">
+                Prefixes: sentence-transformers/, hash/, deterministic/, openai/, text-embedding-,
+                azure/, openai-compatible/, cohere/, bedrock/.
+              </small>
             </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-vector-api-key">Embedding API key</label>
+              <input
+                id="df2-vector-api-key"
+                className="df2-input"
+                type="password"
+                autoComplete="new-password"
+                value={vectorEmbeddingApiKey}
+                onChange={(e) => onVectorEmbeddingApiKeyChange?.(e.target.value)}
+              />
+              <small className="df2-label-hint">Write-only; this key is not prefilled or echoed back.</small>
+            </div>
+            {vectorEmbeddingModel.startsWith("openai-compatible/") && (
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="df2-vector-base-url">Embedding base URL</label>
+                <input
+                  id="df2-vector-base-url"
+                  className="df2-input"
+                  type="url"
+                  value={vectorEmbeddingBaseUrl}
+                  onChange={(e) => onVectorEmbeddingBaseUrlChange?.(e.target.value)}
+                />
+              </div>
+            )}
+            {vectorEmbeddingModel.startsWith("azure/") && (
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="df2-vector-endpoint">Azure embedding endpoint</label>
+                <input
+                  id="df2-vector-endpoint"
+                  className="df2-input"
+                  type="url"
+                  value={vectorEmbeddingEndpoint}
+                  onChange={(e) => onVectorEmbeddingEndpointChange?.(e.target.value)}
+                />
+              </div>
+            )}
             <div className="df2-policy-toolbar">
               <div className="df2-field">
                 <label className="df2-label" htmlFor="df2-vector-chunk">Chunk size</label>
@@ -701,6 +968,96 @@ export function DestinationAdvancedDrawer({
                 />
               </div>
             </div>
+            <div className="df2-policy-toolbar">
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="df2-vector-chunk-strategy">Chunk strategy</label>
+                <select
+                  id="df2-vector-chunk-strategy"
+                  className="df2-input"
+                  value={vectorChunkStrategy}
+                  onChange={(e) => {
+                    const strategy = e.target.value as typeof vectorChunkStrategy;
+                    onVectorChunkStrategyChange?.(strategy);
+                    if (strategy === "token") onVectorChunkUnitChange?.("tokens");
+                  }}
+                >
+                  <option value="recursive">Recursive (default)</option>
+                  <option value="fixed">Fixed windows</option>
+                  <option value="token">Token</option>
+                  <option value="markdown">Markdown sections</option>
+                </select>
+              </div>
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="df2-vector-chunk-unit">Chunk unit</label>
+                <select
+                  id="df2-vector-chunk-unit"
+                  className="df2-input"
+                  value={vectorChunkUnit}
+                  onChange={(e) => onVectorChunkUnitChange?.(e.target.value as typeof vectorChunkUnit)}
+                >
+                  <option value="chars">Characters</option>
+                  <option value="tokens">Tokens</option>
+                </select>
+              </div>
+            </div>
+            {vectorChunkStrategy === "token" && (
+              <small className="df2-label-hint">
+                Token chunking requires tiktoken; no character-estimate fallback is used.
+              </small>
+            )}
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-vector-template">Record text template</label>
+              <textarea
+                id="df2-vector-template"
+                className="df2-input"
+                rows={3}
+                placeholder="{title}: {body}"
+                value={vectorTextTemplate}
+                onChange={(e) => onVectorTextTemplateChange?.(e.target.value)}
+              />
+              <small className="df2-label-hint">
+                Use plain mapped field names; excluded PII fields cannot be referenced.
+              </small>
+            </div>
+            <label className="df2-policy-toggle" style={{ marginTop: 10 }}>
+              <input
+                type="checkbox"
+                checked={vectorSkipUnchanged}
+                onChange={(e) => onVectorSkipUnchangedChange?.(e.target.checked)}
+              />
+              <span><strong>Skip unchanged documents</strong></span>
+            </label>
+            {showPgvectorOptions && (
+              <div className="df2-policy-toolbar">
+                <div className="df2-field">
+                  <label className="df2-label" htmlFor="df2-vector-index">Vector index</label>
+                  <select
+                    id="df2-vector-index"
+                    className="df2-input"
+                    value={vectorIndex}
+                    onChange={(e) => onVectorIndexChange?.(e.target.value as typeof vectorIndex)}
+                  >
+                    <option value="none">None (default)</option>
+                    <option value="hnsw">HNSW</option>
+                  </select>
+                </div>
+                <div className="df2-field">
+                  <label className="df2-label" htmlFor="df2-vector-storage">Vector storage</label>
+                  <select
+                    id="df2-vector-storage"
+                    className="df2-input"
+                    value={vectorStorage}
+                    onChange={(e) => onVectorStorageChange?.(e.target.value as typeof vectorStorage)}
+                  >
+                    <option value="vector">vector (default)</option>
+                    <option value="halfvec">halfvec</option>
+                  </select>
+                </div>
+              </div>
+            )}
+            <p className="df2-label-hint" style={{ margin: "8px 0 0" }}>
+              Changing model/chunking on an existing collection is refused; use a new collection or full refresh.
+            </p>
             {onVectorDurableCacheChange && (
               <label className="df2-policy-toggle" style={{ marginTop: 12 }}>
                 <input
@@ -776,7 +1133,10 @@ export function DestinationAdvancedDrawer({
           </p>
           {names.length > 1 && (
             <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
-              Each stream keeps its own cursor and primary key. Sync mode and schema policy apply to all streams.
+              Each stream keeps its own cursor and primary key. The source extract for
+              each table is on the Source step. A destination CALL or INSERT/MERGE
+              for this stream is below — it is not replayed onto the others.
+              Sync mode and schema policy apply to all streams.
             </p>
           )}
           <div className="df2-stream-table-wrap">
@@ -820,7 +1180,7 @@ export function DestinationAdvancedDrawer({
                       || semantics.status === "block");
                   return (
                     <tr key={streamName}>
-                      <td>
+                      <td data-label="Stream">
                         <label className="df2-stream-name">
                           <input type="checkbox" checked readOnly aria-label={`${streamName} selected`} />
                           <span>
@@ -831,8 +1191,8 @@ export function DestinationAdvancedDrawer({
                           </span>
                         </label>
                       </td>
-                      <td>{syncModeLabel}</td>
-                      <td>
+                      <td data-label="Mode">{syncModeLabel}</td>
+                      <td data-label="Cursor">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={requiresCursor && fields.cursorField && streamCols.includes(fields.cursorField)
@@ -850,7 +1210,7 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Cursor means">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.cursorSemantics || ""}
@@ -869,7 +1229,7 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Primary key">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
@@ -889,8 +1249,8 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>{schemaPolicyLabel}</td>
-                      <td>
+                      <td data-label="Policy">{schemaPolicyLabel}</td>
+                      <td data-label="Status">
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
                           {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
@@ -907,13 +1267,47 @@ export function DestinationAdvancedDrawer({
               </tbody>
             </table>
           </div>
+          {names.length > 1 && onStreamDestProcedureChange && (
+            <div className="df2-stream-procedures">
+              <p className="df2-label-hint">
+                Optional. Leave blank to write the table. One CALL, or one
+                INSERT/MERGE/UPDATE, runs once per row of this stream. :name
+                binds to the column of the same name, and a missing column
+                quarantines that row. CDC, SCD2, and mirror refuse it — it is
+                not a table identity.
+              </p>
+              {names.map((streamName) => {
+                const fields = resolveStreamFields(
+                  streamName,
+                  streamFields,
+                  defaultCursor,
+                  defaultPrimaryKey,
+                  defaultCursorSemantics,
+                );
+                return (
+                  <label className="df2-label" htmlFor={`dst-proc-${streamName}`} key={`proc-${streamName}`}>
+                    {streamName} destination
+                    <textarea
+                      id={`dst-proc-${streamName}`}
+                      className="df2-input"
+                      rows={2}
+                      spellCheck={false}
+                      value={fields.destProcedure || ""}
+                      placeholder={destStreamPlaceholder(streamName)}
+                      onChange={(e) => onStreamDestProcedureChange(streamName, e.target.value)}
+                    />
+                  </label>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {(syncMode === "scd2" || syncMode === "mirror") && (
           <p className="df2-label-hint" style={{ margin: "12px 0 0" }}>
             {syncMode === "scd2"
               ? "SCD Type 2 requires a primary key on each stream to version rows (valid-from / valid-to)."
-              : "Mirror sync requires a primary key on each stream to detect and soft-delete rows missing from the source."}
+              : `Mirror sync requires a primary key on each stream. ${mirrorDeleteText(mirrorDeleteMode)}`}
             {streamNeedsReview ? " Select a primary key above before running." : ""}
           </p>
         )}

@@ -11,7 +11,8 @@ import logging
 import math
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
@@ -19,22 +20,11 @@ from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connect
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 _DEFAULT_SAMPLE = 25
 _MAX_SAMPLE = 100
-_MAX_QUERY_ROWS = 200
+_MAX_QUERY_ROWS = 10_000
 # Name resolution reads the inventory to decide whether a table exists, so it
 # asks for far more than a chat reply would ever print. Enterprise schemas with
 # thousands of objects are ordinary.
 _RESOLVE_INVENTORY_LIMIT = 100_000
-_BOOL_TRUE = {"true", "t", "yes", "y", "1"}
-_BOOL_FALSE = {"false", "f", "no", "n", "0"}
-_DATE_HINTS = (
-    "%Y-%m-%d",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%f",
-    "%Y-%m-%dT%H:%M:%SZ",
-    "%m/%d/%Y",
-    "%d/%m/%Y",
-)
 _MISSING_TABLE_RE = re.compile(
     r"(?:undefinedtable|does not exist|doesn't exist|unknown relation|"
     r"no such table|invalid object name|relation\s+[\"'].+[\"']\s+does not exist|"
@@ -58,6 +48,17 @@ def _object_names_from_list(listed: Any) -> list[str]:
     return names
 
 
+def _is_relational_connector(conn: dict[str, Any]) -> bool:
+    """True for SQL connectors, where a dot separates schema from table.
+
+    File, search and stream connectors name objects like ``orders.csv``.
+    """
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    return bool(ctype) and resolve_driver_type(ctype) not in _BATCH_SAMPLE_DRIVERS
+
+
 def resolve_table_name(
     conn: dict[str, Any],
     table: str,
@@ -74,6 +75,15 @@ def resolve_table_name(
     wanted = (table or "").strip()
     if not wanted:
         return None, None, []
+    # ``file.xlsx#Data`` names a sheet. Fuzzy-matching the whole string to
+    # ``file.xlsx`` dropped the sheet and read a different object.
+    sheet = ""
+    if "#" in wanted:
+        wanted, sheet = wanted.split("#", 1)
+        wanted = wanted.strip()
+        sheet = sheet.strip()
+        if not wanted:
+            return None, None, []
     # Resolution is not a display concern: ask for the whole inventory rather
     # than the page size a chat reply would render.
     listed = list_connector_objects(
@@ -83,20 +93,34 @@ def resolve_table_name(
     )
     names = _object_names_from_list(listed)
     if not names:
-        return wanted, None, []
+        shown = f"{wanted}#{sheet}" if sheet else wanted
+        return shown, None, []
     truncated = bool((getattr(listed, "output", None) or {}).get("truncated"))
     lower_map = {n.lower(): n for n in names}
+    def _with_sheet(name: str) -> str:
+        return f"{name}#{sheet}" if sheet else name
+
     if wanted in names:
-        return wanted, None, names
+        return _with_sheet(wanted), None, names
     if wanted.lower() in lower_map:
         resolved = lower_map[wanted.lower()]
         note = f"Using `{resolved}` (matched case-insensitively)." if resolved != wanted else None
-        return resolved, note, names
+        return _with_sheet(resolved), note, names
+    if "." in wanted and not sheet and _is_relational_connector(conn):
+        # D92 — ``schema.table`` is an exact address. Matching its bare table
+        # (or a fuzzy neighbour) to a same-named object in another schema
+        # sampled a decoy; an inventory that lists only the default schema is
+        # not evidence the qualified table is absent, so the read decides.
+        return wanted, None, names
     # Unqualified vs schema.table
     bare = wanted.split(".")[-1].lower()
     bare_hits = [n for n in names if n.split(".")[-1].lower() == bare]
     if len(bare_hits) == 1:
-        return bare_hits[0], f"Using `{bare_hits[0]}`.", names
+        return _with_sheet(bare_hits[0]), f"Using `{bare_hits[0]}`.", names
+    # A named sheet that did not match a real object is not a typo of another
+    # file. Substituting the closest workbook would drop the sheet.
+    if sheet:
+        return None, None, names[:12]
     close = difflib.get_close_matches(wanted.lower(), list(lower_map.keys()), n=5, cutoff=0.72)
     if len(close) == 1:
         resolved = lower_map[close[0]]
@@ -127,72 +151,158 @@ def _quote_ident(name: str, dialect: str) -> str:
     return ".".join(f'"{p}"' for p in parts)
 
 
+# Document / object engines. Their readers live in batch_readers. Sending them
+# through ``SELECT … LIMIT`` makes preflight report "no source sample" for
+# every transfer that starts there.
+_BATCH_SAMPLE_DRIVERS = frozenset({
+    "elasticsearch",
+    "opensearch",
+    "qdrant",
+    "kafka",
+    "neo4j",
+    "redis",
+    "s3",
+    "gcs",
+    "adls",
+    # The same object payload over another transport. It fell through to the
+    # SQL path and failed "SQLAlchemy dialect for 'sftp'" (D62 sibling).
+    "sftp",
+    "dynamodb",
+})
+
+
+def _object_name_ok(table: str, *, batch: bool) -> bool:
+    """SQL idents stay strict. Object keys may contain ``-`` and ``/``."""
+    if not table or len(table) > 1024:
+        return False
+    if batch:
+        return not any(ord(ch) < 32 or ch in "\"';" for ch in table)
+    return bool(_SAFE_IDENT.match(table))
+
+
 def _sample_sql(table: str, dialect: str, limit: int) -> str:
-    quoted = _quote_ident(table, dialect)
-    d = (dialect or "").lower()
-    if d in {"mssql", "sqlserver"}:
-        return f"SELECT TOP {int(limit)} * FROM {quoted}"
-    return f"SELECT * FROM {quoted} LIMIT {int(limit)}"
+    from services.dialect_profiles import sample_select_sql
+
+    return sample_select_sql(dialect, _quote_ident(table, dialect), limit)
+
+
+def _sample_batch_source(
+    conn: dict[str, Any],
+    table: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """One page from the engine reader. Empty is an empty sample, not a SQL error."""
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+    from src.transfer.stream import _read_batch, _source_name, _unwrap_read
+
+    from .schema_tools import _endpoint_from_connector
+
+    endpoint = _endpoint_from_connector(conn, table)
+    src_type = resolve_driver_type(str(endpoint.format or ""))
+    cfg = resolve_connector_config(endpoint)
+    name = _source_name(endpoint) or table
+    if src_type == "kafka":
+        # The transfer reader joins the pipeline group. After a load that
+        # offset is the end of the topic, so a sample came back with 0 rows.
+        from connectors.kafka_reader import sample_topic_batch
+
+        probe = sample_topic_batch(cfg=cfg, topic=name, limit=limit)
+    else:
+        probe, _cursor = _unwrap_read(
+            _read_batch(
+                src_type,
+                cfg,
+                name,
+                None,
+                0,
+                limit,
+                database=str(cfg.get("database") or ""),
+            )
+        )
+    from services.value_serializer import operator_cell
+
+    columns = [str(h) for h in (probe.headers or [])]
+    # Reader rows are wire cells. Shown as-is the operator read NULL as the
+    # literal ``__DF_SQL_NULL__`` (D62); the SQL sample path returns JSON null.
+    rows = [
+        {c: operator_cell(v) for c, v in zip(columns, row)}
+        for row in (probe.rows or [])[:limit]
+    ]
+    native = {}
+    meta = getattr(probe, "meta", None) or {}
+    if isinstance(meta, dict):
+        raw = meta.get("native_types") or meta.get("schema") or {}
+        if isinstance(raw, dict):
+            native = raw
+    schema = {c: str(native.get(c) or "string") for c in columns}
+    return rows, columns, schema
 
 
 def _is_nullish(v: Any) -> bool:
-    return v is None or v == ""
+    """SQL NULL / absent only. ``''``, whitespace, ``0`` and ``False`` are values.
+
+    ``__DF_SQL_NULL__`` used to look like a value, so a column with seven
+    SQL NULLs profiled at null_rate 0.0. Counting ``''`` as NULL was the
+    opposite error: a column holding empty strings reported a null rate it
+    does not have (D62). Blank cells are counted on their own (``empty``).
+    """
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+
+    return v is None or is_missing_sentinel(v) or is_reader_null_cell(v)
 
 
-def _try_float(v: Any) -> float | None:
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, (int, float)):
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return None
-        return float(v)
-    if isinstance(v, str):
-        s = v.strip().replace(",", "")
-        if not s:
-            return None
-        try:
-            return float(s)
-        except ValueError:
-            return None
-    return None
+def _is_blank(v: Any) -> bool:
+    return isinstance(v, str) and not v.strip()
+
+
+def _try_float(v: Any) -> Decimal | None:
+    """Same decimal the write path would bind — never ``replace(",", "")``.
+
+    Locale money keeps exact scale. Auto ``1,234`` / ``1.234`` return None.
+    IEEE ``float(dec)`` collapsed 2**53+1 against 2**53 in Pilot compare.
+    """
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(v)
 
 
 def _try_bool(v: Any) -> bool | None:
+    """True/False when the write path would bind this cell as a boolean.
+
+    Informal ``yes``/``on``/``y`` invent truth the boolean transform refuses.
+    Native 0/1 integers stay numbers — they are not a boolean wire.
+    """
     if isinstance(v, bool):
         return v
-    if isinstance(v, (int, float)) and v in (0, 1):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in _BOOL_TRUE:
-            return True
-        if s in _BOOL_FALSE:
-            return False
-    return None
+    if not isinstance(v, str):
+        return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(v.strip(), "boolean")
+    if err or parsed is None:
+        return None
+    return bool(parsed)
 
 
 def _try_datetime(v: Any) -> bool:
-    if isinstance(v, datetime):
+    """True when the write path would bind this cell as a date/datetime.
+
+    Dual MDY+DMY strptime used to call ``01/02/2024`` a date. Auto cannot
+    bind that cell, so a Pilot profile that labeled the column datetime
+    invented a calendar the write refuses.
+    """
+    if isinstance(v, date):
         return True
     if not isinstance(v, str):
         return False
     s = v.strip()
     if len(s) < 8:
         return False
-    for fmt in _DATE_HINTS:
-        try:
-            datetime.strptime(s[:26].rstrip("Z"), fmt.rstrip("Z"))
-            return True
-        except ValueError:
-            continue
-    # ISO-ish
-    if "T" in s and len(s) >= 10:
-        try:
-            datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return True
-        except ValueError:
-            return False
-    return False
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(s, "datetime")
+    return parsed is not None and not err
 
 
 def _infer_kind(non_null: list[Any]) -> str:
@@ -203,7 +313,7 @@ def _infer_kind(non_null: list[Any]) -> str:
     ints = sum(
         1
         for v in non_null
-        if (f := _try_float(v)) is not None and float(f).is_integer()
+        if (f := _try_float(v)) is not None and f == f.to_integral_value()
     )
     bools = sum(1 for v in non_null if _try_bool(v) is not None)
     dates = sum(1 for v in non_null if _try_datetime(v))
@@ -219,7 +329,7 @@ def _infer_kind(non_null: list[Any]) -> str:
     return "string"
 
 
-def _numeric_stats(vals: list[float]) -> dict[str, Any]:
+def _numeric_stats(vals: list[Decimal]) -> dict[str, Any]:
     if not vals:
         return {}
     n = len(vals)
@@ -232,11 +342,12 @@ def _numeric_stats(vals: list[float]) -> dict[str, Any]:
         p50 = ordered[mid]
     else:
         p50 = (ordered[mid - 1] + ordered[mid]) / 2
+    stdev = var.sqrt() if isinstance(var, Decimal) else math.sqrt(var)
     return {
         "min": ordered[0],
         "max": ordered[-1],
         "mean": round(mean, 6),
-        "stdev": round(math.sqrt(var), 6),
+        "stdev": round(stdev, 6),
         "p50": p50,
     }
 
@@ -247,8 +358,11 @@ def _analyze_rows(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, A
     n_rows = len(rows)
     for col in columns[:40]:
         vals = [r.get(col) for r in rows]
-        non_null = [v for v in vals if not _is_nullish(v)]
-        nulls = n_rows - len(non_null)
+        present = [v for v in vals if not _is_nullish(v)]
+        nulls = n_rows - len(present)
+        empties = sum(1 for v in present if _is_blank(v))
+        # Type, distinct and top values read the cells that carry a value.
+        non_null = [v for v in present if not _is_blank(v)]
         kind = _infer_kind(non_null)
         distinct = len({str(v) for v in non_null})
         # Top values by frequency
@@ -276,8 +390,9 @@ def _analyze_rows(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, A
 
         col_prof: dict[str, Any] = {
             "column": col,
-            "non_null": len(non_null),
+            "non_null": len(present),
             "nulls": nulls,
+            "empty_strings": empties,
             "null_rate": round(nulls / n_rows, 4) if n_rows else 0.0,
             "distinct_in_sample": distinct,
             "cardinality_ratio": round(distinct / len(non_null), 4) if non_null else 0.0,
@@ -350,17 +465,23 @@ def sample_connector_object(
     limit: int = _DEFAULT_SAMPLE,
     analyze: bool = True,
     session_id: str = "",
+    full_rows: bool = False,
 ):
-    """Sample rows from a saved-connector table/collection (read-only)."""
+    """Sample rows from a saved-connector table/collection (read-only).
+
+    ``rows`` is a display preview of at most 25 rows. ``full_rows=True``
+    returns every sampled row up to ``limit`` instead: the plan's gates judge
+    the rows they asked for, and a 25-row preview silently hid a bad value in
+    rows 26..limit from them (D189).
+    """
     tool = "sample_connector_object"
     table = (table or "").strip()
-    if not table or not _SAFE_IDENT.match(table):
+    if not table:
         return _tool_result(
             tool,
             success=False,
             error=(
-                "Provide a simple table/collection name "
-                "(letters, numbers, underscore, optional schema.table)."
+                "Provide a table, collection, topic, index, or object name."
             ),
         )
     limit = max(1, min(int(limit or _DEFAULT_SAMPLE), _MAX_SAMPLE))
@@ -368,14 +489,30 @@ def sample_connector_object(
     if err:
         return err
 
+    from src.transfer.connector_capabilities import resolve_driver_type
+
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    driver = resolve_driver_type(ctype)
+    batch_source = driver in _BATCH_SAMPLE_DRIVERS
+    if not _object_name_ok(table, batch=batch_source):
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                "Provide a simple table/collection name "
+                "(letters, numbers, underscore, optional schema.table)."
+                if not batch_source
+                else "That object name has quotes, a semicolon, or a control character."
+            ),
+        )
     cid = str(conn.get("id") or conn.get("_id") or "")
     resolve_note = None
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import get_connector
         from src.routers.query_router import QueryExecuteRequest, _run_query
 
-        saved = get_connector(cid)
+        saved = get_connector(cid, workspace_id=caller_workspace_id() or None)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
 
@@ -406,6 +543,41 @@ def sample_connector_object(
             )
         table = resolved
 
+        if batch_source:
+            rows, columns, schema = _sample_batch_source(conn, table, limit)
+            preview_rows = rows if full_rows else rows[: min(limit, 25)]
+            meta = {
+                "connector_id": cid,
+                "connector_name": conn.get("name"),
+                "type": ctype,
+                "table": table,
+                "limit": limit,
+                "truncated": len(rows) >= limit or len(preview_rows) < len(rows),
+                "column_type_source": "reader",
+            }
+            if resolve_note:
+                meta["resolve_note"] = resolve_note
+            result_id = _store_result(
+                rows=rows,
+                columns=columns,
+                column_schema=schema,
+                meta=meta,
+                session_id=session_id,
+                source=tool,
+            )
+            out = {
+                **meta,
+                "result_id": result_id,
+                "columns": columns,
+                "column_schema": schema,
+                "row_count": len(rows),
+                "rows": preview_rows,
+                "read_only": True,
+            }
+            if analyze and rows:
+                out["analysis"] = _analyze_rows(rows, columns)
+            return _tool_result(tool, success=True, output=out)
+
         if ctype == "mongodb":
             body = QueryExecuteRequest(
                 connector_id=cid,
@@ -419,8 +591,10 @@ def sample_connector_object(
                 query=_sample_sql(table, ctype, limit),
                 limit=limit,
             )
-        rows, columns, schema, truncated = _run_query(saved, body)
-        preview_rows = rows[: min(limit, 25)]
+        # The sample feeds Map and the preflight gates: JSON cells as their
+        # document text, as the Execute reader carries them (D207).
+        rows, columns, schema, truncated = _run_query(saved, body, json_engine_text=True)
+        preview_rows = rows if full_rows else rows[: min(limit, 25)]
         meta = {
             "connector_id": cid,
             "connector_name": conn.get("name"),
@@ -483,6 +657,11 @@ def sample_connector_object(
                     f'Ask "list tables on {label}" to see what is available.'
                 ),
             )
+        from services.excel_parser import explain_unreadable_file
+
+        explained = explain_unreadable_file(exc)
+        if explained != str(exc) or explained.startswith("This "):
+            return _tool_result(tool, success=False, error=explained)
         return _tool_result(tool, success=False, error=f"Sample failed: {exc}")
 
 
@@ -507,13 +686,21 @@ def run_connector_query(
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")
-    limit = max(1, min(int(limit or _MAX_QUERY_ROWS), _MAX_QUERY_ROWS))
+    requested = int(limit or 1000)
+    limit = max(1, min(requested, _MAX_QUERY_ROWS))
+    clipped = requested > limit
 
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import get_connector
-        from src.routers.query_router import QueryExecuteRequest, _is_safe_sql, _run_query
+        from src.routers.query_router import (
+            QueryExecuteRequest,
+            _is_safe_sql,
+            _run_query,
+            sql_refusal_message,
+        )
 
-        saved = get_connector(cid)
+        saved = get_connector(cid, workspace_id=caller_workspace_id() or None)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
 
@@ -529,7 +716,7 @@ def run_connector_query(
                 return _tool_result(
                     tool,
                     success=False,
-                    error="Only read-only SQL is allowed (SELECT / WITH / SHOW / DESCRIBE / EXPLAIN).",
+                    error=sql_refusal_message(sql),
                 )
             # Phase D6 — refuse invented identifiers (LLM cannot probe arbitrary columns).
             head = sql.lstrip().split(None, 1)[0].lower() if sql.strip() else ""
@@ -544,27 +731,42 @@ def run_connector_query(
                     listed = list_connector_objects(connector_id=cid, connector_name="")
                     table_names = _object_names_from_list(listed)
                     columns: list[Any] = []
-                    # Prefer explicit collection/table hint; else first FROM ident if known.
-                    table_hint = (collection or "").strip()
-                    if not table_hint:
-                        m = re.search(
-                            r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
+                    # Introspect every FROM/JOIN relation, not just the first:
+                    # joins and post-introspect queries (R24) need columns from
+                    # each referenced table in the allow-list. The collection
+                    # hint still wins when the operator names one.
+                    table_hints: list[str] = []
+                    hint = (collection or "").strip()
+                    if hint:
+                        table_hints.append(hint)
+                    table_hints.extend(
+                        m.group(1)
+                        for m in re.finditer(
+                            r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
                             sql,
                             re.I,
                         )
-                        if m:
-                            table_hint = m.group(1)
-                    if table_hint:
+                    )
+                    seen_hints: set[str] = set()
+                    for table_hint in table_hints:
+                        key = table_hint.lower()
+                        if key in seen_hints:
+                            continue
+                        seen_hints.add(key)
                         try:
                             sch = introspect_connector_table(
                                 conn, table_hint, purpose="source"
                             )
-                            columns = list(sch.get("columns") or [])
+                            columns.extend(list(sch.get("columns") or []))
                         except Exception as exc:
                             _LOG = logging.getLogger(__name__)
-                            _LOG.info("copilot sql guard introspect skipped: %s", exc)
+                            _LOG.info(
+                                "copilot sql guard introspect skipped for %s: %s",
+                                table_hint,
+                                exc,
+                            )
                     allowed = schema_allowlist(columns, table_names)
-                    assert_identifiers_allowed(sql, allowed=allowed)
+                    assert_identifiers_allowed(sql, allowed=allowed, dialect=ctype)
                 except ValueError as exc:
                     return _tool_result(tool, success=False, error=str(exc))
             body = QueryExecuteRequest(connector_id=cid, query=sql, limit=limit)
@@ -578,7 +780,7 @@ def run_connector_query(
             "query": sql,
             "collection": collection or None,
             "limit": limit,
-            "truncated": truncated,
+            "truncated": bool(truncated) or len(rows) >= limit or clipped,
         }
         result_id = _store_result(
             rows=rows,
@@ -619,15 +821,13 @@ def analyze_stored_result(
     tool = "analyze_result"
     from .result_store import get_result_store
 
-    doc = get_result_store().resolve(result_id=result_id, session_id=session_id)
+    store = get_result_store()
+    doc = store.resolve(result_id=result_id, session_id=session_id)
     if not doc:
         return _tool_result(
             tool,
             success=False,
-            error=(
-                "No stored result to analyze. Sample a table or run a query first "
-                '(e.g. "sample airports on Local Postgres").'
-            ),
+            error=store.explain_miss(result_id=result_id, session_id=session_id),
         )
     rows = list(doc.get("rows") or [])
     columns = list(doc.get("columns") or [])
@@ -703,14 +903,13 @@ def filter_stored_result(
     tool = "filter_result"
     from .result_store import get_result_store
 
-    doc = get_result_store().resolve(result_id=result_id, session_id=session_id)
+    store = get_result_store()
+    doc = store.resolve(result_id=result_id, session_id=session_id)
     if not doc:
         return _tool_result(
             tool,
             success=False,
-            error=(
-                "No stored result to filter. Sample a table or run a query first."
-            ),
+            error=store.explain_miss(result_id=result_id, session_id=session_id),
         )
     columns = list(doc.get("columns") or [])
     col = (column or "").strip()
@@ -765,7 +964,14 @@ def filter_stored_result(
             ok = str(value).lower() in str(cell if cell is not None else "").lower()
         elif op_n == "in":
             parts = [p.strip() for p in str(value).split(",") if p.strip()]
-            ok = str(cell) in parts or (str(_try_float(cell)) in parts if _try_float(cell) is not None else False)
+            ok = str(cell) in parts
+            if not ok:
+                bound = _try_float(cell)
+                if bound is not None:
+                    ok = any(
+                        (p_bound := _try_float(p)) is not None and p_bound == bound
+                        for p in parts
+                    )
         else:
             ok = _cmp(cell, value, op_n)
         if ok:

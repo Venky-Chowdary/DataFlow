@@ -5,6 +5,8 @@ import { Skeleton } from "./LoadingState";
 import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
+import { collapseHostedAliasTiles } from "../lib/catalogAliases";
+import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -49,9 +51,12 @@ function highlightMatch(text: string, query: string) {
 
 function statusBadge(item: CatalogConnector) {
   const tier = item.certification_tier || "";
-  // Green = certified full transfer only. Never greenwash REST brand stubs.
-  if (item.transfer_ready || tier === "certified") {
+  // Green = this-host transfer-ready only. Certified + missing package is a warning.
+  if (item.transfer_ready) {
     return { cls: "df2-badge-live", label: item.capability_label || "Certified" };
+  }
+  if (item.environment_gap || (tier === "certified" && !item.transfer_ready)) {
+    return { cls: "df2-badge-warn", label: item.capability_label || "Certified — driver not installed" };
   }
   if (tier === "source_only") {
     return { cls: "df2-badge-run", label: item.capability_label || "Source only" };
@@ -72,6 +77,14 @@ interface ConnectorCatalogPanelProps {
   /** When true, only live transfer connectors are clickable */
   requireAvailable?: boolean;
   initialStatus?: string;
+  /** Hide cloud/edition twins (Snowflake on AWS, Standard, …) — same login. */
+  collapseAliases?: boolean;
+  /**
+   * Search text owned by the host (the page toolbar). When supplied the panel
+   * drops its own search box so a page never shows two search inputs.
+   */
+  query?: string;
+  onQueryChange?: (value: string) => void;
 }
 
 export function ConnectorCatalogPanel({
@@ -82,8 +95,14 @@ export function ConnectorCatalogPanel({
   transferOnly = false,
   requireAvailable = false,
   initialStatus = "",
+  collapseAliases = false,
+  query: hostQuery,
+  onQueryChange,
 }: ConnectorCatalogPanelProps) {
-  const [query, setQuery] = useState("");
+  const hosted = onQueryChange != null;
+  const [ownQuery, setOwnQuery] = useState("");
+  const query = hosted ? (hostQuery ?? "") : ownQuery;
+  const setQuery = hosted ? onQueryChange : setOwnQuery;
   const [debouncedQ, setDebouncedQ] = useState("");
   const [category, setCategory] = useState("");
   const [status, setStatus] = useState(initialStatus);
@@ -147,6 +166,11 @@ export function ConnectorCatalogPanel({
     return items;
   }, [categories]);
 
+  const visibleConnectors = useMemo(
+    () => (collapseAliases ? collapseHostedAliasTiles(connectors) : connectors),
+    [collapseAliases, connectors],
+  );
+
   const showSidebar = !compact;
 
   return (
@@ -183,16 +207,18 @@ export function ConnectorCatalogPanel({
         )}
 
         <div className="df2-catalog-filter-row">
-          <label className="df2-toolbar-search df2-catalog-search" aria-label="Search connector catalog">
-            <DtIcon name="search" size={15} />
-            <input
-              type="search"
-              placeholder="Search connectors…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              autoFocus={compact}
-            />
-          </label>
+          {!hosted && (
+            <label className="df2-toolbar-search df2-catalog-search" aria-label="Search connector catalog">
+              <DtIcon name="search" size={15} />
+              <input
+                type="search"
+                placeholder="Search connectors…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                autoFocus={compact}
+              />
+            </label>
+          )}
 
           <FilterBar ariaLabel="Catalog capability filters" className="df2-catalog-filter-bar">
             <FilterTabs
@@ -210,11 +236,17 @@ export function ConnectorCatalogPanel({
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
             {transferLive > 0 && (
               role === "all"
-                ? ` · ${transferLive.toLocaleString()} transfer-live drivers`
+                ? ` · ${transferLive.toLocaleString()} TRANSFER_READY drivers — tiles are not transfer-live`
                 : ` · ${transferLive.toLocaleString()} usable as ${role}`
             )}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
+            {collapseAliases && connectors.length > visibleConnectors.length && (
+              <>
+                {" · "}
+                {connectors.length - visibleConnectors.length} cloud/edition tiles use the same login
+              </>
+            )}
             {role !== "all" && (
               <>
                 {" · "}
@@ -239,22 +271,14 @@ export function ConnectorCatalogPanel({
               <Skeleton key={i} className="df2-skeleton-tile" />
             ))}
           </div>
-        ) : connectors.length === 0 ? (
+        ) : visibleConnectors.length === 0 ? (
           <p className="df2-catalog-empty">No connectors match. Try &quot;Transfer ready&quot; or a different search.</p>
         ) : (
           <div className="df2-connector-grid">
-            {connectors.map((item) => {
+            {visibleConnectors.map((item) => {
               const badge = statusBadge(item);
-              const tier = item.certification_tier || "";
-              const selectable =
-                item.transfer_ready ||
-                item.connect_only ||
-                tier === "source_only" ||
-                item.effective_status === "live" ||
-                item.status === "beta";
-              const blocked = requireAvailable
-                ? !item.transfer_ready && !item.connect_only && tier !== "source_only"
-                : !selectable && (tier === "planned" || item.effective_status === "planned");
+              const selectable = catalogTileSelectable(item, requireAvailable);
+              const blocked = !selectable;
               return (
                 <button
                   key={item.id}
@@ -274,7 +298,7 @@ export function ConnectorCatalogPanel({
                   }
                 >
                   <div className="df2-connector-tile-icon">
-                    <ConnectorIcon id={catalogType(item.id)} size={28} />
+                    <ConnectorIcon id={item.id} size={28} />
                   </div>
                   <span className="df2-connector-tile-name">{highlightMatch(item.name, debouncedQ)}</span>
                   {item.description && (

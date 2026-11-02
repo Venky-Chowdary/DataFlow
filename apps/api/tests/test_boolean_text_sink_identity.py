@@ -1,13 +1,13 @@
 """A live text destination must not receive an invented typed cast.
 
-Sample inference legitimately calls a ``Y``/``N`` (or ``yes``/``no``) column
-BOOLEAN — but ``transform_engine._parse_boolean`` coerces canonical wire only,
-so writing that column into a destination that physically *is* ``TEXT`` failed
-every row with ``Invalid boolean: 'Y'``. The sink stores the token verbatim, so
-the cast can only invent a failure the destination never had.
+Sample inference types BOOLEAN dest only from write-path tokens
+(true/false/t/f/1/0). Informal ``Y``/``N`` / ``yes``/``no`` stay VARCHAR so
+create-new does not invent a BOOLEAN carrier the writer cannot bind.
+When a Map stamp still says BOOLEAN against a live TEXT sink, the cast must
+drop — the sink stores the token verbatim.
 
 The distinction is proven-live vs projected: a Map ``target_type`` stamp is a
-projection (create-new still invents a BOOLEAN carrier and must keep the cast),
+projection (create-new BOOLEAN must keep the cast for canonical tokens),
 while ``dest_types`` comes from introspecting an existing object.
 """
 
@@ -37,11 +37,14 @@ def test_informal_tokens_are_not_write_coercible(token: str) -> None:
     assert _parse_boolean(token) is None
 
 
-@pytest.mark.parametrize(
-    "samples", [["yes", "no"], ["Y", "N"], ["true", "false"], ["t", "f"]]
-)
-def test_boolean_inference_is_preserved(samples: list[str]) -> None:
+@pytest.mark.parametrize("samples", [["true", "false"], ["t", "f"], ["0", "1"]])
+def test_canonical_boolean_inference_is_preserved(samples: list[str]) -> None:
     assert infer_type(samples, field_name="is_active") == "BOOLEAN"
+
+
+@pytest.mark.parametrize("samples", [["yes", "no"], ["Y", "N"], ["on", "off"]])
+def test_informal_tokens_do_not_invent_boolean_dest(samples: list[str]) -> None:
+    assert infer_type(samples, field_name="is_active") == "VARCHAR"
 
 
 @pytest.mark.parametrize("dest_type", ["TEXT", "VARCHAR", "LONGTEXT", "VARCHAR(50)"])

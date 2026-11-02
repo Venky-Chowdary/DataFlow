@@ -1,4 +1,4 @@
-# Production stack (API + Web + MongoDB)
+# Production stack (API + Web + MongoDB + Redis)
 #   cp .env.production.example .env && ./scripts/generate-production-secrets.sh
 #   docker compose -f docker-compose.prod.yml up -d --build
 
@@ -13,6 +13,20 @@ services:
       - mongodata:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -48,6 +62,12 @@ services:
       DATAWRAP_SEED_DEMO: 0
       DATAWRAP_WORKER_FLEET: 1
       DATAWRAP_MULTI_REPLICA: 1
+      DATAWRAP_PROCESS_ROLE: api
+      DATAWRAP_API_CLAIM_LOOP: 0
+      DATAWRAP_SCHEDULE_LOOP: 0
+      DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      DATAWRAP_BLOB_ROOT: /data/blobs
       MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       DATAWRAP_DATA_DIR: /data/data
@@ -57,14 +77,48 @@ services:
       - dataflow_data:/data/data
       - dataflow_uploads:/data/uploads
       - dataflow_vectors:/data/vector_store
+      - dataflow_blobs:/data/blobs
     depends_on:
       mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "${API_PORT:-8000}:8000"
 
-  # Dedicated worker for CDC / batch transfer execution.  Runs the same image with
-  # a different start command so API pods stay responsive under load.
+  # Cadence only. Due pipelines are enqueued; this process does not execute them.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["/app/scripts/start-scheduler.sh"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATAWRAP_ENV: production
+      DATAWRAP_PROCESS_ROLE: scheduler
+      DATAWRAP_WORKER_FLEET: 1
+      DATAWRAP_API_CLAIM_LOOP: 0
+      DATAWRAP_SCHEDULE_LOOP: 1
+      DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_MULTI_REPLICA: 1
+      DATAWRAP_TRAINING: off
+      DATAWRAP_SEED_DEMO: 0
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      DATAWRAP_DATA_DIR: /data/data
+      DATAWRAP_UPLOAD_DIR: /data/uploads
+      DATAWRAP_VECTOR_STORE_DIR: /data/vector_store
+      DATAWRAP_BLOB_ROOT: /data/blobs
+    volumes:
+      - dataflow_data:/data/data
+      - dataflow_uploads:/data/uploads
+      - dataflow_vectors:/data/vector_store
+      - dataflow_blobs:/data/blobs
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  # Batch transfers. CDC runs in cdc-worker so a batch restart cannot drop a slot.
   worker:
     build:
       context: .
@@ -74,19 +128,65 @@ services:
     env_file: .env
     environment:
       DATAWRAP_ENV: production
+      DATAWRAP_PROCESS_ROLE: worker
       DATAWRAP_WORKER_FLEET: 1
+      DATAWRAP_WORKER_MODE: batch
+      DATAWRAP_API_CLAIM_LOOP: 0
+      DATAWRAP_SCHEDULE_LOOP: 0
+      DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      DATAWRAP_MULTI_REPLICA: 1
       DATAWRAP_TRAINING: off
       DATAWRAP_SEED_DEMO: 0
       MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
       DATAWRAP_DATA_DIR: /data/data
       DATAWRAP_UPLOAD_DIR: /data/uploads
       DATAWRAP_VECTOR_STORE_DIR: /data/vector_store
+      DATAWRAP_BLOB_ROOT: /data/blobs
     volumes:
       - dataflow_data:/data/data
       - dataflow_uploads:/data/uploads
       - dataflow_vectors:/data/vector_store
+      - dataflow_blobs:/data/blobs
     depends_on:
       mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  cdc-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["/app/scripts/start-worker.sh"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATAWRAP_ENV: production
+      DATAWRAP_PROCESS_ROLE: worker
+      DATAWRAP_WORKER_FLEET: 1
+      DATAWRAP_WORKER_MODE: cdc
+      DATAWRAP_API_CLAIM_LOOP: 0
+      DATAWRAP_SCHEDULE_LOOP: 0
+      DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      DATAWRAP_MULTI_REPLICA: 1
+      DATAWRAP_TRAINING: off
+      DATAWRAP_SEED_DEMO: 0
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      DATAWRAP_DATA_DIR: /data/data
+      DATAWRAP_UPLOAD_DIR: /data/uploads
+      DATAWRAP_VECTOR_STORE_DIR: /data/vector_store
+      DATAWRAP_BLOB_ROOT: /data/blobs
+    volumes:
+      - dataflow_data:/data/data
+      - dataflow_uploads:/data/uploads
+      - dataflow_vectors:/data/vector_store
+      - dataflow_blobs:/data/blobs
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   web:
@@ -103,7 +203,9 @@ services:
 
 volumes:
   mongodata:
+  redisdata:
   pgdata:
   dataflow_data:
   dataflow_uploads:
   dataflow_vectors:
+  dataflow_blobs:

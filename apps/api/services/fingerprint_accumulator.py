@@ -6,6 +6,17 @@ without holding every fingerprint in memory: it sorts and hashes in place until
 a threshold, then spills sorted chunks to disk and merges them. The digest is
 identical either way — with no spill it sorts and hashes exactly as the plain
 list path does.
+
+Ordering is by the **fingerprint**, never by the row key. Only the fingerprint is
+hashed, so ordering by anything else makes the digest depend on data the digest
+does not cover: a source re-read supplies the primary key as the row key while a
+destination re-read supplies ``""``, so one byte-identical population sorted into
+two different orders and produced two different digests. Gate-8 then reported a
+checksum mismatch it could not localise — the cell-level sample compared every
+row and found no differing cell. Sorting on the hashed value itself makes the
+digest a property of the fingerprint multiset alone, which is what
+order-independence has to mean for two sides to compare at all. Row keys stay in
+the stream because the keyed compare paths downstream need them.
 """
 
 from __future__ import annotations
@@ -18,8 +29,13 @@ import tempfile
 from collections.abc import Iterable
 
 from services.brand_env import getenv_brand
+from services.column_digest import ColumnDigests
+from services.reconcile_progress import note_hashed_rows
 
-SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
+SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "100000"))
+# Publish scan progress in batches. A per-row Mongo write is what made a
+# million-row checksum look frozen; the heartbeat reads the counter.
+_PROGRESS_EVERY = 8192
 
 
 class FingerprintAccumulator:
@@ -36,11 +52,34 @@ class FingerprintAccumulator:
         self.buffer: list[tuple[str, str]] = []
         self.chunk_files: list[str] = []
         self.total = 0
+        self._progress_noted = 0
+        self._additive_sum = 0
         self._tempdir: tempfile.TemporaryDirectory | None = None
+        # Per-column multiset digests of the same canonical cells — they name
+        # the column when two row digests disagree (diagnostic only).
+        self.columns = ColumnDigests()
+
+    def _flush_progress(self) -> None:
+        pending = self.total - self._progress_noted
+        if pending <= 0:
+            return
+        note_hashed_rows(pending)
+        self._progress_noted = self.total
 
     def add(self, key: str, fingerprint: str) -> None:
         self.buffer.append((key, fingerprint))
         self.total += 1
+        self.columns.add(fingerprint)
+        # Order-independent additive digest: sum of per-row fingerprint
+        # hashes mod 2^256. An append into an occupied table is then
+        # value-verifiable — post-write sum minus pre-write sum must equal
+        # this run's sum (RT-6).
+        self._additive_sum = (
+            self._additive_sum
+            + int.from_bytes(hashlib.sha256(fingerprint.encode("utf-8")).digest(), "big")
+        ) % (1 << 256)
+        if self.total - self._progress_noted >= _PROGRESS_EVERY:
+            self._flush_progress()
         if len(self.buffer) >= self.threshold:
             self._spill()
 
@@ -51,7 +90,7 @@ class FingerprintAccumulator:
     def _spill(self) -> None:
         if not self.buffer:
             return
-        self.buffer.sort(key=lambda x: (x[0], x[1]))
+        self.buffer.sort(key=lambda x: x[1])
         if self._tempdir is None:
             self._tempdir = tempfile.TemporaryDirectory(prefix="dataflow_fp_")
         fd, path = tempfile.mkstemp(dir=self._tempdir.name, suffix=".chk")
@@ -83,21 +122,67 @@ class FingerprintAccumulator:
 
     def _sorted_stream(self) -> Iterable[tuple[str, str]]:
         if not self.chunk_files:
-            self.buffer.sort(key=lambda x: (x[0], x[1]))
+            self.buffer.sort(key=lambda x: x[1])
             yield from self.buffer
             return
         if self.buffer:
             self._spill()
         streams = [self._read_chunk(p) for p in self.chunk_files]
-        yield from heapq.merge(*streams, key=lambda x: (x[0], x[1]))
+        yield from heapq.merge(*streams, key=lambda x: x[1])
+
+    def _identity_stream(self) -> Iterable[tuple[str, str]]:
+        """(key, fingerprint) pairs sorted by identity, without consuming the buffer.
+
+        The value digest sorts by fingerprint alone so a destination re-read
+        (empty key) can match a source re-read. Identity alignment is the other
+        question: the same cells under a different key are not the same row.
+        """
+        parts: list[Iterable[tuple[str, str]]] = []
+        for path in self.chunk_files:
+            chunk = list(self._read_chunk(path))
+            chunk.sort(key=lambda pair: (pair[0], pair[1]))
+            parts.append(chunk)
+        if self.buffer:
+            parts.append(sorted(self.buffer, key=lambda pair: (pair[0], pair[1])))
+        if not parts:
+            return
+        if len(parts) == 1:
+            yield from parts[0]
+            return
+        yield from heapq.merge(*parts, key=lambda pair: (pair[0], pair[1]))
+
+    def identity_digest(self) -> str:
+        """Order-independent SHA-256 of ``key`` and fingerprint. Does not close.
+
+        Call this before :meth:`digest`. The value digest hashes fingerprints
+        only; this one also hashes the row key, so two populations with the
+        same cells and different identities do not align.
+        """
+        self._flush_progress()
+        h = hashlib.sha256()
+        for key, fp in self._identity_stream():
+            h.update(key.encode("utf-8"))
+            h.update(b"\0")
+            h.update(fp.encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
 
     def digest(self) -> str:
         """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
+        self._flush_progress()
         h = hashlib.sha256()
         for _, fp in self._sorted_stream():
             h.update(fp.encode("utf-8"))
         self.close()
         return h.hexdigest()
+
+    def additive_digest(self) -> str:
+        """Additive multiset digest: sum of per-row hashes mod 2^256, as hex.
+
+        Order-independent AND insert-only-safe: for an append the post-write
+        table sum minus the pre-write table sum must equal this run's sum.
+        """
+        return format(self._additive_sum % (1 << 256), "064x")
 
     def close(self) -> None:
         if self._tempdir is not None:
@@ -122,7 +207,7 @@ def fingerprint_checksum(fingerprints: Iterable[tuple[str, str]]) -> str:
 
 
 def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
-    fingerprints.sort(key=lambda x: (x[0], x[1]))
+    fingerprints.sort(key=lambda x: x[1])
     h = hashlib.sha256()
     for _, fp in fingerprints:
         h.update(fp.encode("utf-8"))

@@ -11,6 +11,7 @@ import {
   fetchContractHistory,
   type ContractRevision,
 } from "../lib/api";
+import { ContractColumnsTable, ContractStatusFacts } from "./contracts/ContractFacts";
 
 export const CONTRACT_TABS = ["Overview", "Columns", "Mappings", "Quality", "History"] as const;
 export type ContractTab = (typeof CONTRACT_TABS)[number];
@@ -179,14 +180,7 @@ export function ContractDetailDrawer({
       }
     >
       <div className="df2-drawer-facts" aria-label="Contract summary">
-        <div className="df2-drawer-fact">
-          <span>Status</span>
-          <strong>{badge.label}</strong>
-        </div>
-        <div className="df2-drawer-fact">
-          <span>Version</span>
-          <strong>v{c.version}</strong>
-        </div>
+        <ContractStatusFacts contract={c} />
         <div className="df2-drawer-fact">
           <span>Source</span>
           <strong title={endpointLabel(c.source)}>{endpointLabel(c.source)}</strong>
@@ -253,32 +247,7 @@ export function ContractDetailDrawer({
             {(c.columns?.length ?? 0) === 0 ? (
               <EmptyState compact icon="database" title="No columns" description="This contract has no column definitions." />
             ) : (
-              <div className="df2-table-wrap df2-drawer-table-wrap">
-                <table className="df2-table">
-                  <thead>
-                    <tr>
-                      <th>Name</th>
-                      <th>Type</th>
-                      <th>Nullable</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {c.columns.map((col, i) => {
-                      const row = col as Record<string, unknown>;
-                      const name = cell(row.name ?? row.column_name ?? row.source ?? `col_${i}`);
-                      const typ = cell(row.type ?? row.inferred_type ?? row.data_type);
-                      const nullable = row.nullable == null ? "—" : row.nullable ? "Yes" : "No";
-                      return (
-                        <tr key={`${name}-${i}`}>
-                          <td title={name}>{name}</td>
-                          <td className="df2-cell-mono" title={typ}>{typ}</td>
-                          <td>{nullable}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <ContractColumnsTable contract={c} />
             )}
           </section>
         )}

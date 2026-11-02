@@ -1,0 +1,107 @@
+{
+  "name": "brevo",
+  "docs": "https://developers.brevo.com/reference",
+  "base_url": "https://api.brevo.com/v3",
+  "auth": {
+    "type": "api_key",
+    "location": "header",
+    "name": "api-key"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "contacts",
+      "path": "contacts",
+      "records_path": "contacts",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 100,
+        "sort": "asc"
+      },
+      "cursor": {
+        "field": "modifiedAt",
+        "request_param": "modifiedSince",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "offset",
+        "offset_param": "offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "email": {"type": "string"},
+          "emailBlacklisted": {"type": "boolean"},
+          "smsBlacklisted": {"type": "boolean"},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "modifiedAt": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "lists",
+      "path": "contacts/lists",
+      "records_path": "lists",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 100,
+        "sort": "asc"
+      },
+      "paginator": {
+        "type": "offset",
+        "offset_param": "offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "totalSubscribers": {"type": "integer"},
+          "totalBlacklisted": {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "email_campaigns",
+      "path": "emailCampaigns",
+      "records_path": "campaigns",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 100,
+        "sort": "asc",
+        "type": "classic"
+      },
+      "paginator": {
+        "type": "offset",
+        "offset_param": "offset",
+        "page_size": 100,
+        "page_size_param": "limit"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "subject": {"type": ["string", "null"]},
+          "type": {"type": "string"},
+          "status": {"type": "string"},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "modifiedAt": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

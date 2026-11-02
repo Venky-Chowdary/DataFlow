@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   coerceLastTestOk,
   connectorLooksHealthy,
+  connectorPassedProbe,
   connectorNeedsAttention,
   connectorTestHealth,
   connectorTestLabel,
@@ -17,9 +18,34 @@ describe("connectorHealth", () => {
     assert.equal(connectorTestLabel({ last_test_ok: true, status: "error" }), "Test passed");
   });
 
+  it("does not count never-tested as a passed probe", () => {
+    assert.equal(connectorPassedProbe({}), false);
+    assert.equal(connectorPassedProbe({ last_test_ok: true }), true);
+    assert.equal(connectorLooksHealthy({}), true);
+  });
+
   it("treats last_test_ok=false as failed", () => {
     assert.equal(connectorTestHealth({ last_test_ok: false, status: "configured" }), "failed");
     assert.equal(connectorLooksHealthy({ last_test_ok: false }), false);
+  });
+
+  it("clears a stale failed probe after a later successful job", () => {
+    const c = {
+      last_test_ok: false,
+      last_tested_at: "2026-10-08T01:00:00Z",
+      last_transfer_ok_at: "2026-10-08T02:00:00Z",
+    };
+    assert.equal(connectorTestHealth(c), "passed");
+    assert.equal(connectorTestLabel(c), "Last job succeeded");
+    assert.equal(connectorLooksHealthy(c), true);
+    assert.equal(
+      connectorTestHealth({
+        last_test_ok: false,
+        last_tested_at: "2026-10-08T03:00:00Z",
+        last_transfer_ok_at: "2026-10-08T02:00:00Z",
+      }),
+      "failed",
+    );
   });
 
   it("coerces string/number booleans from Mongo payloads", () => {

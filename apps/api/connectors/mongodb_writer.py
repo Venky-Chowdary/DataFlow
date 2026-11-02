@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
 from typing import Any
@@ -16,6 +15,8 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     DF_LSN_COL,
     _coerced_null_row_count,
+    _conflict_key_identity,
+    _is_nullish_conflict_key,
     _rejected_row_count,
     build_mapped_rows_with_details,
     compare_lsn,
@@ -30,8 +31,163 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from services.document_instant import (
+    cell_exceeds_document_instant,
+    transform_narrows_to_calendar_day,
+)
+from services.value_serializer import json_loads_exact
 
 logger = logging.getLogger(__name__)
+
+
+def bind_mongo_json_document(value: Any) -> Any:
+    """Parse a Mongo JSON/OBJECT/ARRAY/VARIANT cell.
+
+    Numbers match ``json_loads_exact``. Invalid text refuses — never store the
+    raw string as a silent invent. Non-finite constants refuse.
+    """
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        def _reject(name: str) -> None:
+            raise ValueError(f"non-finite JSON constant: {name}")
+
+        try:
+            return json_loads_exact(value, parse_constant=_reject)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"MongoDB JSON refused {value!r} "
+                "(refuse silent string invent)"
+            ) from exc
+    raise ValueError(
+        f"MongoDB JSON refused {value!r} "
+        "(refuse silent pass-through invent)"
+    )
+
+
+def _mongo_conflict_key(doc: Mapping[str, Any], pk_cols: list[str]) -> tuple[Any, ...]:
+    """Canonical PK tuple so extract reader-null matches dest None."""
+    return tuple(_conflict_key_identity(doc.get(c)) for c in pk_cols)
+
+
+def _mongo_incomplete_pk_cols(doc: Mapping[str, Any], pk_cols: list[str]) -> list[str]:
+    """Conflict-key columns that cannot identify a dense Mongo upsert."""
+    return [c for c in pk_cols if _is_nullish_conflict_key(doc.get(c))]
+
+
+def _mongo_insert_id_is_null(doc: Mapping[str, Any]) -> bool:
+    """True when insert would store reader-null as a real ``_id``.
+
+    Only Python None was refused. After extract emits SQL_NULL_SENTINEL,
+    insert_many stored the wire spelling as document identity.
+    Empty string stays a present key (not extract NULL).
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    return "_id" in doc and is_reader_null_cell(doc.get("_id"))
+
+
+def _target_is_temporal(target_type: str) -> bool:
+    """True when the destination cell holds BSON's single date/time carrier."""
+    from services.type_system import (
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        normalize_logical_type,
+    )
+
+    return normalize_logical_type(target_type) in {LOGICAL_DATE, LOGICAL_DATETIME}
+
+
+def _declares_calendar_day(
+    mapping: Mapping[str, Any], source_type: str = ""
+) -> bool:
+    """True when the resolved source type declares a calendar day."""
+    from services.type_system import LOGICAL_DATE, normalize_logical_type
+
+    return normalize_logical_type(source_type) == LOGICAL_DATE
+
+
+def _is_pure_date_value(value: Any) -> bool:
+    """True for a date value with no clock component."""
+    import re
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    from connectors.sql_temporal import parse_sql_date
+
+    if isinstance(value, _datetime):
+        return False
+    if isinstance(value, _date):
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if re.search(r"(?:[Tt]\s*\d|\s+\d{1,2}:\d{2})", text):
+        return False
+    return parse_sql_date(text) is not None
+
+
+def declared_source_is_instant(source_type: str) -> bool:
+    """True when the source type is an offset-bearing instant.
+
+    A naive Python value of that type already lost ``tzinfo`` in the driver.
+    MySQL TIMESTAMP is read after the session is pinned to UTC, and live
+    introspect stamps it ``TIMESTAMPTZ``. Stamping UTC keeps the clock.
+    Bare ``TIMESTAMP`` / ``DATETIME`` / ``TIMESTAMP_NTZ`` stay wall-clock and
+    still need the operator's UTC contract.
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    return datetime_timezone_polarity(source_type) in {"tz", "ltz"}
+
+
+def _mapping_source_type(
+    mapping: Mapping[str, Any], column_types: Mapping[str, str]
+) -> str:
+    """Source DDL for one mapping. The mapping stamp wins over the schema."""
+    declared = mapping.get("source_type") or mapping.get("sourceType") or ""
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    source_name = str(mapping.get("source") or "")
+    if not source_name:
+        return ""
+    looked = column_types.get(source_name)
+    if looked is None:
+        looked = column_types.get(source_name.lower(), "")
+    return str(looked or "").strip()
+
+
+def _row_projection_column_types(
+    mappings: list[dict[str, Any]],
+    column_types: Mapping[str, str],
+    dest_types: Mapping[str, Any],
+) -> dict[str, str]:
+    """Keep BSON-date cells raw until the writer applies per-cell policy."""
+    from services.type_system import LOGICAL_DATE, normalize_logical_type
+
+    projected = dict(column_types)
+    for mapping in mappings:
+        target_name = sanitize_identifier(
+            mapping.get("target") or mapping.get("source"), preserve_case=True
+        )
+        target_type = (
+            dest_types.get(target_name)
+            or dest_types.get(target_name.lower())
+            or dest_types.get(target_name.upper())
+            or mapping.get("target_type")
+            or mapping.get("targetType")
+            or ""
+        )
+        transform = str(mapping.get("transform") or "").strip().lower()
+        if (
+            normalize_logical_type(str(target_type)) == LOGICAL_DATE
+            and transform in {"", "none", "null", "identity"}
+        ):
+            source_name = str(mapping.get("source") or "")
+            if source_name:
+                projected[source_name] = "VARCHAR"
+    return projected
+
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
@@ -124,7 +280,9 @@ def _mongo_rematerialize_if_physical_differs(
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
-        column_types=column_types,
+        column_types=_row_projection_column_types(
+            mappings, column_types or {}, live_dest_types
+        ),
         dest_types=live_dest_types,
         error_policy=policy,
         preserve_case=True,
@@ -183,7 +341,7 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
     for doc in docs:
         if not isinstance(doc, dict):
             continue
-        if "_id" in doc and doc["_id"] is None:
+        if _mongo_insert_id_is_null(doc):
             raise ValueError(
                 "MongoDB insert refused null `_id` — map a real identity or omit "
                 "`_id` for server-assigned ObjectId (refuse null PK invent)"
@@ -200,6 +358,59 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
             raise
         # All errors were duplicate keys; those rows are already present.
         return len(docs)
+
+
+def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
+    """A sample DECIMAL(p,s) is not a Mongo catalog bound.
+
+    Mongo stores Decimal128. Rejecting a later value because the first page
+    fit DECIMAL(4,2) drops rows the document can hold. Operator overrides and
+    a declared relational domain stay as stamped. Only decimal and float
+    stamps are rewritten: a DATE target must stay a date when the source
+    sample is text, or the document stores a string and drops the instant.
+    """
+    from services.decimal_observe import upgrade_sampled_decimal_stamp
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+    from services.type_system import normalize_logical_type
+
+    original = {str(k): str(v) for k, v in dict(dest_types or {}).items()}
+    numeric = {
+        name: current
+        for name, current in original.items()
+        if normalize_logical_type(current) in {"decimal", "float"}
+    }
+    if not numeric:
+        if type(dest_types) is dict or not dest_types:
+            return original
+        return type(dest_types)(original)
+    profiled = apply_sampled_profile_to_dest_types(
+        numeric, mappings, dest_db="mongodb"
+    )
+    by_target: dict[str, dict] = {}
+    for mapping in mappings or []:
+        if not isinstance(mapping, dict):
+            continue
+        target = str(mapping.get("target") or "").strip()
+        if target:
+            by_target[target] = mapping
+            by_target.setdefault(target.casefold(), mapping)
+    fallback_db = str(kwargs.get("source_db") or kwargs.get("source_format") or "")
+    widened = dict(original)
+    for name, current in profiled.items():
+        mapping = by_target.get(name) or by_target.get(str(name).casefold()) or {}
+        if mapping.get("user_override") or mapping.get("userOverride"):
+            widened[name] = str(current)
+            continue
+        source_db = str(mapping.get("source_db") or fallback_db)
+        widened[name] = upgrade_sampled_decimal_stamp(
+            str(current),
+            src_type=str(mapping.get("source_type") or current),
+            dest_db="mongodb",
+            source_db=source_db,
+        )
+    if type(dest_types) is dict or not dest_types:
+        return widened
+    return type(dest_types)(widened)
 
 
 def write_mapped_rows(
@@ -229,6 +440,12 @@ def write_mapped_rows(
     del backfill_new_fields
     try:
         import pymongo
+        # ``import pymongo`` does not load the errors submodule. An except
+        # clause is evaluated while another exception is already active, so
+        # ``pymongo.errors.PyMongoError`` raises AttributeError and hides the
+        # original failure when this process has not imported the submodule yet.
+        import pymongo.errors
+        from pymongo.errors import PyMongoError
         from pymongo import MongoClient  # noqa: F401
     except ImportError:
         from connectors.driver_guard import require_driver, stub_writes_allowed
@@ -250,7 +467,12 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=False if create_table else None,
+    )
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -275,6 +497,10 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="MongoDB",
+    )
+    dest_types = _widen_sampled_mongo_decimals(dest_types, mappings, _kwargs)
+    row_column_types = _row_projection_column_types(
+        mappings, column_types, dest_types
     )
     policy = transform_error_policy(error_policy)
 
@@ -449,7 +675,7 @@ def write_mapped_rows(
                         data_rows=data_rows,
                         mappings=mappings,
                         target_cols=target_cols,
-                        column_types=column_types,
+                        column_types=row_column_types,
                         dest_types=dest_types,
                         error_policy=policy,
                         preserve_case=True,
@@ -466,7 +692,7 @@ def write_mapped_rows(
                 data_rows=data_rows,
                 mappings=mappings,
                 target_cols=target_cols,
-                column_types=column_types,
+                column_types=row_column_types,
                 dest_types=dest_types,
                 error_policy=policy,
                 preserve_case=True,
@@ -507,9 +733,7 @@ def write_mapped_rows(
 
         from datetime import date as _date
         from datetime import datetime as _datetime
-        from datetime import time as _time
 
-        from bson.binary import Binary
         from bson.decimal128 import Decimal128
 
         transform_by_col = {
@@ -530,18 +754,96 @@ def write_mapped_rows(
             if m.get("risk_acknowledged") or m.get("riskAcknowledged")
         }
         utc_normalized_cols: set[str] = set()
+        ms_truncated_cols: set[str] = set()
+        # Columns the source declares as a calendar day. A date has no time of
+        # day and therefore no zone to invent: UTC midnight is the one instant
+        # every driver reads back as the same date. Refusing it as "naive"
+        # blocked plain DATE columns behind a contract that answers a question
+        # the value never raised.
+        calendar_day_cols = {
+            sanitize_identifier(
+                m.get("target") or m.get("source"), preserve_case=True
+            )
+            for m in mappings
+            if _declares_calendar_day(m, _mapping_source_type(m, column_types))
+        }
+        from services.type_system import (
+            LOGICAL_DATETIME,
+            LOGICAL_DATE,
+            LOGICAL_TIME,
+            normalize_logical_type,
+        )
+
+        pure_date_target_cols = set()
+        for mapping in mappings:
+            source_type = _mapping_source_type(mapping, column_types)
+            source_logical = normalize_logical_type(source_type)
+            target_name = sanitize_identifier(
+                mapping.get("target") or mapping.get("source"),
+                preserve_case=True,
+            )
+            target_logical = normalize_logical_type(
+                str(
+                    dest_types.get(target_name)
+                    or mapping.get("target_type")
+                    or mapping.get("targetType")
+                    or ""
+                )
+            )
+            if (
+                source_logical not in {LOGICAL_DATETIME, LOGICAL_TIME}
+                and target_logical == LOGICAL_DATE
+            ):
+                pure_date_target_cols.add(
+                    sanitize_identifier(
+                        mapping.get("target") or mapping.get("source"),
+                        preserve_case=True,
+                    )
+                )
+        calendar_day_truncation_contract_cols = set()
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        for mapping in mappings:
+            column = sanitize_identifier(
+                mapping.get("target") or mapping.get("source"),
+                preserve_case=True,
+            )
+            contract = mapping.get("risk_contract") or mapping.get("riskContract")
+            if (
+                column in calendar_day_cols
+                and isinstance(contract, dict)
+                and mapping_has_clearing_risk_contract(mapping)
+                and (
+                    contract.get("expected_precision_loss")
+                    or contract.get("expected_truncation")
+                )
+            ):
+                calendar_day_truncation_contract_cols.add(column)
+        # Polarity is a property of the column, not the cell. Resolving it
+        # once keeps a million-row write off the DDL regex.
+        instant_cols = {
+            sanitize_identifier(
+                m.get("target") or m.get("source"), preserve_case=True
+            )
+            for m in mappings
+            if declared_source_is_instant(_mapping_source_type(m, column_types))
+        }
 
         def _to_bson(
             value: Any, stype: str, transform: str = "", column: str = ""
         ) -> Any:
-            from services.value_serializer import is_missing_sentinel
+            from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
             # Preserve DF_MISSING through coercion so sparse upsert can omit
             # the field — never convert the sentinel into a live BSON value.
             if is_missing_sentinel(value):
                 return value
-            if value is None:
-                return None
+            handled, bound = absent_sql_bind(value)
+            if handled:
+                return bound
+            from services.value_serializer import document_bind_value
+
+            value = document_bind_value(value)
             upper = stype.upper()
             # An explicit mapping transform overrides the inferred source type so
             # values like decimal strings are stored as the correct BSON type.
@@ -614,13 +916,49 @@ def write_mapped_rows(
                         "(refuse invent via pass-through)"
                     )
                 return coerced
-            if upper == "DATE" and transform != "datetime":
-                from connectors.sql_temporal import coerce_sql_temporal
+            if _target_is_temporal(upper) and (
+                transform_narrows_to_calendar_day(transform)
+                or column in calendar_day_cols
+                or (
+                    column in pure_date_target_cols
+                    and _is_pure_date_value(value)
+                )
+            ):
+                from connectors.sql_temporal import (
+                    coerce_sql_temporal,
+                    parse_sql_date,
+                    parse_sql_datetime,
+                )
                 from datetime import timezone as _tz
 
+                parsed = parse_sql_datetime(value, wall_clock=True)
+                if (
+                    parsed is not None
+                    and any(
+                        (
+                            parsed.hour,
+                            parsed.minute,
+                            parsed.second,
+                            parsed.microsecond,
+                        )
+                    )
+                    and column in calendar_day_cols
+                    and column not in calendar_day_truncation_contract_cols
+                ):
+                    raise ValueError(
+                        "non-midnight value for logical DATE would truncate "
+                        "time-of-day — refuse silent truncation without a "
+                        "covering Risk Contract"
+                    )
+                if parsed is None and parse_sql_date(value) is None:
+                    raise ValueError(
+                        f"cannot parse {value!r} as a pure logical DATE"
+                    )
                 coerced = coerce_sql_temporal(value, "DATE")
                 # DATE → BSON Date as UTC midnight (calendar date instant), never
                 # leave naive for PyMongo local-TZ invent.
+                if coerced is None:
+                    return None
                 if isinstance(coerced, _datetime):
                     d = coerced.date()
                     return _datetime(d.year, d.month, d.day, tzinfo=_tz.utc)
@@ -634,10 +972,10 @@ def write_mapped_rows(
             # A "DATE" carrier with a datetime transform is Mongo's single BSON
             # date, which stores a full instant. Narrowing it truncated every
             # timestamp to midnight even though the carrier could hold the time.
-            if upper in {"DATE"} or upper in {
-                "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
-                "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
-            }:
+            # Every date/datetime spelling names BSON's one carrier —
+            # ``TIMESTAMPTZ(6)`` / ``DATETIME2(7)`` echoed from the source
+            # included. Matching only the bare tokens wrote those as strings.
+            if _target_is_temporal(upper):
                 from connectors.sql_temporal import coerce_sql_temporal
 
                 # BSON Date is a UTC instant. Coerce as TIMESTAMPTZ so ISO-Z keeps
@@ -646,21 +984,41 @@ def write_mapped_rows(
                     coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
                 except ValueError:
                     coerced = coerce_sql_temporal(value, "DATETIME")
+                if coerced is None:
+                    return None
                 if isinstance(coerced, _datetime):
-                    # Never invent UTC on a naive wall-clock (would silently shift
-                    # polarity). Require offset/Z from the wire, a prior coerce, or
-                    # an accepted UTC-normalize risk on this column.
+                    # A declared instant (TIMESTAMPTZ / TIMESTAMP_TZ / LTZ) that
+                    # arrives naive already had its offset stripped by the
+                    # driver. Stamp UTC and keep the clock. A wall-clock source
+                    # still needs an accepted UTC-normalize risk — stamping one
+                    # quietly would shift polarity.
                     if coerced.tzinfo is None:
                         from datetime import timezone as _tzu
 
-                        if column not in utc_normalize_ack:
+                        if column in instant_cols:
+                            coerced = coerced.replace(tzinfo=_tzu.utc)
+                        elif column not in utc_normalize_ack:
                             raise ValueError(
                                 "MongoDB date/time refused naive wall-clock — "
                                 "provide offset/Z, or accept the UTC-normalize "
                                 "risk on this column (refuse silent UTC invent)"
                             )
-                        utc_normalized_cols.add(column)
-                        coerced = coerced.replace(tzinfo=_tzu.utc)
+                        else:
+                            utc_normalized_cols.add(column)
+                            coerced = coerced.replace(tzinfo=_tzu.utc)
+                    # BSON date counts milliseconds; the driver drops anything
+                    # finer without a word. Judge the raw cell so a seven-digit
+                    # string is not first truncated to Python's six.
+                    if cell_exceeds_document_instant(value):
+                        if column in utc_normalize_ack:
+                            ms_truncated_cols.add(column)
+                        else:
+                            raise ValueError(
+                                f"MongoDB date refused {value!r}: BSON date keeps "
+                                "milliseconds and this value has finer digits — map "
+                                "to a string, or accept the millisecond-truncation "
+                                "risk on this column (refuse silent truncation)"
+                            )
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -677,23 +1035,14 @@ def write_mapped_rows(
                 # Fail-closed — never UTF-8-invent bytes.
                 return _Bin(coerce_binary_wire(value))
             if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
-                if isinstance(value, (dict, list)):
-                    return value
-                if isinstance(value, str):
-                    try:
-                        def _reject(name: str) -> None:
-                            raise ValueError(f"non-finite JSON constant: {name}")
+                from services.json_number_capacity import json_number_refusal
 
-                        return json.loads(value, parse_constant=_reject)
-                    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"MongoDB JSON refused {value!r} "
-                            "(refuse silent string invent)"
-                        ) from exc
-                raise ValueError(
-                    f"MongoDB JSON refused {value!r} "
-                    "(refuse silent pass-through invent)"
-                )
+                # D206: BSON has no int past int64 and Decimal128 stops at 34
+                # digits (wider fell back to a string). Refuse, never round.
+                refusal = json_number_refusal(value, engine="mongodb", ddl_type=upper)
+                if refusal:
+                    raise ValueError(refusal)
+                return bind_mongo_json_document(value)
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
                 from connectors.sql_bind import coerce_uuid_wire
 
@@ -711,7 +1060,9 @@ def write_mapped_rows(
                     "(expect 24-char hex)"
                 )
             if upper == "TIME":
-                return str(value)
+                from connectors.sql_temporal import bind_time_iso
+
+                return bind_time_iso(value)
             return value
 
         # BSON coercion is fail-closed (ObjectId hex, non-integral ints, binary
@@ -799,6 +1150,7 @@ def write_mapped_rows(
         chunks = max(1, (total + mongo_batch_size - 1) // mongo_batch_size)
         written = 0
         skipped_total = 0
+        key_index_ready = False
 
         for chunk_idx in range(chunks):
             start = chunk_idx * mongo_batch_size
@@ -806,25 +1158,21 @@ def write_mapped_rows(
             if not batch:
                 break
 
-            # Convert row tuples to documents; omit missing-field sentinels.
-            # Track sparse rows so upsert uses $set (never ReplaceOne — that
-            # would delete destination keys for fields absent in the CDC image).
-            from services.value_serializer import is_missing_sentinel
-
-            from connectors.writer_common import row_has_missing_sentinel
+            # Convert row tuples to documents; omit Missing, bind reader-null
+            # as None (shared present_field_bindings). Track sparse rows so
+            # upsert uses $set (never ReplaceOne — that would delete dest
+            # keys for fields absent in the CDC image).
+            from connectors.writer_common import (
+                present_field_bindings,
+                row_has_missing_sentinel,
+            )
 
             docs: list[dict[str, Any]] = []
             sparse_flags: list[bool] = []
             for row in batch:
                 sparse = row_has_missing_sentinel(row)
                 sparse_flags.append(sparse)
-                docs.append(
-                    {
-                        k: v
-                        for k, v in dict(zip(target_cols, row)).items()
-                        if not is_missing_sentinel(v)
-                    }
-                )
+                docs.append(present_field_bindings(dict(zip(target_cols, row))))
 
             # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
             from bson.objectid import ObjectId
@@ -861,6 +1209,35 @@ def write_mapped_rows(
                         warnings=transform_errors,
                     )
 
+                if not key_index_ready:
+                    # Every upsert filters on the conflict key, and the CDC LSN
+                    # prefetch queries it too. Without an index on those fields
+                    # each one is a collection scan, so throughput decays as the
+                    # collection grows (measured: 598 rows/s at 3K down to ~31
+                    # rows/s at 60K). Creating it is idempotent server-side.
+                    # On a collection this run creates, the index is made UNIQUE:
+                    # the upsert merge is then server-enforced unique on the key,
+                    # which is what the D101 destination-key gate verifies on the
+                    # next run. On an operator's existing collection it stays a
+                    # non-unique throughput index — declaring uniqueness there is
+                    # undisclosed DDL that must be approved at Validate, and can
+                    # fail on existing duplicates. A collection handle that
+                    # cannot create one (a restricted role, or a driver stand-in
+                    # without the method) must not fail the write.
+                    try:
+                        coll.create_index(
+                            [(c, pymongo.ASCENDING) for c in pk_cols],
+                            unique=not collection_existed,
+                        )
+                    except (PyMongoError, AttributeError) as exc:
+                        logger.warning(
+                            "could not index Mongo conflict key %s on %s: %s",
+                            pk_cols,
+                            collection_name,
+                            exc,
+                        )
+                    key_index_ready = True
+
                 # Deduplicate within the batch on the conflict key, keeping the
                 # highest _df_lsn so ``bulk_write(ordered=False)`` does not apply
                 # same-PK updates in an undefined order.
@@ -869,7 +1246,7 @@ def write_mapped_rows(
                 if DF_LSN_COL in target_cols:
                     best_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
                     for doc, sparse in paired:
-                        key = tuple(doc.get(c) for c in pk_cols)
+                        key = _mongo_conflict_key(doc, pk_cols)
                         prev = best_docs.get(key)
                         if prev is None or compare_lsn(doc.get(DF_LSN_COL), prev[0].get(DF_LSN_COL)) >= 0:
                             best_docs[key] = (doc, sparse)
@@ -877,7 +1254,7 @@ def write_mapped_rows(
                 else:
                     seen_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
                     for doc, sparse in paired:
-                        key = tuple(doc.get(c) for c in pk_cols)
+                        key = _mongo_conflict_key(doc, pk_cols)
                         seen_docs[key] = (doc, sparse)
                     paired = list(seen_docs.values())
                 docs = [p[0] for p in paired]
@@ -892,15 +1269,15 @@ def write_mapped_rows(
                         batch_filters = []
                         for doc in docs:
                             filt = {c: doc.get(c) for c in pk_cols}
-                            if not any(v in (None, "") for v in filt.values()):
+                            if not _mongo_incomplete_pk_cols(filt, pk_cols):
                                 batch_filters.append(filt)
                         if batch_filters:
                             projection = {DF_LSN_COL: 1}
                             projection.update({c: 1 for c in pk_cols})
                             for existing in coll.find({"$or": batch_filters}, projection):
-                                key = tuple(existing.get(c) for c in pk_cols)
+                                key = _mongo_conflict_key(existing, pk_cols)
                                 existing_lsn[key] = existing.get(DF_LSN_COL)
-                    except pymongo.errors.PyMongoError as exc:
+                    except PyMongoError as exc:
                         # Fail closed: without the prior LSN map we cannot prove
                         # idempotency, so we must not write this batch.
                         return WriteResult(
@@ -924,8 +1301,8 @@ def write_mapped_rows(
                 skipped_stale = 0
                 for doc_idx, (doc, sparse) in enumerate(zip(docs, sparse_flags)):
                     filt = {c: doc.get(c) for c in pk_cols}
-                    if any(v in (None, "") for v in filt.values()):
-                        missing_cols = [c for c, v in filt.items() if v in (None, "")]
+                    missing_cols = _mongo_incomplete_pk_cols(filt, pk_cols)
+                    if missing_cols:
                         detail = {
                             "row": start + doc_idx + 1,
                             "column": ",".join(missing_cols),
@@ -955,7 +1332,7 @@ def write_mapped_rows(
                         continue
                     if use_lsn_guard:
                         incoming_lsn = doc.get(DF_LSN_COL)
-                        key = tuple(doc.get(c) for c in pk_cols)
+                        key = _mongo_conflict_key(doc, pk_cols)
                         prior_lsn = existing_lsn.get(key)
                         if incoming_lsn is not None and not lsn_is_newer(incoming_lsn, prior_lsn):
                             skipped_stale += 1
@@ -1010,10 +1387,22 @@ def write_mapped_rows(
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
             rejected_details=list(rejected_details),
             coerced_null_rows=coerced_null_rows,
-            warnings=transform_errors,
+            warnings=[
+                *transform_errors,
+                *(
+                    f"{col}: zoneless values written as UTC under the accepted "
+                    "UTC-normalize risk"
+                    for col in sorted(utc_normalized_cols)
+                ),
+                *(
+                    f"{col}: sub-millisecond digits truncated to BSON milliseconds "
+                    "under the accepted risk"
+                    for col in sorted(ms_truncated_cols)
+                ),
+            ],
             meta=gate8_writer_meta(mapped_rows, target_cols),
         )
-    except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
+    except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(
             ok=False,
             rows_written=written if "written" in locals() else 0,

@@ -225,19 +225,22 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
             if "sample-transform" in str(b.get("id") or "")
         ]
         assert transform_blockers == [], transform_blockers
-        # Two honest, actionable blocks remain, each needing an operator decision:
+        # Three honest, actionable blocks remain, each needing an operator decision:
         #   tags   — one document carries a bare scalar where the column is ARRAY,
         #            so writing it wraps a scalar as JSON (domain change).
         #   balance — BSON Decimal128 declares a domain no Snowflake NUMBER can
         #            hold, so the max carrier NUMBER(38,10) can still overflow.
+        #   created — BSON's date carrier is an instant, and one document stores a
+        #            zoneless string there, so landing it stamps a zone the source
+        #            never proved.
         # Mongo's ARRAY → VARIANT itself is the destination's native document
         # wire and must not be blocked as field-DDL loss.
         blocked_cols = {
             str(d.get("source"))
             for b in (pf.get("blockers") or [])
             for d in (b.get("evidence", {}).get("issues_detail") or [])
-        } or {"tags", "balance"}
-        assert blocked_cols <= {"tags", "balance"}, blocked_cols
+        } or {"tags", "balance", "created"}
+        assert blocked_cols <= {"tags", "balance", "created"}, blocked_cols
 
         acknowledged = [
             {
@@ -249,7 +252,10 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
                 "risk_contract": {
                     "column": m["source"],
                     "source_type": schema.get(m["source"], ""),
-                    "destination_type": "VARIANT" if m["source"] == "tags" else "NUMBER(38,10)",
+                    "destination_type": {
+                        "tags": "VARIANT",
+                        "created": "TIMESTAMP_LTZ",
+                    }.get(m["source"], "NUMBER(38,10)"),
                     "execution_policy": "CAST_AND_CONTINUE",
                     "approved_by": "admin@dataflow.app",
                     "reason": "Operator accepted schemaless domain change",
@@ -259,7 +265,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
                     "rollback_strategy": "DOCUMENT_ONLY",
                 },
             }
-            if m["source"] in {"tags", "balance"}
+            if m["source"] in {"tags", "balance", "created"}
             else m
             for m in mappings
         ]
@@ -271,6 +277,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
         request = TransferRequest(
             source=source,
             destination=_snowflake_endpoint(dst_table),
+            source_timezone="UTC",
             sync_mode="full_refresh_overwrite",
             stream_contracts=[{"name": src_collection, "sync_mode": "full_refresh_overwrite",
                                "primary_key": "id", "selected": True}],
@@ -298,6 +305,102 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
         c = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
         c["dataflow"][src_collection].drop()
         c.close()
+
+
+def test_mongodb_to_snowflake_messy_docs_refuses_zoneless_without_source_timezone():
+    pytest.importorskip("fakesnow")
+    try:
+        with socket.create_connection(("localhost", 27017), timeout=1):
+            pass
+    except OSError as exc:
+        pytest.skip(f"Emulator not reachable: {exc}")
+
+    from datetime import datetime, timezone
+
+    from bson.decimal128 import Decimal128
+    from pymongo import MongoClient
+
+    src_collection = "mdb_to_sf_src_" + uuid.uuid4().hex[:8]
+    dst_table = "mdb_to_sf_" + uuid.uuid4().hex[:8]
+    client = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
+    client["dataflow"][src_collection].insert_many([
+        {"id": 1, "name": "alice", "profile": {"age": 30, "city": "NYC"},
+         "tags": ["vip", "beta"], "score": 10, "active": True,
+         "created": datetime(2024, 1, 1, tzinfo=timezone.utc), "balance": Decimal128("100.50")},
+        {"id": 2, "name": "bob", "profile": {"age": "unknown"}, "tags": "single",
+         "score": "N/A", "active": "true", "created": "2024-06-01", "extra": "surprise"},
+        {"id": 3, "name": None, "profile": None, "tags": [], "score": 3.14,
+         "nested_array": [{"k": 1}, {"k": 2}]},
+    ])
+    client.close()
+
+    source = EndpointConfig(
+        kind="database",
+        format="mongodb",
+        host="localhost",
+        port=27017,
+        database="dataflow",
+        table=src_collection,
+    )
+    try:
+        request = TransferRequest(
+            source=source,
+            destination=_snowflake_endpoint(dst_table),
+            sync_mode="full_refresh_overwrite",
+            stream_contracts=[{"name": src_collection, "sync_mode": "full_refresh_overwrite",
+                               "primary_key": "id", "selected": True}],
+            skip_preflight=True,
+        )
+        result = UniversalTransferEngine().execute_tracked(
+            request, uuid.uuid4().hex[:24]
+        )
+        rejected_details = list(
+            (result.destination_summary or {}).get("rejected_details") or []
+        ) + list((result.reconciliation or {}).get("rejected_details") or [])
+        refusal_detail = (result.error or "") + repr(rejected_details)
+        assert "created" in refusal_detail.lower()
+        assert "row 2" in refusal_detail.lower()
+        assert "source_timezone" in refusal_detail
+
+        from connectors.snowflake_conn import get_connection
+
+        conn = get_connection(
+            account="localhost", username="t", password="t",
+            database="dataflow", schema="public", warehouse="", connection_string="",
+        )
+        destination_row = None
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(f'SELECT "created" FROM "{dst_table}" WHERE "id" = 2')
+            except Exception as exc:
+                if not any(
+                    marker in str(exc).lower()
+                    for marker in ("does not exist", "not found", "unknown table")
+                ):
+                    raise
+            else:
+                destination_row = cur.fetchone()
+        finally:
+            conn.close()
+
+        row_2_rejected = any(
+            str(item.get("row")) == "2"
+            and str(item.get("column") or item.get("target") or "").lower()
+            == "created"
+            and "source_timezone" in str(item.get("reason") or "")
+            for item in rejected_details
+            if isinstance(item, dict)
+        )
+        if result.success is False:
+            assert destination_row is None, destination_row
+        else:
+            assert row_2_rejected, rejected_details
+            assert destination_row is None, destination_row
+    finally:
+        cleanup = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
+        cleanup["dataflow"][src_collection].drop()
+        cleanup.close()
 
 
 def test_dynamodb_to_snowflake():

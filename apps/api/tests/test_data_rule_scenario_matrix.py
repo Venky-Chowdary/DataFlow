@@ -14,6 +14,7 @@ tracked separately in PRODUCTION_SKU / execute_tracked matrices.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from services.quarantine_from_preflight import quarantine_rows_from_preflight
 from services.transform_engine import apply_transform, preview_quarantine_cells
 
 _API_ROOT = Path(__file__).resolve().parents[1]
-_PROOF = _API_ROOT / "data" / "proofs" / "data_rule_scenario_matrix.json"
+_PROOF = data_dir() / "proofs" / "data_rule_scenario_matrix.json"
 
 DestFamily = Literal["sql", "schemaless", "warehouse"]
 Mode = Literal["maximum", "strict", "balanced"]
@@ -65,6 +66,10 @@ def _family(dest: str) -> DestFamily:
 
 def _zwsp(s: str) -> str:
     return s.replace("|Z|", "\u200b")
+
+
+def _nul(s: str) -> str:
+    return s.replace("|C|", "\x00")
 
 
 def build_scenarios() -> list[Scenario]:
@@ -136,11 +141,10 @@ def build_scenarios() -> list[Scenario]:
                     )
                 )
 
-    # ── 2. Encoding / format-control (U+200B) ────────────────────────────────
+    # ── 2. Encoding / format-control (U+200B) and control bytes (NUL) ───────
     for dest in all_dests:
         fam = _family(dest)
         for mode in MODES:
-            expect_enc: Expect = "warn" if mode == "balanced" else "block"
             out.append(
                 Scenario(
                     id=f"encoding.zwsp.{dest}.{mode}",
@@ -148,8 +152,32 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=fam,
                     mode=mode,
-                    expect=expect_enc,
-                    note="U+200B in description — warehouses reject; balanced softens",
+                    # SQL Server VARCHAR under the default collation is a
+                    # Windows-1252 code page. Live SQL Server 2022
+                    # (SQL_Latin1_General_CP1_CI_AS): 'hello\u200bworld'
+                    # inserted into VARCHAR(50) reads back as 'hello?world'
+                    # (bytes 68656c6c6f3f776f726c64) while NVARCHAR and a
+                    # *_UTF8 collation keep U+200B. The destination does not
+                    # keep it there, so the code-page sink blocks (D212).
+                    expect="block" if dest == "sqlserver" else "warn",
+                    note=(
+                        "U+200B into a SQL Server code-page VARCHAR is stored as '?' "
+                        "(live evidence) — block, never a silent rewrite (D212)"
+                        if dest == "sqlserver"
+                        else "U+200B is valid Unicode the destination keeps — warn, never block (D69)"
+                    ),
+                    runner="integrity",
+                )
+            )
+            out.append(
+                Scenario(
+                    id=f"encoding.nul.{dest}.{mode}",
+                    rule_class="encoding_anomalies",
+                    dest=dest,
+                    dest_family=fam,
+                    mode=mode,
+                    expect="warn" if mode == "balanced" else "block",
+                    note="NUL control byte in description — destinations reject; balanced softens",
                     runner="integrity",
                 )
             )
@@ -166,7 +194,21 @@ def build_scenarios() -> list[Scenario]:
                     dest_family=fam,
                     mode=mode,
                     expect="block",
-                    note="Empty identity key cells must fail completeness",
+                    note="Missing (NULL) identity key cells must fail completeness",
+                    runner="integrity",
+                )
+            )
+            # D53: '' is a key value. It fails completeness only where the
+            # destination stores '' as NULL (Oracle VARCHAR2).
+            out.append(
+                Scenario(
+                    id=f"required_nulls.empty_string_key.{dest}.{mode}",
+                    rule_class="required_nulls_empty_string",
+                    dest=dest,
+                    dest_family=fam,
+                    mode=mode,
+                    expect="block" if dest == "oracle" else "pass",
+                    note="'' identity key is a value except where the destination stores '' as NULL",
                     runner="integrity",
                 )
             )
@@ -470,10 +512,11 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=_family(dest),
                     mode=mode,
-                    # Duplicate identity always blocks — balanced softens encoding/
-                    # confidence, not silent duplicate-key writes (enterprise proof bar).
-                    expect="block",
-                    note="Sole user_id is the identity candidate; duplicates must block Execute",
+                    # Upsert collapses in-file copies of the key, warns, and counts
+                    # them once. It does not block Execute and it does not drop them
+                    # quietly. Overwrite modes still block; this runner is upsert.
+                    expect="warn",
+                    note="Sole user_id repeats in the file; upsert collapses it once and warns",
                     runner="identity_duplicate",
                 )
             )
@@ -665,7 +708,12 @@ def _run_integrity(sc: Scenario) -> tuple[bool, bool, list[str]]:
     if sc.rule_class == "encoding_anomalies":
         cols = ["_id", "description"] if sc.dest_family == "schemaless" else ["id", "description"]
         rows = [
-            {cols[0]: "1", "description": _zwsp("hello|Z|world")},
+            {
+                cols[0]: "1",
+                "description": (
+                    _nul("hello|C|world") if ".nul." in sc.id else _zwsp("hello|Z|world")
+                ),
+            },
             {cols[0]: "2", "description": "clean"},
         ]
         types = {c: "VARCHAR" for c in cols}
@@ -674,7 +722,12 @@ def _run_integrity(sc: Scenario) -> tuple[bool, bool, list[str]]:
         ]
     elif sc.rule_class == "required_nulls":
         cols = ["_id", "title"] if sc.dest_family == "schemaless" else ["id", "title"]
-        rows = [{cols[0]: "", "title": "a"}, {cols[0]: "", "title": "b"}, {cols[0]: "3", "title": "c"}]
+        rows = [{cols[0]: None, "title": "a"}, {cols[0]: None, "title": "b"}, {cols[0]: "3", "title": "c"}]
+        types = {c: "VARCHAR" for c in cols}
+        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in cols]
+    elif sc.rule_class == "required_nulls_empty_string":
+        cols = ["_id", "title"] if sc.dest_family == "schemaless" else ["id", "title"]
+        rows = [{cols[0]: "", "title": "a"}, {cols[0]: "2", "title": "b"}, {cols[0]: "3", "title": "c"}]
         types = {c: "VARCHAR" for c in cols}
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in cols]
     elif sc.rule_class == "financial_precision":
@@ -1046,8 +1099,15 @@ def _run_identity_duplicate(sc: Scenario) -> dict[str, Any]:
     )
     duplicate = next(c for c in report["checks"] if c["check"] == "duplicate_keys")
     blocked = bool(duplicate["blocks_transfer"])
+    warning = " ".join(str(item) for item in (duplicate.get("warnings") or []))
+    if sc.expect == "pass":
+        ok = not blocked
+    elif sc.expect == "warn":
+        ok = (not blocked) and "counted once" in warning.lower() and "collapsed" in warning.lower()
+    else:
+        ok = blocked
     return {
-        "ok": (not blocked) if sc.expect == "pass" else blocked,
+        "ok": ok,
         "primary_key": duplicate.get("primary_key"),
         "duplicate_check": duplicate,
     }
@@ -1385,6 +1445,7 @@ def test_scenario_catalog_scale_and_write_proof():
         "identity.biz_id_dup.postgresql.strict",
         "encoding.zwsp.snowflake.strict",
         "encoding.zwsp.snowflake.balanced",
+        "encoding.nul.snowflake.strict",
         "ddl.schemaless_no_sql_rules.redis.strict",
         "preflight.schemaless_drift_noise.mongodb.strict",
         "types.bit1_boolean.postgresql.strict",

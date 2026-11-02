@@ -105,7 +105,9 @@ def test_explicit_insecure_policy_is_the_only_bypass(server_key):
 def _md5_fingerprint(key) -> str:
     import hashlib
 
-    digest = hashlib.md5(key.asbytes()).hexdigest()
+    # Renders OpenSSH's legacy MD5 fingerprint so the test can prove we refuse
+    # it — the weak digest is the fixture under test, never a security control.
+    digest = hashlib.md5(key.asbytes(), usedforsecurity=False).hexdigest()
     return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2))
 
 

@@ -9,7 +9,6 @@ from connectors.sql_dsn import private_cloud_host_hint, resolve_sql_endpoint
 from connectors.write_resilience import is_public_proxy_host
 
 logger = logging.getLogger(__name__)
-_ssl_fallback_hosts: set[str] = set()
 
 
 def _parse_postgres_url(url: str) -> dict[str, Any]:
@@ -78,41 +77,97 @@ def get_connection(
         "keepalives_count": 5,
     }
 
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(ep["host"], connection_string)
+    from connectors.pg_infinity import register_pg_temporal_infinity
+
+    register_pg_temporal_infinity()
+    from services.endpoint_session import borrow
+
+    from src.ai.copilot.tool_deadline import remaining_seconds
+
+    left = remaining_seconds()
+    if left is not None:
+        # Inside a tool call the connect may not outlive the call (D169/D181).
+        kwargs["connect_timeout"] = max(2, min(int(kwargs["connect_timeout"]), int(left) or 2))
+    key = tuple(str(kwargs.get(k) or "") for k in ("host", "port", "dbname", "user", "password", "sslmode"))
     try:
-        conn = psycopg2.connect(**kwargs)
+        conn, release = borrow(
+            "postgresql",
+            key,
+            lambda: _open_guarded(psycopg2, kwargs),
+            close=_really_close,
+            alive=lambda c: not c.closed,
+            reset=_reset_for_reuse,
+        )
     except Exception as first_exc:
-        fallback_sslmode: str | None = None
-        if not ssl and public_proxy and sslmode != "require":
-            fallback_sslmode = "require"
-        elif ssl and sslmode == "require" and _ssl_not_supported(str(first_exc)):
-            # ssl=True with a server that does not advertise TLS is often a stale
-            # connector setting. Fall back to negotiate/try TLS first, then plain.
-            fallback_sslmode = "prefer"
+        if ssl and _ssl_not_supported(str(first_exc)):
+            # ssl=True is the connector's explicit TLS requirement (see
+            # SavedConnector.ssl_mode): it is never retried without TLS.
+            raise RuntimeError(
+                f"{first_exc} - TLS is required by this connection and the server "
+                "does not offer it; refusing to fall back to plaintext. Enable TLS on "
+                "the server, or clear SSL/TLS on the connector to allow an unencrypted "
+                "connection."
+            ) from first_exc
+        hint = private_cloud_host_hint(ep["host"], connection_string)
+        if hint:
+            raise RuntimeError(f"{first_exc}{hint}") from first_exc
+        raise
+    if release is not None:
+        conn._df_release = release
+    return conn
 
-        if fallback_sslmode:
-            try:
-                conn = psycopg2.connect(**{**kwargs, "sslmode": fallback_sslmode})
-                if ep["host"] not in _ssl_fallback_hosts:
-                    _ssl_fallback_hosts.add(ep["host"])
-                    logger.warning(
-                        "PostgreSQL sslmode='%s' failed for %s; connected with sslmode='%s'. "
-                        "Review the connector SSL setting if encryption is required.",
-                        sslmode,
-                        ep["host"],
-                        fallback_sslmode,
-                    )
-            except psycopg2.Error:
-                hint = private_cloud_host_hint(ep["host"], connection_string)
-                if hint:
-                    raise RuntimeError(f"{first_exc}{hint}") from first_exc
-                raise first_exc
-        else:
-            hint = private_cloud_host_hint(ep["host"], connection_string)
-            if hint:
-                raise RuntimeError(f"{first_exc}{hint}") from first_exc
-            raise
 
+def _scoped_connection_class(psycopg2: Any) -> type:
+    """A psycopg2 connection whose ``close`` can hand it back to an endpoint scope.
+
+    It stays a real ``psycopg2.extensions.connection`` (``sql.Composed`` and
+    the type casters require one), so no consumer can tell the difference.
+    """
+    global _SCOPED_CLASS
+    if _SCOPED_CLASS is None:
+
+        class ScopedConnection(psycopg2.extensions.connection):
+            _df_release = None
+
+            def close(self) -> None:
+                release, self._df_release = self._df_release, None
+                if release is not None:
+                    release()
+                    return
+                super().close()
+
+        _SCOPED_CLASS = ScopedConnection
+    return _SCOPED_CLASS
+
+
+_SCOPED_CLASS: type | None = None
+
+
+def _open_guarded(psycopg2: Any, kwargs: dict[str, Any]) -> Any:
     from connectors.write_resilience import apply_postgres_session_guards
 
+    conn = psycopg2.connect(
+        **kwargs, connection_factory=_scoped_connection_class(psycopg2)
+    )
     apply_postgres_session_guards(conn)
     return conn
+
+
+def _really_close(conn: Any) -> None:
+    conn._df_release = None
+    conn.close()
+
+
+def _reset_for_reuse(conn: Any) -> None:
+    """Hand a session to its next consumer as a fresh connect would."""
+    from connectors.write_resilience import apply_postgres_session_guards
+
+    conn.rollback()
+    conn.cursor_factory = None
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("RESET ALL")
+    apply_postgres_session_guards(conn)

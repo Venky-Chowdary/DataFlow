@@ -5,13 +5,6 @@
     "apps/web",
     "packages/design-system"
   ],
-  "overrides": {
-    "uuid": "^11.1.1",
-    "postcss": "^8.5.23",
-    "glob": {
-      "minimatch": "^10.2.5"
-    }
-  },
   "scripts": {
     "dev": "npm run dev --workspace=@dataflow/web",
     "setup:api": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pip install -r requirements.txt'",
@@ -36,5 +29,15 @@
     "loop:enterprise": "while true; do npm run test:e2e && npm run build && echo 'ENTERPRISE_LOOP_OK' || echo 'ENTERPRISE_LOOP_FAIL'; sleep 300; done",
     "generate:catalog": "cd apps/api && python scripts/generate_connector_catalog.py",
     "generate:training": "cd packages/ml/src/ml/synthetic && python factory.py --count 10000"
+  },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "postcss": "^8.5.23",
+    "@joshwooding/vite-plugin-react-docgen-typescript": {
+      "glob": "^14.0.3"
+    },
+    "glob": {
+      "minimatch": "^11.0.3"
+    }
   }
 }

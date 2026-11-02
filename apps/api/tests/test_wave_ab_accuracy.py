@@ -145,7 +145,7 @@ def test_excel_over_max_rows_fail_closed(monkeypatch):
     from services.file_parser import FileParser
     import services.excel_parser as ep
 
-    def fake_batches(content, chunk_size):
+    def fake_batches(content, chunk_size, options=None):
         yield [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}, {"id": "3", "name": "c"}]
 
     monkeypatch.setattr(ep, "iter_excel_batches", fake_batches)
@@ -259,6 +259,7 @@ def test_stripe_total_rows_none():
         )
     assert len(batch.rows) == 1
     assert batch.total_rows is None
+    assert (batch.meta or {}).get("truncated") is True
 
 
 def test_integer_bind_refuses_non_integral_float():
@@ -275,7 +276,15 @@ def test_integer_bind_refuses_non_integral_float():
 def test_csv_strict_utf8_decode():
     from services.file_parser import FileParser
 
+    # Never U+FFFD: a declared UTF-8 refuses the bytes it cannot decode, and
+    # an undeclared non-UTF-8 file is read as the single-byte code page it is
+    # (Windows-1252), every byte one exact character (round 10).
+    from services.read_options import ReadOptions
+
     bad = b"id,name\n1,\xff\xfe"
-    result = FileParser.parse_csv(bad)
+    result = FileParser.parse_csv(bad, options=ReadOptions(encoding="utf-8"))
     assert result.success is False
     assert "utf-8" in (result.error or "").lower()
+    sniffed = FileParser.parse_csv(bad)
+    assert sniffed.success, sniffed.error
+    assert sniffed.data == [{"id": "1", "name": "\u00ff\u00fe"}]

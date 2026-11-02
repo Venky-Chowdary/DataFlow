@@ -13,23 +13,29 @@ from services.decision_kernel.type_invent import (
     ddl_invent_never_narrower_than_table,
     ddl_type,
     float_width_carrier,
+    inherit_measured_string_width,
     integer_width_carrier,
     materialize_dest_ddl,
     normalize_logical_type,
+    refuse_create_new_numeric_collapse,
 )
 from services.type_system import (
+    decimal_capacity_is_equal_or_wider,
     is_lossy_coercion,
     is_precision_collapse_coercion,
 )
 
 __all__ = [
     "create_new_mapping_target_type",
+    "decimal_capacity_is_equal_or_wider",
     "ddl_invent_never_narrower_than_table",
     "ddl_type",
     "float_width_carrier",
+    "inherit_measured_string_width",
     "integer_width_carrier",
     "is_lossy_coercion",
     "is_precision_collapse_coercion",
     "materialize_dest_ddl",
     "normalize_logical_type",
+    "refuse_create_new_numeric_collapse",
 ]

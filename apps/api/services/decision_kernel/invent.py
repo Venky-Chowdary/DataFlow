@@ -12,6 +12,7 @@ from typing import Any
 
 from services.column_case import column_type_or_none
 from services.mapping_constraints import is_intentional_omit
+from services.dest_schema_authority import destination_schema_is_sampled
 
 
 class InventContext(str, Enum):
@@ -197,6 +198,42 @@ def _kernel_invent_is_stale(row: dict[str, Any], src: str) -> bool:
     return changed
 
 
+def _capacity_promoted_stamp(
+    row: dict[str, Any],
+    stamped: str,
+    src_types: dict[str, str],
+    dest_db: str,
+) -> str:
+    """A wider create-new stamp when the judged source no longer fits it, else "".
+
+    A file/document source has no declared DDL, so its type is *profiled*, and
+    every stage profiles a different amount of it: Map sees eight sample rows
+    and projects ``DECIMAL(6,4)``, Validate profiles fifty and calls the source
+    ``DECIMAL(7,4)``, Execute reads the whole file and calls it ``DECIMAL(8,4)``.
+    The stamp is frozen at Map, so the gates then compare the source against a
+    carrier Dataflow itself projected too narrow and refuse the run for a
+    fidelity collapse of its own making — with no destination DDL to protect
+    (the table does not exist yet) and no remap the operator could make that is
+    more correct than the one we would write.
+
+    So the stamp is re-projected from the type this stage is judging against and
+    only ever widened: a fresh projection that is itself lossy leaves the stamp
+    alone, and an operator-chosen carrier is never touched.
+    """
+    if row.get("user_override") or row.get("risk_acknowledged"):
+        return ""
+    judged = (
+        column_type_or_none(src_types, str(row.get("source") or ""))
+        or str(row.get("source_type") or "").strip()
+    )
+    if not judged:
+        return ""
+    from services.decision_kernel.type_invent import promote_create_new_capacity_stamp
+
+    promoted = promote_create_new_capacity_stamp(judged, stamped, dest_db)
+    return promoted if promoted and promoted.upper() != stamped.upper() else ""
+
+
 def _backfill_widened_type(
     live_type: str,
     row: dict[str, Any],
@@ -228,14 +265,63 @@ def _backfill_widened_type(
     )
     if not source_type:
         return ""
+    # Function-local: connectors.schema_drift imports the type layer, so a
+    # module-level import here would close an import cycle.
     try:
         from connectors.schema_drift import is_wider_type
-    except Exception:
+    except ImportError:
         return ""
     try:
         if is_wider_type(str(live_type), source_type, dest_db=dest_db):
             return source_type
-    except Exception:
+    except (ValueError, TypeError, KeyError):
+        return ""
+    return ""
+
+
+def _sample_inferred_widened_type(
+    live_type: str,
+    row: dict[str, Any],
+    src_types: dict[str, str],
+    *,
+    dest_db: str,
+) -> str:
+    """The source's type when the live carrier was inferred from values, else "".
+
+    A Mongo collection, a Redis keyspace or a Parquet prefix has no column DDL:
+    its "live type" is profiled from whatever documents were sampled, so a
+    ``DECIMAL(12,2)`` source column holding ``0.01 … 9.99`` in the sampled window
+    comes back as ``DECIMAL(3,2)``. Binding that as the destination carrier is
+    the bind-existing rule applied to evidence that does not exist — the second
+    run of a route that has already landed every row then reads its own sample
+    as a narrower destination and refuses (``DDL identity mismatch``, ``fidelity
+    collapse``), with no DDL to protect and no remap that would be more correct.
+
+    Only a strictly wider source passes, so a genuinely richer destination
+    document (``DECIMAL(18,4)`` where the source is ``DECIMAL(12,2)``) still
+    wins, and an operator-chosen carrier is never touched.
+    """
+    if row.get("user_override") or row.get("risk_acknowledged"):
+        return ""
+    from services.db_type_utils import dest_declares_column_ddl
+
+    if dest_declares_column_ddl(dest_db):
+        return ""
+    source_type = (
+        str(row.get("source_type") or "").strip()
+        or column_type_or_none(src_types, str(row.get("source") or ""))
+        or ""
+    )
+    if not source_type:
+        return ""
+    # Function-local: connectors.schema_drift imports the type layer, so a
+    # module-level import here would close an import cycle.
+    from connectors.schema_drift import is_wider_type
+
+    try:
+        if is_wider_type(str(live_type), source_type, dest_db=dest_db):
+            return source_type
+    except (ValueError, TypeError, KeyError):
         return ""
     return ""
 
@@ -255,6 +341,9 @@ def stamp_additive_mapping_types(
     Fail-closed honesty:
     * ``pending_dest_schema`` — never invent (Studio must reload).
     * Live dest carrier present — bind that stamp; never invent from source.
+      On a sink with no column DDL (Mongo/Redis/DynamoDB, object stores) the
+      "live" carrier is profiled from sampled values, so it may only widen to
+      the source carrier (:func:`_sample_inferred_widened_type`).
     * Column absent from live types + (``create_new`` / create strategies /
       ``backfill_new_fields`` / ``dest_table_exists is False``) — invent via
       :func:`invent_dest_type` ``CREATE_NEW``.
@@ -294,18 +383,45 @@ def stamp_additive_mapping_types(
             continue
         live_hit = live.get(tgt) or live_fold.get(tgt.lower())
         stamped = str(row.get("target_type") or row.get("dest_type") or "").strip()
+        if live_hit and stamped and destination_schema_is_sampled(db):
+            # Bind-existing authority rests on the live carrier being *declared*.
+            # A document / keyspace store / object store has no DDL: its "live
+            # type" is read off a page of values, so a collection currently
+            # holding small ids reports INTEGER and would narrow a BIGINT
+            # population on the second run (D1). Elasticsearch mappings are
+            # declared, so they still win (D16).
+            live_hit = None
         if live_hit:
             # Bind-existing authority — live carrier always wins over Map invent.
-            widened = _backfill_widened_type(
-                live_hit,
-                row,
-                src_types,
-                dest_db=db,
-                backfill_new_fields=backfill_new_fields,
+            # An approved widen already names the post-ALTER carrier
+            # (schema_drift.plan_destination_evolution); re-deriving it from
+            # the source spelling turned NVARCHAR(500) into VARCHAR(500).
+            widened = (
+                stamped
+                if row.get("dest_widen") and stamped
+                else _backfill_widened_type(
+                    live_hit,
+                    row,
+                    src_types,
+                    dest_db=db,
+                    backfill_new_fields=backfill_new_fields,
+                )
             )
-            row["target_type"] = widened or str(live_hit)
+            sampled = (
+                ""
+                if widened
+                else _sample_inferred_widened_type(
+                    live_hit, row, src_types, dest_db=db
+                )
+            )
+            row["target_type"] = widened or sampled or str(live_hit)
             row["create_new"] = False
-            if widened:
+            if sampled:
+                # No DDL exists to alter — the sink writes the value as the
+                # source carries it, so the stamp stays bind-existing.
+                if strategy in {"create_compatible_new", "identity_passthrough"}:
+                    row["assignment_strategy"] = "bind_existing"
+            elif widened:
                 # The ALTER is planned, not performed here: the writer's
                 # widen pass owns the DDL and keeps its own refusals.
                 row["assignment_strategy"] = "backfill_widen_existing"
@@ -331,6 +447,13 @@ def stamp_additive_mapping_types(
             or column_type_or_none(src_types, str(row.get("source") or ""))
             or "TEXT"
         )
+        # A zone the operator declared on this mapping makes a naive column an
+        # instant. The stamp is the CREATE the gates then judge the source
+        # against, so inventing it from the zoneless type created NTZ and
+        # blocked the run the declaration had just unblocked (D11).
+        from services.timezone_policy import effective_source_type
+
+        src = effective_source_type(src, row.get("transform"))
         # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel
         # invent — must still run invent_dest_type (BQ UUID→STRING, etc.).
         # Casefold alone is unsafe: bare logical ``integer`` uppercases to the
@@ -341,6 +464,10 @@ def stamp_additive_mapping_types(
         if stamped and not (is_create and (source_identity_stamp or stale_invent)):
             if is_create and not row.get("create_new"):
                 row["create_new"] = True
+            if is_create:
+                promoted = _capacity_promoted_stamp(row, stamped, src_types, db)
+                if promoted:
+                    row["target_type"] = promoted
             continue
         if not is_create:
             # No invent authority — leave blank; do not report as stamp failure.

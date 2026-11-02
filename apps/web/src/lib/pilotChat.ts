@@ -6,11 +6,16 @@
 import type { CopilotPendingAction } from "./api";
 import {
   confirmPilotPending,
+  isDestructiveLifecycle,
   isDestructiveTransfer,
+  isLifecycleOp,
+  lifecycleConfirmPrompt,
   transferOverwriteMessage,
+  type PilotConfirmOutcome,
 } from "./pilotConfirm";
 import { extractPilotResultId } from "./pilotChatStore";
 import type { ActiveDataContext, Screen } from "./types";
+import { getActiveWorkspaceId } from "./workspace";
 
 /** Shared screen labels for Pilot page + rail action chips. */
 export const PILOT_SCREEN_LABELS: Record<string, string> = {
@@ -28,19 +33,86 @@ export const PILOT_SCREEN_LABELS: Record<string, string> = {
   benchmarks: "Proofs",
 };
 
-/** Apply non-mutating navigate suggestions from a chat turn. */
+/**
+ * Workspace screens Pilot may move an operator to. `landing` is absent on purpose:
+ * it is public marketing, so routing there logs the operator out of their context.
+ */
+const NAVIGABLE_SCREENS: readonly string[] = [
+  "dashboard",
+  "pilot",
+  "transfer",
+  "query",
+  "connectors",
+  "schedules",
+  "transforms",
+  "jobs",
+  "contracts",
+  "mcp",
+  "settings",
+  "docs",
+  "benchmarks",
+];
+
+/** Whether a suggested target is a real authenticated screen we can route to. */
+export function isNavigableScreen(screen: string | undefined): screen is Screen {
+  return !!screen && NAVIGABLE_SCREENS.includes(screen);
+}
+
+/**
+ * Move the operator only when this turn actually ran the `navigate` tool — i.e. they
+ * asked to be taken somewhere. Every other suggestion stays a chip they can press:
+ * auto-running them swallowed the answer (an explained "append mode" turn suggested
+ * the Transfer Studio guide and navigated before the paragraph could be read).
+ */
 export function applyPilotSafeActions(
   actions: { risk?: string; type?: string; screen?: string; route?: string }[] | undefined,
   onNavigate?: (screen: Screen) => void,
+  toolsUsed?: { name: string; success: boolean }[],
 ): void {
   if (!onNavigate || !actions?.length) return;
+  const asked = (toolsUsed || []).some((t) => t.name === "navigate" && t.success);
+  if (!asked) return;
   for (const a of actions) {
     if (a.risk === "mutate" || a.type === "studio") continue;
     const screen = a.screen || a.route;
-    if ((a.type === "navigate" || !a.type) && screen) {
-      onNavigate(screen as Screen);
+    if ((a.type === "navigate" || !a.type) && isNavigableScreen(screen)) {
+      onNavigate(screen);
+      return;
     }
   }
+}
+
+/**
+ * Whether a message may offer follow-up prompts.
+ *
+ * Only the newest turn: chips on every assistant message stack a column of
+ * stale suggestions down the thread, and tapping one from three turns ago
+ * re-asks a question the conversation has already moved past.
+ *
+ * Typed as a predicate on `suggested` so the caller can render the chips
+ * without repeating the emptiness check the guard already made.
+ */
+/** Drop blank and repeated suggestions so a prompt is offered once. */
+export function uniquePilotPrompts(prompts: readonly string[] | undefined): string[] {
+  if (!prompts?.length) return [];
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const raw of prompts) {
+    const prompt = raw.trim();
+    if (!prompt || seen.has(prompt)) continue;
+    seen.add(prompt);
+    unique.push(prompt);
+  }
+  return unique;
+}
+
+export function showsFollowUpPrompts(
+  index: number,
+  total: number,
+  suggested: string[] | undefined,
+): suggested is string[] {
+  if (!suggested || suggested.length === 0) return false;
+  return index === total - 1;
 }
 
 /** Chip label for a suggested navigate/action. */
@@ -91,6 +163,7 @@ export function buildPilotDataContext(
     blockers: activeData?.blockers,
     pilot_session_id: opts.sessionId,
     last_result_id: opts.lastResultId,
+    workspace_id: activeData?.workspace_id || getActiveWorkspaceId() || undefined,
   };
 }
 
@@ -126,24 +199,27 @@ export async function runPilotConfirm(
 ): Promise<"cleared" | "cancelled" | "unknown"> {
   const { onNavigate, toast, confirm, dispatchStudioAction } = handlers;
 
-  if (
-    action.type === "studio"
-    || (
-      action.kind
-      && action.type !== "start_transfer"
-      && action.type !== "create_connector"
-      && action.type !== "run_schedule"
-    )
-  ) {
+  if (action.type === "studio") {
+    if (action.destructive) {
+      const ok = await confirm({
+        title: "Quarantine bad rows and re-run?",
+        message: "This remediation can quarantine rows and start a new transfer run.",
+        confirmLabel: "Quarantine & re-run",
+        tone: "danger",
+      });
+      if (!ok) return "cancelled";
+    }
+    const res = await confirmPilotPending(action);
+    if (res.kind !== "studio") throw new Error("Unexpected confirm result");
     dispatchStudioAction({
-      kind: (action.kind || String(action.payload?.kind || "")) as string,
-      label: action.label,
-      run_id: action.run_id || (action.payload?.run_id as string | undefined),
+      kind: res.remediation_kind,
+      label: res.label,
+      run_id: res.run_id,
     });
     onNavigate?.("transfer");
     toast({
       title: "Opening Fix bad data",
-      message: action.label || "Confirm opens Transfer Studio — apply the fix there.",
+      message: res.label || "Confirm opens Transfer Studio — apply the fix there.",
       tone: "info",
     });
     return "cleared";
@@ -195,6 +271,80 @@ export async function runPilotConfirm(
     return "cleared";
   }
 
+  if (isLifecycleOp(action.type)) {
+    if (isDestructiveLifecycle(action)) {
+      const prompt = lifecycleConfirmPrompt(action);
+      const ok = await confirm({ ...prompt, tone: "danger" });
+      if (!ok) return "cancelled";
+    }
+    const res = await confirmPilotPending(action);
+    if (res.kind !== "lifecycle") throw new Error("Unexpected confirm result");
+    if (res.op === "delete_connector") {
+      window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
+    }
+    onNavigate?.(res.screen);
+    toast({
+      ...lifecycleToast(res),
+      tone:
+        res.op === "repair_cdc_drift" && res.result.resolved !== true
+          ? "warning"
+          : "success",
+    });
+    return "cleared";
+  }
+
   toast({ title: "Unknown action", message: action.type, tone: "error" });
   return "unknown";
+}
+
+function lifecycleToast(
+  res: Extract<PilotConfirmOutcome, { kind: "lifecycle" }>,
+): { title: string; message: string } {
+  const again = res.idempotent ? " (already applied)" : "";
+  switch (res.op) {
+    case "cancel_job":
+      return { title: `Cancellation requested${again}`, message: `Job ${res.job_id} stops after its current batch.` };
+    case "retry_job":
+      return {
+        title: `Retry started${again}`,
+        message: `New job ${res.job_id} re-runs ${String(res.result.retry_of || "the failed job")} from zero.`,
+      };
+    case "resume_job":
+      return { title: `Resume started${again}`, message: `Job ${res.job_id} continues from its last checkpoint.` };
+    case "replay_quarantine":
+      return {
+        title: `Quarantine replay started${again}`,
+        message: `Job ${res.job_id}: ${String(res.result.replayed ?? res.result.rows ?? "open")} rows re-sent.`,
+      };
+    case "repair_cdc_drift": {
+      const title =
+        res.result.resolved === true
+          ? "CDC drift repair complete"
+          : "CDC drift repair partially complete";
+      return {
+        title: `${title}${again}`,
+        message: `Job ${res.job_id}: ${res.result.resolved === true ? "All evidenced keys are reconciled." : `${Number(res.result.remaining_keys ?? 0)} key(s) remain unresolved.`} State convergence / reconciliation, not log replay.`,
+      };
+    }
+    case "delete_connector":
+      return { title: `Connector deleted${again}`, message: `“${res.subject}” was removed from Connectors.` };
+    case "set_schedule_enabled":
+      return {
+        title: res.result.enabled ? `Pipeline resumed${again}` : `Pipeline paused${again}`,
+        message: res.result.enabled
+          ? `“${res.subject}” next runs ${String(res.result.next_run_at || "on its cadence")}.`
+          : `“${res.subject}” will not fire until resumed.`,
+      };
+    case "delete_schedule":
+      return { title: `Pipeline deleted${again}`, message: `“${res.subject}” was removed; its jobs stay in Jobs.` };
+    case "update_schedule": {
+      const cron = String(res.result.cron || "");
+      const interval = String(res.result.interval || "");
+      const clock = cron ? `${interval} · ${cron}` : interval || "its new cadence";
+      return {
+        title: `Pipeline updated${again}`,
+        message: `“${res.subject}” now runs ${clock}. The route and the mapping were not changed.`,
+      };
+    }
+  }
 }

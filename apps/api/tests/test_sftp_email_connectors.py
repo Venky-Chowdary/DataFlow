@@ -12,8 +12,50 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from connectors import email as email_connector
-from connectors.sftp_common import parse_sftp_config, split_remote_path
+from connectors.sftp_common import (
+    apply_sftp_uri_endpoint,
+    parse_sftp_config,
+    split_remote_path,
+)
 from connectors.sftp_writer import write_mapped_rows as write_sftp_rows
+
+
+def test_sftp_uri_fills_empty_host_and_keeps_an_explicit_host():
+    lifted = apply_sftp_uri_endpoint(
+        {
+            "type": "sftp",
+            "host": "",
+            "port": 5432,
+            "connection_string": "sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx",
+        }
+    )
+    assert lifted["host"] == "ftp.example.com"
+    assert lifted["port"] == 2222
+    assert lifted["username"] == "alice"
+    assert lifted["database"] == "/incoming/book.xlsx"
+    kept = apply_sftp_uri_endpoint(
+        {
+            "type": "sftp",
+            "host": "pinned.example",
+            "port": 22,
+            "connection_string": "sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx",
+        }
+    )
+    assert kept["host"] == "pinned.example"
+    assert kept["port"] == 22
+
+
+def test_extract_url_credentials_reads_sftp_uri():
+    from src.ai.copilot.connector_create import extract_url_credentials
+
+    parsed = extract_url_credentials(
+        "load the daily file from sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx"
+    )
+    assert parsed is not None
+    assert parsed["type"] == "sftp"
+    assert parsed["host"] == "ftp.example.com"
+    assert parsed["port"] == 2222
+    assert parsed["username"] == "alice"
 
 
 class TestSFTPConfig:
@@ -45,6 +87,14 @@ class TestSFTPConfig:
         cfg = parse_sftp_config(connection_string="/data/raw/file.jsonl")
         assert cfg.path == "/data/raw/file.jsonl"
         assert cfg.host == ""
+
+    def test_uri_path_survives_root_database_and_filename(self):
+        cfg = parse_sftp_config(
+            connection_string="sftp://alice:secret@ftp.example.com/incoming/nested/data.csv",
+            database="/",
+            table="data.csv",
+        )
+        assert cfg.path == "/incoming/nested/data.csv"
 
     def test_split_remote_path(self):
         assert split_remote_path("/data/file.csv") == ("/data", "file.csv")
@@ -177,3 +227,44 @@ class TestEmailConnector:
         _from, to, message = server.sendmail.call_args[0]
         assert "to@example.com" in to
         assert "export" in message.lower()
+        assert result.meta.get("reconcile_sample")
+        assert result.meta.get("source_row_count") == 1
+
+    @patch("connectors.email.smtplib")
+    def test_write_email_csv_matches_shared_serialize(self, mock_smtplib):
+        from email import message_from_string
+
+        from connectors.object_store_common import serialize_object_store_body
+
+        server = MagicMock()
+        mock_smtplib.SMTP.return_value.__enter__ = MagicMock(return_value=server)
+        mock_smtplib.SMTP.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = email_connector.write_mapped_rows(
+            host="localhost",
+            port=1025,
+            username="u",
+            password="p",
+            database="to@example.com",
+            table_name="payments",
+            headers=["id", "amount"],
+            data_rows=[["1", "1000.00"]],
+            mappings=[{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}],
+            column_types={"id": "INTEGER", "amount": "DECIMAL"},
+        )
+        assert result.ok is True
+        raw = server.sendmail.call_args[0][2]
+        msg = message_from_string(raw)
+        payload = next(
+            part.get_payload(decode=True) for part in msg.walk() if part.get_filename()
+        )
+        expected, mime = serialize_object_store_body(
+            key="export.csv",
+            # Same cells the connector mapped: a source decimal stays textual so
+            # the CSV keeps its declared scale (1000.00, not a float's 1000.0).
+            mapped_rows=[("1", "1000.00")],
+            target_cols=["id", "amount"],
+            dest_types={"id": "INTEGER", "amount": "DECIMAL"},
+        )
+        assert mime == "text/csv"
+        assert payload == expected

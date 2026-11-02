@@ -124,7 +124,9 @@ def test_oracle_snapshot_doubles_embedded_double_quote(factory, monkeypatch):
     sink: list[str] = []
     _drain(reader, sink, monkeypatch)
 
-    ordering = [s for s in sink if "ROW_NUMBER()" in s]
+    ordering = [s for s in sink if "ORDER BY" in s.upper() and "V$DATABASE" not in s.upper()]
     assert ordering, sink
     for sql in ordering:
         assert '"ID"" --"' in sql.upper()
+        # The unescaped form would close the identifier and comment out the rest.
+        assert '"ID" --"' not in sql.upper()

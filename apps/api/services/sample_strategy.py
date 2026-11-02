@@ -140,6 +140,56 @@ def _stratified_sample_indices(
     return picked[:sample_size]
 
 
+def position_reservoir_sample(
+    rows: list[dict[str, Any]],
+    limit: int,
+    *,
+    seed: str = "preflight",
+) -> list[dict[str, Any]]:
+    """Head, tail, and a deterministic reservoir of the middle.
+
+    A prefix sample misses the rows at the end of a file and the rare row in
+    the middle. The seed is part of the plan so the same population draws the
+    same rows again. Still a sample — not population proof.
+    """
+    import hashlib
+
+    rows = list(rows or [])
+    n = len(rows)
+    if limit <= 0 or n <= limit:
+        return rows
+    head_n = max(1, limit // 2)
+    tail_n = max(1, limit // 4)
+    if head_n + tail_n >= n:
+        return rows
+    if head_n + tail_n > limit:
+        tail_n = max(1, limit - head_n)
+    mid_budget = limit - head_n - tail_n
+    middle = list(range(head_n, n - tail_n))
+
+    def _reservoir(indices: list[int], k: int) -> list[int]:
+        if k <= 0 or not indices:
+            return []
+        if len(indices) <= k:
+            return list(indices)
+        chosen = list(indices[:k])
+        for offset, idx in enumerate(indices[k:], start=k):
+            digest = hashlib.sha256(f"{seed}:{offset}".encode()).hexdigest()
+            slot = int(digest[:8], 16) % (offset + 1)
+            if slot < k:
+                chosen[slot] = idx
+        return chosen
+
+    order: list[int] = []
+    seen: set[int] = set()
+    for idx in list(range(head_n)) + _reservoir(middle, mid_budget) + list(range(n - tail_n, n)):
+        if idx in seen:
+            continue
+        seen.add(idx)
+        order.append(idx)
+    return [rows[i] for i in order[:limit]]
+
+
 def _auto_stratify_source_column(
     source_records: list[dict[str, Any]],
     mappings: list[dict[str, Any]],

@@ -25,6 +25,46 @@ def schema_for_endpoint(destination: Any) -> str | None:
         return None
 
 
+def prefer_approved_column_types(request: Any, schema: dict[str, str] | None) -> dict[str, str]:
+    """Keep the types the operator approved when Execute peeks again.
+
+    The execute sample is the first page (about 100 rows). A bad value in
+    that page re-inferred the column (phone → BIGINT, qty → VARCHAR) and
+    invalidated the signed quarantine contract, so the job failed instead of
+    holding the row out. Values past the page never changed the type, which
+    is why the same bad cell quarantined or failed depending on its position
+    (R4-D01 / R4-D02). Approved types win for columns the mapping already
+    named. Columns the plan did not type stay on the live peek.
+    """
+    out = dict(schema or {})
+    approved = getattr(request, "column_types", None) or {}
+    mappings = getattr(request, "mappings", None) or []
+    if not isinstance(approved, dict) or not approved or not mappings:
+        return out
+    wanted: set[str] = set()
+    for mapping in mappings:
+        if isinstance(mapping, dict):
+            source = str(mapping.get("source") or mapping.get("source_column") or "").strip()
+        else:
+            source = str(getattr(mapping, "source", "") or "").strip()
+        if source:
+            wanted.add(source)
+    if not wanted:
+        return out
+    folded = {
+        str(key).strip().lower(): value
+        for key, value in approved.items()
+        if str(key).strip() and value
+    }
+    for source in wanted:
+        typed = approved.get(source) or folded.get(source.lower())
+        if not typed:
+            continue
+        match = next((key for key in out if key.lower() == source.lower()), "")
+        out[match or source] = str(typed)
+    return out
+
+
 def enrich_mappings_with_types(
     mappings: list[dict],
     dest_types: dict[str, str] | None = None,
@@ -71,7 +111,7 @@ def stamp_additive_mappings_for_write(
     try:
         from services.batch_progress import effective_backfill_new_fields
         from services.decision_kernel import stamp_additive_mapping_types
-        from services.sync_cursor import is_overwrite_sync, resolve_effective_sync_mode
+        from services.sync_cursor import resolve_effective_sync_mode
     except Exception as exc:
         # Fail-closed: never Execute create/backfill without Kernel invent surface.
         raise ValueError(
@@ -83,6 +123,7 @@ def stamp_additive_mappings_for_write(
             backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
             schema_policy=str(getattr(request, "schema_policy", "") or ""),
             mappings=mappings,
+            dest_columns=list(dest_types or {}) if dest_table_exists is True else None,
         )
     except Exception:
         backfill = bool(getattr(request, "backfill_new_fields", False))

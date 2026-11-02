@@ -38,8 +38,9 @@ def test_vectorize_refuses_silent_reembed_on_empty_embedding_list():
     )
     assert len(rows) == 1
     assert rows[0]["embedding"] is None
-    assert "empty" in str(rows[0].get("_df_embed_error") or "").lower()
-    assert "refuse silent re-embed" in str(rows[0].get("_df_embed_error") or "")
+    stamp = str(rows[0].get("_df_embed_error") or "").lower()
+    assert "refuse silent re-embed" in stamp
+    assert "empty" in stamp or "missing" in stamp
 
 
 def test_qdrant_refuses_invented_dimension_384():
@@ -210,3 +211,13 @@ def test_pgvector_all_embed_rejected_is_not_ok():
     assert result.ok is False
     assert result.rows_written == 0
     assert result.rejected_details
+
+
+def test_refuse_empty_vectorization_fails_closed_on_mapped_payload():
+    from connectors.writer_common import refuse_empty_vectorization
+
+    assert refuse_empty_vectorization(records=[], data_rows=[]) is None
+    err = refuse_empty_vectorization(records=[{"id": "1"}], data_rows=[])
+    assert err and "refuse silent 0-row success" in err
+    err = refuse_empty_vectorization(records=[], data_rows=[["1", "1000"]])
+    assert err and "refuse silent 0-row success" in err

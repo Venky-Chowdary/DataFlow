@@ -26,7 +26,6 @@ Semantics
 from __future__ import annotations
 
 import logging
-import os
 from services.brand_env import getenv_brand
 import socket
 import time
@@ -165,6 +164,7 @@ def acquire_lease(
     holder_id: str,
     ttl_sec: float | None = None,
     meta: dict[str, Any] | None = None,
+    min_generation: int = 0,
 ) -> CdcLease:
     """Acquire or renew a lease for ``cursor_key`` / ``resource``.
 
@@ -182,6 +182,7 @@ def acquire_lease(
         holder_id=holder,
         ttl_sec=ttl,
         meta=dict(meta or {}),
+        min_generation=int(min_generation),
     )
     return CdcLease.from_dict(raw)
 
@@ -301,12 +302,48 @@ def force_release_lease(
     return result
 
 
+def list_lease_views(
+    *,
+    resource: str = "",
+    job_id: str = "",
+    stale_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Held leases as operator snapshots, optionally filtered.
+
+    A conflict tells the operator which *resource* was refused, not which cursor
+    key holds it, and ``force_release_lease`` needs the key. Enumerating is the
+    only way to get from the error they were shown to the lease they must break.
+    """
+    views: list[dict[str, Any]] = []
+    now = time.time()
+    want_res = (resource or "").strip()
+    want_job = (job_id or "").strip()
+    for raw in get_store().list_leases():
+        lease = CdcLease.from_dict(raw)
+        if want_res and lease.resource != want_res:
+            continue
+        holder_job = parse_holder_job_id(lease.holder_id) or str(
+            (lease.meta or {}).get("job_id") or ""
+        )
+        if want_job and holder_job != want_job:
+            continue
+        if stale_only and not lease.is_stale(now=now):
+            continue
+        view = _lease_snapshot(lease, now=now)
+        view["holder_job_id"] = holder_job or None
+        views.append(view)
+    return views
+
+
 def lease_view(cursor_key: str) -> dict[str, Any] | None:
     """Operator-facing lease snapshot for Job Theater / lag fields."""
     lease = get_lease(cursor_key)
     if lease is None:
         return None
-    now = time.time()
+    return _lease_snapshot(lease, now=time.time())
+
+
+def _lease_snapshot(lease: "CdcLease", *, now: float) -> dict[str, Any]:
     return {
         "cursor_key": lease.cursor_key,
         "resource": lease.resource,
@@ -400,6 +437,7 @@ class CdcLeaseGuard:
     job_id: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
     ttl_sec: float | None = None
+    min_generation: int = 0
     _acquired: bool = field(default=False, init=False, repr=False)
     _generation: int = field(default=0, init=False, repr=False)
 
@@ -437,6 +475,7 @@ class CdcLeaseGuard:
             holder_id=self.holder_id,
             ttl_sec=self.ttl_sec,
             meta=meta,
+            min_generation=self.min_generation,
         )
         self._acquired = True
         self._generation = int(lease.generation)

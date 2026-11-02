@@ -41,6 +41,16 @@ def get_source_snapshot_meta() -> dict[str, Any] | None:
     return dict(meta) if isinstance(meta, dict) else None
 
 
+def patch_source_snapshot_meta(updates: dict[str, Any]) -> None:
+    """Merge operator-visible snapshot facts (e.g. Time Travel fallback)."""
+    meta = _SOURCE_SNAPSHOT_META.get()
+    if not isinstance(meta, dict):
+        return
+    merged = dict(meta)
+    merged.update(updates)
+    _SOURCE_SNAPSHOT_META.set(merged)
+
+
 def bind_source_snapshot(conn: Any, meta: dict[str, Any]) -> contextvars.Token:
     """Bind ``conn`` + ``meta`` for the duration of a transfer read."""
     _SOURCE_SNAPSHOT_META.set(dict(meta))
@@ -291,3 +301,81 @@ def end_sqlite_snapshot(conn: Any | None, *, commit: bool = True) -> None:
             conn.close()
         except Exception as exc:
             logger.warning("end_sqlite_snapshot close: %s", exc, exc_info=exc)
+
+
+def begin_snowflake_time_travel(
+    *,
+    host: str,
+    database: str,
+    username: str,
+    password: str,
+    schema: str = "",
+    warehouse: str = "",
+    connection_string: str = "",
+    role: str = "",
+    private_key: str = "",
+) -> tuple[None, dict[str, Any]]:
+    """Capture ``CURRENT_TIMESTAMP()`` so later SELECTs can ``AT (TIMESTAMP)``.
+
+    Snowflake has no REPEATABLE READ session to hold. Time Travel is the
+    warehouse's own consistent-snapshot answer (Fivetran/HVR Compare class):
+    the extract and the optional Gate-8 re-read both pin the same instant.
+    The connection is not held — Time Travel is timestamp-addressed.
+    """
+    from connectors.snowflake_conn import get_connection, normalize_account
+
+    conn = get_connection(
+        account=normalize_account(host),
+        username=username,
+        password=password,
+        database=database,
+        schema=schema or "PUBLIC",
+        warehouse=warehouse,
+        connection_string=connection_string,
+        role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
+    )
+    try:
+        cur = conn.cursor()
+        try:
+            from connectors.snowflake_reader import _use_warehouse
+
+            _use_warehouse(cur, warehouse)
+            cur.execute("SELECT CURRENT_TIMESTAMP()")
+            row = cur.fetchone()
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    finally:
+        try:
+            conn.close()
+        except Exception as exc:
+            logger.warning("snowflake time-travel stamp close failed: %s", exc)
+    ts = row[0] if row else None
+    if hasattr(ts, "isoformat"):
+        ts_str = ts.isoformat()
+    else:
+        ts_str = str(ts or "").strip()
+    if not ts_str:
+        raise RuntimeError("Snowflake CURRENT_TIMESTAMP() returned empty")
+    meta = {
+        "engine": "snowflake",
+        "isolation": "time_travel",
+        "guarantee": "snowflake_time_travel",
+        "time_travel_ts": ts_str,
+        "snapshot_lsn": ts_str,
+        "export_snapshot": "",
+        "note": (
+            "Full-refresh source pages and optional Gate-8 re-read use "
+            "SELECT … AT (TIMESTAMP => <start>) — one Time Travel snapshot."
+        ),
+    }
+    return None, meta
+
+
+def end_snowflake_time_travel(conn: Any | None, *, commit: bool = True) -> None:
+    """No held session — Time Travel is timestamp-addressed."""
+    del conn, commit

@@ -1,11 +1,13 @@
 """Population-scoped FK orphan probe — the only path to RI ``proven``.
 
 Sample Validate never sets ``population_proof``. This module runs full-table
-anti-joins (COUNT + examples) for single-column FKs on SQL sources.
+MATCH SIMPLE anti-joins (COUNT + examples) for single-column and composite
+FKs on SQL sources. The join algorithm is ``services.fk_tuple_scan`` — the
+same owner as destination post-write RI.
 
 Honesty:
 - Opt-in only (expensive). Never invent proven when the scan did not run.
-- Composite FKs → incomplete (``population_orphan_count=None`` ⇒ not proven).
+- Column-arity mismatch or failed scan → incomplete (``population_orphan_count=None``).
 - Partial / failed scan → fail-closed finding; never silent soft-pass.
 """
 
@@ -14,7 +16,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.foreign_key_identity import parse_foreign_key
 from services.sample_orphan_probe import (
+    _fk_display,
     _fk_parts,
     _resolve_source_column,
     _severity,
@@ -24,71 +28,32 @@ logger = logging.getLogger(__name__)
 
 _MAX_ORPHAN_EXAMPLES = 25
 
-_SQLISH = {
-    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb",
-    "supabase", "mysql", "mariadb", "singlestore", "sqlserver", "mssql",
-    "synapse", "azure_sql_database", "oracle", "db2", "sqlite", "duckdb",
-    "generic_sql", "h2", "snowflake", "clickhouse", "trino", "presto",
-    "questdb",
-}
-
-
-def _split_table(name: str, default_schema: str | None) -> tuple[str | None, str]:
-    raw = (name or "").strip()
-    if not raw:
-        return default_schema, ""
-    if "." in raw:
-        schema, table = raw.split(".", 1)
-        return (schema.strip() or None), table.strip()
-    return default_schema, raw
-
 
 def _sql_population_orphan_scan(
     cfg: dict[str, Any],
     *,
     child_table: str,
-    child_column: str,
     parent_table: str,
-    parent_column: str,
+    child_column: str = "",
+    parent_column: str = "",
+    child_columns: list[str] | None = None,
+    parent_columns: list[str] | None = None,
+    match: str = "",
 ) -> dict[str, Any]:
-    """Full-table orphan COUNT + example values via LEFT JOIN anti-join."""
-    import sqlalchemy as sa
+    """Full-table orphan COUNT + examples via the catalog match type."""
+    from services.fk_tuple_scan import sql_population_orphan_scan
 
-    from connectors.generic_sql import _engine
-
-    schema = (cfg.get("schema") or "").strip() or None
-    child_schema, child_name = _split_table(child_table, schema)
-    parent_schema, parent_name = _split_table(parent_table, schema)
-    if not child_name or not parent_name or not child_column or not parent_column:
-        raise ValueError("incomplete table/column for population orphan scan")
-
-    child = sa.table(child_name, schema=child_schema)
-    parent = sa.table(parent_name, schema=parent_schema)
-    c_col = sa.column(child_column)
-    p_col = sa.column(parent_column)
-
-    orphan_pred = sa.and_(c_col.is_not(None), p_col.is_(None))
-    count_stmt = (
-        sa.select(sa.func.count())
-        .select_from(child.outerjoin(parent, c_col == p_col))
-        .where(orphan_pred)
+    kids = list(child_columns or ([child_column] if child_column else []))
+    parents = list(parent_columns or ([parent_column] if parent_column else []))
+    return sql_population_orphan_scan(
+        cfg,
+        child_table=child_table,
+        parent_table=parent_table,
+        child_columns=kids,
+        parent_columns=parents,
+        max_examples=_MAX_ORPHAN_EXAMPLES,
+        match=match,
     )
-    example_stmt = (
-        sa.select(c_col)
-        .select_from(child.outerjoin(parent, c_col == p_col))
-        .where(orphan_pred)
-        .limit(_MAX_ORPHAN_EXAMPLES)
-    )
-
-    engine = _engine(cfg)
-    with engine.connect() as conn:
-        orphan_count = int(conn.execute(count_stmt).scalar() or 0)
-        examples = [
-            r[0]
-            for r in conn.execute(example_stmt).fetchall()
-            if r and r[0] is not None
-        ]
-    return {"orphan_count": orphan_count, "examples": examples}
 
 
 def _unavailable_finding(
@@ -130,7 +95,7 @@ def probe_population_fk_orphans(
     validation_mode: str = "strict",
     fk_risk_acknowledged: bool = False,
 ) -> dict[str, Any]:
-    """Full-table FK orphan scan for single-column FKs.
+    """Full-table FK orphan scan for single-column and composite FKs.
 
     ``population_proof`` is True only when every FK was fully scanned and
     ``orphan_count == 0``. Incomplete scans set ``complete=False`` and leave
@@ -149,6 +114,19 @@ def probe_population_fk_orphans(
     }
     fks = [fk for fk in (foreign_keys or []) if isinstance(fk, dict)]
     child = (child_table or "").strip()
+    try:
+        from services.procedure_source import callable_skip_note, is_callable_source
+
+        if is_callable_source(source_config):
+            return {
+                **empty,
+                "coverage": "n/a",
+                "note": callable_skip_note(source_config, "population orphan scan"),
+                "skipped": True,
+                "reason": "callable_source",
+            }
+    except Exception:
+        pass
     if not fks:
         return {**empty, "note": "No FK metadata — population orphan scan skipped."}
     if not child:
@@ -207,7 +185,9 @@ def probe_population_fk_orphans(
         if db_type:
             cfg = dict(cfg)
             cfg.setdefault("type", db_type)
-        if db_type and db_type not in _SQLISH:
+        from services.source_duplicate_probe import is_sqlish_source
+
+        if db_type and not is_sqlish_source(db_type):
             finding = _unavailable_finding(
                 note=f"Population orphan scan not implemented for source type {db_type}.",
                 validation_mode=validation_mode,
@@ -245,7 +225,35 @@ def probe_population_fk_orphans(
     )
 
     for fk in fks:
-        cols, ref_table, ref_cols = _fk_parts(fk)
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict:
+            complete = False
+            checks.append(
+                {
+                    "skipped": True,
+                    "reason": "foreign_key_alias_conflict",
+                    "fk": fk,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                }
+            )
+            findings.append(
+                {
+                    "code": "foreign_key_alias_conflict",
+                    "severity": sev,
+                    "columns": list(parsed.child_columns),
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"{parsed.conflict} Population orphan scan did not run — "
+                        "referential integrity is not proven."
+                    ),
+                }
+            )
+            continue
+        cols = list(parsed.child_columns)
+        ref_table = parsed.scan_label
+        ref_cols = list(parsed.parent_columns)
         if not cols or not ref_table or not ref_cols:
             complete = False
             checks.append({"skipped": True, "reason": "incomplete_fk_metadata", "fk": fk})
@@ -262,14 +270,15 @@ def probe_population_fk_orphans(
                 }
             )
             continue
-        if len(cols) != 1 or len(ref_cols) != 1:
+        if len(cols) != len(ref_cols):
             complete = False
             checks.append(
                 {
                     "skipped": True,
-                    "reason": "composite_fk_not_probed",
+                    "reason": "fk_column_pairing_incomplete",
                     "columns": cols,
                     "referenced_table": ref_table,
+                    "referenced_columns": ref_cols,
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                 }
@@ -284,29 +293,32 @@ def probe_population_fk_orphans(
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Composite FK {cols} → {ref_table}{ref_cols} was not scanned "
-                        "(tuple anti-join not implemented). Coverage=population_orphan_probe "
-                        "incomplete — RI not proven."
+                        f"FK {cols} → {ref_table}{ref_cols} has no usable column pairing "
+                        f"({len(cols)} child vs {len(ref_cols)} parent). "
+                        "Coverage=population_orphan_probe incomplete — RI not proven."
                     ),
                 }
             )
             continue
 
-        child_col = _resolve_source_column(maps, cols[0])
-        parent_col = ref_cols[0]
+        child_cols = [_resolve_source_column(maps, c) or c for c in cols]
+        parent_cols = list(ref_cols)
+        label = "+".join(child_cols)
+        parent_label = "+".join(parent_cols)
         try:
             result = _sql_population_orphan_scan(
                 cfg,
                 child_table=child,
-                child_column=child_col,
                 parent_table=ref_table,
-                parent_column=parent_col,
+                child_columns=child_cols,
+                parent_columns=parent_cols,
+                match=parsed.match,
             )
         except Exception as exc:
             logger.warning(
                 "Population orphan scan failed for %s.%s: %s",
                 child,
-                child_col,
+                label,
                 exc,
                 exc_info=exc,
             )
@@ -315,19 +327,19 @@ def probe_population_fk_orphans(
                 {
                     "code": "population_orphan_probe_unavailable",
                     "severity": sev,
-                    "columns": [child_col],
+                    "columns": child_cols,
                     "referenced_table": ref_table,
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Population orphan scan failed for {child}.{child_col} → "
-                        f"{ref_table}.{parent_col}: {exc}. RI not proven."
+                        f"Population orphan scan failed for {child}.({label}) → "
+                        f"{ref_table}.({parent_label}): {exc}. RI not proven."
                     ),
                 }
             )
             checks.append(
                 {
-                    "column": child_col,
+                    "columns": child_cols,
                     "referenced_table": ref_table,
                     "error": str(exc),
                     "coverage": "population_orphan_probe",
@@ -336,35 +348,72 @@ def probe_population_fk_orphans(
             )
             continue
 
+        if result.get("available") is False:
+            complete = False
+            reason = str(result.get("reason") or "population orphan scan unavailable")
+            findings.append(
+                {
+                    "code": "population_orphan_probe_unavailable",
+                    "severity": sev,
+                    "columns": child_cols,
+                    "referenced_table": ref_table,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"Population orphan scan did not run for {child}.({label}) → "
+                        f"{ref_table}.({parent_label}): {reason}"
+                    ),
+                }
+            )
+            checks.append(
+                {
+                    "columns": child_cols,
+                    "referenced_table": ref_table,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "match": result.get("match") or "",
+                    "reason": reason,
+                }
+            )
+            continue
+
         orphan_count = int(result.get("orphan_count") or 0)
         examples = list(result.get("examples") or [])
+        scanned_match = str(result.get("match") or "simple")
         total_orphans += orphan_count
         checks.append(
             {
-                "column": child_col,
+                "column": child_cols[0] if len(child_cols) == 1 else label,
+                "columns": child_cols,
                 "referenced_table": ref_table,
-                "referenced_column": parent_col,
+                "referenced_column": parent_cols[0] if len(parent_cols) == 1 else parent_label,
+                "referenced_columns": parent_cols,
                 "orphan_count": orphan_count,
-                "examples": [str(v)[:80] for v in examples[:5]],
+                "examples": [_fk_display(v) for v in examples[:5]],
                 "coverage": "population_orphan_probe",
                 "population_proof": orphan_count == 0,
+                "match": scanned_match,
+                "match_simple": scanned_match != "full",
+                "match_full": scanned_match == "full",
             }
         )
         if orphan_count > 0:
-            ex = ", ".join(str(v)[:40] for v in examples[:3])
+            ex = ", ".join(
+                text for v in examples[:3] if (text := _fk_display(v, limit=40))
+            )
             findings.append(
                 {
                     "code": "fk_orphan_in_population",
                     "severity": sev,
-                    "columns": [child_col],
+                    "columns": child_cols,
                     "referenced_table": ref_table,
-                    "referenced_columns": [parent_col],
+                    "referenced_columns": parent_cols,
                     "orphan_count": orphan_count,
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Population orphan scan: {orphan_count} row(s) in {child}.{child_col} "
-                        f"missing from {ref_table}.{parent_col}"
+                        f"Population orphan scan: {orphan_count} row(s) in {child}.({label}) "
+                        f"missing from {ref_table}.({parent_label})"
                         + (f" (examples: {ex})" if ex else "")
                         + ". Coverage=population_orphan_probe — RI not proven."
                     ),

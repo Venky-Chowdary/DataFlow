@@ -321,6 +321,36 @@ def test_signal_table_poll_tracks_processed_ids(tmp_path, monkeypatch) -> None:
     assert seen2 == seen
 
 
+def test_schedule_snapshot_mode_is_cdc_only() -> None:
+    from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+    assert schedule_snapshot_mode("cdc", "when_needed") == "when_needed"
+    assert schedule_snapshot_mode("full_refresh_overwrite", "when_needed") == ""
+    assert schedule_snapshot_mode("cdc", "") == "initial"
+
+
+def test_snapshot_mode_preflight_gate_uses_execute_kernel() -> None:
+    from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
+
+    blocked = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        stream_contracts=[{"selected": True, "snapshot_mode": "never"}],
+        watermark=None,
+    )
+    assert blocked and blocked["status"] == "block"
+    assert blocked["details"]["primary_action"] == "open_advanced"
+
+    streamed = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        stream_contracts=[{"selected": True, "snapshot_mode": "never"}],
+        watermark="0/16B8A40",
+    )
+    assert streamed and streamed["status"] == "pass"
+    assert streamed["details"]["run_snapshot"] is False
+
+    assert build_snapshot_mode_preflight_gate(sync_mode="full_refresh_append") is None
+
+
 def test_snapshot_modes_debezium_compatible() -> None:
     assert parse_snapshot_mode("initial") == SnapshotMode.INITIAL
     assert should_run_snapshot(SnapshotMode.INITIAL, watermark=None) is True
@@ -331,6 +361,273 @@ def test_snapshot_modes_debezium_compatible() -> None:
         should_run_snapshot(SnapshotMode.NEVER, watermark=None)
     assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark=None) is True
     assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark="x", resume_broken=True) is True
+    assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark="x") is False
+
+
+def test_open_snapshot_phase_is_not_a_finished_dump() -> None:
+    """A phase=snapshot cursor still has unread keys. Stream-only would skip them."""
+    import json
+
+    from connectors.postgresql_change_stream import encode_pg_resume_token
+    from services.cdc_snapshot_mode import (
+        KIND_BLOCKING,
+        build_snapshot_mode_preflight_gate,
+        classify_snapshot_plan,
+        resolve_cdc_snapshot_plan,
+        snapshot_dump_open,
+    )
+    from services.cdc_cursor_gap import CdcCursorGapError
+
+    pg_open = encode_pg_resume_token(
+        "s", lsn="0/1", phase="snapshot", table="orders", last_pk="1"
+    )
+    pg_done = encode_pg_resume_token("s", lsn="0/1", phase="streaming")
+    mysql_open = json.dumps(
+        {
+            "phase": "snapshot",
+            "file": "mysql-bin.000001",
+            "pos": 4,
+            "table": "orders",
+            "last_pk": "1",
+        },
+        separators=(",", ":"),
+    )
+    mssql_open = encode_mssql_cdc_token(
+        "0000001a", table="orders", phase="snapshot", offset=1, last_pk="1"
+    )
+    oracle_open = encode_logminer_token(
+        1000, table="ORDERS", phase="snapshot", offset=1, last_pk="1"
+    )
+    incremental = json.dumps(
+        {"incremental_snapshot": True, "phase": "snapshot", "lsn": "0/9"}
+    )
+
+    assert snapshot_dump_open(pg_open) is True
+    assert snapshot_dump_open(mysql_open) is True
+    assert snapshot_dump_open(mssql_open) is True
+    assert snapshot_dump_open(oracle_open) is True
+    assert snapshot_dump_open(pg_done) is False
+    assert snapshot_dump_open("2") is False
+    assert snapshot_dump_open(incremental) is False
+    assert snapshot_dump_open(None) is False
+
+    for token in (pg_open, mysql_open, mssql_open, oracle_open):
+        assert should_run_snapshot(SnapshotMode.INITIAL, watermark=token) is True
+        plan = classify_snapshot_plan(SnapshotMode.INITIAL, watermark=token)
+        assert plan["kind"] == KIND_BLOCKING
+        assert plan["run_snapshot"] is True
+        assert plan["reason"] == "snapshot_in_progress"
+        needed = classify_snapshot_plan(SnapshotMode.WHEN_NEEDED, watermark=token)
+        assert needed["run_snapshot"] is True
+
+    finished = classify_snapshot_plan(SnapshotMode.INITIAL, watermark=pg_done)
+    assert finished["run_snapshot"] is False
+    assert finished["reason"] == "resume_ok"
+
+    # A purged log during an unfinished dump is not "initial already spent".
+    gapped = classify_snapshot_plan(
+        SnapshotMode.INITIAL, watermark=pg_open, retention_status="gap"
+    )
+    assert gapped["kind"] == KIND_BLOCKING
+    assert gapped["run_snapshot"] is True
+    assert gapped["reason"] == "snapshot_in_progress"
+
+    with pytest.raises(CdcCursorGapError) as refused:
+        resolve_cdc_snapshot_plan(SnapshotMode.NEVER, watermark=pg_open)
+    assert refused.value.snapshot_plan["reason"] == "never_forbids_open_snapshot"
+
+    gate = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        watermark=pg_open,
+        request_snapshot_mode="initial",
+    )
+    assert gate is not None
+    assert gate["status"] == "pass"
+    assert gate["details"]["run_snapshot"] is True
+    assert gate["details"]["snapshot_dump_open"] is True
+    blocked = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        watermark=pg_open,
+        request_snapshot_mode="never",
+    )
+    assert blocked is not None
+    assert blocked["status"] == "block"
+
+
+def test_classify_snapshot_plan_when_needed_gap_is_blocking() -> None:
+    from services.cdc_snapshot_mode import (
+        KIND_BLOCKING,
+        KIND_REFUSE,
+        KIND_SKIP,
+        classify_snapshot_plan,
+        resolve_cdc_snapshot_plan,
+        snapshot_mode_recovers_gap,
+    )
+    from services.cdc_cursor_gap import CdcCursorGapError
+
+    assert snapshot_mode_recovers_gap("when_needed") is True
+    assert snapshot_mode_recovers_gap("initial") is False
+
+    recovered = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="lsn-old", retention_status="gap"
+    )
+    assert recovered["kind"] == KIND_BLOCKING
+    assert recovered["run_snapshot"] is True
+    assert recovered["run_stream"] is True
+    assert recovered["lost_window"] is True
+    assert recovered["resume_broken"] is True
+    assert recovered["migration_proven"] is False
+
+    healthy = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="lsn-ok", retention_status="ok"
+    )
+    assert healthy["kind"] == KIND_SKIP
+    assert healthy["run_snapshot"] is False
+    assert healthy["lost_window"] is False
+
+    with pytest.raises(CdcCursorGapError) as initial_gap:
+        resolve_cdc_snapshot_plan(
+            SnapshotMode.INITIAL,
+            watermark="lsn-old",
+            retention={"status": "gap", "dialect": "mysql", "resume": "a", "retained": "b"},
+        )
+    assert initial_gap.value.snapshot_plan["kind"] == KIND_REFUSE
+    assert initial_gap.value.snapshot_plan["next_action"] == "set_when_needed"
+
+    with pytest.raises(CdcCursorGapError) as never_gap:
+        resolve_cdc_snapshot_plan(
+            SnapshotMode.NEVER,
+            watermark="lsn-old",
+            retention={"status": "gap", "dialect": "sqlserver"},
+        )
+    assert never_gap.value.snapshot_plan["reason"] == "never_forbids_snapshot"
+
+    pg_lost = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="0/200", retention_status="gap"
+    )
+    assert pg_lost["kind"] == KIND_BLOCKING
+    assert pg_lost["lost_window"] is True
+
+
+def test_cdc_transfer_when_needed_snapshots_on_retention_gap() -> None:
+    from types import SimpleNamespace
+
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+    from src.transfer.models import EndpointConfig
+
+    source = EndpointConfig(kind="database", format="postgresql", database="t", table="orders")
+    destination = EndpointConfig(kind="database", format="sqlite", database="/tmp/x.db", table="d")
+    state = {"snapped": False}
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            state["snapped"] = True
+            yield ChangeBatch(inserts=[{"id": "1"}], resume_token="new-tip")
+
+        def poll(self):
+            yield ChangeBatch(updates=[{"id": "1", "v": "2"}], resume_token="new-tip")
+
+        def ack(self, token=None):
+            pass
+
+    retention = SimpleNamespace(
+        status="gap",
+        dialect="mysql",
+        resume="mysql-bin.000001:4",
+        retained="mysql-bin.000009:1204",
+        cursor_key="ck",
+    )
+    with (
+        patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", Fake),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(1, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+        patch("src.transfer.cdc_transfer.get_watermark", return_value="existing"),
+        patch("src.transfer.cdc_transfer.set_watermark"),
+        patch("services.cdc_retention_probe.attach_cdc_retention", return_value=retention),
+        patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}),
+    ):
+        _rows, ddl, summary, _ = run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "string"},
+            stream_contracts=[
+                {
+                    "sync_mode": "cdc",
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "snapshot_mode": "when_needed",
+                }
+            ],
+            job_id="dz-when-needed-gap",
+        )
+    assert state["snapped"] is True
+    assert summary["snapshot_plan"]["kind"] == "blocking_snapshot"
+    assert summary["snapshot_plan"]["lost_window"] is True
+    assert any("lost_window=1" in line for line in ddl)
+
+
+def test_cdc_transfer_initial_gap_refuses_before_poll() -> None:
+    from types import SimpleNamespace
+
+    from services.cdc_cursor_gap import CdcCursorGapError
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+    from src.transfer.models import EndpointConfig
+
+    source = EndpointConfig(kind="database", format="postgresql", database="t", table="orders")
+    destination = EndpointConfig(kind="database", format="sqlite", database="/tmp/x.db", table="d")
+    state = {"snapped": False, "polled": False}
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            state["snapped"] = True
+            yield ChangeBatch(inserts=[{"id": "1"}])
+
+        def poll(self):
+            state["polled"] = True
+            yield ChangeBatch()
+
+        def ack(self, token=None):
+            pass
+
+    retention = SimpleNamespace(
+        status="gap", dialect="mysql", resume="a", retained="b", cursor_key="ck"
+    )
+    with (
+        patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", Fake),
+        patch("src.transfer.cdc_transfer.get_watermark", return_value="existing"),
+        patch("services.cdc_retention_probe.attach_cdc_retention", return_value=retention),
+    ):
+        with pytest.raises(CdcCursorGapError):
+            run_cdc_database_transfer(
+                source,
+                destination,
+                mappings=[{"source": "id", "target": "id"}],
+                schema={"id": "string"},
+                stream_contracts=[
+                    {
+                        "sync_mode": "cdc",
+                        "primary_key": "id",
+                        "cursor_field": "id",
+                        "snapshot_mode": "initial",
+                    }
+                ],
+                job_id="dz-initial-gap",
+            )
+    assert state["snapped"] is False
+    assert state["polled"] is False
 
 
 def test_incremental_snapshot_interleaved(tmp_path, monkeypatch) -> None:
@@ -458,12 +755,11 @@ def test_mysql_poll_preserves_gtid_on_resume_token(monkeypatch) -> None:
         ),
     ):
         batches = list(cdc.poll())
-    assert batches
-    # Idle poll still refreshes GTID into resume token (commit-boundary path).
-    token = batches[0].resume_token
-    if isinstance(token, dict) and token.get("txn_held"):
-        token = token.get("token") or {}
-    assert token.get("gtid") == "uuid:1-10"
+    # An idle poll did not apply a captured-table change. Publishing the
+    # live head (including its GTID) is how the next run started past an
+    # unread update (DEF-B2-009).
+    assert batches == []
+    assert cdc.resume_token.get("pos") == 100
 
 
 def test_extract_cdc_lsn_supports_gtid_mongo_scn() -> None:
@@ -519,6 +815,84 @@ def test_pg_heartbeat_advances_idle_slot_instead_of_emitting_wal() -> None:
     assert not any("pg_logical_emit_message" in s for s in sqls), sqls
     assert any("pg_replication_slot_advance" in s for s in sqls), sqls
     assert cdc.consistent_point_lsn == "0/900"
+
+
+def test_idle_change_stream_persists_post_batch_resume_token() -> None:
+    """Idle getMore must persist postBatchResumeToken — same identity as PG slot advance.
+
+    Collection-scoped watches never move the token while idle, then a capped
+    oplog wraps (error 286). PyMongo updates ``stream.resume_token`` after
+    empty ``try_next``. Poll yields that token as a position-only heartbeat.
+    An empty getMore with no token must not invent one.
+    """
+    from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+    from services.cdc_lease import configure_store, reset_store
+    from services.cdc_multi_table import should_ack_shared_batch
+    from services.cdc_resume_tokens import is_durable_log_resume_token
+
+    configure_store(backend="memory")
+    idle_token = {"_data": "post-batch-idle"}
+    cfg = {
+        "host": "localhost",
+        "port": 27017,
+        "database": "test",
+        "username": "",
+        "password": "",
+        "auth_source": "",
+        "ssl": False,
+        "connection_string": "",
+        "cursor_key": "idle-cs-unit",
+        "lease_holder_id": "idle-cs-unit",
+    }
+
+    def _reader(stream: MagicMock, *, cursor_key: str) -> MongodbChangeStreamCdc:
+        local = {**cfg, "cursor_key": cursor_key, "lease_holder_id": cursor_key}
+        coll = MagicMock()
+        coll.watch.return_value.__enter__ = MagicMock(return_value=stream)
+        coll.watch.return_value.__exit__ = MagicMock(return_value=False)
+        db = MagicMock()
+        db.__getitem__ = MagicMock(return_value=coll)
+        client = MagicMock()
+        client.__getitem__ = MagicMock(return_value=db)
+        with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
+            return MongodbChangeStreamCdc(
+                local,
+                collection="orders",
+                primary_key="_id",
+                columns=["_id", "amount"],
+                max_wait_seconds=0.05,
+            )
+
+    try:
+        stream = MagicMock()
+        stream.resume_token = idle_token
+        stream.try_next.return_value = None
+        reader = _reader(stream, cursor_key="idle-cs-token")
+        try:
+            batches = list(reader.poll())
+        finally:
+            reader.close()
+        assert len(batches) == 1
+        change = batches[0]
+        assert change.inserts == []
+        assert change.updates == []
+        assert change.deletes == []
+        assert change.total_changes == 0
+        assert change.resume_token == idle_token
+        assert change.ack_barrier is True
+        assert is_durable_log_resume_token(change.resume_token)
+        assert should_ack_shared_batch(change)
+
+        empty = MagicMock()
+        empty.resume_token = None
+        empty.try_next.return_value = None
+        none_reader = _reader(empty, cursor_key="idle-cs-none")
+        try:
+            assert list(none_reader.poll()) == []
+        finally:
+            none_reader.close()
+    finally:
+        reset_store()
 
 
 def test_sqlserver_and_oracle_have_incremental_chunk() -> None:

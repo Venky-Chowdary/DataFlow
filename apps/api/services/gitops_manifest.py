@@ -10,6 +10,27 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.workspace_filter import WorkspaceFilter
+from services.brand import (
+    GITOPS_API_VERSION,
+    GITOPS_GENERATOR,
+    GITOPS_MANIFEST_KIND,
+    LEGACY_GITOPS_MANIFEST_KINDS,
+)
+
+
+class WorkspaceScopeError(ValueError):
+    """An explicit manifest id resolves outside the selected workspace."""
+
+
+MANIFEST_KIND = "DatawrapManifest"
+
+# The product carried the DataFlow name first, and a manifest is a file a customer
+# commits: one exported before the rename still applies.
+MANIFEST_KINDS: tuple[str, ...] = (MANIFEST_KIND, "DataFlowManifest")
+
+RESOURCE_KINDS: tuple[str, ...] = ("PipelineSchedule", "DataContract", "MappingBundle")
+
 
 _SCHEDULE_RUNTIME_KEYS = frozenset(
     {
@@ -21,8 +42,80 @@ _SCHEDULE_RUNTIME_KEYS = frozenset(
         "running",
         "running_instance",
         "running_started_at",
+        "running_job_id",
         "run_history",
         "cursor_value",
+        "retry_at",
+        "retry_attempt",
+        "missed_window_count",
+        "last_missed_windows",
+        "approval_request",
+        "standing_authorization",
+    }
+)
+
+# Observed at run time. GitOps owns policy, not the last-run fingerprint —
+# stamping source_schema from env A onto env B hides real SOURCE_SCHEMA_DRIFT.
+_SCHEDULE_OBSERVED_KEYS = frozenset(
+    {
+        "source_schema",
+        "source_schema_fingerprint",
+        "source_schema_observed_at",
+        "source_primary_key",
+        "fidelity_campaign",
+        "created_at",
+    }
+)
+
+# Studio Advanced + cadence + contract. Export is an allowlist so CD cannot
+# silently drop write_via_staging / snapshot_mode the way a dump-minus-runtime
+# filter does when a new observed field lands in to_dict().
+_SCHEDULE_DECLARATIVE_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "source_connector_id",
+        "source_table",
+        "dest_connector_id",
+        "dest_table",
+        "interval",
+        "enabled",
+        "cron",
+        "timezone",
+        "sync_mode",
+        "validation_mode",
+        "schema_policy",
+        "backfill_new_fields",
+        "write_via_staging",
+        "priority_column",
+        "priority_direction",
+        "row_limit",
+        "delivery_guarantee",
+        "snapshot_mode",
+        "allow_append_only",
+        "cdc_row_filter",
+        "multi_subnet_failover",
+        "mappings",
+        "stream_contracts",
+        "cursor_column",
+        "primary_key",
+        "source_read_mode",
+        "procedure_call",
+        "source_query",
+        "procedure_params",
+        "workspace_id",
+        "contract_id",
+        "require_signed_contract",
+        "date_locale",
+        "number_locale",
+        "shape_recipe",
+        "approved_shape_recipe_hash",
+        "approved_decision_artifact_hash",
+        "approved_ddl_identity_hash",
+        "max_retries",
+        "retry_backoff_seconds",
+        "notify_on_failure",
+        "notify_on_success",
     }
 )
 
@@ -35,7 +128,24 @@ _CONTRACT_RUNTIME_KEYS = frozenset(
 
 def schedule_spec(sched: Any) -> dict[str, Any]:
     data = sched.to_dict() if hasattr(sched, "to_dict") else dict(sched)
-    return {k: v for k, v in data.items() if k not in _SCHEDULE_RUNTIME_KEYS}
+    return {
+        k: data[k]
+        for k in _SCHEDULE_DECLARATIVE_KEYS
+        if k in data
+        and k not in _SCHEDULE_RUNTIME_KEYS
+        and k not in _SCHEDULE_OBSERVED_KEYS
+    }
+
+
+def apply_schedule_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Keep policy knobs from YAML; never stamp a remembered source shape."""
+    if not isinstance(spec, dict):
+        return {}
+    return {
+        k: v
+        for k, v in spec.items()
+        if k not in _SCHEDULE_RUNTIME_KEYS and k not in _SCHEDULE_OBSERVED_KEYS
+    }
 
 
 def contract_spec(contract: Any) -> dict[str, Any]:
@@ -47,7 +157,7 @@ def contract_artifact(contract: Any) -> dict[str, Any]:
     """Single-file ``dataflow-contract.yaml`` shape (kind + metadata + spec)."""
     spec = contract_spec(contract)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "DataContract",
         "metadata": {
             "name": spec.get("name") or spec.get("id"),
@@ -61,7 +171,7 @@ def contract_artifact(contract: Any) -> dict[str, Any]:
 def schedule_artifact(sched: Any) -> dict[str, Any]:
     spec = schedule_spec(sched)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "PipelineSchedule",
         "metadata": {"name": spec.get("name"), "id": spec.get("id")},
         "spec": spec,
@@ -90,7 +200,7 @@ def mapping_bundle_artifact(contract: Any) -> dict[str, Any]:
     """``dataflow-mapping-bundle.yaml`` — import always lands as DRAFT contract."""
     spec = mapping_bundle_spec(contract)
     return {
-        "apiVersion": "dataflow.space/v1",
+        "apiVersion": GITOPS_API_VERSION,
         "kind": "MappingBundle",
         "metadata": {
             "name": spec.get("name") or spec.get("id"),
@@ -108,12 +218,27 @@ def build_dataflow_manifest(
     *,
     include_contracts: bool = True,
     include_mapping_bundles: bool = False,
+    workspace_id: str = "",
+    isolation: bool = False,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
-    """Build a multi-resource manifest of schedules (and optional contracts)."""
+    """Build a multi-resource manifest of schedules (and optional contracts).
+
+    ``workspace_filter`` is the caller's tenant scope and replaces the
+    ``workspace_id``/``isolation`` rule, which could not express "legacy rows
+    only" for a caller who belongs to no workspace.
+    """
     from services.schedule_store import list_schedules
 
     resources: list[dict[str, Any]] = []
-    for sched in list_schedules():
+    ws = (workspace_id or "").strip()
+    for sched in list_schedules(workspace_filter):
+        sws = (getattr(sched, "workspace_id", "") or "").strip()
+        if workspace_filter is None and ws:
+            if isolation and sws != ws:
+                continue
+            if not isolation and sws and sws != ws:
+                continue
         resources.append(schedule_artifact(sched))
 
     if include_contracts or include_mapping_bundles:
@@ -128,15 +253,25 @@ def build_dataflow_manifest(
         if callable(list_fn):
             contracts = list_fn() or []
         for contract in contracts:
+            meta = getattr(contract, "metadata", None) or {}
+            cws = str(meta.get("workspace_id") or "").strip()
+            if workspace_filter is not None:
+                if not workspace_filter.matches(cws):
+                    continue
+            elif ws:
+                if isolation and cws != ws:
+                    continue
+                if not isolation and cws and cws != ws:
+                    continue
             if include_contracts:
                 resources.append(contract_artifact(contract))
             if include_mapping_bundles:
                 resources.append(mapping_bundle_artifact(contract))
 
     return {
-        "apiVersion": "dataflow.space/v1",
-        "kind": "DatawrapManifest",
-        "metadata": {"generator": "dataflow-gitops-export"},
+        "apiVersion": GITOPS_API_VERSION,
+        "kind": GITOPS_MANIFEST_KIND,
+        "metadata": {"generator": GITOPS_GENERATOR},
         "resources": resources,
     }
 
@@ -147,11 +282,16 @@ def _normalize_resources(payload: dict[str, Any] | list[Any]) -> list[dict[str, 
     if not isinstance(payload, dict):
         return []
     kind = str(payload.get("kind") or "")
-    if kind == "DatawrapManifest":
+    if kind == GITOPS_MANIFEST_KIND or kind in LEGACY_GITOPS_MANIFEST_KINDS:
         raw = payload.get("resources") or []
         return [r for r in raw if isinstance(r, dict)]
-    if kind in {"PipelineSchedule", "DataContract", "MappingBundle"}:
+    if kind in RESOURCE_KINDS:
         return [payload]
+    if kind:
+        raise ValueError(
+            f"unsupported kind {kind!r}: expected one of "
+            f"{', '.join((*MANIFEST_KINDS, *RESOURCE_KINDS))}"
+        )
     # Bare schedule/contract dict without kind — treat as schedule if it looks like one.
     if payload.get("source_connector_id") or payload.get("source_table"):
         return [{"kind": "PipelineSchedule", "spec": payload}]
@@ -188,7 +328,33 @@ def _coerce_payload(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]
     return payload
 
 
-def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
+def _assert_policy_values(resources: list[dict[str, Any]]) -> None:
+    """Refuse the whole manifest on an unknown validation_mode / schema_policy.
+
+    QA r12 bugs 6/7. Checked before anything is created, so CD never half-applies
+    a manifest, and ``plan`` reports what ``apply`` would refuse. The route
+    turns the ``ValueError`` into a 422.
+    """
+    from services.transfer_policy_values import PolicyValueError, canonicalize_policy_fields
+
+    for resource in resources:
+        kind, ident = _resource_identity(resource)
+        if kind != "PipelineSchedule":
+            continue
+        spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
+        try:
+            canonicalize_policy_fields(spec)
+        except PolicyValueError as exc:
+            label = str(spec.get("name") or spec.get("id") or ident or "").strip()
+            raise ValueError(f"PipelineSchedule {label!r}: {exc}") from exc
+
+
+def plan_manifest(
+    payload: dict[str, Any] | list[Any] | str,
+    *,
+    workspace_id: str = "",
+    workspace_filter: WorkspaceFilter | None = None,
+) -> dict[str, Any]:
     """Dry-run: report create/update/skip without mutating stores."""
     payload = _coerce_payload(payload)
     from services.schedule_store import get_schedule, list_schedules
@@ -199,8 +365,14 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
         from src.services.contract_store import get_contract_store
 
     resources = _normalize_resources(payload)
+    _assert_policy_values(resources)
     actions: list[dict[str, Any]] = []
-    schedule_names = {s.name: s.id for s in list_schedules()}
+    scope = (workspace_id or "").strip()
+    visible_schedules = [
+        s for s in list_schedules()
+        if _visible(getattr(s, "workspace_id", ""), scope, workspace_filter)
+    ]
+    schedule_names = {s.name: s.id for s in visible_schedules}
     store = get_contract_store()
 
     for resource in resources:
@@ -210,18 +382,34 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
             sid = str(spec.get("id") or "").strip()
             name = str(spec.get("name") or "").strip()
             existing = get_schedule(sid) if sid else None
+            if existing and not _visible(
+                getattr(existing, "workspace_id", ""), scope, workspace_filter
+            ):
+                raise WorkspaceScopeError("Schedule belongs to another workspace")
             if existing is None and name and name in schedule_names:
                 existing = get_schedule(schedule_names[name])
             action = "update" if existing else "create"
-            actions.append({
+            entry: dict[str, Any] = {
                 "kind": kind,
                 "action": action,
                 "id": (existing.id if existing else sid) or None,
                 "name": name or (existing.name if existing else None),
-            })
+            }
+            cadence_error = _cadence_error(spec)
+            if cadence_error:
+                # The apply would refuse this schedule; a plan that says "create"
+                # for it promises a change CD can never make.
+                entry.update(action="error", error=cadence_error)
+            actions.append(entry)
         elif kind in {"DataContract", "MappingBundle"}:
             cid = str(spec.get("id") or "").strip()
             existing = store.get_contract(cid) if cid else None
+            if existing and not _visible(
+                str((getattr(existing, "metadata", None) or {}).get("workspace_id") or ""),
+                scope,
+                workspace_filter,
+            ):
+                raise WorkspaceScopeError("Contract belongs to another workspace")
             action = "update" if existing else "create"
             actions.append({
                 "kind": kind,
@@ -249,8 +437,67 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
         "creates": sum(1 for a in actions if a["action"] == "create"),
         "updates": sum(1 for a in actions if a["action"] == "update"),
         "skips": sum(1 for a in actions if a["action"] == "skip"),
+        "errors": sum(1 for a in actions if a["action"] == "error"),
         "actions": actions,
     }
+
+
+def _cadence_error(spec: dict[str, Any]) -> str | None:
+    """Why the store would refuse this spec's clock, or None when it is usable."""
+    from services.cron_schedule import CronError, resolve_timezone, validate_cron
+
+    cron = str(spec.get("cron") or "").strip()
+    if not cron:
+        return None
+    try:
+        validate_cron(cron)
+        resolve_timezone(str(spec.get("timezone") or "UTC"))
+    except CronError as exc:
+        return str(exc)
+    return None
+
+
+def _visible(
+    resource_workspace_id: str | None,
+    workspace_id: str,
+    workspace_filter: WorkspaceFilter | None,
+) -> bool:
+    """Whether the caller's scope covers a resource.
+
+    The tenant-scope filter when the router resolved one; the single-workspace
+    rule otherwise (internal callers with no request).
+    """
+    if workspace_filter is not None:
+        return workspace_filter.matches(resource_workspace_id)
+    from services.workspace_access import workspace_resource_is_visible
+
+    return workspace_resource_is_visible(resource_workspace_id, workspace_id)
+
+
+def bind_contract_workspace(
+    contract: Any,
+    workspace_id: str,
+    *,
+    existing: Any = None,
+    workspace_filter: WorkspaceFilter | None = None,
+) -> None:
+    """Stamp the caller's workspace and refuse overwriting another tenant's agreement.
+
+    Same boundary as PipelineSchedule apply: a UUID in a pasted YAML is not
+    enough to flip or replace another workspace's signed schema agreement.
+    """
+    bound = (workspace_id or "").strip()
+    if existing is not None:
+        existing_meta = getattr(existing, "metadata", None) or {}
+        existing_ws = str(existing_meta.get("workspace_id") or "").strip()
+        if (bound or workspace_filter is not None) and not _visible(
+            existing_ws, bound, workspace_filter
+        ):
+            raise WorkspaceScopeError("Contract belongs to another workspace")
+    if bound:
+        meta = dict(getattr(contract, "metadata", None) or {})
+        meta["workspace_id"] = bound
+        contract.metadata = meta
 
 
 def apply_manifest(
@@ -258,6 +505,8 @@ def apply_manifest(
     *,
     dry_run: bool = False,
     require_signed_contracts: bool = False,
+    workspace_id: str = "",
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
     """Apply a DatawrapManifest (or single resource). ``dry_run=True`` delegates to plan.
 
@@ -268,7 +517,7 @@ def apply_manifest(
     """
     payload = _coerce_payload(payload)
     if dry_run:
-        return plan_manifest(payload)
+        return plan_manifest(payload, workspace_id=workspace_id, workspace_filter=workspace_filter)
 
     from services.schedule_store import (
         assert_signed_contract,
@@ -285,6 +534,7 @@ def apply_manifest(
         from src.services.data_contract import ContractStatus, DataContract
 
     resources = _normalize_resources(payload)
+    _assert_policy_values(resources)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
 
@@ -293,14 +543,22 @@ def apply_manifest(
         spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
         try:
             if kind == "PipelineSchedule":
-                apply_spec = dict(spec)
+                apply_spec = apply_schedule_spec(spec)
+                bound_ws = (workspace_id or "").strip()
+                if bound_ws:
+                    apply_spec["workspace_id"] = bound_ws
                 if require_signed_contracts:
                     apply_spec["require_signed_contract"] = True
                     cid = str(apply_spec.get("contract_id") or "").strip()
                     # Fail closed before create/update so CD never soft-skips.
                     assert_signed_contract(cid, require_signed=True)
                 sid = str(apply_spec.get("id") or "").strip()
-                if sid and get_schedule(sid):
+                existing = get_schedule(sid) if sid else None
+                if existing and not _visible(
+                    getattr(existing, "workspace_id", ""), bound_ws, workspace_filter
+                ):
+                    raise WorkspaceScopeError("Schedule belongs to another workspace")
+                if sid and existing:
                     updated = update_schedule(sid, apply_spec)
                     results.append({
                         "kind": kind,
@@ -331,6 +589,15 @@ def apply_manifest(
                 # Imported contracts stay draft until explicitly signed.
                 contract.status = ContractStatus.DRAFT
                 existing = store.get_contract(contract.id) if contract.id else None
+                if existing:
+                    existing_meta = getattr(existing, "metadata", None) or {}
+                    if not _visible(
+                        str(existing_meta.get("workspace_id") or ""), workspace_id, workspace_filter
+                    ):
+                        raise WorkspaceScopeError("Contract belongs to another workspace")
+                bind_contract_workspace(
+                    contract, workspace_id, existing=existing, workspace_filter=workspace_filter
+                )
                 store.save_contract(contract)
                 results.append({
                     "kind": kind,
@@ -348,12 +615,15 @@ def apply_manifest(
                     "reason": f"unsupported kind {kind!r}",
                 })
         except Exception as exc:
-            results.append({
+            result = {
                 "kind": kind or "Unknown",
                 "action": "error",
                 "ok": False,
                 "error": str(exc)[:400],
-            })
+            }
+            if isinstance(exc, WorkspaceScopeError):
+                result["error_code"] = "cross_workspace"
+            results.append(result)
 
     return {
         "dry_run": False,

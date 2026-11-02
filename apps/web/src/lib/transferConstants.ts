@@ -3,6 +3,8 @@
  * Keep IDs aligned with apps/api/services/preflight_service.py allowed sets.
  */
 
+import { destSchemaIsRecreatedOnOverwrite } from "./destSchemaRecreate";
+
 /** Must match apps/api/services/coercion_probe.py PREFLIGHT_SAMPLE_LIMIT (Validate≡Execute). */
 export const PREFLIGHT_SAMPLE_LIMIT = 500;
 
@@ -20,7 +22,15 @@ export type SchemaPolicyId =
   | "propagate_columns"
   | "propagate_all"
   | "pause_on_change"
-  | "type_locked";
+  | "type_locked"
+  | "block_all";
+
+/**
+ * Classic wizard sessions start on manual approval so a new column pauses
+ * until the operator approves it — Execute does not ADD COLUMN. Schedules
+ * keep their own default. Stored jobs keep the policy they saved.
+ */
+export const DEFAULT_SCHEMA_POLICY: SchemaPolicyId = "manual_review";
 
 export type ValidationModeId =
   | "balanced"
@@ -75,6 +85,7 @@ export const VALIDATION_MODES: {
 ];
 
 export type DateLocaleId = "" | "DMY" | "MDY";
+export type NumberLocaleId = "" | "US" | "EU";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
   { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot. Destroys existing rows." },
@@ -83,34 +94,39 @@ export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
   { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts when the table already has keys you may update." },
   { id: "cdc", label: "CDC", detail: "Log-based changes with cursor + key; at-least-once upsert until proven otherwise." },
   { id: "scd2", label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
-  { id: "mirror", label: "Mirror", detail: "Keep destination in sync with soft-deletes for missing keys; requires primary key." },
+  { id: "mirror", label: "Mirror", detail: "Soft-delete dest keys missing from the source (_deleted). Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT _deleted. Requires primary key." },
 ];
 
 export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: string }[] = [
   {
     id: "manual_review",
     label: "Manual approval",
-    detail: "Detect drift; keep the approved contract until you review (safest default).",
+    detail: "Validate blocks on new/renamed columns until you Acknowledge or remap. Execute does not ADD COLUMN.",
   },
   {
     id: "propagate_columns",
     label: "Propagate columns",
-    detail: "Auto-add new destination columns on transfer (type changes still need review).",
+    detail: "Validate auto-maps additive columns. Execute ADD COLUMN. Type narrow still pauses.",
   },
   {
     id: "propagate_all",
     label: "Propagate columns (all streams)",
-    detail: "Same additive ADD COLUMN behavior as Propagate columns (not type auto-rewrite). Incompatible type changes still need review.",
+    detail: "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. Does not rewrite destination types.",
   },
   {
     id: "pause_on_change",
     label: "Pause on drift",
-    detail: "Stop scheduled runs when schema changes — best for production warehouses.",
+    detail: "Any detected change — including additive — pauses Validate and scheduled beats.",
   },
   {
     id: "type_locked",
     label: "Type locked",
-    detail: "Reject type changes at the destination — fail closed on incompatible casts.",
+    detail: "Widen and dest type changes pause. New columns need review. No silent cast.",
+  },
+  {
+    id: "block_all",
+    label: "Block all changes",
+    detail: "Any source change blocks until you Accept drift for this run. Destination-only columns do not block.",
   },
 ];
 
@@ -158,17 +174,21 @@ export function availableSyncModes(opts: {
   sourceDriver: string;
   sourceKind: "file" | "database" | "cloud" | string;
   isMultiStream: boolean;
+  sourceReadMode?: string;
+  destWriteMode?: string;
 }): { id: SyncModeId; label: string; detail: string }[] {
   const dest = (opts.destDriver || "").toLowerCase();
   const src = (opts.sourceDriver || "").toLowerCase();
   const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
+  const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query"
+    || opts.destWriteMode === "procedure" || opts.destWriteMode === "query";
   return SYNC_MODES.filter((mode) => {
     if (mode.id === "scd2" || mode.id === "mirror") {
-      if (opts.isMultiStream) return false;
+      if (callable) return false;
       if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
     }
     if (mode.id === "cdc") {
-      if (fileish) return false;
+      if (fileish || callable) return false;
       if (src && !CDC_CAPABLE_SOURCES.has(src)) return false;
     }
     return true;
@@ -178,6 +198,26 @@ export function availableSyncModes(opts: {
 export const SYNC_MODE_META: Record<string, { label: string; detail: string }> = Object.fromEntries(
   SYNC_MODES.map((m) => [m.id, { label: m.label, detail: m.detail }]),
 );
+SYNC_MODE_META.full_refresh_mirror = SYNC_MODE_META.mirror;
+
+/** Operator-facing sync mode — engine aliases like full_refresh_mirror stay Mirror. */
+export function formatSyncModeLabel(mode?: string | null): string {
+  const raw = String(mode || "").trim();
+  if (!raw) return "—";
+  return SYNC_MODE_META[raw]?.label ?? raw.replace(/_/g, " ");
+}
+
+export function formatSchemaPolicyLabel(policy?: string | null): string {
+  const raw = String(policy || "").trim();
+  if (!raw) return "—";
+  return SCHEMA_POLICIES.find((p) => p.id === raw)?.label ?? raw.replace(/_/g, " ");
+}
+
+export function formatValidationModeLabel(mode?: string | null): string {
+  const raw = String(mode || "").trim();
+  if (!raw) return "—";
+  return VALIDATION_MODES.find((v) => v.id === raw)?.label ?? raw.replace(/_/g, " ");
+}
 
 export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[] = [
   { id: "", label: "Auto", detail: "Infer day/month order from source sample; fail closed if ambiguous." },
@@ -185,19 +225,99 @@ export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[]
   { id: "MDY", label: "MDY (month/day/year)", detail: "United States date order." },
 ];
 
-/** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */
-export const MULTI_STREAM_SCD2_MIRROR_BLOCK =
-  "Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or select a single table.";
+export const NUMBER_LOCALES: { id: NumberLocaleId; label: string; detail: string }[] = [
+  { id: "", label: "Auto", detail: "Parse $1,000.00 and €2.000,50. Refuse a lone 1,234 / 1.234 — that is US thousands or EU decimal." },
+  { id: "US", label: "US (1,234.56)", detail: "Comma thousands, dot decimal." },
+  { id: "EU", label: "EU (1.234,56)", detail: "Dot thousands, comma decimal." },
+];
 
-export function multiStreamScd2MirrorBlockCopy(kind: "alert" | "toast" | "schedule" | "execute" = "alert"): string {
-  if (kind === "schedule") {
-    return "SCD2/mirror cannot be scheduled for multiple streams — use full/incremental/CDC or a single stream.";
+/**
+ * Destination-aware sync caption. Full append into a leftover empty table is
+ * still dest-exists — live NUMBER/VARCHAR widths bind; Map does not ALTER them.
+ */
+export function syncModeHonestyLine(
+  mode: string,
+  destTableExists: boolean | null,
+  destDbType?: string | null,
+): string {
+  if (mode === "full_refresh_append") {
+    if (destTableExists === true) {
+      return (
+        "Inserts into the existing table. Live destination types bind — Full append "
+        + "does not CREATE a new table and does not ALTER NUMBER/VARCHAR widths. "
+        + "An empty leftover table still exists."
+      );
+    }
+    if (destTableExists === false) {
+      return (
+        "Table is missing — first write CREATE TABLE from Map types, then insert. "
+        + "This is create-new, not append into leftover DDL."
+      );
+    }
+    return (
+      "Keep existing rows; insert the full snapshot again. Confirm whether the "
+      + "destination object exists before Execute — leftover empty tables still count as existing."
+    );
   }
-  if (kind === "toast" || kind === "execute") {
-    return MULTI_STREAM_SCD2_MIRROR_BLOCK;
+  if (mode === "full_refresh_overwrite") {
+    if (destTableExists === true) {
+      if (destSchemaIsRecreatedOnOverwrite(destDbType)) {
+        return (
+          "Drops and recreates the existing table from the source shape. "
+          + "Destroys current rows and the declared carriers. "
+          + "Validate names a replacement that would overflow a declared carrier (G19) "
+          + "and blocks Execute until you remap or sign a Migration Risk Contract."
+        );
+      }
+      return (
+        "Replaces rows in the existing table. Destroys current data. "
+        + "Does not by itself ALTER live column widths — widen in the warehouse or map to a new column."
+      );
+    }
+    return "Drop/replace destination, then load the full snapshot. Destroys existing rows if the object already exists.";
   }
-  return MULTI_STREAM_SCD2_MIRROR_BLOCK;
+  return SYNC_MODES.find((m) => m.id === mode)?.detail ?? "";
 }
 
-export const MULTI_STREAM_SCD2_PRIMARY_CTA = "Switch to full append";
+/**
+ * Schema-policy caption — matches ``resolve_schema_evolution`` (Validate + Execute SSOT).
+ * Hard type-narrow always pauses, including under propagate_* (not Airbyte airbyte_meta).
+ */
+export function schemaPolicyHonestyLine(policy: string): string {
+  switch ((policy || "").trim().toLowerCase()) {
+    case "propagate_columns":
+      return (
+        "Validate auto-maps additive columns; Execute issues ADD COLUMN. "
+        + "Type narrow, PK, and dest-only NOT NULL still pause — not a silent rewrite."
+      );
+    case "propagate_all":
+      return (
+        "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. "
+        + "Does not rewrite destination types. Hard-breaking changes still pause."
+      );
+    case "pause_on_change":
+      return (
+        "Any detected change — including additive — pauses Validate and scheduled beats. "
+        + "Nothing is written until you change policy or remap."
+      );
+    case "type_locked":
+      return (
+        "Widen and destination type changes pause. New columns need review. "
+        + "Execute does not silent-cast."
+      );
+    case "block_all":
+      return (
+        "Any source change — including a nullable add — blocks until you "
+        + "Accept drift for this run. Destination-only columns stay an audit note. "
+        + "Hard type-narrow cannot be accepted away."
+      );
+    case "manual_review":
+    default:
+      return (
+        "Validate blocks on new or renamed columns until you Acknowledge or remap. "
+        + "Execute does not ADD COLUMN. Hard type-narrow always pauses."
+      );
+  }
+}
+
 

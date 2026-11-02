@@ -10,12 +10,16 @@ Delivery is at-least-once upsert by vector id.
 from __future__ import annotations
 
 import importlib.util
-import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, sanitize_json_value
-from services.vectorization import vectorize_records
+from services.value_serializer import (
+    cell_to_string,
+    json_dumps_exact_numbers,
+    load_http_json,
+    sanitize_json_value,
+)
 
 from connectors.writer_common import WriteResult as _WriteResult
 
@@ -35,16 +39,24 @@ def _requests_session() -> Any:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    from services.egress_guard import redirect_guard_hook
+
+    session.hooks["response"].append(redirect_guard_hook())
     return session
 
 
 def _index_url(host: str, connection_string: str = "") -> str:
+    from services.egress_guard import assert_connector_dial_allowed
+
     raw = (connection_string or host or "").strip()
     if not raw:
         return ""
     if raw.startswith("http://") or raw.startswith("https://"):
-        return raw.rstrip("/")
-    return f"https://{raw.rstrip('/')}"
+        url = raw.rstrip("/")
+    else:
+        url = f"https://{raw.rstrip('/')}"
+    assert_connector_dial_allowed(url, point="http_client")
+    return url
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -83,7 +95,7 @@ def _pinecone_total_vector_count(
         return 0
     ns = (namespace or "").strip()
     namespaces = payload.get("namespaces")
-    if ns and isinstance(namespaces, dict):
+    if isinstance(namespaces, dict):
         entry = namespaces.get(ns)
         if isinstance(entry, dict):
             raw = entry.get("vectorCount")
@@ -93,7 +105,8 @@ def _pinecone_total_vector_count(
                 return max(0, int(raw or 0))
             except (TypeError, ValueError):
                 return 0
-        # Named namespace absent from stats → treat as empty for that namespace.
+        # Namespace absent from per-namespace stats → empty for that namespace
+        # (never fall back to totalVectorCount when siblings exist).
         return 0
     raw = payload.get("totalVectorCount")
     if raw is None:
@@ -102,6 +115,162 @@ def _pinecone_total_vector_count(
         return max(0, int(raw or 0))
     except (TypeError, ValueError):
         return 0
+
+
+_PINECONE_LIST_PAGE = 99
+_PINECONE_FETCH_BATCH = 100
+
+
+def _pinecone_vector_id(entry: Any) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("id") or "").strip()
+    return str(entry or "").strip()
+
+
+def _pinecone_metadata_source_id(vector: Any) -> Any:
+    if not isinstance(vector, dict):
+        return None
+    meta = vector.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    if "source_id" in meta:
+        return meta.get("source_id")
+    return meta.get("sourceId")
+
+
+def scan_source_ids(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    max_entities: int = 20_000,
+) -> tuple[str, list[Any]]:
+    """Dest-engine metadata ``source_id`` values. Never ``vectorCount``.
+
+    Pinecone ``describe_index_stats`` is physical vectors (the Fivetran
+    ``_deleted`` analogue for RAG: 2 documents → 5 chunks looks like
+    duplication). Identity is DISTINCT ``source_id`` from list+fetch of
+    the namespace the writer filled. Pod indexes that cannot ``/vectors/list``
+    stay unmeasured — never fall back to ``vectorCount``.
+
+    Returns ``(state, values)`` matching Milvus/Qdrant:
+
+    * ``missing`` — named namespace absent / empty (create-on-first-write → 0)
+    * ``no_field`` — fetched vectors have no ``source_id`` metadata
+    * ``truncated`` — physical cardinality exceeds the census bound
+    * ``complete`` — every listed vector's ``source_id`` is in ``values``
+    * ``unmeasured`` — auth / transport / list-unsupported / fetch failure
+    """
+    namespace = str(table_name or cfg.get("schema") or "").strip()
+    index_url = _index_url(
+        str(cfg.get("host") or ""),
+        str(cfg.get("connection_string") or ""),
+    )
+    if not index_url:
+        return "unmeasured", []
+    try:
+        session = _requests_session()
+        key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        hdrs = _headers(key)
+        stats = session.get(
+            f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
+        )
+        status = int(stats.status_code)
+        if status in {401, 403}:
+            return "unmeasured", []
+        if status == 404:
+            return "unmeasured", []
+        if status != 200:
+            return "unmeasured", []
+        try:
+            body = stats.json()
+        except Exception:
+            return "unmeasured", []
+        payload = body if isinstance(body, dict) else None
+        physical = _pinecone_total_vector_count(payload, namespace=namespace)
+        cap = int(max_entities)
+        if physical == 0:
+            return "complete", []
+        if physical > cap:
+            return "truncated", []
+        ids: list[str] = []
+        token = ""
+        while True:
+            params: dict[str, Any] = {"limit": _PINECONE_LIST_PAGE}
+            if namespace:
+                params["namespace"] = namespace
+            if token:
+                params["paginationToken"] = token
+            listed = session.get(
+                f"{index_url}/vectors/list",
+                headers=hdrs,
+                params=params,
+                timeout=30,
+            )
+            if listed.status_code in {404, 400, 501}:
+                # Pod-based indexes have no list API. vectorCount is not identity.
+                return "unmeasured", []
+            if listed.status_code != 200:
+                return "unmeasured", []
+            try:
+                page = load_http_json(listed)
+            except Exception:
+                return "unmeasured", []
+            rows = page.get("vectors") if isinstance(page, dict) else None
+            if not isinstance(rows, list):
+                return "unmeasured", []
+            for entry in rows:
+                vid = _pinecone_vector_id(entry)
+                if vid:
+                    ids.append(vid)
+                if len(ids) > cap:
+                    return "truncated", []
+            pagination = page.get("pagination") if isinstance(page, dict) else None
+            nxt = ""
+            if isinstance(pagination, dict):
+                nxt = str(pagination.get("next") or "").strip()
+            if not nxt:
+                break
+            token = nxt
+        if not ids:
+            # Stats said vectors exist but list returned none — lag or ACL, not empty.
+            return "unmeasured", []
+        if len(ids) > physical:
+            return "truncated", []
+        values: list[Any] = []
+        saw_field = False
+        for i in range(0, len(ids), _PINECONE_FETCH_BATCH):
+            chunk = ids[i : i + _PINECONE_FETCH_BATCH]
+            fetch_params = [("ids", vector_id) for vector_id in chunk]
+            if namespace:
+                fetch_params.append(("namespace", namespace))
+            fetched = session.get(
+                f"{index_url}/vectors/fetch",
+                params=fetch_params,
+                headers=hdrs,
+                timeout=60,
+            )
+            if fetched.status_code != 200:
+                return "unmeasured", []
+            try:
+                fetched_body = load_http_json(fetched)
+            except Exception:
+                return "unmeasured", []
+            vectors = fetched_body.get("vectors") if isinstance(fetched_body, dict) else None
+            if not isinstance(vectors, dict):
+                return "unmeasured", []
+            for vid in chunk:
+                vector = vectors.get(vid)
+                if isinstance(vector, dict) and (
+                    "source_id" in (vector.get("metadata") or {})
+                    or "sourceId" in (vector.get("metadata") or {})
+                ):
+                    saw_field = True
+                values.append(_pinecone_metadata_source_id(vector))
+        if not saw_field:
+            return "no_field", []
+        return "complete", values
+    except Exception:
+        return "unmeasured", []
 
 
 @dataclass
@@ -138,6 +307,14 @@ def test_pinecone(
         return False, str(exc)
 
 
+def _pinecone_metadata_value(value: Any) -> Any | None:
+    """Single-value view of ``vector_prepare_metadata``."""
+    from connectors.writer_common import vector_prepare_metadata
+
+    prepared = vector_prepare_metadata({"_": value})
+    return prepared.get("_")
+
+
 def build_pinecone_vectors(
     vector_rows: list[dict[str, Any]],
     *,
@@ -156,19 +333,24 @@ def build_pinecone_vectors(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
+        vector_reject_row_label,
     )
 
     vectors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
-        meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
-        meta["content"] = str(row.get("content") or "")[:40000]
-        meta["source_id"] = cell_to_string(row.get("source_id", ""))
+        from connectors.writer_common import vector_prepare_metadata
+
+        meta = vector_prepare_metadata(row.get("metadata") or {})
+        meta["content"] = vector_cell_token(row.get("content"))[:40000]
+        meta["source_id"] = vector_cell_token(row.get("source_id"))
         try:
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "chunk_index",
                 "target": "chunk_index",
                 "value": cell_to_string(row.get("chunk_index")),
@@ -178,20 +360,11 @@ def build_pinecone_vectors(
             continue
         meta["chunk_index"] = chunk
         # Pinecone metadata values must be string/number/bool/list[string].
-        clean_meta: dict[str, Any] = {}
-        for k, v in meta.items():
-            if v is None:
-                continue
-            if isinstance(v, (str, int, float, bool)):
-                clean_meta[str(k)] = v
-            elif isinstance(v, list) and all(isinstance(x, str) for x in v):
-                clean_meta[str(k)] = v
-            else:
-                clean_meta[str(k)] = str(v)
+        clean_meta = vector_prepare_metadata(meta)
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "embedding",
                 "target": "values",
                 "value": "",
@@ -206,9 +379,8 @@ def build_pinecone_vectors(
             cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
         )
         if not vector_id:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -218,9 +390,7 @@ def build_pinecone_vectors(
                     "policy": "quarantine",
                 })
                 continue
-            vector_id = hashlib.sha256(
-                f"{source}\0{chunk}\0{content}".encode("utf-8")
-            ).hexdigest()
+            vector_id = hashlib.sha256(material.encode("utf-8")).hexdigest()
         vectors.append({
             "id": vector_id,
             "values": sanitize_json_value(values),
@@ -425,34 +595,129 @@ def write_mapped_rows(
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
         )
+    target = namespace or "default"
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        create_embedding_usage,
+    )
+    from services.vectorization import vector_identity_columns
+    from services.vector_sync import prepare_vector_sync_write
+
+    sync_cfg = {
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password": password,
+        "schema": schema,
+        "ssl": ssl,
+        "connection_string": connection_string,
+        "api_key": key,
+    }
+    usage = create_embedding_usage(embedding_model, _kwargs, embedding_column)
     try:
-        vector_rows = vectorize_records(
+        sync_context = prepare_vector_sync_write(
+            "pinecone",
+            sync_cfg,
+            target,
             records,
+            identity_columns=vector_identity_columns(pk_cols, mappings, records),
+            model=embedding_model,
             content_column=content_column,
             embedding_column=embedding_column,
             metadata_columns=metadata_columns,
             exclude_pii_columns=exclude_pii_columns,
-            model=embedding_model,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
             durable_embedding_cache=durable_embedding_cache,
+            options=_kwargs,
+            usage=usage,
+        )
+        vector_rows = sync_context["rows"]
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=target,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=f"Embedding provider {usage.provider} model {usage.model} failed ({type(exc).__name__}): {exc}",
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
             ok=False,
             rows_written=0,
-            table_name=namespace or "default",
+            table_name=target,
             target_schema="",
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vector synchronization preparation failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
-    target = namespace or "default"
     if not vector_rows:
+        if sync_context["unchanged_skipped"]:
+            try:
+                if sync_context["fingerprint"] is not None:
+                    from services.vector_fingerprint import enforce_fingerprint
+
+                    enforce_fingerprint(
+                        "pinecone",
+                        sync_cfg,
+                        target,
+                        sync_context["fingerprint"],
+                    )
+            except Exception as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=target,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=f"Pinecone fingerprint enforcement failed ({type(exc).__name__})",
+                    meta={"embedding_usage": usage.to_dict()},
+                )
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=target,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+                meta={
+                    "embedding_usage": usage.to_dict(),
+                    "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+                    "vector_docs_embedded": 0,
+                    "stale_chunks_deleted": 0,
+                    "vector_stale_cleanup_skipped_docs": 0,
+                },
+            )
+        from connectors.writer_common import refuse_empty_vectorization
+
+        empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
+        if empty_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=target,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=empty_err,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+                meta={"embedding_usage": usage.to_dict()},
+            )
         return WriteResult(
             ok=True,
             rows_written=0,
@@ -463,6 +728,7 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     from services.vector_embedding import resolve_embedding_dimension
@@ -486,6 +752,7 @@ def write_mapped_rows(
                 "policy": "fail",
             }],
             rejected_rows=len(map_rejected) + 1,
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     vectors, embed_rejected = build_pinecone_vectors(vector_rows, dimension=dimension)
@@ -502,6 +769,7 @@ def write_mapped_rows(
             or "all embeddings rejected",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     from connectors.writer_common import reject_on_strict_policy
 
@@ -517,8 +785,12 @@ def write_mapped_rows(
             error=strict_error,
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     inserted = 0
+    fingerprint_status = "unknown"
+    stale_chunks_deleted = 0
+    stale_cleanup_skipped = 0
     try:
         session = _requests_session()
         hdrs = _headers(key)
@@ -542,6 +814,7 @@ def write_mapped_rows(
                     ),
                     rejected_details=rejected,
                     rejected_rows=len(rejected),
+                    meta={"embedding_usage": usage.to_dict()},
                 )
             try:
                 live_dim = _pinecone_live_dimension(stats.json())
@@ -561,6 +834,7 @@ def write_mapped_rows(
                 ),
                 rejected_details=rejected,
                 rejected_rows=len(rejected),
+                meta={"embedding_usage": usage.to_dict()},
             )
         if int(live_dim) != int(dimension):
             return WriteResult(
@@ -587,7 +861,38 @@ def write_mapped_rows(
                     }
                 ],
                 rejected_rows=len(rejected) + 1,
+                meta={"embedding_usage": usage.to_dict()},
             )
+        incoming_fingerprint = sync_context["fingerprint"]
+        if incoming_fingerprint is None:
+            from services.vector_fingerprint import fingerprint_for_write
+
+            incoming_fingerprint = fingerprint_for_write(
+                model=embedding_model,
+                dimension=dimension,
+                distance="cosine",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                skip_chunking=skip_chunking,
+                embedding_column=embedding_column,
+                chunk_strategy=str(_kwargs.get("chunk_strategy") or "recursive"),
+                chunk_unit=str(_kwargs.get("chunk_unit") or "chars"),
+                chunk_tokenizer=(
+                    _kwargs.get("chunk_tokenizer")
+                    if isinstance(_kwargs.get("chunk_tokenizer"), str)
+                    else None
+                ),
+                text_template=(
+                    _kwargs.get("text_template")
+                    if isinstance(_kwargs.get("text_template"), str)
+                    else None
+                ),
+            )
+        from services.vector_fingerprint import enforce_fingerprint
+
+        fingerprint_status = enforce_fingerprint(
+            "pinecone", sync_cfg, target, incoming_fingerprint
+        )
         batch_size = 100
         total = len(vectors)
         for i in range(0, total, batch_size):
@@ -597,7 +902,7 @@ def write_mapped_rows(
                 payload["namespace"] = namespace
             resp = session.post(
                 f"{index_url}/vectors/upsert",
-                data=json.dumps(payload, default=sanitize_json_value),
+                data=json_dumps_exact_numbers(payload),
                 headers=hdrs,
                 timeout=60,
             )
@@ -614,9 +919,10 @@ def write_mapped_rows(
             target_schema="",
             checksum="",
             chunks_completed=(inserted + 99) // 100,
-            error=str(exc),
+            error=f"Pinecone write failed ({type(exc).__name__}): {exc}",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     _final_abort = reject_on_strict_policy(error_policy, rejected, "Pinecone")
@@ -632,8 +938,49 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
             warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+            meta={"embedding_usage": usage.to_dict()},
         )
 
+    keep: dict[str, set[str]] = {}
+    for vector in vectors:
+        meta = vector.get("metadata") or {}
+        source_id = str(meta.get("source_id") or "")
+        if source_id:
+            keep.setdefault(source_id, set()).add(str(vector.get("id") or ""))
+    from services.vector_sync import (
+        _rejected_doc_keys,
+        vector_engine_delete_stale_chunks,
+    )
+
+    rejected_source_ids = _rejected_doc_keys(
+        headers, data_rows, pk_cols, mappings, rejected
+    )
+    for source_id in rejected_source_ids | sync_context["unchanged_source_ids"]:
+        keep.pop(source_id, None)
+    if rejected:
+        stale_cleanup_skipped = len(keep)
+    else:
+        try:
+            stale_chunks_deleted = vector_engine_delete_stale_chunks(
+                "pinecone", sync_cfg, target, keep
+            )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=inserted,
+                table_name=target,
+                target_schema="",
+                checksum="",
+                chunks_completed=(inserted + 99) // 100,
+                error=f"Pinecone stale cleanup failed ({type(exc).__name__})",
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+                meta={
+                    "embedding_usage": usage.to_dict(),
+                    "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+                    "vector_docs_embedded": sync_context["embedded_docs"],
+                },
+            )
     return WriteResult(
         ok=True,
         rows_written=inserted,
@@ -644,7 +991,15 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
-        meta=_pinecone_gate8_meta(vectors),
+        meta={
+            **_pinecone_gate8_meta(vectors),
+            "embedding_usage": usage.to_dict(),
+            "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+            "vector_docs_embedded": sync_context["embedded_docs"],
+            "vector_fingerprint_status": fingerprint_status,
+            "stale_chunks_deleted": stale_chunks_deleted,
+            "vector_stale_cleanup_skipped_docs": stale_cleanup_skipped,
+        },
     )
 
 

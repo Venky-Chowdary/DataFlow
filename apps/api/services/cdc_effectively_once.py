@@ -28,6 +28,7 @@ DELIVERY_CLASS_AT_LEAST_ONCE = "at_least_once"
 DELIVERY_CLASS_AT_MOST_ONCE = "at_most_once"
 
 SINK_EFFECTIVELY_ONCE_ELIGIBLE = "effectively_once_eligible"
+SINK_PK_UPSERT_AT_LEAST_ONCE = "pk_upsert_at_least_once"
 SINK_APPEND_ONLY = "append_only_at_least_once"
 
 DUPLICATE_SCENARIO_APPEND_REDELIVERY = "append_only_redelivery_duplicates_rows"
@@ -308,6 +309,27 @@ def classify_sink_delivery(
                 "At-most-once is not offered (would allow silent loss).",
             ],
         }
+    pk_upsert_no_lsn = bool(has_primary_key and upsert_capable and upsert_mode)
+    if pk_upsert_no_lsn:
+        return {
+            "class": SINK_PK_UPSERT_AT_LEAST_ONCE,
+            "delivery_class": DELIVERY_CLASS_AT_LEAST_ONCE,
+            "exactly_once": False,
+            "at_least_once": True,
+            "at_most_once": False,
+            "effectively_once_pk_sink": False,
+            "duplicates_on_redelivery": False,
+            "duplicate_scenario": DUPLICATE_SCENARIO_ALO_WITHOUT_LSN,
+            "dest_type": dest,
+            "supports_upsert": upsert_capable,
+            "has_lsn_guard": False,
+            "notes": [
+                "PK upsert is last-write-wins under at-least-once CDC.",
+                "No _df_lsn guard — stale redelivery can overwrite newer state.",
+                "Same PK does not insert a duplicate row.",
+                "Not exactly-once. Not append-only row duplication.",
+            ],
+        }
     return {
         "class": SINK_APPEND_ONLY,
         "delivery_class": DELIVERY_CLASS_AT_LEAST_ONCE,
@@ -336,13 +358,33 @@ def gate_cdc_destination(
     allow_append_only: bool = False,
     require_effectively_once: bool = False,
     has_lsn_column: bool | None = None,
+    require_exactly_once: bool = False,
+    sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail-fast when CDC would write append-only without an explicit allow.
 
     Default: block CDC → non-upsert sinks so operators do not silently get
     duplicate rows on redelivery while thinking they have LSN-guarded idempotency.
     Pass ``allow_append_only=True`` to opt into honest at-least-once append.
+
+    ``require_exactly_once=True`` fails closed unless the sink can commit the
+    apply and the dest-owned offset in one transaction
+    (``services.cdc_exactly_once.classify_sink_exactly_once``). The returned
+    posture then carries ``delivery_class == "exactly_once"`` for that sink only.
     """
+    if require_exactly_once:
+        from services.cdc_exactly_once import require_exactly_once_sink
+
+        return require_exactly_once_sink(
+            dest_type=dest_type,
+            has_primary_key=has_primary_key,
+            write_mode=write_mode,
+            allow_append_only=allow_append_only,
+            has_lsn_column=has_lsn_column,
+            sync_mode=sync_mode,
+            dest_cfg=dest_cfg,
+        )
     posture = classify_sink_delivery(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
@@ -350,6 +392,15 @@ def gate_cdc_destination(
         has_lsn_column=has_lsn_column,
     )
     if posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE:
+        return posture
+    if posture["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE:
+        if require_effectively_once:
+            raise CdcAppendOnlySinkError(
+                "CDC destination "
+                f"'{dest_type or 'unknown'}' upserts by PK without _df_lsn. "
+                "Delivery is at-least-once last-write-wins, not LSN-guarded "
+                "effectively-once. Not exactly-once."
+            )
         return posture
     if require_effectively_once or not allow_append_only:
         raise CdcAppendOnlySinkError(
@@ -377,10 +428,16 @@ def honesty_dict() -> dict[str, Any]:
         "delivery_classes": {
             DELIVERY_CLASS_EXACTLY_ONCE: {
                 "claimed": False,
-                "available": False,
+                "available": True,
+                "opt_in": True,
+                "algorithm": "dest_owned_watermark_txn",
                 "note": (
-                    "Platform never claims exactly-once end-to-end CDC. "
-                    "PK+_df_lsn upsert is LSN-guarded row-state idempotency under at-least-once capture."
+                    "Platform never claims all CDC is exactly-once. "
+                    "delivery_guarantee=auto selects a dest-owned watermark "
+                    "in the same dest transaction as apply when the route is "
+                    "eligible (Flink / Estuary sink pattern). An explicit "
+                    "at_least_once pin stays. Ineligible exactly_once fails "
+                    "closed. Ineligible routes stay at-least-once upsert."
                 ),
             },
             DELIVERY_CLASS_AT_LEAST_ONCE: {
@@ -388,8 +445,9 @@ def honesty_dict() -> dict[str, Any]:
                 "default": True,
                 "available": True,
                 "note": (
-                    "Default CDC delivery: peek→apply→ack may redeliver. "
-                    "PK upsert sinks with _df_lsn reject stale tokens; append sinks can duplicate."
+                "Default CDC delivery: peek→apply→ack may redeliver. "
+                "PK upsert sinks with _df_lsn reject stale tokens; "
+                "PK upsert without LSN is last-write-wins; append sinks can duplicate."
                 ),
             },
             DELIVERY_CLASS_AT_MOST_ONCE: {
@@ -410,7 +468,17 @@ def honesty_dict() -> dict[str, Any]:
             "Log capture remains at-least-once (peek→apply→ack).",
             "PK sinks with _df_lsn reject older tokens so row state does not regress.",
             "Append-only sinks are gated unless allow_append_only is set.",
-            "Do not claim exactly-once pipeline delivery.",
+            "Do not claim platform-wide exactly-once pipeline delivery.",
+            "Route-scoped dest-owned watermark EOS is opt-in and fail-closed.",
             "Do not claim at-most-once (would allow silent loss).",
         ],
+        "exactly_once_route_opt_in": True,
+        "exactly_once_algorithm": "dest_owned_watermark_txn",
+        **_exactly_once_scope(),
     }
+
+
+def _exactly_once_scope() -> dict[str, Any]:
+    from services.cdc_exactly_once import exactly_once_sink_scope
+
+    return exactly_once_sink_scope()

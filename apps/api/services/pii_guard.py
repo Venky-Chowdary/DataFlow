@@ -13,14 +13,27 @@ import hashlib
 import re
 from typing import Any
 
+from services.value_serializer import is_reader_null_cell
+
 # Simplistic but fast patterns.  For production, integrate with a DLP or ML service.
 PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
     "phone": re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    "credit_card": re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"),
+    # PAN candidate: 13-19 digits, space/dash separators. Luhn-validated in
+    # pii_findings / _redact_text — a bare 16-digit run is NOT a card number.
+    "pci_pan": re.compile(r"\b\d(?:[\d -]{11,22}\d)\b"),
     "ip_address": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
+
+# Union of every pattern above: a value matches no label iff it fails this.
+# Used as an exact one-pass gate so a clean column costs one scan, not five.
+_PII_UNION: re.Pattern[str] = re.compile(
+    "|".join(f"(?:{p.pattern})" for p in PII_PATTERNS.values())
+)
+# Every pattern needs either an ``@`` (email) or a digit (phone/ssn/card/ip),
+# so a value holding neither cannot match any label.
+_PII_REQUIRED_CHARS: frozenset[str] = frozenset("@0123456789")
 
 SENSITIVE_NAME_HINTS: set[str] = {
     "email", "phone", "mobile", "ssn", "dob", "birth", "passport", "license",
@@ -68,15 +81,112 @@ def _mask_matched_token(raw: str) -> str:
     return raw[:6] + "…" + raw[-4:]
 
 
-def detect_pii(value: Any) -> dict[str, Any]:
-    """Detect PII patterns in a single value."""
+def _mask_without_pii(text: str) -> str:
+    """``mask`` for text already known to match no PII pattern.
+
+    Same output as ``mask``, minus the pattern sweep the caller just ran: no
+    pattern matched, so the email branch and the embedded-PII branch cannot fire.
+    """
+    if _looks_structured(text):
+        return _redact_text(text)
+    if len(text) <= 4:
+        return "*" * len(text)
+    if len(text) <= 12:
+        return text[:2] + "*" * (len(text) - 4) + text[-2:]
+    return text[:6] + "…" + text[-4:]
+
+
+def _is_decimal_literal(text: str) -> bool:
+    """Pure decimal wire (digits + at most one fraction point, optional
+    exponent) — e.g. '0.0000000150', '1.50E-8', '-12.5'. Plain integers are
+    deliberately NOT exempt: a 10-digit column can be a phone number."""
+    s = text.strip()
+    if not s or ("." not in s and "e" not in s.lower()):
+        return False
+    try:
+        from decimal import Decimal, InvalidOperation
+
+        Decimal(s)
+        return True
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def luhn_valid(digits: str) -> bool:
+    """Luhn check on a card-number-shaped string (13-19 digits = PCI PAN range).
+
+    The input must be *only* digits plus the space/dash separators a printed
+    card number uses. Hex/UUID/ObjectId-looking values also contain 13-19
+    extractable digits — without this check a Mongo ``_id`` or a hex key can
+    Luhn-validate by chance and read as a PAN (X-MG1)."""
+    raw = (digits or "").strip()
+    if not raw or re.search(r"[^\d -]", raw):
+        return False
+    d = re.sub(r"\D", "", raw)
+    if not (13 <= len(d) <= 19) or not d.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(reversed(d)):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+def _pci_pan_matches(text: str) -> list[str]:
+    """Luhn-valid PAN candidates inside ``text``."""
+    return [
+        m.group(0)
+        for m in PII_PATTERNS["pci_pan"].finditer(text or "")
+        if luhn_valid(m.group(0))
+    ]
+
+
+def pii_findings(value: Any) -> dict[str, int]:
+    """Pattern label → match count for one value; empty when nothing matched.
+
+    Callers that only classify a column (audits, routing) use this instead of
+    ``detect_pii`` so they do not pay for a masked sample they discard.
+    """
     text = str(value) if value is not None else ""
+    if not _PII_REQUIRED_CHARS.intersection(text):
+        return {}
+    if _is_decimal_literal(text):
+        # A decimal literal (has a fraction point or exponent) can never be a
+        # phone, card, SSN, or IP — those formats have no '.'/'e'. Without this
+        # the phone pattern matched '0.0000000150' as '0.'+000-000-0150 and a
+        # numeric mismatch detail got masked (X-26).
+        return {}
+    if _PII_UNION.search(text) is None:
+        return {}
     findings: dict[str, int] = {}
+    # PCI PAN owns the precedence: a Luhn-valid card number also matches the
+    # phone shape, so blank out PAN spans before the other labels scan.
+    pan_matches = _pci_pan_matches(text)
+    if pan_matches:
+        findings["pci_pan"] = len(pan_matches)
+        text = PII_PATTERNS["pci_pan"].sub(
+            lambda m: " " * len(m.group(0)) if luhn_valid(m.group(0)) else m.group(0),
+            text,
+        )
     for label, pattern in PII_PATTERNS.items():
+        if label == "pci_pan":
+            continue
         matches = pattern.findall(text)
         if matches:
             findings[label] = len(matches)
-    return {"has_pii": bool(findings), "findings": findings, "sample": mask(text)}
+    return findings
+
+
+def detect_pii(value: Any) -> dict[str, Any]:
+    """Detect PII patterns in a single value."""
+    text = str(value) if value is not None else ""
+    findings = pii_findings(text)
+    sample = mask(text) if findings else _mask_without_pii(text)
+    return {"has_pii": bool(findings), "findings": findings, "sample": sample}
 
 
 def mask(value: Any) -> str:
@@ -125,7 +235,10 @@ def mask_record(record: dict[str, Any], sensitive_columns: set[str] | None = Non
         sensitive_columns = {k for k in record if is_sensitive_name(k)}
     out: dict[str, Any] = {}
     for k, v in record.items():
-        if k in sensitive_columns:
+        # SQL NULL carries no PII; masking it turned None into '' and the wire
+        # sentinel into masked text, so redacted load-history profiles saw a
+        # different null population than the live compare (D81).
+        if k in sensitive_columns and not is_reader_null_cell(v):
             out[k] = mask(v)
         else:
             out[k] = v
@@ -153,7 +266,15 @@ def _redact_text(text: str) -> str:
     if not isinstance(text, str):
         return text
     for _label, pattern in PII_PATTERNS.items():
-        text = pattern.sub(lambda m: _mask_matched_token(m.group(0)), text)
+        if _label == "pci_pan":
+            text = pattern.sub(
+                lambda m: _mask_matched_token(m.group(0))
+                if luhn_valid(m.group(0))
+                else m.group(0),
+                text,
+            )
+        else:
+            text = pattern.sub(lambda m: _mask_matched_token(m.group(0)), text)
     return text
 
 
@@ -165,7 +286,7 @@ def _sensitive_source_columns(mappings: list[dict]) -> set[str]:
         for m in mappings
         if m.get("source")
         and (
-            m.get("transform") in {"mask_pii", "hash_pii"}
+            m.get("transform") in {"mask_pii", "hash_pii", "redact"}
             or is_sensitive_name(m.get("source") or "")
         )
     }

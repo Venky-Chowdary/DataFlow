@@ -62,6 +62,10 @@ def test_kafka_value_logical_inference():
     assert _kafka_value_to_logical({"a": 1}) == "JSON"
     assert _kafka_value_to_logical([1, 2]) == "ARRAY"
     assert _kafka_value_to_logical(None) == ""
+    # JSON string samples are VARCHAR, not an unbounded TEXT LOB. TEXT made
+    # kafka→mysql invent LONGTEXT at Execute after Validate fingerprinted TEXT.
+    assert _kafka_value_to_logical("USD") == "VARCHAR"
+    assert _kafka_value_to_logical("EUR") == "VARCHAR"
 
 
 def test_crm_kafka_caps_claim_introspect():
@@ -81,8 +85,8 @@ def test_kafka_empty_topic_does_not_invent_text_columns(monkeypatch):
 
     monkeypatch.setattr(
         kr,
-        "read_topic_batch",
-        lambda **_kw: (_Empty(), None),
+        "sample_topic_batch",
+        lambda **_kw: _Empty(),
     )
     schema, native, warning = kr.infer_topic_schema({"host": "localhost"}, "empty.topic")
     assert schema == {}

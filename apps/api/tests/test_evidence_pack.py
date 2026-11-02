@@ -1,12 +1,13 @@
 """Evidence pack CI — claims must not exceed measured floors."""
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
 
 API_ROOT = Path(__file__).resolve().parents[1]
-PROOF_DIR = API_ROOT / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 
 def test_evidence_catalog_meets_all_claim_floors(tmp_path: Path) -> None:
@@ -26,6 +27,16 @@ def test_evidence_catalog_meets_all_claim_floors(tmp_path: Path) -> None:
         f"Misses: {[c['id'] for c in catalog['claims'] if not c['passed']]}. "
         f"See {json_path}"
     )
+
+
+def test_create_new_risk_measure_uses_a_measured_mysql_precision_collapse() -> None:
+    from services.evidence_pack import measure_create_new_type_risk
+
+    measured = measure_create_new_type_risk()
+    assert measured["source_type"] == "DECIMAL(80,40)"
+    assert measured["target_type"] == "TEXT"
+    assert measured["risk_kinds"] == ["precision_collapse"]
+    assert measured["requires_review"] is True
 
 
 def test_evidence_forbidden_300_plus_without_inventory() -> None:

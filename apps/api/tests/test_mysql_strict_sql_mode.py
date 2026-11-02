@@ -54,6 +54,7 @@ def test_apply_mysql_session_guards_sets_timeouts_and_strict():
     executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list if c.args)
     assert "wait_timeout" in executed
     assert "innodb_lock_wait_timeout" in executed
+    assert "time_zone" in executed
     assert any(
         "sql_mode =" in str(c.args[0]) for c in cur.execute.call_args_list if c.args
     )

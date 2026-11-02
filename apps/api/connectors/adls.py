@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 
-from connectors.adls_common import blob_service_client
+from connectors.adls_common import blob_service_client, list_service_containers
 from connectors.base import ConnectResult
 
 
@@ -38,12 +38,28 @@ def test_adls(
         "retry_total": 0,
     }
 
+    from connectors.adls_common import api_version_rejected
+
     try:
         client = blob_service_client(cfg)
-        # Lightweight connectivity probe
-        list(client.list_containers())[:1]
-    except Exception as exc:
-        return ConnectResult(ok=False, tables=[], error=str(exc), driver="azure-storage-blob")
+        # The public list_containers() sends include= (empty list). Azurite
+        # answers 400 to that query. The generated call with include=None
+        # omits it.
+        list_service_containers(client, maxresults=1)
+    except Exception as exc:  # noqa: BLE001 — probe must return ConnectResult
+        if api_version_rejected(exc) and not cfg.get("api_version"):
+            # A tunneled Azurite does not look local. Retry once on the
+            # version it accepts. Real Azure does not reject its own version,
+            # so this does not pin production accounts.
+            try:
+                client = blob_service_client({**cfg, "api_version": "2021-12-02"})
+                list_service_containers(client, maxresults=1)
+            except Exception as retry_exc:  # noqa: BLE001 — probe must return ConnectResult
+                return ConnectResult(
+                    ok=False, tables=[], error=str(retry_exc), driver="azure-storage-blob"
+                )
+        else:
+            return ConnectResult(ok=False, tables=[], error=str(exc), driver="azure-storage-blob")
 
     if not container:
         return ConnectResult(
@@ -69,5 +85,5 @@ def test_adls(
             message=f"Container `{container}` reachable — {len(blobs)} blob(s) listed.",
             driver="azure-storage-blob",
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — probe must return ConnectResult
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="azure-storage-blob")

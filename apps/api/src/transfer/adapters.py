@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import csv
-import io
-import json
+from services.brand import bigquery_dataset_of
 import logging
 import re
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,18 +30,13 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
-try:
-    from services.value_serializer import cell_to_string, json_default
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    from src.services.value_serializer import cell_to_string, json_default
-
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
+from services.read_options import ReadOptions
 
 from .connector_registry import run_probe
+from .job_quarantine import split_refused_unit
 from .models import EndpointConfig
-from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type
 
 
 class FileExportMapBlocked(ValueError):
@@ -140,6 +132,12 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
+    try:
+        from services.vectorization import attach_embedding_fallback_warning
+
+        warnings = attach_embedding_fallback_warning(warnings)
+    except ImportError:
+        pass
     # GA: never truncate rejected_details before quarantine / proof harvest.
     rejected_details = list(getattr(result, "rejected_details", []) or [])
     out: dict[str, Any] = {
@@ -154,7 +152,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None)
     if isinstance(meta, dict) and meta:
         # Promote Gate-8 sample / identity stamps into destination_summary.
-        for key in ("reconcile_sample", "written_ids", "source_row_count"):
+        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     return out
@@ -167,6 +165,7 @@ def raise_writer_failure(result: Any, label: str) -> None:
     details = list(getattr(result, "rejected_details", []) or [])
     rejected_rows = int(getattr(result, "rejected_rows", 0) or 0) or len(details)
     summary = _writer_diagnostics(result)
+    rejected_rows = split_refused_unit(details, rejected_rows, summary)
     try:
         from connectors.write_resilience import is_connection_lost
     except ImportError:
@@ -216,12 +215,28 @@ def parse_file_content(
     filename: str,
     *,
     enable_ocr: bool = False,
+    read_options: ReadOptions | None = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    result = FileParser.parse(content, filename, enable_ocr=enable_ocr)
+    result = FileParser.parse(
+        content, filename, enable_ocr=enable_ocr, read_options=read_options
+    )
     if not result.success:
         raise ValueError(result.error or "File parse failed")
-    schema = FileParser.infer_schema(result.data)
-    return result.data, result.columns, schema
+    # Avro / Parquet / ORC already carry the writer contract. Sample inference
+    # invented DECIMAL(38,18) as FLOAT after pandas (and still after to_pylist).
+    writer_schema = getattr(result, "schema_map", None)
+    schema = (
+        dict(writer_schema)
+        if writer_schema
+        else FileParser.infer_schema(result.data)
+    )
+    from services.value_serializer import payload_record_wire
+
+    # The engine reads records as wire, as the streaming path's batches are (D121).
+    records = [
+        payload_record_wire(r) if isinstance(r, dict) else r for r in result.data
+    ]
+    return records, result.columns, schema
 
 
 def parse_file_route_sample(
@@ -261,44 +276,34 @@ def parse_file_route_sample(
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     sample = result.data[:preview_rows]
+    writer_schema = getattr(result, "schema_map", None)
     schema = (
-        FileParser.infer_schema(sample)
-        if sample
-        else {c: "string" for c in result.columns}
+        dict(writer_schema)
+        if writer_schema
+        else (
+            FileParser.infer_schema(sample)
+            if sample
+            else {c: "string" for c in result.columns}
+        )
     )
     return result.columns, schema, result.row_count
 
 
 def _matrix_cell(value: Any) -> Any:
-    # Preserve SQL NULL / missing distinctly from the literal empty string so
-    # downstream writers can tell the difference.
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+    # One owner with ``matrix_cell_from_record``: Missing stays Missing,
+    # reader-null is None (not the extract wire token).
+    from connectors.source_row_spool import matrix_present_cell
 
-    if value is None:
-        return None
-    # STOP_COLUMN / sparse CDC — never collapse DF_MISSING to "" via cell_to_string.
-    if is_missing_sentinel(value):
-        return DF_MISSING_SENTINEL
-    return cell_to_string(value)
+    return matrix_present_cell(value)
 
 
 def records_to_matrix(
     records: list[dict], columns: list[str]
 ) -> tuple[list[str], list[list[Any]]]:
-    from services.value_serializer import DF_MISSING_SENTINEL
+    from connectors.source_row_spool import iter_matrix_rows
 
     headers = columns or (list(records[0].keys()) if records else [])
-    rows: list[list[Any]] = []
-    for rec in records:
-        row: list[Any] = []
-        for h in headers:
-            # Absent key = omit-from-SET (same contract as cdc_transfer._records_to_matrix).
-            if h not in rec:
-                row.append(DF_MISSING_SENTINEL)
-            else:
-                row.append(_matrix_cell(rec.get(h)))
-        rows.append(row)
-    return headers, rows
+    return headers, list(iter_matrix_rows(records, headers))
 
 
 def mongodb_connection_string(cfg: dict[str, Any]) -> str:
@@ -317,42 +322,24 @@ def mongodb_connection_string(cfg: dict[str, Any]) -> str:
 
 
 def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
-    """Ping MongoDB and automatically resolve the correct authSource.
+    """Ping MongoDB and resolve the authSource every other path will use.
 
-    When auth_source is not supplied, the connection string may still work with
-    the default database (path) or admin. We try the candidates in order and
-    return the first one that succeeds, which keeps the UI connection-string
-    flow simple for users who do not know the authentication database.
+    An explicit auth source (form field or the URL's ``authSource``) is the
+    only candidate: Test must prove exactly what reads and writes will use
+    (D135). Without one we try ``admin`` — the default every URI is built
+    with — then the app database, and write the winner back into ``cfg`` so
+    callers persist it and later paths agree.
     """
-    from urllib.parse import parse_qs, urlparse
+    from connectors.mongodb_common import _mongo_client, explicit_mongodb_auth_source
 
-    from connectors.mongodb_common import _mongo_client
-
-    connection_string = (cfg.get("connection_string") or "").strip()
-    qs = parse_qs(urlparse(connection_string).query, keep_blank_values=True)
-    url_auth_source = qs.get("authSource", qs.get("authsource", [""]))[0]
+    explicit = explicit_mongodb_auth_source(
+        cfg.get("connection_string") or "", str(cfg.get("auth_source") or "")
+    )
     database = (cfg.get("database") or "").strip()
-
-    candidates: list[str] = []
-    if cfg.get("auth_source"):
-        candidates.append(str(cfg.get("auth_source")).strip())
-    if url_auth_source:
-        candidates.append(url_auth_source)
-    # Prefer admin before the app database — managed Mongo (Railway/Atlas)
-    # almost always defines the user in admin, while the app DB is the path.
-    candidates.append("admin")
-    if database and database != "admin":
-        candidates.append(database)
-
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for auth_source in candidates:
-        key = (auth_source or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        ordered.append(key)
+    if explicit:
+        ordered = [explicit]
+    else:
+        ordered = ["admin"] + ([database] if database and database != "admin" else [])
 
     last_error = ""
     for auth_source in ordered:
@@ -401,67 +388,56 @@ def _find_implicit_connector_id(
     return None
 
 
+# Form defaults and EndpointConfig parsing stamp these when the operator did
+# not type a host. They are not an override of a saved connector.
+_LOOPBACK_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "host.docker.internal",
+    }
+)
+
+
+def _loopback_host(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return text in _LOOPBACK_HOSTS
+
+
+def _saved_host_wins_placeholder(inline: Any, saved: Any) -> bool:
+    """True when the inline host is a loopback placeholder and the saved host is not.
+
+    Studio and job payloads send ``localhost`` whenever the form default was
+    not replaced. The saved connector (bore.pub, a cloud host) is the endpoint
+    Test already proved. A real non-loopback inline host remains an override.
+    A connector that is actually localhost stays localhost.
+    """
+    return (
+        _loopback_host(inline)
+        and bool(str(saved or "").strip())
+        and not _loopback_host(saved)
+    )
+
+
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import (
+        effective_port,
+        prefer_listen_port,
+        resolve_driver_type,
+        stored_listen_port,
+    )
 
     driver = resolve_driver_type(endpoint.format or "")
     fmt = driver
-    default_port = (
-        27017
-        if fmt == "mongodb"
-        else 3306
-        if fmt == "mysql"
-        else 1433
-        if fmt == "sqlserver"
-        else 1521
-        if fmt == "oracle"
-        else 9092
-        if fmt == "kafka"
-        else 6379
-        if fmt == "redis"
-        else 9200
-        if fmt == "elasticsearch"
-        else 5439
-        if fmt == "redshift"
-        else 0
-        if fmt in ("sqlite", "generic_sql", "iceberg")
-        else 22
-        if fmt == "sftp"
-        else 587
-        if fmt == "email"
-        else 6333
-        if fmt == "qdrant"
-        else 8080
-        if fmt == "weaviate"
-        else 19530
-        if fmt == "milvus"
-        else 443
-        if fmt
-        in (
-            "snowflake",
-            "bigquery",
-            "dynamodb",
-            "s3",
-            "gcs",
-            "adls",
-            "salesforce",
-            "hubspot",
-            "stripe",
-            "shopify",
-            "zendesk",
-            "notion",
-            "airtable",
-            "rest_api",
-            "influxdb",
-            "neo4j",
-            "couchbase",
-            "pinecone",
-        )
-        else 5432
-    )
+    # One owner with the writer. Neo4j is 7474, InfluxDB 8086, Redis 6379.
+    default_port = effective_port(fmt, 0)
     from services.dialect_profiles import normalize_schema
 
     # Start with inline endpoint values only; driver defaults are applied after the
@@ -489,8 +465,11 @@ def resolve_connector_config(
         "path_style": endpoint.path_style,
         "region": endpoint.region or "",
     }
-    # Keep "role" as the canonical key used by Snowflake connector functions.
-    cfg["role"] = endpoint.auth_role or ""
+    # Engine login role only — never topology source/destination/both.
+    from services.connector_auth import engine_login_role
+
+    cfg["role"] = engine_login_role(endpoint.auth_role)
+    cfg["auth_role"] = cfg["role"]
     cfg.update(endpoint.extra)
     connector_id = endpoint.connector_id or _find_implicit_connector_id(
         endpoint, cfg, fmt, workspace_id=workspace_id
@@ -513,9 +492,30 @@ def resolve_connector_config(
                 else (saved if saved is not None else "")
             )
 
+        inline_host = cfg.get("host")
+        saved_host = conn_dict.get("host")
+        placeholder_host = _saved_host_wins_placeholder(inline_host, saved_host)
+        chosen_host = (
+            saved_host if placeholder_host else _pick(inline_host, saved_host)
+        )
+        inline_port = cfg.get("port")
+        saved_port = conn_dict.get("port")
+        # A discarded localhost is not an instruction to keep the driver
+        # default port. The tunnel port on the saved connector is the one
+        # Test dialed. A non-default inline port is still an override.
+        if placeholder_host:
+            try:
+                inline_port_num = int(inline_port or 0)
+            except (TypeError, ValueError):
+                inline_port_num = 0
+            if inline_port_num in (0, int(default_port or 0)):
+                inline_port = 0
+        dial_driver = resolve_driver_type(str(conn_dict.get("type") or fmt or ""))
         merged_cfg = {
-            "host": _pick(cfg.get("host"), conn_dict.get("host")),
-            "port": _pick(cfg.get("port"), conn_dict.get("port")),
+            "host": chosen_host,
+            # Inline 5432 is the old form default, not an instruction to
+            # ignore a saved Redis 6380 / Elasticsearch 9200 / Kafka 9092.
+            "port": prefer_listen_port(dial_driver, inline_port, saved_port),
             "database": chosen_database,
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),
@@ -561,6 +561,20 @@ def resolve_connector_config(
         for key, value in {**cfg, **conn_dict}.items():
             if key not in merged_cfg:
                 merged_cfg[key] = value
+        # A saved SFTP connector keeps its host-key pin under ``extra``
+        # (connector_store.connector_extra_from_payload). An endpoint that names
+        # only the connector id (the planner's fallback sampler, a Validate
+        # sample) must carry it the way an inline ``extra`` is carried
+        # (``cfg.update(endpoint.extra)`` above). Dropped, the pinned host read
+        # as untrusted, Map scored a file with no sample rows and G4 held an
+        # exact-name column of an existing table (D159). Inline values win.
+        saved_extra = conn_dict.get("extra")
+        if isinstance(saved_extra, dict):
+            from connectors.sftp_common import host_key_settings
+
+            for key, value in host_key_settings(saved_extra).items():
+                if value and not merged_cfg.get(key):
+                    merged_cfg[key] = value
         merged_cfg["destination_identity"] = identity.as_dict()
         sync_credentials_into_connection_string(merged_cfg)
         cfg = merged_cfg
@@ -575,7 +589,10 @@ def resolve_connector_config(
         cfg["host"] = cfg["host"] or "localhost"
     else:
         cfg["host"] = cfg.get("host") or ""
-    cfg["port"] = cfg["port"] or default_port
+    cfg["port"] = stored_listen_port(
+        resolve_driver_type(str(cfg.get("type") or fmt or "")),
+        cfg.get("port"),
+    )
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
     cfg["schema"] = normalize_schema(
@@ -592,6 +609,20 @@ def resolve_connector_config(
     # Ensure generic SQLAlchemy paths (introspection, schema drift, duplicate-key
     # probes) use the same credentials as the explicit user/pass fields.
     sync_credentials_into_connection_string(cfg)
+    # Merge can restore topology ``both`` from a saved connector. Strip it once
+    # here so every downstream Snowflake/Redshift path sees a login role or "".
+    from services.connector_auth import engine_login_role
+
+    cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
+    if cfg.get("auth_role"):
+        cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
+    # OpenShift is a hosting plane — resolve Service DNS onto the real store.
+    # Never a Kubernetes API write. See services.openshift_dest.
+    from services.openshift_dest import apply_openshift_hosting
+    from services.pgvector_layout import apply_layout_to_cfg
+
+    # D209: a pgvector destination whose layout is ``table`` is PostgreSQL.
+    cfg = apply_layout_to_cfg(apply_openshift_hosting(cfg))
     return cfg
 
 
@@ -613,6 +644,83 @@ def resolve_endpoint(
     # its stored driver type is authoritative; otherwise keep the inline format.
     merged["format"] = merged.get("type") or merged.get("format") or endpoint.format
     return EndpointConfig.from_dict(endpoint.kind, merged)
+
+
+def refresh_saved_connectors(request: Any) -> None:
+    """Re-resolve both endpoints of a request replayed from a job record.
+
+    Rerun / retry / resume rebuild the request from the stored
+    ``transfer_request``, whose host and credentials are those the connection
+    had when the job first ran (D172). Raises ``ValueError`` when a referenced
+    connector no longer exists.
+    """
+    request.source = refresh_saved_endpoint(
+        request.source, workspace_id=request.workspace_id
+    )
+    request.destination = refresh_saved_endpoint(
+        request.destination, workspace_id=request.workspace_id
+    )
+
+
+def refresh_saved_endpoint(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> EndpointConfig:
+    """Re-resolve a saved connector's *current* settings for a replayed endpoint.
+
+    D172 — a job's stored ``transfer_request`` holds the host, credentials and
+    database the connection had when the job first ran, because they were
+    resolved before the request was persisted. Resolution lets inline values win
+    over the saved connector, so a rerun / retry / resume dialled the old server
+    after the connector was moved or its credentials rotated (and, if the old
+    server still answered, read or wrote the wrong database). Connection
+    identity therefore comes from the saved connector, by id, at run time; what
+    the job chose stays (table, collection, schema, extras, and a database the
+    operator explicitly overrode). Endpoints with no saved connector keep their
+    stored config. Raises ``ValueError`` when the connector no longer exists.
+    """
+    if not endpoint.connector_id:
+        return endpoint
+    import dataclasses
+
+    # Existence and scope are checked against the job's workspace first: the
+    # generic lookup below may fall back to an unscoped store read, and a
+    # deleted or out-of-scope connector must fail, never resolve to something
+    # else or to the frozen snapshot.
+    from services.connector_store import get_connector
+
+    if get_connector(endpoint.connector_id, workspace_id=workspace_id) is None:
+        raise ValueError(f"Connector {endpoint.connector_id} no longer exists")
+
+    extra = dict(endpoint.extra or {})
+    identity = extra.pop("destination_identity", None)
+    # The database came from the saved connector (so it follows the connector)
+    # unless the operator chose it: an override or an inline-only database the
+    # connector never had stays as the job stored it.
+    from_connector = (
+        isinstance(identity, dict) and identity.get("authority") == "saved_connector"
+    )
+    stripped = dataclasses.replace(
+        endpoint,
+        host="",
+        port=0,
+        database="" if from_connector else endpoint.database,
+        username="",
+        password="",
+        connection_string="",
+        warehouse="",
+        ssl=False,
+        auth_mode="",
+        auth_role="",
+        auth_source="",
+        api_key="",
+        service_account="",
+        private_key="",
+        region="",
+        endpoint_url="",
+        path_style=False,
+        extra=extra,
+    )
+    return resolve_endpoint(stripped, workspace_id=workspace_id)
 
 
 def _lookup_saved_connector(
@@ -644,6 +752,9 @@ def _lookup_saved_connector(
                 "endpoint_url": getattr(conn, "endpoint_url", ""),
                 "path_style": getattr(conn, "path_style", False),
                 "role": getattr(conn, "auth_role", ""),
+                # SFTP host-key pin and other operator extras live here. Dropping
+                # them made a saved pin look untrusted on Pilot introspect.
+                "extra": dict(getattr(conn, "extra", None) or {}),
             }
     except Exception as exc:
         logger.debug("connector store lookup failed: %s", exc, exc_info=exc)
@@ -655,275 +766,6 @@ def _lookup_saved_connector(
         return None
 
 
-def _columns_type_and_nullability(
-    columns: list[dict[str, Any]],
-) -> tuple[dict[str, str], dict[str, bool]]:
-    """Split introspect column dicts into type map + nullable map."""
-    types, nulls, _defaults, _ident, _gen, _coll = _columns_schema_meta(columns)
-    return types, nulls
-
-
-def _columns_schema_meta(
-    columns: list[dict[str, Any]],
-) -> tuple[
-    dict[str, str],
-    dict[str, bool],
-    dict[str, str],
-    list[str],
-    list[str],
-    dict[str, str],
-]:
-    """Type / nullability / defaults / identity / generated / collation maps."""
-    types: dict[str, str] = {}
-    nulls: dict[str, bool] = {}
-    defaults: dict[str, str] = {}
-    identity: list[str] = []
-    generated: list[str] = []
-    collations: dict[str, str] = {}
-    for col in columns:
-        name = col.get("name")
-        if not name:
-            continue
-        key = str(name)
-        types[key] = str(col.get("inferred_type") or "TEXT")
-        if "nullable" in col:
-            nulls[key] = bool(col["nullable"])
-        dflt = col.get("default")
-        if dflt is not None and str(dflt).strip() != "":
-            defaults[key] = str(dflt)
-        if col.get("is_identity"):
-            identity.append(key)
-        inferred_u = str(col.get("inferred_type") or "").upper()
-        if "GENERATED ALWAYS" in inferred_u or str(col.get("generation") or "").lower() == "always":
-            if key not in generated:
-                generated.append(key)
-        coll = str(col.get("collation") or "").strip()
-        if coll:
-            collations[key] = coll
-    return types, nulls, defaults, identity, generated, collations
-
-
-def _introspect_table_schema_rich(
-    db_type: str,
-    cfg: dict[str, Any],
-    table: str,
-    headers: list[str],
-    records: list[dict] | None = None,
-    *,
-    strict_namespace: bool = False,
-) -> tuple[dict[str, str], dict[str, bool], dict[str, Any]]:
-    """Load column types + nullability + unique keys from INFORMATION_SCHEMA.
-
-    ``strict_namespace`` is required for destination probes so missing tables in
-    the chosen DB/schema are not "healed" from another namespace on the host.
-    Nullability feeds G3 NOT NULL contracts — never invent nullable=True when
-    the catalog says otherwise.
-    Third return value carries ``primary_key_columns`` / ``unique_keys`` when the
-    catalog exposes them (PG/MySQL today), plus Property 6 defaults/identity.
-    """
-    empty_keys: dict[str, Any] = {
-        "primary_key_columns": [],
-        "unique_keys": [],
-        "defaults": {},
-        "identity_columns": [],
-        "generated_columns": [],
-        "collations": {},
-        "physical_storage": None,
-        "check_constraints_meta": None,
-        "indexes_meta": None,
-        "warnings": [],
-    }
-
-    def _keys_from_info(
-        payload: dict[str, Any],
-        *,
-        defaults: dict[str, str] | None = None,
-        identity_columns: list[str] | None = None,
-        generated_columns: list[str] | None = None,
-        collations: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        warnings = [str(w) for w in (payload.get("warnings") or []) if w]
-        # Catalog message often carries the advisory-key honesty note when
-        # ``warnings`` was folded into ``message`` by introspect.
-        msg = str(payload.get("message") or "").strip()
-        if msg and any(
-            token in msg.lower()
-            for token in ("not enforced", "informational", "advisory")
-        ):
-            if msg not in warnings:
-                warnings.append(msg)
-        return {
-            "primary_key_columns": list(payload.get("primary_key_columns") or []),
-            "unique_keys": list(payload.get("unique_keys") or []),
-            "defaults": dict(defaults or {}),
-            "identity_columns": list(identity_columns or []),
-            "generated_columns": list(generated_columns or []),
-            "collations": dict(collations or {}),
-            "foreign_keys": list(payload.get("foreign_keys") or []),
-            "check_constraints": list(payload.get("check_constraints") or []),
-            # None when the dialect/probe never measured placement — the
-            # certificate reports "unknown", never "no partitioning".
-            "physical_storage": payload.get("physical_storage"),
-            # None when the CHECK catalog was never read — the certificate says
-            # "unmeasured", never "no CHECK constraints".
-            "check_constraints_meta": payload.get("check_constraints_meta"),
-            # None when the index catalog was never read — the certificate says
-            # "unmeasured", never "no secondary indexes".
-            "indexes_meta": payload.get("indexes_meta"),
-            "warnings": warnings,
-        }
-
-    if db_type == "generic_sql":
-        try:
-            from connectors.generic_sql import introspect_table_schema
-
-            info = introspect_table_schema(cfg, table)
-            if info.get("ok") and info.get("columns"):
-                types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
-                    info["columns"]
-                )
-                return types, nulls, _keys_from_info(
-                    info,
-                    defaults=defaults,
-                    identity_columns=ident,
-                    generated_columns=gen,
-                    collations=coll,
-                )
-        except Exception as exc:
-            logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
-
-    from services.dialect_profiles import schema_from_cfg
-    from services.schema_introspect import introspect_schema
-
-    info = introspect_schema(
-        db_type,
-        host=cfg.get("host", ""),
-        port=int(
-            cfg.get("port")
-            or (
-                3306
-                if db_type == "mysql"
-                else 1433
-                if db_type == "sqlserver"
-                else 1521
-                if db_type == "oracle"
-                else 5439
-                if db_type == "redshift"
-                else 5432
-            )
-        ),
-        database=cfg.get("database", ""),
-        username=cfg.get("username", ""),
-        password=cfg.get("password", ""),
-        schema=schema_from_cfg(db_type, cfg),
-        connection_string=cfg.get("connection_string", ""),
-        # Prefer connector ssl exactly as list/probe use it. Do not default True
-        # when the key is missing — that caused managed vs local mismatch where
-        # SHOW TABLES succeeded (ssl=False) but INFORMATION_SCHEMA failed (ssl=True),
-        # leaving Map with "destination schema unavailable" for an existing table.
-        ssl=bool(cfg.get("ssl", False)),
-        warehouse=cfg.get("warehouse", ""),
-        table=table,
-        catalog_type=cfg.get("type", ""),
-        auth_source=cfg.get("auth_source", ""),
-        api_key=cfg.get("api_key", ""),
-        strict_namespace=strict_namespace,
-    )
-    if info.get("ok") and info.get("columns"):
-        types, nulls, defaults, ident, gen, coll = _columns_schema_meta(info["columns"])
-        return types, nulls, _keys_from_info(
-            info,
-            defaults=defaults,
-            identity_columns=ident,
-            generated_columns=gen,
-            collations=coll,
-        )
-
-    # Retry once with flipped SSL when the first probe failed (common when the
-    # connector ssl flag does not match the host's TLS requirement).
-    if not info.get("ok") and db_type in (
-        "postgresql",
-        "redshift",
-        "mysql",
-        "sqlserver",
-    ):
-        flipped = not bool(cfg.get("ssl", False))
-        info_retry = introspect_schema(
-            db_type,
-            host=cfg.get("host", ""),
-            port=int(
-                cfg.get("port")
-                or (
-                    3306
-                    if db_type == "mysql"
-                    else 1433
-                    if db_type == "sqlserver"
-                    else 1521
-                    if db_type == "oracle"
-                    else 5439
-                    if db_type == "redshift"
-                    else 5432
-                )
-            ),
-            database=cfg.get("database", ""),
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=schema_from_cfg(db_type, cfg),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=flipped,
-            warehouse=cfg.get("warehouse", ""),
-            table=table,
-            catalog_type=cfg.get("type", ""),
-            auth_source=cfg.get("auth_source", ""),
-            api_key=cfg.get("api_key", ""),
-            strict_namespace=strict_namespace,
-        )
-        if info_retry.get("ok") and info_retry.get("columns"):
-            types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
-                info_retry["columns"]
-            )
-            return types, nulls, _keys_from_info(
-                info_retry,
-                defaults=defaults,
-                identity_columns=ident,
-                generated_columns=gen,
-                collations=coll,
-            )
-
-    # Fallback: infer logical types from the sample records we already have in hand.
-    # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
-    # stored values may be strings but whose content is numeric, boolean, JSON, etc.
-    if records:
-        try:
-            from services.file_parser import FileParser
-
-            inferred = FileParser.infer_schema(records)
-            if inferred:
-                return {h: inferred.get(h, "TEXT") for h in headers}, {}, empty_keys
-        except Exception as exc:
-            logger.debug("record schema inference failed: %s", exc, exc_info=exc)
-    return {h: "TEXT" for h in headers}, {}, empty_keys
-
-
-def _introspect_table_schema(
-    db_type: str,
-    cfg: dict[str, Any],
-    table: str,
-    headers: list[str],
-    records: list[dict] | None = None,
-    *,
-    strict_namespace: bool = False,
-) -> dict[str, str]:
-    """Load column types from INFORMATION_SCHEMA or infer from sample records."""
-    types, _nulls, _keys = _introspect_table_schema_rich(
-        db_type,
-        cfg,
-        table,
-        headers,
-        records=records,
-        strict_namespace=strict_namespace,
-    )
-    return types
 
 
 _NON_STREAMING_ROW_LIMIT = 100_000
@@ -938,6 +780,36 @@ def _guard_truncated_read(batch, db_type: str, name: str) -> None:
             f"are capped at {len(batch.rows):,}. Use database-to-database transfer (async) "
             "for large tables."
         )
+    meta = batch.meta if isinstance(getattr(batch, "meta", None), dict) else {}
+    # SaaS list APIs (Stripe) do not publish COUNT(*). ``truncated`` is the
+    # reader's proof that pagination still had pages after the execute cap.
+    if meta.get("truncated"):
+        raise ValueError(
+            f"Source {db_type}.{name} still has unread pages after a "
+            f"non-streaming read of {len(batch.rows):,} rows. Refusing silent "
+            "truncate. Use database-to-database transfer (async) for large objects."
+        )
+
+
+def _pack_source_read(
+    records: list[dict],
+    headers: list[str],
+    schema: dict[str, str],
+    *,
+    batch: Any = None,
+    stamp_total: dict[str, Any] | None = None,
+) -> tuple[list[dict], list[str], dict[str, str]]:
+    """Return the read triple and optionally stamp the measured population.
+
+    Readers already run ``COUNT(*)`` (or equivalent) onto ``batch.total_rows``.
+    Introspect used to throw that away and treat ``len(records)`` (the 100-row
+    preview) as the transfer size.
+    """
+    if stamp_total is not None:
+        total = getattr(batch, "total_rows", None) if batch is not None else None
+        stamp_total["total_rows"] = int(total) if total is not None else None
+        stamp_total["sample_rows"] = len(records)
+    return records, headers, schema
 
 
 def read_source_database(
@@ -945,12 +817,52 @@ def read_source_database(
     *,
     limit: int = _NON_STREAMING_ROW_LIMIT,
     raise_on_truncate: bool = True,
+    stamp_total: dict[str, Any] | None = None,
+    cursor_column: str = "",
+    cursor_after: Any = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
-    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    db_type = source_read_driver(resolve_driver_type(cfg.get("type") or endpoint.format or ""))
+
+    from services.procedure_source import is_callable_source, read_callable_batch
+
+    if is_callable_source(cfg) or is_callable_source(endpoint):
+        batch = read_callable_batch(cfg, offset=0, limit=limit, peek=True)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type or "procedure", endpoint.table or "procedure")
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = (batch.meta or {}).get("native_types") if isinstance(batch.meta, dict) else {}
+        schema = dict(native) if isinstance(native, dict) else {}
+        if not schema:
+            schema = {c: "string" for c in batch.headers}
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
+    from connectors.sdk import get_descriptor, sdk_read_as_matrix
+
+    sdk_descriptor = get_descriptor(db_type)
+    if (
+        sdk_descriptor
+        and "source" in sdk_descriptor.roles
+        and sdk_descriptor.catalog_ids
+    ):
+        stream = endpoint.table or endpoint.collection
+        if not stream:
+            raise ValueError(f"Source {db_type} stream name required")
+        headers, rows, schema, _ = sdk_read_as_matrix(
+            db_type,
+            cfg,
+            stream,
+            limit=limit,
+        )
+        records = [dict(zip(headers, row)) for row in rows]
+        return _pack_source_read(
+            records, headers, schema, stamp_total=stamp_total
+        )
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
@@ -977,7 +889,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             "postgresql", cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "mongodb":
         from connectors.mongodb_reader import read_collection_batch
@@ -1005,7 +919,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             "mongodb", cfg, coll_name, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "mysql":
         from connectors.mysql_reader import read_table_batch
@@ -1031,7 +947,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "bigquery":
         from connectors.bigquery_reader import read_table_batch
@@ -1045,7 +963,7 @@ def read_source_database(
             database=cfg["database"],
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
-            schema=cfg.get("schema", "dataflow"),
+            schema=bigquery_dataset_of(cfg),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
@@ -1059,10 +977,13 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "snowflake":
         from connectors.snowflake_reader import read_table_batch
+        from services.connector_auth import snowflake_session_kwargs
 
         table = endpoint.table
         if not table:
@@ -1078,7 +999,15 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
-            role=cfg.get("role", ""),
+            cursor_primary_key=str(
+                (endpoint.extra or {}).get("primary_key")
+                or cfg.get("primary_key")
+                or ""
+            ),
+            skip_population_count=bool(
+                (endpoint.extra or {}).get("skip_population_count")
+            ),
+            **snowflake_session_kwargs(cfg),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -1086,7 +1015,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "gcs":
         from connectors.gcs_reader import read_object
@@ -1106,7 +1037,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "adls":
         from connectors.adls_reader import read_object
@@ -1126,7 +1059,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "s3":
         from connectors.s3_reader import read_object
@@ -1146,7 +1081,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "dynamodb":
         from connectors.dynamodb_reader import read_all_paginated
@@ -1163,7 +1100,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "elasticsearch":
         from connectors.elasticsearch_reader import read_index_batch
@@ -1182,7 +1121,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "redis":
         from connectors.redis_reader import read_keys_batch, resolve_key_pattern
@@ -1194,12 +1135,40 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, pattern)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        if records:
+            from services.object_store_introspect import (
+                profile_schemaless_source_schema,
+            )
+
+            schema = profile_schemaless_source_schema(
+                list(batch.headers), records, source_format="redis"
+            )
+        else:
+            schema = {c: "string" for c in batch.headers}
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
+    if db_type == "qdrant":
+        from connectors.qdrant_reader import read_points_batch
+
+        collection = endpoint.table or endpoint.database or endpoint.collection
+        if not collection:
+            raise ValueError(
+                "Qdrant collection name required (table or database field)"
+            )
+        batch, _ = read_points_batch(cfg=cfg, collection=collection, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, collection)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
             FileParser.infer_schema(records)
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "sqlite":
         from connectors.sqlite_reader import read_table_batch
@@ -1225,7 +1194,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "generic_sql":
         from connectors.generic_sql import read_table_batch
@@ -1252,7 +1223,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type in ("sqlserver", "oracle"):
         from .connector_dispatch import read_via_registry
@@ -1267,7 +1240,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "iceberg":
         from .connector_dispatch import read_via_registry
@@ -1282,7 +1257,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "sftp":
         from connectors.sftp_reader import read_object
@@ -1314,7 +1291,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type in (
         "salesforce",
@@ -1334,7 +1313,14 @@ def read_source_database(
         mod = __import__(f"connectors.{db_type}", fromlist=["read_object"])
         read_fn = getattr(mod, "read_object")
         sobject = endpoint.table or endpoint.database or endpoint.collection or ""
-        batch: ReadBatch = read_fn(cfg=cfg, object=sobject, limit=limit)
+        saas_kwargs: dict[str, Any] = {}
+        if cursor_column:
+            # Buffered execute is the Stripe/HubSpot/Salesforce path. Streaming
+            # already passes created[gte] / SOQL seek; this must too or the
+            # incremental SKU is only a client-side filter after a full re-read.
+            saas_kwargs["cursor_column"] = cursor_column
+            saas_kwargs["cursor_after"] = cursor_after
+        batch: ReadBatch = read_fn(cfg=cfg, object=sobject, limit=limit, **saas_kwargs)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, sobject or db_type)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
@@ -1343,7 +1329,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "singer_tap":
         from connectors.sdk import sdk_read_as_matrix
@@ -1365,6 +1353,39 @@ def read_source_database(
             "Email cannot be a transfer source; configure it as a destination only."
         )
 
+    if db_type == "kafka":
+        # Buffered reads (kafka → file, or a destination that is not in the
+        # streaming set) previously raised "read not implemented". The topic
+        # reader is the same one the checkpointed stream uses. Offsets are
+        # not committed here — delivery stays at-least-once until the
+        # destination apply commits them on the streaming path.
+        from connectors.kafka_reader import read_topic_batch
+
+        topic = endpoint.table or endpoint.database or endpoint.collection or ""
+        if not topic:
+            raise ValueError("Kafka source topic name required")
+        batch, kafka_cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        if stamp_total is not None:
+            # The caller that owns the run commits these on acceptance (D85).
+            stamp_total["kafka_cursor"] = kafka_cursor
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, topic)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = batch.meta if isinstance(batch.meta, dict) else {}
+        typed = native.get("native_types") if isinstance(native, dict) else None
+        schema = (
+            dict(typed)
+            if isinstance(typed, dict) and typed
+            else (
+                FileParser.infer_schema(records)
+                if records
+                else {c: "string" for c in batch.headers}
+            )
+        )
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
@@ -1383,15 +1404,182 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
+    from connectors.writer_common import active_quarantine_mappings
     from services.dest_precount import PRECOUNT_KEY, precount_destination
+    from services.dialect_profiles import schema_from_cfg
+    from services.row_conservation import CENSUS_KEY, prepare_keyed_upsert
+    from src.transfer.connector_capabilities import resolve_driver_type
 
-    rows_before = precount_destination(endpoint, resolve_connector_config(endpoint))
-    rows_written, ddl_log, summary = _write_destination_database(
-        endpoint, records, columns, schema, mappings, **options
+    from connectors.engine_record_spill import (
+        ENGINE_SPILL_SUMMARY_KEY,
+        mirror_pk_sources,
+        spill_engine_write_records,
+        spool_write_kinds,
     )
+
+    cfg = resolve_connector_config(endpoint)
+    from services.procedure_destination import (
+        DEST_ROW_MODES,
+        assert_dest_procedure_sync_allowed,
+        plan_dest_procedure,
+    )
+
+    dest_plan = plan_dest_procedure(endpoint)
+    if dest_plan is not None:
+        assert_dest_procedure_sync_allowed(str(options.get("sync_mode") or ""), endpoint)
+        if dest_plan.mode in DEST_ROW_MODES:
+            return _write_dest_procedure_rows(endpoint, records, dest_plan)
+        if dest_plan.before_spec is not None:
+            _run_dest_procedure_hook(endpoint, dest_plan.before_spec)
+
+    rows_before = precount_destination(endpoint, cfg)
+    write_mode = str(options.get("write_mode") or "")
+    conflict_columns = list(options.get("conflict_columns") or [])
+    collect_mirror_keys = bool(options.pop("collect_mirror_keys", False))
+    release_records = bool(options.pop("release_records", False))
+    retain_engine_spill = bool(options.pop("retain_engine_spill", False))
+    options.pop("source_spool", None)
+    db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
+    census_payload = None
+    if write_mode.lower() == "upsert" and conflict_columns:
+        records, census_payload = prepare_keyed_upsert(
+            records,
+            key_columns=conflict_columns,
+            mappings=mappings,
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema_from_cfg(db_type, cfg),
+            table_name=resolve_dest_table(db_type, endpoint, "dt_import"),
+            dest_nonempty=bool(rows_before),
+        )
+    spill = None
+    if db_type in spool_write_kinds():
+        extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+        pk_sources = (
+            mirror_pk_sources(conflict_columns, mappings)
+            if collect_mirror_keys and conflict_columns
+            else None
+        )
+        spill = spill_engine_write_records(
+            records,
+            columns,
+            mappings,
+            extra=extra,
+            collect_pk_sources=pk_sources,
+            clear_records=release_records,
+        )
+        options["source_spool"] = spill.spool
+    from services.duplicate_policy import (
+        reset_match_action,
+        resolve_duplicate_policy,
+        set_match_action,
+    )
+
+    extra = getattr(endpoint, "extra", None) or {}
+    decided = resolve_duplicate_policy(
+        duplicate_policy=str(options.get("duplicate_policy") or extra.get("duplicate_policy") or ""),
+        allow_duplicates=bool(options.get("allow_duplicates") or extra.get("allow_duplicates")),
+        sync_mode=str(options.get("sync_mode") or ""),
+        business_key=bool(conflict_columns),
+        write_mode=write_mode,
+    )
+    if decided.explicit or (
+        decided.policy == "upsert" and write_mode == "insert" and conflict_columns
+    ):
+        write_mode = decided.write_mode
+        options["write_mode"] = decided.write_mode
+    match_token = set_match_action(decided.match_action)
+    try:
+        # The Map governs holdouts for the whole write, including the bind and
+        # salvage paths that stamp their own details.
+        with active_quarantine_mappings(mappings):
+            rows_written, ddl_log, summary = _write_destination_database(
+                endpoint, records, columns, schema, mappings, **options
+            )
+        if dest_plan is not None and dest_plan.after_spec is not None:
+            _run_dest_procedure_hook(endpoint, dest_plan.after_spec)
+            ddl_log = list(ddl_log or [])
+            ddl_log.append(f"after_write {dest_plan.after_spec.identifier}")
+            if isinstance(summary, dict):
+                summary["dest_procedure_after"] = dest_plan.after_spec.identifier
+    except Exception:
+        reset_match_action(match_token)
+        if spill is not None:
+            spill.close()
+        raise
+    reset_match_action(match_token)
     if rows_before is not None and isinstance(summary, dict):
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
+    if census_payload is not None and isinstance(summary, dict):
+        summary[CENSUS_KEY] = census_payload
+    if spill is not None and isinstance(summary, dict):
+        summary["engine_record_spill"] = {
+            "spilled": spill.spilled,
+            "source_row_count": spill.source_row_count,
+            "unexpanded_row_count": spill.unexpanded_row_count,
+        }
+        # STRUCT explode expands the matrix inside the spool: source_row_count
+        # is the expanded population, unexpanded is what the reader fetched.
+        # Gate-8 expected = source - filtered + expanded; without this stamp
+        # every exploded row reads as an unexplained extra on the target.
+        _expanded = int(spill.source_row_count or 0) - int(
+            spill.unexpanded_row_count or 0
+        )
+        if _expanded > 0:
+            summary["rows_expanded"] = _expanded
+        if retain_engine_spill:
+            summary[ENGINE_SPILL_SUMMARY_KEY] = spill
+        else:
+            spill.close()
+    elif spill is not None:
+        spill.close()
     return rows_written, ddl_log, summary
+
+
+def _dest_procedure_execute(endpoint: EndpointConfig):
+    """One dest engine session. Caller owns commit via ``engine.begin()``."""
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+    from sqlalchemy import text
+
+    cfg = resolve_connector_config(endpoint)
+    engine = _engine(cfg)
+
+    def _close() -> None:
+        release_engine(engine)
+
+    return engine, text, _close
+
+
+def _run_dest_procedure_hook(endpoint: EndpointConfig, spec) -> None:
+    from services.procedure_destination import run_dest_hook
+
+    engine, text, close = _dest_procedure_execute(endpoint)
+    try:
+        with engine.begin() as conn:
+            run_dest_hook(spec, lambda sql, binds: conn.execute(text(sql), binds or {}))
+    finally:
+        close()
+
+
+def _write_dest_procedure_rows(
+    endpoint: EndpointConfig,
+    records: list[dict],
+    plan,
+) -> tuple[int, list[str], dict]:
+    from services.procedure_destination import apply_rows_via_procedure
+
+    engine, text, close = _dest_procedure_execute(endpoint)
+    try:
+        with engine.begin() as conn:
+            return apply_rows_via_procedure(
+                endpoint,
+                list(records or []),
+                execute_call=lambda sql, binds: conn.execute(text(sql), binds or {}),
+                plan=plan,
+            )
+    finally:
+        close()
 
 
 def _write_destination_database(
@@ -1401,6 +1589,7 @@ def _write_destination_database(
     schema: dict[str, str],
     mappings: list[dict],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
+    cancel_check: Callable[[int | None], None] | None = None,
     validation_mode: str = "strict",
     backfill_new_fields: bool = False,
     write_mode: str = "insert",
@@ -1408,6 +1597,12 @@ def _write_destination_database(
     job_id: str | None = None,
     skip_preflight: bool = False,
     error_policy: str | None = None,
+    sync_mode: str = "",
+    source_spool: Any = None,
+    allow_equal_lsn: bool = False,
+    protect_landed_object: bool = False,
+    empty_cells_as_null: bool = False,
+    upsert_ddl_approved: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1417,7 +1612,7 @@ def _write_destination_database(
     zone, which must land every source row for inspection even when the job is
     strict. Callers that omit it keep the validation-mode-derived policy.
     """
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import effective_port, resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
 
     cfg = resolve_connector_config(endpoint)
@@ -1436,7 +1631,22 @@ def _write_destination_database(
         else transform_error_policy_for_validation_mode(validation_mode)
     )
 
-    headers, data_rows = records_to_matrix(records, columns)
+    from connectors.source_row_spool import OBJECT_STORE_WRITE_KINDS
+    from connectors.sql_write_materialize import SQL_SPOOL_WRITE_KINDS
+
+    # Object-store and SQL/warehouse writers ingest records through
+    # SourceRowSpool — do not build a second full matrix here (STRUCT
+    # explode would copy again).
+    _spool_kinds = OBJECT_STORE_WRITE_KINDS | SQL_SPOOL_WRITE_KINDS
+    if source_spool is not None and hasattr(source_spool, "headers"):
+        headers = list(source_spool.headers or columns or [])
+        data_rows: list[list[Any]] = []
+        records = []
+    elif db_type in _spool_kinds:
+        headers = columns or (list(records[0].keys()) if records else [])
+        data_rows = []
+    else:
+        headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
@@ -1447,34 +1657,7 @@ def _write_destination_database(
 
     common = {
         "host": cfg["host"],
-        "port": cfg["port"]
-        or (
-            5439
-            if db_type == "redshift"
-            else 5432
-            if db_type == "postgresql"
-            else 3306
-            if db_type == "mysql"
-            else 1433
-            if db_type == "sqlserver"
-            else 1521
-            if db_type == "oracle"
-            else 9092
-            if db_type == "kafka"
-            else 6333
-            if db_type == "qdrant"
-            else 8080
-            if db_type == "weaviate"
-            else 19530
-            if db_type == "milvus"
-            else 22
-            if db_type == "sftp"
-            else 587
-            if db_type == "email"
-            else 0
-            if db_type in ("generic_sql", "iceberg", "sqlite")
-            else 443
-        ),
+        "port": effective_port(db_type, cfg.get("port")),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
@@ -1490,9 +1673,14 @@ def _write_destination_database(
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
+        "records": None if source_spool is not None else (records if db_type in _spool_kinds else None),
+        "source_spool": source_spool,
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
+        # D102: writers call this BEFORE each batch commit so a cancel stops
+        # the next write instead of landing it and being noticed afterwards.
+        "cancel_check": cancel_check,
         "error_policy": error_policy,
         "backfill_new_fields": backfill_new_fields,
         "job_id": job_id,
@@ -1501,6 +1689,14 @@ def _write_destination_database(
         ),
         "file_batch_idx": 0,
         "skip_preflight": skip_preflight,
+        "sync_mode": sync_mode,
+        "protect_landed_object": protect_landed_object,
+        # File/object-store blanks into typed columns are SQL NULL (D1): the
+        # buffered engine path dropped the flag before writers ever saw it.
+        "empty_cells_as_null": empty_cells_as_null,
+        # D101: writers may not create undisclosed DDL (upsert unique index)
+        # on an operator's existing table unless Validate disclosed + approved.
+        "upsert_ddl_approved": upsert_ddl_approved,
         # Live dest nullability for write-time NOT NULL escalate (G3 parity).
         "destination_column_nullability": dict(
             (cfg.get("extra") or {}).get("schema_nullability")
@@ -1516,8 +1712,29 @@ def _write_destination_database(
             or (getattr(endpoint, "extra", None) or {}).get("destination_column_types")
             or {}
         ),
+        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
+    if allow_equal_lsn:
+        common["allow_equal_lsn"] = True
+    from .connector_dispatch import writer_extra_kwargs
 
+    common.update(writer_extra_kwargs(db_type, cfg=cfg, dest=endpoint, common=common))
+    if db_type in {
+        "s3",
+        "minio",
+        "gcs",
+        "gcp_storage",
+        "adls",
+        "azure_blob",
+        "azure_data_lake",
+        "sftp",
+        "email",
+        "smtp",
+    }:
+        dest_extra = dict(cfg.get("extra") or {})
+        if cfg.get("file_format") and not dest_extra.get("file_format"):
+            dest_extra["file_format"] = cfg["file_format"]
+        common["dest_extra"] = dest_extra
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
 
@@ -1528,7 +1745,9 @@ def _write_destination_database(
                 f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}"
             )
         result = write_mapped_rows(
-            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
         )
         if not result.ok:
             raise_writer_failure(result, "Snowflake write failed")
@@ -1552,12 +1771,27 @@ def _write_destination_database(
         from connectors.postgresql_writer import write_mapped_rows
 
         common["schema"] = schema_from_cfg(db_type, cfg)
-        if db_type == "redshift":
+        if db_type in {"redshift", "amazon_redshift", "redshift_serverless"}:
             common["port"] = cfg["port"] or 5439
+            common["dest_extra"] = dict(cfg.get("extra") or {})
+        if (
+            db_type == "postgresql"
+            # Overwrite-in-transaction only makes sense for an insert-mode
+            # load. A keyed upsert must never truncate (P0-R1).
+            and write_mode == "insert"
+            and (getattr(endpoint, "extra", None) or {}).get(
+                "pg_overwrite_in_transaction"
+            )
+        ):
+            common["pg_overwrite_in_transaction"] = True
         for col in columns:
             ddl_log.append(
                 f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"
             )
+        if db_type == "postgresql" and cfg.get("vector_layout") == "table":
+            from services.pgvector_typed_embedding import augment_writer_kwargs
+
+            augment_writer_kwargs(common, cfg, getattr(endpoint, "extra", None))  # D209
         result = write_mapped_rows(
             **common,
             write_mode=write_mode,
@@ -1611,7 +1845,7 @@ def _write_destination_database(
     if db_type == "bigquery":
         from connectors.bigquery_writer import write_mapped_rows
 
-        common["schema"] = cfg.get("schema", "dataflow")
+        common["schema"] = bigquery_dataset_of(cfg)
         for col in columns:
             ddl_log.append(
                 f"BQ COLUMN {col} {ddl_type('bigquery', schema.get(col, 'string'))}"
@@ -1790,7 +2024,11 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"REDIS FIELD {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+        )
         if not result.ok:
             raise_writer_failure(result, "Redis write failed")
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
@@ -1800,6 +2038,9 @@ def _write_destination_database(
             {
                 "type": "redis",
                 "prefix": result.table_name,
+                # Reconcile reads dest_summary["table"]. The prefix-only key
+                # left the table name empty and Gate-8 scanned the whole database.
+                "table": result.table_name,
                 "checksum": result.checksum,
                 "driver": result.driver,
                 **_writer_diagnostics(result),
@@ -1808,13 +2049,18 @@ def _write_destination_database(
 
     if db_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
+        from services.sync_cursor import is_overwrite_sync
 
         for col in columns:
             ddl_log.append(
                 f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}"
             )
         result = write_mapped_rows(
-            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            atomic_overwrite=is_overwrite_sync(sync_mode),
+            total_chunks=1,
         )
         if not result.ok:
             raise_writer_failure(result, "SQLite write failed")
@@ -1876,7 +2122,7 @@ def _write_destination_database(
             raise ValueError(
                 "SFTP destination requires a remote file path (connection_string, database, or table field)"
             )
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise_writer_failure(result, "SFTP write failed")
         ddl_log.insert(0, f"PUT sftp://{cfg.get('host', '')}/{result.table_name}")
@@ -2069,295 +2315,57 @@ def _write_destination_database(
     raise ValueError(f"Database destination '{db_type}' write not implemented")
 
 
-def write_destination_file(
-    endpoint: EndpointConfig,
-    records: list[dict],
-    columns: list[str],
-    *,
-    source_format: str | None = None,
-    mappings: list[dict] | None = None,
-    column_types: dict[str, str] | None = None,
-    validation_mode: str = "strict",
-) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, or TSV using unified format converter."""
-    import sys
-    from pathlib import Path
+#: Export formats whose bytes are a binary/structured container the destination
+#: asked for. There is no JSON fallback for these: the file either is that
+#: container or the export refuses.
+_CONTAINER_EXPORT_FORMATS: frozenset[str] = frozenset(
+    {"excel", "parquet", "avro", "orc", "xml"}
+)
 
-    _api_root = Path(__file__).resolve().parents[2]
-    if str(_api_root) not in sys.path:
-        sys.path.insert(0, str(_api_root))
-    from connectors.writer_common import (
-        resolve_target_columns,
-        transform_error_policy_for_validation_mode,
-    )
-    from services.format_converter import can_convert, convert_rows
 
-    fmt = (endpoint.format or "json").lower()
-    # ndjson is a JSON Lines alias for the conversion engine
-    if fmt == "ndjson":
-        fmt = "jsonl"
-    src_fmt = (source_format or fmt).lower()
-    if src_fmt == "ndjson":
-        src_fmt = "jsonl"
-    types = column_types or {}
 
-    export_columns = columns
-    export_records = records
-    transform_errors: list[str] = []
-    rejected_details: list[dict[str, Any]] = []
 
-    if mappings:
-        from connectors.writer_common import (
-            apply_write_quarantine_matrix,
-            build_mapped_rows_with_details,
-            reject_on_strict_policy,
-            transform_error_policy,
+#: Destinations whose catalog folds unquoted identifiers to one case.
+_CASE_FOLDING_DESTS = frozenset({"oracle", "snowflake", "db2"})
+
+
+def carry_dest_spelling_across_drop(
+    destination: Any,
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+) -> None:
+    """Remember the destination's stored spelling before an overwrite drops it.
+
+    On Oracle/Snowflake a table that does not exist is created under the folded
+    (upper-case) name, which is right for a first load and wrong for an
+    overwrite: a quoted lower-case destination came back as a *different* object
+    and everything reading the old identifier found nothing.
+
+    The probe is best-effort by contract: no prior spelling simply means "treat
+    this as a first load and fold". It must never fail the transfer — Snowflake
+    writes through the native driver, so its optional SQLAlchemy dialect being
+    absent is not a reason to refuse a route that never needed it.
+    """
+    import logging
+
+    if db_type.lower() not in _CASE_FOLDING_DESTS:
+        return
+    try:
+        from connectors.generic_sql import physical_table_spelling
+
+        prior = physical_table_spelling(cfg, table_name, schema)
+    except Exception as exc:  # noqa: BLE001 — advisory probe, never a run failure
+        logging.getLogger(__name__).debug(
+            "pre-drop spelling probe failed for %s: %s", table_name, exc
         )
-        from services.value_serializer import (
-            DF_MISSING_SENTINEL,
-            is_missing_sentinel,
-        )
-
-        headers = columns
-        data_rows: list[list[Any]] = []
-        for rec in records:
-            row: list[Any] = []
-            for col in headers:
-                if col not in rec:
-                    # Absent key ≠ empty string — preserve omit semantics for Map.
-                    row.append(DF_MISSING_SENTINEL)
-                    continue
-                val = rec[col]
-                if is_missing_sentinel(val):
-                    row.append(val)
-                elif val is None:
-                    row.append(None)
-                else:
-                    row.append(cell_to_string(val))
-            data_rows.append(row)
-        target_cols, _ = resolve_target_columns(mappings, types)
-        error_policy = transform_error_policy_for_validation_mode(validation_mode)
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=types,
-            error_policy=error_policy,
-            dest_types={
-                str(m.get("target") or ""): str(
-                    m.get("target_type") or m.get("dest_type") or types.get(m.get("source") or "", "")
-                )
-                for m in mappings
-                if str(m.get("target") or "").strip()
-            },
-        )
-        # Same typed quarantine matrix as SQL/object writers — never export oversize/
-        # unfit cells that transforms left as strings.
-        dest_type_list = [
-            str(
-                next(
-                    (
-                        m.get("target_type") or m.get("dest_type") or types.get(m.get("source") or "", "")
-                        for m in mappings
-                        if str(m.get("target") or "") == col
-                    ),
-                    types.get(col, ""),
-                )
-                or ""
-            )
-            for col in target_cols
-        ]
-        if mapped_rows and any(str(t).strip() for t in dest_type_list):
-            policy = transform_error_policy(error_policy)
-            mapped_rows = apply_write_quarantine_matrix(
-                mapped_rows,
-                target_cols,
-                dest_type_list,
-                rejected_details,
-                policy,
-                dialect_label="file_export",
-                mappings=list(mappings) or None,
-            )
-        # Keep DF_MISSING through export — JSON/JSONL omit keys; dense CSV/grid
-        # render empty via cell_to_string. Never force-null invent before serialize.
-        abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
-        if abort:
-            raise FileExportMapBlocked(
-                abort,
-                rejected_details=rejected_details,
-                rejected_rows=len(rejected_details),
-            )
-        export_columns = target_cols
-        export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
-
-    def _export_summary(
-        filename: str,
-        *,
-        mime: str | None = None,
-        converted_from: str | None = None,
-    ) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "format": fmt,
-            "filename": filename,
-            "rows": len(export_records),
-            "transform_errors": transform_errors[:10],
-            "mapped": bool(mappings),
-            "rejected_details": list(rejected_details),
-            "rejected_rows": len(rejected_details),
+        return
+    if prior:
+        destination.extra = {
+            **(getattr(destination, "extra", None) or {}),
+            "dest_table_prior_spelling": prior,
         }
-        if mime is not None:
-            out["mime"] = mime
-        if converted_from is not None:
-            out["converted_from"] = converted_from
-        return out
-
-    grid = [
-        [cell_to_string(rec.get(col, "")) for col in export_columns]
-        for rec in export_records
-    ]
-
-    # JSON/JSONL must use omit-aware serialization below — the grid convert path
-    # runs cell_to_string which collapses DF_MISSING to "" (false invent).
-    if fmt not in {"json", "jsonl"} and can_convert(src_fmt, fmt) and grid:
-        content, mime = convert_rows(
-            export_columns, grid, source_format=src_fmt, target_format=fmt
-        )
-        ext = (
-            "tsv"
-            if fmt == "tsv"
-            else "xlsx"
-            if fmt == "excel"
-            else "parquet"
-            if fmt == "parquet"
-            else "avro"
-            if fmt == "avro"
-            else "orc"
-            if fmt == "orc"
-            else "xml"
-            if fmt == "xml"
-            else fmt
-            if fmt in ("csv", "jsonl")
-            else "json"
-        )
-        filename = f"export.{ext}"
-        return (
-            content,
-            filename,
-            _export_summary(
-                filename=filename,
-                mime=mime,
-                converted_from=src_fmt if src_fmt != fmt else None,
-            ),
-        )
-
-    def _to_json_value(value: Any, col: str) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return value
-            ctype = normalize_inferred(types.get(col, "string")).lower()
-            if ctype in {"json", "array", "object", "struct"}:
-                try:
-                    def _reject(name: str) -> None:
-                        raise ValueError(f"non-finite JSON constant: {name}")
-
-                    return json.loads(
-                        text, parse_float=Decimal, parse_constant=_reject
-                    )
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if ctype in {
-                "text",
-                "string",
-                "varchar",
-                "uuid",
-                "binary",
-                "date",
-                "datetime",
-                "time",
-            }:
-                return value
-            try:
-                def _reject(name: str) -> None:
-                    raise ValueError(f"non-finite JSON constant: {name}")
-
-                return json.loads(
-                    text, parse_float=Decimal, parse_constant=_reject
-                )
-            except (json.JSONDecodeError, ValueError):
-                return value
-        return value
-
-    def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        from services.value_serializer import is_missing_sentinel
-
-        # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
-        return [
-            {
-                c: _to_json_value(v, c)
-                for c, v in r.items()
-                if not is_missing_sentinel(v)
-            }
-            for r in rows
-        ]
-
-    export_mime = ""
-    if fmt == "csv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
-        )
-        content = buf.getvalue().encode("utf-8")
-        filename = "export.csv"
-        export_mime = "text/csv"
-    elif fmt == "tsv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(
-            buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore"
-        )
-        writer.writeheader()
-        writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
-        )
-        content = buf.getvalue().encode("utf-8")
-        filename = "export.tsv"
-        export_mime = "text/tab-separated-values"
-    elif fmt == "jsonl":
-        records = _json_export_records(export_records)
-        lines = [
-            json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
-            for r in records
-        ]
-        content = "\n".join(lines).encode("utf-8")
-        filename = "export.jsonl"
-        export_mime = "application/x-ndjson"
-    elif fmt == "excel":
-        content, export_mime = convert_rows(
-            export_columns, grid, source_format="csv", target_format=fmt
-        )
-        filename = "export.xlsx"
-    elif fmt == "parquet":
-        content, export_mime = convert_rows(
-            export_columns, grid, source_format="csv", target_format=fmt
-        )
-        filename = "export.parquet"
-    else:
-        records = _json_export_records(export_records)
-        content = json.dumps(
-            records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
-        ).encode("utf-8")
-        filename = "export.json"
-        export_mime = "application/json"
-    return (
-        content,
-        filename,
-        _export_summary(filename, mime=export_mime or None),
-    )
 
 
 def resolve_endpoint_dict(
@@ -2375,3 +2383,23 @@ def resolve_endpoint_dict(
         if key not in out and value is not None:
             out[key] = value
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Schema introspection lives in its own module (Phase F8 size freeze) and is
+# re-exported here so every existing import keeps working.
+# --------------------------------------------------------------------------- #
+from src.transfer.adapters_introspect import (  # noqa: E402,F401
+    _columns_schema_meta,
+    _columns_type_and_nullability,
+    _introspect_table_schema,
+    _introspect_table_schema_rich,
+)
+
+def __getattr__(name: str):
+    if name == "write_destination_file":
+        from src.transfer.adapters_file_write import write_destination_file
+
+        globals()[name] = write_destination_file
+        return write_destination_file
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -155,7 +155,7 @@ def test_json_scalar_wrap_is_warn_not_silent_ok():
 
 
 def test_timetz_preserves_offset_and_refuses_naive_utc_invent():
-    from datetime import time, timezone, timedelta
+    from datetime import time, timedelta
     import pytest
     from connectors.sql_temporal import coerce_sql_temporal
     from services.transform_engine import apply_transform
@@ -181,7 +181,7 @@ def test_timetz_preserves_offset_and_refuses_naive_utc_invent():
 
 def test_boolean_refuses_informal_yes_invent():
     from services.transform_engine import apply_transform
-    from services.type_system import boolean_value_fits, is_lossy_coercion
+    from services.type_system import boolean_value_fits
     from connectors.sql_bind import coerce_boolean_wire
 
     val, err = apply_transform("yes", "boolean")
@@ -511,9 +511,14 @@ def test_long_int8_varbyte_national_wave23():
 
     assert is_national_string_carrier("NATIONAL CHARACTER VARYING(50)") is True
     assert is_lossy_coercion("NATIONAL CHARACTER VARYING(50)", "VARCHAR(50)") is True
-    assert create_new_mapping_target_type("CHAR(10)", "sqlserver") == "CHAR(10)"
-    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)") is True
-    assert is_lossy_coercion("CHAR(10)", "NCHAR(10)") is True
+    # D212: an unbound source can hold non-ASCII text, so SQL Server gets the
+    # national carrier; a SQL Server code-page CHAR source keeps its polarity.
+    assert create_new_mapping_target_type("CHAR(10)", "sqlserver") == "NCHAR(10)"
+    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)") is False
+    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)", source_db="sqlserver") is True
+    assert create_new_mapping_target_type(
+        "CHAR(10)", "sqlserver", source_db="sqlserver"
+    ).startswith("CHAR(10)")
 
     assert create_new_mapping_target_type("SYSNAME", "sqlserver") == "NVARCHAR(128)"
     assert normalize_logical_type("Nullable(Int32)") == "integer"
@@ -887,9 +892,37 @@ def test_bounded_sink_lob_tier_national_srid_wave13():
     assert is_lossy_coercion("NAME", "VARCHAR(32)") is True
 
 
+def test_bounded_string_sinks_remain_lossy_without_pair_proof():
+    from services.type_system import (
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+    )
+
+    unproven = {("other_source", "other_target"): {}}
+    for source_type, target_type in (
+        ("INTEGER", "VARCHAR(1)"),
+        ("JSON", "CHAR(10)"),
+    ):
+        for names in (
+            {"source": None, "target": None},
+            {"source": "source_col", "target": "target_col"},
+        ):
+            assert is_lossy_coercion(
+                source_type,
+                target_type,
+                proven=unproven,
+                **names,
+            )
+            assert is_precision_collapse_coercion(
+                source_type,
+                target_type,
+                proven=unproven,
+                **names,
+            )
+
+
 def test_g3_same_logical_and_specialty_invent_wave12():
     from services.type_coercion_validator import (
-        coerce_blocks_transfer,
         validate_mapping_coercions,
     )
     from services.type_system import (

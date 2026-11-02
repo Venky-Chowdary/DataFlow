@@ -11,40 +11,31 @@ from __future__ import annotations
 
 import re
 
+from src.transfer.engine_family import sql_duplex_family
+
 
 def _normalize_dest_db(db_type: str | None) -> str:
-    """Canonical destination engine id for DDL / cap lookups."""
+    """Canonical destination engine id for DDL / cap lookups.
+
+    A catalog tile with a duplex SQL driver (``alloydb``,
+    ``amazon_rds_postgresql``, ``azure_database_for_mysql``, ``sql_server``,
+    ``amazon_rds_oracle``, ``pgvector``) is its engine family, answered by the
+    one resolver execution uses (:func:`engine_family`). The sets below are
+    dialect knowledge only: engines without a duplex driver whose DDL grammar
+    is another engine's (Greenplum and Citus speak PostgreSQL DDL, Doris and
+    StarRocks MySQL DDL). They are not catalog alias lists.
+    """
     db = (db_type or "").strip().lower()
-    # PostgreSQL family — DDL_TYPES / caps keyed only on ``postgresql``.
+    family = sql_duplex_family(db)
+    if family:
+        return family
+    # PostgreSQL DDL grammar — DDL_TYPES / caps keyed only on ``postgresql``.
     # Without this, create-new invents TEXT for NUMBER/DATE/BOOLEAN with soft-pass.
     if db in {
-        "postgres",
-        "pg",
-        "postgresql",
-        "cockroachdb",
-        "cockroach",
-        "timescaledb",
-        "timescale",
-        "alloydb",
-        "yugabytedb",
-        "yugabyte",
         "citus",
-        "supabase",
-        "supabase_db",
         "greenplum",
         "greenplum_cloud",
-        "neon",
-        "neon_serverless",
-        "azure_postgres",
-        "aws_rds_postgres",
-        "rds_postgres",
-        "aurora",
-        "aurora_postgres",
-        "aurora-postgresql",
         "pgbouncer",
-        "cloudsql_postgres",
-        "gcp_cloud_sql_postgres",
-        "cloud_sql_postgres",
         "opengauss",
         "open_gauss",
         "kingbase",
@@ -56,30 +47,10 @@ def _normalize_dest_db(db_type: str | None) -> str:
     }:
         return "postgresql"
     if db in {
-        "mariadb",
-        "tidb",
-        "tidb_cloud",
-        "mysql2",
-        "aurora_mysql",
-        "aurora-mysql",
-        "singlestore",
         "memsql",
-        "cloudsql_mysql",
-        "gcp_cloud_sql_mysql",
-        "rds_mysql",
-        "maria",
-        "percona",
         "doris",
         "starrocks",
-        "oceanbase",
         "selectdb",
-        # Product catalog wires these through mysql+pymysql (not PG wire).
-        "polardb",
-        "gaussdb",
-        "goldendb",
-        "vitess",
-        "planetscale",
-        "mysql_planetscale",
     }:
         return "mysql"
     if db in {
@@ -137,18 +108,13 @@ def _normalize_dest_db(db_type: str | None) -> str:
         return "duckdb"
     if db in {"sqlite", "libsql", "turso"}:
         return "sqlite"
-    # Microsoft T-SQL family — one DDL SSOT (NVARCHAR / BIT / DATETIME2).
+    # T-SQL grammar engines without the SQL Server driver (Synapse, Fabric).
     if db in {
-        "mssql",
-        "azure_sql",
-        "azure_sql_db",
-        "azure_sql_mi",
         "azuresql",
         "azure-sql",
         "sqlazure",
         "synapse",
         "azure_synapse",
-        "sql_server",
         "fabric",
         "fabric_sql",
         "fabric_warehouse",
@@ -180,6 +146,69 @@ def _normalize_dest_db(db_type: str | None) -> str:
     return db
 
 
+# Engines whose text carrier is one untyped string. A declared width or a
+# UUID domain is not enforced by any DDL the dialect can spell, so
+# ``UUID → string`` is the wire, not a narrowing that needs a Risk Contract.
+_UNENFORCED_STRING_ENGINES = frozenset({"sqlite", "redis", "dynamodb"})
+
+
+def dest_string_length_is_unenforced(db_type: str | None) -> bool:
+    """True when the engine stores every text carrier as one untyped string.
+
+    SQLite's dynamic typing gives ``CHAR(36)``, ``VARCHAR(36)`` and ``TEXT`` the
+    same TEXT affinity: the declared length is parsed and discarded, nothing is
+    blank-padded, and no domain (UUID included) is enforced by any carrier the
+    dialect can spell. Redis JSON and DynamoDB ``S`` are the same shape — there
+    is no narrower UUID or ``VARCHAR(n)`` column to land in. A fidelity rule
+    that reads ``UUID → string`` there as a narrowing is describing a carrier
+    the engine does not have — the value is carried byte-exact.
+    """
+    return _normalize_dest_db(db_type) in _UNENFORCED_STRING_ENGINES
+
+
+# Engines whose ``CHAR(n)`` is a synonym for ``VARCHAR(n)``: nothing is ever
+# blank-padded (Snowflake documents the deviation), so there is no
+# fixed-width carrier whose pad or trim-equality a ``VARCHAR(n)`` could lose.
+_UNPADDED_CHAR_ENGINES = frozenset({"snowflake"})
+
+
+def dest_char_is_unpadded(db_type: str | None) -> bool:
+    """True when the engine's CHAR(n) stores and compares like VARCHAR(n)."""
+    return _normalize_dest_db(db_type) in _UNPADDED_CHAR_ENGINES
+
+
+# Engines verified to have no UUID type (nor a typed binary UUID form) for
+# any column to declare: the exact 36-char text wire is the strictest UUID
+# carrier they can spell. Add an engine only with a test that pins it.
+_UUID_TYPELESS_ENGINES = frozenset({"snowflake"})
+
+
+def dest_upsert_needs_unique_index(db_type: str | None) -> bool:
+    """True when an upsert into an existing table runs CREATE UNIQUE INDEX.
+
+    Read from the capability registry (``merge_registry.upsert_identity``),
+    never a per-engine list here: only engines whose native upsert fires on a
+    unique constraint (PostgreSQL ``ON CONFLICT``, MySQL ``ON DUPLICATE KEY``)
+    get one. MERGE engines (Snowflake, SQL Server, BigQuery, Databricks,
+    Oracle, ...) key the write themselves and DataFlow creates no index there,
+    so there is no DDL to disclose (D182, D101).
+    """
+    from connectors.merge_registry import (
+        UPSERT_IDENTITY_UNIQUE_INDEX,
+        upsert_identity,
+    )
+
+    db = _normalize_dest_db(db_type)
+    if not db:
+        return True
+    return upsert_identity(db) == UPSERT_IDENTITY_UNIQUE_INDEX
+
+
+def dest_has_no_uuid_type(db_type: str | None) -> bool:
+    """True when no carrier on the engine can enforce a UUID domain."""
+    return _normalize_dest_db(db_type) in _UUID_TYPELESS_ENGINES
+
+
 def _collation_compatible_with_dest(db: str, collation: str) -> bool:
     """Refuse cross-engine invent (MySQL utf8mb4_* on PG, etc.)."""
     coll = (collation or "").strip()
@@ -208,6 +237,11 @@ def _collation_compatible_with_dest(db: str, collation: str) -> bool:
             return False
         if windowish:
             return False
+        # MariaDB 11 utf8mb4_uca1400_ai_ci is not a MySQL collation. Copying
+        # it into CREATE makes MySQL raise Unknown collation, and that error
+        # was retried as a dropped connection so the job sat at 5% forever.
+        if db == "mysql" and "UCA1400" in upper:
+            return False
         return bool(
             re.search(r"UTF8|LATIN1|ASCII|UCA|BINARY|UNICODE|GENERAL", upper)
             or upper.endswith(("_CI", "_CS", "_BIN"))
@@ -216,6 +250,15 @@ def _collation_compatible_with_dest(db: str, collation: str) -> bool:
         if not re.match(r"^[A-Za-z0-9_]+$", coll):
             return False
         if mysqlish:
+            return False
+        # A SQL Server collation always states its sensitivities: a
+        # ``_CI_AS``/``_CS_AI`` pair, or a ``_BIN``/``_BIN2`` ordering, with the
+        # optional ``_SC``/``_WS``/``_KS``/``_UTF8`` qualifiers after it. MySQL
+        # spells the same locale ``latin1_swedish_ci`` — one sensitivity only —
+        # which passes a bare LATIN name test and then makes the CREATE fail
+        # (``Collation 'latin1_swedish_ci' is not supported``). The suffix is
+        # what separates the two vocabularies, so it is required.
+        if not re.search(r"_(?:C[IS]_A[IS]|BIN2?)(?:_(?:SC|WS|KS|UTF8))*$", upper):
             return False
         return bool(
             re.search(r"LATIN|SQL_|JAPANESE|CHINESE|KOREAN|CYRILLIC|_C[IS]_A[IS]", upper)

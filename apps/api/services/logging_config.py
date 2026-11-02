@@ -21,8 +21,9 @@ This module fixes both:
 * A :class:`ContextFilter` that stamps every record with the ambient
   ``correlation_id``, ``job_id``, and ``trace_id``, so a single grep or a single
   structured query returns the whole story of one job across every module.
-* :func:`job_log_context`, a context manager that binds a ``job_id`` for the
-  duration of a transfer, including across the thread-pool boundary.
+* :func:`log_context`, a context manager that binds ``job_id``,
+  ``workspace_id``, ``schedule_id``, ``run_id``, ``attempt`` and ``phase`` for
+  a block (:func:`job_log_context` is the job-only form used by the engine).
 
 Both the filter and the context are ``ContextVar``-backed, which means they
 follow ``async`` tasks correctly and are captured explicitly for worker threads
@@ -33,7 +34,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import time
 from contextlib import contextmanager
@@ -41,13 +41,26 @@ from contextvars import ContextVar, Token
 from typing import Any, Iterator
 
 from services.brand_env import getenv_brand
+from services.log_redaction import redact_log_text, redact_log_value
 
 #: Job currently being executed on this task/thread. Bound by
 #: :func:`job_log_context` so engine and connector logs self-identify.
 _JOB_ID: ContextVar[str] = ContextVar("df_log_job_id", default="")
 
+#: Ambient identity bound by :func:`log_context`, keyed by record field name.
+_BOUND_FIELDS: dict[str, ContextVar[str]] = {
+    "job_id": _JOB_ID,
+    "workspace_id": ContextVar("df_log_workspace_id", default=""),
+    "schedule_id": ContextVar("df_log_schedule_id", default=""),
+    "run_id": ContextVar("df_log_run_id", default=""),
+    "attempt": ContextVar("df_log_attempt", default=""),
+    "phase": ContextVar("df_log_phase", default=""),
+}
+
 #: Fields a LogRecord always carries after :class:`ContextFilter` runs.
-_CONTEXT_FIELDS = ("correlation_id", "job_id", "trace_id")
+_CONTEXT_FIELDS = ("correlation_id", "trace_id", *_BOUND_FIELDS)
+
+_MAX_CONTEXT_CHARS = 256
 
 #: Attributes present on every LogRecord. Anything outside this set was passed
 #: by the caller via ``extra=`` and is worth emitting as a structured field.
@@ -97,17 +110,41 @@ def reset_job_id(token: Token) -> None:
 
 
 @contextmanager
+def log_context(**ids: Any) -> Iterator[None]:
+    """Stamp every record emitted in this block with the given identity fields.
+
+    Accepts the keys of ``_BOUND_FIELDS``; ``None`` clears a field for the
+    block. Unknown keys are ignored with a warning rather than failing the
+    caller. Values are restored on exit, so nested scopes compose.
+    """
+    tokens: list[tuple[ContextVar[str], Token]] = []
+    unknown = sorted(key for key in ids if key not in _BOUND_FIELDS)
+    if unknown:
+        logging.getLogger(__name__).warning(
+            "log_context ignored unknown fields: %s", ",".join(unknown)
+        )
+    try:
+        for key, value in ids.items():
+            var = _BOUND_FIELDS.get(key)
+            if var is None:
+                continue
+            text = "" if value is None else str(value).strip()
+            tokens.append((var, var.set(text[:_MAX_CONTEXT_CHARS])))
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+
+@contextmanager
 def job_log_context(job_id: str | None) -> Iterator[None]:
     """Stamp every log record emitted in this block with ``job_id``.
 
     Used by the transfer engine so that connector and reconciliation logs, which
     have no idea a job exists, still become attributable to one.
     """
-    token = set_job_id(job_id)
-    try:
+    with log_context(job_id=job_id):
         yield
-    finally:
-        reset_job_id(token)
 
 
 class ContextFilter(logging.Filter):
@@ -119,8 +156,9 @@ class ContextFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if not hasattr(record, "job_id"):
-            record.job_id = _JOB_ID.get()
+        for field, var in _BOUND_FIELDS.items():
+            if not hasattr(record, field):
+                setattr(record, field, var.get())
         if not hasattr(record, "correlation_id"):
             record.correlation_id = _safe_correlation_id()
         if not hasattr(record, "trace_id"):
@@ -172,16 +210,18 @@ class JsonFormatter(logging.Formatter):
             "ts": self.formatTime(record),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": redact_log_text(record.getMessage()),
         }
         for field in _CONTEXT_FIELDS:
             value = getattr(record, field, "")
             if value:
                 payload[field] = value
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_log_text(
+                self.formatException(record.exc_info)
+            )
         if record.stack_info:
-            payload["stack"] = self.formatStack(record.stack_info)
+            payload["stack"] = redact_log_text(self.formatStack(record.stack_info))
         # Anything the caller passed via extra= becomes a first-class field so
         # structured queries can filter on it (rows=, table=, dest_type=, ...).
         for key, value in record.__dict__.items():
@@ -189,7 +229,7 @@ class JsonFormatter(logging.Formatter):
                 continue
             if key.startswith("_"):
                 continue
-            payload[key] = _jsonable(value)
+            payload[key] = _jsonable(redact_log_value(key, value))
         return json.dumps(payload, default=str)
 
 
@@ -214,7 +254,7 @@ class TextFormatter(logging.Formatter):
             if getattr(record, field, "")
         ]
         record.context = f" ({' '.join(bits)})" if bits else ""
-        return super().format(record)
+        return redact_log_text(super().format(record))
 
 
 def log_format() -> str:
@@ -250,6 +290,7 @@ def configure_logging(*, force: bool = False) -> None:
     handler = logging.StreamHandler(stream=sys.stderr)
     handler.setFormatter(formatter)
     handler.addFilter(context_filter)
+    handler.addFilter(_LibraryFloorFilter())
 
     root = logging.getLogger()
     # Replace rather than append: Uvicorn may already have installed a handler,
@@ -258,6 +299,20 @@ def configure_logging(*, force: bool = False) -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+    try:
+        from services.otel_logging import install_otel_log_handler
+
+        otel_handler = install_otel_log_handler(root)
+        if otel_handler is not None and not any(
+            isinstance(f, _LibraryFloorFilter) for f in otel_handler.filters
+        ):
+            otel_handler.addFilter(_LibraryFloorFilter())
+    except Exception as exc:  # noqa: BLE001 - local logging must remain available
+        # Local logging must remain available even if remote export is broken.
+        logging.getLogger(__name__).warning(
+            "OpenTelemetry log handler bootstrap failed: %s",
+            exc,
+        )
 
     # Uvicorn's loggers propagate to root once their own handlers are dropped,
     # so access and error logs pick up the same format and context fields.
@@ -280,16 +335,8 @@ def _library_levels() -> dict[str, int]:
     rather than raising — a malformed log setting must not stop the process from
     booting.
     """
-    defaults = {
-        "pymongo": logging.WARNING,
-        "botocore": logging.WARNING,
-        "boto3": logging.WARNING,
-        "urllib3": logging.WARNING,
-        "snowflake.connector": logging.WARNING,
-        "sqlalchemy.engine": logging.WARNING,
-        "asyncio": logging.WARNING,
-        "watchfiles": logging.WARNING,
-    }
+    defaults = dict(SENSITIVE_LIBRARY_FLOORS)
+    defaults.update({"asyncio": logging.WARNING, "watchfiles": logging.WARNING})
     raw = (getenv_brand("LOG_LEVELS") or "").strip()
     for pair in raw.split(","):
         if "=" not in pair:
@@ -297,8 +344,52 @@ def _library_levels() -> dict[str, int]:
         name, _, level_name = pair.partition("=")
         level = getattr(logging, level_name.strip().upper(), None)
         if isinstance(level, int):
-            defaults[name.strip()] = level
+            name = name.strip()
+            floor = _sensitive_floor(name)
+            defaults[name] = level if floor is None else max(level, floor)
     return defaults
+
+
+# Libraries that log credentials, auth headers, signed URLs, DSNs or bound row
+# values below WARNING (kafka: PLAIN auth_bytes; botocore: Authorization header
+# and signature; urllib3/httpx: full URL incl. query; sqlalchemy.engine and
+# pymongo.command: SQL params / command documents). The floor is a hard minimum:
+# DATAFLOW_LOG_LEVELS may raise it, never lower it, and _LibraryFloorFilter on
+# our handlers enforces it even if a library lowers its own logger level
+# (boto3.set_stream_logger does).
+SENSITIVE_LIBRARY_FLOORS: dict[str, int] = {
+    name: logging.WARNING
+    for name in (
+        "kafka",
+        "botocore",
+        "boto3",
+        "urllib3",
+        "httpx",
+        "httpcore",
+        "snowflake.connector",
+        "google.auth",
+        "azure",
+        "paramiko",
+        "pymongo",
+        "sqlalchemy.engine",
+    )
+}
+
+
+def _sensitive_floor(logger_name: str) -> int | None:
+    name = logger_name
+    while name:
+        floor = SENSITIVE_LIBRARY_FLOORS.get(name)
+        if floor is not None:
+            return floor
+        name = name.rpartition(".")[0]
+    return None
+
+
+class _LibraryFloorFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        floor = _sensitive_floor(record.name)
+        return floor is None or record.levelno >= floor
 
 
 def reset_for_tests() -> None:

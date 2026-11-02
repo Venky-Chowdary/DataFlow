@@ -1,3 +1,5 @@
+import { clearActiveWorkspaceId } from "./workspace";
+
 export interface WorkspaceSession {
   email: string;
   name: string;
@@ -8,6 +10,30 @@ export interface WorkspaceSession {
 }
 
 const SESSION_KEY = "df2.session";
+
+/** Credential the dev preview writes. It is not an API session and must not be sent as Bearer. */
+export const UI_PREVIEW_TOKEN = "dev-ui-preview";
+
+export function isUiPreviewSession(session: WorkspaceSession | null = readSession()): boolean {
+  return session?.token === UI_PREVIEW_TOKEN;
+}
+
+/**
+ * Bearer credential for API calls. The dev preview token stays in the browser
+ * so the wizard can render, and is never presented as an API session.
+ */
+export function apiBearerToken(session: WorkspaceSession | null = readSession()): string | null {
+  if (!session?.token || isUiPreviewSession(session)) return null;
+  return session.token;
+}
+
+/**
+ * A 401 retires a real API session. A UI preview has no API session to expire,
+ * so the same 401 must leave the operator on the page they opened.
+ */
+export function apiUnauthorizedEndsSession(session: WorkspaceSession | null = readSession()): boolean {
+  return !isUiPreviewSession(session);
+}
 
 export function readSession(): WorkspaceSession | null {
   try {
@@ -26,6 +52,12 @@ export function readSession(): WorkspaceSession | null {
 }
 
 export function writeSession(session: WorkspaceSession, remember: boolean) {
+  // Another account signing in on this browser must not inherit the previous
+  // account's workspace id: it would be sent as X-Workspace-Id (D154).
+  const previous = readSession();
+  if (!previous || previous.email.trim().toLowerCase() !== session.email.trim().toLowerCase()) {
+    clearActiveWorkspaceId();
+  }
   const raw = JSON.stringify(session);
   try {
     if (remember) {
@@ -40,6 +72,10 @@ export function writeSession(session: WorkspaceSession, remember: boolean) {
   }
 }
 
+/**
+ * End the session — sign-out, a 401, or expiry. The active workspace id goes
+ * with it, so the next account in this browser never sends it (D154).
+ */
 export function clearSession() {
   try {
     localStorage.removeItem(SESSION_KEY);
@@ -47,8 +83,18 @@ export function clearSession() {
   } catch {
     /* ignore */
   }
+  clearActiveWorkspaceId();
 }
 
-export function getAuthToken(): string | null {
-  return readSession()?.token ?? null;
+/**
+ * The signed-in operator's name for an audit trail, or `null`.
+ *
+ * Sent as `X-Actor` on decision calls. The API prefers the identity it verified
+ * itself and only falls back to this header when enforcement is off, so it can
+ * name the operator of a single-operator deployment but never impersonate one.
+ */
+export function getSessionActor(): string | null {
+  const s = readSession();
+  const actor = (s?.email || s?.name || "").trim();
+  return actor.length >= 2 ? actor : null;
 }

@@ -220,7 +220,7 @@ export function ResultGrid({
             <strong>Row {detailRow + 1}</strong>
             <button
               type="button"
-              className="df2-qw-icon-btn"
+              className="df2-close-btn df2-close-btn-sm"
               onClick={() => setDetailRow(null)}
               aria-label="Close row detail"
             >

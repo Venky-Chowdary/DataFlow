@@ -1,0 +1,781 @@
+"""Chatbot/RAG grounding contract.
+
+The failure these lock down: a configured provider made the assistant *look* like
+working RAG while the answer rested on nothing. Any provider reply was accepted as
+grounded, the retrieved passages never reached the caller, and the local provider —
+which emits a column-analysis JSON document whatever it is asked — answered prose
+questions. So an operator got a confident paragraph, `sources: []`, and no way to
+tell a documented answer from a guess.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+from src.ai.llm.provider import (  # noqa: E402
+    DataTransferLocalProvider,
+    DataTransferOpenAIProvider,
+    LLMResponse,
+)
+from src.ai.rag.generator import UNGROUNDED_CONFIDENCE, DataTransferRAGGenerator  # noqa: E402
+from src.ai.rag.lexical_index import Bm25Index, content_terms, normalize, tokenize  # noqa: E402
+from src.ai.rag.product_docs import (  # noqa: E402
+    HELP_CORPUS_PATH,
+    compose_documented_answer,
+    compose_product_answer,
+    retrieve_product_answer,
+    load_generated_chunks,
+    load_help_corpus_chunks,
+    load_product_doc_chunks,
+    nearest_articles,
+    product_doc_search,
+    spoken_doc_excerpt,
+)
+from src.ai.rag.query_analysis import analyze_query  # noqa: E402
+from src.ai.rag.retriever import RetrievalResult  # noqa: E402
+
+DOCUMENTED_QUESTIONS = [
+    "What does quarantine mean in Datawrap?",
+    "how do I use the MCP server",
+    "what are the preflight gates",
+    "how do I add a connector",
+    "what is a data contract",
+    "how do I prove the row counts matched after a transfer",
+    "how do I schedule a pipeline every hour",
+]
+
+OFF_TOPIC_QUESTIONS = [
+    "how do I cook rice",
+    "what is the weather in Paris",
+    "who won the world cup in 1998",
+    "zzzz qqqq wwww",
+]
+
+
+# --- corpus -----------------------------------------------------------------
+
+def test_help_corpus_is_present_and_self_consistent():
+    payload = json.loads(HELP_CORPUS_PATH.read_text(encoding="utf-8"))
+    help_chunks = load_help_corpus_chunks()
+    assert payload["chunk_count"] == len(payload["chunks"])
+    assert len(help_chunks) == payload["chunk_count"]
+    assert help_chunks, "an empty corpus means Pilot can answer nothing from documentation"
+    for chunk in help_chunks:
+        assert chunk.id and chunk.doc_title and chunk.section_title and chunk.text
+        assert chunk.href.startswith("#/help/")
+
+
+def test_generated_chunks_extend_the_help_corpus_without_replacing_it():
+    """Facts generated from the enforcing modules are additive and attributed.
+
+    They exist because whole subjects the product *has* — the role table, the
+    sync-mode grid, the row ledger — had no retrievable passage, and writing
+    prose copies of them would let the documentation drift from the code that
+    enforces them.
+    """
+    help_chunks = load_help_corpus_chunks()
+    generated = load_generated_chunks()
+    every = load_product_doc_chunks()
+
+    assert generated, "generated product facts must not be empty"
+    assert len(every) == len(help_chunks) + len(generated)
+    assert {c.id for c in help_chunks}.isdisjoint({c.id for c in generated})
+    for chunk in generated:
+        assert chunk.generated and chunk.source_module
+        assert chunk.id and chunk.doc_title and chunk.section_title and chunk.text
+
+
+# --- lexical index ----------------------------------------------------------
+
+def test_short_names_normalize_onto_the_documented_spelling():
+    assert normalize("postgres") == "postgresql"
+    assert normalize("mongo") == "mongodb"
+    assert tokenize("Postgres tables") == ["postgresql", normalize("table")]
+    assert tokenize("tables") == tokenize("table")
+    assert tokenize("batches") == tokenize("batch")
+    # English drops a silent -e before -ed/-ing, so the base form has to meet
+    # the stem those suffixes already produce or the product's own verbs never
+    # find their own past tense.
+    for base, inflected in (
+        ("delete", "deleted"),
+        ("quarantine", "quarantined"),
+        ("validate", "validated"),
+        ("schedule", "scheduling"),
+        ("reconcile", "reconciled"),
+        ("store", "stored"),
+        ("write", "writing"),
+    ):
+        assert tokenize(base) == tokenize(inflected), base
+    assert tokenize("policies") == tokenize("policy")
+    assert "full_refresh" in tokenize("use full_refresh here")
+
+
+def test_stopwords_carry_no_signal_and_domain_words_do():
+    terms = content_terms("How do I fix a failing gate?")
+    assert "how" not in terms and "do" not in terms
+    assert "gate" in terms and "fix" in terms
+
+
+def test_use_is_part_of_the_question_frame_not_its_subject():
+    """"How do I use the API" is about the API, not about using.
+
+    The corpus writes "Use this path when…" as the opening of unrelated
+    procedures, so scored as a subject term ``use`` made every imperative step
+    in the corpus a candidate: the question was answered from "Preflight gates
+    → Procedure: fix a blocked gate" instead of "API reference → Core
+    endpoints". It joins ``show``, ``tell`` and ``explain``, which were already
+    read as framing.
+    """
+    assert content_terms("how do I use the API") == ["api"]
+    assert content_terms("which sync mode should I use") == ["sync", "mode"]
+    # The nouns survive — only the verb is framing.
+    assert "usage" not in content_terms("how do I use the API")
+
+
+def test_the_bring_my_own_frame_leaves_only_the_subject():
+    """"Can I bring my own encryption key" is a question about the key.
+
+    ``own`` is a possessive intensifier in all ten of its corpus occurrences
+    and ``bring`` appears once, in a sentence about Pilot and MCP that this
+    question kept being answered from.
+    """
+    assert content_terms("can I bring my own encryption key") == ["encryption", "key"]
+    assert content_terms("can I use my own domain") == ["domain"]
+
+
+def test_both_senses_of_key_reach_their_own_subject():
+    """``key`` is the most overloaded word in a data-movement product.
+
+    "Can I use my own encryption key" was answered from sync mode upsert —
+    "key-idempotently: new keys insert, known keys update" says the word three
+    times — while the BYOK section it asked about ranked below. The identity
+    sense had a phrase expansion and the encryption sense did not.
+    """
+    encryption = compose_product_answer(
+        retrieve_product_answer("can I use my own encryption key")
+    ).lower()
+    assert "byok" in encryption and "kms" in encryption
+    assert "sync mode" not in encryption
+
+    identity = compose_product_answer(
+        retrieve_product_answer("which sync mode needs a primary key")
+    ).lower()
+    assert "primary key" in identity and "sync mode" in identity
+
+
+def test_grounding_counts_terms_the_corpus_cannot_answer():
+    index = Bm25Index([
+        ("a", "Quarantine holds rejected rows with column, value and reason."),
+        ("b", "Schedules run a pipeline on a cadence."),
+    ])
+    covered = index.search("quarantine rejected rows")
+    assert covered and covered[0].grounding == pytest.approx(1.0)
+
+    partial = index.search("quarantine kubernetes helm chart")
+    assert partial, "a partial match must still rank, so the floor can reject it"
+    assert partial[0].grounding < 0.5
+
+
+# --- retrieval --------------------------------------------------------------
+
+@pytest.mark.parametrize("question", DOCUMENTED_QUESTIONS)
+def test_documented_question_retrieves_citable_evidence(question: str):
+    hits = product_doc_search(question)
+    assert hits, question
+    top = hits[0].as_source()
+    assert top["type"] == "product_doc"
+    assert top["doc"] and top["section"] and top["text"]
+    assert top["href"].startswith("#/help/")
+    assert 0.0 < float(top["grounding"]) <= 1.0
+    assert top["matched_terms"]
+
+
+@pytest.mark.parametrize("question", OFF_TOPIC_QUESTIONS)
+def test_off_topic_question_retrieves_no_evidence(question: str):
+    assert product_doc_search(question) == []
+
+
+def test_composed_answer_quotes_the_sections_and_names_them():
+    hits = product_doc_search("what does quarantine mean")
+    answer = compose_documented_answer(hits)
+    assert "Source:" in answer
+    assert hits[0].chunk.citation in answer
+    assert "never silently dropped" in answer
+    # Spoken FAQ — definition, not the procedure dump.
+    assert "Where:" not in answer
+    assert "Open the job" not in answer
+    assert not hits[0].chunk.section_title.startswith("Procedure:")
+
+
+def test_definitional_preflight_ranks_core_gates_not_the_procedure():
+    hits = product_doc_search("what are the preflight gates")
+    assert hits
+    title = hits[0].chunk.section_title.lower()
+    assert "core gates" in title or "preflight gates" in title
+    assert not title.startswith("procedure:")
+    answer = compose_documented_answer(hits)
+    assert "G1 " in answer
+    assert "Where:" not in answer
+    assert "Open the failing gate card" not in answer
+
+
+def test_spoken_doc_excerpt_keeps_definition_sentences():
+    text = (
+        "Procedure: inspect quarantine\n"
+        "Quarantine means bad values were isolated with column, value, and reason — never silently dropped.\n"
+        "Open the job\n"
+        "Look for Quarantine status or a non-zero rejected count in the stats strip.\n"
+        "Where: Operations → Jobs → select run\n"
+        "Tip: Completed with quarantine still wrote clean rows."
+    )
+    spoken = spoken_doc_excerpt(text, "Procedure: inspect quarantine")
+    assert "never silently dropped" in spoken
+    assert "Where:" not in spoken
+    assert "Open the job" not in spoken
+
+
+def test_nearest_articles_are_leads_not_evidence():
+    leads = nearest_articles("how do I cook rice")
+    assert all(isinstance(t, str) for t in leads)
+    assert product_doc_search("how do I cook rice") == []
+
+
+# --- generator: provider behaviour -----------------------------------------
+
+class _FakeChain:
+    """Stands in for the provider chain with a scripted prose reply."""
+
+    def __init__(self, reply: str | None = None, *, fail: bool = False, raise_exc: bool = False):
+        self.reply = reply
+        self.fail = fail
+        self.raise_exc = raise_exc
+        self.prompts: list[str] = []
+
+    def generate_prose(self, prompt: str, system: str = "") -> LLMResponse:
+        self.prompts.append(prompt)
+        if self.raise_exc:
+            raise RuntimeError("provider exploded")
+        if self.fail:
+            return LLMResponse(content="", success=False, provider="openai")
+        return LLMResponse(content=self.reply or "", success=True, provider="openai")
+
+
+def _retrieval(question: str) -> RetrievalResult:
+    return RetrievalResult(
+        query=question,
+        documents=[],
+        canonical_form=None,
+        matched_pattern=None,
+        synonym_matches=[],
+        confidence=0.0,
+        product_docs=product_doc_search(question),
+    )
+
+
+def _generator(chain) -> DataTransferRAGGenerator:
+    gen = DataTransferRAGGenerator()
+    gen._llm = chain
+    return gen
+
+
+QUESTION = "What does quarantine mean in Datawrap?"
+
+
+def test_no_provider_answers_from_the_documentation_with_sources():
+    result = _generator(None).generate_natural_language_response(QUESTION, _retrieval(QUESTION))
+    assert result.method == "product_doc"
+    assert result.grounded is True
+    assert result.sources and all(s["type"] == "product_doc" for s in result.sources)
+    assert 0.5 <= result.confidence <= 0.95
+
+
+def test_provider_that_ignores_the_prompt_is_not_published_as_grounded():
+    chain = _FakeChain("STUB_ANSWER: grounded reply from the stub provider.")
+    result = _generator(chain).generate_natural_language_response(QUESTION, _retrieval(QUESTION))
+    assert chain.prompts, "the passages must be sent to the provider"
+    assert "quarantine" in chain.prompts[0].lower()
+    assert result.method == "product_doc"
+    assert "STUB_ANSWER" not in result.answer
+    assert result.sources
+
+
+def test_structured_document_is_never_served_as_an_answer():
+    chain = _FakeChain(json.dumps({"analysis": [], "reasoning": ["Column 'x' → 'unknown'"]}))
+    result = _generator(chain).generate_natural_language_response(QUESTION, _retrieval(QUESTION))
+    assert result.method == "product_doc"
+    assert "analysis" not in result.answer
+
+
+def test_provider_narration_that_keeps_the_evidence_is_accepted():
+    hits = product_doc_search(QUESTION)
+    narration = (
+        "Quarantine isolates rejected rows with their column, value and reason "
+        "instead of dropping them, and you replay them after the fix. "
+        + " ".join(hits[0].matched_terms)
+    )
+    result = _generator(_FakeChain(narration)).generate_natural_language_response(
+        QUESTION, _retrieval(QUESTION)
+    )
+    assert result.method == "product_doc_llm"
+    assert result.grounded is True
+    assert result.sources
+    assert result.answer == narration
+
+
+@pytest.mark.parametrize("chain", [_FakeChain(fail=True), _FakeChain(raise_exc=True), _FakeChain("")])
+def test_provider_failure_falls_back_to_the_documented_text(chain):
+    result = _generator(chain).generate_natural_language_response(QUESTION, _retrieval(QUESTION))
+    assert result.method == "product_doc"
+    assert result.grounded is True
+    assert result.sources
+
+
+@pytest.mark.parametrize("question", OFF_TOPIC_QUESTIONS)
+def test_uncovered_question_is_refused_at_low_confidence(question: str):
+    chain = _FakeChain("Sure! Here is a confident answer about anything you asked.")
+    result = _generator(chain).generate_natural_language_response(question, _retrieval(question))
+    assert result.method == "ungrounded"
+    assert result.grounded is False
+    assert result.sources == []
+    assert result.confidence == UNGROUNDED_CONFIDENCE
+    assert "does not cover" in result.answer
+    assert not chain.prompts, "nothing was retrieved, so no provider call may be made"
+
+
+# --- provider chain ---------------------------------------------------------
+
+def test_local_provider_is_excluded_from_prose_answers():
+    from src.ai.llm.fallback import DataTransferFallbackChain
+
+    assert DataTransferLocalProvider().speaks_prose is False
+    assert DataTransferOpenAIProvider.speaks_prose is True
+
+    chain = DataTransferFallbackChain()
+    chain.providers = [DataTransferLocalProvider()]
+    assert chain.generate_prose("explain quarantine").success is False
+    # the same provider still serves the structured column path
+    assert chain.generate("analyze column 'email'").success is True
+
+
+# --- API surface ------------------------------------------------------------
+
+def test_query_natural_language_carries_sources_and_grounded_flag():
+    from src.ai import query_natural_language
+
+    documented = query_natural_language(QUESTION)
+    assert documented["grounded"] is True
+    assert documented["sources"]
+    assert documented["method"].startswith("product_doc")
+
+    refused = query_natural_language("how do I cook rice")
+    assert refused["grounded"] is False
+    assert refused["sources"] == []
+    assert refused["confidence"] == UNGROUNDED_CONFIDENCE
+
+
+def test_rag_query_endpoint_publishes_the_evidence():
+    import asyncio
+
+    from src.routers.ai_router import RAGQueryRequest, api_rag_query
+
+    response = asyncio.run(api_rag_query(RAGQueryRequest(query=QUESTION)))
+    assert response.grounded is True
+    assert response.sources
+    assert response.sources[0]["href"].startswith("#/help/")
+
+    refused = asyncio.run(api_rag_query(RAGQueryRequest(query="how do I cook rice")))
+    assert refused.grounded is False
+    assert refused.sources == []
+    assert refused.confidence == UNGROUNDED_CONFIDENCE
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what does quarantine mean",
+        "how do I use the MCP server",
+        "how do I prove the row counts matched",
+        "what are the preflight gates",
+    ],
+)
+def test_pilot_chat_answers_documented_questions_with_citations(question: str):
+    from src.ai.copilot.pilot_agent import DataPilotAgent
+
+    reply = DataPilotAgent().chat(question)
+    assert reply.sources, question
+    assert reply.sources[0]["href"].startswith("#/help/")
+    assert "Source:" in reply.answer
+    assert reply.confidence >= 0.9
+
+
+@pytest.mark.parametrize("question", ["how do I cook rice", "who won the world cup in 1998"])
+def test_pilot_chat_does_not_sound_certain_without_evidence(question: str):
+    from src.ai.copilot.pilot_agent import DataPilotAgent
+
+    reply = DataPilotAgent().chat(question)
+    assert reply.sources == []
+    assert reply.confidence <= 0.4, (question, reply.confidence, reply.answer[:200])
+
+
+def test_pilot_chat_cites_documentation_for_a_curated_definition():
+    """The curated definition is a lead, not a substitute for a traceable page."""
+    from src.ai.copilot.pilot_agent import DataPilotAgent
+
+    reply = DataPilotAgent().chat("what is append mode")
+    assert "Append" in reply.answer
+    assert reply.sources and reply.sources[0]["href"].startswith("#/help/")
+
+
+@pytest.mark.parametrize(
+    ("question", "is_aggregate"),
+    [
+        ("what does quarantine mean in Datawrap?", False),
+        ("what does this column mean", False),
+        ("what does upsert mean", False),
+        ("what is the mean of amount in orders on Local Postgres", True),
+        ("what is the mean salary in employees", True),
+        ("average salary in employees", True),
+        ("how many rows in airports", True),
+    ],
+)
+def test_definitional_mean_is_not_parsed_as_an_average(question: str, is_aggregate: bool):
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    planned = {name for name, _ in infer_tools_from_message(question)}
+    assert ("aggregate_data" in planned) is is_aggregate, (question, planned)
+
+
+def test_polish_keeps_facts_only_when_the_rewrite_carries_them():
+    from src.ai.rag.evidence import keeps_draft_facts
+
+    draft = "Quarantine held 1,204 rows from `orders` on job pf_2f9a1c for a failed cast."
+    good = (
+        "1,204 rows from `orders` were quarantined on job pf_2f9a1c because a cast failed."
+    )
+    assert keeps_draft_facts(draft, good)
+    assert not keeps_draft_facts(draft, "Sure! Here is a friendly summary of your data.")
+    # A dropped count is a wrong answer even though the prose reads plausibly.
+    assert not keeps_draft_facts(
+        draft, "Some rows from `orders` were quarantined on job pf_2f9a1c after a cast failed."
+    )
+    assert not keeps_draft_facts(draft, "")
+    # Spelling a small count out is a rewrite, not a lost fact.
+    assert keeps_draft_facts("3 jobs listed.", "You have three transfer jobs listed.")
+    assert not keeps_draft_facts("3 jobs listed.", "You have several transfer jobs listed.")
+    # Auto cannot bind 1,234, so dropping the comma invents a US reading.
+    assert not keeps_draft_facts("Counted 1,234 rows.", "Counted 1234 rows.")
+    assert not keeps_draft_facts(
+        draft,
+        "1204 rows from `orders` were quarantined on job pf_2f9a1c because a cast failed.",
+    )
+    # Three-or-more thousand groups bind on Auto; a digit-only rewrite is the same figure.
+    assert keeps_draft_facts("Counted 1,000,000 rows.", "Counted 1000000 rows.")
+
+
+def test_snake_case_identifiers_are_facts_a_rewrite_must_keep():
+    from src.ai.rag.evidence import keeps_draft_facts
+
+    draft = "For a nightly load use full_refresh_overwrite; to add only new rows use incremental_append."
+    assert keeps_draft_facts(draft, "Use full_refresh_overwrite nightly, or incremental_append for new rows only.")
+    # Spelling the words out in order is a rewrite, not a lost identifier.
+    assert keeps_draft_facts(draft, "Use **Full Refresh Overwrite** nightly, or **Incremental Append** for new rows.")
+    assert not keeps_draft_facts(draft, "Use a full overwrite nightly, or append for new rows only.")
+
+
+def test_a_rewrite_may_only_deny_what_the_draft_denied():
+    from src.ai.rag.evidence import contradicts_draft
+
+    draft = (
+        "Export a schedule as YAML from the schedule detail drawer with Export YAML — "
+        "a GitOps read that does not include credentials."
+    )
+    # The live OpenAI run narrated this from that draft.
+    assert contradicts_draft(
+        draft,
+        "You cannot export a schedule as YAML directly. The export does not include any credentials.",
+    )
+    assert not contradicts_draft(
+        draft,
+        "Open the schedule's detail drawer and click Export YAML. The export never includes credentials.",
+    )
+    quarantine = "Quarantine is the rule that no row disappears silently: a bad row is quarantined rather than dropped."
+    assert not contradicts_draft(
+        quarantine, "Quarantine ensures no row is lost without notice; a bad row is not dropped."
+    )
+    assert not contradicts_draft("Upsert needs a reliable key.", "Upsert requires a reliable key.")
+
+
+def test_trailing_chat_filler_is_stripped_but_the_answer_body_is_kept():
+    from src.ai.rag.evidence import strip_chat_filler
+
+    body = "- **full_refresh_overwrite**: replaces the table.\n- **incremental_append**: adds new rows."
+    assert strip_chat_filler(body + "\n\nWould you like to know more about sync modes?") == body
+    assert strip_chat_filler(body + " If you need further clarification, feel free to ask!") == body
+    assert strip_chat_filler("Would you like the CSV or the JSON export?") == (
+        "Would you like the CSV or the JSON export?"
+    )
+
+
+def test_polish_that_denies_what_the_draft_explained_is_discarded(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+    from src.ai.llm.provider import LLMResponse
+
+    class _Inverting:
+        def generate(self, prompt: str, system: str = "", max_tokens: int = 0) -> LLMResponse:
+            return LLMResponse(
+                content=(
+                    "You cannot export a schedule as YAML directly. The export feature provides "
+                    "a read-only view of the schedule manifest and does not include credentials."
+                ),
+                success=True,
+                provider="openai",
+            )
+
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: (_Inverting(), "openai_polish"),
+    )
+    local = pa.CopilotResponse(
+        answer=(
+            "Export a schedule as YAML from the schedule detail drawer with Export YAML — "
+            "a GitOps read that does not include credentials."
+        ),
+        intent="product_help",
+        confidence=0.9,
+        method="pilot_local_engine",
+        tools_used=[{"name": "search_knowledge", "success": True, "summary": "2 hits"}],
+        sources=[{"title": "GitOps & YAML export", "href": "#/help/gitops"}],
+    )
+    kept = pa.DataPilotAgent()._polish_with_llm("how do I export a schedule as YAML", [], local, "")
+    assert kept.answer == local.answer
+    assert kept.method == "pilot_local_engine"
+
+
+def test_navigation_acknowledgements_are_not_narrated(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+
+    called = []
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: called.append(1) or (None, "openai_polish"),
+    )
+    local = pa.CopilotResponse(
+        answer="Opening **Jobs** for you.",
+        intent="transfer_help",
+        confidence=0.95,
+        method="pilot_local_engine",
+        tools_used=[{"name": "navigate", "success": True, "summary": "jobs"}],
+        sources=[{"title": "Jobs", "href": "#/jobs"}],
+    )
+    kept = pa.DataPilotAgent()._polish_with_llm("open jobs", [], local, "")
+    assert kept is local
+    assert not called
+
+
+def test_provider_that_ignores_the_prompt_cannot_replace_a_grounded_answer(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+    from src.ai.llm.provider import LLMResponse
+
+    class _Ignoring:
+        def generate(self, prompt: str, system: str = "", max_tokens: int = 0) -> LLMResponse:
+            return LLMResponse(
+                content="Absolutely! I'd be delighted to help with whatever you need today.",
+                success=True,
+                provider="openai",
+            )
+
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: (_Ignoring(), "openai_polish"),
+    )
+    agent = pa.DataPilotAgent()
+    local = pa.CopilotResponse(
+        answer="Quarantine held 1,204 rows from `orders`.",
+        intent="product_help",
+        confidence=0.9,
+        method="pilot_local_engine",
+        tools_used=[{"name": "search_knowledge", "success": True, "summary": "3 hits"}],
+        sources=[{"title": "Quarantine & replay", "href": "#/help/quarantine"}],
+    )
+    kept = agent._polish_with_llm("what does quarantine mean", [], local, system="")
+    assert kept.answer == local.answer
+    assert kept.method == "pilot_local_engine"
+
+
+def test_narration_never_raises_confidence(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+    from src.ai.llm.provider import LLMResponse
+
+    class _Faithful:
+        def generate(self, prompt: str, system: str = "", max_tokens: int = 0) -> LLMResponse:
+            return LLMResponse(
+                content="Quarantine held 1,204 rows from `orders` after a failed cast.",
+                success=True,
+                provider="openai",
+            )
+
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: (_Faithful(), "openai_polish"),
+    )
+    local = pa.CopilotResponse(
+        answer="Quarantine held 1,204 rows from `orders`.",
+        intent="product_help",
+        confidence=0.7,
+        method="pilot_local_engine",
+        tools_used=[{"name": "search_knowledge", "success": True, "summary": "3 hits"}],
+        sources=[{"title": "Quarantine & replay", "href": "#/help/quarantine"}],
+    )
+    polished = pa.DataPilotAgent()._polish_with_llm("q", [], local, system="")
+    assert polished.method == "openai_polish"
+    assert polished.confidence == 0.7
+
+
+def test_unsupported_question_is_refused_by_the_product_tool():
+    from src.ai.copilot.tools import get_pilot_tools
+
+    out = get_pilot_tools()._explain_product("how do I cook rice").output
+    assert out["intent"] == "unsupported"
+    assert out["grounded"] is False
+    assert out["sources"] == []
+    assert "will not answer it from guesswork" in out["answer"]
+
+
+def test_knowledge_search_serves_cited_documentation_first():
+    from src.ai.copilot.tools import get_pilot_tools
+
+    out = get_pilot_tools()._search_knowledge("how do I inspect quarantine").output
+    assert out["grounded"] is True
+    assert out["source"] == "product_documentation"
+    assert out["sources"] and out["answer"]
+    assert all(h["type"] == "product_doc" for h in out["hits"])
+
+
+def test_copilot_explain_product_answers_from_documentation():
+    from src.ai.copilot.tools import get_pilot_tools
+
+    result = get_pilot_tools()._explain_product("how do I use the MCP server")
+    assert result.success
+    assert result.output["source"] == "product_documentation"
+    assert result.output["grounded"] is True
+    assert result.output["sources"]
+    assert "MCP" in result.output["answer"]
+
+
+def test_curated_definition_is_delivered_with_documentation_citations():
+    """A definition the operator cannot trace to a page is not an answer."""
+    from src.ai.copilot.tools import get_pilot_tools
+
+    out = get_pilot_tools()._explain_product("What is append mode?").output
+    assert out["source"] == "product_documentation"
+    assert out["grounded"] is True
+    assert out["sources"]
+    # The precise curated definition survives as the lead paragraph.
+    assert "**Append** adds source rows" in out["answer"]
+
+
+def test_a_refusal_is_never_handed_to_a_provider_to_rewrite(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+    from src.ai.llm.provider import LLMResponse
+
+    class _Helpful:
+        def generate(self, prompt: str, system: str = "", max_tokens: int = 0) -> LLMResponse:
+            return LLMResponse(
+                content="To cook rice, rinse it, then simmer two parts water to one part rice.",
+                success=True,
+                provider="openai",
+            )
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: (called.append("picked") or (_Helpful(), "openai_polish")),
+    )
+    local = pa.CopilotResponse(
+        answer="That is outside what the Datawrap documentation covers.",
+        intent="unsupported",
+        confidence=0.2,
+        method="pilot_local_engine",
+        tools_used=[{"name": "search_knowledge", "success": True, "summary": "no hits"}],
+    )
+    kept = pa.DataPilotAgent()._polish_with_llm("how do I cook rice", [], local, system="")
+    assert kept is local
+    assert called == []
+
+
+def test_copilot_chat_reports_grounded_only_when_evidence_exists():
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    client = TestClient(app)
+    documented = client.post(
+        "/api/v1/copilot/chat", json={"message": "What does quarantine mean in Datawrap?"}
+    ).json()
+    assert documented["grounded"] is True
+    assert documented["sources"]
+
+    refused = client.post("/api/v1/copilot/chat", json={"message": "how do I cook rice"}).json()
+    assert refused["grounded"] is False
+    assert refused["sources"] == []
+    assert refused["confidence"] <= 0.3
+
+
+def test_suggest_transforms_does_not_call_string_to_integer_lossless():
+    """The assist matrix said string→integer was lossless cast. The write path is not."""
+    gen = DataTransferRAGGenerator()
+    out = gen.suggest_transformations("VARCHAR", "INTEGER")
+    assert out.method == "conversion_contract"
+    assert "lossy: false" not in out.answer.lower()
+    assert "cast" not in out.answer.lower()
+    assert "needs_user_approval" in out.answer.lower() or "lossy: true" in out.answer.lower()
+    assert out.confidence < 0.9
+
+
+def test_suggest_transforms_does_not_invent_parse_date_or_iso_from_a_date_name():
+    gen = DataTransferRAGGenerator()
+    out = gen.suggest_transformations(
+        "VARCHAR",
+        "DATE",
+        semantic_type="Date",
+        source_column="event_date",
+        target_column="event_date",
+    )
+    assert "parse_date" not in out.answer.lower()
+    assert "standardize_iso8601" not in out.transformations
+    assert out.transformations == []
+    assert "identity" in out.answer.lower() or "no invented parse" in out.answer.lower()
+
+
+def test_restriction_verb_is_the_frame_not_the_subject():
+    """``limit`` means two different things and the stemmer cannot tell them apart.
+
+    "Can I limit who sees a connector" was answered with the four connector
+    maturity labels, because "**Beta** — works with known limits" matches the
+    noun sense in a short sentence that normalizes well. It outscored "Every
+    role is one of viewer, operator, editor or admin" by more than two to one,
+    so it was the lead rather than padding — no relevance floor could remove it.
+
+    Next to who/access the word cannot be the noun, so it stops counting as a
+    subject term there and the permissions vocabulary carries the question.
+    """
+    answer = compose_product_answer(
+        retrieve_product_answer("can I limit who sees a connector")
+    ).lower()
+    assert "viewer" in answer
+    assert "catalog presence only" not in answer
+    assert "transfer-ready" not in answer
+
+
+def test_the_noun_sense_of_limit_is_still_a_subject_term():
+    """The frame rule is scoped to the restriction sense, not to the word."""
+    assert "limit" in analyze_query("what are the limits of a beta connector").terms
+    assert "limit" not in analyze_query("can I limit who sees a connector").terms

@@ -569,6 +569,36 @@ def test_g3_not_null_contract_warns_on_nullable_meta_without_null_samples():
     assert any("not null" in str(w).lower() for w in warns)
 
 
+def test_g3_not_null_keeps_empty_string_on_text_carriers():
+    """'' is a present value on TEXT/VARCHAR NOT NULL — not SQL NULL invent."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="database",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="note_empty", inferred_type="TEXT", nullable=False)],
+            row_count_estimate=2,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="note_empty", inferred_type="TEXT", nullable=False)
+            ],
+        ),
+        mappings=[ColumnMapping(source="note_empty", target="note_empty", confidence=0.99)],
+    )
+    result = gate_g3_schema_contract(PreflightContext(
+        plan=plan,
+        sample_rows=[{"note_empty": ""}, {"note_empty": ""}],
+    ))
+    assert result.status.value == "pass"
+    issues = (result.details or {}).get("issues", []) or []
+    assert not any("not null" in str(i).lower() for i in issues)
+
+
 def test_g3_not_null_contract_blocks_when_samples_contain_nulls():
     plan = TransferPlan(
         source=SourceConfig(
@@ -788,3 +818,42 @@ def test_g3_json_scalar_wrap_blocks_without_risk_ack():
     assert cleared.status.value == "pass", (cleared.status, cleared.message, cleared.details)
     warns = (cleared.details or {}).get("warnings", []) or []
     assert any("wrap" in str(w).lower() or "json" in str(w).lower() for w in warns)
+
+
+def test_lenient_s3_to_s3_does_not_block_on_cell_types():
+    """Plain lenient object copy is not a cast. Strict still blocks a lossy map."""
+    plan = TransferPlan(
+        validation_mode="lenient",
+        source=SourceConfig(
+            kind="database",
+            db_type="s3",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="qty", inferred_type="VARCHAR")],
+            row_count_estimate=4,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            db_type="s3",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[ColumnSchema(name="qty", inferred_type="INTEGER")],
+        ),
+        mappings=[
+            ColumnMapping(
+                source="qty",
+                target="qty",
+                confidence=0.9,
+                target_type="INTEGER",
+            )
+        ],
+    )
+    result = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert result.status.value != "block"
+    assert (result.details or {}).get("rule_id") == "g3_schema_contract.object_store_copy"
+    assert "g3_schema_contract.lossy_coercion" not in str(result.details)
+
+    plan.validation_mode = "strict"
+    strict = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert strict.status.value == "block"

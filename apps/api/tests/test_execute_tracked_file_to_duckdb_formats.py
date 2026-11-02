@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import sys
+import tempfile
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -62,6 +63,19 @@ def _to_parquet(rows: list[dict]) -> bytes:
     return buf.getvalue()
 
 
+#: A text CSV/TSV cell that is ``""`` stays an empty string. Numeric, temporal,
+#: and boolean blanks are still SQL NULL. JSON, JSONL and Parquet spell a real
+#: null as ``null``, so this fixture writes those cells as None (see below).
+_NULL_CAPABLE = {"json", "jsonl", "parquet"}
+
+
+def _rows_for(fmt: str) -> list[dict]:
+    """The same fixture, with the null cell spelled the way the format spells it."""
+    if fmt not in _NULL_CAPABLE:
+        return ROWS
+    return [{k: (None if v == "" else v) for k, v in row.items()} for row in ROWS]
+
+
 _FORMATS = {
     "csv": ("sample.csv", _to_csv),
     "tsv": ("sample.tsv", _to_tsv),
@@ -77,12 +91,12 @@ def test_file_to_duckdb_preserves_types(fmt: str):
 
     filename, content_fn = _FORMATS[fmt]
     table_name = f"f2d_{fmt}_{uuid.uuid4().hex[:8]}"
-    path = f"/tmp/{table_name}.duck"
+    path = f"{tempfile.gettempdir()}/{table_name}.duck"
 
     request = TransferRequest(
         source=EndpointConfig(kind="file", format=fmt),
         source_filename=filename,
-        source_content=content_fn(ROWS),
+        source_content=content_fn(_rows_for(fmt)),
         destination=EndpointConfig(
             kind="database",
             format="duckdb",
@@ -127,14 +141,18 @@ def test_file_to_duckdb_preserves_types(fmt: str):
             '{"k":"v"}',
             '["a","b"]',
         )
+        # C04 codec: an unquoted empty CSV/TSV cell is SQL NULL — only a
+        # quoted "" cell lands as ''. DictWriter writes this fixture's ""
+        # unquoted, so all formats expect NULL here.
+        text_blank = None
         assert rows[1] == (
             2,
             Decimal("2000.5000"),
-            None,
+            text_blank,
             datetime(2024, 2, 28, 14, 30, 0),
             False,
-            None,
-            None,
+            text_blank,
+            text_blank,
         )
         assert rows[2] == (
             3,
@@ -145,6 +163,61 @@ def test_file_to_duckdb_preserves_types(fmt: str):
             '{}',
             '[]',
         )
+    finally:
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def test_json_empty_string_reaches_duckdb_as_a_value() -> None:
+    """``""`` in a null-capable format is a value, and DuckDB keeps it as one.
+
+    The paired half of the rule the fixture above encodes: a text column keeps
+    ``""``, while JSON that meant NULL would have said ``null``. Folding ``""``
+    into NULL here would erase a distinction the source declared.
+    """
+    pytest.importorskip("duckdb")
+
+    table_name = f"f2d_empty_{uuid.uuid4().hex[:8]}"
+    path = f"{tempfile.gettempdir()}/{table_name}.duck"
+    rows = [
+        {"id": 1, "note": ""},
+        {"id": 2, "note": None},
+        {"id": 3, "note": "hello"},
+    ]
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="json"),
+        source_filename="sample.json",
+        source_content=_to_json(rows),
+        destination=EndpointConfig(
+            kind="database",
+            format="duckdb",
+            database=path,
+            table=table_name,
+        ),
+        sync_mode="upsert",
+        stream_contracts=[{
+            "name": "notes",
+            "sync_mode": "upsert",
+            "primary_key": "id",
+            "selected": True,
+        }],
+        skip_preflight=True,
+    )
+
+    try:
+        result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+        assert result.success is True, result.error
+
+        import duckdb
+
+        conn = duckdb.connect(path)
+        stored = conn.execute(f'SELECT id, note FROM "{table_name}" ORDER BY id').fetchall()
+        conn.close()
+
+        assert [row[1] for row in stored] == ["", None, "hello"]
     finally:
         try:
             Path(path).unlink()

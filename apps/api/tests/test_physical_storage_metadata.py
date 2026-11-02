@@ -8,7 +8,6 @@ the aspect is ``unknown``, never a silent "absent".
 from __future__ import annotations
 
 import os
-import socket
 import uuid
 
 import pytest
@@ -25,6 +24,7 @@ from services.schema_fidelity import (
     build_catalog_from_introspect,
     plan_create_new_fidelity,
 )
+from tests.helpers.live_env import pg_creds, pg_up
 
 
 def _aspect(report: dict, aspect: str) -> dict:
@@ -137,24 +137,10 @@ def test_unknown_dialect_reports_unavailable_not_unpartitioned():
 # live PostgreSQL
 # --------------------------------------------------------------------------
 
-_PG = {
-    "host": os.environ.get("P6_PG_HOST", "127.0.0.1"),
-    "port": int(os.environ.get("P6_PG_PORT", "5432")),
-    "database": os.environ.get("P6_PG_DB", "postgres"),
-    "username": os.environ.get("P6_PG_USER", "postgres"),
-    "password": os.environ.get("P6_PG_PASSWORD", "admin"),
-}
+_PG = pg_creds("P6")
 
 
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection((_PG["host"], _PG["port"]), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-@pytest.mark.skipif(not _pg_up(), reason="live PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up("P6"), reason="live PostgreSQL not reachable")
 def test_live_postgres_partitioning_is_measured_from_the_catalog():
     psycopg2 = pytest.importorskip("psycopg2")
 

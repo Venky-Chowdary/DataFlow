@@ -39,11 +39,15 @@ def flag_mapping_review(
     schema_version: int | None = None,
     ddl: str = "",
     column_names: list[str] | None = None,
+    workspace_id: str = "",
 ) -> dict[str, Any]:
     """Record that CDC schema drifted and Map review is required."""
+    from services.workspace_filter import current_workspace_stamp
+
     signal = {
         "id": str(uuid.uuid4()),
         "source_key": str(source_key or "").strip(),
+        "workspace_id": str(workspace_id or "") or current_workspace_stamp(),
         "table": str(table or "").strip(),
         "reason": reason or "schema_drift",
         "schema_version": schema_version,
@@ -85,6 +89,8 @@ def list_reviews(
     except Exception as exc:
         logger.error("Failed reading CDC mapping review store: %s", exc)
         return []
+    from services.workspace_filter import bound_allows
+
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -96,6 +102,10 @@ def list_reviews(
             continue
         if source_key and row.get("source_key") != source_key:
             continue
+        # Rows flagged before workspace stamping carry no workspace_id; they
+        # are only visible to callers whose scope includes unscoped rows.
+        if not bound_allows(row.get("workspace_id")):
+            continue
         out.append(row)
         if len(out) >= limit:
             break
@@ -103,6 +113,8 @@ def list_reviews(
 
 
 def acknowledge_review(review_id: str) -> dict[str, Any] | None:
+    from services.workspace_filter import bound_allows
+
     path = _store_path()
     if not path.exists():
         return None
@@ -117,7 +129,11 @@ def acknowledge_review(review_id: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             rewritten.append(line)
             continue
-        if row.get("id") == review_id and row.get("status") == "open":
+        if (
+            row.get("id") == review_id
+            and row.get("status") == "open"
+            and bound_allows(row.get("workspace_id"))
+        ):
             row["status"] = "acknowledged"
             row["acknowledged_at"] = _now()
             updated = row

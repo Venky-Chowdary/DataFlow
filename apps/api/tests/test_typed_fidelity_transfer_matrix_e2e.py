@@ -13,6 +13,7 @@ Snowflake uses fakesnow. Bind/wire coverage for 30 destinations lives in
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import sys
@@ -67,7 +68,7 @@ from tests.typed_fidelity_helpers import (  # noqa: E402
     uniq,
 )
 
-_LIVE_PROOF = _API_ROOT / "data" / "proofs" / "typed_fidelity_live_matrix.json"
+_LIVE_PROOF = data_dir() / "proofs" / "typed_fidelity_live_matrix.json"
 
 
 def test_postgresql_to_postgresql_typed_preflight_on():

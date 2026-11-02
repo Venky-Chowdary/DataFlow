@@ -1,4 +1,5 @@
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
+import { isPlaceholderSnowflakeAccount, SNOWFLAKE_PLACEHOLDER_HOST_MSG, validateSnowflakeConnectionString } from "./snowflakeUrl";
 import {
   getConnectorDefaults,
   getRestApiDefaultObject,
@@ -16,7 +17,60 @@ export type AuthMode =
   | "service_account"
   | "aws_keys"
   | "api_key"
-  | "file_path";
+  | "file_path"
+  | "key_pair"
+  | "pat";
+
+/** File sources that take a path/URI — one owner for form + default auth. */
+const FILE_FORMAT_TYPES = [
+  "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml",
+  "pdf", "docx", "html", "yaml", "fixed_width",
+] as const;
+
+/** Minimal connector fields auth-mode inference reads (structural — any
+ * record/list row shape qualifies). */
+export interface AuthModeConnectorFields {
+  auth_mode?: string | null;
+  private_key?: string | null;
+  password?: string | null;
+  api_key?: string | null;
+  service_account?: string | null;
+  connection_string?: string | null;
+  username?: string | null;
+}
+
+/** Resolve the auth-mode tab a connector form should pre-select.
+ * Mirrors services.connector_auth.infer_auth_mode: a stored/masked private_key
+ * must not outrank a present password — the backend now refuses the silent
+ * key-pair route, so the edit form must not pre-select it either. */
+export function inferConnectorAuthMode(
+  conn: AuthModeConnectorFields | null | undefined,
+  type: string,
+): AuthMode {
+  const resolved = resolveCatalogIdToType(type);
+  if (conn?.auth_mode) return conn.auth_mode as AuthMode;
+  if (resolved === "snowflake" && conn?.private_key) {
+    // Stored secrets come back masked ("****"), not PEM material — a stray
+    // key field is not proof of key-pair auth. Infer it only when no
+    // password/PAT competes for the route.
+    if (!conn?.password) return "key_pair";
+  }
+  if (FILE_FORMAT_TYPES.includes(resolved as (typeof FILE_FORMAT_TYPES)[number]))
+    return "file_path";
+  if (conn?.api_key) return "api_key";
+  if (conn?.service_account) return "service_account";
+  if (conn?.connection_string) return "connection_string";
+  if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
+  if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
+  if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
+  if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
+  if (resolved === "milvus") return conn?.api_key ? "api_key" : "user_pass";
+  if (resolved === "adls" && conn?.connection_string) return "connection_string";
+  if (resolved === "sftp" && conn?.connection_string) return "connection_string";
+  if (resolved === "email" && conn?.connection_string) return "connection_string";
+  return "user_pass";
+}
 
 /** Single form field descriptor. */
 export interface FormField {
@@ -37,7 +91,21 @@ export interface AuthModeConfig {
   label: string;
   fields: FormField[];
   validate: (values: Record<string, unknown>) => string | null;
+  /** One-line operator copy shown on the setup rail. */
+  description?: string;
 }
+
+/** Default rail copy — Snowflake and others override per mode when needed. */
+export const AUTH_MODE_DETAIL: Record<AuthMode, string> = {
+  user_pass: "Host, username, and password for this system.",
+  connection_string: "Login URL. If the password contains @, encode it as %40.",
+  service_account: "JSON key or file path for cloud identity.",
+  aws_keys: "Access key ID and secret access key.",
+  api_key: "API token issued by this service.",
+  file_path: "Local path or object-store URI.",
+  key_pair: "PKCS#8 private key assigned on the user.",
+  pat: "Programmatic access token. Snowflake sends it as password=.",
+};
 
 /** Complete per-connector form configuration. */
 export interface ConnectorFormConfig {
@@ -100,8 +168,14 @@ function requiredAny(values: Record<string, unknown>, keys: string[], message: s
   return message;
 }
 
-function auth(mode: AuthMode, label: string, fields: FormField[], validate: (values: Record<string, unknown>) => string | null): AuthModeConfig {
-  return { value: mode, label, fields, validate };
+function auth(
+  mode: AuthMode,
+  label: string,
+  fields: FormField[],
+  validate: (values: Record<string, unknown>) => string | null,
+  description?: string,
+): AuthModeConfig {
+  return { value: mode, label, fields, validate, description: description || AUTH_MODE_DETAIL[mode] };
 }
 
 /** Generic SQL placeholder derived from the generic SQL map. */
@@ -114,6 +188,7 @@ function genericSqlPlaceholder(type: string): string {
   if (base === "sqlite" || base === "duckdb") return "sqlite:////path/to/db.sqlite";
   if (base === "duckdb") return "duckdb:////path/to/file.duckdb";
   if (base === "mssql+pyodbc") return `mssql+pyodbc://user:pass@host:${port}/db?driver=ODBC+Driver+17+for+SQL+Server`;
+
   if (base === "oracle+oracledb") return `oracle+oracledb://user:pass@host:${port}/SERVICE`;
   if (base === "ibm_db_sa") return `ibm_db_sa://user:pass@host:${port}/db`;
   if (base === "clickhouse+native") return `clickhouse+native://user:pass@host:${port}/db`;
@@ -128,6 +203,14 @@ function genericSqlPlaceholder(type: string): string {
   if (base.startsWith("postgresql")) return `${base}://user:pass@host:${port}/db`;
 
   return `${base}://user:pass@host:${port}/db`;
+}
+
+/** True when the resolved type maps to a SQL Server (mssql-family) dialect —
+ * the only generic SQL family where a self-signed-TLS operator opt-in exists. */
+function isMssqlFamily(resolved: string): boolean {
+  if (resolved === "sqlserver") return true;
+  const base = GENERIC_SQL_INFO[resolved]?.base || "";
+  return base.startsWith("mssql");
 }
 
 /** Build the form configuration for a connector type. */
@@ -150,7 +233,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isEmail = resolved === "email";
   const isSQLite = resolved === "sqlite";
   const isDuckDB = resolved === "duckdb";
-  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml"].includes(resolved);
+  const isFile = (FILE_FORMAT_TYPES as readonly string[]).includes(resolved);
   const isAzure = resolved === "adls";
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
   const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
@@ -178,7 +261,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     };
   }
 
-  // Apache Iceberg — filesystem / mounted warehouse root (REST catalog later).
+  // Apache Iceberg — filesystem warehouse or REST catalog leftover MERGE.
   if (isIceberg) {
     authModes.push(
       auth(
@@ -187,7 +270,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         [
           text("connection_string", "Warehouse root", {
             placeholder: "/data/iceberg-warehouse or file:///mnt/lake",
-            hint: "Local or mounted path where Iceberg metadata + data files are written. REST/Glue catalog committers are not required for this writer.",
+            hint: "Filesystem CoW writer. Overwrite leftover MERGE lists dest-engine file footers. Incremental leftover MERGE is a hard no-op.",
           }),
           text("database", "Default namespace (optional)", {
             optional: true,
@@ -196,6 +279,29 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           }),
         ],
         (values) => required(values, "connection_string", "Warehouse root"),
+        "Local or mounted lakehouse root. No REST/Glue committer.",
+      ),
+      auth(
+        "connection_string",
+        "REST catalog",
+        [
+          text("connection_string", "REST catalog URI", {
+            placeholder: "http://127.0.0.1:8181",
+            hint: "Iceberg REST catalog. Leftover MERGE commits deletes through RestCatalog. Glue and Nessie stay Planned.",
+          }),
+          text("warehouse", "Warehouse", {
+            placeholder: "file:///mnt/lake or s3://bucket/wh",
+            hint: "Object-store or file warehouse the REST catalog commits into.",
+          }),
+          text("database", "Default namespace (optional)", {
+            optional: true,
+            placeholder: "analytics",
+          }),
+        ],
+        (values) =>
+          required(values, "connection_string", "REST catalog URI")
+          || required(values, "warehouse", "Warehouse"),
+        "REST catalog URI plus warehouse. Overwrite leftover MERGE is dest-engine catalog snapshot + delete.",
       ),
     );
     return {
@@ -218,6 +324,11 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       password("password", "Password"),
       checkbox("ssl", "Use SSL / TLS", { hint: "Encrypt the connection to the server." })
     );
+    if (isMssqlFamily(resolved)) {
+      userPassFields.push(
+        checkbox("trustServerCertificate", "Trust server certificate", { optional: true, hint: "For self-signed or private-CA servers only — skips TLS chain verification." })
+      );
+    }
   } else if (isMongo) {
     userPassFields.push(
       text("host", "Host", { placeholder: "cluster0.mongodb.net" }),
@@ -230,13 +341,13 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     userPassFields.push(
-      text("host", "Account host", { placeholder: "account.snowflakecomputing.com" }),
+      text("host", "Account host", { placeholder: "myorg-acctname" }),
       text("username", "Username"),
       password("password", "Password"),
       text("database", "Database"),
       text("schema", "Schema", { placeholder: "PUBLIC" }),
       text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
-      text("authRole", "Role", { placeholder: "ACCOUNTADMIN", optional: true })
+      text("authRole", "Role", { placeholder: "Default role", optional: true })
     );
   } else if (isRedis) {
     userPassFields.push(
@@ -262,13 +373,14 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("username", "Username"),
       password("password", "Password (optional if using key)", { optional: true }),
       text("database", "Remote path / directory", { optional: true, placeholder: "/uploads" }),
-      textarea("privateKey", "SSH private key (optional)", { rows: 4, optional: true, placeholder: "-----BEGIN OPENSSH PRIVATE KEY----- ...", hint: "Paste the private key text. If provided, password is optional." })
+      textarea("privateKey", "SSH private key (optional)", { rows: 4, optional: true, placeholder: "-----BEGIN OPENSSH PRIVATE KEY----- ...", hint: "Paste the private key text. If provided, password is optional." }),
+      textarea("hostKey", "SSH host key pin (optional)", { rows: 2, optional: true, placeholder: "SHA256:… or an ssh-keyscan line", hint: "Pin the server's host key. A failed Test prints the fingerprint — paste it here after verifying it with the server admin." })
     );
   } else if (isEmail) {
     userPassFields.push(
       text("host", "SMTP host", { placeholder: "smtp.gmail.com" }),
       number("port", "Port", { placeholder: "587" }),
-      text("authSource", "From address", { placeholder: "noreply@datawrap.app" }),
+      text("authSource", "From address", { placeholder: "noreply@example.com" }),
       text("database", "Recipients", { placeholder: "alice@example.com, bob@example.com" }),
       text("username", "SMTP username"),
       password("password", "SMTP password"),
@@ -378,7 +490,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     connStrFields.push(
       textarea("connection_string", "SMTP URL", {
         rows: 2,
-        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@datawrap.app&to=alice@example.com",
+        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@example.com&to=alice@example.com",
         hint: "smtp:// or smtps:// URL. Use query params from= and to= for sender/recipients.",
       })
     );
@@ -393,9 +505,9 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     connStrFields.push(
-      textarea("connection_string", "Snowflake URL", {
-        rows: 2,
-        placeholder: "snowflake://user:pass@account/db/schema?warehouse=COMPUTE_WH&role=ACCOUNTADMIN",
+      textarea("connection_string", "Snowflake login URL", {
+        rows: 3,
+        placeholder: "snowflake://USER:PASSWORD@myorg-acctname/DATABASE/SCHEMA?warehouse=COMPUTE_WH",
       })
     );
   } else if (isSQLite || isDuckDB) {
@@ -410,6 +522,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "Connection string", {
         rows: 2,
         placeholder: isSnowflake ? "" : genericSqlPlaceholder(type),
+        hint: "SQLAlchemy-style login URL. If the password contains @, encode it as %40 — or use Username & password.",
       })
     );
   }
@@ -420,18 +533,20 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     saFields.push(
       textarea("serviceAccount", "Service account JSON or file path", {
         rows: 6,
+        sensitive: true,
         placeholder: '{\n  "type": "service_account",\n  ...\n}',
         hint: "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
       }),
       text("database", isBigQuery ? "GCP project ID" : "Bucket name")
     );
     if (isBigQuery) {
-      saFields.push(text("schema", "Dataset", { optional: true, placeholder: "dataflow" }));
+      saFields.push(text("schema", "Dataset", { optional: true, placeholder: "analytics" }));
     }
   } else if (isAzure) {
     saFields.push(
       textarea("serviceAccount", "Service principal JSON", {
         rows: 4,
+        sensitive: true,
         placeholder: '{\n  "tenantId": "...",\n  "clientId": "...",\n  "clientSecret": "..."\n}',
         hint: "Azure AD application with Storage Blob Data Contributor role.",
       }),
@@ -466,6 +581,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Index (optional)", { optional: true }),
       textarea("apiKey", "API key", {
         rows: 2,
+        sensitive: true,
         placeholder: "id:api_key or encoded API key",
         hint: "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
       }),
@@ -479,6 +595,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("apiKey", "API key (optional)", {
         rows: 2,
         optional: true,
+        sensitive: true,
         placeholder: "Weaviate API key",
         hint: "Required for Weaviate Cloud; optional for local.",
       }),
@@ -498,6 +615,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       }),
       textarea("apiKey", "API key", {
         rows: 2,
+        sensitive: true,
         placeholder: "pcsk_…",
         hint: "Required. Namespace defaults to the destination table name.",
       })
@@ -510,6 +628,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("apiKey", "API key / token", {
         rows: 2,
         optional: true,
+        sensitive: true,
         placeholder: "root:Milvus or Zilliz Cloud API key",
         hint: "Milvus REST uses Bearer user:pass or a cloud API key.",
       }),
@@ -543,6 +662,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
       textarea("apiKey", resolved === "stripe" ? "Secret key" : isSalesforce ? "Access token (Bearer)" : "API token", {
         rows: 2,
+        sensitive: true,
         placeholder: resolved === "stripe" ? "sk_..." : isSalesforce ? "00D…!AQEA… (session access token)" : "Paste access token",
         hint: isSalesforce
           ? `Paste a Bearer access token (not username/password). ${objectHint}`
@@ -561,6 +681,402 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     }
   }
 
+  if (resolved === "github") {
+    authModes.push(
+      auth(
+        "pat",
+        "GitHub personal access token",
+        [
+          text("owner", "Repository owner"),
+          text("repo", "Repository"),
+          password("access_token", "Personal access token"),
+        ],
+        (values) =>
+          required(values, "owner", "Repository owner")
+          || required(values, "repo", "Repository")
+          || required(values, "access_token", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "jira") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Jira Cloud API token",
+        [
+          text("site", "Jira site URL", { placeholder: "https://your-domain.atlassian.net" }),
+          text("email", "Atlassian account email"),
+          password("api_token", "API token"),
+        ],
+        (values) =>
+          required(values, "site", "Jira site URL")
+          || required(values, "email", "Atlassian account email")
+          || required(values, "api_token", "API token"),
+      ),
+    );
+  } else if (resolved === "intercom") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Intercom access token",
+        [password("access_token", "Access token")],
+        (values) => required(values, "access_token", "Access token"),
+      ),
+    );
+  } else if (resolved === "gitlab") {
+    authModes.push(
+      auth(
+        "api_key",
+        "GitLab personal access token",
+        [
+          text("base_url", "GitLab base URL", {
+            optional: true,
+            placeholder: "https://gitlab.com/api/v4 (default)",
+          }),
+          password("api_key", "Personal access token"),
+        ],
+        (values) => required(values, "api_key", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "mailchimp") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Mailchimp API key",
+        [
+          text("dc", "Data center", {
+            optional: true,
+            placeholder: "us21 (derived from the key if blank)",
+          }),
+          password("api_key", "API key"),
+        ],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "pipedrive") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Pipedrive API token",
+        [
+          text("domain", "Company domain", { placeholder: "acme (acme.pipedrive.com)" }),
+          password("api_key", "API token"),
+        ],
+        (values) =>
+          required(values, "domain", "Company domain")
+          || required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "klaviyo") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Klaviyo private API key",
+        [password("api_key", "Private API key", { placeholder: "pk_…" })],
+        (values) => required(values, "api_key", "Private API key"),
+      ),
+    );
+  } else if (resolved === "servicenow") {
+    authModes.push(
+      auth(
+        "user_pass",
+        "ServiceNow integration user",
+        [
+          text("instance", "Instance", { placeholder: "dev123 (dev123.service-now.com)" }),
+          text("username", "Username"),
+          password("password", "Password"),
+        ],
+        (values) =>
+          required(values, "instance", "Instance")
+          || required(values, "username", "Username")
+          || required(values, "password", "Password"),
+      ),
+    );
+  } else if (resolved === "freshdesk") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Freshdesk API key",
+        [
+          text("domain", "Helpdesk domain", { placeholder: "acme (acme.freshdesk.com)" }),
+          password("api_key", "API key"),
+        ],
+        (values) =>
+          required(values, "domain", "Helpdesk domain")
+          || required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "slack") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Slack bot token",
+        [
+          password("api_key", "Bot User OAuth Token", { placeholder: "xoxb-…" }),
+          text("channel", "Channel ID (optional — needed for message history)", { placeholder: "C0123456789", optional: true }),
+        ],
+        (values) => required(values, "api_key", "Bot User OAuth Token"),
+      ),
+    );
+  } else if (resolved === "asana") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Asana personal access token",
+        [
+          password("api_key", "Personal access token"),
+          text("workspace", "Workspace GID"),
+        ],
+        (values) =>
+          required(values, "api_key", "Personal access token")
+          || required(values, "workspace", "Workspace GID"),
+      ),
+    );
+  } else if (resolved === "calendly") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Calendly personal access token",
+        [
+          password("api_key", "Personal access token"),
+          text("user_uri", "User URI", { placeholder: "https://api.calendly.com/users/…" }),
+        ],
+        (values) =>
+          required(values, "api_key", "Personal access token")
+          || required(values, "user_uri", "User URI"),
+      ),
+    );
+  } else if (resolved === "woocommerce") {
+    authModes.push(
+      auth(
+        "user_pass",
+        "WooCommerce REST API keys",
+        [
+          text("domain", "Store domain", { placeholder: "shop.example.com" }),
+          text("username", "Consumer key", { placeholder: "ck_…" }),
+          password("password", "Consumer secret", { placeholder: "cs_…" }),
+        ],
+        (values) =>
+          required(values, "domain", "Store domain")
+          || required(values, "username", "Consumer key")
+          || required(values, "password", "Consumer secret"),
+      ),
+    );
+  } else if (resolved === "bigcommerce") {
+    authModes.push(
+      auth(
+        "api_key",
+        "BigCommerce API account",
+        [
+          text("store_hash", "Store hash", { placeholder: "abc123xyz" }),
+          password("api_key", "Access token (X-Auth-Token)"),
+        ],
+        (values) =>
+          required(values, "store_hash", "Store hash")
+          || required(values, "api_key", "Access token"),
+      ),
+    );
+  } else if (resolved === "brevo") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Brevo API key",
+        [password("api_key", "API key", { placeholder: "xkeysib-…" })],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "freshservice") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Freshservice API key",
+        [
+          text("domain", "Helpdesk domain", { placeholder: "acme (acme.freshservice.com)" }),
+          password("api_key", "API key"),
+        ],
+        (values) =>
+          required(values, "domain", "Helpdesk domain")
+          || required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "close") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Close API key",
+        [password("api_key", "API key")],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "posthog") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Posthog personal API key",
+        [
+          text("host", "Posthog host", { placeholder: "app.posthog.com" }),
+          text("project_id", "Project ID", { placeholder: "42" }),
+          password("api_key", "Personal API key", { placeholder: "phx_…" }),
+        ],
+        (values) =>
+          required(values, "host", "Posthog host")
+          || required(values, "project_id", "Project ID")
+          || required(values, "api_key", "Personal API key"),
+      ),
+    );
+  } else if (resolved === "confluence") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Confluence email + API token",
+        [
+          text("host", "Site name", { placeholder: "acme (acme.atlassian.net)" }),
+          text("email", "Atlassian account email"),
+          password("api_key", "API token"),
+        ],
+        (values) =>
+          required(values, "host", "Site name")
+          || required(values, "email", "Atlassian account email")
+          || required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "zendesk") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Zendesk email + API token",
+        [
+          text("host", "Subdomain", { placeholder: "acme (acme.zendesk.com)" }),
+          text("email", "Account email"),
+          password("api_key", "API token"),
+        ],
+        (values) =>
+          required(values, "host", "Subdomain")
+          || required(values, "email", "Account email")
+          || required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "airtable") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Airtable personal access token",
+        [
+          password("api_key", "Personal access token", { placeholder: "pat…" }),
+          text("base_id", "Base ID", { placeholder: "app…" }),
+          text("table_id", "Table ID or name", { placeholder: "tbl…" }),
+        ],
+        (values) =>
+          required(values, "api_key", "Personal access token")
+          || required(values, "base_id", "Base ID"),
+      ),
+    );
+  } else if (resolved === "clickup") {
+    authModes.push(
+      auth(
+        "api_key",
+        "ClickUp personal API token",
+        [
+          password("api_key", "API token", { placeholder: "pk_…" }),
+          text("list_id", "List ID (for tasks)", { placeholder: "9001…" }),
+        ],
+        (values) => required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "mailjet") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Mailjet API key + secret key",
+        [
+          password("api_key", "API key (public)"),
+          password("secret_key", "Secret key (private)"),
+        ],
+        (values) =>
+          required(values, "api_key", "API key")
+          || required(values, "secret_key", "Secret key"),
+      ),
+    );
+  } else if (resolved === "sendgrid") {
+    authModes.push(
+      auth(
+        "api_key",
+        "SendGrid API key",
+        [password("api_key", "API key", { placeholder: "SG.…" })],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "monday") {
+    authModes.push(
+      auth(
+        "api_key",
+        "monday.com API token",
+        [
+          password("api_key", "API token"),
+          text("board_id", "Board ID (for items)", { placeholder: "e.g. 123456789" }),
+        ],
+        (values) => required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "linear") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Linear API key",
+        [password("api_key", "API key", { placeholder: "lin_api_…" })],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
+  } else if (resolved === "todoist") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Todoist API token",
+        [password("api_key", "API token")],
+        (values) => required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "typeform") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Typeform personal access token",
+        [
+          password("api_key", "Personal access token", { placeholder: "tfp_…" }),
+          text("form_id", "Form ID (for responses)", { placeholder: "abcDEF12" }),
+        ],
+        (values) => required(values, "api_key", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "notion") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Notion integration token",
+        [
+          password("api_key", "Internal integration secret", { placeholder: "secret_…" }),
+          text("database_id", "Database ID (for database rows)", { placeholder: "32-char id" }),
+        ],
+        (values) => required(values, "api_key", "Integration secret"),
+      ),
+    );
+  } else if (resolved === "zoho_crm") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Zoho CRM OAuth2",
+        [
+          text("client_id", "Client ID"),
+          password("client_secret", "Client secret"),
+          password("refresh_token", "Refresh token"),
+        ],
+        (values) =>
+          required(values, "client_id", "Client ID")
+          || required(values, "client_secret", "Client secret")
+          || required(values, "refresh_token", "Refresh token"),
+      ),
+    );
+  }
+
   // Build auth modes for each connector
   if (userPassFields.length) {
     authModes.push(
@@ -571,8 +1087,11 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!isGcp && !isAws && !isElastic && !isRedis && !isSQLite && !isDuckDB && !fmt(values, "host")) {
           return "Host is required.";
         }
+        if (isSnowflake && isPlaceholderSnowflakeAccount(fmt(values, "host"))) {
+          return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        }
         if (
-          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb"].includes(resolved) &&
+          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb", "snowflake"].includes(resolved) &&
           (values.port as number) <= 0
         ) {
           return "Port is required.";
@@ -600,11 +1119,57 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   }
 
+  if (isSnowflake) {
+    authModes.push(
+      auth("pat", "Programmatic access token", [
+        text("host", "Account host", { placeholder: "myorg-acctname" }),
+        text("username", "Username"),
+        password("password", "Programmatic access token"),
+        text("database", "Database"),
+        text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
+        text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
+        text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
+      ], (values) => {
+        if (!fmt(values, "host")) return "Account host is required.";
+        if (isPlaceholderSnowflakeAccount(fmt(values, "host"))) return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        if (!fmt(values, "username")) return "Username is required.";
+        if (!fmt(values, "password")) return "Programmatic access token is required.";
+        return null;
+      }, "Token from Snowsight.")
+    );
+    authModes.push(
+      auth("key_pair", "Key-pair (JWT)", [
+        text("host", "Account host", { placeholder: "myorg-acctname" }),
+        text("username", "Username"),
+        textarea("privateKey", "PKCS#8 private key", {
+          rows: 6,
+          sensitive: true,
+          placeholder: "-----BEGIN PRIVATE KEY-----",
+        }),
+        password("password", "Key passphrase (optional)", { optional: true }),
+        text("database", "Database"),
+        text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
+        text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
+        text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
+      ], (values) => {
+        if (!fmt(values, "host")) return "Account host is required.";
+        if (isPlaceholderSnowflakeAccount(fmt(values, "host"))) return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        if (!fmt(values, "username")) return "Username is required.";
+        if (!fmt(values, "privateKey")) return "PKCS#8 private key is required.";
+        return null;
+      }, "PKCS#8 private key.")
+    );
+  }
+
   if (connStrFields.length) {
     authModes.push(
-      auth("connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string", connStrFields, (values) =>
-        required(values, "connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string")
-      )
+      auth("connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string", connStrFields, (values) => {
+        const label = isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string";
+        const missing = required(values, "connection_string", label);
+        if (missing) return missing;
+        if (isSnowflake) return validateSnowflakeConnectionString(fmt(values, "connection_string"));
+        return null;
+      })
     );
   }
 
@@ -644,8 +1209,12 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         }
         if (resolved === "salesforce") {
           const h = String(fmt(values, "host") || "").toLowerCase();
-          if (h.includes("login.salesforce.com") || h.includes("test.salesforce.com")) {
-            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com.";
+          if (
+            h.includes("login.salesforce.com") ||
+            h.includes("test.salesforce.com") ||
+            h.includes("yourorg.my.salesforce.com")
+          ) {
+            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com or the yourorg placeholder.";
           }
         }
         if (resolved === "weaviate" || resolved === "milvus") {
@@ -693,10 +1262,14 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (resolved === "github") return "pat";
+  if (resolved === "servicenow") return "user_pass";
+  if (resolved === "woocommerce") return "user_pass";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk", "airtable", "clickup", "mailjet", "sendgrid", "monday", "linear"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
-  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
+  if ((FILE_FORMAT_TYPES as readonly string[]).includes(resolved)) return "file_path";
   return "user_pass";
 }
 

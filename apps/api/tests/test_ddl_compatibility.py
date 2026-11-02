@@ -213,11 +213,31 @@ def test_duplicate_pk_in_source_is_owned_by_data_integrity_not_g6():
         destination_db_type="postgresql",
         validation_mode="strict",
         sync_mode="full_refresh_overwrite",
+        # The source PK, declared the way production passes it.
+        contract_primary_key="order_id",
     )
     assert not report["passed"]
     dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
     assert dup.get("blocks_transfer") is True
     assert any("duplicate" in str(i).lower() for i in dup.get("issues", []))
+
+
+def test_inferred_only_duplicate_pk_on_overwrite_heap_warns_not_blocks():
+    """Same inputs as the source-PK case without a declared key: warn only."""
+    from services.data_integrity import run_integrity_audit
+
+    report = run_integrity_audit(
+        source_columns=["order_id"],
+        mappings=[{"source": "order_id", "target": "order_id", "confidence": 1.0}],
+        sample_rows=[{"order_id": "1"}, {"order_id": "1"}],
+        destination_db_type="postgresql",
+        validation_mode="strict",
+        sync_mode="full_refresh_overwrite",
+    )
+    dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
+    assert dup.get("blocks_transfer") is False, dup
+    blob = " ".join(str(w) for w in dup.get("warnings") or [])
+    assert "duplicate" in blob.lower() and "1×2" in blob, dup
 
 
 def test_passes_when_target_column_case_differs():
@@ -291,7 +311,11 @@ def test_mongodb_non_id_suffix_fields_do_not_trigger_pk_duplicate_block():
 
 
 def test_mongodb_explicit_id_mapping_duplicate_detected_by_data_integrity():
-    """G6 stays DDL-focused; duplicate `_id` values are caught in G9."""
+    """G6 stays DDL-focused. Upsert collapses two in-file ``id``→``_id`` rows to one.
+
+    The duplicate is an advisory, counted once, and does not block. An explicit
+    block policy still refuses the same mapping.
+    """
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "id", "target": "_id", "confidence": 0.99}],
         source_schema={"id": "VARCHAR"},
@@ -306,17 +330,40 @@ def test_mongodb_explicit_id_mapping_duplicate_detected_by_data_integrity():
 
     from services.data_integrity import run_integrity_audit
 
+    mappings = [{"source": "id", "target": "_id", "confidence": 0.99}]
+    rows = [{"id": "dup"}, {"id": "dup"}]
     report = run_integrity_audit(
         source_columns=["id"],
-        mappings=[{"source": "id", "target": "_id", "confidence": 0.99}],
-        sample_rows=[{"id": "dup"}, {"id": "dup"}],
+        mappings=mappings,
+        sample_rows=rows,
         destination_db_type="mongodb",
         validation_mode="strict",
         sync_mode="upsert",
     )
-    assert not report["passed"]
-    dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
-    assert dup.get("blocks_transfer") is True
+    dup = next(c for c in report["checks"] if c["check"] == "duplicate_keys")
+    assert dup["blocks_transfer"] is False
+    assert dup["passed"] is True
+    warning = " ".join(dup.get("warnings") or [])
+    assert "1 extra row" in warning
+    assert "collapsed to one per key" in warning
+    assert "Counted once" in warning
+    assert "Not quarantined" in warning
+    assert "dup" in warning
+
+    blocked = run_integrity_audit(
+        source_columns=["id"],
+        mappings=mappings,
+        sample_rows=rows,
+        destination_db_type="mongodb",
+        validation_mode="strict",
+        sync_mode="upsert",
+        in_file_dedupe="block",
+    )
+    refused = next(c for c in blocked["checks"] if c["check"] == "duplicate_keys")
+    assert refused["blocks_transfer"] is True
+    assert refused["passed"] is False
+    assert any("dup" in str(item) for item in (refused.get("issues") or []))
+    assert not any("collapsed" in str(item).lower() for item in (refused.get("warnings") or []))
 
 
 def test_float_to_decimal_not_soft_passed_by_samples():

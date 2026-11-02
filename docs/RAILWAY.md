@@ -30,6 +30,10 @@ Recommended production shape: **Web + API + Worker + MongoDB** — not a microse
 
 You do **not** need one Railway service per connector. That keeps the platform maintainable.
 
+You also do **not** need a new Railway service for the process split. `deploy/railway/api.toml` is one replica. Leave `DATAFLOW_PROCESS_ROLE`, `DATAFLOW_SCHEDULE_LOOP`, and `DATAFLOW_API_CLAIM_LOOP` unset on that API. It keeps the cadence loop and, when `DATAFLOW_WORKER_FLEET=1`, it still claims jobs if the worker is down. Confirm acks move to Mongo automatically when `DATAFLOW_MULTI_REPLICA=1`. Do not set `DATAFLOW_ACK_BACKEND=file` in that mode.
+
+Add a scheduler service only when you want cadence off the API. Config file: `deploy/railway/scheduler.toml`. On the API, then set `DATAFLOW_PROCESS_ROLE=api`, `DATAFLOW_SCHEDULE_LOOP=0`, and `DATAFLOW_API_CLAIM_LOOP=0`. Until that service exists, do not set `SCHEDULE_LOOP=0` or no pipeline will fire. A second worker with `DATAFLOW_WORKER_MODE=cdc` is optional; the one worker claims both batch and CDC when `WORKER_MODE` is unset.
+
 ---
 
 ## Step 1 — Create Railway project

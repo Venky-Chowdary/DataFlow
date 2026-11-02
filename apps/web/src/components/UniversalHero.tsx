@@ -20,7 +20,7 @@ export function UniversalHero({ onStartTransfer, onOpenPilot }: UniversalHeroPro
         </h1>
         <p className="dt-universal-hero-sub">
           Upload a file, connect a database, or point at an API — AI maps columns by meaning,
-          validates with 8 preflight gates, and quarantines bad rows instead of dropping them.
+          validates with 9 preflight gates, and quarantines bad rows instead of dropping them.
         </p>
         <div className="dt-universal-hero-actions">
           <button type="button" className="dt-btn dt-btn-primary dt-btn-lg dt-universal-cta" onClick={onStartTransfer}>

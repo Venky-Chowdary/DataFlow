@@ -5,8 +5,16 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.transfer_policy_values import PolicyFieldsModel
+from services.api_errors import ApiError
+from services.audit_coverage import record_security_event
+from services.brand import PRODUCT_SLUG
+from services.cdc_capture_release import release_schedule_cdc_capture
+from services.gitops_yaml import dump_artifact_yaml
+from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
     INTERVALS,
     SYNC_MODES,
@@ -15,87 +23,175 @@ from services.schedule_store import (
     delete_schedule,
     get_schedule,
     list_schedules,
+    project_operator_cadence,
     update_schedule,
 )
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
+    tenant_scope,
 )
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
+
+
+def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return sched
+
+
+def _bound_schedule(request: Request, schedule_id: str, *, write: bool = False) -> PipelineSchedule:
+    """Load a schedule and refuse cross-workspace access (``write`` for mutations)."""
+    sched = _schedule_or_404(schedule_id)
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=write)
+    return sched
 
 SyncMode = Literal[
     "full_refresh_overwrite",
     "full_refresh_append",
     "incremental",
+    "incremental_append",
+    "incremental_deduped",
     "cdc",
     "scd2",
     "mirror",
     "reverse_etl",
 ]
 IntervalPreset = Literal["hourly", "daily", "weekly"]
-SchemaPolicy = Literal[
-    "manual_review",
-    "propagate_columns",
-    "propagate_all",
-    "pause_on_change",
-    "type_locked",
-]
 
 
-class ScheduleCreate(BaseModel):
+class ScheduleCreate(PolicyFieldsModel):
     name: str = Field(..., min_length=1, max_length=120)
     source_connector_id: str
     source_table: str
     dest_connector_id: str
     dest_table: str
-    interval: IntervalPreset = "daily"
+    interval: str = "daily"
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: SyncMode = "full_refresh_overwrite"
     validation_mode: str = "strict"
-    schema_policy: SchemaPolicy = "manual_review"
+    schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = Field(default=0, ge=0)
+    delivery_guarantee: str = "auto"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
+    cursor_semantics: str = ""
     primary_key: str = ""
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = Field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    # Transform Library binding — pick a library recipe by id; pin a version
+    # or follow latest; pass parameter values (the only per-use override).
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = Field(default=0, ge=0)
+    transform_recipe_version_mode: Literal["pin", "follow"] = "pin"
+    transform_recipe_params: dict[str, Any] = Field(default_factory=dict)
+    approved_set_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     max_retries: int = Field(default=0, ge=0, le=10)
     retry_backoff_seconds: int = Field(default=60, ge=0, le=3600)
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool = True
+    file_wait_seconds: int = Field(default=0, ge=0, le=86400)
+    duplicate_policy: str = ""
+    in_file_dedupe: str = "block"
+    #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
+    replay_schedule_id: str = ""
+
+    @field_validator("interval")
+    @classmethod
+    def _interval_names_the_accepted_forms(cls, value: str) -> str:
+        """D-11: the old Literal 422 hid that `cron` is a first-class cadence."""
+        from services.schedule_store import INTERVALS, rolling_minutes
+
+        v = (value or "").strip().lower()
+        if v in INTERVALS or v == "cron" or rolling_minutes(v) is not None:
+            return v
+        raise ValueError(
+            f"Invalid interval {value!r}. Accepted: hourly, daily, weekly; "
+            "pass interval='cron' with a 5-field cron expression in `cron` for "
+            "custom cadences; or a rolling form like 'every_15m'."
+        )
 
 
-class ScheduleUpdate(BaseModel):
+class ScheduleUpdate(PolicyFieldsModel):
     name: Optional[str] = None
     source_connector_id: Optional[str] = None
     source_table: Optional[str] = None
     dest_connector_id: Optional[str] = None
     dest_table: Optional[str] = None
-    interval: Optional[IntervalPreset] = None
+    interval: Optional[str] = None
+    #: Runner token when ``interval`` is the displayed cadence label.
+    interval_preset: Optional[str] = None
     cron: Optional[str] = None
     timezone: Optional[str] = None
     sync_mode: Optional[SyncMode] = None
     validation_mode: Optional[str] = None
-    schema_policy: Optional[SchemaPolicy] = None
+    schema_policy: Optional[str] = None
     backfill_new_fields: Optional[bool] = None
+    write_via_staging: Optional[bool] = None
+    priority_column: Optional[str] = None
+    priority_direction: Optional[str] = None
+    row_limit: Optional[int] = Field(default=None, ge=0)
+    delivery_guarantee: Optional[str] = None
+    snapshot_mode: Optional[str] = None
+    allow_append_only: Optional[bool] = None
+    cdc_row_filter: Optional[str] = None
+    multi_subnet_failover: Optional[bool] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
+    cursor_semantics: Optional[str] = None
     primary_key: Optional[str] = None
+    source_read_mode: Optional[str] = None
+    procedure_call: Optional[str] = None
+    source_query: Optional[str] = None
+    procedure_params: Optional[dict[str, Any]] = None
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
+    date_locale: Optional[str] = None
+    number_locale: Optional[str] = None
+    shape_recipe: Optional[dict[str, Any]] = None
+    approved_shape_recipe_hash: Optional[str] = None
+    transform_recipe_id: Optional[str] = None
+    transform_recipe_version: Optional[int] = Field(default=None, ge=0)
+    transform_recipe_version_mode: Optional[Literal["pin", "follow"]] = None
+    transform_recipe_params: Optional[dict[str, Any]] = None
+    approved_set_hash: Optional[str] = None
+    approved_decision_artifact_hash: Optional[str] = None
+    approved_ddl_identity_hash: Optional[str] = None
     max_retries: Optional[int] = Field(default=None, ge=0, le=10)
     retry_backoff_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     notify_on_failure: Optional[bool] = None
     notify_on_success: Optional[bool] = None
     enabled: Optional[bool] = None
+    file_wait_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
+    duplicate_policy: Optional[str] = None
+    in_file_dedupe: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):
@@ -106,23 +202,56 @@ class ScheduleResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
+    #: hourly | daily | weekly | cron | every_Nm. Present even when
+    #: ``interval`` is a label; ``cron`` whenever a cron expression is set.
+    interval_preset: str = ""
+    #: Human cadence. Cron wins over the preset.
+    cadence_label: str = ""
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: str = "full_refresh_overwrite"
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
+    delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
+    cursor_semantics: str = ""
     primary_key: str = ""
     cursor_value: str = ""
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = Field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict[str, Any] = Field(default_factory=dict)
+    approved_set_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     max_retries: int = 0
     retry_backoff_seconds: int = 60
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool
+    file_wait_seconds: int = 0
+    duplicate_policy: str = ""
+    in_file_dedupe: str = "block"
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -134,10 +263,13 @@ class ScheduleResponse(BaseModel):
     retry_attempt: int = 0
     missed_window_count: int = 0
     last_missed_windows: int = 0
+    #: Operator-approved catch-up replays still queued (POST /{id}/catch-up).
+    catch_up_windows_left: int = 0
     running: bool = False
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+    stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     # The source shape this schedule last read. A run is refused when a column
     # it carries changes type, is dropped or is renamed, so the operator has to
     # be able to see the baseline that judged it — otherwise the refusal is a
@@ -146,13 +278,50 @@ class ScheduleResponse(BaseModel):
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
     mapping_count: int = 0
+    # Autopilot: the finding this schedule is parked on, and the standing
+    # authority (if any) that lets later identical runs proceed unattended.
+    approval_request: dict[str, Any] = Field(default_factory=dict)
+    standing_authorization: dict[str, Any] = Field(default_factory=dict)
+    # Derived from the run records (``last_status`` too): the latest run's
+    # reason, the run in flight, and the newest beat that was skipped and why.
+    last_status_reason: str = ""
+    last_status_code: str = ""
+    last_run_id: str = ""
+    current_run: Optional[dict[str, Any]] = None
+    last_skip: Optional[dict[str, Any]] = None
+    #: Why the store saved this schedule differently from the request (e.g.
+    #: "Created disabled: ..."); empty once it no longer applies.
+    enabled_note: str = ""
+    #: One word for whether this schedule will fire: ``paused`` (disabled),
+    #: ``running``, ``scheduled`` (next_run_at is set) or ``stalled`` (enabled
+    #: but nothing will fire until a human acts). ``stalled_reason`` says why
+    #: and what clears it — enabled=true with next_run_at=null was the only
+    #: signal before (QA r12 Mongo D9).
+    state: str = ""
+    stalled_reason: str = ""
+    #: What this write must tell the caller without refusing it (draft saved
+    #: disabled, source table unverifiable). Empty on reads.
+    warnings: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
-        data = s.to_dict()
+    def from_schedule(
+        cls, s: PipelineSchedule, *, warnings: Optional[list[str]] = None
+    ) -> ScheduleResponse:
+        from services.schedule_run_lifecycle import derive_status
+
+        data = project_operator_cadence(s.to_dict())
+        data.update(derive_status(s))
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
+        # Paused / parked schedules do not fire — surface no next run (M24/D96).
+        from services.schedule_store import visible_next_run_at
+
+        data["next_run_at"] = visible_next_run_at(s)
+        from services.schedule_store import schedule_run_state
+
+        data["state"], data["stalled_reason"] = schedule_run_state(s)
+        data["warnings"] = list(warnings or [])
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
         return cls(**{k: v for k, v in data.items() if k in allowed})
@@ -167,15 +336,30 @@ class ScheduleSummaryResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
+    interval_preset: str = ""
+    cadence_label: str = ""
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: str = "full_refresh_overwrite"
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
+    date_locale: str = ""
+    number_locale: str = ""
+    delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
+    cursor_semantics: str = ""
     primary_key: str = ""
     cursor_value: str = ""
+    source_read_mode: str = ""
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
@@ -184,6 +368,9 @@ class ScheduleSummaryResponse(BaseModel):
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool
+    file_wait_seconds: int = 0
+    duplicate_policy: str = ""
+    in_file_dedupe: str = "block"
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -193,15 +380,65 @@ class ScheduleSummaryResponse(BaseModel):
     retry_attempt: int = 0
     missed_window_count: int = 0
     last_missed_windows: int = 0
+    catch_up_windows_left: int = 0
     running: bool = False
     created_at: str
     mapping_count: int = 0
+    # Validate≡Execute stamps. Hashes only — shape_recipe stays on GET /{id}.
+    approved_shape_recipe_hash: str = ""
+    approved_set_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
+    # A parked schedule reads as "off" from run_count and last_status alone. The
+    # list row has to say a human owes it a decision, without the full finding.
+    needs_approval: bool = False
+    approval_id: str = ""
+    approval_code: str = ""
+    approval_finding: str = ""
+    approvable: bool = False
+    authorized: bool = False
+    state: str = ""
+    stalled_reason: str = ""
+    # Due but not started: how late, and exactly what holds the one-writer
+    # claim (schedule + job). "Next run in the past" alone was a dead end.
+    overdue_seconds: int = 0
+    blocked_by: dict[str, Any] = Field(default_factory=dict)
+    blocked_reason: str = ""
+    last_status_reason: str = ""
+    last_status_code: str = ""
+    last_run_id: str = ""
+    current_run: Optional[dict[str, Any]] = None
+    last_skip: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
+        from services.schedule_store import (
+            claim_holder,
+            describe_claim_holder,
+            schedule_overdue_seconds,
+        )
+
         full = ScheduleResponse.from_schedule(s)
         payload = full.model_dump()
         payload.pop("mappings", None)
+        overdue = schedule_overdue_seconds(s)
+        if overdue:
+            holder = claim_holder(s)
+            payload["overdue_seconds"] = overdue
+            if holder:
+                payload["blocked_by"] = holder
+                payload["blocked_reason"] = describe_claim_holder(holder)
+        req = dict(s.approval_request or {})
+        open_req = str(req.get("status") or "").strip().lower() == STATUS_OPEN
+        grant = dict(s.standing_authorization or {})
+        payload.update(
+            needs_approval=open_req,
+            approval_id=str(req.get("id") or "") if open_req else "",
+            approval_code=str(req.get("code") or "") if open_req else "",
+            approval_finding=str(req.get("finding") or "") if open_req else "",
+            approvable=bool(req.get("approvable")) if open_req else False,
+            authorized=bool(grant.get("id")) and not grant.get("revoked_at"),
+        )
         return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
 
 
@@ -216,30 +453,62 @@ async def schedule_intervals():
     }
 
 
-@router.get("/export/dataflow")
-def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
-    """Export all schedules (+ contracts) as a single ``dataflow.yaml`` GitOps manifest."""
-    import yaml
+@router.get("/export/manifest")
+@router.get("/export/dataflow")  # pre-rename path, kept for API and CLI clients
+def export_dataflow_manifest(
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Export schedules (+ contracts) visible in this workspace as a GitOps manifest.
 
+    ``/export/manifest`` is the path the web app calls (QA r12 #4b: no old
+    brand in the bundle); ``/export/dataflow`` answers the same for older clients.
+    """
     from services.gitops_manifest import build_dataflow_manifest
+    from services.team_store import require_workspace_isolation
 
-    artifact = build_dataflow_manifest()
+    scope = tenant_scope(request, workspace_id)
+    artifact = build_dataflow_manifest(
+        workspace_id=scope.workspace_id,
+        isolation=require_workspace_isolation(),
+        workspace_filter=scope.filter,
+    )
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
+            content=dump_artifact_yaml(artifact),
             media_type="application/x-yaml",
-            headers={"Content-Disposition": "attachment; filename=dataflow.yaml"},
+            headers={"Content-Disposition": f"attachment; filename={PRODUCT_SLUG}.yaml"},
         )
     return artifact
 
 
-@router.post("/gitops/plan")
-async def gitops_plan_manifest(payload: dict[str, Any]):
-    """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
-    from services.gitops_manifest import plan_manifest
+def _record_gitops_scope_denial(request: Request) -> None:
+    from services.audit_coverage import record_authz_denial
 
+    record_authz_denial(
+        request,
+        required_permission="workspace.resource",
+        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+        reason="cross_workspace",
+    )
+
+
+@router.post("/gitops/plan")
+async def gitops_plan_manifest(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
+    from services.gitops_manifest import WorkspaceScopeError, plan_manifest
+
+    scope = tenant_scope(request, workspace_id)
     try:
-        return plan_manifest(payload)
+        return plan_manifest(payload, workspace_id=scope.workspace_id, workspace_filter=scope.filter)
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -247,8 +516,10 @@ async def gitops_plan_manifest(payload: dict[str, Any]):
 @router.post("/gitops/apply")
 async def gitops_apply_manifest(
     payload: dict[str, Any],
+    request: Request,
     dry_run: bool = False,
     require_signed_contracts: bool = False,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Apply a GitOps manifest (create/update schedules + draft contracts).
 
@@ -256,16 +527,62 @@ async def gitops_apply_manifest(
     Pass ``require_signed_contracts=true`` for CD/staging: every schedule must
     reference a SIGNED contract.
     """
-    from services.gitops_manifest import apply_manifest
+    from services.gitops_manifest import WorkspaceScopeError, apply_manifest
 
+    ws = resolve_write_workspace(request, workspace_id)
     try:
-        return apply_manifest(
+        result = apply_manifest(
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
+            workspace_id=ws,
+            workspace_filter=tenant_scope(request, workspace_id).filter,
         )
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if any(
+        item.get("error_code") == "cross_workspace"
+        for item in result.get("results", [])
+    ):
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace")
+    rows = result.get("results") or result.get("actions") or []
+    successful_schedules = [
+        row for row in rows
+        if row.get("kind") == "PipelineSchedule"
+        and row.get("ok", True)
+        and row.get("action") in {"create", "update", "unchanged"}
+    ]
+    created = sum(1 for row in successful_schedules if row.get("action") == "create")
+    updated = sum(1 for row in successful_schedules if row.get("action") == "update")
+    unchanged = sum(1 for row in successful_schedules if row.get("action") == "unchanged")
+    created_count = result.get("creates")
+    updated_count = result.get("updates")
+    deleted_count = result.get("deletes")
+    unchanged_count = result.get("unchanged")
+    created_count = created_count if isinstance(created_count, int) else created
+    updated_count = updated_count if isinstance(updated_count, int) else updated
+    deleted_count = deleted_count if isinstance(deleted_count, int) else 0
+    unchanged_count = unchanged_count if isinstance(unchanged_count, int) else unchanged
+    schedule_id = successful_schedules[0].get("id") if successful_schedules else None
+    record_security_event(
+        "schedule.gitops.apply",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{schedule_id or 'gitops'}",
+        status=200,
+        details={
+            "created": created_count,
+            "updated": updated_count,
+            "deleted": deleted_count,
+            "unchanged": unchanged_count,
+            "dry_run": bool(dry_run),
+        },
+    )
+    return result
 
 
 @router.get("/", response_model=list[ScheduleSummaryResponse])
@@ -275,10 +592,8 @@ async def list_pipeline_schedules(
 ):
     import asyncio
 
-    ws = resolve_read_workspace(request, workspace_id)
-    schedules = await asyncio.to_thread(list_schedules)
-    if ws:
-        schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
+    scope = tenant_scope(request, workspace_id).filter
+    schedules = await asyncio.to_thread(list_schedules, scope)
     return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 
@@ -309,14 +624,42 @@ async def create_pipeline_schedule(
     if ws and not payload.get("workspace_id"):
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):
-        assert_resource_workspace(request, str(payload.get("workspace_id") or ""))
+        assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
+    warnings: list[str] = []
     try:
-        sched = create_schedule(payload)
+        sched = create_schedule(
+            payload,
+            # Only an explicit enabled:true is a request to arm (QA SC7); an
+            # omitted flag saves an unmapped schedule as a draft and says so.
+            refuse_empty_enable="enabled" in body.model_fields_set and body.enabled,
+            warnings=warnings,
+        )
+    except ApiError:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ScheduleResponse.from_schedule(sched)
+    record_security_event(
+        "schedule.definition.create",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{sched.id}",
+        status=201,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
+    return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
 
+@router.put("/{schedule_id}", response_model=ScheduleResponse)
 @router.patch("/{schedule_id}", response_model=ScheduleResponse)
 async def patch_pipeline_schedule(
     schedule_id: str,
@@ -328,46 +671,113 @@ async def patch_pipeline_schedule(
     existing = get_schedule(schedule_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
+    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "", write=True)
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    # A PATCH must not re-home a schedule into another workspace.
+    data.pop("workspace_id", None)
     if not data:
         return ScheduleResponse.from_schedule(existing)
+    warnings: list[str] = []
     try:
-        updated = update_schedule(schedule_id, data)
+        updated = update_schedule(schedule_id, data, warnings=warnings)
+    except ApiError:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    return ScheduleResponse.from_schedule(updated)
+    record_security_event(
+        "schedule.definition.update",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "id": updated.id,
+            "source_connector_id": updated.source_connector_id,
+            "source_table": updated.source_table,
+            "dest_connector_id": updated.dest_connector_id,
+            "dest_table": updated.dest_table,
+            "sync_mode": updated.sync_mode,
+            "enabled": bool(updated.enabled),
+        },
+    )
+    return ScheduleResponse.from_schedule(updated, warnings=warnings)
 
 
 @router.get("/{schedule_id}/export")
-def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] = "yaml"):
+def export_pipeline_schedule(
+    schedule_id: str,
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Export a schedule as a versionable YAML/JSON artifact for GitOps."""
-    import yaml
-
     from services.gitops_manifest import schedule_artifact
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
     artifact = schedule_artifact(sched)
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
+            content=dump_artifact_yaml(artifact),
             media_type="application/x-yaml",
             headers={"Content-Disposition": f"attachment; filename=schedule-{schedule_id}.yaml"},
         )
     return artifact
 
 
+@router.get("/{schedule_id}/notifications")
+async def list_schedule_notifications(
+    schedule_id: str,
+    request: Request,
+    limit: int = 50,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Alert deliveries for this schedule's runs, newest first (QA SC9).
+
+    Includes runs refused before a job existed. Records carry no URL, secret
+    or payload.
+    """
+    import asyncio
+
+    from services.notification_delivery_log import list_deliveries
+
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
+    rows = await asyncio.to_thread(
+        list_deliveries,
+        workspace_id=getattr(sched, "workspace_id", "") or "",
+        schedule_id=schedule_id,
+        limit=limit,
+    )
+    return {"schedule_id": schedule_id, "deliveries": rows}
+
+
 @router.post("/import", response_model=ScheduleResponse, status_code=201)
-async def import_pipeline_schedule(payload: dict[str, Any]):
+async def import_pipeline_schedule(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Import a PipelineSchedule GitOps artifact (create or replace by id)."""
     from services.gitops_manifest import apply_manifest
 
-    # Prefer single-resource apply so kind wrappers and bare specs both work.
-    result = apply_manifest(payload, dry_run=False)
+    ws = resolve_write_workspace(request, workspace_id)
+    if ws:
+        # Bind the imported spec to the caller's workspace so a pasted YAML
+        # cannot land in another tenant.
+        spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
+        if isinstance(spec, dict):
+            spec["workspace_id"] = ws
+    result = apply_manifest(
+        payload,
+        dry_run=False,
+        workspace_id=ws,
+        workspace_filter=tenant_scope(request, workspace_id).filter,
+    )
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:
@@ -376,29 +786,114 @@ async def import_pipeline_schedule(payload: dict[str, Any]):
     sched = get_schedule(str(sched_row.get("id") or ""))
     if not sched:
         raise HTTPException(status_code=500, detail="Schedule imported but not readable")
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=True)
+    record_security_event(
+        "schedule.definition.import",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{sched.id}",
+        status=201,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(sched)
 
 @router.delete("/{schedule_id}")
-async def remove_pipeline_schedule(schedule_id: str):
+async def remove_pipeline_schedule(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
+    capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
-    return {"success": True}
+    record_security_event(
+        "schedule.definition.delete",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{schedule_id}",
+        status=200,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
+    return {"success": True, "capture_release": capture}
 
 
 @router.get("/{schedule_id}/history")
-async def get_pipeline_history(schedule_id: str, limit: int = 25):
-    """Return the persisted run history (most recent first)."""
-    import asyncio
+async def get_pipeline_history(
+    schedule_id: str,
+    request: Request,
+    limit: int = 25,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Return the run records, most recent first: open, finished and skipped.
 
-    sched = await asyncio.to_thread(get_schedule, schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
-    history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]
-    return {"schedule_id": schedule_id, "runs": history}
+    Each record carries ``run_id``, ``status``, ``reason``, ``reason_code`` and
+    its persisted ``transitions``. Legacy rows are filled on read.
+    """
+    from services.schedule_run_lifecycle import derive_status, run_view
+
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
+    rows = [run_view(r, i) for i, r in enumerate(sched.run_history or [])]
+    history = list(reversed(rows))[: max(1, min(limit, 100))]
+    return {"schedule_id": schedule_id, "runs": history, "status": derive_status(sched)}
+
+
+def _flat_schema_map(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    nested = raw.get("columns")
+    if isinstance(nested, dict):
+        raw = nested
+    return {
+        str(k): str(v)
+        for k, v in raw.items()
+        if not str(k).startswith("_") and not isinstance(v, (dict, list))
+    }
+
+
+def _probe_source_schema_timed(endpoint, seconds: float = 12.0) -> dict[str, Any]:
+    """Live introspect with a hard ceiling so Accept cannot spin on a warehouse."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from services.schedule_runner import probe_schedule_source_schema
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(probe_schedule_source_schema, endpoint)
+        try:
+            return future.result(timeout=seconds) or {}
+        except FuturesTimeout as exc:
+            raise TimeoutError(
+                "The source did not answer in time. Accept records the shape "
+                "this finding already compared — a sleeping warehouse cannot "
+                "block that."
+            ) from exc
 
 
 @router.post("/{schedule_id}/accept-source-schema")
-async def accept_source_schema(schedule_id: str):
+async def accept_source_schema(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Record the source's current shape as this schedule's baseline.
 
     A run refused for source drift is a finding, not a verdict: the operator has
@@ -408,71 +903,636 @@ async def accept_source_schema(schedule_id: str):
 
     Deliberately explicit. Re-baselining is the operator asserting the change is
     understood, so it is never done for them by a retry.
+
+    The shape that parked the run is preferred over a second live introspect.
+    Re-probing Snowflake while the warehouse is asleep is what made Accept hang
+    with no error. A same-spelling ``narrow_type`` (TIMESTAMP_NTZ →
+    TIMESTAMP_NTZ) uses the remembered baseline — there is nothing new to read.
     """
     from datetime import datetime, timezone
 
-    from services.schedule_runner import _endpoint_from_connector, _resolve_connector
+    from services.schema_drift import is_same_declaration_narrow
+    from services.schedule_approvals import resolve_plan_change
+    from services.schedule_runner import (
+        _apply_callable_schedule_source,
+        _endpoint_from_connector,
+        _resolve_connector,
+    )
     from services.source_schema_memory import fingerprint_source
-    from src.transfer.endpoint_intelligence import introspect_endpoint
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
+    open_req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    evidence = (
+        dict(open_req.get("evidence") or {})
+        if str(open_req.get("status") or "") == STATUS_OPEN
+        else {}
+    )
 
-    src = _resolve_connector(sched.source_connector_id)
-    if not src:
-        raise HTTPException(
-            status_code=400,
-            detail="Source connector is unavailable — cannot read the current schema.",
-        )
-    try:
-        endpoint = _endpoint_from_connector(src, sched.source_table)
-        info = introspect_endpoint(endpoint) or {}
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Could not read the source schema: {exc}"
-        ) from exc
+    schema = _flat_schema_map(evidence.get("current_schema"))
+    columns = [str(c) for c in (evidence.get("current_columns") or schema.keys()) if str(c).strip()]
+    source = "finding"
 
-    schema = {str(k): str(v) for k, v in (info.get("schema") or {}).items()}
+    if not schema and is_same_declaration_narrow(evidence.get("breaking")):
+        schema = _flat_schema_map(getattr(sched, "source_schema", None) or {})
+        columns = list(schema.keys())
+        source = "unchanged-declaration"
+
+    if not schema:
+        src = _resolve_connector(sched.source_connector_id)
+        if not src:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Source connector is unavailable — cannot read the current "
+                    "schema. Open Map once the connector answers, or retry Accept."
+                ),
+            )
+        try:
+            endpoint = _endpoint_from_connector(src, sched.source_table)
+            _apply_callable_schedule_source(endpoint, sched)
+            info = _probe_source_schema_timed(endpoint)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Could not read the source schema: {exc}"
+            ) from exc
+        schema = _flat_schema_map(info.get("schema"))
+        columns = [str(c) for c in (info.get("columns") or schema.keys())]
+        source = "live-probe"
+
     if not schema:
         raise HTTPException(
             status_code=502,
             detail="Source returned no schema — nothing to record as a baseline.",
         )
-    columns = [str(c) for c in (info.get("columns") or schema.keys())]
-    fingerprint = fingerprint_source(columns, schema)
+    fingerprint = fingerprint_source(columns or list(schema.keys()), schema)
+    pk = [
+        str(p).strip()
+        for p in (evidence.get("current_primary_key") or getattr(sched, "source_primary_key", None) or [])
+        if str(p).strip()
+    ]
     updated = update_schedule(
         schedule_id,
         {
             "source_schema": schema,
             "source_schema_fingerprint": fingerprint,
             "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_primary_key": pk,
         },
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
+
+    user = getattr(request.state, "user", None) or {}
+    actor = str(user.get("email") or user.get("name") or "").strip() or "operator"
+    closed = resolve_plan_change(
+        schedule_id,
+        actor=actor,
+        reason="Accepted the source's current shape as this schedule's baseline.",
+    )
+
     return {
         "success": True,
         "schedule_id": schedule_id,
         "source_schema_fingerprint": fingerprint,
         "columns": len(schema),
+        "recorded_from": source,
+        "approval_closed": bool(closed),
         "message": (
             f"Baseline updated to the source's current shape ({len(schema)} columns). "
-            "The next run compares against this."
+            + (
+                "The parked finding is closed — the next run compares against this."
+                if closed
+                else "The next run compares against this."
+            )
         ),
     }
 
 
-@router.post("/{schedule_id}/run")
-async def run_pipeline_now(schedule_id: str):
-    """Trigger an immediate run (does not change the regular cadence)."""
-    from ..services.schedule_runner import _run_schedule
+class ScheduleRecipeUpgrade(BaseModel):
+    """Explicit recipe-version upgrade for a bound schedule (B3).
 
+    ``expected_from_version`` is optimistic concurrency: the operator
+    reviewed a preview at version N — if another operator re-pinned the
+    schedule to something else since, the upgrade refuses with 409.
+    ``expected_diff_hash`` binds the upgrade to the exact diff hash the
+    preview returned, refusing a stale review after further recipe edits.
+    """
+
+    target_version: int = Field(ge=1)
+    expected_from_version: Optional[int] = Field(default=None, ge=1)
+    expected_diff_hash: Optional[str] = None
+
+
+@router.post("/{schedule_id}/transform-recipe/upgrade")
+def upgrade_schedule_recipe(
+    schedule_id: str,
+    body: ScheduleRecipeUpgrade,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Re-pin a schedule's transform recipe to a newer version — explicit.
+
+    The companion GET preview is ``POST /transform-library/{id}/
+    upgrade-preview``: this call applies the re-pin the operator already
+    reviewed, re-resolving the compiled shape_recipe at the target version
+    so the bound steps always match the binding they claim. Pin mode is
+    forced — a follow-latest schedule upgrades by editing its mode, not
+    this endpoint.
+    """
+    resolve_write_workspace(request, workspace_id)
+    existing = get_schedule(schedule_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "", write=True)
+    recipe_id = str(getattr(existing, "transform_recipe_id", "") or "").strip()
+    if not recipe_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Schedule has no transform recipe binding to upgrade",
+        )
+    from_version = int(getattr(existing, "transform_recipe_version", 0) or 0)
+    if (
+        body.expected_from_version is not None
+        and int(body.expected_from_version) != from_version
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Schedule binding moved: expected pinned version "
+                f"{int(body.expected_from_version)}, currently {from_version}. "
+                "Re-run upgrade-preview before re-pinning."
+            ),
+        )
+
+    from services.transform_library import (
+        get_transform_library,
+        recipe_diff_hash,
+        recipe_step_diff,
+    )
+
+    store = get_transform_library()
+    ws = getattr(existing, "workspace_id", "") or ""
+    old = store.get(recipe_id, workspace_id=ws or None, version=from_version)
+    new = store.get(
+        recipe_id, workspace_id=ws or None, version=body.target_version
+    )
+    if new is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Transform recipe {recipe_id} version "
+                f"{body.target_version} not found"
+            ),
+        )
+    step_diff = (
+        recipe_step_diff(
+            [st.to_dict() for st in old.steps],
+            [st.to_dict() for st in new.steps],
+        )
+        if old is not None
+        else []
+    )
+    if body.expected_diff_hash:
+        actual_hash = recipe_diff_hash(
+            recipe_id, from_version, int(body.target_version), step_diff
+        )
+        if actual_hash != body.expected_diff_hash.strip():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Stale preview: the recipe or binding changed after "
+                    "the preview was taken. Re-run upgrade-preview before "
+                    "re-pinning."
+                ),
+            )
+    is_rollback = int(body.target_version) < from_version
+    try:
+        updated = update_schedule(
+            schedule_id,
+            {
+                "transform_recipe_id": recipe_id,
+                "transform_recipe_version": int(body.target_version),
+                "transform_recipe_version_mode": "pin",
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.recipe.upgrade",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "recipe_id": recipe_id,
+            "from_version": from_version,
+            "to_version": int(body.target_version),
+            "rollback": is_rollback,
+        },
+    )
+    return {
+        "schedule_id": schedule_id,
+        "recipe_id": recipe_id,
+        "from_version": from_version,
+        "to_version": int(body.target_version),
+        "rollback": is_rollback,
+        "bound_version": int(
+            getattr(updated, "transform_recipe_version", 0) or 0
+        ),
+        "step_diff": step_diff,
+    }
+
+
+@router.post("/{schedule_id}/sync")
+async def sync_pipeline(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Stage Sync now or a full re-sync of a schedule's signed contract."""
+    from services.schedule_store import assert_schedule_run_allowed
+    from services.sync_now import SyncNowRefused, prepare_sync
+
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
+    try:
+        assert_schedule_run_allowed(sched)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    mode = str(raw.get("mode") or "sync")
+    parent = {
+        "sync_mode": getattr(sched, "sync_mode", "") or "",
+        "primary_key": getattr(sched, "primary_key", "") or "",
+        "mappings": list(getattr(sched, "mappings", None) or []),
+        "stream_contracts": list(getattr(sched, "stream_contracts", None) or []),
+        "schema_policy": getattr(sched, "schema_policy", "") or "",
+        "contract_id": getattr(sched, "contract_id", "") or "",
+    }
+    try:
+        return prepare_sync(
+            mode=mode,
+            parent_request=parent,
+            parent_id=schedule_id,
+            schedule_id=schedule_id,
+            source_connected=True,
+            destination_connected=True,
+            connectivity_checked=False,
+        )
+    except SyncNowRefused as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc), **exc.details}) from exc
+
+
+@router.post("/{schedule_id}/run")
+async def run_pipeline_now(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Trigger an immediate run (does not change the regular cadence).
+
+    Paused / disabled is a cadence switch, not a Run now refusal. A paused
+    schedule still has connectors — collapsing that skip into "check
+    connectors" sent operators to Test on healthy Snowflake rows.
+    """
+    from services.schedule_store import assert_schedule_run_allowed
+    from ..services.schedule_runner import ScheduleStartError, _run_schedule
+
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
+    try:
+        assert_schedule_run_allowed(sched)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        user = getattr(request.state, "user", None) or {}
+        actor = (
+            str(user.get("email") or user.get("name") or "").strip()
+            or str(request.headers.get("X-Actor") or "").strip()
+        )
+        job_id = _run_schedule(
+            schedule_id,
+            manual=True,
+            triggered_by=actor or "run-now",
+        )
+    except ApiError:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ScheduleStartError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+    if not job_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not start this schedule. Open the schedule for the parked "
+                "finding, or confirm the source and destination connectors still resolve."
+            ),
+        )
+    updated = get_schedule(schedule_id)
+    return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+
+
+class CatchUpRequest(BaseModel):
+    #: How many overdue cadence windows to replay as individual runs.
+    #: 0 = every outstanding window, still capped (server-side) per request.
+    windows: int = Field(default=0, ge=0, le=24)
+
+
+@router.post("/{schedule_id}/catch-up")
+async def request_schedule_catch_up(
+    schedule_id: str,
+    request: Request,
+    body: CatchUpRequest | None = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Replay missed cadence windows — operator-approved, bounded, audited.
+
+    An outage or a long-running window leaves skipped slots counted on the
+    schedule but never replayed; for schedules where each window is a distinct
+    batch (e.g. daily file drops) that is a real coverage gap. This queues up
+    to 24 runs — one per missed window, oldest first — each tagged ``catch_up``
+    in run history. The claim path still serializes them: one writer at a time.
+    """
+    from services.schedule_store import (
+        CATCH_UP_WINDOW_CAP,
+        request_schedule_catch_up as _queue_catch_up,
+    )
+
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id, write=True)
+    updated, queued = _queue_catch_up(schedule_id, (body.windows if body else 0))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {
+        "success": True,
+        "windows_queued": queued,
+        "cap": CATCH_UP_WINDOW_CAP,
+        "schedule": ScheduleResponse.from_schedule(updated),
+    }
+
+
+# --- Autopilot: the approval inbox -------------------------------------------
+#
+# A scheduled run that a gate refuses used to record one more failed run and fail
+# identically on every later beat. It now parks on a single durable finding that a
+# human can decide, and a decision can optionally mint a scoped, expiring,
+# hash-bound standing authorization so later runs of the *same plan* proceed
+# unattended. Nothing here weakens execution: preflight, the destination reread
+# and Gate-8 reconciliation still decide whether a run is green.
+
+
+class ApprovalDecision(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    #: Attestations the operator is making. Only those the finding asked for are
+    #: honoured; a scope with nothing signed behind it is refused.
+    compliance: bool = False
+    schema_drift: bool = False
+    fk_risk: bool = False
+    #: False approves this run only. True delegates the same signature to future
+    #: runs of the identical plan, and needs ``schedule.authorize``.
+    grant_standing: bool = False
+    expires_in_days: int = Field(default=30, ge=1, le=90)
+    scopes: Optional[list[str]] = None
+
+
+class RejectDecision(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    #: Leave the schedule paused (default) rather than let the next beat re-raise
+    #: the same refusal.
+    disable: bool = True
+
+
+class AuthorizationGrant(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    scopes: list[str] = Field(..., min_length=1)
+    compliance: bool = False
+    schema_drift: bool = False
+    fk_risk: bool = False
+    expires_in_days: int = Field(default=30, ge=1, le=90)
+
+
+def _decider(request: Request, *, authorize: bool = False) -> str:
+    """The named human behind this decision, or 403.
+
+    The actor is taken from the verified session whenever there is one, never from
+    the body: an audit trail the client names itself is not an audit trail. A
+    signed-in operator therefore decides without naming themselves twice, and the
+    role on that identity is still enforced. Only when no identity was verified —
+    a single-operator deployment with enforcement off — may the caller name
+    themselves through the ``X-Actor`` header.
+    """
+    from services.effective_role import (
+        effective_permissions,
+        workspace_id_from_request_headers,
+    )
+    from services.rbac import Permission
+    from src.services import auth_service
+
+    user = getattr(request.state, "user", None) or {}
+    needed = Permission.SCHEDULE_AUTHORIZE if authorize else Permission.SCHEDULE_MANAGE
+    if user:
+        granted = effective_permissions(user, workspace_id_from_request_headers(request.headers))
+        if needed not in granted:
+            raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
+        actor = str(user.get("email") or user.get("name") or "").strip()
+        if len(actor) >= MIN_ACTOR_LEN:
+            return actor
+    if not auth_service.auth_required():
+        actor = str(request.headers.get("X-Actor") or "").strip()
+        if len(actor) >= MIN_ACTOR_LEN:
+            return actor
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "X-Actor must name the person making this decision "
+                f"(at least {MIN_ACTOR_LEN} characters)."
+            ),
+        )
+    raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
+
+
+@router.get("/approvals/open")
+async def list_open_approvals(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Every schedule currently parked on a decision, newest first.
+
+    The tenant comes from the same header every other schedule route reads. As a
+    plain argument it was a query parameter no caller sends, so the scope
+    resolved empty and the inbox listed schedules — with their connector ids —
+    from every workspace the operator was not looking at.
+    """
+    import asyncio
+
+    from services.schedule_approvals import open_approvals
+
+    scope = tenant_scope(request, workspace_id).filter
+    items = await asyncio.to_thread(open_approvals, workspace_filter=scope)
+    return {"count": len(items), "approvals": items}
+
+
+@router.get("/{schedule_id}/approval")
+async def get_schedule_approval(schedule_id: str, request: Request):
+    """This schedule's open finding and its standing authorization, if any."""
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    job_id = _run_schedule(schedule_id)
-    if not job_id:
-        raise HTTPException(status_code=400, detail="Could not start pipeline — check connectors")
-    updated = get_schedule(schedule_id)
-    return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+    assert_resource_workspace(request, sched.workspace_id or "")
+    return {
+        "schedule_id": schedule_id,
+        "approval": dict(sched.approval_request or {}),
+        "authorization": dict(sched.standing_authorization or {}),
+    }
+
+
+@router.post("/{schedule_id}/approvals/{approval_id}/approve")
+async def approve_schedule_finding(
+    schedule_id: str,
+    approval_id: str,
+    payload: ApprovalDecision,
+    request: Request,
+):
+    """Approve one finding, and optionally delegate it to future identical runs."""
+    from services.schedule_approvals import (
+        AuthorizationRefused,
+        approve_request,
+    )
+
+    actor = _decider(request, authorize=bool(payload.grant_standing))
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
+    try:
+        result = approve_request(
+            schedule_id,
+            approval_id,
+            actor=actor,
+            reason=payload.reason,
+            acknowledgments={
+                "compliance": payload.compliance,
+                "schema_drift": payload.schema_drift,
+                "fk_risk": payload.fk_risk,
+            },
+            scopes=payload.scopes,
+            grant_standing=payload.grant_standing,
+            expires_in_days=payload.expires_in_days,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AuthorizationRefused as exc:
+        # A refused delegation writes nothing, so the schedule is never left
+        # half-approved.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "approval": result["approval"],
+        "authorization": result["authorization"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.post("/{schedule_id}/approvals/{approval_id}/reject")
+async def reject_schedule_finding(
+    schedule_id: str,
+    approval_id: str,
+    payload: RejectDecision,
+    request: Request,
+):
+    """Reject a finding; the schedule is paused rather than left to re-refuse."""
+    from services.schedule_approvals import reject_request
+
+    actor = _decider(request)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
+    try:
+        result = reject_request(
+            schedule_id,
+            approval_id,
+            actor=actor,
+            reason=payload.reason,
+            disable=payload.disable,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "approval": result["approval"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.post("/{schedule_id}/authorization")
+async def grant_schedule_authorization(
+    schedule_id: str,
+    payload: AuthorizationGrant,
+    request: Request,
+):
+    """Grant scoped, expiring standing authority for this schedule's current plan."""
+    from services.schedule_approvals import (
+        AuthorizationRefused,
+        set_standing_authorization,
+    )
+
+    actor = _decider(request, authorize=True)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
+    try:
+        result = set_standing_authorization(
+            schedule_id,
+            actor=actor,
+            reason=payload.reason,
+            scopes=list(payload.scopes),
+            acknowledgments={
+                "compliance": payload.compliance,
+                "schema_drift": payload.schema_drift,
+                "fk_risk": payload.fk_risk,
+            },
+            expires_in_days=payload.expires_in_days,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AuthorizationRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "authorization": result["authorization"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.delete("/{schedule_id}/authorization")
+async def revoke_schedule_authorization(
+    schedule_id: str,
+    request: Request,
+    reason: str = "",
+):
+    """Revoke standing authority. The record is kept, permanently unusable."""
+    from services.schedule_approvals import revoke_standing_authorization
+
+    actor = _decider(request, authorize=True)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
+    try:
+        result = revoke_standing_authorization(schedule_id, actor=actor, reason=reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"success": True, "authorization": result["authorization"]}

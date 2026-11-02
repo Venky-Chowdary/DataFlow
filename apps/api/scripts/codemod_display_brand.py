@@ -27,13 +27,13 @@ REPLACEMENTS: list[tuple[str, str]] = [
     ("Datawrap Pilot", "Datawrap Pilot"),
     ("Datawrap", "Datawrap"),
     ("Dataflow", "Datawrap"),
-    ("sales@dataflow.dev", "sales@datawrap.app"),
-    ("noreply@dataflow.com", "noreply@datawrap.app"),
-    ("admin@dataflow.app", "admin@datawrap.app"),
-    ("https://dataflow.app", "https://datawrap.app"),
-    ("http://dataflow.app", "https://datawrap.app"),
-    ("api.dataflow.io", "api.datawrap.app"),
-    ("your-company.dataflow.io", "your-company.datawrap.app"),
+    ("sales@dataflow.dev", "sales@datawrap.io"),
+    ("noreply@dataflow.com", "noreply@example.com"),
+    ("admin@dataflow.app", "contact@datawrap.io"),
+    ("https://dataflow.app", "https://www.datawrap.io"),
+    ("http://dataflow.app", "https://www.datawrap.io"),
+    ("api.dataflow.io", "api.datawrap.io"),
+    ("your-company.dataflow.io", "your-company.datawrap.io"),
     ("dataflow.company.com", "datawrap.company.com"),
     ("dataflow@example.com", "datawrap@example.com"),
     ("dataflow@localhost", "datawrap@localhost"),
@@ -72,7 +72,7 @@ def transform(text: str) -> str:
 
 
 def main() -> None:
-    files = hits = 0
+    files = 0
     for target in TARGETS:
         paths = [target] if target.is_file() else list(target.rglob("*"))
         for path in paths:

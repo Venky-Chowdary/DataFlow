@@ -1,0 +1,21 @@
+{
+  "conversations": [
+    {
+      "id": "3003",
+      "updated_at": 1767225900,
+      "created_at": 1767225800,
+      "title": "Synthetic Conversation Three",
+      "state": "open"
+    },
+    {
+      "id": "3004",
+      "updated_at": 1767226000,
+      "created_at": 1767225900,
+      "title": "Synthetic Conversation Four",
+      "state": "closed"
+    }
+  ],
+  "pages": {
+    "next": null
+  }
+}

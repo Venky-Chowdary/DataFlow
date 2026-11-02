@@ -11,8 +11,8 @@ Honesty
 """
 
 from __future__ import annotations
-
 import os
+
 from services.brand_env import getenv_brand
 import socket
 import sys
@@ -40,7 +40,7 @@ CFG = {
     or "sa",
     "password": getenv_brand("AG_PASSWORD")
     or getenv_brand("MSSQL_PASSWORD")
-    or "Datawrap_CDC_2022!",
+    or os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
     "multi_subnet_failover": _AG_LIVE,
 }
 

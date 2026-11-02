@@ -52,6 +52,42 @@ CURSOR_SEMANTICS: frozenset[str] = frozenset(
     }
 )
 
+#: Conventional names for a column the source maintains on every change.
+#: Matching the name is not proof a trigger exists. Zero matches and two
+#: matches are both "no selection" — a missing watermark stays missing, and
+#: two candidates are not a guess. ``created_at`` is absent on purpose.
+_MODIFICATION_TIMESTAMP_COLUMNS: frozenset[str] = frozenset(
+    {
+        "updated_at",
+        "updatedat",
+        "last_updated",
+        "last_modified",
+        "modified_at",
+        "modified_on",
+        "updated_on",
+        "update_timestamp",
+        "modification_timestamp",
+        "row_updated_at",
+    }
+)
+
+
+def sole_modification_timestamp_column(columns: list[str] | None) -> str:
+    """Source spelling of the only modification-timestamp column, or ``""``.
+
+    Used when an incremental upsert was asked for and no cursor was named.
+    The caller must declare ``modification_timestamp`` and show the operator
+    the assumption. A column that is not on the source is never invented.
+    """
+    found: list[str] = []
+    for col in columns or []:
+        name = str(col or "").strip()
+        if name and name.lower() in _MODIFICATION_TIMESTAMP_COLUMNS:
+            found.append(name)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
 #: Semantics under which a row that changes after it was read is read again.
 _CAPTURES_UPDATES: frozenset[str] = frozenset({MODIFICATION_TIMESTAMP, CDC_POSITION})
 
@@ -109,6 +145,7 @@ def evaluate_cursor_semantics(
     cursor_field: str,
     declared: str,
     validation_mode: str = "strict",
+    lookback_days: int = 0,
 ) -> CursorSemanticsVerdict:
     """Judge a cursor declaration against what the sync mode promises.
 
@@ -175,13 +212,35 @@ def evaluate_cursor_semantics(
     # Not monotonic on insert: a row can arrive behind the watermark and be
     # skipped permanently, and under an update-bearing mode an in-place edit is
     # never re-read. Both are silent, so neither may be assumed away.
+    if value == BUSINESS_DATE and lookback_days >= 1:
+        # Supported: the bounded read starts at watermark - lookback_days, so
+        # a backdated insert or an in-place edit inside the window is re-read
+        # and collapses on the dedupe key. Honest residuals, stated to the
+        # operator: a change to a row dated outside the window is never
+        # re-read, and the re-read only collapses where a key exists.
+        return CursorSemanticsVerdict(
+            status="ok",
+            declared=value,
+            cursor_field=cursor,
+            sync_mode=mode,
+            reason=(
+                f"{cursor} declared '{value}' with a {lookback_days}-day "
+                "re-read window: every run re-reads the last "
+                f"{lookback_days} day(s) and collapses re-reads on the "
+                "dedupe key. A change to a row dated outside the window is "
+                "never re-read — widen the lookback if late edits reach "
+                "further back."
+            ),
+            captures_updates=False,
+            monotonic_on_insert=False,
+        )
     if value == BUSINESS_DATE:
         reason = (
             f"{cursor} declared '{value}': it comes from a calendar rather than "
             "the insert order, so a row inserted with an earlier date stays "
             f"behind the watermark and is never read"
             + (
-                f", and an update that leaves it untouched is never re-read either"
+                ", and an update that leaves it untouched is never re-read either"
                 if promises_updates
                 else ""
             )
@@ -229,7 +288,16 @@ def evaluate_cursor_semantics(
                 "on every change"
             )
         ),
-        alternatives=[
+        alternatives=(
+            [
+                "Declare a business-date re-read window "
+                "(cursor_lookback_days) to keep the date cursor — each run "
+                "re-reads that many days and collapses re-reads on the key",
+            ]
+            if value == BUSINESS_DATE
+            else []
+        )
+        + [
             f"Declare it '{MODIFICATION_TIMESTAMP}' if the source updates it on "
             "every change",
             f"Declare it '{INSERT_ONLY}' if rows are inserted once and never "

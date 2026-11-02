@@ -45,15 +45,24 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import tempfile
 import threading
+from collections.abc import Callable
+from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
+
+from services.brand_env import getenv_brand
+
+from services.copy_range_proof import range_keys_match  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 #: Pipe buffer between the two COPY cursors. Large enough that the reader is not
 #: woken per row, small enough that a stalled destination applies backpressure to
 #: the source instead of buffering a whole table in memory.
-_PIPE_CHUNK = 1 << 20
+_PIPE_CHUNK = 1 << 22
+_COPY_DECLINE: ContextVar[list[str] | None] = ContextVar("df_copy_decline", default=None)
 
 
 class FastPathResult(NamedTuple):
@@ -73,6 +82,14 @@ class FastPathResult(NamedTuple):
     #: fewer rules and reads more slowly than its source, so they travel with the
     #: result the same way the primary key and defaults do.
     indexes_carried: tuple[str, ...] = ()
+    #: What the checksum proves. Mapped column values, not triggers, RLS,
+    #: unmapped columns, or destination objects this path declined.
+    proof_scope: str = "mapped_columns"
+    #: Whether the destination table existed before this run. Server-to-server
+    #: copies create the dest themselves, so the reconcile/undo layer cannot
+    #: learn the fact from the row writer's own census — it has to travel with
+    #: the result or a created-this-run table survives a failed run (X-36).
+    dest_table_existed_before: bool | None = None
 
     @property
     def verified(self) -> bool:
@@ -83,8 +100,686 @@ class FastPathResult(NamedTuple):
         )
 
 
+def begin_copy_decline_capture(sink: list[str] | None = None) -> tuple[Token, list[str]]:
+    """Record FastPathUnavailable reasons for the operator dest_summary."""
+    bucket = sink if sink is not None else []
+    token = _COPY_DECLINE.set(bucket)
+    return token, bucket
+
+
+def reset_copy_decline_capture(token: Token) -> None:
+    _COPY_DECLINE.reset(token)
+
+
+def note_copy_decline(reason: str, *, log: bool = True) -> None:
+    """Append a COPY decline reason. Duplicate text in one capture is skipped."""
+    text = str(reason or "").strip()
+    if not text:
+        return
+    if log:
+        logger.info("COPY fast path declined: %s", text)
+    sink = _COPY_DECLINE.get()
+    if sink is not None and text not in sink:
+        sink.append(text)
+
+
 class FastPathUnavailable(Exception):
     """Raised when the route cannot be proven identical — caller falls back."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        note_copy_decline(str(message), log=False)
+
+
+def occupied_pk_range_action(
+    already: int, expected: int, *, replace_destination: bool, keys_proven: bool = True
+) -> str:
+    """How an occupied primary-key range may be loaded.
+
+    ``skip`` — dest already holds this range's source count.
+    ``load`` — the range is empty, so rows can be inserted.
+    ``reload`` — overwrite may delete the partial range and load it again.
+
+    Append never returns ``reload``. A count that is neither empty nor
+    complete is not proof the rows are a crashed shard of this run. Deleting
+    them drops rows this run did not write, the delete is committed, and the
+    append conservation proof then fails on the missing growth
+    (E3-001: dest 50 → 54, growth 4, 50 source rows unaccounted).
+
+    ``keys_proven=False``: the counts may match, but the range does not hold
+    this source range's keys (:func:`services.copy_range_proof.range_keys_match`)
+    — a count alone is never a skip (append of N new keys into N rows).
+    """
+    if int(already) == int(expected) and (keys_proven or int(expected) == 0):
+        return "skip"
+    if int(already) == 0:
+        return "load"
+    if not replace_destination:
+        raise FastPathUnavailable(
+            "append into an occupied destination whose key range is only partly "
+            "present stays on the row path — deleting that range would drop rows "
+            "this run did not write"
+        )
+    return "reload"
+
+
+class _CreateScope:
+    """Source catalog handed to a fast path, and the certificate it earned."""
+
+    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report")
+
+    def __init__(
+        self,
+        catalog: Any,
+        mappings: list[dict[str, Any]] | None,
+        dest_table: str = "",
+    ) -> None:
+        self.catalog = catalog
+        self.mappings = list(mappings or [])
+        self.dest_table = str(dest_table or "")
+        self.pending: FastPathCreate | None = None
+        self.report: dict[str, Any] | None = None
+
+    def owns(self, table: str) -> bool:
+        """Whether ``table`` is the destination this scope certifies.
+
+        A COPY upsert stages into ``_df_stg_<dest>`` with the same builder; a
+        staging CREATE must neither plan nor settle the destination's
+        certificate.
+        """
+        if not self.dest_table or not table:
+            return True
+        return table.strip().lower() == self.dest_table.strip().lower()
+
+    def certificate(self) -> dict[str, Any] | None:
+        """The settled certificate, or the pending plan downgraded to ``unknown``.
+
+        A CREATE that was planned but never read back from the destination
+        catalog emitted its clauses as claims; nothing verified them.
+        """
+        if self.report is not None or self.pending is None or self.pending.plan is None:
+            return self.report
+        for item in self.pending.plan.report.items:
+            if item.status == "carried":
+                item.status = "unknown"
+                item.reason = (
+                    "Emitted by the fast path but not read back from the destination "
+                    f"catalog. Would have: {item.reason}"
+                )
+        return self.pending.plan.report.to_dict()
+
+
+_CREATE_SCOPE: ContextVar[_CreateScope | None] = ContextVar(
+    "df_copy_create_scope", default=None
+)
+
+class FastPathCreate(NamedTuple):
+    """A fast-path CREATE resolved against the schema fidelity planner.
+
+    ``column_suffixes`` / ``table_constraints`` / ``create_suffix`` are the
+    planner's own fragments (NOT NULL, DEFAULT, COLLATE, PRIMARY KEY, UNIQUE,
+    CHECK, placement) for a dialect whose quoting matches the builder's.
+    ``primary_key`` / ``not_null`` are the same facts for a builder that renders
+    those two aspects with its own identifiers and declines the rest.
+    """
+
+    plan: Any = None
+    primary_key: tuple[str, ...] = ()
+    not_null: frozenset[str] = frozenset()
+    column_suffixes: dict[str, tuple[str, ...]] = {}
+    table_constraints: tuple[str, ...] = ()
+    create_suffix: str = ""
+
+    def column_suffix(self, target: str) -> str:
+        frags = self.column_suffixes.get(target)
+        if frags is not None:
+            return "".join(f" {f}" for f in frags)
+        return " NOT NULL" if target in self.not_null else ""
+
+
+#: Dialects whose fast-path builders quote identifiers exactly as the planner
+#: does, so its DDL fragments can be rendered verbatim.
+PLANNER_QUOTED_DIALECTS: frozenset[str] = frozenset(
+    {"postgresql", "redshift", "mysql", "mariadb", "sqlite"}
+)
+
+
+def begin_fast_path_create_scope(
+    source_schema_catalog: Any,
+    mappings: list[dict[str, Any]] | None,
+    dest_table: str = "",
+) -> tuple[Token, _CreateScope]:
+    """Make the source catalog visible to any CREATE a fast path renders.
+
+    The row path plans create-new DDL through ``schema_fidelity`` and settles
+    the certificate from the destination catalog; a fast path that renders its
+    own CREATE must answer to the same planner or hand the load back. The scope
+    carries the catalog in and the settled certificate out, so ``stream``
+    stamps it on the summary.
+    """
+    scope = _CreateScope(source_schema_catalog, mappings, dest_table)
+    return _CREATE_SCOPE.set(scope), scope
+
+
+def reset_fast_path_create_scope(token: Token) -> None:
+    _CREATE_SCOPE.reset(token)
+
+
+def plan_fast_path_create(
+    *,
+    dest_dialect: str,
+    pairs: list[tuple[str, str]],
+    ddls: list[str],
+    primary_key: list[str] | None,
+    dest_table: str = "",
+    dest_schema: str = "",
+) -> FastPathCreate:
+    """Resolve what a fast-path CREATE must render, or decline the fast path.
+
+    Outside a create scope the builder's own primary key is returned unchanged
+    (direct callers own their proof). In scope the plan is left pending until
+    ``settle_fast_path_create`` reads the destination back; the planner decides: a dialect
+    in ``PLANNER_QUOTED_DIALECTS`` gets every fragment the row path would
+    render. SQL Server's builder quotes with brackets and already appends
+    ``column_suffix``, so it also receives COLLATE / NOT NULL and still
+    declines DEFAULT, UNIQUE, CHECK, identity, CHARACTER SET, and placement
+    (those live in table constraints this builder does not render). Any other
+    builder gets PRIMARY KEY / NOT NULL and declines when the plan carries
+    anything more. A planned PRIMARY KEY that contradicts the one the builder
+    was given always declines.
+    """
+    scope = _CREATE_SCOPE.get()
+    targets = [t for _s, t in pairs]
+    given = tuple(c for c in (primary_key or []) if c in targets)
+    if scope is None or scope.catalog is None or not scope.owns(dest_table):
+        return FastPathCreate(primary_key=given)
+    from services.schema_fidelity import resolve_create_fidelity_plan
+
+    mappings = scope.mappings or [{"source": s, "target": t} for s, t in pairs]
+    plan = resolve_create_fidelity_plan(
+        source_schema_catalog=scope.catalog,
+        mappings=mappings,
+        target_columns=targets,
+        target_types=list(ddls),
+        dest_dialect=dest_dialect,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+    )
+    planned_pk = sorted(c.lower() for c in plan.primary_key)
+    given_pk = sorted(c.lower() for c in given)
+    if planned_pk and given_pk and planned_pk != given_pk:
+        raise FastPathUnavailable(
+            f"create-new must carry PRIMARY KEY ({', '.join(plan.primary_key)}) "
+            f"but the fast path was given ({', '.join(given)}) — the row path "
+            "creates and certifies the destination"
+        )
+    pk = tuple(plan.primary_key) or given
+    dialect = dest_dialect.lower()
+    if dialect in PLANNER_QUOTED_DIALECTS:
+        constraints = tuple(plan.table_constraints)
+        if not plan.primary_key and pk:
+            from connectors.sql_identifiers import quote_sql_identifier
+
+            quote = "`" if dialect in {"mysql", "mariadb"} else '"'
+            constraints += (
+                "PRIMARY KEY ("
+                + ", ".join(quote_sql_identifier(c, quote) for c in pk)
+                + ")",
+            )
+        scope.pending = FastPathCreate(
+            plan=plan,
+            primary_key=pk,
+            not_null=frozenset(plan.not_null_columns),
+            column_suffixes={
+                c: tuple(frags) for c, frags in plan.column_suffixes.items()
+            },
+            table_constraints=constraints,
+            create_suffix=(plan.create_suffix or "").strip(),
+        )
+        return scope.pending
+    # SQL Server CREATE quotes identifiers itself and appends column_suffix.
+    # COLLATE Latin1_General_* is a bare fragment, safe after the bracketed
+    # name. Table-level DEFAULT / UNIQUE / CHECK / placement are not rendered
+    # here, so those still hand the load back to the row path.
+    sqlserver_dest = dialect in {"sqlserver", "mssql", "sql_server"}
+    missing: list[str] = []
+    if plan.column_defaults:
+        missing.append(f"DEFAULT on {', '.join(plan.column_defaults)}")
+    if plan.unique_constraints:
+        missing.append(
+            "UNIQUE "
+            + ", ".join("(" + ", ".join(u) + ")" for u in plan.unique_constraints)
+        )
+    if plan.check_predicates:
+        missing.append(f"{len(plan.check_predicates)} CHECK constraint(s)")
+    if plan.identity_columns:
+        missing.append(f"identity on {', '.join(plan.identity_columns)}")
+    if plan.create_suffix:
+        missing.append("physical placement clause")
+    if any(
+        "CHARACTER SET" in frag.upper()
+        or (not sqlserver_dest and "COLLATE" in frag.upper())
+        for frags in plan.column_suffixes.values()
+        for frag in frags
+    ):
+        missing.append("column collation")
+    if missing:
+        raise FastPathUnavailable(
+            "create-new must carry "
+            + "; ".join(missing)
+            + " — the schema fidelity planner owns that DDL, so the row path "
+            "creates and certifies the destination"
+        )
+    scope.pending = FastPathCreate(
+        plan=plan,
+        primary_key=pk,
+        not_null=frozenset(plan.not_null_columns),
+        column_suffixes=(
+            {c: tuple(frags) for c, frags in plan.column_suffixes.items()}
+            if sqlserver_dest
+            else {}
+        ),
+    )
+    return scope.pending
+
+
+def settle_fast_path_create(
+    *,
+    dest_dialect: str,
+    dest_schema: str,
+    dest_table: str,
+    execute: Callable[[str], Any],
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+    cursor: Any | None = None,
+) -> None:
+    """Run the plan's post-CREATE DDL and certify it from the destination catalog.
+
+    An emitted clause is a claim; the certificate the scope hands back to the
+    run summary is the one the destination catalog settled, exactly as on the
+    row path.
+    """
+    scope = _CREATE_SCOPE.get()
+    if scope is None or scope.pending is None or scope.pending.plan is None:
+        return
+    if not scope.owns(dest_table):
+        return
+    from services.schema_fidelity import settle_create_new_on_destination
+
+    create, scope.pending = scope.pending, None
+    scope.report = settle_create_new_on_destination(
+        create.plan,
+        dest_dialect=dest_dialect,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        table_already_exists=False,
+        execute=execute,
+        fetchall=fetchall,
+        cursor=cursor,
+    )
+
+
+def settle_fast_path_create_on(
+    cursor: Any, *, dest_dialect: str, dest_table: str, dest_schema: str = ""
+) -> None:
+    """``settle_fast_path_create`` over a DB-API cursor (or sqlite3 connection)."""
+    dialect = dest_dialect.lower()
+    if dialect in {"postgresql", "redshift", "mysql", "mariadb"}:
+        from services.identity_carry import dbapi_percent_fetchall
+
+        fetchall: Callable[[str, tuple[Any, ...]], Any] = dbapi_percent_fetchall(cursor)
+    elif dialect == "oracle":
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            bound = sql
+            for idx in range(1, len(params) + 1):
+                bound = bound.replace("?", f":{idx}", 1)
+            cursor.execute(bound, params)
+            return cursor.fetchall()
+
+    elif dialect in {"sqlserver", "mssql", "sql_server"}:
+        # Catalog probes are written with ``?``. pyodbc (and the qmark wrapper)
+        # binds that. pymssql binds ``%s`` and aborts the batch on a marker
+        # mismatch, so the style is chosen before the first execute.
+        driver = f"{type(cursor).__module__}.{type(cursor).__name__}".lower()
+        placeholder = "%s" if "pymssql" in driver else "?"
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            bound = sql if placeholder == "?" else sql.replace("?", placeholder)
+            ran = cursor.execute(bound, params)
+            return (ran if ran is not None else cursor).fetchall()
+
+    else:
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            ran = cursor.execute(sql, params)
+            return (ran if ran is not None else cursor).fetchall()
+
+    settle_fast_path_create(
+        dest_dialect=dest_dialect,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        execute=cursor.execute,
+        fetchall=fetchall,
+        cursor=cursor,
+    )
+
+
+class CopyLedgerKey(NamedTuple):
+    """Identity of a whole-table COPY shard in ``_dataflow_write_ledger``.
+
+    A COPY commits one shard in one transaction; stamping it in the same
+    ledger the chunked writers use lets a retry of the same job find that
+    the shard already landed instead of appending it again (or declining to
+    the row path, which would then chunk-append a second copy).
+    """
+
+    job_id: str
+    batch_key: str
+    chunk_idx: int = 0
+
+
+def copy_ledger_key(job_id: str | None, dest_table: str) -> CopyLedgerKey | None:
+    if not job_id:
+        return None
+    from connectors.write_resilience import build_write_batch_key
+
+    return CopyLedgerKey(
+        job_id=str(job_id),
+        batch_key=build_write_batch_key(table_name=dest_table, extra="copy_shard"),
+    )
+
+
+def fast_path_create_certificate() -> dict[str, Any] | None:
+    """Certificate earned by the CREATE inside the current scope, if any."""
+    scope = _CREATE_SCOPE.get()
+    return None if scope is None else scope.certificate()
+
+
+def declared_copy_carrier(
+    item: dict[str, Any],
+    schema: dict[str, str],
+    source_col: str,
+    target_col: str,
+) -> str:
+    """The carrier a fast-path CREATE declares for one mapped column.
+
+    A Map mapping states the destination carrier as ``target_type`` and the
+    source's as ``source_type``; only a schema-derived mapping carries ``type``.
+    Consulting ``type`` and the introspected schema alone meant a caller that
+    passes no schema — the multi-stream contract route passes an empty one and
+    re-introspects inside each stream — fell through to the ``TEXT`` default for
+    every column, so a declared BIGINT key landed as SQLite ``TEXT`` and its
+    values were stored as text.
+    """
+    return str(
+        item.get("type")
+        or item.get("target_type")
+        or item.get("source_type")
+        or schema.get(source_col)
+        or schema.get(target_col)
+        or ""
+    )
+
+
+def copy_create_carrier(item: dict[str, Any], declared: str) -> str:
+    """The carrier a fast-path CREATE declares: the mapping's target first.
+
+    ``declared_copy_carrier`` answers what the *source* holds, which is what the
+    COPY-safety checks need. The CREATE must instead declare what the row path
+    would create (Map ≡ CREATE): the source stamp of a MySQL table
+    (``int(10) unsigned``) is not a destination type, and building the CREATE
+    from it produced a PostgreSQL syntax error (QA round 11). A mapping without
+    a target type keeps the source carrier, legalised by ``materialize_dest_ddl``.
+    """
+    return str(item.get("target_type") or declared or "")
+
+
+#: Mapping transforms that bind a text cell *as* a typed value on the row path.
+_TYPED_PARSE_TRANSFORMS = frozenset(
+    {"integer", "decimal", "boolean", "date", "datetime", "time"}
+)
+
+
+def census_logical_type(item: dict[str, Any], declared: str) -> str:
+    """The logical type the fast-path cell census must grade a column under.
+
+    A file cell is text; the row path binds it through the mapping's typed
+    transform (``decimal`` reads ``1,234`` as 1.234 under EU), so a census that
+    grades only the declared carrier lets an exact-decimal column that SQLite
+    spells ``TEXT`` pass ``1,234`` verbatim — the fast path and the row path
+    would then store different values for the same cell. When the carrier is
+    text (or unknown) and the transform names a parse, the census grades the
+    cell under the transform's kind and declines anything non-canonical.
+    """
+    transform = str(item.get("transform") or "").strip().lower()
+    if transform not in _TYPED_PARSE_TRANSFORMS:
+        return declared
+    from services.decision_kernel import normalize_logical_type
+
+    kind = normalize_logical_type(declared) if declared else ""
+    if kind in {"", "string", "text"}:
+        return transform
+    return declared
+
+
+#: Digits the destination engine's own text→number parser accepts verbatim.
+CANONICAL_DECIMAL_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_CANONICAL_INTEGER_TEXT = re.compile(r"^[+-]?\d+$")
+_ISO_DATE_TEXT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_TIME_TEXT = re.compile(r"^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$")
+_ISO_DATETIME_TEXT = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-]\d{2}(?::?\d{2})?)?$"
+)
+#: Boolean spellings every COPY-family loader (PostgreSQL COPY, MySQL strict
+#: LOAD DATA into TINYINT(1), SQLite) accepts without a cast the row path owns.
+_COPY_BOOLEAN_TEXT = frozenset({"0", "1"})
+
+
+def text_cell_copy_safe(
+    value: str | None,
+    logical: str,
+    *,
+    physical: str = "",
+    dest_db: str = "",
+) -> bool:
+    """Would the destination engine's bulk loader accept this text cell as-is?
+
+    An identity file COPY hands raw text to ``COPY FROM STDIN`` / ``LOAD DATA``
+    / ``executemany``, so the *engine* parses the cell. That parse is
+    all-or-nothing: one ``not-a-number`` fails the whole load and no cell is
+    quarantined. The census therefore runs over every cell before the
+    destination is touched, and a cell the carrier cannot hold declines the
+    fast path so the row path validates and quarantines it. Text carriers hold
+    anything; unknown logical types are left to the row path's own contract.
+
+    Syntax alone is not the carrier: ``99999999999999999999`` is an integer the
+    engine's BIGINT parser rejects at load, and ``0.016666668`` is a decimal
+    NUMBER(11,8) would round. When the ``physical`` destination type is known
+    the cell is also graded against the same range / precision-scale owners the
+    row path binds through (``fits_integer`` / ``fits_decimal``), so the census
+    and the writer agree on what fits.
+    """
+    if value is None:
+        return True
+    from services.decision_kernel import normalize_logical_type
+
+    kind = normalize_logical_type(logical) if logical else ""
+    if kind == "integer":
+        if not _CANONICAL_INTEGER_TEXT.match(value):
+            return False
+        if not physical:
+            return True
+        from connectors.writer_common import fits_integer
+
+        return fits_integer(value, physical, dest_db=dest_db)
+    if kind in {"decimal", "float"}:
+        if not CANONICAL_DECIMAL_TEXT.match(value):
+            return False
+        if not physical or kind != "decimal":
+            return True
+        from connectors.writer_common import (
+            fits_decimal,
+            parse_decimal_precision_scale,
+        )
+
+        params = parse_decimal_precision_scale(physical, dest_db=dest_db)
+        if params is None:
+            return True
+        return fits_decimal(value, params[0], params[1], dest_db=dest_db)
+    if kind == "boolean":
+        return value in _COPY_BOOLEAN_TEXT
+    if kind in {"date", "datetime", "time"}:
+        shape = {"date": _ISO_DATE_TEXT, "datetime": _ISO_DATETIME_TEXT}.get(kind, _ISO_TIME_TEXT)
+        if not shape.match(value):
+            return False
+        # Shape is not the calendar: '2024-02-30' / '0000-00-00' are ISO-shaped
+        # and the engine's bulk parse fails the whole load on them. The cell is
+        # graded by the row path's own temporal rules (calendar, carrier range,
+        # FSP / zone polarity) so census and writer hold out the same cell.
+        from connectors.sql_temporal import (
+            logical_to_temporal_ddl,
+            temporal_text_unfit_reason,
+        )
+        from connectors.writer_quarantine_unfit import temporal_cell_unfit_reason
+
+        ddl = physical or logical_to_temporal_ddl(kind) or logical
+        if temporal_text_unfit_reason(value, ddl, engine=dest_db):
+            return False
+        if not physical:
+            return True
+        return not temporal_cell_unfit_reason(value, physical, dest_db=dest_db)
+    return True
+
+
+def fifo_streaming_supported() -> bool:
+    """Does this host have named pipes the COPY routes stream through?"""
+    return hasattr(os, "mkfifo")
+
+
+def copy_spill_dir() -> str | None:
+    """Directory for the COPY spill file, when the operator names one.
+
+    A whole table lands here on a host without named pipes, and the default
+    temp directory is on the system volume. ``DATAFLOW_COPY_SPILL_DIR`` moves
+    it to a volume sized for the migration.
+    """
+    return (os.environ.get("DATAFLOW_COPY_SPILL_DIR") or "").strip() or None
+
+
+def stream_between_cursors(
+    *,
+    prefix: str,
+    producer: Callable[[str], None],
+    consumer: Callable[[str], None],
+    join_timeout: float = 120.0,
+) -> str:
+    """Move a COPY payload from ``producer`` to ``consumer`` through a path.
+
+    The two engines never speak to each other: one writes a TSV/binary stream,
+    the other reads it, and the only thing they share is a filesystem path.
+    Where the host has named pipes that path is a FIFO, so nothing is ever
+    fully materialised and a slow destination backpressures the source.
+
+    Windows has no ``os.mkfifo``, and every named-pipe route used to decline
+    there — a Windows-hosted DataFlow silently lost the server-side copy on
+    PG→MySQL, MySQL→PG and cross-instance MySQL→MySQL and fell back to the
+    3,200-row/sec Python writer. The payload is spilled to a real file
+    instead and read once the producer has finished: the same bytes in the
+    same order, sequential instead of overlapped, at the cost of the table's
+    text size on disk (see :func:`copy_spill_dir`).
+
+    Returns ``"fifo"`` or ``"spill"`` so the route can record which handoff
+    produced its rows; the proof is unaffected either way.
+    """
+    if not fifo_streaming_supported():
+        tmp = tempfile.mkdtemp(prefix=prefix, dir=copy_spill_dir())
+        path = os.path.join(tmp, "stream.tsv")
+        try:
+            producer(path)
+            consumer(path)
+        finally:
+            _discard_stream_path(path, tmp)
+        return "spill"
+
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    path = os.path.join(tmp, "stream.tsv")
+    os.mkfifo(path, 0o600)  # type: ignore[attr-defined]  # guarded above
+    failure: list[BaseException] = []
+
+    def _pump() -> None:
+        try:
+            producer(path)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
+            failure.append(exc)
+
+    pump = threading.Thread(target=_pump, name=f"{prefix}fifo", daemon=True)
+    pump.start()
+    try:
+        consumer(path)
+    except BaseException:
+        # Opening a FIFO blocks until the other end appears: a producer that
+        # never got there would hold this join forever, so the failing path
+        # waits briefly and lets the real exception out.
+        pump.join(timeout=30)
+        raise
+    finally:
+        pump.join(timeout=join_timeout)
+        _discard_stream_path(path, tmp)
+    if failure:
+        raise failure[0]
+    return "fifo"
+
+
+def _discard_stream_path(path: str, directory: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.debug("copy stream unlink skipped", exc_info=True)
+    try:
+        os.rmdir(directory)
+    except OSError:
+        logger.debug("copy stream rmdir skipped", exc_info=True)
+
+
+def skip_complete_identity_copy(
+    *,
+    source_count: int,
+    dest_count: int,
+    shard_mode: str,
+    extra_snapshot: dict[str, Any] | None = None,
+) -> FastPathResult:
+    """Occupied key-addressed dest whose COUNT equals source COUNT — skip write.
+
+    Only for destinations where a re-run rewrites the same keys or objects
+    (Redis keys, vector ids, object-store objects, Kafka compacted keys), so an
+    equal COUNT *is* the complete state. Row-addressed stores — SQL tables,
+    MongoDB collections, warehouse tables, Iceberg — must never call this:
+    ``full_refresh_append`` accumulates (two runs of N rows hold 2N), and an
+    equal COUNT is not proof the load already happened — the source may have
+    changed under the same cardinality. Those routes decline into an occupied
+    dest and the row path appends with a measured ``target_rows_before``.
+    Proof remains dest COUNT, never upsert ack.
+    """
+    proof = f"dest_count:{dest_count}"
+    snapshot = {
+        "copy_workers": 1,
+        "copy_split": "skip",
+        "copy_partitions": 1,
+        "partitions_skipped": 1,
+        "partitions_loaded": 0,
+        "shard_mode": shard_mode,
+        **(extra_snapshot or {}),
+    }
+    return FastPathResult(
+        rows_copied=source_count,
+        source_rows=source_count,
+        source_checksum=proof,
+        target_rows=dest_count,
+        target_checksum=proof,
+        source_snapshot=snapshot,
+        proof_scope="dest_count_equals_source_snapshot_count",
+    )
 
 
 def _quote(name: str) -> str:
@@ -131,6 +826,10 @@ class SourceShape(NamedTuple):
     not_null: set[str]
     defaults: dict[str, str]
     primary_key: list[str]
+    #: Non-default collations, keyed by column, already quoted for ``COLLATE``.
+    #: A column whose collation is the type default is absent — carrying the
+    #: default would pin dest to a collation the source did not declare.
+    collations: dict[str, str]
 
 
 def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) -> SourceShape:
@@ -146,10 +845,19 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
         SELECT a.attname,
                format_type(a.atttypid, a.atttypmod),
                a.attnotnull,
-               pg_get_expr(ad.adbin, ad.adrelid)
+               pg_get_expr(ad.adbin, ad.adrelid),
+               CASE
+                 WHEN a.attcollation <> 0
+                  AND a.attcollation <> t.typcollation
+                 THEN quote_ident(nc.nspname) || '.' || quote_ident(col.collname)
+                 ELSE NULL
+               END
         FROM pg_catalog.pg_attribute a
         JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
         JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+        JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+        LEFT JOIN pg_catalog.pg_collation col ON col.oid = a.attcollation
+        LEFT JOIN pg_catalog.pg_namespace nc ON nc.oid = col.collnamespace
         LEFT JOIN pg_catalog.pg_attrdef ad
           ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
         WHERE n.nspname = %s AND c.relname = %s
@@ -162,7 +870,8 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
     types: dict[str, str] = {}
     not_null: set[str] = set()
     defaults: dict[str, str] = {}
-    for name, declared, notnull, default in cur.fetchall():
+    collations: dict[str, str] = {}
+    for name, declared, notnull, default, collation in cur.fetchall():
         if str(name).lower() not in wanted:
             continue
         types[str(name)] = str(declared)
@@ -170,6 +879,8 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
             not_null.add(str(name))
         if default:
             defaults[str(name)] = str(default)
+        if collation:
+            collations[str(name)] = str(collation)
 
     cur.execute(
         """
@@ -185,7 +896,7 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
         (schema or "public", table),
     )
     primary_key = [str(r[0]) for r in cur.fetchall()]
-    return SourceShape(types, not_null, defaults, primary_key)
+    return SourceShape(types, not_null, defaults, primary_key, collations)
 
 
 def unsupported_structure(cur: Any, schema: str, table: str) -> str:
@@ -228,6 +939,30 @@ def unsupported_structure(cur: Any, schema: str, table: str) -> str:
     )
     if int(cur.fetchone()[0] or 0):
         found.append("identity or generated column")
+    cur.execute(
+        """
+        SELECT count(*)
+        FROM pg_catalog.pg_trigger t
+        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s AND NOT t.tgisinternal
+        """,
+        (schema or "public", table),
+    )
+    if int(cur.fetchone()[0] or 0):
+        found.append("trigger")
+    cur.execute(
+        """
+        SELECT c.relrowsecurity
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s
+        """,
+        (schema or "public", table),
+    )
+    row = cur.fetchone()
+    if row and bool(row[0]):
+        found.append("row level security")
     return ", ".join(sorted(set(found)))
 
 
@@ -247,32 +982,66 @@ def create_destination_like_source(
     lowered = {k.lower(): v for k, v in shape.types.items()}
     not_null = {c.lower() for c in shape.not_null}
     defaults = {k.lower(): v for k, v in shape.defaults.items()}
+    collations = {k.lower(): v for k, v in shape.collations.items()}
     rename = {s.lower(): t for s, t in pairs}
 
-    cols: list[str] = []
-    for source_col, target_col in pairs:
+    declared_types: list[str] = []
+    for source_col, _target in pairs:
         declared = lowered.get(source_col.lower())
         if not declared:
             raise FastPathUnavailable(
                 f"source column {source_col!r} has no declared type"
             )
+        declared_types.append(declared)
+    # The key only carries when every one of its columns is being copied; a
+    # partial key is not the same constraint and must not be invented.
+    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
+    given_pk = [c for c in pk_targets if c] if shape.primary_key and all(pk_targets) else []
+    create = plan_fast_path_create(
+        dest_dialect="postgresql",
+        pairs=pairs,
+        ddls=declared_types,
+        primary_key=given_pk,
+        dest_table=table,
+        dest_schema=schema,
+    )
+
+    cols: list[str] = []
+    for (source_col, target_col), declared in zip(pairs, declared_types, strict=True):
         piece = f"{_quote(target_col)} {declared}"
+        if create.plan is not None:
+            piece += create.column_suffix(target_col)
+            cols.append(piece)
+            continue
+        collation = collations.get(source_col.lower())
+        if collation:
+            piece += f" COLLATE {collation}"
         default = defaults.get(source_col.lower())
         if default:
+            if "nextval(" in default.lower():
+                raise FastPathUnavailable(
+                    f"source column {source_col!r} DEFAULT references a sequence "
+                    "that cannot be proven present on the destination"
+                )
             piece += f" DEFAULT {default}"
         if source_col.lower() in not_null:
             piece += " NOT NULL"
         cols.append(piece)
 
-    # The key only carries when every one of its columns is being copied; a
-    # partial key is not the same constraint and must not be invented.
-    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
-    if shape.primary_key and all(pk_targets):
-        cols.append(
-            "PRIMARY KEY (" + ", ".join(_quote(c) for c in pk_targets if c) + ")"
-        )
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+        suffix = f" {create.create_suffix}" if create.create_suffix else ""
+    else:
+        suffix = ""
+        if create.primary_key:
+            cols.append(
+                "PRIMARY KEY (" + ", ".join(_quote(c) for c in create.primary_key) + ")"
+            )
     cur.execute(
-        f"CREATE TABLE IF NOT EXISTS {_table_ref(schema, table)} ({', '.join(cols)})"  # nosec B608
+        f"CREATE TABLE {_table_ref(schema, table)} ({', '.join(cols)}){suffix}"  # nosec B608
+    )
+    settle_fast_path_create_on(
+        cur, dest_dialect="postgresql", dest_table=table, dest_schema=schema or "public"
     )
 
 
@@ -442,9 +1211,23 @@ def _stream_copy(
 
     pump = threading.Thread(target=_pump, name="copy-fast-path", daemon=True)
     pump.start()
+    class _CancelAwareReader:
+        """D102: poll the job's cancel probe on every COPY read block."""
+
+        __slots__ = ("_reader",)
+
+        def __init__(self, reader: Any) -> None:
+            self._reader = reader
+
+        def read(self, size: int = -1) -> bytes:
+            from services.cancel_check import cancel_checkpoint
+
+            cancel_checkpoint()
+            return self._reader.read(size)
+
     try:
         with os.fdopen(read_fd, "rb", _PIPE_CHUNK) as reader:
-            dest_cur.copy_expert(dest_sql, reader)
+            dest_cur.copy_expert(dest_sql, _CancelAwareReader(reader))
     except BaseException:
         # Drain so the writer's blocked write() returns and the thread can exit
         # instead of holding the source transaction open.
@@ -460,6 +1243,129 @@ def _stream_copy(
         raise failure[0]
 
 
+def _norm_pg_host(host: str) -> str:
+    h = (host or "").strip().lower()
+    if h in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return "127.0.0.1"
+    return h
+
+
+def postgres_same_relation(
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    source_schema: str,
+    source_table: str,
+    dest_schema: str,
+    dest_table: str,
+) -> bool:
+    """True when COPY would read and write the same PostgreSQL table."""
+    src_host = _norm_pg_host(str(src_cfg.get("host") or ""))
+    dest_host = _norm_pg_host(str(dest_cfg.get("host") or ""))
+    if src_host != dest_host:
+        return False
+    if int(src_cfg.get("port") or 5432) != int(dest_cfg.get("port") or 5432):
+        return False
+    src_db = str(src_cfg.get("database") or src_cfg.get("dbname") or "").lower()
+    dest_db = str(dest_cfg.get("database") or dest_cfg.get("dbname") or "").lower()
+    if src_db and dest_db and src_db != dest_db:
+        return False
+    return (
+        (source_schema or "public").lower() == (dest_schema or "public").lower()
+        and source_table.lower() == dest_table.lower()
+    )
+
+
+def _pg_dest_range_count(
+    cur: Any, dest_ref: str, dest_ident: str, part: dict[str, Any]
+) -> int:
+    from services.copy_pg_mysql import _pg_quoted_literal, pk_range_predicate
+
+    if part.get("null_shard"):
+        pred = f"{dest_ident} IS NULL"
+    else:
+        lo_sql = (
+            _pg_quoted_literal(cur, part["lo"]) if part.get("lo") is not None else None
+        )
+        hi_sql = (
+            _pg_quoted_literal(cur, part["hi"]) if part.get("hi") is not None else None
+        )
+        pred = pk_range_predicate(dest_ident, lo_sql, hi_sql)
+    if not pred:
+        cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+    else:
+        cur.execute(f"SELECT COUNT(*) FROM {dest_ref} WHERE {pred}")  # nosec B608
+    return int(cur.fetchone()[0])
+
+
+def _plan_pg_pk_partitions(
+    src_cur: Any,
+    source_ref: str,
+    src_ident: str,
+    pk_declared: str,
+    n_parts: int,
+    source_count: int,
+) -> list[dict[str, Any]]:
+    from services.copy_pg_mysql import (
+        _INTEGER_PK_BASES,
+        _pg_base,
+        _pg_quoted_literal,
+        fetch_integer_pk_cuts,
+        fetch_pk_interior_cuts,
+        key_ranges_from_cuts,
+        pk_range_predicate,
+    )
+
+    if n_parts <= 1:
+        key_ranges: list[tuple[Any | None, Any | None]] = [(None, None)]
+    elif _pg_base(pk_declared) in _INTEGER_PK_BASES:
+        cuts = fetch_integer_pk_cuts(src_cur, source_ref, src_ident, n_parts)
+        key_ranges = key_ranges_from_cuts(cuts)
+    else:
+        cuts = fetch_pk_interior_cuts(src_cur, source_ref, src_ident, n_parts)
+        key_ranges = key_ranges_from_cuts(cuts)
+    src_cur.execute(
+        f"SELECT COUNT(*) FROM {source_ref} WHERE {src_ident} IS NULL"  # nosec B608
+    )
+    nulls = int(src_cur.fetchone()[0])
+    unbounded = len(key_ranges) == 1 and key_ranges[0] == (None, None)
+    plan: list[tuple[str, Any, Any, bool]] = []
+    if nulls and not unbounded:
+        plan.append((f"{src_ident} IS NULL", None, None, True))
+    for lo, hi in key_ranges:
+        lo_sql = _pg_quoted_literal(src_cur, lo) if lo is not None else None
+        hi_sql = _pg_quoted_literal(src_cur, hi) if hi is not None else None
+        pred = pk_range_predicate(src_ident, lo_sql, hi_sql)
+        plan.append((pred, lo, hi, False))
+    partitions: list[dict[str, Any]] = []
+    for pred, lo, hi, is_null in plan:
+        if pred:
+            src_cur.execute(
+                f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}"  # nosec B608
+            )
+        else:
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+        expected = int(src_cur.fetchone()[0])
+        partitions.append({
+            "lo": lo,
+            "hi": hi,
+            "null_shard": is_null,
+            "source_count": expected,
+            "predicate": pred,
+            "action": "load",
+        })
+    accounted = sum(int(p["source_count"]) for p in partitions)
+    if accounted != source_count:
+        raise ValueError(
+            f"PK range source COUNTs {accounted} != snapshot {source_count}"
+        )
+    return partitions
+
+
+def pg_pg_copy_enabled() -> bool:
+    raw = (getenv_brand("PG_PG_COPY", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def copy_between_postgres(
     *,
     source_cfg: dict[str, Any],
@@ -470,6 +1376,7 @@ def copy_between_postgres(
     dest_table: str,
     pairs: list[tuple[str, str]],
     replace_destination: bool = True,
+    source_where: str = "",
 ) -> FastPathResult:
     """Copy a population between two PostgreSQL tables and prove it arrived.
 
@@ -479,6 +1386,10 @@ def copy_between_postgres(
     """
     if not pairs:
         raise FastPathUnavailable("no comparable columns")
+    if postgres_same_relation(
+        source_cfg, dest_cfg, source_schema, source_table, dest_schema, dest_table
+    ):
+        raise FastPathUnavailable("refusing COPY onto the same PostgreSQL table")
     from services.engine_checksum import postgresql_engine_checksum
 
     source_cols = [p[0] for p in pairs]
@@ -500,6 +1411,12 @@ def copy_between_postgres(
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
             )
+            # Dest WAL flush per COPY row is the 10M-row tax. LOCAL lasts this
+            # transaction; commit still writes the catalog + heap, just not
+            # fsync-per-record. Crash between commit and OS flush can lose the
+            # dest table — the source snapshot is still the proof, and the
+            # operator re-runs overwrite.
+            dst_cur.execute("SET LOCAL synchronous_commit = off")
             snapshot = _snapshot_evidence(src_cur)
             blocked = unsupported_structure(src_cur, source_schema, source_table)
             if blocked:
@@ -519,9 +1436,6 @@ def copy_between_postgres(
                 raise FastPathUnavailable(
                     f"source columns absent from catalog: {', '.join(missing)}"
                 )
-            create_destination_like_source(
-                dst_cur, dest_schema, dest_table, pairs, shape
-            )
             # Decide index carry before the load so an index this path cannot
             # reproduce declines the whole route while the destination is still
             # empty, rather than after a full table has been copied.
@@ -533,26 +1447,206 @@ def copy_between_postgres(
                 dest_table=dest_table,
                 pairs=pairs,
             )
+            constraints_before = None
             if replace_destination:
-                # A full refresh replaces rather than adds. TRUNCATE rather than
-                # DELETE: this runs in the same transaction as the load, so a
-                # failure rolls back to the previous contents.
-                dst_cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
+                # D195: DROP + CREATE rebuilt an existing destination from the
+                # source's shape and dropped its CHECK / FK / DEFAULT / indexes
+                # / comment. An existing table is emptied in place inside this
+                # transaction instead; one whose column types differ from the
+                # source declines to the row path rather than surviving as a
+                # stale shell.
+                from services.dest_overwrite_swap import (
+                    pg_constraint_fingerprint,
+                    pg_empty_live_for_overwrite,
+                )
 
-            source_digest = postgresql_engine_checksum(
-                src_cur, source_ref, source_cols
-            )
-            if source_digest is None:
-                raise FastPathUnavailable("source digest unavailable")
+                existed = pg_empty_live_for_overwrite(
+                    dst_cur,
+                    schema=dest_schema or "public",
+                    table=dest_table,
+                    quote=_quote,
+                    column_types={
+                        tgt: str(shape.types.get(src) or next(
+                            (v for k, v in shape.types.items() if k.lower() == src.lower()), ""
+                        ))
+                        for src, tgt in pairs
+                    },
+                )
+                create = not existed
+                if existed:
+                    constraints_before = pg_constraint_fingerprint(
+                        dst_cur, dest_schema or "public", dest_table, _quote
+                    )
+            else:
+                from connectors.sql_identifiers import pg_regclass_literal
 
-            _stream_copy(
-                src_cur,
-                dst_cur,
-                f"COPY (SELECT {source_list} FROM {source_ref}) "  # nosec B608
-                "TO STDOUT (FORMAT binary)",
-                f"COPY {dest_ref} ({target_list}) FROM STDIN (FORMAT binary)",  # nosec B608
+                dst_cur.execute(
+                    "SELECT to_regclass(%s)",
+                    (pg_regclass_literal(dest_schema or "public", dest_table),),
+                )
+                create = dst_cur.fetchone()[0] is None
+            if create:
+                try:
+                    create_destination_like_source(
+                        dst_cur, dest_schema, dest_table, pairs, shape
+                    )
+                except FastPathUnavailable:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — CREATE failure is a catalog/lock condition
+                    raise FastPathUnavailable(
+                        f"cannot create destination like source: {exc}"
+                    ) from exc
+
+            dest_occupied = False
+            if not create:
+                dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+                dest_occupied = int(dst_cur.fetchone()[0]) > 0
+
+            from services.copy_pg_mysql import (
+                _jsonable_bound,
+                mapped_single_pk,
+                pg_mysql_copy_partitions,
+                pg_mysql_copy_workers,
+                pk_range_predicate,
             )
-            rows_copied = int(dst_cur.rowcount or 0)
+
+            pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
+            cursor_where = (source_where or "").strip()
+            if dest_occupied and pk_map is None and not cursor_where:
+                raise FastPathUnavailable(
+                    "append into non-empty PostgreSQL dest stays on the row path"
+                )
+            if cursor_where and dest_occupied:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
+
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}{where_sql}")  # nosec B608
+            source_count = int(src_cur.fetchone()[0])
+            workers = 1 if cursor_where else pg_mysql_copy_workers(source_count)
+            n_parts = 1 if cursor_where else pg_mysql_copy_partitions(source_count, workers)
+            partitions: list[dict[str, Any]] = []
+            shard_mode = "serial"
+            copy_split = "binary"
+            predicates: list[str] = [""]
+            skip_all = False
+
+            if cursor_where:
+                shard_mode = "cursor"
+                copy_split = "cursor"
+                predicates = [cursor_where]
+                partitions = [{
+                    "lo": None,
+                    "hi": None,
+                    "null_shard": False,
+                    "source_count": source_count,
+                    "predicate": cursor_where,
+                    "action": "load",
+                }]
+            elif pk_map is not None:
+                src_pk, dest_pk = pk_map
+                src_ident = _quote(src_pk)
+                dest_ident = _quote(dest_pk)
+                shard_mode = "pk"
+                pk_declared = shape.types.get(src_pk) or ""
+                if not pk_declared:
+                    live_l = {k.lower(): v for k, v in shape.types.items()}
+                    pk_declared = live_l.get(src_pk.lower()) or ""
+                partitions = _plan_pg_pk_partitions(
+                    src_cur, source_ref, src_ident, pk_declared, n_parts, source_count
+                )
+                if dest_occupied:
+                    copy_split = "pk"
+                    for part in partitions:
+                        already = _pg_dest_range_count(
+                            dst_cur, dest_ref, dest_ident, part
+                        )
+                        expected = int(part["source_count"])
+                        # A count is not identity: skip only a range that holds this
+                        # source range's keys (append of N new keys into N rows).
+                        if already == expected and range_keys_match(
+                            src_dialect="postgresql", src_cur=src_cur, src_ref=source_ref, src_ident=src_ident,
+                            dst_dialect="postgresql", dst_cur=dst_cur, dst_ref=dest_ref, dst_ident=dest_ident,
+                            part=part,
+                        ):
+                            part["action"] = "skip"
+                            part["dest_count"] = already
+                        elif already == 0:
+                            part["action"] = "load"
+                        else:
+                            occupied_pk_range_action(
+                                already, expected, replace_destination=replace_destination,
+                                keys_proven=False,
+                            )
+                            from services.copy_pg_mysql import _pg_quoted_literal
+
+                            pred = pk_range_predicate(
+                                dest_ident,
+                                _pg_quoted_literal(dst_cur, part["lo"])
+                                if part.get("lo") is not None
+                                else None,
+                                _pg_quoted_literal(dst_cur, part["hi"])
+                                if part.get("hi") is not None
+                                else None,
+                                null_shard=bool(part.get("null_shard")),
+                            )
+                            if not pred:
+                                raise FastPathUnavailable(
+                                    "refusing unbounded dest DELETE on resume"
+                                )
+                            dst_cur.execute(
+                                f"DELETE FROM {dest_ref} WHERE {pred}"  # nosec B608
+                            )
+                            part["action"] = "reload"
+                    predicates = [
+                        str(p.get("predicate") or "")
+                        for p in partitions
+                        if p.get("action") in {"load", "reload"}
+                    ]
+                    skip_all = not predicates
+                else:
+                    predicates = [""]
+
+            need_checksum = not skip_all
+            source_digest = None
+            if need_checksum:
+                source_digest = postgresql_engine_checksum(
+                    src_cur, source_ref, source_cols, where=cursor_where
+                )
+                if source_digest is None:
+                    raise FastPathUnavailable("source digest unavailable")
+                if int(source_digest.row_count) != source_count:
+                    raise ValueError(
+                        "COPY fast path refused: digest count "
+                        f"{source_digest.row_count} != snapshot {source_count}"
+                    )
+
+            dest_copy_sql = (
+                f"COPY {dest_ref} ({target_list}) FROM STDIN (FORMAT binary)"  # nosec B608
+            )
+            copied_any = False
+            for pred in predicates:
+                where = f" WHERE {pred}" if pred else ""
+                _stream_copy(
+                    src_cur,
+                    dst_cur,
+                    f"COPY (SELECT {source_list} FROM {source_ref}{where}) "  # nosec B608
+                    "TO STDOUT (FORMAT binary)",
+                    dest_copy_sql,
+                )
+                copied_any = True
+            if copied_any:
+                driver_rows = int(dst_cur.rowcount or 0)
+                if driver_rows > 0 and len(predicates) == 1 and not predicates[0]:
+                    if driver_rows != source_count:
+                        raise ValueError(
+                            "COPY fast path refused: driver rowcount "
+                            f"{driver_rows} disagrees with the source snapshot "
+                            f"({source_count} rows)"
+                        )
+
+            rows_copied = source_count
 
             # Build indexes after the bulk load, not before: on an empty table
             # each COPYed row would pay index maintenance, and building once over
@@ -561,23 +1655,111 @@ def copy_between_postgres(
             # rows copied verbatim; if one somehow did, the surrounding
             # transaction rolls the whole load back rather than half-applying it.
             indexes_carried: list[str] = []
-            for index_name, index_sql in index_plan:
-                dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
-                indexes_carried.append(index_name)
+            if create:
+                from connectors.sql_identifiers import pg_regclass_literal
 
-            dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
-            if dest_digest is None:
-                raise FastPathUnavailable("destination digest unavailable")
+                for index_name, index_sql in index_plan:
+                    # Schema-fidelity settle emits the same CREATE INDEX at
+                    # CREATE time. Building it again aborts the load with
+                    # DuplicateTable after the rows are already in the
+                    # transaction (pgvector source_id btree is the case that
+                    # always has one).
+                    dst_cur.execute(
+                        "SELECT to_regclass(%s)",
+                        (pg_regclass_literal(dest_schema or "public", index_name),),
+                    )
+                    if dst_cur.fetchone()[0] is not None:
+                        indexes_carried.append(index_name)
+                        continue
+                    dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
+                    indexes_carried.append(index_name)
 
+            dest_digest = None
+            if need_checksum:
+                dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
+                if dest_digest is None:
+                    raise FastPathUnavailable("destination digest unavailable")
+            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+            dest_count = int(dst_cur.fetchone()[0])
+            if dest_count != source_count:
+                raise ValueError(
+                    "COPY fast path refused: dest COUNT(*) "
+                    f"{dest_count} != source snapshot {source_count}"
+                )
+            if shard_mode == "pk" and pk_map is not None:
+                dest_ident = _quote(pk_map[1])
+                for part in partitions:
+                    dest_part = _pg_dest_range_count(
+                        dst_cur, dest_ref, dest_ident, part
+                    )
+                    part["dest_count"] = dest_part
+                    if dest_part != int(part["source_count"]):
+                        raise ValueError(
+                            "PK range dest COUNT "
+                            f"{dest_part} != source {part['source_count']} "
+                            f"(lo={part['lo']!r} hi={part['hi']!r})"
+                        )
+
+        proof_count = f"dest_count:{dest_count}"
+        source_checksum = (
+            source_digest.checksum if source_digest is not None else proof_count
+        )
+        target_checksum = (
+            dest_digest.checksum if dest_digest is not None else proof_count
+        )
+        partition_proof = [
+            {
+                "lo": _jsonable_bound(p.get("lo")),
+                "hi": _jsonable_bound(p.get("hi")),
+                "null_shard": bool(p.get("null_shard")),
+                "source_count": int(p["source_count"]),
+                "dest_count": int(p.get("dest_count") or 0),
+                "action": str(p.get("action") or "load"),
+            }
+            for p in partitions
+        ]
+        snapshot["copy_split"] = copy_split
+        snapshot["engine_digest_target_columns"] = list(target_cols)
+        snapshot["shard_mode"] = shard_mode if partitions else "serial"
+        snapshot["copy_workers"] = 1
+        snapshot["copy_partitions"] = len(partitions) or 1
+        snapshot["partitions_skipped"] = sum(
+            1 for p in partitions if p.get("action") == "skip"
+        )
+        snapshot["partition_proof"] = partition_proof
+        proof_scope = (
+            "partition_dest_count_equals_source_snapshot"
+            if skip_all
+            else (
+                "mapped_column_checksum_and_dest_count_equals_source_snapshot"
+                if not partition_proof
+                else "mapped_column_checksum_and_partition_dest_count"
+            )
+        )
         result = FastPathResult(
             rows_copied=rows_copied,
-            source_rows=source_digest.row_count,
-            source_checksum=source_digest.checksum,
-            target_rows=dest_digest.row_count,
-            target_checksum=dest_digest.checksum,
+            source_rows=source_count,
+            source_checksum=source_checksum,
+            target_rows=dest_count,
+            target_checksum=target_checksum,
             source_snapshot=snapshot,
             indexes_carried=tuple(indexes_carried),
+            proof_scope=proof_scope,
         )
+        if constraints_before is not None:
+            from services.dest_overwrite_swap import (
+                pg_constraint_fingerprint,
+                verify_constraint_set,
+            )
+
+            with dest_conn.cursor() as check_cur:
+                verify_constraint_set(
+                    constraints_before,
+                    pg_constraint_fingerprint(
+                        check_cur, dest_schema or "public", dest_table, _quote
+                    ),
+                    table=dest_ref,
+                )
         if not result.verified:
             # The destination transaction has not committed, so refusing here
             # leaves the table as it was rather than half-replaced.

@@ -12,7 +12,6 @@ export interface RepairProposalDrawerProps {
   open: boolean;
   proposal: RepairProposal | null;
   mappings?: RepairMapping[];
-  actor?: string;
   onClose: () => void;
   /** Called after approve+apply with updated mappings (when mappings were supplied). */
   onApplied?: (updated: RepairMapping[], proposal: RepairProposal) => void;
@@ -30,6 +29,8 @@ function isMutativeAction(action: Record<string, unknown>): boolean {
   const kind = String(action.kind || "");
   if (!MUTATIVE_KINDS.has(kind)) return false;
   if (action.mapping_applyable === false) return false;
+  if (action.requires_ddl === true && kind === "change_target_type") return false;
+  if (action.apply_proven === false && kind === "change_target_type") return false;
   return Boolean(action.column || action.source);
 }
 
@@ -48,7 +49,6 @@ export function RepairProposalDrawer({
   open,
   proposal,
   mappings = [],
-  actor = "operator",
   onClose,
   onApplied,
   onDecided,
@@ -108,7 +108,6 @@ export function RepairProposalDrawer({
     try {
       const decided = await decideRepairProposal(proposal.id, {
         approve,
-        actor,
         mappings: approve && canApplyMappings ? mappings : undefined,
       });
       if (
@@ -193,7 +192,9 @@ export function RepairProposalDrawer({
               disabled={!canDecide}
               leadingIcon={<DtIcon name="check" size={14} />}
             >
-              Approve & apply mappings
+              {analysis.mutativeActions.every((a) => a.kind === "change_target_type")
+                ? "Approve & apply CREATE types"
+                : "Approve & apply mappings"}
             </Button>
           ) : mappings.length > 0 ? (
             <Button
@@ -248,6 +249,26 @@ export function RepairProposalDrawer({
                 then Re-run Validate.
               </li>
             </ol>
+          </div>
+        )}
+
+        {!analysis.duplicateRoot && analysis.mutativeActions.some((a) => a.kind === "change_target_type") && (
+          <div className="df2-repair-root" role="status">
+            <strong>What Approve does</strong>
+            <p>
+              The source is not broken. Map guessed destination types from the preview.
+              Later values do not fit those types, so CREATE would be too narrow and
+              Execute would load nothing — on any warehouse or database destination.
+            </p>
+            <ol className="df2-repair-next-steps">
+              <li>Approve updates the Map CREATE types listed below — the destination is not written yet.</li>
+              <li>Each type was proven against the overflow values Validate scanned (same write-path check Execute uses).</li>
+              <li>Validate runs again on those same values and should clear this gate. Click Execute only then.</li>
+            </ol>
+            <p className="df2-label-hint">
+              Live destination columns still need ALTER — Map cannot change destination
+              DDL. Approve is disabled for those. Do not truncate.
+            </p>
           </div>
         )}
 

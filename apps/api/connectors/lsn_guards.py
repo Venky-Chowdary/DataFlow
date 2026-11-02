@@ -19,10 +19,33 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
+
+#: How one dialect spells "this expression matches this regex".
+LsnMatcher = Callable[[str, str], str]
 
 # Destination metadata column for CDC monotonic apply (PK + LSN guard).
 DF_LSN_COL = "_df_lsn"
+
+
+def _parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
+    parts = [part.strip() for part in str(rs_id or "").strip().split(".")]
+    if len(parts) != 3:
+        return None
+    if parts[0].lower().startswith("0x"):
+        parts[0] = parts[0][2:]
+    if any(not re.fullmatch(r"[0-9a-f]+", part, flags=re.IGNORECASE) for part in parts):
+        return None
+    try:
+        return tuple(int(part, 16) for part in parts)  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
+    """Parse an Oracle LogMiner RS_ID into its numeric components."""
+    return _parse_oracle_rs_id(rs_id)
+
 
 def lsn_family(lsn: Any) -> str:
     """Return CDC stamp family for LSN-guard compares (Debezium-class).
@@ -42,7 +65,14 @@ def lsn_family(lsn: Any) -> str:
     if lower.startswith("gtid:"):
         return "mysql_gtid"
     if lower.startswith("scn:"):
-        return "oracle_scn"
+        if re.fullmatch(r"scn:\d+(?:\.c)?", text, flags=re.IGNORECASE):
+            return "oracle_scn"
+        partial = re.fullmatch(
+            r"scn:\d+\.p(.+)\.\d{10}", text, flags=re.IGNORECASE
+        )
+        if partial and _parse_oracle_rs_id(partial.group(1)) is not None:
+            return "oracle_scn"
+        return "opaque"
     if lower.startswith("mongo:"):
         return "mongo_resume"
     # Postgres WAL LSN: hex/hex
@@ -55,8 +85,11 @@ def lsn_family(lsn: Any) -> str:
         file_name, _, pos = text.rpartition(":")
         if file_name and pos.isdigit():
             return "mysql_binlog"
+    # SQL Server LSN with an in-position commit coordinate.
+    if re.fullmatch(r"(?:0x)?[0-9a-f]+\.(?:p[0-9a-f]+|c)", lower):
+        return "mssql_lsn"
     # SQL Server binary LSN hex (0x… or long hex)
-    if lower.startswith("0x") and all(c in "0123456789abcdef" for c in lower[2:]):
+    if lower.startswith("0x") and re.fullmatch(r"0x[0-9a-f]+", lower):
         return "mssql_lsn"
     if len(text) >= 10 and all(c in "0123456789abcdefABCDEF" for c in text) and not text.isdigit():
         return "mssql_lsn"
@@ -78,11 +111,28 @@ def lsn_sort_key(lsn: Any) -> tuple:
         return (0, -1, -1, "")
     lower = text.lower()
     if lower.startswith("scn:"):
-        body = text.split(":", 1)[1].strip()
-        try:
-            return (1, int(body), 0, "")
-        except (TypeError, ValueError):
-            return (0, 0, 0, body)
+        legacy = re.fullmatch(r"scn:(\d+)", text, flags=re.IGNORECASE)
+        if legacy:
+            return (1, int(legacy.group(1)), 0, "")
+        partial = re.fullmatch(
+            r"scn:(\d+)\.p(.+)\.(\d{10})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        rs_id = _parse_oracle_rs_id(partial.group(2)) if partial else None
+        if partial and rs_id is not None:
+            rs_seq, rs_blk, rs_off = rs_id
+            ssn = int(partial.group(3))
+            return (
+                1,
+                int(partial.group(1)),
+                1,
+                f"{rs_seq:020d}{rs_blk:020d}{rs_off:010d}{ssn:020d}",
+            )
+        complete = re.fullmatch(r"scn:(\d+)\.c", text, flags=re.IGNORECASE)
+        if complete:
+            return (1, int(complete.group(1)), 2, "")
+        return (0, 0, 0, text)
     if lower.startswith("mongo:"):
         return (0, 0, 0, text.split(":", 1)[1])
     # Postgres WAL LSN: hex/hex (reject paths that look like URLs).
@@ -98,6 +148,29 @@ def lsn_sort_key(lsn: Any) -> tuple:
         file_name, _, pos = text.rpartition(":")
         if file_name and pos.isdigit():
             return (2, file_name, int(pos), "")
+    mssql_composite = re.fullmatch(
+        r"(?:0x)?([0-9a-f]+)\.(?:p([0-9a-f]+)|c)",
+        lower,
+    )
+    if mssql_composite:
+        rank = 1 if mssql_composite.group(2) is not None else 2
+        seqval = mssql_composite.group(2)
+        return (
+            4,
+            int(mssql_composite.group(1), 16),
+            rank,
+            f"{int(seqval, 16):040d}" if seqval is not None else "",
+        )
+    mssql_legacy = lower[2:] if lower.startswith("0x") else lower
+    if (
+        (lower.startswith("0x") and re.fullmatch(r"0x[0-9a-f]+", lower))
+        or (
+            len(text) >= 10
+            and not text.isdigit()
+            and re.fullmatch(r"[0-9a-f]+", mssql_legacy)
+        )
+    ):
+        return (4, int(mssql_legacy, 16), 0, "")
     # Zero-padded / numeric versions (SQL Server CT, etc.).
     if text.isdigit():
         return (1, int(text), 0, "")
@@ -260,6 +333,7 @@ def dedupe_rows_by_pk_and_lsn_keeping_numbers(
     row's number is not simply the last one seen for that key.
     """
     from connectors.writer_common import (
+        _conflict_key_identity,
         dedupe_rows_keeping_numbers,
         resolve_conflict_targets,
         resolve_row_number,
@@ -279,7 +353,7 @@ def dedupe_rows_by_pk_and_lsn_keeping_numbers(
     best: dict[tuple, tuple] = {}
     best_numbers: dict[tuple, int] = {}
     for position, row in enumerate(rows):
-        key = tuple(row[i] for i in indices)
+        key = tuple(_conflict_key_identity(row[i]) for i in indices)
         prev = best.get(key)
         if prev is None or compare_lsn(row[lsn_idx], prev[lsn_idx]) >= 0:
             best[key] = row
@@ -314,6 +388,11 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
     SQL Server LSN hex, and Oracle SCN. Used to stamp ``_df_lsn`` for
     at-least-once upsert guards (not exactly-once).
     """
+    if resume_token is None:
+        return None
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    resume_token = unwrap_resume_token(resume_token)
     if resume_token is None:
         return None
     if isinstance(resume_token, dict):
@@ -385,7 +464,141 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
     return text
 
 
-def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
+def extract_cdc_commit_position(resume_token: Any) -> str | None:
+    """Return a canonical commit position for Oracle/SQL Server resume tokens."""
+    if resume_token is None:
+        return None
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = unwrap_resume_token(resume_token)
+    if not isinstance(token, dict):
+        return None
+    nested = token.get("token")
+    if isinstance(nested, (dict, str)) and nested:
+        nested_position = extract_cdc_commit_position(nested)
+        if nested_position:
+            return nested_position
+
+    kind = str(token.get("kind") or "")
+    phase = str(token.get("phase") or "")
+    if kind == "oracle-logminer" and phase == "snapshot":
+        try:
+            snapshot_scn = int(token.get("scn") or 0)
+        except (TypeError, ValueError):
+            return None
+        if snapshot_scn > 0:
+            # Snapshot SCN H reflects source through H-1, where streaming resumes.
+            return f"scn:{snapshot_scn - 1}"
+    if phase != "streaming":
+        return None
+    if kind == "oracle-logminer":
+        major_lsn = extract_cdc_lsn(token)
+        if not major_lsn:
+            return None
+        rs_id = str(token.get("rs_id") or "").strip()
+        if not rs_id:
+            if token.get("scn_complete") or "scn_complete" not in token:
+                return f"{major_lsn}.c"
+            return major_lsn
+        raw_ssn = token.get("ssn")
+        try:
+            ssn = int(raw_ssn or 0)
+        except (TypeError, ValueError):
+            return f"{major_lsn}.p{rs_id}.{str(raw_ssn)}"
+        return f"{major_lsn}.p{rs_id}.{ssn:010d}"
+    if kind == "mssql-cdc":
+        raw_lsn = str(token.get("lsn") or "").strip().lower()
+        if not raw_lsn:
+            return None
+        major_lsn = raw_lsn[2:] if raw_lsn.startswith("0x") else raw_lsn
+        major_lsn = major_lsn.zfill(20)
+        raw_seqval = token.get("seqval")
+        if isinstance(raw_seqval, (bytes, bytearray)):
+            seqval = bytes(raw_seqval).hex()
+        else:
+            seqval = str(raw_seqval or "").strip().lower()
+        if seqval.startswith("0x"):
+            seqval = seqval[2:]
+        if seqval:
+            return f"{major_lsn}.p{seqval}"
+        return f"{major_lsn}.c"
+    return None
+
+
+#: Families that carry a ``prefix:`` yet are **not** MySQL binlog ``file:pos``.
+#: Mirrors the prefix branches at the top of :func:`lsn_family`, which are
+#: tested before the ``file:pos`` shape. The destination predicates below must
+#: apply the same precedence: a Mongo resume token is hex, and pushing it into
+#: the integer position compare either errors (``::bigint``) or silently
+#: compares garbage.
+NON_BINLOG_LSN_PREFIXES = ("gtid:", "mongo:", "scn:")
+
+_PREFIX_ALTERNATION = "|".join(p.rstrip(":") for p in NON_BINLOG_LSN_PREFIXES)
+
+# Regex, not LIKE: a literal ``%`` in generated SQL collides with the ``%s``
+# paramstyle of psycopg2/pymysql, which format the statement against the bound
+# row (``TypeError: not enough arguments for format string``) — so the guard
+# would take down the whole executemany batch it is meant to protect.
+
+
+def _re_prefixed(full: bool) -> str:
+    """Pattern: the stamp carries a non-binlog family prefix."""
+    return f"({_PREFIX_ALTERNATION}):.*" if full else f"^({_PREFIX_ALTERNATION}):"
+
+
+def _re_one_prefix(prefix: str, full: bool) -> str:
+    return f"{prefix}.*" if full else f"^{prefix}"
+
+
+def _re_filepos_tail(full: bool) -> str:
+    """Pattern: ``file:pos`` — ends in the integer position.
+
+    :func:`lsn_family` requires ``pos.isdigit()`` after ``rpartition(':')``, so
+    a hex Mongo resume token or an SCN never enters the position compare.
+    """
+    return ".*:[0-9]+" if full else ":[0-9]+$"
+
+
+def _lsn_filepos_family_sql(expr: str, matcher: LsnMatcher, *, full: bool = False) -> str:
+    """SQL: ``expr`` is a MySQL binlog ``file:pos`` stamp and nothing else."""
+    return (
+        f"({matcher(expr, _re_filepos_tail(full))} "
+        f"AND NOT {matcher(expr, _re_prefixed(full))})"
+    )
+
+
+def _lsn_scn_family_sql(expr: str, matcher: LsnMatcher, *, full: bool = False) -> str:
+    """SQL: ``expr`` is an Oracle ``scn:<digits>`` stamp.
+
+    :func:`lsn_sort_key` orders SCNs by ``int(body)``, so the destination guard
+    must compare them numerically too — as text ``scn:9`` outranks ``scn:100``
+    and an older redelivery wins.
+    """
+    return matcher(expr, "scn:[0-9]+" if full else "^scn:[0-9]+$")
+
+
+def _lsn_same_prefix_sql(
+    inc: str, dest: str, matcher: LsnMatcher, *, full: bool = False
+) -> str:
+    """SQL: both sides carry the same family prefix, or neither carries one.
+
+    Keeps the opaque-text branch from inventing ``newer`` across families —
+    ``mongo:…`` vs ``gtid:…`` is incomparable in :func:`compare_lsn` and must
+    stay incomparable in the destination guard.
+    """
+    return " AND ".join(
+        f"({matcher(inc, _re_one_prefix(prefix, full))} "
+        f"= {matcher(dest, _re_one_prefix(prefix, full))})"
+        for prefix in NON_BINLOG_LSN_PREFIXES
+    )
+
+
+def postgres_lsn_update_guard_sql(
+    table_name: str,
+    lsn_column: str = DF_LSN_COL,
+    *,
+    allow_equal_lsn: bool = False,
+) -> str:
     """WHERE fragment for ON CONFLICT when ``_df_lsn`` is present.
 
     Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps use family-aware
@@ -397,26 +610,40 @@ def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL)
     excl = f'EXCLUDED."{lsn_column}"'
     dest = f'"{table_name}"."{lsn_column}"'
     dest_c = f"COALESCE({dest}, '')"
-    both_filepos = (
-        f"({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%' "
-        f"AND {dest_c} LIKE '%%:%%' AND {dest_c} NOT LIKE 'gtid:%%')"
-    )
-    # split_part is Postgres-native (same dialect as ON CONFLICT).
+
+    def match(expr: str, pat: str) -> str:
+        return f"LOWER({expr}) ~ '{pat}'"
+
+    excl_filepos = _lsn_filepos_family_sql(excl, match)
+    dest_filepos = _lsn_filepos_family_sql(dest_c, match)
+    both_filepos = f"({excl_filepos} AND {dest_filepos})"
+    # split_part is Postgres-native (same dialect as ON CONFLICT). The position
+    # is the *last* segment, matching lsn_family's rpartition.
+    excl_pos = f"NULLIF(regexp_replace({excl}, '^.*:', ''), '')::bigint"
+    dest_pos = f"NULLIF(regexp_replace({dest}, '^.*:', ''), '')::bigint"
     filepos_newer = (
         f"(split_part({excl}, ':', 1) > split_part({dest}, ':', 1) "
         f"OR (split_part({excl}, ':', 1) = split_part({dest}, ':', 1) "
-        f"AND NULLIF(split_part({excl}, ':', 2), '')::bigint "
-        f"> NULLIF(split_part({dest}, ':', 2), '')::bigint))"
+        f"AND {excl_pos} > {dest_pos}))"
     )
     both_numeric = f"({excl} ~ '{num_pat}' AND {dest_c} ~ '{num_pat}')"
-    # Opaque: neither side looks like pg / file:pos / all-digits.
+    excl_scn = _lsn_scn_family_sql(excl, match)
+    dest_scn = _lsn_scn_family_sql(dest_c, match)
+    scn_newer = (
+        f"({excl_scn} AND {dest_scn} "
+        f"AND regexp_replace(LOWER({excl}), '^scn:', '')::bigint "
+        f"> regexp_replace(LOWER({dest}), '^scn:', '')::bigint)"
+    )
+    # Opaque: neither side looks like pg / file:pos / scn / all-digits, and both
+    # carry the same family prefix so a Mongo token never outranks a GTID set.
     both_opaque = (
         f"({excl} !~ '{pg_pat}' AND {dest_c} !~ '{pg_pat}' "
-        f"AND NOT ({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%') "
-        f"AND NOT ({dest_c} LIKE '%%:%%' AND {dest_c} NOT LIKE 'gtid:%%') "
-        f"AND {excl} !~ '{num_pat}' AND {dest_c} !~ '{num_pat}')"
+        f"AND NOT {excl_filepos} AND NOT {dest_filepos} "
+        f"AND NOT {excl_scn} AND NOT {dest_scn} "
+        f"AND {excl} !~ '{num_pat}' AND {dest_c} !~ '{num_pat}' "
+        f"AND {_lsn_same_prefix_sql(excl, dest_c, match)})"
     )
-    return (
+    strict_guard = (
         f"( "
         f"({excl} ~ '{pg_pat}' AND {dest_c} ~ '{pg_pat}' "
         f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
@@ -424,64 +651,125 @@ def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL)
         f"({excl} !~ '{pg_pat}' AND ("
         f"{dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR {scn_newer} "
         f"OR ({both_numeric} AND {excl}::bigint > {dest}::bigint) "
         f"OR ({both_opaque} AND {excl} > {dest})"
         f")) "
         f")"
     )
+    if not allow_equal_lsn:
+        return strict_guard
+    return (
+        f"({strict_guard} OR "
+        f"({excl} IS NOT NULL AND {excl} <> '' AND {excl} = {dest}))"
+    )
 
 
-def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`") -> str:
+def mysql_lsn_values_newer_sql(
+    lsn_column: str = DF_LSN_COL,
+    *,
+    quote: str = "`",
+    allow_equal_lsn: bool = False,
+) -> str:
     """Boolean SQL: ``VALUES(lsn)`` is strictly newer than the destination cell.
 
-    Handles empty dest, ``file:pos`` (file then integer pos), numeric versions,
-    and opaque tokens — refuses cross-family invent. Used inside
-    ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
+    Handles empty dest, PG ``hi/lo`` hex, ``file:pos`` (file then integer pos),
+    numeric versions, and opaque tokens — refuses cross-family invent. Used
+    inside ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
     """
     col = f"{quote}{lsn_column}{quote}"
     inc = f"VALUES({col})"
     dest = col
     pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
     num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
+
+    def match(expr: str, pat: str) -> str:
+        return f"LOWER({expr}) REGEXP '{pat}'"
+
+    inc_filepos = _lsn_filepos_family_sql(inc, match)
+    dest_filepos = _lsn_filepos_family_sql(dest, match)
+    both_filepos = f"({inc_filepos} AND {dest_filepos})"
     filepos_newer = (
         f"(SUBSTRING_INDEX({inc}, ':', 1) > SUBSTRING_INDEX({dest}, ':', 1) "
         f"OR (SUBSTRING_INDEX({inc}, ':', 1) = SUBSTRING_INDEX({dest}, ':', 1) "
         f"AND CAST(SUBSTRING_INDEX({inc}, ':', -1) AS UNSIGNED) "
         f"> CAST(SUBSTRING_INDEX({dest}, ':', -1) AS UNSIGNED)))"
     )
-    both_numeric = f"({inc} REGEXP '{num_re}' AND {dest} REGEXP '{num_re}')"
-    both_opaque = (
-        f"(NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%') "
-        f"AND {inc} NOT REGEXP '{pg_re}' AND {dest} NOT REGEXP '{pg_re}' "
-        f"AND {inc} NOT REGEXP '{num_re}' AND {dest} NOT REGEXP '{num_re}')"
+    both_pg = f"({inc} REGEXP '{pg_re}' AND {dest} REGEXP '{pg_re}')"
+    # CONV returns a string, so each half is cast to UNSIGNED before compare —
+    # otherwise 0/100 sorts before 0/20 under text ordering.
+    inc_hi = f"CAST(CONV(SUBSTRING_INDEX({inc}, '/', 1), 16, 10) AS UNSIGNED)"
+    dest_hi = f"CAST(CONV(SUBSTRING_INDEX({dest}, '/', 1), 16, 10) AS UNSIGNED)"
+    inc_lo = f"CAST(CONV(SUBSTRING_INDEX({inc}, '/', -1), 16, 10) AS UNSIGNED)"
+    dest_lo = f"CAST(CONV(SUBSTRING_INDEX({dest}, '/', -1), 16, 10) AS UNSIGNED)"
+    pg_newer = (
+        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
     )
-    return (
+    both_numeric = f"({inc} REGEXP '{num_re}' AND {dest} REGEXP '{num_re}')"
+    inc_scn = _lsn_scn_family_sql(inc, match)
+    dest_scn = _lsn_scn_family_sql(dest, match)
+    scn_newer = (
+        f"({inc_scn} AND {dest_scn} "
+        f"AND CAST(SUBSTRING(LOWER({inc}), 5) AS UNSIGNED) "
+        f"> CAST(SUBSTRING(LOWER({dest}), 5) AS UNSIGNED))"
+    )
+    both_opaque = (
+        f"(NOT {inc_filepos} AND NOT {dest_filepos} "
+        f"AND NOT {inc_scn} AND NOT {dest_scn} "
+        f"AND {inc} NOT REGEXP '{pg_re}' AND {dest} NOT REGEXP '{pg_re}' "
+        f"AND {inc} NOT REGEXP '{num_re}' AND {dest} NOT REGEXP '{num_re}' "
+        f"AND {_lsn_same_prefix_sql(inc, dest, match)})"
+    )
+    strict_guard = (
         f"({dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR {scn_newer} "
+        f"OR ({both_pg} AND {pg_newer}) "
         f"OR ({both_numeric} AND CAST({inc} AS UNSIGNED) > CAST({dest} AS UNSIGNED)) "
         f"OR ({both_opaque} AND {inc} > {dest}))"
     )
+    if not allow_equal_lsn:
+        return strict_guard
+    return f"({strict_guard} OR ({inc} IS NOT NULL AND {inc} <> '' AND {inc} = {dest}))"
 
 
-def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
+def sqlite_lsn_update_guard_sql(
+    table_name: str,
+    lsn_column: str = DF_LSN_COL,
+    *,
+    allow_equal_lsn: bool = False,
+) -> str:
     """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE``.
 
-    Family-aware for ``file:pos`` / numeric / opaque. PG ``hi/lo`` hex is
-    best-effort opaque text here (SQLite lacks portable hex→int); writers also
-    run :func:`filter_stale_lsn_rows` / :func:`compare_lsn` in Python before bind.
-    Cross-family pairs never invent ``newer`` via bare text ``>``.
+    Family-aware for PG ``hi/lo`` hex, ``file:pos``, numeric, and opaque.
+    Equal-width zero-padded hex strings compare in integer order, so
+    ``0/100`` is newer than ``0/20`` (bare text would invert them).
+    Writers also run :func:`filter_stale_lsn_rows` / :func:`compare_lsn`
+    in Python before bind. Cross-family pairs never invent ``newer``.
     """
     excl = f'excluded."{lsn_column}"'
     dest = f'"{table_name}"."{lsn_column}"'
-    both_filepos = (
-        f"({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
+
+    def sqlite_filepos(expr: str) -> str:
+        """SQLite has no REGEXP: strip trailing digits and require ``…:`` left.
+
+        Equivalent to ``:[0-9]+$`` — ``mongo:826A…04`` loses its trailing digits
+        and still ends in hex, so it never reaches the integer position compare.
+        """
+        trimmed = f"rtrim({expr}, '0123456789')"
+        prefixes = " AND ".join(
+            f"LOWER(substr({expr}, 1, {len(p)})) <> '{p}'"
+            for p in NON_BINLOG_LSN_PREFIXES
+        )
+        return (
+            f"(length({trimmed}) < length({expr}) "
+            f"AND substr({trimmed}, -1) = ':' AND length({trimmed}) > 1 "
+            f"AND {prefixes})"
+        )
+
+    excl_filepos = sqlite_filepos(excl)
+    dest_filepos = sqlite_filepos(dest)
+    both_filepos = f"({excl_filepos} AND {dest_filepos})"
     # instr/substr — portable without REGEXP extension.
     excl_file = f"substr({excl}, 1, instr({excl}, ':') - 1)"
     dest_file = f"substr({dest}, 1, instr({dest}, ':') - 1)"
@@ -499,21 +787,65 @@ def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -
         f"({dest} GLOB '[0-9]*' AND {dest} NOT GLOB '*[^0-9]*' AND length({dest}) > 0)"
     )
     both_numeric = f"({excl_numeric} AND {dest_numeric})"
+    excl_hi = f"substr({excl}, 1, instr({excl}, '/') - 1)"
+    dest_hi = f"substr({dest}, 1, instr({dest}, '/') - 1)"
+    excl_lo = f"substr({excl}, instr({excl}, '/') + 1)"
+    dest_lo = f"substr({dest}, instr({dest}, '/') + 1)"
+    hex_part = (
+        lambda part: f"({part} GLOB '[0-9A-Fa-f]*' AND {part} NOT GLOB '*[^0-9A-Fa-f]*')"
+    )
+    both_pg = (
+        f"({excl} LIKE '%/%' AND {excl} NOT LIKE '%/%/%' AND {excl} NOT LIKE '%:%' "
+        f"AND {dest} LIKE '%/%' AND {dest} NOT LIKE '%/%/%' AND {dest} NOT LIKE '%:%' "
+        f"AND {hex_part(excl_hi)} AND {hex_part(excl_lo)} "
+        f"AND {hex_part(dest_hi)} AND {hex_part(dest_lo)})"
+    )
+    pad = (
+        lambda part: f"substr('0000000000000000' || upper({part}), -16, 16)"
+    )
+    pg_newer = (
+        f"({pad(excl_hi)} > {pad(dest_hi)} "
+        f"OR ({pad(excl_hi)} = {pad(dest_hi)} AND {pad(excl_lo)} > {pad(dest_lo)}))"
+    )
+
+    def sqlite_scn(expr: str) -> str:
+        digits = f"substr({expr}, 5)"
+        return (
+            f"(LOWER(substr({expr}, 1, 4)) = 'scn:' AND length({digits}) > 0 "
+            f"AND {digits} NOT GLOB '*[^0-9]*')"
+        )
+
+    excl_scn = sqlite_scn(excl)
+    dest_scn = sqlite_scn(dest)
+    scn_newer = (
+        f"({excl_scn} AND {dest_scn} "
+        f"AND CAST(substr({excl}, 5) AS INTEGER) > CAST(substr({dest}, 5) AS INTEGER))"
+    )
     excl_opaque = (
-        f"(NOT ({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%') "
+        f"(NOT {excl_filepos} AND NOT {excl_scn} "
         f"AND {excl} NOT LIKE '%/%' AND NOT {excl_numeric})"
     )
     dest_opaque = (
-        f"(NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%') "
+        f"(NOT {dest_filepos} AND NOT {dest_scn} "
         f"AND {dest} NOT LIKE '%/%' AND NOT {dest_numeric})"
     )
-    both_opaque = f"({excl_opaque} AND {dest_opaque})"
-    return (
+    same_prefix = " AND ".join(
+        f"((LOWER(substr({excl}, 1, {len(p)})) = '{p}') "
+        f"= (LOWER(substr({dest}, 1, {len(p)})) = '{p}'))"
+        for p in NON_BINLOG_LSN_PREFIXES
+    )
+    both_opaque = f"({excl_opaque} AND {dest_opaque} AND {same_prefix})"
+    strict_guard = (
         f"({dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR {scn_newer} "
+        f"OR ({both_pg} AND {pg_newer}) "
         f"OR ({both_numeric} AND CAST({excl} AS INTEGER) > CAST({dest} AS INTEGER)) "
         f"OR ({both_opaque} AND {excl} > {dest}))"
     )
+    if not allow_equal_lsn:
+        return strict_guard
+    return f"({strict_guard} OR ({excl} IS NOT NULL AND {excl} <> '' AND {excl} = {dest}))"
 
 
 def snowflake_lsn_match_predicate(
@@ -531,10 +863,14 @@ def snowflake_lsn_match_predicate(
     dest = f'COALESCE({target_alias}."{lsn_column}", \'\')'
     pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
     num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
+
+    # Snowflake REGEXP_LIKE implicitly anchors, so patterns are full-match.
+    def match(expr: str, pat: str) -> str:
+        return f"REGEXP_LIKE(LOWER({expr}), '{pat}')"
+
+    inc_filepos = _lsn_filepos_family_sql(inc, match, full=True)
+    dest_filepos = _lsn_filepos_family_sql(dest, match, full=True)
+    both_filepos = f"({inc_filepos} AND {dest_filepos})"
     # SPLIT_PART(..., -1) = last segment (pos) in Snowflake.
     filepos_newer = (
         f"(SPLIT_PART({inc}, ':', 1) > SPLIT_PART({dest}, ':', 1) "
@@ -545,11 +881,14 @@ def snowflake_lsn_match_predicate(
     both_pg = (
         f"(REGEXP_LIKE({inc}, '{pg_re}') AND REGEXP_LIKE({dest}, '{pg_re}'))"
     )
-    # Hex hi/lo via TO_NUMBER with hex format mask.
-    inc_hi = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    dest_hi = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    inc_lo = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 2), 'XXXXXXXXXXXXXXXX')"
-    dest_lo = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 2), 'XXXXXXXXXXXXXXXX')"
+    # Both sides are guarded by ``pg_re`` (pure hex), so a zero-left-padded
+    # lower-case segment compares lexicographically exactly as its numeric
+    # value — no hex format mask, which SQL emulators do not implement.
+    def hexpad(expr: str, part: int) -> str:
+        return f"LPAD(LOWER(SPLIT_PART({expr}, '/', {part})), 16, '0')"
+
+    inc_hi, dest_hi = hexpad(inc, 1), hexpad(dest, 1)
+    inc_lo, dest_lo = hexpad(inc, 2), hexpad(dest, 2)
     pg_newer = (
         f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
     )
@@ -558,16 +897,28 @@ def snowflake_lsn_match_predicate(
     )
     inc_opaque = (
         f"(NOT REGEXP_LIKE({inc}, '{pg_re}') AND NOT REGEXP_LIKE({inc}, '{num_re}') "
-        f"AND NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%'))"
+        f"AND NOT {inc_filepos})"
     )
     dest_opaque = (
         f"(NOT REGEXP_LIKE({dest}, '{pg_re}') AND NOT REGEXP_LIKE({dest}, '{num_re}') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%'))"
+        f"AND NOT {dest_filepos})"
     )
-    both_opaque = f"({inc_opaque} AND {dest_opaque})"
+    inc_scn = _lsn_scn_family_sql(inc, match, full=True)
+    dest_scn = _lsn_scn_family_sql(dest, match, full=True)
+    scn_newer = (
+        f"({inc_scn} AND {dest_scn} "
+        f"AND TRY_TO_NUMBER(SPLIT_PART({inc}, ':', -1)) "
+        f"> TRY_TO_NUMBER(SPLIT_PART({dest}, ':', -1)))"
+    )
+    both_opaque = (
+        f"({inc_opaque} AND {dest_opaque} "
+        f"AND NOT {inc_scn} AND NOT {dest_scn} "
+        f"AND {_lsn_same_prefix_sql(inc, dest, match, full=True)})"
+    )
     return (
         f"({dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR {scn_newer} "
         f"OR ({both_pg} AND {pg_newer}) "
         f"OR ({both_numeric} AND TRY_TO_NUMBER({inc}) > TRY_TO_NUMBER({dest})) "
         f"OR ({both_opaque} AND {inc} > {dest}))"
@@ -589,10 +940,13 @@ def bigquery_lsn_match_predicate(
     dest = f"COALESCE({target_alias}.`{lsn_column}`, '')"
     pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
     num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
+
+    def match(expr: str, pat: str) -> str:
+        return f"REGEXP_CONTAINS(LOWER({expr}), r'{pat}')"
+
+    inc_filepos = _lsn_filepos_family_sql(inc, match)
+    dest_filepos = _lsn_filepos_family_sql(dest, match)
+    both_filepos = f"({inc_filepos} AND {dest_filepos})"
     filepos_newer = (
         f"(SPLIT({inc}, ':')[OFFSET(0)] > SPLIT({dest}, ':')[OFFSET(0)] "
         f"OR (SPLIT({inc}, ':')[OFFSET(0)] = SPLIT({dest}, ':')[OFFSET(0)] "
@@ -615,17 +969,29 @@ def bigquery_lsn_match_predicate(
     inc_opaque = (
         f"(NOT REGEXP_CONTAINS({inc}, r'{pg_re}') "
         f"AND NOT REGEXP_CONTAINS({inc}, r'{num_re}') "
-        f"AND NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%'))"
+        f"AND NOT {inc_filepos})"
     )
     dest_opaque = (
         f"(NOT REGEXP_CONTAINS({dest}, r'{pg_re}') "
         f"AND NOT REGEXP_CONTAINS({dest}, r'{num_re}') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%'))"
+        f"AND NOT {dest_filepos})"
     )
-    both_opaque = f"({inc_opaque} AND {dest_opaque})"
+    inc_scn = _lsn_scn_family_sql(inc, match)
+    dest_scn = _lsn_scn_family_sql(dest, match)
+    scn_newer = (
+        f"({inc_scn} AND {dest_scn} "
+        f"AND SAFE_CAST(SPLIT({inc}, ':')[OFFSET(1)] AS INT64) "
+        f"> SAFE_CAST(SPLIT({dest}, ':')[OFFSET(1)] AS INT64))"
+    )
+    both_opaque = (
+        f"({inc_opaque} AND {dest_opaque} "
+        f"AND NOT {inc_scn} AND NOT {dest_scn} "
+        f"AND {_lsn_same_prefix_sql(inc, dest, match)})"
+    )
     return (
         f"({dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR {scn_newer} "
         f"OR ({both_pg} AND {pg_newer}) "
         f"OR ({both_numeric} AND SAFE_CAST({inc} AS INT64) > SAFE_CAST({dest} AS INT64)) "
         f"OR ({both_opaque} AND {inc} > {dest}))"

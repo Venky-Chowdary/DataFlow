@@ -12,9 +12,10 @@ long-lived sockets mid-transfer. Writers must:
 from __future__ import annotations
 
 import logging
-import os
-from services.brand_env import getenv_brand
+import threading
 import time
+
+from services.brand_env import getenv_brand
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -98,7 +99,71 @@ def proxy_stream_batch_size(
     return write_chunk_size(host, default=default, connection_string=connection_string)
 
 
+# MySQL/MariaDB codes that mean the session is gone, so a reconnect can help:
+# client CR_CONNECTION_ERROR/CR_CONN_HOST_ERROR (2002/2003), CR_SERVER_GONE_ERROR
+# (2006), CR_SERVER_LOST (2013), CR_SERVER_LOST_EXTENDED (2055); server
+# ER_SERVER_SHUTDOWN (1053), ER_ABORTING_CONNECTION (1152), ER_NET_READ_ERROR /
+# ER_NET_READ_INTERRUPTED / ER_NET_ERROR_ON_WRITE / ER_NET_WRITE_INTERRUPTED
+# (1158-1161), ER_CONNECTION_KILLED (1927), ER_CLIENT_INTERACTION_TIMEOUT (4031).
+# Every other server code (1064 syntax, 1071/1170 key DDL, 1146 missing table,
+# 1205 lock wait, 1406 data too long…) repeats identically on a fresh session.
+MYSQL_CONNECTION_LOST_CODES: frozenset[int] = frozenset(
+    {2002, 2003, 2006, 2013, 2055, 1053, 1152, 1158, 1159, 1160, 1161, 1927, 4031}
+)
+_MYSQL_DRIVER_MODULES = ("pymysql", "MySQLdb", "mysql.connector", "mariadb")
+
+
+_WRAPPED_ERROR_DEPTH = 5
+
+
+def _mysql_driver_error(exc: BaseException) -> BaseException | None:
+    """The MySQL-family driver exception inside ``exc``, if any.
+
+    SQLAlchemy (generic_sql) wraps the driver error as ``DBAPIError.orig``;
+    other layers chain it via ``raise … from`` / implicit context. Depth is
+    bounded so a cyclic chain cannot spin.
+    """
+    seen: set[int] = set()
+    frontier: list[BaseException] = [exc]
+    for _ in range(_WRAPPED_ERROR_DEPTH):
+        nxt: list[BaseException] = []
+        for err in frontier:
+            if id(err) in seen:
+                continue
+            seen.add(id(err))
+            if type(err).__module__.startswith(_MYSQL_DRIVER_MODULES):
+                return err
+            context = None if err.__suppress_context__ else err.__context__
+            for inner in (getattr(err, "orig", None), err.__cause__, context):
+                if isinstance(inner, BaseException):
+                    nxt.append(inner)
+        if not nxt:
+            break
+        frontier = nxt
+    return None
+
+
+def _mysql_error_code(exc: BaseException | str) -> int | None:
+    """Server/client error code of a (possibly wrapped) MySQL driver error, else None."""
+    if not isinstance(exc, BaseException):
+        return None
+    err = _mysql_driver_error(exc)
+    if err is None:
+        return None
+    code = getattr(err, "errno", None)
+    if not isinstance(code, int) and err.args and isinstance(err.args[0], int):
+        code = err.args[0]
+    # pymysql raises InterfaceError(0, "") on a closed socket: no code to read.
+    return code if isinstance(code, int) and code > 0 else None
+
+
 def is_connection_lost(exc: BaseException | str) -> bool:
+    mysql_code = _mysql_error_code(exc)
+    if mysql_code is not None:
+        # Classify by code, not message: an OperationalError wrapper around a
+        # DDL refusal (1170 "BLOB/TEXT column used in key specification")
+        # was retried as a dropped socket for the whole reconnect budget.
+        return mysql_code in MYSQL_CONNECTION_LOST_CODES
     text = str(exc).lower()
     name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
     try:
@@ -123,6 +188,7 @@ def is_connection_lost(exc: BaseException | str) -> bool:
                 "out of range",
                 "lock wait",
                 "lock timeout",
+                "unknown collation",
             )
         ):
             return "server closed" in text or "connection reset" in text or "broken pipe" in text
@@ -155,6 +221,128 @@ def should_retry_connection_lost(
     return attempt < chunk_reconnect_attempts(proxy=proxy)
 
 
+class PgOverwriteTransaction:
+    """One PostgreSQL full-refresh overwrite, held until the load finishes.
+
+    TRUNCATE and the inserts that follow it commit together. Readers stay on
+    the previous table until :meth:`finish`. The state lives on this object,
+    registered by connection, and is never written onto the driver connection.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.truncated = False
+        self.truncated_tables: set[str] = set()
+        self.job_id = ""
+        # Real xid of the committing transaction, captured inside finish()
+        # just before commit — the value stamped on the rows' xmin, so a
+        # failed run can undo exactly its own rows (P2 keyed undo).
+        self.tx_id: int | None = None
+
+    def begin(self, *, job_id: str = "") -> None:
+        """Hold every commit until :meth:`finish`. Safe to call on each batch."""
+        self.active = True
+        self.tx_id = None
+        if job_id and not self.job_id:
+            self.job_id = str(job_id)
+
+    def was_truncated(self, table_name: str = "") -> bool:
+        """True once emptying is done for this table.
+
+        A routed overwrite writes several destination tables on one held
+        transaction — the flag must be per table or only the first route
+        table gets truncated and the others append (RT-2).
+        """
+        if table_name:
+            return table_name in self.truncated_tables
+        return self.truncated
+
+    def note_truncated(self, table_name: str = "") -> None:
+        """Emptying is done for this load: an existing table was truncated, or
+        this run is creating the table and must not truncate its own rows.
+        """
+        self.truncated = True
+        if table_name:
+            self.truncated_tables.add(table_name)
+        self.active = True
+
+    def finish(self, conn: Any, *, success: bool) -> None:
+        if conn is None or not self.active:
+            unbind_overwrite_transaction(conn)
+            return
+        try:
+            if success:
+                try:
+                    # Inside the write transaction: pg_current_xact_id() is
+                    # the xid that stamps xmin on every row this txn wrote.
+                    with conn.cursor() as _txc:
+                        _txc.execute("SELECT pg_current_xact_id()")
+                        self.tx_id = int(_txc.fetchone()[0])
+                except Exception:
+                    self.tx_id = None
+                conn.commit()
+                if self.job_id:
+                    try:
+                        from services.auto_create_lifecycle import (
+                            mark_auto_create_committed,
+                        )
+
+                        mark_auto_create_committed(self.job_id)
+                    except Exception:
+                        logger.debug("auto_create commit mark skipped", exc_info=True)
+            else:
+                conn.rollback()
+        except Exception as exc:
+            logger.warning(
+                "PostgreSQL overwrite transaction finish failed: %s", exc, exc_info=exc
+            )
+        finally:
+            self.active = False
+            self.truncated = False
+            self.truncated_tables.clear()
+            self.job_id = ""
+            unbind_overwrite_transaction(conn)
+
+
+_OVERWRITE_TXNS: dict[int, PgOverwriteTransaction] = {}
+_OVERWRITE_LOCK = threading.Lock()
+
+
+def bind_overwrite_transaction(conn: Any, txn: PgOverwriteTransaction) -> None:
+    if conn is None:
+        return
+    with _OVERWRITE_LOCK:
+        _OVERWRITE_TXNS[id(conn)] = txn
+
+
+def overwrite_transaction_for(conn: Any) -> PgOverwriteTransaction | None:
+    if conn is None:
+        return None
+    with _OVERWRITE_LOCK:
+        return _OVERWRITE_TXNS.get(id(conn))
+
+
+def unbind_overwrite_transaction(conn: Any) -> None:
+    if conn is None:
+        return
+    with _OVERWRITE_LOCK:
+        _OVERWRITE_TXNS.pop(id(conn), None)
+
+
+def finish_held_overwrite(conn: Any, *, success: bool) -> None:
+    """Commit or roll back a PostgreSQL overwrite that deferred its commits.
+
+    TRUNCATE and the following inserts share one transaction so a reader sees
+    the old table or the new table, not a prefix of the load (R4-D06). The
+    stream holds the connection across batches and closes it at the end; a
+    close without this commit would roll the whole overwrite back.
+    """
+    txn = overwrite_transaction_for(conn)
+    if txn is None:
+        return
+    txn.finish(conn, success=success)
+
+
 def close_quietly(conn: Any) -> None:
     if conn is None:
         return
@@ -174,13 +362,26 @@ def apply_postgres_session_guards(conn: Any) -> None:
     the operator.  DDL paths that need a shorter fail-fast window can ``SET LOCAL``
     a lower value and ``RESET`` afterwards.
     """
+    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+
+    # Inside a tool call (plan, rank, sample, query...) a statement may not
+    # outlive the call: the server cancels it at the call's deadline instead of
+    # scanning on for a caller that gave up (D181). Transfer jobs keep 0.
+    budget = statement_timeout_seconds()
+    statement_ms = int(budget * 1000) if budget is not None else 0
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = 0")
-            cur.execute("SET idle_in_transaction_session_timeout = 0")
-            cur.execute("SET lock_timeout = 120000")
-            cur.execute("SET application_name = 'dataflow'")
+            cur.execute(f"SET statement_timeout = {statement_ms}")
+            # Likewise a transaction a tool left open (a scan it stopped at
+            # its budget) is ended by the server at the call's deadline, so it
+            # cannot hold locks on the customer's table afterwards.
+            cur.execute(f"SET idle_in_transaction_session_timeout = {statement_ms}")
+            cur.execute(f"SET lock_timeout = {destination_lock_wait_seconds() * 1000}")
+            from services.brand import session_application_name
+
+            # A constant from services.brand ("dataflow" / "datawrap"), never input.
+            cur.execute(f"SET application_name = '{session_application_name()}'")
         conn.autocommit = False
     except Exception:
         try:
@@ -192,7 +393,7 @@ def apply_postgres_session_guards(conn: Any) -> None:
 def apply_mysql_session_guards(
     conn: Any,
     *,
-    lock_wait_seconds: int = 120,
+    lock_wait_seconds: int = 0,
     require_strict_sql_mode: bool = True,
 ) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
@@ -208,17 +409,19 @@ def apply_mysql_session_guards(
     When ``require_strict_sql_mode`` is True (default), failure to enable STRICT
     modes raises — never continue a transfer that can silently truncate.
     """
-    lock_s = max(5, min(int(lock_wait_seconds or 120), 600))
+    lock_s = max(5, min(int(lock_wait_seconds or destination_lock_wait_seconds()), 600))
     try:
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
             cur.execute("SET SESSION net_read_timeout = 600")
             cur.execute("SET SESSION net_write_timeout = 600")
-            # TIMESTAMP columns are converted with the session time_zone on both
-            # write and read. Pinning UTC makes the instant deterministic instead
-            # of inheriting whatever zone the server happens to run in.
-            cur.execute("SET SESSION time_zone = '+00:00'")
+            # TIMESTAMP conversion is session-relative. The same pin is used by
+            # source readers, dest writers, and generic_sql pooled connections
+            # (services.timezone_policy.pin_mysql_session_utc).
+            from services.timezone_policy import MYSQL_UTC_PIN_SQL
+
+            cur.execute(MYSQL_UTC_PIN_SQL)
             cur.execute(f"SET SESSION lock_wait_timeout = {lock_s}")
             cur.execute(f"SET SESSION innodb_lock_wait_timeout = {lock_s}")
             _ensure_mysql_strict_sql_mode(cur, require=require_strict_sql_mode)
@@ -281,6 +484,25 @@ def _ensure_mysql_strict_sql_mode(cur: Any, *, require: bool = True) -> None:
         )
 
 
+#: How long a session waits on another session's table/row lock (seconds).
+DEFAULT_LOCK_WAIT_SECONDS = 120
+
+
+def destination_lock_wait_seconds() -> int:
+    """The lock-wait bound every write session uses (``*_LOCK_WAIT_SECONDS``).
+
+    PostgreSQL and MySQL sessions already waited at most 120 s; SQL Server's
+    pooled sessions waited forever (``LOCK_TIMEOUT -1``), so a retry whose
+    DELETE/TRUNCATE queued behind a lock the failed attempt's session still
+    held froze at "Connecting to destination and creating table..." (D19).
+    """
+    try:
+        value = int(float(getenv_brand("DEST_LOCK_WAIT_SECONDS", str(DEFAULT_LOCK_WAIT_SECONDS))))
+    except ValueError:
+        value = DEFAULT_LOCK_WAIT_SECONDS
+    return max(1, min(value, 600))
+
+
 def apply_mssql_session_guards(
     conn: Any,
     *,
@@ -297,9 +519,14 @@ def apply_mssql_session_guards(
     try:
         cur = getattr(conn, "cursor", None)
         if callable(cur):
+            # DATETIME2(7): read the seventh fractional digit pyodbc drops.
+            from connectors.sqlserver_tick import install_tick_converter
+
+            install_tick_converter(conn)
             with conn.cursor() as c:
                 c.execute("SET ANSI_WARNINGS ON")
                 c.execute("SET ANSI_PADDING ON")
+                c.execute(f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}")
                 try:
                     c.execute("SET CONCAT_NULL_YIELDS_NULL ON")
                 except Exception:
@@ -312,6 +539,7 @@ def apply_mssql_session_guards(
 
             conn.execute(sa.text("SET ANSI_WARNINGS ON"))
             conn.execute(sa.text("SET ANSI_PADDING ON"))
+            conn.execute(sa.text(f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}"))
             try:
                 conn.execute(sa.text("SET CONCAT_NULL_YIELDS_NULL ON"))
             except Exception:
@@ -726,8 +954,27 @@ def mark_sqlalchemy_chunk_committed(
 
 
 def _is_duplicate_key_error(exc: BaseException) -> bool:
-    """Whether an exception is a primary-key / unique violation."""
+    """Whether an exception is a primary-key / unique violation.
+
+    CHECK, FOREIGN KEY and NOT NULL violations also surface as IntegrityError
+    (SQL Server error 547, 515, ...) — they must NOT be treated as duplicates:
+    silently skipping them mislabels a contract violation as a repeat row.
+    """
     text = str(exc).lower()
+    non_duplicate_signals = (
+        "check constraint",
+        "conflicted with the check",
+        "foreign key constraint",
+        "conflicted with the foreign key",
+        "cannot insert null",
+        "cannot insert the value null",
+        "not null constraint",
+        "does not allow nulls",
+        "violates not-null constraint",
+        "violates check constraint",
+    )
+    if any(s in text for s in non_duplicate_signals):
+        return False
     signals = (
         "duplicate key",
         "unique constraint",

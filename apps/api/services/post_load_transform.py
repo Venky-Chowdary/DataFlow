@@ -20,6 +20,47 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_transfer_logger = logging.getLogger("dataflow.transfer")
+
+
+def apply_post_load_transforms(
+    request: Any, dest_summary: dict[str, Any]
+) -> None:
+    """Run configured transformations and fold actionable results into the summary."""
+    try:
+        destination = getattr(request, "destination", None)
+        if destination is None:
+            return
+        landed = str(
+            getattr(destination, "table", "")
+            or getattr(destination, "collection", "")
+            or ""
+        )
+        outcome = run_post_load_transforms(
+            destination=destination,
+            landed_table=landed,
+            workspace_id=str(getattr(request, "workspace_id", "") or ""),
+        )
+        if (
+            outcome.get("ran")
+            or outcome.get("status") in {"failed", "partial"}
+            or (
+                outcome.get("status") == "skipped"
+                and outcome.get("message")
+                and "No transformation project" not in str(outcome.get("message"))
+            )
+        ):
+            dest_summary["transformations"] = outcome
+    except Exception as exc:
+        _transfer_logger.warning(
+            "Post-load transformations skipped: %s", exc, exc_info=exc
+        )
+        dest_summary["transformations"] = {
+            "ran": False,
+            "status": "failed",
+            "projects": [],
+            "message": f"Post-load transformations could not start: {exc}",
+        }
 
 
 def run_post_load_transforms(

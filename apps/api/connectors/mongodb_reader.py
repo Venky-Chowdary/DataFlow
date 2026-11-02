@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,36 @@ if str(_api_root) not in sys.path:
 from services.json_intelligence import expand_mongo_documents
 from services.value_serializer import cell_to_string
 
-from .mongodb_common import _mongo_client
+from .mongodb_common import _mongo_client, _new_mongo_client
+
+
+def _cursor_boolean(value: str) -> bool | None:
+    """Write-path boolean tokens only — informal yes/y/2 are not TRUE."""
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(value, "boolean")
+    if parsed is None or err:
+        return None
+    return bool(parsed)
+
+
+def _cursor_datetime(value: str) -> Any:
+    """Write-path datetime bind — ISO, epoch, unambiguous calendars. Auto slash refuses."""
+    from datetime import datetime
+
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(value, "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        return datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     """Convert a string cursor value into a BSON-native type for MongoDB queries."""
-    from datetime import datetime
     from decimal import InvalidOperation, Overflow
 
     from bson.decimal128 import Decimal128
@@ -32,44 +57,167 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
 
     ctype = (cursor_type or "").upper()
     if ctype in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "SERIAL", "BIGSERIAL"}:
-        try:
-            return int(value.replace(",", ""))
-        except ValueError:
-            return value
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(value)
+        return parsed if parsed is not None else value
     if ctype in {"DECIMAL", "NUMERIC", "NUMBER", "MONEY", "SMALLMONEY"}:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            return value
         try:
-            return Decimal128(value.replace(",", ""))
+            return Decimal128(str(parsed))
         except (InvalidOperation, Overflow, ValueError):
             return value
     if ctype in {"BOOLEAN", "BOOL"}:
-        return value.strip().lower() in {"true", "t", "yes", "y", "1"}
+        parsed_bool = _cursor_boolean(value)
+        return parsed_bool if parsed_bool is not None else value
     if ctype in {"DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ", "DATE"}:
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return value
+        parsed_dt = _cursor_datetime(value)
+        return parsed_dt if parsed_dt is not None else value
     if ctype in {"STRING", "VARCHAR", "TEXT", "CHAR"}:
         return value
 
     wm_type = infer_watermark_type([value])
     if wm_type == WatermarkType.INTEGER:
-        try:
-            return int(value.replace(",", ""))
-        except ValueError:
-            return value
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(value)
+        return parsed if parsed is not None else value
     if wm_type == WatermarkType.FLOAT:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            return value
         try:
-            return Decimal128(value.replace(",", ""))
+            return Decimal128(str(parsed))
         except (InvalidOperation, Overflow, ValueError):
             return value
     if wm_type == WatermarkType.DATETIME:
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return value
+        parsed_dt = _cursor_datetime(value)
+        return parsed_dt if parsed_dt is not None else value
     return value
+
+
+# BSON compares across types by type order, never by value: a `$gt` on a
+# datetime can never match a field whose cells hold ISO strings. A watermark
+# cast from the *declared* logical type therefore matches nothing and the sync
+# reports "no new rows" forever. The cursor value is aligned to the type the
+# collection actually stores instead.
+_BSON_KIND_OF_TYPE = {
+    "string": "string",
+    "date": "date",
+    "timestamp": "date",
+    "int": "number",
+    "long": "number",
+    "double": "number",
+    "decimal": "number",
+    "bool": "bool",
+    "objectId": "objectid",
+}
+
+
+def stored_cursor_bson_kind(
+    coll: Any, field: str, *, sample_limit: int = 5000
+) -> str:
+    """The BSON type family the collection actually stores in ``field``.
+
+    Returns ``""`` when nothing is stored (empty collection / absent field), and
+    raises when the field mixes families — a mixed cursor field cannot bound an
+    incremental read, and guessing one family would silently skip the others.
+    """
+    if not field:
+        return ""
+    pipeline = [
+        {"$match": {field: {"$exists": True, "$ne": None}}},
+        {"$limit": int(sample_limit)},
+        {"$group": {"_id": {"$type": f"${field}"}}},
+    ]
+    try:
+        types = {str(d.get("_id") or "") for d in coll.aggregate(pipeline)}
+    except Exception:
+        return ""
+    kinds = {_BSON_KIND_OF_TYPE.get(t, "") for t in types if t}
+    kinds.discard("")
+    if not kinds:
+        return ""
+    if len(kinds) > 1:
+        raise ValueError(
+            f"Cursor field '{field}' stores more than one BSON type "
+            f"({', '.join(sorted(types))}) in this collection. MongoDB orders "
+            "values by type before value, so no single watermark can bound an "
+            "incremental read across them — normalise the field to one type at "
+            "the source, or run this sync as full refresh."
+        )
+    return kinds.pop()
+
+
+def _align_cursor_to_stored_kind(raw: str, casted: Any, kind: str) -> Any:
+    """Re-cast a watermark into the BSON family the collection stores."""
+    import datetime as _dt
+    from decimal import InvalidOperation
+
+    from bson.decimal128 import Decimal128
+    from bson.objectid import ObjectId
+
+    if not kind:
+        return casted
+    if kind == "string":
+        return raw if isinstance(casted, (_dt.datetime, _dt.date, bool, int, float)) else casted
+    if kind == "date":
+        if isinstance(casted, _dt.datetime):
+            return casted
+        parsed = _cast_cursor_value(raw, "TIMESTAMP")
+        if isinstance(parsed, _dt.datetime):
+            return parsed
+        raise ValueError(
+            f"Watermark '{raw}' is not a timestamp, but this collection stores "
+            "BSON dates in the cursor field — the incremental bound cannot be "
+            "compared. Reset the cursor for this stream."
+        )
+    if kind == "number":
+        if isinstance(casted, (int, float, Decimal128)) and not isinstance(casted, bool):
+            return casted
+        from services.transform_engine import decimal_wire_value, integer_wire_value
+
+        as_int = integer_wire_value(str(raw))
+        if as_int is not None:
+            return as_int
+        parsed = decimal_wire_value(raw)
+        if parsed is not None:
+            try:
+                return Decimal128(str(parsed))
+            except (InvalidOperation, ValueError, TypeError):
+                pass
+        raise ValueError(
+            f"Watermark '{raw}' is not numeric, but this collection stores "
+            "numbers in the cursor field. Reset the cursor for this stream."
+        )
+    if kind == "bool":
+        if isinstance(casted, bool):
+            return casted
+        parsed_bool = _cursor_boolean(str(raw))
+        if parsed_bool is not None:
+            return parsed_bool
+        raise ValueError(
+            f"Watermark '{raw}' is not a canonical boolean "
+            "(true/false/t/f/1/0), but this collection stores booleans in "
+            "the cursor field. Reset the cursor for this stream."
+        )
+    if kind == "objectid":
+        if isinstance(casted, ObjectId):
+            return casted
+        text = str(raw).strip()
+        if ObjectId.is_valid(text):
+            return ObjectId(text)
+        raise ValueError(
+            f"Watermark '{raw}' is not an ObjectId, but this collection stores "
+            "ObjectIds in the cursor field. Reset the cursor for this stream."
+        )
+    return casted
 
 
 def _connection_string(cfg: dict[str, Any]) -> str:
@@ -89,22 +237,75 @@ def _connection_string(cfg: dict[str, Any]) -> str:
 
 def _serialize(value: Any) -> str:
     # BSON null must stay distinct from missing/empty string on SQL sinks.
+    if isinstance(value, datetime):
+        value = (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None or value.utcoffset() is None
+            else value.astimezone(timezone.utc)
+        )
     return cell_to_string(value, preserve_sql_null=True)
 
 
-def _project_doc_row(doc: dict[str, Any], headers: list[str]) -> list[str]:
+def _inside_present_document(doc: dict[str, Any], header: str) -> bool:
+    """True when ``header`` is a flattened child path of a field this document has.
+
+    ``maybe_v`` is expanded from ``maybe``. When ``maybe`` is present (an object
+    without ``v``, or null) the child is known to be null; only a missing
+    ``maybe`` leaves ``maybe_v`` unknown. Projecting it as missing kept the
+    previous run's ``maybe_v`` on upsert while ``maybe`` went null (D211).
+    """
+    return any(
+        header.startswith(f"{key}_") and (value is None or isinstance(value, dict))
+        for key, value in doc.items()
+    )
+
+
+def _project_doc_row(
+    doc: dict[str, Any], headers: list[str], *, flattened: bool = False
+) -> list[str]:
     """Project a Mongo document onto headers — missing ≠ explicit null."""
     from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
     row: list[str] = []
     for h in headers:
         if h not in doc:
-            row.append(DF_MISSING_SENTINEL)
+            known_null = flattened and _inside_present_document(doc, h)
+            row.append(SQL_NULL_SENTINEL if known_null else DF_MISSING_SENTINEL)
         elif doc[h] is None:
             row.append(SQL_NULL_SENTINEL)
         else:
             row.append(_serialize(doc[h]))
     return row
+
+
+def _page_docs_to_batch(
+    docs: list[dict[str, Any]],
+    *,
+    cfg: dict[str, Any],
+    columns: list[str] | None,
+    offset: int,
+    total: int | None,
+) -> ReadBatch:
+    """Shared projection for batch / cursor / held-scan pages."""
+    if not docs:
+        return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
+    for doc in docs:
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
+    docs = expand_mongo_documents(docs, cfg=cfg)
+    page_keys: list[str] = []
+    seen: set[str] = set()
+    for doc in docs:
+        for k in doc.keys():
+            if k not in seen:
+                seen.add(k)
+                page_keys.append(k)
+    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
+    from services.json_intelligence import mongo_flatten_enabled
+
+    flattened = mongo_flatten_enabled(cfg)
+    rows = [_project_doc_row(doc, headers, flattened=flattened) for doc in docs]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
 def read_collection_batch(
@@ -123,33 +324,14 @@ def read_collection_batch(
         total = known_total_rows
     else:
         total = coll.count_documents({})
-    # Sort by _id so the first batch and any offset-based pagination share the
-    # same ordering as cursor/keyset pagination. Without this, the initial
-    # batch can come back in insertion order and the keyset cursor will skip
-    # every document whose _id is less than an arbitrary high watermark.
+    # Legacy OFFSET path — .skip(n) is O(n²) and drifts under concurrent
+    # inserts. Fresh dumps use read_collection_scan_batch; resume uses
+    # read_collection_cursor_batch on ``_id``.
     cursor = coll.find({}).sort("_id", 1).skip(offset).limit(limit)
     docs = list(cursor)
-    if not docs:
-        return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
-
-    for doc in docs:
-        if "_id" in doc:
-            doc["_id"] = str(doc["_id"])
-
-    docs = expand_mongo_documents(docs, cfg=cfg)
-
-    page_keys: list[str] = []
-    seen: set[str] = set()
-    for doc in docs:
-        for k in doc.keys():
-            if k not in seen:
-                seen.add(k)
-                page_keys.append(k)
-    # Always union — sparse fields mid-collection must not vanish when columns frozen.
-    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
-
-    rows = [_project_doc_row(doc, headers) for doc in docs]
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    return _page_docs_to_batch(
+        docs, cfg=cfg, columns=columns, offset=offset, total=total
+    )
 
 
 def read_collection_cursor_batch(
@@ -172,7 +354,7 @@ def read_collection_cursor_batch(
     """
     from bson.objectid import ObjectId
 
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     client = _mongo_client(_connection_string(cfg))
     coll = client[database][collection]
@@ -180,33 +362,40 @@ def read_collection_cursor_batch(
     sort_spec: list[tuple[str, int]] = [(cursor_column, 1)]
     pk = (cursor_primary_key or "").strip()
     use_composite = bool(pk and pk != cursor_column)
+    # The stored family, not the declared one, decides the comparison.
+    cursor_kind = stored_cursor_bson_kind(coll, cursor_column)
+    pk_kind = stored_cursor_bson_kind(coll, pk) if use_composite else ""
 
-    def _as_mongo_cursor(raw: str, *, as_id: bool = False) -> Any:
-        casted = _cast_cursor_value(raw, cursor_type if not as_id else "STRING")
+    def _as_mongo_cursor(raw: str, *, tiebreak: bool = False) -> Any:
+        """Cast one half of the bookmark against the field it belongs to.
+
+        Each half of a composite bookmark is compared against its own column, so
+        it must be aligned to *that* column's stored BSON family. Aligning the
+        tie-break half to the cursor column's family made every ``_id``-ordered
+        Mongo snapshot with a non-``_id`` tie-break (any collection paged past
+        one chunk) die on page 2 with "Watermark 'N' is not an ObjectId".
+        """
+        field = pk if tiebreak else cursor_column
+        casted = _cast_cursor_value(raw, "STRING" if tiebreak else cursor_type)
         if (
-            as_id
+            field == "_id"
             and isinstance(casted, str)
             and len(casted) == 24
             and ObjectId.is_valid(casted)
         ):
             return ObjectId(casted)
-        if (
-            not as_id
-            and cursor_column == "_id"
-            and isinstance(casted, str)
-            and len(casted) == 24
-            and ObjectId.is_valid(casted)
-        ):
-            return ObjectId(casted)
-        return casted
+        return _align_cursor_to_stored_kind(
+            raw, casted, pk_kind if tiebreak else cursor_kind
+        )
 
-    if cursor_after is not None and cursor_after != "":
+    bookmark = present_cursor_bookmark(cursor_after)
+    if bookmark is not None:
         cur_raw, pk_raw = split_cursor_bookmark(
-            cursor_after, has_tiebreak=use_composite
+            bookmark, has_tiebreak=use_composite
         )
         if use_composite and pk_raw != "":
             casted = _as_mongo_cursor(cur_raw)
-            pk_casted = _as_mongo_cursor(pk_raw, as_id=(pk == "_id"))
+            pk_casted = _as_mongo_cursor(pk_raw, tiebreak=True)
             query["$or"] = [
                 {cursor_column: {"$gt": casted}},
                 {cursor_column: casted, pk: {"$gt": pk_casted}},
@@ -226,23 +415,78 @@ def read_collection_cursor_batch(
         total = coll.count_documents(query)
     cursor = coll.find(query).sort(sort_spec).limit(limit)
     docs = list(cursor)
-    if not docs:
-        return ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=total)
+    return _page_docs_to_batch(
+        docs, cfg=cfg, columns=columns, offset=0, total=total
+    )
 
-    for doc in docs:
-        if "_id" in doc:
-            doc["_id"] = str(doc["_id"])
 
-    docs = expand_mongo_documents(docs, cfg=cfg)
+def read_collection_scan_batch(
+    *,
+    cfg: dict[str, Any],
+    database: str,
+    collection: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 500,
+    known_total_rows: int | None = None,
+    scan_state: dict[str, Any] | None = None,
+) -> ReadBatch:
+    """Page one ``find().sort(_id)`` cursor with getmore — no ``.skip()``.
 
-    page_keys: list[str] = []
-    seen: set[str] = set()
-    for doc in docs:
-        for k in doc.keys():
-            if k not in seen:
-                seen.add(k)
-                page_keys.append(k)
-    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
+    Debezium/Fivetran snapshot the collection on a held ``_id``-ordered cursor.
+    ``skip(offset)`` walks the prefix on every page (O(n²)) and, under concurrent
+    inserts, can skip or duplicate documents. Mid-run resume must not call this
+    from a non-zero offset — stream.py keeps the held cursor or seeks ``_id``.
+    """
+    from connectors.sql_snapshot_scan import close_table_scan, publish_scan_order
 
-    rows = [_project_doc_row(doc, headers) for doc in docs]
-    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
+    state = scan_state if scan_state is not None else {}
+    if not state.get("started"):
+        # The scan closes this client when the extract finishes. A cached
+        # client is shared with every other job on the URI, so closing it
+        # kills their sockets mid-getMore. This scan owns its client.
+        # no_cursor_timeout keeps the server cursor alive while a slow
+        # destination write sits between pages (the default 10-minute idle
+        # kill dropped a long snapshot around the pages already committed).
+        client = _new_mongo_client(_connection_string(cfg))
+        coll = client[database][collection]
+        if known_total_rows is not None:
+            total = known_total_rows
+        else:
+            total = coll.count_documents({})
+        cursor = coll.find({}, no_cursor_timeout=True).sort("_id", 1)
+        try:
+            cursor = cursor.batch_size(max(1, int(limit)))
+        except Exception:
+            pass
+        state.update(
+            started=True,
+            client=client,
+            cur=cursor,
+            total=total,
+            headers=list(columns or []),
+            cfg=cfg,
+        )
+        publish_scan_order(state, ["_id"])
+    cursor = state["cur"]
+    page: list[dict[str, Any]] = []
+    n = max(1, int(limit))
+    try:
+        for _ in range(n):
+            page.append(dict(next(cursor)))
+    except StopIteration:
+        pass
+    if not page:
+        headers = list(state.get("headers") or columns or [])
+        total = state.get("total")
+        close_table_scan(state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    batch = _page_docs_to_batch(
+        page,
+        cfg=state.get("cfg") or cfg,
+        columns=state.get("headers") or columns,
+        offset=offset,
+        total=state.get("total"),
+    )
+    state["headers"] = list(batch.headers)
+    return batch

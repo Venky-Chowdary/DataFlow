@@ -189,7 +189,8 @@ def recommend_vector_field_roles(
         avg = _avg_len(samples)
 
         if is_pii or role in _PII_ROLES or analysis_type in {
-            "email", "phone", "ssn", "credit_card", "person_name", "address", "iban",
+            "email", "phone", "ssn", "credit_card", "pci_pan", "person_name",
+            "address", "iban",
         }:
             fields.append(FieldRouting(
                 column=col,

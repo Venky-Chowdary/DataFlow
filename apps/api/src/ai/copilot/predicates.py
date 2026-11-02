@@ -62,9 +62,6 @@ _NUMERIC_HINTS = (
 _TEMPORAL_HINTS = ("date", "time", "timestamp")
 _BOOLEAN_HINTS = ("bool",)
 
-_TRUE_WORDS = frozenset({"true", "t", "yes", "y", "1", "on"})
-_FALSE_WORDS = frozenset({"false", "f", "no", "n", "0", "off"})
-
 
 class PredicateError(ValueError):
     """A filter that cannot be honoured — reported to the operator verbatim."""
@@ -79,6 +76,8 @@ class Predicate:
     values: list[Any] = field(default_factory=list)
     # Human phrase, echoed back so the operator can see what was applied.
     text: str = ""
+    # Joiner to the previous predicate, carried from the spoken filter.
+    join: str = "and"
 
 
 @dataclass
@@ -89,6 +88,9 @@ class ParsedFilter:
     op: str
     raw_values: list[str] = field(default_factory=list)
     text: str = ""
+    # Joiner to the previous filter, exactly as spoken. SQL precedence keeps
+    # AND inside each OR disjunct: ``a or b and c`` is ``a or (b and c)``.
+    join: str = "and"
 
 
 # --------------------------------------------------------------------------
@@ -101,7 +103,7 @@ _IDENT = r"[A-Za-z_][A-Za-z0-9_ ]{0,40}?"
 # phrase ("... = open on Local Postgres") gets swallowed into the literal.
 _END = (
     r"(?=\s+(?:and|or|group|grouped|by|per|order|ordered|on|from|in|for|with|"
-    r"limit|top|bottom)\b|[.,;?!]|$)"
+    r"limit|top|bottom)\b|[;?!]|(?<!\d)[.,](?!\d)|$)"
 )
 
 # Ordered: the most specific shape must win. Each pattern captures a column and
@@ -114,14 +116,21 @@ _FILTER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             rf"\b({_IDENT})\s+(?:contains|like|starts?\s+with|ends?\s+with)\s+"
-            rf"['\"]?([^'\"\n,;]{{1,80}}?)['\"]?{_END}",
+            # An apostrophe inside a word is data ("O'Brien"), not a closer.
+            rf"['\"]?((?:[^'\"\n,;]|'(?=[A-Za-z0-9])){{1,80}}?)['\"]?{_END}",
             re.I,
         ),
         "contains",
     ),
     (
         re.compile(
-            rf"\b({_IDENT})\s*(>=|<=|!=|<>|>|=|<)\s*['\"]?([^'\"\n,;]{{1,80}}?)['\"]?{_END}",
+            # Quoted literals match first — commas/periods inside quotes are
+            # data ("Central, HQ"), never the value boundary (D105 minor).
+            rf"\b({_IDENT})\s*(>=|<=|!=|<>|>|=|<)\s*"
+            rf"(?:'((?:[^'\n;]|'(?=[A-Za-z0-9])){{1,80}})'"
+            rf"|\"((?:[^\"\n;]){{1,80}})\""
+            rf"|((?:[^'\"\n;]|'(?=[A-Za-z0-9])){{1,80}}?))"
+            rf"{_END}",
             re.I,
         ),
         "cmp",
@@ -160,7 +169,8 @@ _FILTER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            rf"\b({_IDENT})\s+(?:is|are|equals?|=)\s+['\"]?([A-Za-z0-9_.@\-+]{{1,60}})['\"]?{_END}",
+            rf"\b({_IDENT})\s+(?:is|are|equals?|=)\s+['\"]?"
+            rf"([A-Za-z0-9_.@\-+']{{1,60}})['\"]?{_END}",
             re.I,
         ),
         "eq",
@@ -255,6 +265,19 @@ def parse_filters(message: str) -> tuple[list[ParsedFilter], str]:
         if len(found) >= _MAX_PREDICATES:
             break
 
+    # Order filters textually (patterns scan in priority order, not position)
+    # and recover the joiner between neighbours — ``qty = 1 or qty = 2`` must
+    # not collapse to ``qty = 1 AND qty = 2`` (D23). Anything that is not a
+    # bare ``or`` keeps the historical AND, so unparseable gaps stay
+    # conservative rather than widening the answer.
+    paired = sorted(zip(found, spans), key=lambda fs: fs[1][0])
+    for i in range(1, len(paired)):
+        gap = text[paired[i - 1][1][1]:paired[i][1][0]]
+        if re.fullmatch(r"[\s,;.]*or\b[\s,;.]*", gap, re.I):
+            paired[i][0].join = "or"
+    if paired:
+        found = [pf for pf, _ in paired]
+
     remainder = text
     for start, end in sorted(spans, reverse=True):
         remainder = remainder[:start] + " " + remainder[end:]
@@ -285,7 +308,10 @@ def _build_parsed(
         return ParsedFilter(column=column, op=op, raw_values=[value], text=phrase)
     if kind == "cmp":
         symbol = match.group(2)
-        value = (match.group(3) or "").strip()
+        # Quoted-literal branches win over the bare-value branch (groups 3/4/5).
+        value = (
+            match.group(3) or match.group(4) or match.group(5) or ""
+        ).strip()
         op = {
             "=": "eq", "!=": "ne", "<>": "ne",
             ">": "gt", ">=": "gte", "<": "lt", "<=": "lte",
@@ -437,43 +463,68 @@ def _coerce(value: str, kind: str, column: str) -> Any:
     """Convert a spoken literal to the column's carrier, or refuse honestly."""
     raw = (value or "").strip().strip("\"'`")
     if kind == "numeric":
-        cleaned = raw.replace(",", "").replace("$", "").replace("%", "").strip()
-        try:
-            if re.fullmatch(r"[-+]?\d+", cleaned):
-                return int(cleaned)
-            return float(cleaned)
-        except ValueError:
+        from services.transform_engine import decimal_wire_value
+
+        dec = decimal_wire_value(raw)
+        if dec is None:
             raise PredicateError(
-                f"`{column}` is numeric, so it can't be compared to “{raw}”."
-            ) from None
+                f"`{column}` is numeric, so it can't be compared to “{raw}”. "
+                "Auto will not guess 1,234 vs 1.234 — set number locale US or EU."
+            )
+        if dec == dec.to_integral_value():
+            return int(dec)
+        return dec
     if kind == "boolean":
-        low = raw.lower()
-        if low in _TRUE_WORDS:
-            return True
-        if low in _FALSE_WORDS:
-            return False
-        raise PredicateError(
-            f"`{column}` is boolean — use true/false, not “{raw}”."
-        )
+        from services.transform_engine import apply_transform
+
+        parsed, err = apply_transform(raw, "boolean")
+        if err or parsed is None:
+            raise PredicateError(
+                f"`{column}` is boolean — “{raw}” is not canonical true/false. "
+                "Informal yes/on/y invents truth the write path refuses."
+            )
+        return bool(parsed)
     if kind == "temporal":
         parsed = _parse_date_literal(raw)
         if parsed is None:
             raise PredicateError(
                 f"`{column}` is a date column — “{raw}” is not a date I can read. "
-                "Try 2024-01-31, “in 2024”, or “last 30 days”."
+                "Try 2024-01-31, “in 2024”, or set date locale US or EU for slash dates."
             )
         return parsed
     return raw
 
 
 def _parse_date_literal(raw: str) -> date | None:
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y", "%Y-%m", "%Y"):
+    """Bind a spoken date the same way the write path binds a DATE cell.
+
+    Year-only and ``YYYY-MM`` stay window helpers (``in 2024``, ``2024-03``).
+    Slash and dash day/month pairs go through ``apply_transform(..., "date")``
+    so Auto fails closed on ``01/02/2024`` instead of inventing MDY.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}", text):
+        year = int(text)
+        if 1 <= year <= 9999:
+            return date(year, 1, 1)
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        year_s, month_s = text.split("-")
         try:
-            parsed = datetime.strptime(raw, fmt)
+            return date(int(year_s), int(month_s), 1)
         except ValueError:
-            continue
-        return parsed.date()
-    return None
+            return None
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "date")
+    if err or iso is None:
+        return None
+    try:
+        return datetime.strptime(str(iso)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def ground_filters(
@@ -535,6 +586,10 @@ def ground_filters(
             )
             continue
         out.append(Predicate(column=real, op=pf.op, values=[value], text=pf.text))
+    # Every ParsedFilter produced exactly one Predicate above (or raised), so
+    # the spoken OR/AND joiners carry across 1:1.
+    for pf, pred in zip(parsed, out):
+        pred.join = pf.join
     return out
 
 
@@ -612,7 +667,24 @@ def to_sql(
             clauses.append(f"{col} LIKE {bind(pattern)}")
         else:
             clauses.append(f"{col} {_SQL_OPS[pred.op]} {bind(pred.values[0])}")
-    return " AND ".join(clauses), params
+    # OR splits the filter into disjuncts; AND binds inside each one, matching
+    # SQL precedence and what the operator said (D23). Parentheses only appear
+    # when an AND-group needs protection inside an OR — a pure AND keeps the
+    # flat form operators already read.
+    disjuncts: list[list[str]] = [[]]
+    for clause, pred in zip(clauses, predicates):
+        if pred.join == "or" and disjuncts[-1]:
+            disjuncts.append([])
+        disjuncts[-1].append(clause)
+    multi = len(disjuncts) > 1
+    body = " OR ".join(
+        " AND ".join(group)
+        if len(group) == 1 or not multi
+        else "(" + " AND ".join(group) + ")"
+        for group in disjuncts
+        if group
+    )
+    return body, params
 
 
 def _mongo_value(value: Any) -> Any:
@@ -626,44 +698,63 @@ def _mongo_value(value: Any) -> Any:
     return value
 
 
-def to_mongo_match(predicates: list[Predicate]) -> dict[str, Any]:
-    """Render the same predicates as a ``$match`` filter document."""
-    if not predicates:
-        return {}
-    match: dict[str, Any] = {}
-
-    def merge(column: str, expr: dict[str, Any]) -> None:
-        current = match.get(column)
-        if isinstance(current, dict):
-            current.update(expr)
-        else:
-            match[column] = expr
-
-    for pred in predicates:
-        col = pred.column
-        if pred.op == "is_null":
-            merge(col, {"$eq": None})
-        elif pred.op == "not_null":
-            merge(col, {"$ne": None})
-        elif pred.op == "range":
-            merge(col, {
+def _member_match(pred: Predicate) -> dict[str, Any]:
+    """The ``$match`` fragment for one predicate."""
+    col = pred.column
+    if pred.op == "is_null":
+        return {col: {"$eq": None}}
+    if pred.op == "not_null":
+        return {col: {"$ne": None}}
+    if pred.op == "range":
+        return {
+            col: {
                 "$gte": _mongo_value(pred.values[0]),
                 "$lt": _mongo_value(pred.values[1]),
-            })
-        elif pred.op in ("in", "not_in"):
-            key = "$in" if pred.op == "in" else "$nin"
-            merge(col, {key: [_mongo_value(v) for v in pred.values]})
-        elif pred.op in ("contains", "starts_with", "ends_with"):
-            needle = re.escape(str(pred.values[0]))
-            pattern = {
-                "contains": needle,
-                "starts_with": f"^{needle}",
-                "ends_with": f"{needle}$",
-            }[pred.op]
-            merge(col, {"$regex": pattern, "$options": "i"})
-        else:
-            merge(col, {_MONGO_OPS[pred.op]: _mongo_value(pred.values[0])})
-    return match
+            }
+        }
+    if pred.op in ("in", "not_in"):
+        key = "$in" if pred.op == "in" else "$nin"
+        return {col: {key: [_mongo_value(v) for v in pred.values]}}
+    if pred.op in ("contains", "starts_with", "ends_with"):
+        needle = re.escape(str(pred.values[0]))
+        pattern = {
+            "contains": needle,
+            "starts_with": f"^{needle}",
+            "ends_with": f"{needle}$",
+        }[pred.op]
+        return {col: {"$regex": pattern, "$options": "i"}}
+    return {col: {_MONGO_OPS[pred.op]: _mongo_value(pred.values[0])}}
+
+
+def to_mongo_match(predicates: list[Predicate]) -> dict[str, Any]:
+    """Render the same predicates as a ``$match`` filter document.
+
+    OR'd predicates join under ``$or`` — merging them per-column would AND
+    them (``qty = 1 or qty = 2`` is satisfiable, ``qty: {$eq:1,$eq:2}`` is
+    not, D23).
+    """
+    if not predicates:
+        return {}
+    disjuncts: list[list[Predicate]] = [[]]
+    for pred in predicates:
+        if pred.join == "or" and disjuncts[-1]:
+            disjuncts.append([])
+        disjuncts[-1].append(pred)
+    docs: list[dict[str, Any]] = []
+    for group in disjuncts:
+        merged: dict[str, Any] = {}
+        for pred in group:
+            for col, expr in _member_match(pred).items():
+                current = merged.get(col)
+                if isinstance(current, dict):
+                    current.update(expr)
+                else:
+                    merged[col] = expr
+        if merged:
+            docs.append(merged)
+    if len(docs) == 1:
+        return docs[0]
+    return {"$or": docs}
 
 
 def describe(predicates: list[Predicate]) -> str:
@@ -684,4 +775,8 @@ def describe(predicates: list[Predicate]) -> str:
             bits.append(f"`{pred.column}` {pred.op.replace('_', ' ')} “{pred.values[0]}”")
         else:
             bits.append(f"`{pred.column}` {_SQL_OPS[pred.op]} {pred.values[0]}")
-    return " and ".join(bits)
+    out = bits[0] if bits else ""
+    for bit, pred in zip(bits[1:], predicates[1:]):
+        out += " or " if pred.join == "or" else " and "
+        out += bit
+    return out

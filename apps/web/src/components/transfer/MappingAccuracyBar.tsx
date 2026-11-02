@@ -1,6 +1,7 @@
 import { DtIcon } from "../DtIcon";
 import { mappingRequiresRiskAck, type EditableMapping } from "../../lib/mapping";
 import { isCreateNewColumn } from "../../lib/columnWorkbench";
+import { ProgressRing } from "../ui/ProgressRing";
 
 interface MappingAccuracyBarProps {
   mappings: EditableMapping[];
@@ -31,23 +32,10 @@ export function MappingAccuracyBar({
 
   return (
     <div className="df2-mapping-accuracy" role="status" aria-label="Mapping approval coverage — not Execute clearance">
-      <div className="df2-mapping-accuracy-ring" aria-hidden>
-        <svg viewBox="0 0 64 64">
-          <circle cx="32" cy="32" r="28" className="df2-mapping-accuracy-track" />
-          <circle
-            cx="32"
-            cy="32"
-            r="28"
-            className="df2-mapping-accuracy-fill"
-            strokeDasharray={`${(matchPct / 100) * 175.9} 175.9`}
-            transform="rotate(-90 32 32)"
-          />
-        </svg>
-        <div className="df2-mapping-accuracy-pct">
-          <strong>{matchPct}%</strong>
-          <small>approved</small>
-        </div>
-      </div>
+      <ProgressRing value={matchPct} size={56} tone={matchPct >= 100 ? "ok" : review > 0 ? "warn" : "ok"}>
+        <strong>{matchPct}%</strong>
+        <small>approved</small>
+      </ProgressRing>
 
       <div className="df2-mapping-accuracy-stats">
         <div className="df2-mapping-accuracy-stat ok">
