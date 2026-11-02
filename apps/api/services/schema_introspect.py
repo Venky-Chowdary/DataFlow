@@ -4733,9 +4733,12 @@ def _introspect_neo4j(**kwargs: Any) -> dict[str, Any]:
             "columns": [],
             "tables": labels or [label],
         }
+    from services.schema_inference import infer_columns_from_rows
+
+    # Graph properties are optional per node: every column is nullable.
     columns = [
-        {"name": name, "inferred_type": "TEXT", "nullable": True}
-        for name in (batch.headers or [])
+        {**col, "nullable": True}
+        for col in infer_columns_from_rows(list(batch.headers or []), list(batch.rows or []))
     ]
     return {"ok": True, "columns": columns, "tables": labels or [label], "schema": label}
 
