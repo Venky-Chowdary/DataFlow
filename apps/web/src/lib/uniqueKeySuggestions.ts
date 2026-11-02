@@ -7,7 +7,55 @@ export type UniqueKeySuggestion = {
   sampleRows: number;
   /** uniqueCount / non-null rows in sample */
   uniquenessRatio: number;
+  /** Identity evidence beyond uniqueness: name prior + value shape. Higher is stronger. */
+  keyScore: number;
 };
+
+const MEASURE_NAME =
+  /(^|_)(age|amount|amt|price|cost|total|sum|qty|quantity|count|cnt|score|rate|ratio|balance|salary|weight|height|width|length|percent|pct|lat|lng|lon|latitude|longitude|value|size|duration|discount|tax|revenue)($|_)/;
+const TEMPORAL_NAME = /(^|_)(date|time|timestamp|ts|datetime|created|updated|modified)($|_)|_at$|_on$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INT_RE = /^-?\d+$/;
+const NUM_RE = /^-?\d+\.\d+$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
+function snake(column: string): string {
+  return column.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+/** Name prior: how strongly the column name alone claims identity. */
+function nameScore(column: string): number {
+  const n = snake(column);
+  if (n === "fingerprint" || n === "dedup_hash") return 100;
+  if (n === "external_id" || n === "job_id") return 90;
+  if (n === "id" || n === "uuid" || n === "guid" || n === "pk" || n === "_id" || n === "oid" || n === "rowid") return 85;
+  if (n.endsWith("_id") || n.endsWith("_uuid") || n.endsWith("_guid") || n.endsWith("_key") || n === "key") return 80;
+  if (/_(no|num|number|code)$/.test(n) || n === "sku" || n === "isbn") return 60;
+  if (n === "email" || n.endsWith("_email") || n === "username" || n === "login") return 40;
+  if (MEASURE_NAME.test(n)) return 0;
+  if (TEMPORAL_NAME.test(n)) return 5;
+  return 20;
+}
+
+/**
+ * Value shape: UUIDs and dense increasing integer sequences look like surrogate
+ * keys; decimals, negatives and timestamps look like measures or events. A
+ * small sample makes chance-uniqueness of a measure (12 ages, all distinct)
+ * likely, so shape must outweigh "it happened to be unique".
+ */
+function valueScore(values: string[]): number {
+  if (!values.length) return 0;
+  if (values.every((v) => UUID_RE.test(v))) return 15;
+  if (values.some((v) => NUM_RE.test(v))) return -40;
+  if (values.every((v) => DATE_RE.test(v))) return -15;
+  if (values.every((v) => INT_RE.test(v))) {
+    const nums = values.map(Number);
+    if (nums.some((x) => x < 0)) return -30;
+    const increasing = nums.every((x, i) => i === 0 || x > nums[i - 1]);
+    return increasing ? 15 : 0;
+  }
+  return 0;
+}
 
 function cellKey(value: unknown): string {
   if (value == null) return "";
@@ -38,6 +86,7 @@ export function suggestUniqueKeyCandidates(
   for (const column of columns) {
     if (!column || exclude.has(column.toLowerCase())) continue;
     const seen = new Set<string>();
+    const values: string[] = [];
     let nullCount = 0;
     for (const row of rows) {
       const raw = row[column];
@@ -47,33 +96,31 @@ export function suggestUniqueKeyCandidates(
         continue;
       }
       seen.add(key);
+      values.push(key);
     }
     const nonNull = rows.length - nullCount;
     if (nonNull < 2) continue;
     const uniqueCount = seen.size;
     if (uniqueCount < nonNull) continue; // has duplicates in sample
     if (nullCount > Math.floor(rows.length * 0.1)) continue; // too many nulls
+    const name = nameScore(column);
+    const shape = valueScore(values);
+    // A measure (age, amount) or a decimal is never an identity, however unique the sample.
+    if (name === 0 || shape <= -40) continue;
     out.push({
       column,
       uniqueCount,
       nullCount,
       sampleRows: rows.length,
       uniquenessRatio: uniqueCount / nonNull,
+      keyScore: name + shape,
     });
   }
 
   out.sort((a, b) => {
     if (b.uniquenessRatio !== a.uniquenessRatio) return b.uniquenessRatio - a.uniquenessRatio;
     if (a.nullCount !== b.nullCount) return a.nullCount - b.nullCount;
-    // Prefer natural key names after uniqueness.
-    const rank = (c: string) => {
-      const n = c.toLowerCase();
-      if (n === "fingerprint" || n === "dedup_hash") return 0;
-      if (n === "external_id" || n === "job_id") return 1;
-      if (n.endsWith("_id") || n === "uuid") return 2;
-      return 3;
-    };
-    return rank(a.column) - rank(b.column) || a.column.localeCompare(b.column);
+    return b.keyScore - a.keyScore || a.column.localeCompare(b.column);
   });
 
   return out.slice(0, limit);

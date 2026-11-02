@@ -9,6 +9,7 @@ import {
   destinationCatalogRetriesOnStep,
   destinationContinueBlocker,
   fileDatabasePathFromUrl,
+  rowsContainFormatControlChars,
   formatFileSize,
   sealRemediationApproval,
   studioSourceLabel,
@@ -92,5 +93,14 @@ describe("destination step blockers", () => {
     assert.equal(destinationContinueBlocker({ ...base, sourceReady: false }), "Finish the source step first.");
     assert.equal(destinationContinueBlocker({ ...base, targetDb: "/x.db" }), null);
     assert.equal(destinationContinueBlocker({ ...base, destKindMode: "file_export", destType: "" }), null);
+  });
+});
+
+describe("format-control detection", () => {
+  it("flags zero-width and BOM characters only", () => {
+    assert.equal(rowsContainFormatControlChars([{ a: "plain", b: 3 }]), false);
+    assert.equal(rowsContainFormatControlChars([{ a: "x\u200By" }]), true);
+    assert.equal(rowsContainFormatControlChars([{ a: "\uFEFFhead" }]), true);
+    assert.equal(rowsContainFormatControlChars(null), false);
   });
 });

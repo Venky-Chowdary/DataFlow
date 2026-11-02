@@ -203,6 +203,14 @@ def _type_scores(values: list[str]) -> dict[str, float]:
     return {k: round(v / non_empty, 3) for k, v in scores.items()}
 
 
+# Identity-shaped names by token, not substring: "paid", "valid", "provider" are not ids.
+_KEY_NAME_RE = re.compile(r"(^|_)(id|uuid|guid|key|code|pk)$")
+
+
+def _snake_name(name: str) -> str:
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name)).lower()
+
+
 def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> dict[str, Any]:
     """Profile one column: type inference, statistics, patterns, quality signals."""
     strings = [_as_str(v) for v in values[:sample_limit]]
@@ -257,7 +265,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         pii = True
 
     # Uniqueness estimate — high distinct ratio on id-like columns
-    is_likely_key = bool(distinct_ratio > 0.95 and distinct >= 5 and re.search(r"id|key|uuid|code", name, re.I))
+    is_likely_key = bool(distinct_ratio > 0.95 and distinct >= 5 and _KEY_NAME_RE.search(_snake_name(name)))
 
     return {
         "name": name,

@@ -768,7 +768,7 @@ export function ColumnReviewPanel({
                 {mapBandLabel("safe", mapBands.safe.length)}
                 {collapseSafe ? " · Expand" : " · Collapse"}
               </button>
-              {mapBands.safe.length > 0 && (
+              {mapBands.safe.length > 0 && mapBands.safe.length !== eligibleApproveCount && (
                 <button
                   type="button"
                   className="df2-btn df2-btn-sm df2-btn-primary"

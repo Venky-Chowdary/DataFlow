@@ -132,3 +132,12 @@ export function destinationContinueBlocker(o: {
   if (!o.callable && !o.targetCollection.trim()) return `Name the destination ${o.objectWord}.`;
   return null;
 }
+
+const FORMAT_CONTROL_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/;
+
+/** True when any string cell carries a zero-width / bidi format character. */
+export function rowsContainFormatControlChars(rows: Record<string, unknown>[] | null | undefined): boolean {
+  return (rows || []).some((row) =>
+    Object.values(row || {}).some((v) => typeof v === "string" && FORMAT_CONTROL_RE.test(v)),
+  );
+}

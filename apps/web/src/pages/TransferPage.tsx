@@ -302,6 +302,7 @@ import {
   sealRemediationApproval,
   studioSourceLabel,
   destinationContinueBlocker,
+  rowsContainFormatControlChars,
   FILE_DATABASE_ENGINES,
   fileDatabasePathFromUrl,
 } from "./transfer/studioHelpers";
@@ -1271,6 +1272,10 @@ export function TransferPage({
         { exclude: primaryKeyField ? [primaryKeyField] : [], limit: 5 },
       ),
     [samplePreviewRows, currentSourceColumns, primaryKeyField],
+  );
+  const formatControlCharsSeen = useMemo(
+    () => rowsContainFormatControlChars(shapeSampleRows),
+    [shapeSampleRows],
   );
   const compositeKeySuggestions = useMemo(
     () =>
@@ -8029,6 +8034,7 @@ export function TransferPage({
             onApplyAction={applySuggestedAction}
             onApplyCreateNewWidens={() => applyCreateNewTypeWidens(createNewFitWidenActions(preflight))}
             onStripControlChars={stripControlCharsAndRerun}
+            formatControlCharsSeen={formatControlCharsSeen}
             stripControlsApplied={columnMappings.some(
               (m) => m.transform === "strip_controls",
             )}

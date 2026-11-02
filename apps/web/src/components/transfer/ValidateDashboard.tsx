@@ -239,6 +239,8 @@ interface ValidateDashboardProps {
   onStripControlChars?: () => void | Promise<RemediationOpResult | void>;
   /** True when text mappings already carry strip_controls (Execute will sanitize). */
   stripControlsApplied?: boolean;
+  /** Preview rows contain zero-width / bidi format characters — gates the strip tip. */
+  formatControlCharsSeen?: boolean;
   /** Soften to quarantine-friendly posture, strip, and re-run. Returns what changed. */
   onQuarantineAndRerun?: () => void | Promise<RemediationOpResult | void>;  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
   cellPreview?: CellPreviewResult | null;
@@ -774,6 +776,7 @@ export function ValidateDashboard({
   onApplyCreateNewWidens,
   onStripControlChars,
   stripControlsApplied = false,
+  formatControlCharsSeen = true,
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
@@ -1947,7 +1950,7 @@ export function ValidateDashboard({
                   : " · preview sample"}
             </p>
           )}
-          {!running && preflight?.passed && !stripControlsApplied && onStripControlChars && (
+          {!running && preflight?.passed && formatControlCharsSeen && !stripControlsApplied && onStripControlChars && (
             <p className="df2-vd-hero-engine-meta" role="status">
               Tip: strip format-control characters via <strong>Fix bad data…</strong> before Execute if a prior job failed on U+200B.
             </p>
