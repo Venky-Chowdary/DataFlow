@@ -1490,7 +1490,7 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {(compact || pages > 1) && (
+      {(pages > 1 || (compact && (displayItems.length > 0 || foldedCount === 0))) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           {compact && (
             <span>
