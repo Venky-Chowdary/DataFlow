@@ -598,7 +598,9 @@ def _write_batch(
             kwargs["embedding_model"] = extra.get("embedding_model")
             kwargs["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
             kwargs["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
-            kwargs["skip_chunking"] = bool(extra.get("skip_chunking"))
+            from services.vectorization import vector_chunking_declared
+
+            kwargs["skip_chunking"] = not vector_chunking_declared(extra)
             kwargs["chunk_strategy"] = extra.get("chunk_strategy", "recursive")
             kwargs["chunk_unit"] = extra.get("chunk_unit", "chars")
             kwargs["chunk_tokenizer"] = extra.get("chunk_tokenizer")

@@ -441,6 +441,25 @@ def _validate_provider_dimension(provider: Any, vectors: list[list[float]]) -> N
 
 CONTENT_STORE_LIMIT = 4000
 
+#: Options whose presence declares that the operator wants text chunked.
+_CHUNKING_DECLARATIONS = ("content_column", "chunk_size", "chunk_strategy", "chunk_unit")
+
+
+def vector_chunking_declared(extra: Mapping[str, Any] | None) -> bool:
+    """True when the destination declared chunked documents (D231).
+
+    A table source is one object per row unless the operator names a content
+    column, a chunking option, or ``vector_layout=document``; chunking an
+    undeclared long cell turned a 30-row source into 159 objects. An explicit
+    ``skip_chunking`` always wins.
+    """
+    cfg = extra or {}
+    if "skip_chunking" in cfg and cfg.get("skip_chunking") is not None:
+        return not bool(cfg.get("skip_chunking"))
+    if str(cfg.get("vector_layout") or "").strip().lower() == "document":
+        return True
+    return any(cfg.get(key) not in (None, "") for key in _CHUNKING_DECLARATIONS)
+
 
 def _is_store_compatible_vector_id(value: str) -> bool:
     """True when source PK can be used as vector-store document id."""

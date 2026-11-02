@@ -205,7 +205,9 @@ def _apply_vector_extra(common: dict[str, Any], endpoint: EndpointConfig) -> Non
     common["chunk_overlap"] = (
         int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
     )
-    common["skip_chunking"] = bool(extra.get("skip_chunking"))
+    from services.vectorization import vector_chunking_declared
+
+    common["skip_chunking"] = not vector_chunking_declared(extra)
     if "durable_embedding_cache" in extra:
         common["durable_embedding_cache"] = bool(extra.get("durable_embedding_cache"))
 
