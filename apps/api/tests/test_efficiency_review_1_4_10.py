@@ -308,3 +308,47 @@ def test_quarantine_is_the_runtime_default_and_rows_checksum_account():
     assert report["checksums_match"] is True
     assert report["balanced"] is True
     assert report["delivery"] == "at_least_once_upsert"
+
+
+def test_full_resync_retargets_contract_sync_mode_off_the_cursor_window():
+    """D-full-resync: the engine resolves a stream contract's sync_mode before
+    the request's, so a full re-sync that changed only request.sync_mode still
+    read the contract's incremental window from the saved watermark."""
+    from types import SimpleNamespace
+
+    from services.sync_cursor import resolve_effective_sync_mode
+    from services.sync_now import apply_resync_to_request, child_request_dict, full_resync_plan
+
+    parent = {
+        "sync_mode": "incremental_deduped",
+        "watermark": "2026-01-01T00:00:00",
+        "mappings": [{"source": "id", "target": "id", "transform": "none"}],
+        "stream_contracts": [{
+            "name": "orders", "sync_mode": "incremental_deduped",
+            "primary_key": "id", "cursor_field": "updated_at",
+        }],
+    }
+    child = child_request_dict(parent, mode="full", parent_job_id="p")
+    contract = child["stream_contracts"][0]
+    assert child["sync_mode"] == "upsert"
+    assert contract["sync_mode"] == "upsert"
+    assert resolve_effective_sync_mode(child["sync_mode"], contract["sync_mode"]) == "upsert"
+    assert "watermark" not in child
+    assert parent["stream_contracts"][0]["sync_mode"] == "incremental_deduped"
+
+    # The plan reads the contract's mode when the request carries none.
+    scd2 = {"stream_contracts": [{"sync_mode": "scd2", "primary_key": "id"}]}
+    assert full_resync_plan(scd2)["sync_mode"] == "scd2"
+
+    scheduled = SimpleNamespace(
+        sync_mode="incremental_append",
+        primary_key="id",
+        stream_contracts=[{"sync_mode": "incremental_append", "cursor_field": "updated_at"}],
+        source=SimpleNamespace(extra={"watermark": "x"}),
+        historical_resync=False,
+        preflight_scope="",
+    )
+    apply_resync_to_request(scheduled, "full")
+    assert scheduled.sync_mode == "upsert"
+    assert scheduled.stream_contracts[0]["sync_mode"] == "upsert"
+    assert "watermark" not in scheduled.source.extra

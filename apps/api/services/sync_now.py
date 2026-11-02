@@ -36,7 +36,7 @@ def full_resync_plan(request: dict[str, Any] | None) -> dict[str, Any]:
     re-sync that does not append a second copy — the confirm names that.
     """
     request = request or {}
-    mode = str(request.get("sync_mode") or "").strip().lower()
+    mode = _signed_sync_mode(request)
     key = str(request.get("primary_key") or "").strip()
     if not key:
         for contract in request.get("stream_contracts") or []:
@@ -70,6 +70,33 @@ def full_resync_plan(request: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _signed_sync_mode(request: dict[str, Any]) -> str:
+    """The mode the engine will run: a stream contract's mode wins over the request's."""
+    from services.sync_cursor import resolve_effective_sync_mode
+
+    contract_mode = ""
+    for contract in request.get("stream_contracts") or []:
+        if isinstance(contract, dict) and str(contract.get("sync_mode") or "").strip():
+            contract_mode = str(contract.get("sync_mode")).strip()
+            break
+    return resolve_effective_sync_mode(request.get("sync_mode"), contract_mode or None).lower()
+
+
+def _retarget_stream_contracts(contracts: list[Any] | None, sync_mode: str) -> list[Any]:
+    """Point every signed stream contract at the re-sync mode.
+
+    The engine resolves a contract's own sync_mode before the request's, so a
+    full re-sync that changed only ``request.sync_mode`` still ran the
+    contract's incremental cursor window from the saved watermark.
+    """
+    out: list[Any] = []
+    for contract in contracts or []:
+        if isinstance(contract, dict) and str(contract.get("sync_mode") or "").strip():
+            contract = {**contract, "sync_mode": sync_mode}
+        out.append(contract)
+    return out
+
+
 def _clear_cursors(request: dict[str, Any]) -> None:
     for key in ("cursor_value", "watermark"):
         request.pop(key, None)
@@ -98,6 +125,9 @@ def child_request_dict(
     if mode == "full":
         plan = full_resync_plan(request)
         request["sync_mode"] = plan["sync_mode"]
+        request["stream_contracts"] = _retarget_stream_contracts(
+            request.get("stream_contracts"), plan["sync_mode"]
+        )
         request["historical_resync"] = True
         request["full_resync"] = plan
         _clear_cursors(request)
@@ -115,6 +145,9 @@ def apply_resync_to_request(request: Any, mode: str) -> None:
             "stream_contracts": list(getattr(request, "stream_contracts", None) or []),
         })
         request.sync_mode = plan["sync_mode"]
+        request.stream_contracts = _retarget_stream_contracts(
+            list(getattr(request, "stream_contracts", None) or []), plan["sync_mode"]
+        )
         request.historical_resync = True
         source = getattr(request, "source", None)
         extra = dict(getattr(source, "extra", None) or {})
