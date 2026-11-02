@@ -5966,7 +5966,12 @@ def _run_reconciliation_impl(
                 "those dropped digits are a declared narrowing, not proven "
                 "cell fidelity."
             )
-            stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
+            # The headline must not call narrowed cells verified fidelity.
+            headline = str(stamped.get("message") or "").rstrip().replace(
+                "Row fidelity verified — source and target checksums match",
+                "Source and target checksums match at the destination's granularity",
+            )
+            stamped["message"] = f"{headline}{note}"
         stamped = _name_row_on_checksum_only_failure(stamped, full_compare_ctx)
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
         stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
@@ -6267,6 +6272,20 @@ def _run_reconciliation_impl(
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+    def _measured_fractional_digits() -> dict[str, int]:
+        from services.carrier_instant import FractionalDigitsObserver
+
+        observer = FractionalDigitsObserver(source_schema)
+        if records:
+            observer.observe_records(records)
+        elif source_spool is not None and getattr(source_spool, "row_count", 0):
+            headers = list(getattr(source_spool, "headers", None) or columns)
+            observer.observe_matrix(headers, source_spool.iter_rows())
+        else:
+            streamed = (dest_summary or {}).get("source_fractional_digits")
+            return dict(streamed) if isinstance(streamed, dict) else {}
+        return observer.digits()
+
     try:
         from services.carrier_instant import carrier_rounded_columns
 
@@ -6275,6 +6294,7 @@ def _run_reconciliation_impl(
             source_schema=source_schema,
             dest_types=dest_types,
             dest_engine=db_type,
+            measured_fractional_digits=_measured_fractional_digits(),
         )
     except Exception as exc:
         logging.getLogger(__name__).warning(

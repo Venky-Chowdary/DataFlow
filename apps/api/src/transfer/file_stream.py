@@ -2232,6 +2232,9 @@ def stream_file_to_database(
         batch_iter = _with_shape_drain()
 
     fp_accumulator = FingerprintAccumulator()
+    from services.carrier_instant import FractionalDigitsObserver
+
+    fraction_observer = FractionalDigitsObserver(schema)
     # Independent reader cardinality for Gate-8 — never invent from written+held_out.
     source_rows_seen = 0
     batch_quality_enabled = validation_mode in ("strict", "maximum")
@@ -2694,6 +2697,7 @@ def stream_file_to_database(
         try:
             if use_source_spool:
                 local_warnings = _apply_batch_audit(idx, headers, records=batch)
+                fraction_observer.observe_records(batch)
                 spill = spill_engine_write_records(
                     batch,
                     headers,
@@ -2722,6 +2726,7 @@ def stream_file_to_database(
             else:
                 headers, data_rows = records_to_matrix(batch, columns)
                 local_warnings = _apply_batch_audit(idx, headers, rows=data_rows)
+                fraction_observer.observe_matrix(headers, data_rows)
                 batch_written, last_checksum, dest_summary = _run_file_write(
                     idx, headers, data_rows
                 )
@@ -3357,6 +3362,9 @@ def stream_file_to_database(
     # resumed run ``source_rows_seen`` counts only the tail after the checkpoint,
     # so the full-file re-scan count (all source rows read) is preferred; using
     # the tail while ``written`` includes prior progress mis-accounts Gate-8.
+    measured_digits = fraction_observer.digits()
+    if measured_digits:
+        dest_summary["source_fractional_digits"] = measured_digits
     if resumed and full_source_rows > 0:
         dest_summary["source_row_count"] = int(full_source_rows)
         dest_summary["source_row_count_source"] = "full_rescan_rows"

@@ -23,11 +23,17 @@ truncated instead would fail Gate-8 rather than pass it — the honest direction
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterable
+from typing import Any
 from datetime import date, datetime, time, timedelta
 
 from connectors.sql_temporal import round_to_smalldatetime, sql_base_type
 from services.document_instant import INSTANT_DATE_TOKEN_ENGINES
-from services.type_system import destination_temporal_fractional_digits
+from services.type_system import (
+    destination_temporal_fractional_digits,
+    value_fractional_second_digits,
+)
 
 # SQL Server ``datetime`` stores 1/300-second ticks (.000/.003/.007 endings).
 MSSQL_LEGACY_DATETIME_TICK_US = 10_000 / 3
@@ -83,6 +89,7 @@ def carrier_rounded_columns(
     source_schema: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     dest_engine: str = "",
+    measured_fractional_digits: dict[str, int] | None = None,
 ) -> list[dict[str, object]]:
     """Columns whose instants are fingerprinted at a coarser granularity.
 
@@ -90,6 +97,12 @@ def carrier_rounded_columns(
     destination can hold* — it cannot prove the fractional seconds the carrier
     dropped, so the report has to say which columns those were instead of
     claiming full cell fidelity.
+
+    ``measured_fractional_digits`` is the most fractional-second digits seen
+    per source column (:class:`FractionalDigitsObserver`). A source that declares no fractional
+    precision (CSV, JSON, a bare ``TIMESTAMPTZ``) is judged by its measured
+    cells: digits the carrier cannot keep are a narrowing even when no type
+    declared them (D232).
     """
     from services.type_system import temporal_precision_would_narrow
 
@@ -113,9 +126,13 @@ def carrier_rounded_columns(
         ).strip()
         if not target_type or not source_type:
             continue
-        if not temporal_precision_would_narrow(
-            source_type, target_type, dest_db=dest_engine
-        ) and not _tick_dropped_at_cap(source_type, target_type, dest_engine):
+        if not (
+            temporal_precision_would_narrow(source_type, target_type, dest_db=dest_engine)
+            or _tick_dropped_at_cap(source_type, target_type, dest_engine)
+            or _measured_digits_exceed_carrier(
+                measured_fractional_digits, source, source_type, target_type, dest_engine
+            )
+        ):
             continue
         seen.add(target)
         out.append({
@@ -131,6 +148,84 @@ def carrier_rounded_columns(
             ),
         })
     return out
+
+
+def _is_temporal_source(source_type: str) -> bool:
+    from services.type_system import LOGICAL_DATETIME, LOGICAL_TIME, normalize_logical_type
+
+    return normalize_logical_type(source_type) in {LOGICAL_DATETIME, LOGICAL_TIME}
+
+
+def _measured_digits_exceed_carrier(
+    measured: dict[str, int] | None,
+    source: str,
+    source_type: str,
+    target_type: str,
+    dest_engine: str,
+) -> bool:
+    """A measured source cell carries more fractional digits than the carrier keeps."""
+    if not measured or not source or not _is_temporal_source(source_type):
+        return False
+    kept = carrier_instant_digits(target_type, engine=dest_engine)
+    if kept is None:
+        return False
+    return int(measured.get(source) or 0) > kept
+
+
+class FractionalDigitsObserver:
+    """Most fractional-second digits seen per temporal source column.
+
+    Fed with the source cells as they stream, so Gate-8 can name a column
+    whose destination carrier dropped digits even when no row list survives
+    to reconciliation and the source type declared no precision.
+    """
+
+    def __init__(self, column_types: dict[str, str] | None) -> None:
+        self._columns = {
+            str(col)
+            for col, ctype in (column_types or {}).items()
+            if _is_temporal_source(str(ctype or ""))
+        }
+        self._digits: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def observe_matrix(self, headers: list[str], rows: Iterable[list[Any]]) -> None:
+        idx = [(i, str(h)) for i, h in enumerate(headers or []) if str(h) in self._columns]
+        if not idx:
+            return
+        seen: dict[str, int] = {}
+        for row in rows:
+            for i, col in idx:
+                if i < len(row):
+                    digits = value_fractional_second_digits(row[i])
+                    if digits > seen.get(col, 0):
+                        seen[col] = digits
+        self._merge(seen)
+
+    def observe_records(self, records: Iterable[dict]) -> None:
+        if not self._columns:
+            return
+        seen: dict[str, int] = {}
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            for col in self._columns:
+                digits = value_fractional_second_digits(row.get(col))
+                if digits > seen.get(col, 0):
+                    seen[col] = digits
+        self._merge(seen)
+
+    def _merge(self, seen: dict[str, int]) -> None:
+        if not seen:
+            return
+        with self._lock:
+            for col, digits in seen.items():
+                if digits > self._digits.get(col, 0):
+                    self._digits[col] = digits
+
+    def digits(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._digits)
 
 
 def _tick_dropped_at_cap(source_type: str, target_type: str, dest_engine: str) -> bool:
