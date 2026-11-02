@@ -504,6 +504,7 @@ export function TransferPage({
   const [numberLocale, setNumberLocale] = useState<NumberLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
+  const [captureJournal, setCaptureJournal] = useState(false);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
   const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
   const [vectorMetadataColumns, setVectorMetadataColumns] = useState("");
@@ -812,6 +813,12 @@ export function TransferPage({
     destDriverType === "milvus";
 
   const writeViaStagingSupported = destSupportsWriteViaStaging(destDriverType);
+  const captureJournalBlockedReason =
+    syncMode === "cdc"
+      ? "Unavailable for CDC — change streams keep their own durable log."
+      : sourceKind === "file" || sourceKind === "database"
+        ? ""
+        : "Unavailable for this source — files and database/SaaS sources only.";
 
   useEffect(() => {
     if (!writeViaStagingSupported && writeViaStaging) {
@@ -5397,6 +5404,7 @@ export function TransferPage({
               : {}),
             ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
           };
+          if (captureJournal && !captureJournalBlockedReason) extra.journal_capture = true;
           if (syncMode === "cdc") {
             if (multiSubnetFailover) extra.multi_subnet_failover = true;
             const sqlServerCdc = [
@@ -8652,6 +8660,9 @@ export function TransferPage({
         writeViaStaging={writeViaStaging}
         onWriteViaStagingChange={setWriteViaStaging}
         writeViaStagingSupported={writeViaStagingSupported}
+        captureJournal={captureJournal}
+        onCaptureJournalChange={setCaptureJournal}
+        captureJournalBlockedReason={captureJournalBlockedReason}
         showVectorOptions={
           destDriverType === "pgvector" ||
           destDriverType === "qdrant" ||

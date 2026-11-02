@@ -776,6 +776,15 @@ class UniversalTransferEngine:
                 else ({"captured": False, "reason": journal_skip} if journal_skip else None)
             )
             replay = (request.source.extra or {}).get("journal_replay")
+            if outcome or replay:
+                try:
+                    _job_store().update_job_fields(
+                        job_id,
+                        {k: v for k, v in (("journal", outcome), ("journal_replay", replay)) if v},
+                        touch_updated_at=False,
+                    )
+                except Exception:
+                    logger.exception("Could not record the journal outcome on %s", job_id)
             if isinstance(result, TransferResult) and (outcome or replay):
                 summary = dict(result.source_summary or {})
                 if outcome:

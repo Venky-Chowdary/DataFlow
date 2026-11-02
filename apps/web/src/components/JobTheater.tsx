@@ -642,6 +642,9 @@ export function JobTheaterView({
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
   const writerWarnings = readWriterWarnings(job);
+  const journal = job.journal ?? null;
+  const journalReplay = job.journal_replay ?? null;
+  const journalRows = (journal?.streams ?? []).reduce((sum, s) => sum + (Number(s.rows) || 0), 0);
   const warningCount = writerWarnings.messages.length;
   const warningsSuppressed = writerWarnings.suppressed;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
@@ -1689,6 +1692,23 @@ export function JobTheaterView({
               : "No destination warnings"}
           </small>
         </article>
+        {(journal || journalReplay) && (
+        <article className={`df2-theater-v3-sla-card${journal && !journal.captured ? " is-warn" : ""}`}>
+          <span>{journalReplay ? "Replayed journal" : "Source journal"}</span>
+          <strong>
+            {journalReplay
+              ? `${Number(journalReplay.rows || 0).toLocaleString()} rows`
+              : journal?.captured ? `${journalRows.toLocaleString()} rows kept` : "Not kept"}
+          </strong>
+          <small>
+            {journalReplay
+              ? <>Read from journal <code>{journalReplay.journal_id}</code> — the live source was not touched</>
+              : journal?.captured
+                ? <>Replay with <code>{journal.journal_id}</code> as the source journal id{journal.expires_at ? ` · expires ${new Date(journal.expires_at * 1000).toLocaleDateString()}` : ""}</>
+                : journal?.reason || "This run's extraction was not journaled"}
+          </small>
+        </article>
+        )}
         {fkCycle.length > 0 && (
         <article className={`df2-theater-v3-sla-card${fkCarry?.cycleResolved ? "" : " is-warn"}`}>
           <span>FK cycle</span>

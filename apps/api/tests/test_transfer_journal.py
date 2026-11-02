@@ -22,9 +22,13 @@ from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 from tests.test_property2_golden_path_never_blocked import _FakeMongo  # noqa: E402
 
 
+_JOB_FIELDS: dict[str, dict] = {}
+
+
 class _Mongo(_FakeMongo):
-    def update_job_fields(self, *a, **k):
-        return None
+    def update_job_fields(self, job_id, fields, **k):
+        _JOB_FIELDS.setdefault(str(job_id), {}).update(fields)
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +80,10 @@ def _replay_request(journal_id: str, dst: Path) -> TransferRequest:
 
 
 def _run(request: TransferRequest):
-    return UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex)
+    job_id = uuid.uuid4().hex
+    result = UniversalTransferEngine().execute_tracked(request, job_id)
+    result._job_fields = _JOB_FIELDS.get(job_id, {})
+    return result
 
 
 def test_capture_once_then_replay_to_two_destinations_without_reading_the_source(tmp_path):
@@ -87,6 +94,7 @@ def test_capture_once_then_replay_to_two_destinations_without_reading_the_source
     journal = first.source_summary["journal"]
     assert journal["captured"] is True, journal
     assert journal["streams"][0]["rows"] == 120
+    assert first._job_fields["journal"] == journal  # the operator sees it on the job
     expected = _rows(src)
     assert _rows(d0) == expected
 
@@ -99,6 +107,7 @@ def test_capture_once_then_replay_to_two_destinations_without_reading_the_source
         assert replay.records_transferred == 120
         assert replay.source_summary["journal_replay"]["journal_id"] == journal["journal_id"]
         assert "journal" not in replay.source_summary  # a replay is not re-captured
+        assert replay._job_fields["journal_replay"]["journal_id"] == journal["journal_id"]
         got = [(int(i), str(n), float(a)) for i, n, a in _rows(dst)]
         assert got == expected
         assert replay.reconciliation.get("passed") is not False

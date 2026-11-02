@@ -575,8 +575,20 @@ export interface Gate8ReconciliationPayload {
   } | null;
 }
 
+export interface JobJournalOutcome {
+  captured?: boolean;
+  reason?: string;
+  journal_id?: string;
+  streams?: { name: string; rows: number; sha256: string }[];
+  expires_at?: number;
+}
+
 export interface JobProgress extends TransferJob {
   progress_pct: number;
+  /** Capture-once journal outcome (opt-in per run). */
+  journal?: JobJournalOutcome | null;
+  /** Set when this run replayed a journal instead of reading the live source. */
+  journal_replay?: { journal_id: string; stream: string; rows: number; sha256: string } | null;
   phase?: string;
   message?: string;
   error?: string;

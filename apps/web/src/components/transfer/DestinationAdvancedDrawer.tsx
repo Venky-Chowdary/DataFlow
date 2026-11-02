@@ -181,6 +181,11 @@ interface DestinationAdvancedDrawerProps {
   schemaHonestyLine?: string;
   /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
   writeViaStagingSupported?: boolean;
+  /** Capture-once journal: keep the extracted source for replay to other destinations. */
+  captureJournal?: boolean;
+  onCaptureJournalChange?: (value: boolean) => void;
+  /** Empty when capture is available; otherwise why this run cannot be journaled. */
+  captureJournalBlockedReason?: string;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
   showVectorOptions?: boolean;
   showPgvectorOptions?: boolean;
@@ -316,6 +321,9 @@ export function DestinationAdvancedDrawer({
   writeViaStaging = false,
   onWriteViaStagingChange,
   writeViaStagingSupported = true,
+  captureJournal = false,
+  onCaptureJournalChange,
+  captureJournalBlockedReason = "",
   syncHonestyLine = "",
   schemaHonestyLine = "",
   showVectorOptions = false,
@@ -766,6 +774,23 @@ export function DestinationAdvancedDrawer({
                   {writeViaStagingSupported === false
                     ? "Unavailable for this destination — SQL engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."
                     : "Load into a staging table next to the destination first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
+                </small>
+              </span>
+            </label>
+          )}
+          {onCaptureJournalChange && (
+            <label className={`df2-policy-toggle${captureJournalBlockedReason ? " is-disabled" : ""}`}>
+              <input
+                type="checkbox"
+                checked={Boolean(captureJournal) && !captureJournalBlockedReason}
+                disabled={Boolean(captureJournalBlockedReason)}
+                onChange={(e) => onCaptureJournalChange(e.target.checked)}
+              />
+              <span>
+                <strong>Capture source journal</strong>
+                <small>
+                  {captureJournalBlockedReason
+                    || "Keep the rows this run extracts (SHA-256 pinned) so other destinations or a re-backfill replay them without reading the source again. Each replay is re-mapped, re-validated and re-verified."}
                 </small>
               </span>
             </label>
