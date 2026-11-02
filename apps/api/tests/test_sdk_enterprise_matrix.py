@@ -22,6 +22,7 @@ import pytest
 import requests
 
 from connectors.sdk import get_sdk_connector, list_sdk_connectors
+from tests.connector_certification.manifest_cases import SYNTHETIC_CONFIGS
 from connectors.sdk.declarative.errors import (
     ConnectorAuthError,
     RateLimitExhausted,
@@ -31,59 +32,7 @@ from connectors.sdk.declarative.errors import (
 
 # Minimal synthetic configs — every credential field a connector needs to
 # render its first-stream request.  Supersets are fine; extra keys are ignored.
-CONFIGS: dict[str, dict] = {
-    "gitlab": {"api_key": "synthetic"},
-    "mailchimp": {"dc": "us21", "api_key": "synthetic"},
-    "pipedrive": {"domain": "acme", "api_key": "synthetic"},
-    "klaviyo": {"api_key": "synthetic"},
-    "servicenow": {"instance": "dev1", "username": "etl", "password": "synthetic"},
-    "freshdesk": {"domain": "acme", "api_key": "synthetic"},
-    "slack": {"api_key": "xoxb-synthetic"},
-    "asana": {"api_key": "synthetic", "workspace": "ws-1"},
-    "calendly": {
-        "api_key": "synthetic",
-        "user_uri": "https://api.calendly.com/users/U1",
-    },
-    "woocommerce": {
-        "domain": "shop.example.com",
-        "username": "ck_x",
-        "password": "cs_y",
-    },
-    "bigcommerce": {"store_hash": "abc123", "api_key": "synthetic"},
-    "brevo": {"api_key": "synthetic"},
-    "freshservice": {"domain": "acme", "api_key": "synthetic"},
-    "close": {"api_key": "synthetic"},
-    "todoist": {"api_key": "synthetic"},
-    "typeform": {"api_key": "synthetic", "form_id": "f1"},
-    "notion": {"api_key": "synthetic", "database_id": "db1"},
-    "zoho_crm": {
-        "client_id": "cid",
-        "client_secret": "csec",
-        "refresh_token": "rt",
-        "access_token": "zoho-synthetic",
-    },
-    "posthog": {
-        "domain": "app.posthog.com",
-        "api_key": "phx_synthetic",
-        "project_id": "42",
-    },
-    "confluence": {
-        "domain": "acme",
-        "username": "a@acme.com",
-        "api_key": "atl-synthetic",
-    },
-    "zendesk": {
-        "domain": "acme",
-        "username": "a@acme.com",
-        "api_key": "zd-synthetic",
-    },
-    "airtable": {"api_key": "pat_synthetic", "base_id": "appXYZ", "table_id": "tblABC"},
-    "clickup": {"api_key": "pk_synthetic", "list_id": "9001"},
-    "mailjet": {"api_key": "pub_synthetic", "secret_key": "sec_synthetic"},
-    "sendgrid": {"api_key": "SG.synthetic"},
-    "monday": {"api_key": "mdy_synthetic", "board_id": "42"},
-    "linear": {"api_key": "lin_api_synthetic"},
-}
+CONFIGS: dict[str, dict] = SYNTHETIC_CONFIGS
 
 # Connectors in the registry that are NOT manifest-driven (bridges, bespoke
 # classes) are out of scope for this matrix.

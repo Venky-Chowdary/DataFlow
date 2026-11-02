@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from connectors.sdk import ConnectorDescriptor, register_connector
+from connectors.sdk import ConnectorDescriptor, FULL_REFRESH_ONLY_SKIP, register_connector
 from connectors.sdk.declarative.connector import ManifestConnector
 
 
@@ -16,6 +16,7 @@ class ZohoCrmSource(ManifestConnector):
         roles=frozenset({"source"}),
         auth_modes=("oauth2_refresh",),
         sync_modes=("full_refresh",),
+        certification_skips=FULL_REFRESH_ONLY_SKIP,
         form_fields=(
             {"name": "client_id", "type": "string", "required": True, "sensitive": False},
             {"name": "client_secret", "type": "string", "required": True, "sensitive": True},

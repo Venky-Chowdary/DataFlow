@@ -29,6 +29,40 @@
     "request_param": "start_time",
     "format": "epoch_s",
     "initial": "0"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "priority": {
+      "type": "string"
+     },
+     "requester_id": {
+      "type": "integer"
+     },
+     "assignee_id": {
+      "type": "integer"
+     },
+     "created_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updated_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "generated_timestamp": {
+      "type": "integer"
+     }
+    }
    }
   },
   {
@@ -51,6 +85,34 @@
     "request_param": "start_time",
     "format": "epoch_s",
     "initial": "0"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "name": {
+      "type": "string"
+     },
+     "email": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string"
+     },
+     "created_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updated_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "generated_timestamp": {
+      "type": "integer"
+     }
+    }
    }
   },
   {
@@ -73,6 +135,28 @@
     "request_param": "start_time",
     "format": "epoch_s",
     "initial": "0"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "name": {
+      "type": "string"
+     },
+     "created_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updated_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "generated_timestamp": {
+      "type": "integer"
+     }
+    }
    }
   },
   {
@@ -88,6 +172,27 @@
     "next_url_path": "next_page",
     "page_size": 100,
     "page_size_param": "per_page"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "author_id": {
+      "type": "integer"
+     },
+     "body": {
+      "type": "string"
+     },
+     "public": {
+      "type": "boolean"
+     },
+     "created_at": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
    }
   }
  ]

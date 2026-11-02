@@ -70,6 +70,26 @@
     "next_url_path": "_links.next",
     "page_size": 100,
     "page_size_param": "limit"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "key": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     }
+    }
    }
   },
   {

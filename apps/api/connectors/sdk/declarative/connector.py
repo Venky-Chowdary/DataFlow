@@ -268,6 +268,13 @@ class DeclarativeSource(BaseConnector):
         )
         return True
 
+    def _offered_sync_modes(self, stream: Any) -> list[str]:
+        """Discovery never advertises a mode the connector's descriptor withholds."""
+        modes = ["full_refresh", "incremental"] if stream.cursor else ["full_refresh"]
+        descriptor = getattr(type(self), "descriptor", None)
+        declared = set(getattr(descriptor, "sync_modes", ()) or ())
+        return [mode for mode in modes if mode in declared] if declared else modes
+
     def discover(self) -> list[StreamSchema]:
         result: list[StreamSchema] = []
         for index, stream in enumerate(self.manifest.streams):
@@ -319,9 +326,7 @@ class DeclarativeSource(BaseConnector):
                     primary_key=list(stream.primary_key),
                     cursor_field=stream.cursor.field if stream.cursor else "",
                     json_schema=dict(schema),
-                    supported_sync_modes=(
-                        ["full_refresh", "incremental"] if stream.cursor else ["full_refresh"]
-                    ),
+                    supported_sync_modes=self._offered_sync_modes(stream),
                 )
             )
         return result

@@ -423,6 +423,8 @@ def certify(case: CertificationCase) -> CertificationReport:
         if "certification_added" not in drift["added"] or not drift["type_changed"]:
             raise AssertionError("schema drift omitted added-field/type changes")
         for field_name in (*case.primary_key, case.cursor_field):
+            if not field_name:
+                continue
             removed = json.loads(json.dumps(old_schema))
             path_parts = field_name.split(".")
             definition: Any = removed

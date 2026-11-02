@@ -90,6 +90,23 @@ class ConnectorDescriptor:
         object.__setattr__(self, "certification_skips", MappingProxyType(skips))
 
 
+# Shared, honest certification skips for declarative SaaS sources.
+FULL_REFRESH_ONLY_SKIP: Mapping[str, str] = MappingProxyType(
+    {
+        "incremental_read": (
+            "descriptor declares full_refresh only; no trustworthy vendor updated-since "
+            "filter is wired, so incremental is not offered"
+        )
+    }
+)
+SINGLE_PAGE_SKIP: Mapping[str, str] = MappingProxyType(
+    {
+        "resume_after_failure": (
+            "single-page API (no pagination); recovery is a full re-read of that page"
+        )
+    }
+)
+
 def load_sdk_protocol_message(line: str) -> dict[str, Any] | None:
     """One Singer / Airbyte protocol line. Numbers match ``json_loads_exact``.
 

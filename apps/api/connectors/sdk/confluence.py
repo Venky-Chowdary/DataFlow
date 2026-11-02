@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from connectors.sdk import ConnectorDescriptor, register_connector
+from connectors.sdk import ConnectorDescriptor, FULL_REFRESH_ONLY_SKIP, register_connector
 from connectors.sdk.declarative.connector import ManifestConnector
 
 
@@ -16,6 +16,7 @@ class ConfluenceSource(ManifestConnector):
         roles=frozenset({"source"}),
         auth_modes=("basic",),
         sync_modes=("full_refresh",),
+        certification_skips=FULL_REFRESH_ONLY_SKIP,
         form_fields=(
             {"name": "domain", "type": "string", "required": True, "sensitive": False},
             {"name": "username", "type": "string", "required": True, "sensitive": False},

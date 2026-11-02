@@ -989,7 +989,7 @@ def build_certification_cases(tmp_path: Path, monkeypatch: Any = None) -> dict[s
         unsupported_steps=frozenset({"rate_limit"}),
     )
 
-    return {
+    hand_written = {
         case.connector_id: case
         for case in (
             singer_case,
@@ -1001,3 +1001,6 @@ def build_certification_cases(tmp_path: Path, monkeypatch: Any = None) -> dict[s
             intercom_case,
         )
     }
+    from tests.connector_certification.manifest_cases import build_manifest_cases
+
+    return {**build_manifest_cases(set(hand_written)), **hand_written}
