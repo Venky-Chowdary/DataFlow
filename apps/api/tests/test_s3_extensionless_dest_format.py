@@ -51,7 +51,12 @@ def _dest(url: str, port: int, fmt: str | None) -> EndpointConfig:
 
 
 def _keys(client) -> list[str]:
-    return sorted(o["Key"] for o in client.list_objects_v2(Bucket="x5bucket").get("Contents", []))
+    """Export keys; the D116 pre-append rollback image is kept for undo, not an export."""
+    return sorted(
+        o["Key"]
+        for o in client.list_objects_v2(Bucket="x5bucket").get("Contents", [])
+        if not o["Key"].endswith(".__df_append_backup__")
+    )
 
 
 def _ids(data: bytes, fmt: str) -> list[int]:

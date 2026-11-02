@@ -203,8 +203,13 @@ def test_approving_after_the_plan_moved_is_a_conflict_not_a_silent_sign_off(
         json={"reason": REASON, "schema_drift": True},
         headers={"X-Actor": ACTOR},
     )
-    assert res.status_code == 409
-    assert "AUTH_BINDING_CHANGED" in res.text
+    # The plan edit itself closes the finding (QA r12 Mongo D9), so a late
+    # approve finds nothing open to sign instead of signing the old plan.
+    assert res.status_code == 404
+    assert "already resolved" in res.text
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.approval_request.get("resolved_by") != ACTOR
 
 
 def test_an_unknown_decision_is_not_found(client, parked):

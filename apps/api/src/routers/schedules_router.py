@@ -973,6 +973,9 @@ async def accept_source_schema(
         for p in (evidence.get("current_primary_key") or getattr(sched, "source_primary_key", None) or [])
         if str(p).strip()
     ]
+    from services.schedule_store import has_open_approval
+
+    had_open = has_open_approval(sched)
     updated = update_schedule(
         schedule_id,
         {
@@ -992,6 +995,10 @@ async def accept_source_schema(
         actor=actor,
         reason="Accepted the source's current shape as this schedule's baseline.",
     )
+    if not closed and had_open:
+        # The baseline write can already release the finding itself.
+        after = get_schedule(schedule_id)
+        closed = after is not None and not has_open_approval(after)
 
     return {
         "success": True,

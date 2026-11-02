@@ -290,6 +290,22 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
         ),
         encoding="utf-8",
     )
+    from services import file_parser
+
+    upload_id = "bupload1"
+    upload_path = resource_matrix / "b_upload.csv"
+    upload_path.write_text("id,name\n1,B_UPLOAD_SENTINEL\n", encoding="utf-8")
+    monkeypatch.setitem(
+        file_parser._file_registry,
+        upload_id,
+        {
+            "file_id": upload_id,
+            "filename": "b_upload.csv",
+            "path": str(upload_path),
+            "format": "csv",
+            "workspace_id": workspace_b,
+        },
+    )
     mongo = _MongoFixture(workspace_b)
     connectors_module = importlib.import_module("src.routers.connectors_router")
     monkeypatch.setattr(connectors_module, "get_mongodb_service", lambda: mongo)
@@ -329,6 +345,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             values = {"contract_id": contract.id}
         elif "{grant_id}" in template:
             values = {"grant_id": grant.id}
+        elif template.startswith("/api/v1/connectors/uploads/{file_id}"):
+            values = {"file_id": upload_id}
         elif template.startswith("/api/v1/journals/{journal_id}"):
             values = {"journal_id": journal_id}
         elif template == "/api/v1/workspace/benchmark/runs/{run_id}":

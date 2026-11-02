@@ -35,7 +35,18 @@ class AirtableSource(ManifestConnector):
         adapted.setdefault("api_key", adapted.get("access_token") or adapted.get("token") or "")
         adapted.setdefault("base_id", adapted.get("base") or "")
         adapted.setdefault("table_id", adapted.get("table") or "")
+        # Studio and the legacy REST reader name an Airtable table "base/table".
+        base, sep, table = str(adapted.get("table_id") or "").partition("/")
+        if sep and not adapted.get("base_id"):
+            adapted["base_id"], adapted["table_id"] = base, table
         super().__init__(adapted)
+
+    def read(self, stream: str, **kwargs: Any):
+        # The transfer engine passes the configured table as the stream name;
+        # "base/table" (or the bare table id) is the records stream.
+        if stream not in {"records", "tables"}:
+            stream = "records"
+        return super().read(stream, **kwargs)
 
     def spec(self) -> dict[str, Any]:
         return {

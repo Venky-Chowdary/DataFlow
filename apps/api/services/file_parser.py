@@ -474,10 +474,17 @@ def store_upload(filename: str, content: bytes) -> dict:
         "path": str(path),
         "object_uri": object_uri,
         "validation": validation_report,
+        "workspace_id": _upload_workspace(),
     }
     _file_registry[file_id] = record
     _save_registry()
     return record
+
+
+def _upload_workspace() -> str:
+    from services.workspace_filter import current_workspace_stamp
+
+    return current_workspace_stamp() or ""
 
 
 def get_file(file_id: str) -> dict | None:

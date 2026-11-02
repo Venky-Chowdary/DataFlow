@@ -65,7 +65,10 @@ def _run_transfer(
         skip_preflight=True,
     )
 
-    with mock.patch("requests.request", side_effect=_respond):
+    # SDK sources go through a requests.Session; legacy readers call requests.request.
+    with mock.patch("requests.request", side_effect=_respond), mock.patch(
+        "requests.Session.request", side_effect=_respond
+    ):
         engine = UniversalTransferEngine()
         result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
@@ -96,6 +99,12 @@ def _refused_as_planned(brand: str, result: Any, path: str) -> bool:
     from src.transfer.connector_capabilities import _DRIVER_CAPS, transfer_ready
 
     if transfer_ready(_DRIVER_CAPS[brand]):
+        return False
+    from connectors.sdk import get_sdk_connector
+
+    if get_sdk_connector(brand) is not None:
+        # Source-only beta: wired into the engine on synthetic-fixture evidence,
+        # labeled beta in the catalog rather than refused as Planned.
         return False
     assert result.success is False
     assert result.records_transferred == 0

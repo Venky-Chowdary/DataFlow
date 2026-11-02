@@ -2716,7 +2716,13 @@ def profile_stored_upload(file_id: str) -> dict:
 
     from services.file_parser import get_file
 
+    from services.workspace_filter import bound_allows
+
     record = get_file(file_id)
+    owner = str((record or {}).get("workspace_id") or "")
+    if record and owner and not bound_allows(owner):
+        # Another workspace's upload reads exactly like a missing one.
+        record = None
     path = _Path(str((record or {}).get("path") or ""))
     if not record or not path.is_file():
         raise HTTPException(
