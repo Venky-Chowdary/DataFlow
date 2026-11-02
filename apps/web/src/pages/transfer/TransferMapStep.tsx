@@ -316,10 +316,10 @@ export function TransferMapStep({
       </div>
 
       <div className="df2-card-body df2-map-step-body">
-        {(llmUsed || (uniqueKeySuggestions[0] && onApplyPrimaryKey)) && (
+        {(llmUsed || (!primaryKeyField && uniqueKeySuggestions[0] && onApplyPrimaryKey)) && (
           <p className="df2-map-inline-suggest" data-testid="map-inline-suggest" role="status">
             <span>Suggested</span>
-            {uniqueKeySuggestions[0] && onApplyPrimaryKey ? (
+            {!primaryKeyField && uniqueKeySuggestions[0] && onApplyPrimaryKey ? (
               <button
                 type="button"
                 className="df2-btn df2-btn-sm"

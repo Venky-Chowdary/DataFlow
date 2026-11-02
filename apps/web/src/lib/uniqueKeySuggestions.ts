@@ -105,8 +105,9 @@ export function suggestUniqueKeyCandidates(
     if (nullCount > Math.floor(rows.length * 0.1)) continue; // too many nulls
     const name = nameScore(column);
     const shape = valueScore(values);
-    // A measure (age, amount) or a decimal is never an identity, however unique the sample.
-    if (name === 0 || shape <= -40) continue;
+    // A measure (age, amount), a decimal, or a timestamp-shaped event column is
+    // never an identity, however unique a small sample happens to be.
+    if (name === 0 || shape <= -40 || name + shape <= 0) continue;
     out.push({
       column,
       uniqueCount,

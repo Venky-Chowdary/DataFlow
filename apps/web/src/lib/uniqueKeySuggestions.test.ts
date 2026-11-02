@@ -38,7 +38,8 @@ describe("suggestUniqueKeyCandidates", () => {
     const hits = suggestUniqueKeyCandidates(rows, ["age", "email", "id", "signup_date", "status"]);
     assert.equal(hits[0]?.column, "id");
     assert.ok(hits.every((h) => h.column !== "age"), "a measure is never offered as identity");
-    assert.ok(hits.findIndex((h) => h.column === "email") < hits.findIndex((h) => h.column === "signup_date"));
+    assert.equal(hits[1]?.column, "email");
+    assert.ok(hits.every((h) => h.column !== "signup_date"), "a date is not offered as identity");
   });
 
   it("never offers decimals as a key and recognises camelCase / uuid ids", () => {
