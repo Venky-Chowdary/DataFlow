@@ -7013,6 +7013,9 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
     # digit the writer renders, so run 2's sampled TIMESTAMP is the carrier
     # run 1 wrote.
     "redis": 7,
+    # Kafka values are JSON: ``datetime`` goes out as ISO-8601 text through
+    # the same renderer, so a wall-clock column keeps every digit (D235).
+    "kafka": 7,
     **{
         e: 6
         for e in (
@@ -7023,6 +7026,11 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
         )
     },
 }
+
+
+#: Engines whose bare temporal carrier is ISO-8601 text the writer renders,
+#: not a typed column with a declared precision.
+_ISO_TEXT_TEMPORAL_ENGINES = frozenset({"sqlite", "redis", "kafka"})
 
 
 def _bare_temporal_digits(dest_db: str) -> int | None:
@@ -7093,7 +7101,7 @@ def destination_temporal_fractional_digits(
         if db in {"bigquery", "bq"}:
             # BigQuery DATETIME is microsecond.
             return 6
-        if db in {"sqlite", "redis"}:
+        if db in _ISO_TEXT_TEMPORAL_ENGINES:
             # D224: a text carrier keeps every digit the writer bound. Reading
             # SQLite DATETIME as FSP 0 made Gate-8 fingerprint the source at
             # whole seconds, so a copy that dropped the microseconds verified.
