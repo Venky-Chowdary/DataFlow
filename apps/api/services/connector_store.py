@@ -352,14 +352,36 @@ def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, An
     return extra
 
 
-def _merged_extra(saved: Any, data: Mapping[str, Any] | None) -> dict[str, Any]:
+#: Trust extras that identify one endpoint's key — never valid for another host.
+_HOST_BOUND_TRUST_KEYS = ("host_key", "known_hosts")
+
+
+def _endpoint_moved(before_host: Any, data: Mapping[str, Any] | None) -> bool:
+    """True when the edit points the connector at a different host.
+
+    A port-only edit keeps the pin: correcting a stale port (D208) reaches the
+    same server, and a mismatched key still fails closed at connect.
+    """
+    host = str((data or {}).get("host") or "").strip().lower()
+    return bool(host) and host != str(before_host or "").strip().lower()
+
+
+def _merged_extra(
+    saved: Any, data: Mapping[str, Any] | None, *, endpoint_moved: bool = False
+) -> dict[str, Any]:
     """An edit keeps saved extras it does not restate.
 
     The edit form omits a blank host-key pin the same way it masks a secret;
     replacing ``extra`` wholesale would silently drop the pin and downgrade the
-    next SFTP connect to trust-on-first-use.
+    next SFTP connect to trust-on-first-use. A pin belongs to one endpoint,
+    though (D215): when the edit moves the host, the old host's pin and
+    known_hosts are dropped unless restated. The policy stays, so a strict
+    connector refuses the new host and names its fingerprint to pin.
     """
     base = dict(saved) if isinstance(saved, dict) else {}
+    if endpoint_moved:
+        for key in _HOST_BOUND_TRUST_KEYS:
+            base.pop(key, None)
     return {**base, **connector_extra_from_payload(data)}
 
 
@@ -876,7 +898,10 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             data = split_sftp_host_edit(data, data.get("type") or before.type, before.port)
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
-        merged["extra"] = _merged_extra(existing.extra, data)
+        merged["extra"] = _merged_extra(
+            existing.extra, data,
+            endpoint_moved=_endpoint_moved(existing.host, data),
+        )
         # Never let a masked UI payload overwrite a saved secret / connection string.
         for secret_field in ("password", "api_key", "service_account", "private_key"):
             merged[secret_field] = _coerce_secret_update(merged.get(secret_field), existing.to_dict().get(secret_field))
@@ -902,7 +927,10 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # re-encrypted by _encrypt_connector_doc — every successful update
             # heals the record instead of refusing it.
             merged = stamp_ssl_mode({**raw, **data, "_id": raw.get("_id")}, data)
-            merged["extra"] = _merged_extra(raw.get("extra"), data)
+            merged["extra"] = _merged_extra(
+                raw.get("extra"), data,
+                endpoint_moved=_endpoint_moved(raw.get("host"), data),
+            )
             merged.pop("id", None)
             for secret_field in _DOC_SECRET_KEYS:
                 merged[secret_field] = _coerce_secret_update(
