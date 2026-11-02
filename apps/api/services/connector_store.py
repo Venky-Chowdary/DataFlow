@@ -352,6 +352,17 @@ def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, An
     return extra
 
 
+def _merged_extra(saved: Any, data: Mapping[str, Any] | None) -> dict[str, Any]:
+    """An edit keeps saved extras it does not restate.
+
+    The edit form omits a blank host-key pin the same way it masks a secret;
+    replacing ``extra`` wholesale would silently drop the pin and downgrade the
+    next SFTP connect to trust-on-first-use.
+    """
+    base = dict(saved) if isinstance(saved, dict) else {}
+    return {**base, **connector_extra_from_payload(data)}
+
+
 def _resolve_backend() -> str:
     """Pick the persistence backend."""
     global _backend_choice
@@ -865,6 +876,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             data = split_sftp_host_edit(data, data.get("type") or before.type, before.port)
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
+        merged["extra"] = _merged_extra(existing.extra, data)
         # Never let a masked UI payload overwrite a saved secret / connection string.
         for secret_field in ("password", "api_key", "service_account", "private_key"):
             merged[secret_field] = _coerce_secret_update(merged.get(secret_field), existing.to_dict().get(secret_field))
@@ -890,6 +902,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # re-encrypted by _encrypt_connector_doc — every successful update
             # heals the record instead of refusing it.
             merged = stamp_ssl_mode({**raw, **data, "_id": raw.get("_id")}, data)
+            merged["extra"] = _merged_extra(raw.get("extra"), data)
             merged.pop("id", None)
             for secret_field in _DOC_SECRET_KEYS:
                 merged[secret_field] = _coerce_secret_update(

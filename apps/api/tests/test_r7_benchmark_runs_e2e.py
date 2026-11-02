@@ -87,7 +87,7 @@ def test_benchmark_runs_in_the_background_with_progress_and_real_memory(client):
     md = client.get(f"/api/v1/workspace/benchmark/runs/{run['id']}?format=md")
     assert md.status_code == 200
     assert "Datawrap vs this" in md.text
-    assert "0 MB" not in md.text
+    assert "0 MB" not in md.text, [l for l in md.text.splitlines() if "MB" in l]
 
 
 def test_comparison_label_names_datawrap_and_follows_the_ratio():
