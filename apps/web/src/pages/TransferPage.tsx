@@ -5717,6 +5717,12 @@ export function TransferPage({
     setStep(STEP_VALIDATE);
   }, []);
 
+  /** A recovered failure is terminal: its launch pointer must not replace Execute. */
+  const leaveFailedRunToValidate = useCallback(() => {
+    setTransferLaunch(null);
+    leaveTheaterToValidate();
+  }, [leaveTheaterToValidate]);
+
   const leaveTheaterToMap = useCallback(() => {
     setActiveJobId(null);
     setTransferring(false);
@@ -8213,8 +8219,8 @@ export function TransferPage({
                 : undefined
             }
             savingContract={savingContract}
-            executeBlocked={Boolean(contractBlockReason)}
-            executeBlockedReason={contractBlockReason || undefined}
+            executeBlocked={Boolean(contractBlockReason) || !jobRun.allowed}
+            executeBlockedReason={contractBlockReason || jobRun.reason || undefined}
             contractSlot={(
               <ContractBindField
                 idPrefix="studio"
@@ -8482,11 +8488,11 @@ export function TransferPage({
               onBackToMap={leaveTheaterToMap}
               onRebaselineContinuity={continuityRecoveryAvailable ? async (reason) => {
                 await acceptContinuityBaseline(reason);
-                leaveTheaterToValidate();
+                leaveFailedRunToValidate();
               } : undefined}
               onRebuildFullRefresh={continuityRecoveryAvailable ? () => {
                 setSyncMode("full_refresh_overwrite");
-                leaveTheaterToValidate();
+                leaveFailedRunToValidate();
               } : undefined}
               onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onResumed={(nextId) => {
