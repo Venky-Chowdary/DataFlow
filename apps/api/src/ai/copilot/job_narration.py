@@ -66,7 +66,7 @@ def narrate_jobs(output: dict, message: str | None) -> str:
     from .workspace_intents import job_status_asked
 
     asked = job_status_asked(message or "")
-    if asked and asked not in FAILED_STATUSES:
+    if asked and asked != "failed":
         canon = {"canceled": "cancelled", "success": "completed", "succeeded": "completed"}
 
         def _norm(s: object) -> str:

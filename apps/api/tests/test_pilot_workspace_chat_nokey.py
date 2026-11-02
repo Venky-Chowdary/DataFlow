@@ -189,3 +189,19 @@ def test_viewer_cannot_confirm_a_transform(isolated, monkeypatch):
     staged = DataPilotTools().execute("create_transform_recipe", {"template_key": "scd2-history"})
     result = _confirm(staged.output["ack_id"])
     assert result.get("ok") is not True
+
+
+def test_cancelled_count_is_answered_as_a_count():
+    out = _jobs_output()
+    out["jobs"].append({"id": "x", "source": "s", "destination": "d", "status": "cancelled", "records": 0})
+    out["status_counts"]["cancelled"] = 1
+    assert narrate_jobs(out, "how many cancelled jobs").startswith("**1** of your **3** job(s) were cancelled")
+
+
+def test_overview_of_my_workspace_is_a_briefing_not_a_tab():
+    assert ground_plan("overview of my workspace", [("navigate", {"screen": "overview"})], None) == [
+        ("brief_workspace", {})
+    ]
+    assert ground_plan("open overview", [("navigate", {"screen": "overview"})], None) == [
+        ("navigate", {"screen": "overview"})
+    ]

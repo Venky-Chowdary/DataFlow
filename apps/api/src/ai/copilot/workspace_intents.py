@@ -38,6 +38,9 @@ _SUBJECTS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("connectors", re.compile(r"\b(?:connectors?|connections?)\b", re.I)),
 )
 _HOW_TO_RE = re.compile(r"^\s*(?:how\s+(?:do|can|would|should)\s+(?:i|we|you)|how\s+to)\b", re.I)
+_WORKSPACE_SUMMARY_RE = re.compile(
+    r"\b(?:overview|summary|status|state|health)\s+of\s+(?:my|the|our)\s+workspace\b", re.I
+)
 # Plans that read nothing about the workspace, so rerouting cannot lose a
 # question the router already understood.
 _WEAK_PLANS = ({"explain_product"}, {"list_jobs"}, set())
@@ -83,6 +86,9 @@ def ground_plan(
     # move as well read "postgres" as a saved connector and led with its miss.
     if "explain_product" in names and _HOW_TO_RE.match(message or ""):
         return [(n, a) for n, a in planned if n == "explain_product"]
+    # "overview of my workspace" asks for the briefing, not the Overview tab.
+    if names == {"navigate"} and _WORKSPACE_SUMMARY_RE.search(message or ""):
+        return [("brief_workspace", {})]
     here = subject_of(message)
     prior = conversation_subject(history)
 
