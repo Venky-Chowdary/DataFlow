@@ -408,10 +408,55 @@ function ConnectorBody({ payload }: { payload: Record<string, unknown> | undefin
   );
 }
 
+function TransformBody({ payload }: { payload: Record<string, unknown> | undefined }) {
+  const preview = (payload?.preview && typeof payload.preview === "object"
+    ? payload.preview
+    : {}) as Record<string, unknown>;
+  const name = String(preview.name || "Transform");
+  const description = String(preview.description || "");
+  const steps = Number(preview.steps || 0);
+  const cols = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : "");
+  const inputs = cols(preview.input_columns);
+  const outputs = cols(preview.output_columns);
+  return (
+    <dl className="df2-pilot-confirm-meta">
+      <div>
+        <dt>Template</dt>
+        <dd><strong>{name}</strong></dd>
+      </div>
+      {description ? (
+        <div>
+          <dt>Does</dt>
+          <dd>{description}</dd>
+        </div>
+      ) : null}
+      {steps ? (
+        <div>
+          <dt>Steps</dt>
+          <dd>{steps}</dd>
+        </div>
+      ) : null}
+      {inputs ? (
+        <div>
+          <dt>Reads</dt>
+          <dd><code>{inputs}</code></dd>
+        </div>
+      ) : null}
+      {outputs ? (
+        <div>
+          <dt>Writes</dt>
+          <dd><code>{outputs}</code></dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
 export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
   const isTransfer = action.type === "start_transfer";
   const isConnector = action.type === "create_connector";
   const isSchedule = action.type === "run_schedule";
+  const isTransform = action.type === "create_transform_recipe";
   const plan = isTransfer ? asPlan(action.payload) : null;
   const preview = isTransfer ? asPreview(action.payload) : null;
   const schedulePreview = isSchedule ? schedulePreviewFromPayload(action.payload) : null;
@@ -441,7 +486,9 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
               ? "Pipeline ready to run"
               : isConnector
                 ? "Save connector"
-                : "Needs your confirmation"}
+                : isTransform
+                  ? "Save transform recipe"
+                  : "Needs your confirmation"}
         </span>
         <strong className="df2-pilot-confirm-title">{action.label || action.type}</strong>
       </div>
@@ -452,6 +499,8 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
         <ScheduleBody action={action} payload={action.payload} />
       ) : isConnector ? (
         <ConnectorBody payload={action.payload} />
+      ) : isTransform ? (
+        <TransformBody payload={action.payload} />
       ) : (
         <p className="df2-pilot-confirm-muted">
           Review the change above, then confirm. Nothing happens until you do.
@@ -463,7 +512,7 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
           variant={destructive ? "danger" : "primary"}
           size="sm"
           loading={busy}
-          loadingLabel="Starting…"
+          loadingLabel={isTransform || isConnector ? "Saving…" : "Starting…"}
           disabled={Boolean(confirmBlock)}
           onClick={onConfirm}
         >
