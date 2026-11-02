@@ -673,6 +673,46 @@ def qdrant_delete_stale_chunks(
     return deleted
 
 
+_WEAVIATE_STATE_PAGE = 1000
+
+
+def _weaviate_state_page(
+    session: Any, base_url: str, headers: dict[str, str], target: str, query: str
+) -> list[dict[str, Any]]:
+    response = session.post(
+        f"{base_url}/v1/graphql",
+        json={"query": query},
+        headers=headers,
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Weaviate document-state query failed: {response.status_code}"
+        )
+    body = response.json() if response.content else {}
+    if body.get("errors"):
+        raise RuntimeError("Weaviate document-state query was rejected")
+    data = ((body.get("data") or {}).get("Get") or {}).get(target) or []
+    return [obj for obj in data if isinstance(obj, Mapping)]
+
+
+def _weaviate_state_rows(
+    page: Sequence[Mapping[str, Any]], selected_fields: Sequence[str]
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for obj in page:
+        additional = obj.get("_additional") or {}
+        out.append(
+            {
+                "id": str(additional.get("id") or ""),
+                "source_id": obj.get("source_id"),
+                "chunk_index": obj.get("chunk_index"),
+                "metadata": {key: obj.get(key) for key in selected_fields},
+            }
+        )
+    return out
+
+
 def _m6_engine_rows(
     engine: str,
     cfg: Mapping[str, Any],
@@ -740,38 +780,21 @@ def _m6_engine_rows(
                     where = clauses[0] if len(clauses) == 1 else (
                         "{ operator: Or, operands: [" + ", ".join(clauses) + "] }"
                     )
-                    query = (
-                        f"{{ Get {{ {target}(where: {where}) "
-                        f"{{ {property_selection} _additional {{ id }} }} }} }}"
-                    )
-                    response = session.post(
-                        f"{base_url}/v1/graphql",
-                        json={"query": query},
-                        headers=headers,
-                        timeout=30,
-                    )
-                    if response.status_code != 200:
-                        raise RuntimeError(
-                            f"Weaviate document-state query failed: {response.status_code}"
+                    # A Get without limit returns QUERY_DEFAULTS_LIMIT (100)
+                    # objects, so a document with more chunks than that read
+                    # back short and stale cleanup could not verify (D231).
+                    page_offset = 0
+                    while True:
+                        query = (
+                            f"{{ Get {{ {target}(where: {where}, "
+                            f"limit: {_WEAVIATE_STATE_PAGE}, offset: {page_offset}) "
+                            f"{{ {property_selection} _additional {{ id }} }} }} }}"
                         )
-                    body = response.json() if response.content else {}
-                    if body.get("errors"):
-                        raise RuntimeError("Weaviate document-state query was rejected")
-                    data = ((body.get("data") or {}).get("Get") or {}).get(target) or []
-                    for obj in data:
-                        additional = obj.get("_additional") or {}
-                        metadata = {
-                            key: obj.get(key)
-                            for key in selected_fields
-                        }
-                        rows.append(
-                            {
-                                "id": str(additional.get("id") or ""),
-                                "source_id": obj.get("source_id"),
-                                "chunk_index": obj.get("chunk_index"),
-                                "metadata": metadata,
-                            }
-                        )
+                        page = _weaviate_state_page(session, base_url, headers, target, query)
+                        rows.extend(_weaviate_state_rows(page, selected_fields))
+                        if len(page) < _WEAVIATE_STATE_PAGE:
+                            break
+                        page_offset += _WEAVIATE_STATE_PAGE
                 return rows
             for page in iter_weaviate_objects_after(
                 session=session,
