@@ -33,13 +33,11 @@ def _table(name: str) -> str:
 
 def _session(cur: Any, *, database: str, schema: str) -> str:
     schema_name = (schema or "PUBLIC").strip() or "PUBLIC"
-    if database:
-        database_q = _q(database)
-        cur.execute(f"CREATE DATABASE IF NOT EXISTS {database_q}")
-        cur.execute(f"USE DATABASE {database_q}")
-    schema_q = _q(schema_name)
-    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_q}")
-    cur.execute(f"USE SCHEMA {schema_q}")
+    from connectors.snowflake_conn import use_snowflake_namespace
+
+    use_snowflake_namespace(
+        cur, database_q=_q(database) if database else "", schema_q=_q(schema_name), create=True
+    )
     return schema_name
 
 

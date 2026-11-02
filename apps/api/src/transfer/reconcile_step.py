@@ -4383,8 +4383,37 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
             schema=snowflake_fold_identifier(str(cfg.get("schema") or "PUBLIC")),
             warehouse=str(cfg.get("warehouse") or ""),
             connection_string=str(cfg.get("connection_string") or ""),
+            role=str(cfg.get("role") or ""),
         )
     return None
+
+
+def _snowflake_census_select(
+    conn: Any, cfg: dict[str, Any], table: str, cols: list[str]
+) -> str:
+    """Census SELECT over the stored Snowflake table and column names.
+
+    Tables Datawrap created as quoted lowercase (``"orders"``) are invisible to
+    a folded ``ORDERS`` reference, so resolve both against the catalog — the
+    same lookup the dest COUNT(*) uses.
+    """
+    from connectors.snowflake_conn import (
+        resolve_or_fold_snowflake_table,
+        snowflake_column_ref,
+        snowflake_physical_name_map,
+        snowflake_qualified_table,
+    )
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    schema = snowflake_fold_identifier(str(cfg.get("schema") or "PUBLIC"))
+    cur = conn.cursor()
+    try:
+        stored = resolve_or_fold_snowflake_table(cur, schema, table)
+        physical = snowflake_physical_name_map(cur, schema, stored)
+    finally:
+        cur.close()
+    sel = ", ".join(snowflake_column_ref(c, physical) for c in cols)
+    return f"SELECT {sel} FROM {snowflake_qualified_table(schema, stored)}"  # nosec B608
 
 
 def _culprit_table_ref(eng: str, cfg: dict[str, Any], table: str) -> str:
@@ -4521,15 +4550,22 @@ def _generic_key_census(
             db.execute("CREATE TABLE k(side INTEGER NOT NULL, pk TEXT, h TEXT)")
             db.execute("CREATE INDEX ki ON k(side, pk)")
 
+            ref_table_name = (src_tbl, dst_tbl)
+
             def _load(conn_info, cfg, eng, ref_table, pk_col, cols, side):
                 e2, conn = conn_info
                 q = '"' if e2 != "mysql" else "`"
                 from connectors.sql_identifiers import quote_sql_identifier as _qi
 
-                sel = ", ".join(
-                    [_qi(pk_col, q)] + [_qi(c, q) for c in cols]
-                )
-                stmt = f"SELECT {sel} FROM {ref_table}"  # nosec B608
+                if e2 == "snowflake":
+                    stmt = _snowflake_census_select(
+                        conn, cfg, ref_table_name[side], [pk_col, *cols]
+                    )
+                else:
+                    sel = ", ".join(
+                        [_qi(pk_col, q)] + [_qi(c, q) for c in cols]
+                    )
+                    stmt = f"SELECT {sel} FROM {ref_table}"  # nosec B608
                 try:
                     cur = conn.cursor()
                     cur.execute(stmt)

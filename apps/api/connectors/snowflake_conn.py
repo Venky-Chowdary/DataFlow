@@ -704,6 +704,27 @@ def _snowflake_desc_column_rows(
     return out, False
 
 
+def use_snowflake_namespace(cur: Any, *, database_q: str, schema_q: str, create: bool) -> None:
+    """``USE`` the (already quoted) database and schema; create only if missing.
+
+    Snowflake checks ``CREATE DATABASE`` (an account privilege) and ``CREATE
+    SCHEMA`` before it checks ``IF NOT EXISTS``, so issuing them for objects
+    that already exist fails for least-privilege roles that own only their
+    database. Try ``USE`` first and fall back to ``CREATE`` only when that fails.
+    """
+    for kind, ident in (("DATABASE", database_q), ("SCHEMA", schema_q)):
+        if not ident:
+            continue
+        try:
+            cur.execute(f"USE {kind} {ident}")
+            continue
+        except Exception:
+            if not create:
+                raise
+        cur.execute(f"CREATE {kind} IF NOT EXISTS {ident}")
+        cur.execute(f"USE {kind} {ident}")
+
+
 def snowflake_qualified_table(schema: str, table: str) -> str:
     """Quote schema.table using the exact stored/folded names (no second fold)."""
     from connectors.sql_identifiers import (

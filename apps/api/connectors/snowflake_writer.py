@@ -19,6 +19,7 @@ from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import (
+    use_snowflake_namespace,
     _is_local_account,
     get_connection,
     normalize_account,
@@ -1611,18 +1612,16 @@ def write_mapped_rows(
                             "The SNOWFLAKE database is read-only system data. "
                             "Please specify a user database (for example, ANALYTICS) in the connector."
                         )
-                    db_q = quote_sql_identifier(
+                use_snowflake_namespace(
+                    cur,
+                    database_q=quote_sql_identifier(
                         sanitize_identifier(database, preserve_case=True)
-                    )
-                    if create_table:
-                        cur.execute(f"CREATE DATABASE IF NOT EXISTS {db_q}")
-                    cur.execute(f"USE DATABASE {db_q}")
-                sch_q = quote_sql_identifier(
-                    sanitize_identifier(schema, preserve_case=True)
+                    ) if database else "",
+                    schema_q=quote_sql_identifier(
+                        sanitize_identifier(schema, preserve_case=True)
+                    ),
+                    create=create_table,
                 )
-                if create_table:
-                    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
-                cur.execute(f"USE SCHEMA {sch_q}")
 
             # Bind to the real stored table name (case) before DDL/DML.
             from connectors.sql_identifiers import snowflake_fold_identifier
