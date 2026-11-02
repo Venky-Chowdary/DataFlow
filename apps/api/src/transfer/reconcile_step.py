@@ -351,7 +351,11 @@ def _proof_mongo_source_batches(
     read_cols: list[str],
     page: int = 5000,
 ):
-    """Raw Mongo source pages, projected the way the transfer reader does."""
+    """Raw Mongo collection pages, projected the way the transfer reader does.
+
+    Used for both a Mongo source re-read and a Mongo destination read-back:
+    one projection, so both sides of the proof see the same value shapes.
+    """
     from connectors.mongodb_common import _mongo_client
     from connectors.mongodb_reader import _connection_string, _page_docs_to_batch
 
@@ -1622,7 +1626,7 @@ def _transform_applied_proof_impl(
         actual_rows = 0
         try:
             dst_cfg0 = resolve_connector_config(endpoint)
-            dest_ref0 = warehouse_sql_table_ref(
+            dest_ref0 = "" if dest_db_type == "mongodb" else warehouse_sql_table_ref(
                 dest_db_type,
                 dst_cfg0,
                 str(
@@ -1686,6 +1690,21 @@ def _transform_applied_proof_impl(
                 actual_checksum = canonical_checksum_from_iter(
                     _scoped_gen(
                         _proof_file_dest_batches(endpoint, dest_summary, dst_cfg0)
+                    ),
+                    digest_cols,
+                    dest_db_type=dest_db_type,
+                    dest_types=dest_types,
+                )
+            elif dest_db_type == "mongodb":
+                # D228: a document store has no SQL dialect — read the
+                # written collection back through the Mongo reader.
+                actual_checksum = canonical_checksum_from_iter(
+                    _scoped_gen(
+                        _proof_mongo_source_batches(
+                            source_endpoint=endpoint,
+                            src_cfg=dst_cfg0,
+                            read_cols=sel_cols0,
+                        )
                     ),
                     digest_cols,
                     dest_db_type=dest_db_type,
