@@ -228,6 +228,10 @@ def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -
     is_admin = scope.unrestricted
     if not scope.allows(conn.workspace_id):
         return False
+    # The RBAC permission comes from the actor's role, not from this
+    # connector's workspace: a viewer there must not change what lives in it.
+    if write and not scope.can_write(conn.workspace_id):
+        return False
     try:
         from services.resource_acl import assert_resource_acl
 

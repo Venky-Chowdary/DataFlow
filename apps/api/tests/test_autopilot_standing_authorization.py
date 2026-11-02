@@ -459,10 +459,20 @@ def test_approving_and_authorizing_covers_later_identical_runs(sched):
 
 
 def test_an_approval_is_refused_once_the_plan_moved_under_it(sched):
-    """The operator would be signing for something they were never shown."""
+    """The operator would be signing for something they were never shown.
+
+    The plan moved while the request sat in the inbox. An operator's own plan
+    PATCH closes the finding instead (``_release_finding_on_plan_change``); a
+    change the operator was never shown must not be signed for unseen.
+    """
     request = _finding(sched)
     open_approval_request(sched.id, request)
-    store.update_schedule(sched.id, {"mappings": [{"source": "amount", "target": "NET"}]})
+    # Written out of band (not an operator PATCH, which would close the finding).
+    schedules = store._load_all()
+    for row in schedules:
+        if row.id == sched.id:
+            row.mappings = [{"source": "amount", "target": "NET"}]
+    store._save_all(schedules)
     with pytest.raises(AuthorizationRefused) as excinfo:
         approve_request(
             sched.id,

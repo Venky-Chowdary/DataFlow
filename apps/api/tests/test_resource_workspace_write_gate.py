@@ -38,6 +38,9 @@ def workspace_b(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
     monkeypatch.setenv("DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json"))
     monkeypatch.delenv("DATAFLOW_REQUIRE_WORKSPACE", raising=False)
+    # Membership only governs authenticated deployments: with auth off the
+    # single local operator is unrestricted (actor_is_unrestricted).
+    monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
     monkeypatch.setattr(team_store, "mongo_database", lambda: None)
     monkeypatch.setattr(resource_acl, "STORE_PATH", tmp_path / "resource-acls.jsonl")
     contract_store.reset_contract_store()
@@ -78,7 +81,11 @@ def test_write_mode_requires_write_membership(workspace_b, email, expected):
 
 
 def test_write_mode_keeps_scope_404_before_write_403(workspace_b):
-    req = _request(VIEWER, workspace_header="other-workspace")
+    # Declared scope is another workspace the viewer may write in: B's
+    # resource is outside that scope, so it answers 404 before any write 403.
+    other = team_store.create_workspace(name="Initech", created_by=OWNER)
+    team_store.add_workspace_member(workspace_id=other.id, email=VIEWER, role="editor", added_by=OWNER)
+    req = _request(VIEWER, workspace_header=other.id)
     assert _status(lambda: assert_resource_workspace(req, workspace_b, write=True)) == 404
 
 

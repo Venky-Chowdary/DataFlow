@@ -272,15 +272,16 @@ def test_live_pg_dest_ri_orphan_strict_blocks_before_write() -> None:
             ),
             uuid.uuid4().hex[:24],
         )
-        # Strict fails closed before an orphan is committed: the FK guard
-        # names the relationship and the orphan key, and nothing lands.
+        # Strict fails closed before an orphan is committed: the FK parent
+        # preflight (services.fk_parent_preflight) probes the destination
+        # parent, names the relationship and the orphan count, and nothing lands.
         assert result.success is False, (
             f"dest orphans must fail strict: {result.error!r} {result.reconciliation!r}"
         )
         err = str(result.error or "")
-        assert "referential integrity failed" in err.lower(), err
+        assert "1 distinct sample key(s) reference a parent row the destination does not hold" in err, err
         assert "child.parent_id -> parent.id" in err, err
-        assert "('2',)" in err, err
+        assert "strict validation refuses orphan child rows" in err.lower(), err
         rows = _fetch(f'SELECT id, parent_id FROM "{dst_schema}".child ORDER BY id')
         assert list(rows) == [], "destination child must equal its pre-run (empty) state"
         orphan = _fetch(
