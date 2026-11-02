@@ -1200,6 +1200,9 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   if (lower.includes("403") || lower.includes("forbidden")) {
     return "You don’t have permission to use Datawrap Pilot in this workspace.";
   }
+  if (lower.includes("429") || lower.includes("too many pilot messages")) {
+    return "You’re sending messages faster than Pilot accepts. Wait a few seconds, then try again.";
+  }
   if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
     return "Couldn’t reach Datawrap Pilot right now. Check that the app is online, then try again.";
   }
