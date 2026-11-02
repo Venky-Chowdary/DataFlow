@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   CONTINUITY_FAILURE_REASONS,
   CONTINUITY_GATE_ID,
+  presentFailureLogError,
   stripContinuityRecoveryProse,
 } from "./ContinuityRecoveryForm";
 
@@ -35,4 +36,18 @@ test("a cursor reset is recovered by controls, not cursor-clear API prose", () =
   assert.doesNotMatch(out, /clear_cursor|POST/);
   assert.ok(CONTINUITY_FAILURE_REASONS.has("cursor_destination_reset"));
   assert.ok(CONTINUITY_FAILURE_REASONS.has("destination_continuity_mismatch"));
+});
+
+test("the failed-run event log line drops cursor-clear prose for continuity failures only", () => {
+  const msg =
+    "Destination reset since the last incremental run: the destination table is missing "
+    + "— resuming would skip the whole history and report success. Clear the cursor (MCP tool "
+    + "clear_cursor_resnapshot, or POST /api/v1/ops/cdc-cursors/clear) to re-snapshot, or "
+    + "rebaseline the route (MCP tool rebaseline_transfer).";
+  const logged = presentFailureLogError(msg, { reason: "cursor_destination_reset" });
+  assert.match(String(logged), /report success\.$/);
+  assert.doesNotMatch(String(logged), /clear_cursor|POST|rebaseline/);
+  // Other failures keep their full message: it is the only diagnosis there is.
+  assert.equal(presentFailureLogError(msg, { reason: "other" }), msg);
+  assert.equal(presentFailureLogError(undefined, { reason: "cursor_destination_reset" }), undefined);
 });

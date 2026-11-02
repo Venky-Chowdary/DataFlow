@@ -46,6 +46,7 @@ import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
 import {
   CONTINUITY_FAILURE_REASONS,
+  presentFailureLogError,
   ContinuityRecoveryForm,
   stripContinuityRecoveryProse,
 } from "./transfer/ContinuityRecoveryForm";
@@ -351,7 +352,8 @@ export function JobTheater({
           doneRef.current = true;
           if (!completedLoggedRef.current) {
             completedLoggedRef.current = true;
-            append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
+            const loggedError = presentFailureLogError(update.error, update.error_details);
+            append(`Job failed${loggedError ? ` — ${loggedError}` : ""}`);
           }
           if (first) onFailedRef.current?.(update);
         } else if (update.status === "cancelled") {

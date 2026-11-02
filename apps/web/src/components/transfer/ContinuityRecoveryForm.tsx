@@ -10,6 +10,21 @@ export function stripContinuityRecoveryProse(text: string): string {
   return text.split(/\s+To recover:|\s+Clear the cursor \(/)[0];
 }
 
+/**
+ * The event-log line for a failed run. A continuity failure is recovered by
+ * the Rebuild / Accept controls, so the log must not repeat the MCP / REST
+ * cursor-clear prose the engine message carries for API callers.
+ */
+export function presentFailureLogError(
+  error: string | undefined,
+  details: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!error) return error;
+  return CONTINUITY_FAILURE_REASONS.has(String(details?.reason || ""))
+    ? stripContinuityRecoveryProse(error)
+    : error;
+}
+
 /** Failure reasons whose recovery is the continuity form, not API prose. */
 export const CONTINUITY_FAILURE_REASONS = new Set([
   "destination_continuity_mismatch",
