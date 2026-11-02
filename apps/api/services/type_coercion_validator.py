@@ -16,6 +16,7 @@ from services.type_system import (
     resolve_mapping_target_type,
     specialty_carrier_base,
     specialty_wire_preserves_value,
+    temporal_carrier_holds_time,
     uuid_capacity_string_carrier,
     uuid_carrier_is_dialect_equivalent,
 )
@@ -108,6 +109,12 @@ def validate_mapping_coercions(
             continue
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
+        tgt_label = tgt_type
+        if tgt_logical == "date" and temporal_carrier_holds_time(dest_db_type):
+            # BSON / ES ``date`` is a UTC instant at milliseconds, not a
+            # calendar day; grading it as DATE mislabels the risk (D234).
+            tgt_logical = "datetime"
+            tgt_label = f"{tgt_type}: UTC instant, 3 fractional digits"
         # Width-safe UUID / ObjectId wires are value-preserving create-new sinks
         # (unless type_locked — contract forbids logical drift even to safe wires).
         specialty = specialty_carrier_base(src_type)
@@ -210,7 +217,7 @@ def validate_mapping_coercions(
             "validation_mode": mode,
             "schema_policy": "type_locked" if type_locked else (schema_policy or ""),
             "message": (
-                f"{src} ({src_type}) → {tgt} ({tgt_type})"
+                f"{src} ({src_type}) → {tgt} ({tgt_label})"
                 + (
                     " — schema_policy=type_locked forbids changing the "
                     "destination type"
