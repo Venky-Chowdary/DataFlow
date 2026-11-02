@@ -493,6 +493,22 @@ def sample_connector_object(
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     driver = resolve_driver_type(ctype)
+    from src.transfer.connector_capabilities import get_capabilities
+
+    caps = get_capabilities(driver)
+    if caps.get("dest_only") and not caps.get("read"):
+        # No reader exists, so the SQL query path would fail with a missing
+        # dialect instead of the real limit (D242).
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                f"**{conn.get('name') or driver}** is a {driver} connector, which "
+                "DataFlow supports as destination-only: it has no reader, so there "
+                f'are no rows to sample. Its object count works: "count {table} on '
+                f'{conn.get("name") or "this connector"}".'
+            ),
+        )
     batch_source = driver in _BATCH_SAMPLE_DRIVERS
     if not _object_name_ok(table, batch=batch_source):
         return _tool_result(
