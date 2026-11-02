@@ -510,6 +510,23 @@ _ON_CAST_FAILURE_POLICIES = {
 }
 
 
+def _regrade_signed_coercions(
+    mapping: dict[str, Any], mappings: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Grade coercion issues against the contracts this plan just signed (D234)."""
+    from services.type_coercion_validator import regrade_coercion_issues_for_contracts
+
+    issues = regrade_coercion_issues_for_contracts(mapping.get("coercion_issues"), mappings)
+    cleared = {str(i.get("message") or "") for i in issues if i.get("cleared_by_risk_contract")}
+    return {
+        **mapping,
+        "coercion_issues": issues,
+        "quality_issues": [
+            q for q in (mapping.get("quality_issues") or []) if str(q) not in cleared
+        ],
+    }
+
+
 def _sign_required_risk_contracts(
     mappings: list[dict[str, Any]],
     acceptance: dict[str, Any],
@@ -1336,6 +1353,8 @@ def plan_transfer(
         blocked_for_contract = _fidelity_columns_from_preflight(preflight, mappings)
         if not blocked_for_contract:
             break
+
+    mapping = _regrade_signed_coercions(mapping, mappings)
 
     contract_refusal = _plan_contract_refusal(
         contract_id,

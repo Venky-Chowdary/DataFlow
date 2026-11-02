@@ -206,6 +206,7 @@ def validate_mapping_coercions(
             "target_logical": tgt_logical,
             "lossy": lossy,
             "severity": severity,
+            "type_locked_block": locked_block,
             "validation_mode": mode,
             "schema_policy": "type_locked" if type_locked else (schema_policy or ""),
             "message": (
@@ -241,6 +242,41 @@ def _measured_population(
         if isinstance(hit, (list, tuple)) and len(hit) > 0:
             return list(hit)[:500]
     return column_population(sample_rows, source)
+
+
+def regrade_coercion_issues_for_contracts(
+    issues: list[dict[str, Any]] | None,
+    mappings: list[dict] | None,
+) -> list[dict[str, Any]]:
+    """Apply contracts signed after grading, by the same rule the grader uses.
+
+    A plan signs Migration Risk Contracts after the mapping pipeline graded
+    coercions, so a cleared lossy pair kept ``severity="block"`` beside
+    ``safe_to_start=true`` (D234). A clearing continue-policy contract demotes
+    the issue to ``warn`` and says so; a ``type_locked`` block never clears.
+    """
+    from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+    by_pair: dict[tuple[str, str], dict] = {}
+    for m in mappings or []:
+        if isinstance(m, dict):
+            src = str(m.get("source_column") or m.get("source") or "")
+            tgt = str(m.get("target_column") or m.get("target") or "")
+            by_pair[(src, tgt)] = m
+    out: list[dict[str, Any]] = []
+    for issue in issues or []:
+        item = dict(issue)
+        pair = (str(item.get("source") or ""), str(item.get("target") or ""))
+        if (
+            item.get("severity") == "block"
+            and not item.get("type_locked_block")
+            and mapping_has_clearing_risk_contract(by_pair.get(pair))
+        ):
+            item["severity"] = "warn"
+            item["cleared_by_risk_contract"] = True
+            item["suggested_fix"] = None
+        out.append(item)
+    return out
 
 
 def coercion_blocks_transfer(issues: list[dict[str, Any]]) -> bool:
