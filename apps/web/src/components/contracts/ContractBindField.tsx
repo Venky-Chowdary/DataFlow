@@ -112,11 +112,23 @@ export function ContractBindField({
     onBlockReasonChange?.(blockReason);
   }, [blockReason, onBlockReasonChange]);
 
+  // Nothing to choose: a picker whose only option is "None" is chrome, not a decision.
+  if (route && !loading && !contractId && signedContracts.length === 0) {
+    return (
+      <div className="df2-contract-bind df2-contract-bind--compact">
+        <p className="df2-field-hint" role="status">
+          <strong>Contract</strong> · No signed contract matches this source and destination.
+          {" "}Save contract here, then sign it on Contracts to enforce it on future runs.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className={compact ? "df2-contract-bind df2-contract-bind--compact" : "df2-contract-bind"}>
       <div className="df2-field">
         <label className="df2-label" htmlFor={`${idPrefix}-contract`}>Contract</label>
-        {route && (
+        {route && (signedContracts.length > 5 || search.trim()) && (
           <input
             className="df2-input"
             value={search}
