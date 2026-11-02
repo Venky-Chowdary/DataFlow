@@ -8,6 +8,7 @@ import {
   keepTheaterMountedOnStatus,
   routeBarLiveWhileWriting,
   showStudioResultDashboard,
+  terminalTheaterHandlers,
 } from "./theaterMount.js";
 
 describe("keepTheaterMountedOnStatus", () => {
@@ -96,5 +97,16 @@ describe("canPersistStudioSchedule", () => {
       }),
       false,
     );
+  });
+});
+
+describe("terminalTheaterHandlers", () => {
+  it("routes failed and cancelled runs to the run-result handler, not only completed", () => {
+    const seen: string[] = [];
+    const h = terminalTheaterHandlers((job: { status: string }) => seen.push(job.status));
+    h.onComplete({ status: "completed" });
+    h.onFailed({ status: "failed" });
+    h.onCancelled({ status: "cancelled" });
+    assert.deepEqual(seen, ["completed", "failed", "cancelled"]);
   });
 });

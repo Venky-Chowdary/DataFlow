@@ -242,6 +242,7 @@ import {
   keepTheaterMountedOnStatus,
   routeBarLiveWhileWriting,
   showStudioResultDashboard,
+  terminalTheaterHandlers,
 } from "../lib/theaterMount";
 import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
@@ -8747,7 +8748,7 @@ export function TransferPage({
               sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
               destType={destKindMode === "file_export" ? exportFormat : destType}
               preflight={preflight || undefined}
-              onComplete={handleJobComplete}
+              {...terminalTheaterHandlers(handleJobComplete)}
               onNewTransfer={resetTransferStudio}
               onBackToValidate={backFromTheaterToValidate}
               onBackToMap={leaveTheaterToMap}

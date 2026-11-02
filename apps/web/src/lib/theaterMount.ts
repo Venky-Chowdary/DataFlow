@@ -46,3 +46,19 @@ export function canPersistStudioSchedule(input: {
     && String(input.destConnectorId || "").trim(),
   );
 }
+
+/**
+ * Every terminal Theater status reaches the Studio's run-result handler.
+ *
+ * Wiring only ``onComplete`` left a failed or cancelled run without a result,
+ * so Validate could not tell the verdict was disproved and kept the old green
+ * preflight beside the dead run's "Open live progress".
+ */
+export function terminalTheaterHandlers<J>(handler: (job: J) => void): {
+  onComplete: (job: J) => void;
+  onFailed: (job: J) => void;
+  onCancelled: (job: J) => void;
+} {
+  return { onComplete: handler, onFailed: handler, onCancelled: handler };
+}
+
