@@ -3266,6 +3266,13 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     col["inferred_type"] = sampled_schema.get(name) or col[
                         "inferred_type"
                     ]
+                if name not in homogeneous_date_fields:
+                    from services.document_instant import string_instant_precision_stamp
+
+                    col["inferred_type"] = string_instant_precision_stamp(
+                        col["inferred_type"],
+                        [doc.get(name) for doc in docs if isinstance(doc, dict)],
+                    )
                 if mix_notes.get(name):
                     col["type_mix_warning"] = mix_notes[name]
             elif not col.get("inferred_type"):
@@ -3397,6 +3404,8 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
 
 
 def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
+    from services.document_instant import string_instant_precision_stamp
+
     index = kwargs.get("table") or kwargs.get("database")
     if not index:
         try:
@@ -3525,7 +3534,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                     semantic_role = intel.get("semantic_role")
                     if inferred in ("VARCHAR", "TEXT"):
                         inferred = mapped if mapped != "VARCHAR" else inferred
-                    mapped = inferred
+                    mapped = string_instant_precision_stamp(inferred, samples)
                 elif es_type == "binary":
                     mapped = "BINARY"
                 col_rec: dict[str, Any] = {
@@ -3545,7 +3554,10 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 intel = infer_column(samples, field_name=name) if samples else {"logical_type": "TEXT"}
                 columns.append({
                     "name": name,
-                    "inferred_type": time_of_day_over_date(str(intel.get("logical_type") or "TEXT"), samples),
+                    "inferred_type": string_instant_precision_stamp(
+                        time_of_day_over_date(str(intel.get("logical_type") or "TEXT"), samples),
+                        samples,
+                    ),
                     "nullable": True,
                     "semantic_role": intel.get("semantic_role"),
                 })

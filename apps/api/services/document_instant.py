@@ -18,6 +18,7 @@ an instant for a source that never had a zone.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from functools import lru_cache
 from typing import Final
 
@@ -298,9 +299,49 @@ def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
         normalize_logical_type,
     )
 
+    from services.type_system import parse_temporal_fractional_precision
+
     token = (ddl_type_token or "").strip()
     if (engine or "").strip().lower() not in INSTANT_DATE_TOKEN_ENGINES:
         return token
     if normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}:
-        return f"TIMESTAMPTZ({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
+        # An explicit precision was measured off string cells, which are not
+        # BSON dates (see string_instant_precision_stamp).
+        digits = parse_temporal_fractional_precision(token)
+        if digits is None:
+            digits = DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+        return f"TIMESTAMPTZ({digits})"
     return token
+
+
+#: A timestamp held as text keeps whatever digits it was written with.
+STRING_INSTANT_FRACTIONAL_FLOOR: Final[int] = 6
+
+
+def string_instant_precision_stamp(inferred: str, cells: Iterable[object]) -> str:
+    """Stamp the precision a document field's *string* timestamps carry.
+
+    Only a BSON/ES date is a millisecond carrier. ISO strings that sample as a
+    timestamp were stamped bare, then read as that millisecond carrier, so a new
+    PostgreSQL table got TIMESTAMPTZ(3) and every microsecond row quarantined
+    (D233). Text is unbounded, so the stamp never goes below six digits, and it
+    rises to the finest digits measured. Fields with a BSON date cell, typed
+    precision, or no timestamp logical type are returned unchanged.
+    """
+    from services.type_system import (
+        LOGICAL_DATETIME,
+        normalize_logical_type,
+        parse_temporal_fractional_precision,
+        value_fractional_second_digits,
+    )
+
+    token = (inferred or "").strip()
+    if normalize_logical_type(token) != LOGICAL_DATETIME:
+        return token
+    if parse_temporal_fractional_precision(token) is not None:
+        return token
+    values = [c for c in cells if c is not None]
+    if not values or not all(isinstance(c, str) for c in values):
+        return token
+    measured = max(value_fractional_second_digits(c) for c in values)
+    return f"{token}({max(STRING_INSTANT_FRACTIONAL_FLOOR, measured)})"
