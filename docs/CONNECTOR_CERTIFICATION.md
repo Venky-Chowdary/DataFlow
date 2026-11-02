@@ -24,6 +24,8 @@ Only add a descriptor skip when the connector genuinely cannot perform that life
 
 `synthetic-fixture` means the connector passed against controlled test fixtures; it is not a live-service claim. `live` is reserved for evidence collected against an actual vendor service and should be accompanied by its own reproducible evidence record.
 
+Live evidence records: [Snowflake](SNOWFLAKE_LIVE_CERTIFICATION.md) (9/9 cells on a real account, least-privilege role).
+
 Synthetic certification does **not** prove vendor API compatibility, quota behavior, or performance at real data volumes. It also does not establish exactly-once delivery: page checkpoint recovery is at-least-once, so consumers must tolerate replay of boundary records.
 
 ## M4 source-only SDK connectors

@@ -167,7 +167,8 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 
 
 # Production SKU: the source × destination combinations we explicitly commit to
-# supporting and verifying in CI. Snowflake routes use fakesnow and BigQuery
+# supporting and verifying in CI. Snowflake routes use fakesnow in CI (and are
+# live-certified on a real account: docs/SNOWFLAKE_LIVE_CERTIFICATION.md); BigQuery
 # routes use the goccy/bigquery-emulator, so the warehouse matrix is always-on
 # in CI without cloud credentials. Salesforce/HubSpot reverse-ETL destinations
 # execute against a local HTTP stub on this desktop (not a customer org);
