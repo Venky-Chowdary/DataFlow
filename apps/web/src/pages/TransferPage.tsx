@@ -442,6 +442,9 @@ export function TransferPage({
   const [streamPreviews, setStreamPreviews] = useState<StreamSchemaPreview[]>([]);
   const [activeStreamTab, setActiveStreamTab] = useState("");
   /** Prevents auto-introspect from looping after timeout/error for the same source. */
+  // Bumped when a job restore re-selects a source so introspect re-reads it
+  // even if the connector and table equal the previous job's.
+  const [sourceRestoreNonce, setSourceRestoreNonce] = useState(0);
   const sourceIntrospectGateRef = useRef<{ key: string; status: "idle" | "running" | "ok" | "error" }>({
     key: "",
     status: "idle",
@@ -1696,7 +1699,10 @@ export function TransferPage({
         if (!next.length && sourceCols.length) {
           const identity = stampCompiledWorkbookMappings(
             carryOperatorDecisions(
-              buildMappingsFromSource(analysisCols, targetCols),
+              reapplySeededTargets(
+                buildMappingsFromSource(analysisCols, targetCols),
+                jobSeedMappingsRef.current,
+              ),
               prior,
             ),
           );
@@ -1707,11 +1713,11 @@ export function TransferPage({
             return identity;
           }
         }
-        const seed = jobSeedMappingsRef.current;
+        // The job's targets stay the baseline for every re-proposal on this
+        // route; operator edits still win through carryOperatorDecisions.
         const carried = stampCompiledWorkbookMappings(
-          carryOperatorDecisions(reapplySeededTargets(next, seed), prior),
+          carryOperatorDecisions(reapplySeededTargets(next, jobSeedMappingsRef.current), prior),
         );
-        if (seed?.length) jobSeedMappingsRef.current = null;
         setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
@@ -1814,7 +1820,10 @@ export function TransferPage({
         );
       } catch (e) {
         console.error("Mapping pipeline failed:", e);
-        let fallback = buildMappingsFromSource(analysisCols, mapTargetCols);
+        let fallback = reapplySeededTargets(
+          buildMappingsFromSource(analysisCols, mapTargetCols),
+          jobSeedMappingsRef.current,
+        );
         // Without the pipeline nothing has projected a destination type. For a
         // database destination whose columns were never read, the source type is
         // not an answer — echoing it printed "VARCHAR(16777216) → VARCHAR(16777216)"
@@ -2430,9 +2439,12 @@ export function TransferPage({
     if (src.kind === "connector") {
       if (CLOUD_SOURCE_TYPES.has(src.connectorType)) setSourceKind("cloud");
       else if (!FILE_FORMAT_SOURCE_TYPES.has(src.connectorType)) setSourceKind("database");
+      autoSelectedSourceConnector.current = true;
+      sourceIntrospectGateRef.current = { key: "", status: "idle" };
       setSourceConnectorId(src.connectorId);
       if (src.table) setSourceTable(src.table);
       if (src.collection) setSourceCollection(src.collection);
+      setSourceRestoreNonce((n) => n + 1);
       return;
     }
     if (src.kind === "journal") {
@@ -2440,6 +2452,8 @@ export function TransferPage({
       return;
     }
     if (src.kind === "missing") {
+      // The operator must pick the job's source; never auto-pick an unrelated one.
+      autoSelectedSourceConnector.current = true;
       toast(src.reason === "inline_file"
         ? {
           title: "Source file not stored",
@@ -3581,6 +3595,7 @@ export function TransferPage({
     sourceReadMode,
     procedureCall,
     streamFields,
+    sourceRestoreNonce,
   ]);
 
   const retrySourceIntrospect = useCallback(() => {
