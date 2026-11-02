@@ -143,8 +143,17 @@ def _is_ip_address(text: str) -> bool:
     return True
 
 
+#: ``2024-03-10`` / ``2024/3/9``: year-first dates. No phone format leads with
+#: a 4-digit group followed by two 1-2 digit groups (D241).
+_YEAR_FIRST_DATE_RE = re.compile(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$")
+
+
 def _is_phone(text: str) -> bool:
-    if not PHONE_RE.match(text) or _DOTTED_QUAD_RE.match(text):
+    if (
+        not PHONE_RE.match(text)
+        or _DOTTED_QUAD_RE.match(text)
+        or _YEAR_FIRST_DATE_RE.match(text)
+    ):
         return False
     from services.pii_guard import _is_decimal_literal
 
