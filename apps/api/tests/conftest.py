@@ -670,8 +670,41 @@ def _is_postgresql_auth_ok(
         return False
 
 
+def _select_ci_shard(config, items):
+    """Keep only this CI shard's test files (``DATAFLOW_TEST_SHARD=i/n``).
+
+    Whole files stay together (module fixtures, shared tables). Files are
+    assigned largest-first to the least-loaded shard by test count; every shard
+    collects the same items, so they all compute the same split and each file
+    runs exactly once.
+    """
+    raw = os.getenv("DATAFLOW_TEST_SHARD", "").strip()
+    if not raw:
+        return
+    index, total = (int(x) for x in raw.split("/", 1))
+    if not 1 <= index <= total:
+        raise pytest.UsageError(f"DATAFLOW_TEST_SHARD={raw!r}: expected i/n with 1 <= i <= n")
+    per_file: dict[str, int] = {}
+    for item in items:
+        path = item.nodeid.split("::", 1)[0]
+        per_file[path] = per_file.get(path, 0) + 1
+    load = [0] * total
+    shard_of: dict[str, int] = {}
+    for path, count in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
+        target = min(range(total), key=lambda i: (load[i], i))
+        shard_of[path] = target
+        load[target] += count
+    keep, drop = [], []
+    for item in items:
+        (keep if shard_of[item.nodeid.split("::", 1)[0]] == index - 1 else drop).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip live-service tests when emulators are absent or unauthenticated."""
+    _select_ci_shard(config, items)
     if not _is_mongo_reachable():
         skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
         for item in items:

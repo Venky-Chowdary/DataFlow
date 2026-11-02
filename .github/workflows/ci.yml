@@ -296,8 +296,61 @@ jobs:
             --yes \
             --require-signed-contracts
 
+  # The API suite (~2,400 files) in parallel shards: one job ran past GitHub's
+  # 6-hour job limit. A file's shard is a stable hash of its path
+  # (tests/conftest.py::_select_ci_shard), so each file runs exactly once.
+  api-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    name: api-tests (${{ matrix.shard }}/6)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start CI services + install Python deps
+        uses: ./.github/actions/ci-services
+
+      - name: Run API tests
+        # The log is tee'd so the failing test ids can be listed again at the end
+        # of the job (the step output is tens of thousands of lines long).
+        working-directory: apps/api
+        run: |
+          set -o pipefail
+          python -m pytest tests -v --timeout=900 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
+        env:
+          DATAFLOW_TEST_SHARD: ${{ matrix.shard }}/6
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_PII_HASH_KEY: test-pii-key
+          DATAFLOW_ALLOW_STUB_WRITES: "1"
+          DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
+          # Wall-clock throughput guard in tests/test_scale_transfer.py: the shared
+          # runner needs ~140s for 100k rows, the same code takes ~130s on a
+          # workstation (production's code: identical), so the 120s default is a
+          # local-machine figure. Owner-visible; not a product budget.
+          DATAFLOW_SCALE_MAX_SEC: "300"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: dataflow
+          PGPASSWORD: dataflow
+          PGDATABASE: dataflow
+
+      - name: Failing API test ids
+        if: ${{ !cancelled() && (success() || failure()) }}
+        run: |
+          echo "### Failing API tests (shard ${{ matrix.shard }}/6)" >> "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
+
   api-and-web:
     runs-on: ubuntu-latest
+    # Gates on the API shards, and still runs (and fails) when one of them failed.
+    needs: api-tests
+    if: ${{ !cancelled() }}
     # No service containers. Redis used to be one; a Docker Hub
     # "toomanyrequests" pull failed Initialize containers, skipped Checkout,
     # and every later `npm` step exited 254 because package.json was absent.
@@ -320,92 +373,15 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Start MySQL (local_infile), Mongo replica set, fake-gcs, Azurite
-        # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
-        # execute cells (same flags as docker-compose.yml; emulator, not tenant).
-        run: |
-          bash .github/scripts/start_ci_databases.sh mysql mongo gcs adls redis
+      - name: Start CI services + install Python deps
+        uses: ./.github/actions/ci-services
 
-      - name: Start Postgres with logical CDC
-        run: |
-          bash .github/scripts/start_ci_databases.sh postgres-cdc
+      # The API suite runs in the api-tests shards above; preflight stays here.
+      - name: Preflight package tests
+        id: preflight_tests
+        run: npm run test:preflight
 
-      - name: Start BigQuery emulator
-        # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
-        # so the warehouse SKU matrix (file→BigQuery, PG→BigQuery) is proven without
-        # production credentials. Snowflake is exercised through fakesnow.
-        run: bash .github/scripts/start_ci_databases.sh bigquery
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Python dependencies
-        run: |
-          cd apps/api
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          cd ../../packages/preflight
-          python -m pip install -e .
-
-      - name: Grant MySQL CDC privileges
-        run: |
-          python - <<'PY'
-          import sys, time
-          try:
-              import pymysql
-          except ImportError:
-              print("pymysql not installed; skipping MySQL CDC grant", file=sys.stderr)
-              sys.exit(0)
-          conn = None
-          for _ in range(60):
-              try:
-                  conn = pymysql.connect(
-                      host="127.0.0.1",
-                      port=3306,
-                      user="root",
-                      password="dataflow",
-                      database="dataflow",
-                  )
-                  break
-              except Exception:
-                  time.sleep(1)
-          if conn is None:
-              print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
-              sys.exit(0)
-          with conn.cursor() as cur:
-              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'")
-              cur.execute("GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%'")
-              cur.execute("FLUSH PRIVILEGES")
-          conn.close()
-          PY
-
-      - name: Run tests
-        id: api_tests
-        # The log is tee'd so the failing test ids can be listed again at the end
-        # of the job (the step output is tens of thousands of lines long).
-        run: |
-          set -o pipefail
-          npm run test 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
-        env:
-          DATAFLOW_JOB_STORE: memory
-          DATAFLOW_DISABLE_OBJECT_STORE: "1"
-          DATAFLOW_PII_HASH_KEY: test-pii-key
-          DATAFLOW_ALLOW_STUB_WRITES: "1"
-          DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
-          # Wall-clock throughput guard in tests/test_scale_transfer.py: the shared
-          # runner needs ~140s for 100k rows, the same code takes ~130s on a
-          # workstation (production's code: identical), so the 120s default is a
-          # local-machine figure. Owner-visible; not a product budget.
-          DATAFLOW_SCALE_MAX_SEC: "300"
-          PGHOST: 127.0.0.1
-          PGPORT: "5432"
-          PGUSER: dataflow
-          PGPASSWORD: dataflow
-          PGDATABASE: dataflow
-
-      # Phase B9 — proof steps MUST run even when Run tests fails (audit §3.2).
+      # Phase B9 — proof steps MUST run even when a test step fails (audit §3.2).
       # Never silently omit CDC / warehouse evidence from the CI record.
       - name: CDC matrix report
         id: cdc_matrix
@@ -531,18 +507,12 @@ jobs:
         working-directory: apps/web
         run: node scripts/check_a11y_hex.mjs
 
-      - name: Failing API test ids
-        if: ${{ !cancelled() && (success() || failure()) }}
-        run: |
-          echo "### Failing API tests" >> "$GITHUB_STEP_SUMMARY"
-          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
-          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
-
       # Surface which gate failed when earlier steps failed but proofs still ran.
       - name: Fail job if api tests or proof gates failed
         if: ${{ always() && !cancelled() }}
         run: |
-          api="${{ steps.api_tests.outcome }}"
+          api="${{ needs.api-tests.result }}"
+          pre="${{ steps.preflight_tests.outcome }}"
           cdc="${{ steps.cdc_matrix.outcome }}"
           wh="${{ steps.warehouse_sku.outcome }}"
           trm="${{ steps.transfer_ready_matrix.outcome }}"
@@ -557,7 +527,7 @@ jobs:
           echo "bundle_brand=$brand"
           echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp a11y_hex=$a11y"
           fail=0
-          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
+          for name_out in "api_tests:$api" "preflight_tests:$pre" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
             # skipped only acceptable when job cancelled mid-flight; otherwise require success
@@ -567,6 +537,7 @@ jobs:
           done
           echo "### Merge gate (B9)" >> "$GITHUB_STEP_SUMMARY"
           echo "- api_tests: \`$api\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- preflight_tests: \`$pre\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- cdc_matrix: \`$cdc\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- warehouse_sku: \`$wh\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- transfer_ready_matrix: \`$trm\`" >> "$GITHUB_STEP_SUMMARY"

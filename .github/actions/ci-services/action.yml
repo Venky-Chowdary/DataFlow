@@ -1,0 +1,70 @@
+name: CI services + Python deps
+description: Start the CI databases/emulators and install API + preflight Python deps (shared by the API shards and api-and-web).
+runs:
+  using: composite
+  steps:
+    - name: Start MySQL (local_infile), Mongo replica set, fake-gcs, Azurite
+      # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
+      # execute cells (same flags as docker-compose.yml; emulator, not tenant).
+      shell: bash
+      run: |
+        bash .github/scripts/start_ci_databases.sh mysql mongo gcs adls redis
+
+    - name: Start Postgres with logical CDC
+      shell: bash
+      run: |
+        bash .github/scripts/start_ci_databases.sh postgres-cdc
+
+    - name: Start BigQuery emulator
+      # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
+      # so the warehouse SKU matrix (file→BigQuery, PG→BigQuery) is proven without
+      # production credentials. Snowflake is exercised through fakesnow.
+      shell: bash
+      run: bash .github/scripts/start_ci_databases.sh bigquery
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install Python dependencies
+      shell: bash
+      run: |
+        cd apps/api
+        python -m pip install --upgrade pip
+        python -m pip install -r requirements.txt
+        cd ../../packages/preflight
+        python -m pip install -e .
+
+    - name: Grant MySQL CDC privileges
+      shell: bash
+      run: |
+        python - <<'PY'
+        import sys, time
+        try:
+            import pymysql
+        except ImportError:
+            print("pymysql not installed; skipping MySQL CDC grant", file=sys.stderr)
+            sys.exit(0)
+        conn = None
+        for _ in range(60):
+            try:
+                conn = pymysql.connect(
+                    host="127.0.0.1",
+                    port=3306,
+                    user="root",
+                    password="dataflow",
+                    database="dataflow",
+                )
+                break
+            except Exception:
+                time.sleep(1)
+        if conn is None:
+            print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
+            sys.exit(0)
+        with conn.cursor() as cur:
+            cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'")
+            cur.execute("GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%'")
+            cur.execute("FLUSH PRIVILEGES")
+        conn.close()
+        PY
