@@ -219,6 +219,7 @@ def _execute_policy_gates_for_request(
     request: TransferRequest,
     *,
     source_columns: list[str] | None = None,
+    resume: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate≡Execute policy gates — never default source_kind to file.
 
@@ -271,4 +272,5 @@ def _execute_policy_gates_for_request(
         mappings=mappings,
         source_table=source_table,
         source_config=source_config if isinstance(source_config, dict) else None,
+        resume=resume,
     )

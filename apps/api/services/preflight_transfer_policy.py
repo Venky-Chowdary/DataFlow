@@ -35,6 +35,7 @@ def run_transfer_policy_gates(
     mappings: list[dict[str, Any]] | None = None,
     source_table: str = "",
     source_config: dict[str, Any] | None = None,
+    resume: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
 
@@ -100,7 +101,10 @@ def run_transfer_policy_gates(
     try:
         from services.append_continuity import continuity_preflight_gate
 
-        continuity_gate = continuity_preflight_gate(
+        # A resume continues the job whose own committed batches moved the
+        # destination past its baseline; Gate-8 verifies that whole job, the
+        # same exemption check_before_write makes at Execute.
+        continuity_gate = None if resume else continuity_preflight_gate(
             destination_endpoint,
             sync=sync,
             contracts=contracts,

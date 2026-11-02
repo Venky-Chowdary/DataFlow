@@ -184,9 +184,10 @@ def _extract_objects(
             try:
                 headers, rows, truncated = _read_sdk_object(cfg, ctype, stream.name)
             except Exception as exc:
+                # Named in the extract result, not hidden: the query reports it.
                 errors.append(f"{stream.name}: {exc}")
-                continue
-            yield _sanitized_table_name(stream.name, used), headers, rows, truncated
+            else:
+                yield _sanitized_table_name(stream.name, used), headers, rows, truncated
         return
 
     if ctype in _STORE_TYPES:

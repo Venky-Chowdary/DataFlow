@@ -42,6 +42,9 @@ ALLOWED = [
     # Weaviate class this product creates in the customer's Weaviate: an
     # object name, governed by services.brand like every other artifact.
     re.compile(r"\bDataflowChunk\b"),
+    # Legacy GitOps manifest ``kind`` customers committed before the rename;
+    # accepted on apply (services.gitops_manifest.MANIFEST_KINDS), never emitted.
+    re.compile(r"\bDataFlowManifest\b"),
 ]
 
 

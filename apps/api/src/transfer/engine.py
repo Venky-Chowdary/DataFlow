@@ -1978,7 +1978,7 @@ class UniversalTransferEngine:
                 pf = apply_policy_gates(
                     pf,
                     _engine_module._execute_policy_gates_for_request(
-                        request, source_columns=columns
+                        request, source_columns=columns, resume=resume
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -3427,7 +3427,7 @@ class UniversalTransferEngine:
                 pf = apply_policy_gates(
                     pf,
                     _engine_module._execute_policy_gates_for_request(
-                        request, source_columns=columns
+                        request, source_columns=columns, resume=resume
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -4580,7 +4580,7 @@ class UniversalTransferEngine:
                 pf = apply_policy_gates(
                     pf,
                     _engine_module._execute_policy_gates_for_request(
-                        request, source_columns=columns
+                        request, source_columns=columns, resume=resume
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
