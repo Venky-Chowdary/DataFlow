@@ -769,8 +769,33 @@ def _iter_fingerprints(
             _ddl_cache[col] = ddl
         return ddl
 
+    # Cell fingerprints are a pure function of (value, ddl, engine): real
+    # tables repeat values massively (currencies, statuses, categories), so a
+    # per-scan memo turns 360k normalize calls into #unique-cells calls. The
+    # key carries type(value) so int 1 and bool True never share a slot; a cap
+    # keeps a pathological all-unique scan bounded instead of cached forever.
+    _MISS = object()
+    _memo: dict = {}
+    _memo_full = False
+    _MEMO_CAP = 500_000
+
+    def _fp_cell(val: Any, ddl: str) -> str:
+        nonlocal _memo_full
+        try:
+            key = (type(val), val, ddl)
+            cached = _memo.get(key, _MISS)
+        except TypeError:
+            return _fingerprint_with_ddl(val, ddl, eng)
+        if cached is not _MISS:
+            return cached
+        out = _fingerprint_with_ddl(val, ddl, eng)
+        if not _memo_full:
+            _memo[key] = out
+            _memo_full = len(_memo) >= _MEMO_CAP
+        return out
+
     def _fp(val: Any, col: str = "") -> str:
-        return _fingerprint_with_ddl(val, _ddl_for(col), eng)
+        return _fp_cell(val, _ddl_for(col))
 
     if columns is not None:
         cols = columns
@@ -789,7 +814,7 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 parts = [
-                    f"{label}={_fingerprint_with_ddl(row.get(c), ddl, eng)}"
+                    f"{label}={_fp_cell(row.get(c), ddl)}"
                     for c, label, ddl in emit_plan
                 ]
                 if sort_key:
@@ -805,7 +830,7 @@ def _iter_fingerprints(
                 n = len(row)
                 parts = [
                     f"{label}="
-                    f"{_fingerprint_with_ddl(row[col_index[c]] if col_index[c] < n else None, ddl, eng)}"
+                    f"{_fp_cell(row[col_index[c]] if col_index[c] < n else None, ddl)}"
                     for c, label, ddl in emit_plan
                 ]
                 row_key = (

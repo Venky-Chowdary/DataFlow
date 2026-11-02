@@ -739,19 +739,34 @@ def _write_mapped_csv(
     pending: list[dict[str, str | None]] = []
     sqlite_dest = (dest_db or "").strip().lower() == "sqlite"
 
+    # Per-column cell memos: bind/copy-safe/csv-cell are pure functions of the
+    # cell and its column's carrier — repeated values (statuses, currencies,
+    # dates) pay the normalize once per unique cell, not once per row.
+    _MISS = object()
+    _bind_memo: list[dict] = [dict() for _ in source_cols]
+    _safe_memo: dict = {}
+    _csv_memo: dict = {}
+    _MEMO_CAP = 500_000
+
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
             # C04: '' (a quoted "" or a JSON/Excel empty string) is not a
             # number — NULL on a non-text carrier, on every engine, before
             # the COPY-safe check sees the cell.
-            copy_cells = {
-                col: file_empty_cell_bind(
-                    rec.get(col),
-                    carriers[index] if index < len(carriers) else "",
-                )
-                for index, col in enumerate(source_cols)
-            }
+            copy_cells = {}
+            for index, col in enumerate(source_cols):
+                cell = rec.get(col)
+                memo = _bind_memo[index]
+                bound = memo.get(cell, _MISS)
+                if bound is _MISS:
+                    bound = file_empty_cell_bind(
+                        cell,
+                        carriers[index] if index < len(carriers) else "",
+                    )
+                    if len(memo) < _MEMO_CAP:
+                        memo[cell] = bound
+                copy_cells[col] = bound
             if sqlite_dest:
                 copy_cells = {
                     col: _sqlite_copy_cell_text(
@@ -763,15 +778,30 @@ def _write_mapped_csv(
                 }
             for col, logical, physical in census:
                 cell = copy_cells.get(col)
-                if not text_cell_copy_safe(
-                    cell, logical, physical=physical, dest_db=dest_db
-                ):
+                key = (col, cell)
+                safe = _safe_memo.get(key, _MISS)
+                if safe is _MISS:
+                    safe = text_cell_copy_safe(
+                        cell, logical, physical=physical, dest_db=dest_db
+                    )
+                    if len(_safe_memo) < _MEMO_CAP:
+                        _safe_memo[key] = safe
+                if not safe:
                     raise FastPathUnavailable(
                         f"{col!r} cell {cell!r} (data row {count + written + 1}) is not "
                         f"{physical or logical} COPY-safe; the row path owns its "
                         "validation and quarantine"
                     )
-            writer.writerow([_csv_cell(copy_cells.get(col)) for col in source_cols])
+            out_row: list[Any] = []
+            for index, col in enumerate(source_cols):
+                cell = copy_cells.get(col)
+                rendered = _csv_memo.get(cell, _MISS)
+                if rendered is _MISS:
+                    rendered = _csv_cell(cell)
+                    if len(_csv_memo) < _MEMO_CAP:
+                        _csv_memo[cell] = rendered
+                out_row.append(rendered)
+            writer.writerow(out_row)
             written += 1
         if fingerprints is not None and rows:
             fingerprints(rows)
