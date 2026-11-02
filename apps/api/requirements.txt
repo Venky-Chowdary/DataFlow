@@ -113,6 +113,7 @@ thrift>=0.24.0,<0.25         # impyla floor; <0.24 has PYSEC-2026-3925/6/7
 # Testing
 pytest>=9.0.3
 pytest-asyncio>=0.23.0
+pytest-timeout>=2.3.1  # makes the per-test @pytest.mark.timeout marks real; a hung test fails instead of eating the 6h CI job
 httpx>=0.25.0
 responses>=0.24.0  # HTTP mocking for SaaS connector tests
 

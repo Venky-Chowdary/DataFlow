@@ -129,6 +129,12 @@ _SNAPSHOT = [
 ]
 
 
+def _dest(table: str) -> str:
+    # Source and destination default to the same server and database; the same
+    # name would make the run write into the source table it is reading.
+    return f"{table}_dst"
+
+
 def _request(table: str, sync: str):
     from src.transfer.models import EndpointConfig, TransferRequest
 
@@ -136,7 +142,7 @@ def _request(table: str, sync: str):
         source=EndpointConfig(kind="database", format="postgresql", schema="public",
                               table=table, **_SRC),
         destination=EndpointConfig(kind="database", format="postgresql", schema="public",
-                                   table=table, **_DST),
+                                   table=_dest(table), **_DST),
         sync_mode=sync,
         stream_contracts=[
             {"name": table, "selected": True, "primary_key": ["id"], "sync_mode": sync,
@@ -170,7 +176,7 @@ def _cleanup(table: str) -> None:
         _sql(_SRC, f'DROP PUBLICATION IF EXISTS "{pub}"')
     _sql(_SRC, f'DROP TABLE IF EXISTS "{table}"')
     _sql(_SRC, f'DROP TABLE IF EXISTS "{table}_busy"')
-    _sql(_DST, f'DROP TABLE IF EXISTS "{table}"')
+    _sql(_DST, f'DROP TABLE IF EXISTS "{_dest(table)}"')
 
 
 @needs_pg
@@ -192,7 +198,7 @@ def test_cdc_attaches_while_a_long_write_transaction_is_open(isolated):
         first = _run(isolated, table, "cdc")
         assert first.success, first.error
         assert time.monotonic() - started >= 7.0, "the attach did not wait for the open transaction"
-        assert _image(_DST, table) == _image(_SRC, table) == {r[0]: r for r in _SNAPSHOT}
+        assert _image(_DST, _dest(table)) == _image(_SRC, table) == {r[0]: r for r in _SNAPSHOT}
         # No throwaway probe slot is left behind or created.
         names = [r[0] for r in _sql(_SRC, "SELECT slot_name FROM pg_replication_slots", fetch=True)]
         assert not [n for n in names if n.endswith("_avail_test")], names
@@ -208,8 +214,9 @@ def test_cdc_attaches_while_a_long_write_transaction_is_open(isolated):
         _sql(_SRC, f'DELETE FROM "{table}" WHERE id = 3')
         second = _run(isolated, table, "cdc_incremental")
         assert second.success, second.error
-        assert _image(_DST, table) == _image(_SRC, table)
-        assert _image(_DST, table)[1] == (1, None) and 3 not in _image(_DST, table)
+        dst = _image(_DST, _dest(table))
+        assert dst == _image(_SRC, table)
+        assert dst[1] == (1, None) and 3 not in dst
     finally:
         released.cancel()
         try:
