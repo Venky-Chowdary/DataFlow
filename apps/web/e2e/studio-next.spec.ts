@@ -1018,7 +1018,9 @@ conn.commit()
     await settleToasts(page);
     await setPalette(page, true);
     const flatten = page.locator(".df2-canvas-op[data-op='flatten_json']");
-    await flatten.scrollIntoViewIfNeeded();
+    // Centre the tile: one parked at the palette's bottom edge sits under the
+    // sticky footer, so hover() scrolls the page first and the box "moves".
+    await flatten.evaluate((node) => node.scrollIntoView({ block: "center" }));
     // The palette fills in as the catalog and suggestions arrive; a tile row
     // landing above shifts it by one row (49px). Measure once it holds still.
     let before = await flatten.boundingBox();
