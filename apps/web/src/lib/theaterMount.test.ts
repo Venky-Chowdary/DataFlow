@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   canPersistStudioSchedule,
+  jobDetailNeedsRefetch,
   keepTheaterMountedOnStatus,
   routeBarLiveWhileWriting,
   showStudioResultDashboard,
@@ -108,5 +109,18 @@ describe("terminalTheaterHandlers", () => {
     h.onFailed({ status: "failed" });
     h.onCancelled({ status: "cancelled" });
     assert.deepEqual(seen, ["completed", "failed", "cancelled"]);
+  });
+});
+
+describe("jobDetailNeedsRefetch", () => {
+  it("re-reads the detail when the listed run turns terminal", () => {
+    assert.equal(jobDetailNeedsRefetch("running", "completed"), true);
+    assert.equal(jobDetailNeedsRefetch("running", "failed"), true);
+    assert.equal(jobDetailNeedsRefetch("queued", "cancelled"), true);
+  });
+  it("does not refetch on unchanged or still-live statuses", () => {
+    assert.equal(jobDetailNeedsRefetch("completed", "completed"), false);
+    assert.equal(jobDetailNeedsRefetch("queued", "running"), false);
+    assert.equal(jobDetailNeedsRefetch("running", undefined), false);
   });
 });

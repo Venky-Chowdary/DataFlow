@@ -62,3 +62,16 @@ export function terminalTheaterHandlers<J>(handler: (job: J) => void): {
   return { onComplete: handler, onFailed: handler, onCancelled: handler };
 }
 
+/**
+ * The Jobs detail pane caches the full job record; the list carries only a
+ * summary. When the listed status moves to terminal (or first appears
+ * terminal after a live snapshot), the detail must be re-read: reconciliation
+ * and Gate-8 evidence are written at completion and are not in the list row.
+ */
+export function jobDetailNeedsRefetch(
+  shownStatus: string | undefined,
+  listedStatus: string | undefined,
+): boolean {
+  if (!listedStatus || shownStatus === listedStatus) return false;
+  return isJobTerminal(listedStatus);
+}

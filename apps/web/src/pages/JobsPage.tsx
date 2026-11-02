@@ -27,6 +27,7 @@ import {
 } from "../lib/jobHistory";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "../lib/uiUtils";
 import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
+import { jobDetailNeedsRefetch } from "../lib/theaterMount";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
@@ -297,6 +298,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
+  const [detailNonce, setDetailNonce] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [blockingJob, setBlockingJob] = useState<{ id: string; status: string; createdAt: string } | null>(null);
@@ -497,7 +499,24 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [selectedId, detailNonce]);
+
+  // Reconciliation / Gate-8 land on the job record at completion; the list
+  // row does not carry them, so a run that finishes while selected re-reads.
+  const listedStatus = jobs.find((j) => j._id === selectedId)?.status;
+  const shownStatusRef = useRef<{ id: string | null; status: string | undefined } | null>(null);
+  useEffect(() => {
+    const prev = shownStatusRef.current;
+    shownStatusRef.current = { id: selectedId, status: listedStatus };
+    if (prev && prev.id === selectedId && jobDetailNeedsRefetch(prev.status, listedStatus)) {
+      setDetailNonce((n) => n + 1);
+    }
+  }, [selectedId, listedStatus]);
+
+  const refreshJobsAndDetail = useCallback(() => {
+    onRefresh?.();
+    setDetailNonce((n) => n + 1);
+  }, [onRefresh]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -946,7 +965,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                     Journals
                   </Button>
                   {onRefresh && (
-                    <Button size="sm" onClick={onRefresh} leadingIcon={<DtIcon name="activity" size={14} />}>
+                    <Button size="sm" onClick={refreshJobsAndDetail} leadingIcon={<DtIcon name="activity" size={14} />}>
                       Refresh
                     </Button>
                   )}
