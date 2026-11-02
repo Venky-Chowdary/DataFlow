@@ -7,6 +7,8 @@ import {
   analysisFromPipeline,
   destinationCatalogLoadsOnStep,
   destinationCatalogRetriesOnStep,
+  destinationContinueBlocker,
+  fileDatabasePathFromUrl,
   formatFileSize,
   sealRemediationApproval,
   studioSourceLabel,
@@ -67,5 +69,28 @@ describe("transfer studioHelpers (Phase F9)", () => {
     }
     assert.equal(destinationCatalogRetriesOnStep(STEP_VALIDATE, true), false);
     assert.equal(destinationCatalogRetriesOnStep(STEP_MAP, false), true);
+  });
+});
+
+describe("destination step blockers", () => {
+  const base = {
+    sourceReady: true, destKindMode: "database", destType: "sqlite", callable: false, sqlReady: true,
+    hasConnector: false, targetDb: "", targetCollection: "customers", schemaLoading: false,
+    isFileDatabase: true, objectWord: "table",
+  };
+  it("parses file-database URLs", () => {
+    assert.equal(fileDatabasePathFromUrl("sqlite:////home/u/dest.db"), "/home/u/dest.db");
+    assert.equal(fileDatabasePathFromUrl("duckdb:///rel.duckdb?x=1"), "rel.duckdb");
+    assert.equal(fileDatabasePathFromUrl("sqlite:///:memory:"), "");
+    assert.equal(fileDatabasePathFromUrl("postgresql://h/db"), "");
+  });
+  it("names the missing field instead of a silent disabled button", () => {
+    assert.equal(destinationContinueBlocker(base), "Enter the database file path.");
+    assert.equal(destinationContinueBlocker({ ...base, isFileDatabase: false }), "Enter the destination database.");
+    assert.equal(destinationContinueBlocker({ ...base, targetDb: "/x.db", targetCollection: "" }), "Name the destination table.");
+    assert.equal(destinationContinueBlocker({ ...base, destType: "" }), "Pick a saved connection or an engine.");
+    assert.equal(destinationContinueBlocker({ ...base, sourceReady: false }), "Finish the source step first.");
+    assert.equal(destinationContinueBlocker({ ...base, targetDb: "/x.db" }), null);
+    assert.equal(destinationContinueBlocker({ ...base, destKindMode: "file_export", destType: "" }), null);
   });
 });

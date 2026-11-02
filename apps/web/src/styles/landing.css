@@ -13822,23 +13822,23 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 /* Status + subprocessor pages */
 .lp-status-body { display: grid; gap: 1rem; max-width: 960px; margin: 0 auto; }
-.lp-status-banner { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid rgba(15, 23, 42, .12); background: rgba(15, 23, 42, .03); }
+.lp-status-banner { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.25rem; border-radius: var(--df-radius-xl); border: 1px solid rgba(15, 23, 42, .12); background: rgba(15, 23, 42, .03); }
 .lp-status-banner strong { flex: 1; font-size: 1.05rem; }
-.lp-status-dot { width: .7rem; height: .7rem; border-radius: 999px; background: #94a3b8; flex: none; }
-.is-operational .lp-status-dot { background: #16a34a; }
-.is-degraded .lp-status-dot { background: #d97706; }
-.is-outage .lp-status-dot { background: #dc2626; }
+.lp-status-dot { width: .7rem; height: .7rem; border-radius: var(--df-radius-xl); background: var(--df-text-muted); flex: none; }
+.is-operational .lp-status-dot { background: var(--df-success); }
+.is-degraded .lp-status-dot { background: var(--df-warning); }
+.is-outage .lp-status-dot { background: var(--df-danger); }
 .lp-status-banner.is-operational { border-color: rgba(22, 163, 74, .35); background: rgba(22, 163, 74, .06); }
 .lp-status-banner.is-degraded { border-color: rgba(217, 119, 6, .35); background: rgba(217, 119, 6, .06); }
 .lp-status-banner.is-outage { border-color: rgba(220, 38, 38, .35); background: rgba(220, 38, 38, .06); }
-.lp-status-list { list-style: none; margin: 0; padding: 0; border: 1px solid rgba(15, 23, 42, .12); border-radius: 12px; overflow: hidden; }
+.lp-status-list { list-style: none; margin: 0; padding: 0; border: 1px solid rgba(15, 23, 42, .12); border-radius: var(--df-radius-xl); overflow: hidden; }
 .lp-status-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .9rem 1.25rem; }
 .lp-status-row + .lp-status-row { border-top: 1px solid rgba(15, 23, 42, .08); }
 .lp-status-row div { display: grid; gap: .15rem; }
 .lp-status-row small { opacity: .7; }
 .lp-status-pill { display: inline-flex; align-items: center; gap: .45rem; font-weight: 600; white-space: nowrap; }
 .lp-status-note { margin: 0; }
-.lp-status-table-wrap { overflow-x: auto; border: 1px solid rgba(15, 23, 42, .12); border-radius: 12px; }
+.lp-status-table-wrap { overflow-x: auto; border: 1px solid rgba(15, 23, 42, .12); border-radius: var(--df-radius-xl); }
 .lp-status-table { width: 100%; border-collapse: collapse; font-size: .95rem; }
 .lp-status-table th, .lp-status-table td { text-align: left; vertical-align: top; padding: .8rem 1rem; }
 .lp-status-table thead th { background: rgba(15, 23, 42, .04); font-weight: 600; }

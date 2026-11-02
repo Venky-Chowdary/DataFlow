@@ -1141,7 +1141,7 @@ export function TransferTransformStep({
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
           {canvasEnabled ? "Back to Connect" : "Back to Destination"}
         </button>
-        {!canvasEnabled && pane === "prepare" ? (
+        {!canvasEnabled && pane === "prepare" && hasEnabledRecipe ? (
           <button
             type="button"
             className="df2-btn df2-btn-primary"

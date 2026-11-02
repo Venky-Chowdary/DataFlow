@@ -301,6 +301,9 @@ import {
   formatFileSize,
   sealRemediationApproval,
   studioSourceLabel,
+  destinationContinueBlocker,
+  FILE_DATABASE_ENGINES,
+  fileDatabasePathFromUrl,
 } from "./transfer/studioHelpers";
 
 type SyncMode = SyncModeId;
@@ -468,6 +471,7 @@ export function TransferPage({
   const [destType, setDestType] = useState<string>("");
   const [destKindMode, setDestKindMode] = useState<"database" | "file_export">("database");
   const destDriverType = destType ? resolveDriverType(destType) : "";
+  const isFileDatabase = FILE_DATABASE_ENGINES.has(destDriverType);
   // Map must tell the engine where the source types came from. Without this the
   // pipeline treated a warehouse's declared DDL as a guess and let sample
   // profiling re-infer it, so the same Snowflake DATE column projected DATE on
@@ -5874,6 +5878,20 @@ export function TransferPage({
           )
         : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
+  const destContinueBlocker = destinationContinueBlocker({
+    sourceReady: canConfigureDest,
+    destKindMode,
+    destType,
+    callable: isCallableDestMode(destWriteMode),
+    sqlReady: destSqlReady,
+    hasConnector: Boolean(connectorId),
+    targetDb,
+    targetCollection,
+    schemaLoading: destSchemaLoading,
+    isFileDatabase,
+    objectWord: destDriverType === "mongodb" ? "collection" : "table",
+  });
+
   const needsDbPreflight = destKindMode === "database";
   const studioSchedulePersistable = canPersistStudioSchedule({
     isConnectorSource,
@@ -7383,11 +7401,18 @@ export function TransferPage({
                   <input
                     className="df2-input"
                     value={destConnectionString}
-                    onChange={(e) => setDestConnectionString(e.target.value)}
+                    onChange={(e) => {
+                      setDestConnectionString(e.target.value);
+                      if (isFileDatabase) {
+                        const path = fileDatabasePathFromUrl(e.target.value);
+                        if (path) setTargetDb(path);
+                      }
+                    }}
                     placeholder={destDriverType === "mongodb" ? "mongodb://localhost:27017/" : getGenericSqlPlaceholder(destType)}
                   />
                 </div>
               )}
+              {!isFileDatabase && (<>
               <div className="df2-field">
                 <label className="df2-label">
                   {destDriverType === "pinecone" ? "Index host" : "Host"}
@@ -7433,6 +7458,7 @@ export function TransferPage({
                   </div>
                 </div>
               )}
+              </>)}
             </div>
           </div>
           )}
@@ -7484,7 +7510,9 @@ export function TransferPage({
                         ? "Namespace (optional)"
                         : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
                           ? "Unused (optional)"
-                          : "Database"}
+                          : isFileDatabase
+                            ? "Database file path"
+                            : "Database"}
                 </label>
                 <input
                   id="dest-db"
@@ -7503,7 +7531,9 @@ export function TransferPage({
                           ? "analytics"
                           : destDriverType === "milvus"
                             ? "default"
-                            : "test_db"
+                            : isFileDatabase
+                              ? `/data/warehouse.${destDriverType === "duckdb" ? "duckdb" : "sqlite"}`
+                              : "test_db"
                   }
                   autoComplete="off"
                   spellCheck={false}
@@ -7851,6 +7881,9 @@ export function TransferPage({
             <DtIcon name="arrow-left" size={14} /> Back to source
           </button>
           <div className="df2-btn-row">
+          {!canRunPreflight && destContinueBlocker && (
+            <span className="df2-label-hint" role="status">{destContinueBlocker}</span>
+          )}
           <button
             type="button"
             className="df2-btn df2-btn-ghost"

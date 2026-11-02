@@ -94,3 +94,41 @@ export function destinationCatalogLoadsOnStep(step: number, canvas: boolean): bo
 export function destinationCatalogRetriesOnStep(step: number, canvas: boolean): boolean {
   return step === STEP_DESTINATION || step === STEP_MAP || (canvas && step === STEP_SOURCE);
 }
+
+/** Engines whose "database" is a local file path, not a server. */
+export const FILE_DATABASE_ENGINES = new Set(["sqlite", "duckdb"]);
+
+/** `sqlite:////abs/path.db` / `duckdb:///rel.duckdb` → the file path, else "". */
+export function fileDatabasePathFromUrl(url: string): string {
+  const m = /^(?:sqlite|duckdb)(?:\+\w+)?:\/\/\/(.+)$/i.exec(url.trim());
+  if (!m) return "";
+  const path = m[1].split("?")[0];
+  return path === ":memory:" ? "" : path;
+}
+
+/** Why "Continue" on the Destination step is disabled, or null when it is not. */
+export function destinationContinueBlocker(o: {
+  sourceReady: boolean;
+  destKindMode: string;
+  destType: string;
+  callable: boolean;
+  sqlReady: boolean;
+  hasConnector: boolean;
+  targetDb: string;
+  targetCollection: string;
+  schemaLoading: boolean;
+  isFileDatabase: boolean;
+  objectWord: string;
+}): string | null {
+  if (!o.sourceReady) return "Finish the source step first.";
+  if (o.destKindMode === "file_export") return null;
+  if (!o.destType) return "Pick a saved connection or an engine.";
+  if (o.schemaLoading) return "Reading the destination catalog…";
+  if (o.callable && !o.sqlReady) return "Enter the destination statement.";
+  if (!o.hasConnector && !o.targetDb.trim()) {
+    return o.isFileDatabase ? "Enter the database file path." : "Enter the destination database.";
+  }
+  if (!o.callable && !o.targetDb.trim()) return "Enter the destination database.";
+  if (!o.callable && !o.targetCollection.trim()) return `Name the destination ${o.objectWord}.`;
+  return null;
+}
