@@ -819,7 +819,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
     { h: "Processing details", p: "Subject matter: data movement, mapping, validation, quarantine, and verification you configure. Duration: the term of your agreement plus the deletion period below. Data subjects and categories: whatever your connected datasets contain, plus workspace users' name, email, role, and audit events. Special-category data is processed only if you choose to connect it." },
     { h: "Your instructions", p: "Datawrap processes personal data only on your documented instructions — your agreement, your workspace configuration, and the transfers, schedules, and exports you run. We will tell you if we believe an instruction breaks data-protection law." },
     { h: "Confidentiality", p: "Everyone at Datawrap with access to customer personal data is bound by written confidentiality obligations and has access only as needed to operate and support the service." },
-    { h: "Security measures", p: "TLS in transit; connector credentials encrypted at rest and optionally wrapped with your own KMS key; workspace isolation on every store read; role-based access with capped API keys; SSO, SCIM, and MFA; a hash-chained, signed audit log; quarantine instead of silent drops; and post-write checksum verification. These measures are reviewed and may improve, but will not materially weaken during your term." },
+    { h: "Security measures", p: "TLS in transit; connector credentials encrypted at rest and optionally wrapped with your own KMS key; workspace isolation on every store read; role-based access with capped API keys; SSO and SCIM; a hash-chained, signed audit log; quarantine instead of silent drops; and post-write checksum verification. These measures are reviewed and may improve, but will not materially weaken during your term." },
     { h: "Subprocessors", p: "You authorize the subprocessors on our Subprocessors page. We bind each to data-protection terms at least as protective as this addendum and remain responsible for them. We give 30 days' notice of a new subprocessor; you may object on reasonable data-protection grounds, and if we cannot address the objection you may terminate the affected service." },
     { h: "Data subject requests", p: "We will promptly forward requests we receive about your data to you and, taking into account the nature of processing, help you respond through the workspace's export and deletion controls or by reasonable assistance." },
     { h: "Personal data breach", p: "We will notify you without undue delay, and in any case within 72 hours, after becoming aware of a personal data breach affecting your data, with the information you need to meet your own notification duties, and we will keep you updated as we learn more." },
@@ -1079,6 +1079,25 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <span>Auth</span><i /><span>Map</span><i /><span>G1–G9</span><i /><span>Prove</span>
             </div>
             <div className="lp-sec-agent-chip is-ok">Secret references only</div>
+          </div>
+        </section>
+      </MarketingReveal>
+      <MarketingReveal>
+        <section className="lp-sec-section" id="vulnerability-disclosure" aria-labelledby="lp-sec-disclosure">
+          <div className="lp-sec-section-head">
+            <p className="lp-mkt-kicker">Vulnerability disclosure</p>
+            <h2 id="lp-sec-disclosure">Report a vulnerability</h2>
+            <p>
+              Email <a href="mailto:contact@datawrap.io?subject=Security%20report">contact@datawrap.io</a> with
+              the subject “Security report” — please don’t open a public issue. We acknowledge within 3 business
+              days, assess within 10, and update you at least every 14 days until the fix ships.
+            </p>
+            <p>
+              Safe harbor: we won’t pursue good-faith research that tests only accounts you own, stops at the first
+              sign of another customer’s data, avoids denial-of-service and social engineering, and gives us
+              reasonable time to fix before disclosure. Machine-readable contact:{" "}
+              <a href="/.well-known/security.txt">/.well-known/security.txt</a>.
+            </p>
           </div>
         </section>
       </MarketingReveal>
