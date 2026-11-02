@@ -7213,6 +7213,29 @@ def _run_reconciliation_impl(
             "rows_skipped": rows_skipped,
         })
 
+    if db_type == "weaviate":
+        from services.weaviate_document_verify import gate8_weaviate_report
+
+        value_report = gate8_weaviate_report(
+            cfg=cfg,
+            table_name=table_name,
+            mappings=mapping_dicts,
+            source_rows=source_rows,
+            source_endpoint=source_endpoint,
+            read_sample=_read_target_sample_retrying,
+            run_records=records,
+            source_schema=source_schema,
+            base={
+                "source_rows": source_rows,
+                "source_checksum": source_checksum,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+            },
+        )
+        if value_report is not None:
+            return _finalize(value_report)
+
     if db_type in VECTOR_IDENTITY_ENGINES:
         # dest-only REST engines: no SQL chunk COUNT.
         # Never stuff writer upsert ack into target_rows — that is the

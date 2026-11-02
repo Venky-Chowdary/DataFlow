@@ -535,6 +535,66 @@ def scan_source_ids(
         return "unmeasured", []
 
 
+def read_document_properties(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """One property map per source document, read back from the class (D231).
+
+    Each map is the document's lowest chunk with ``_df_object_count`` (objects
+    stored for that ``source_id``). A class property the object leaves unset
+    is null (Weaviate stores no null). A mapped reserved target (``id``) is the
+    object identity, carried as ``source_id``. Also returns each property's
+    Weaviate ``dataType``. Raises when the class cannot be listed completely.
+    """
+    session = _requests_session()
+    api_key = str(cfg.get("api_key") or cfg.get("password") or "")
+    base_url = _base_url(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 8080),
+        bool(cfg.get("ssl", False)),
+        str(cfg.get("connection_string") or ""),
+    )
+    hdrs = _headers(api_key)
+    class_name = _class_name(str(table_name or ""))
+    schema_resp = session.get(f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10)
+    if schema_resp.status_code != 200:
+        raise ValueError(f"Weaviate schema read failed: {schema_resp.status_code}")
+    schema_doc = schema_resp.json() if schema_resp.content else {}
+    data_types: dict[str, str] = {}
+    for prop in (schema_doc or {}).get("properties") or []:
+        if isinstance(prop, dict) and prop.get("name"):
+            kinds = prop.get("dataType") or [""]
+            data_types[str(prop["name"])] = str(kinds[0] if kinds else "")
+    firsts: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    for page in iter_weaviate_objects_after(
+        session=session,
+        base_url=base_url,
+        headers=hdrs,
+        class_name=class_name,
+        include="",
+    ):
+        for obj in page:
+            props = dict(obj.get("properties") or {})
+            sid = cell_to_string(props.get("source_id"))
+            counts[sid] = counts.get(sid, 0) + 1
+            best = firsts.get(sid)
+            if best is None or (props.get("chunk_index") or 0) < (best.get("chunk_index") or 0):
+                firsts[sid] = props
+    docs: list[dict[str, Any]] = []
+    for sid, props in firsts.items():
+        # Weaviate keeps no null: an unset property of the class reads as null.
+        for name in data_types:
+            props.setdefault(name, None)
+        for reserved in _RESERVED_PROPERTIES:
+            props.setdefault(reserved, props.get("source_id"))
+        props["_df_object_count"] = counts[sid]
+        docs.append(props)
+    return docs, data_types
+
+
 def write_mapped_rows(
     *,
     host: str,

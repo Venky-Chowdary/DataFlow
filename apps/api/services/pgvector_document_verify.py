@@ -82,6 +82,20 @@ def _canon_numeric(value: Any) -> str:
     return _canon(dec) if dec.is_finite() else _canon(value)
 
 
+def _canon_instant(value: Any) -> str:
+    """An instant compared as UTC to the microsecond (Weaviate ``date`` stores RFC 3339 'Z')."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return _canon(value)
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        from datetime import timezone
+
+        return "i:" + value.astimezone(timezone.utc).isoformat()
+    return _canon(value)
+
+
 def _canon_text_or_temporal(value: Any, numeric: bool = False) -> set[str]:
     """Spellings a source temporal may legitimately take in JSON."""
     if numeric:
@@ -202,6 +216,7 @@ def compare_documents(
     fields: list[tuple[str, str]],
     numeric: set[str] | None = None,
     boolean: set[str] | None = None,
+    instant: set[str] | None = None,
 ) -> dict[str, Any]:
     """Every source row must be a document whose carried fields equal it.
 
@@ -212,15 +227,18 @@ def compare_documents(
     """
     numeric = set(numeric or set())
     boolean = set(boolean or set())
+    instant = set(instant or set())
     for source, key in fields:
         if any(_is_number(m.get(key, m.get(source))) for m in documents) or any(
             _is_number(r.get(source)) for r in source_rows
         ):
             numeric.add(key)
     # A declared BOOLEAN read as 0/1 is stored as a JSON bool: not a number.
-    numeric -= boolean
+    numeric -= boolean | instant
 
     def canon_for(key: str) -> Callable[[Any], str]:
+        if key in instant:
+            return _canon_instant
         if key in boolean:
             return _canon_bool
         return _canon_numeric if key in numeric else _canon
@@ -242,7 +260,9 @@ def compare_documents(
     unmatched: list[dict[str, Any]] = []
     for row in source_rows:
         options = [
-            [_canon_bool(row.get(source))]
+            [_canon_instant(row.get(source))]
+            if key in instant
+            else [_canon_bool(row.get(source))]
             if key in boolean
             else sorted(_canon_text_or_temporal(row.get(source), key in numeric))
             for source, key in fields
