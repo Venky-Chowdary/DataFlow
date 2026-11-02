@@ -123,14 +123,34 @@ def check_mcp_rate_limit(principal: str) -> dict[str, float | bool | str]:
     )
 
 
+# Pilot chat turns (process-local). A turn can read connectors and call a paid
+# LLM, so one principal must not be able to flood it.
+_PILOT_STORE = TokenBucketStore()
+
+
+def check_pilot_rate_limit(principal: str) -> dict[str, float | bool | str]:
+    """Consume one Pilot chat token for ``principal``; DATAFLOW_PILOT_RATE_LIMIT=0 disables."""
+    raw = os.getenv("DATAFLOW_PILOT_RATE_LIMIT", "1").strip().lower()
+    if raw in {"0", "false", "off", "no"}:
+        return {"allowed": True, "disabled": True}
+    return _PILOT_STORE.consume(
+        principal,
+        capacity=_env_float("DATAFLOW_PILOT_RATE_BURST", 30.0),
+        refill_per_sec=_env_float("DATAFLOW_PILOT_RATE_QPS", 0.5),
+        max_keys=_env_int("DATAFLOW_PILOT_RATE_MAX_KEYS", 5000),
+    )
+
+
 def reset_mcp_rate_limits() -> None:
     """Test helper — clear in-memory buckets."""
     _MCP_STORE.clear()
+    _PILOT_STORE.clear()
 
 
 __all__ = [
     "TokenBucketStore",
     "check_mcp_rate_limit",
+    "check_pilot_rate_limit",
     "rate_limit_enabled",
     "reset_mcp_rate_limits",
 ]

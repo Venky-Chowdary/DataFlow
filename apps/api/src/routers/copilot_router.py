@@ -153,6 +153,19 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
             for m in request.history[-_MAX_HISTORY_TURNS:]
         ]
         role, _actor = _caller(http_request)
+        from services.client_ip import client_ip_from_request
+        from services.mcp_rate_limit import check_pilot_rate_limit
+
+        limit = check_pilot_rate_limit(
+            f"pilot:{_actor}" if _actor else f"pilot-ip:{client_ip_from_request(http_request) or 'unknown'}"
+        )
+        if not limit.get("allowed"):
+            retry = max(1, int(float(limit.get("retry_after_sec") or 1)))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many Pilot messages in a short time. Try again in {retry} s.",
+                headers={"Retry-After": str(retry)},
+            )
         data_context = dict(request.data_context or {})
         # The workspace the turn works in is the actor's, never a bare header:
         # a workspace they do not belong to is a 403 (D162).

@@ -66,3 +66,16 @@ def test_internal_error_text_is_not_returned(monkeypatch):
     body = r.text
     assert "password" not in body and "10.0.0.5" not in body
     assert "Pilot could not answer" in body
+
+
+def test_one_principal_cannot_flood_pilot(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PILOT_RATE_BURST", "3")
+    monkeypatch.setenv("DATAFLOW_PILOT_RATE_QPS", "0.05")
+    spy = _Spy()
+    client = _client(monkeypatch, spy)
+    codes = [client.post("/api/v1/copilot/chat", json={"message": "hi"}).status_code for _ in range(5)]
+    assert codes[:3] == [200, 200, 200]
+    r = client.post("/api/v1/copilot/chat", json={"message": "hi"})
+    assert r.status_code == 429 and int(r.headers["Retry-After"]) >= 1
+    assert "Too many Pilot messages" in r.text
+    assert len(spy.calls) == 3
