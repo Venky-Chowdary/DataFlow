@@ -187,12 +187,9 @@ def search_catalog(
     # "43 drivers" answered both questions and neither: it counts a connector
     # usable in *a* transfer, which includes write-only stores when asked about
     # sources and read-only feeds when asked about destinations.
-    source_drivers = len({
-        c.get("driver_type") for c in enriched_all if c.get("source_ready") and c.get("driver_type")
-    })
-    dest_drivers = len({
-        c.get("driver_type") for c in enriched_all if c.get("dest_ready") and c.get("driver_type")
-    })
+    sides = _side_driver_counts(enriched_all)
+    source_drivers = sides["source_live"]
+    dest_drivers = sides["dest_live"]
 
     return {
         "total": total,
@@ -214,14 +211,35 @@ def search_catalog(
         "planned_count": planned,
         # Per-side counts, derived the same way the list above is filtered, so
         # the number always describes the list the operator is looking at.
-        "source_live": source_drivers,
-        "dest_live": dest_drivers,
+        **sides,
         **_capability_driver_counts(),
         "role_live": (
             source_drivers if role == "source"
             else dest_drivers if role == "destination"
             else unique_drivers
         ),
+    }
+
+
+def _side_driver_counts(enriched: list[dict]) -> dict[str, int]:
+    """Distinct engines pickable on each side, split live vs fixture-proven beta.
+
+    Betas are offered so operators can try them, but their only evidence is a
+    synthetic fixture — the rule transfer_live_driver_types uses to exclude
+    them — so counting them as live would push a side past the transfer union.
+    """
+    try:
+        from src.transfer.connector_capabilities import get_capabilities
+    except ImportError:
+        from transfer.connector_capabilities import get_capabilities
+    source = {c.get("driver_type") for c in enriched if c.get("source_ready") and c.get("driver_type")}
+    dest = {c.get("driver_type") for c in enriched if c.get("dest_ready") and c.get("driver_type")}
+    beta = {t for t in source | dest if get_capabilities(t).get("evidence") == "synthetic-fixture"}
+    return {
+        "source_live": len(source - beta),
+        "dest_live": len(dest - beta),
+        "source_beta": len(source & beta),
+        "dest_beta": len(dest & beta),
     }
 
 
@@ -248,7 +266,8 @@ def _capability_driver_counts() -> dict[str, object]:
         "capabilities_dest_live": len(dest_live_driver_types()),
         "capabilities_transfer_live": len(transfer_live_driver_types()),
         "count_note": (
-            "source_live and dest_live count catalog tiles you can pick. "
+            "source_live and dest_live count live catalog engines you can pick; "
+            "source_beta and dest_beta count fixture-proven beta engines. "
             "capabilities_source_live, capabilities_dest_live, and "
             "capabilities_transfer_live are the transfer-ready driver sets "
             "get_transfer_capabilities reports. Catalog tiles are not transfer-live drivers."
@@ -313,19 +332,15 @@ def catalog_summary() -> dict:
         # Per-side engine counts. "Usable in a transfer" is not the same question
         # as "usable as a source", and answering both with one number counted
         # write-only stores among the sources.
-        "source_live": len({
-            c.get("driver_type") for c in enriched if c.get("source_ready") and c.get("driver_type")
-        }),
-        "dest_live": len({
-            c.get("driver_type") for c in enriched if c.get("dest_ready") and c.get("driver_type")
-        }),
+        **_side_driver_counts(enriched),
         "catalog_tiles_are_not_transfer_live": True,
         "customer_tenant_warehouse_sku_claimed": False,
         "honesty_note": (
             "Catalog tiles are not transfer-live. Public live/certified counts "
             "are unique engines (unique_drivers). source_live / dest_live are "
-            "the per-side counts, which differ: a vector store is a destination "
-            "only and a REST feed a source only. catalog_tile_total includes "
+            "the per-side live counts, which differ: a vector store is a destination "
+            "only and a REST feed a source only. source_beta / dest_beta count "
+            "fixture-proven beta engines, never live. catalog_tile_total includes "
             "Planned roadmap and hosted aliases."
         ),
     }

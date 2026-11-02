@@ -112,6 +112,7 @@ export function ConnectorCatalogPanel({
   const [total, setTotal] = useState(0);
   const [transferLive, setTransferLive] = useState(0);
   const [sourceOnlyCount, setSourceOnlyCount] = useState(0);
+  const [roleBetaCount, setRoleBetaCount] = useState(0);
   const [plannedCount, setPlannedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +144,12 @@ export function ConnectorCatalogPanel({
         role === "all"
           ? (data.certified ?? data.transfer_live ?? 0)
           : (data.role_live ?? data.certified ?? data.transfer_live ?? 0),
+      );
+      // Fixture-proven betas are listed but never counted as live engines.
+      setRoleBetaCount(
+        role === "source" ? (data.source_beta ?? 0)
+          : role === "destination" ? (data.dest_beta ?? 0)
+            : 0,
       );
       setSourceOnlyCount(data.source_only ?? 0);
       setPlannedCount(data.planned_count ?? data.roadmap ?? 0);
@@ -237,8 +244,9 @@ export function ConnectorCatalogPanel({
             {transferLive > 0 && (
               role === "all"
                 ? ` · ${transferLive.toLocaleString()} TRANSFER_READY drivers — tiles are not transfer-live`
-                : ` · ${transferLive.toLocaleString()} usable as ${role}`
+                : ` · ${transferLive.toLocaleString()} live as ${role}`
             )}
+            {roleBetaCount > 0 && ` · ${roleBetaCount.toLocaleString()} beta`}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
             {collapseAliases && connectors.length > visibleConnectors.length && (

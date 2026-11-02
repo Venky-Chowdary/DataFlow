@@ -27,6 +27,7 @@ from services.catalog_service import catalog_summary, search_catalog  # noqa: E4
 from src.transfer.connector_capabilities import (  # noqa: E402
     dest_live_driver_types,
     enrich_catalog_entry,
+    get_capabilities,
     source_live_driver_types,
 )
 
@@ -87,15 +88,16 @@ def test_suggestions_obey_the_same_role_rule():
 
 def test_per_side_counts_describe_the_list_they_label():
     """The number shown next to a role-scoped list must count that list."""
-    for role, key in (("source", "source_live"), ("destination", "dest_live")):
+    sides = (("source", "source_live", "source_beta"), ("destination", "dest_live", "dest_beta"))
+    for role, key, beta_key in sides:
         result = search_catalog(role=role, transfer_only=True, limit=1000)
         offered_drivers = {
             c.get("driver_type") for c in result["connectors"] if c.get("driver_type")
         }
         assert result["role_live"] == result[key]
-        assert result["role_live"] == len(offered_drivers), (
-            f"{role}: labelled {result['role_live']} but the list holds "
-            f"{len(offered_drivers)} distinct engines"
+        assert result[key] + result[beta_key] == len(offered_drivers), (
+            f"{role}: labelled {result[key]} live + {result[beta_key]} beta but the "
+            f"list holds {len(offered_drivers)} distinct engines"
         )
 
 
@@ -194,3 +196,12 @@ def test_planned_tiles_are_ready_for_neither_side():
             or c.get("effective_status") == "planned"
         ]
         assert planned == [], f"{role} offers planned tiles: {planned[:5]}"
+
+
+def test_fixture_beta_sources_are_counted_apart_from_live():
+    """Fixture-proven SDK betas are pickable but are not live engines."""
+    summary = catalog_summary()
+    assert summary["source_beta"] >= 1
+    zendesk = get_capabilities("zendesk")
+    assert zendesk.get("evidence") == "synthetic-fixture"
+    assert summary["transfer_live"] >= summary["source_live"]
