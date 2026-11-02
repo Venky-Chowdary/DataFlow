@@ -58,18 +58,26 @@ def _storage_key(key: str, workspace_id: str) -> str:
     return f"{workspace_id}::{key}" if workspace_id else key
 
 
+def _owner(workspace_id: str | None) -> str:
+    """The router resolves the request's workspace; direct callers inherit the
+    ambient tenant scope."""
+    explicit = str(workspace_id or "").strip()
+    return explicit or current_workspace_stamp()
+
+
 def save_shape_draft(
     *,
     route_key: str,
     recipe: dict[str, Any],
     source_columns: list[str] | None = None,
     canvas_layout: dict[str, Any] | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     key = route_key.strip()
     if not key:
         raise ShapeError("A draft needs a source and destination.")
     parsed = ShapeRecipe.parse(recipe, source_columns=source_columns or None)
-    workspace_id = current_workspace_stamp()
+    workspace_id = _owner(workspace_id)
     record = {
         "route_key": key,
         "workspace_id": workspace_id,
@@ -84,22 +92,22 @@ def save_shape_draft(
     return record
 
 
-def load_shape_draft(route_key: str) -> dict[str, Any] | None:
+def load_shape_draft(route_key: str, *, workspace_id: str | None = None) -> dict[str, Any] | None:
     """This workspace's draft for the route, else a legacy unscoped one the
     caller's scope still covers."""
     key = route_key.strip()
     data = _load()
-    for candidate in (_storage_key(key, current_workspace_stamp()), key):
+    for candidate in (_storage_key(key, _owner(workspace_id)), key):
         found = data.get(candidate)
         if isinstance(found, dict) and bound_allows(found.get("workspace_id")):
             return found
     return None
 
 
-def delete_shape_draft(route_key: str) -> None:
+def delete_shape_draft(route_key: str, *, workspace_id: str | None = None) -> None:
     key = route_key.strip()
     data = _load()
-    data.pop(_storage_key(key, current_workspace_stamp()), None)
+    data.pop(_storage_key(key, _owner(workspace_id)), None)
     _save(data)
 
 

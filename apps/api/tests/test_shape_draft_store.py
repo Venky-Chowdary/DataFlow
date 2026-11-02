@@ -73,3 +73,24 @@ def test_one_workspace_cannot_evict_another_workspaces_drafts(tmp_path, monkeypa
         assert [load_shape_draft(f"busy-{n}") is not None for n in range(6)] == [False] * 3 + [True] * 3
     with bound_workspace_filter(None, stamp="ws-quiet"):
         assert load_shape_draft("quiet-route") is not None
+
+
+def test_router_resolved_workspace_scopes_save_load_and_delete(tmp_path, monkeypatch):
+    """The drafts router passes the request's resolved workspace explicitly —
+    PUT/GET/DELETE /shape/drafts 500'd when the store refused the keyword."""
+    import services.shape_draft_store as store
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "drafts.json")
+    key = route_key("orders.csv", "orders")
+    recipe = {"steps": [{"op": "trim", "column": "email"}]}
+    saved = save_shape_draft(route_key=key, recipe=recipe, source_columns=["email"], workspace_id="ws-acme")
+    assert saved["workspace_id"] == "ws-acme"
+    save_shape_draft(route_key=key, recipe={"steps": []}, workspace_id="ws-other")
+
+    mine = load_shape_draft(key, workspace_id="ws-acme")
+    assert mine is not None and mine["steps"][0]["op"] == "trim"
+    assert load_shape_draft(key, workspace_id="ws-other")["steps"] == []
+
+    delete_shape_draft(key, workspace_id="ws-other")
+    assert load_shape_draft(key, workspace_id="ws-other") is None
+    assert load_shape_draft(key, workspace_id="ws-acme") is not None
