@@ -7325,7 +7325,10 @@ def _run_reconciliation_impl(
                                 f"{len(v)} {k}" for k, v in _culprit.items()
                             )
                             + " — value mismatch, not a count problem. "
-                            + source_checksum_scope_note
+                            "The copy ran inside the engines, so the value "
+                            "compare was this key census: each side's mapped "
+                            "columns re-read and hashed per primary key, and "
+                            "the listed keys hash differently."
                         ),
                     }
                 else:
