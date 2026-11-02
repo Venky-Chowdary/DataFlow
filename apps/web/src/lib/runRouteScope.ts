@@ -62,3 +62,17 @@ export function runResultDescribesRoute(
 ): boolean {
   return executedRouteKey == null || executedRouteKey === currentRouteKey;
 }
+
+/**
+ * A launch owns Validate only while the verdict it ran under is still on screen.
+ * Changing sync mode, identity or mappings clears that verdict; the next action
+ * is then a fresh preflight and Execute, not "Open live progress" for the
+ * previous run. Launches made without a verdict (preflight skipped) stay.
+ */
+export function launchDescribesCurrentVerdict<
+  L extends { verdict?: unknown },
+>(launch: L | null, currentVerdict: unknown): L | null {
+  if (!launch) return null;
+  if (launch.verdict && launch.verdict !== currentVerdict) return null;
+  return launch;
+}

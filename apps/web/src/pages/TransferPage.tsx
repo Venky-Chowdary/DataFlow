@@ -119,6 +119,7 @@ import {
 import {
   describeDestRoute,
   destRouteKey,
+  launchDescribesCurrentVerdict,
   runResultDescribesRoute,
 } from "../lib/runRouteScope";
 import { diagnoseSql } from "../lib/sqlEditorModel";
@@ -616,7 +617,12 @@ export function TransferPage({
     () => FALLBACK_EXPORT_FORMATS.map((id) => ({ id, label: id.toUpperCase() })),
   );
   const [liveRouteCount, setLiveRouteCount] = useState<number | null>(null);
-  const [transferLaunch, setTransferLaunch] = useState<{ jobId: string; rows: number } | null>(null);
+  const [transferLaunch, setTransferLaunch] = useState<{
+    jobId: string;
+    rows: number;
+    /** Validate verdict the run was launched under; null when preflight was skipped. */
+    verdict?: PreflightResult | null;
+  } | null>(null);
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
   const [mappingProof, setMappingProof] = useState<import("../components/MappingProofDrawer").MappingProof | null>(null);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
@@ -5761,6 +5767,7 @@ export function TransferPage({
         setTransferLaunch({
           jobId: data.job_id,
           rows: Number(sourceRowEstimate ?? parsed?.row_count ?? 0),
+          verdict: preflight,
         });
         setTransferring(false);
         toast({
@@ -6240,7 +6247,10 @@ export function TransferPage({
    * job is the route on screen — otherwise "Open live progress" takes Execute's
    * place for a plan that was never executed.
    */
-  const routeScopedLaunch = runResultDescribesCurrentPlan ? transferLaunch : null;
+  const routeScopedLaunch = launchDescribesCurrentVerdict(
+    runResultDescribesCurrentPlan ? transferLaunch : null,
+    preflight,
+  );
   const studioPrimary = resolveValidateStudioPrimary({
     preflight,
     preflighting,

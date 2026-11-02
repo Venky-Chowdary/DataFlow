@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   describeDestRoute,
   destRouteKey,
+  launchDescribesCurrentVerdict,
   runResultDescribesRoute,
   type DestRoute,
 } from "./runRouteScope";
@@ -98,4 +99,18 @@ test("a recorded export route is named by format and path", () => {
 test("an absent or unreadable route is named nothing rather than guessed", () => {
   assert.equal(describeDestRoute(null), "");
   assert.equal(describeDestRoute("not json"), "");
+});
+
+test("a launch stops owning Validate once its verdict is cleared or replaced", () => {
+  const verdict = { passed: true };
+  const launch = { jobId: "j1", rows: 3, verdict };
+  assert.equal(launchDescribesCurrentVerdict(launch, verdict), launch);
+  // Sync mode / identity change cleared the verdict (QA: Incremental deduped).
+  assert.equal(launchDescribesCurrentVerdict(launch, null), null);
+  // A fresh preflight is a new verdict — Execute, not the old run's progress.
+  assert.equal(launchDescribesCurrentVerdict(launch, { passed: true }), null);
+  // Preflight skipped at launch: the launch stays until the run is replaced.
+  const skipped = { jobId: "j2", rows: 1, verdict: null };
+  assert.equal(launchDescribesCurrentVerdict(skipped, null), skipped);
+  assert.equal(launchDescribesCurrentVerdict(null, verdict), null);
 });
