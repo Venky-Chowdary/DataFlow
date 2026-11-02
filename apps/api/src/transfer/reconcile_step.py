@@ -699,6 +699,47 @@ _TSQL_DIALECTS = {"sqlserver", "mssql", "azure_sql"}
 _PY_WHITESPACE = "".join(chr(c) for c in range(0x3001) if chr(c).isspace())
 
 
+
+# UPPER/LOWER on these differ between builds of one engine (D226): musl maps
+# ß -> ẞ, ICU expands ß -> SS and ﬁ -> FI, glibc keeps both. The engine
+# applies the one-to-one Unicode mapping (sql_upper / sql_lower).
+_CASE_DIVERGENT_PROBE = "aßﬁǅŉẞİ"
+
+
+def _source_unfaithful_case_modes(
+    src_type: str, src_cfg: dict[str, Any], modes: set[str]
+) -> frozenset[str]:
+    """The ``case`` modes whose UPPER/LOWER on the source differ from the engine's.
+
+    A server that maps case differently is not a faithful oracle for that
+    mode: its disagreement says nothing about the step. A probe that cannot
+    run marks every mode, so the step is reported uncovered, not proven.
+    """
+    import sqlalchemy as sa
+
+    from services.dest_precount import warehouse_sql_engine
+    from services.transform_engine import sql_lower, sql_upper
+
+    stmt = sa.text("SELECT UPPER(:probe) AS u, LOWER(:probe) AS l").bindparams(
+        probe=_CASE_DIVERGENT_PROBE
+    )
+    if src_type in _TSQL_DIALECTS:
+        stmt = sa.text(
+            "SELECT UPPER(CAST(:probe AS nvarchar(64))) AS u, "
+            "LOWER(CAST(:probe AS nvarchar(64))) AS l"
+        ).bindparams(probe=_CASE_DIVERGENT_PROBE)
+    try:
+        with warehouse_sql_engine(src_type, src_cfg) as eng:
+            with eng.connect() as conn:
+                row = conn.execute(stmt).one()
+    except Exception:  # noqa: BLE001 - any probe failure means "not proven"
+        return frozenset(modes)
+    agrees = {
+        "upper": str(row[0]) == sql_upper(_CASE_DIVERGENT_PROBE),
+        "lower": str(row[1]) == sql_lower(_CASE_DIVERGENT_PROBE),
+    }
+    return frozenset(m for m in modes if not agrees.get(m, False))
+
 def _recipe_step_sql(
     op: str,
     opts: dict[str, Any],
@@ -708,6 +749,7 @@ def _recipe_step_sql(
     src_type: str,
     dest_ddl: str = "",
     nan_is_null: bool = False,
+    unfaithful_case_modes: frozenset[str] = frozenset(),
 ) -> str | None:
     """Faithful SQL equivalent of one recipe step, or None when the dialect
     has none. The G-1d independent oracle recomputes declared columns in the
@@ -743,6 +785,8 @@ def _recipe_step_sql(
 
     if op == "case":
         mode = str(opts.get("mode") or "").casefold()
+        if mode in unfaithful_case_modes:
+            return None
         if mode == "upper":
             return f"UPPER({col_expr})"
         if mode == "lower":
@@ -1426,6 +1470,16 @@ def _transform_applied_proof_impl(
             src_to_dest_ddl[_msrc] = _mdl
             src_to_dest_ddl[_msrc.lower()] = _mdl
     _covered_step_idx: set[int] = set()
+    case_modes = {
+        str((st.get("options") or {}).get("mode") or "").casefold()
+        for st in steps
+        if str(st.get("op") or "") == "case"
+    }
+    unfaithful_case_modes = (
+        _source_unfaithful_case_modes(src_type, src_cfg, case_modes)
+        if oracle_ok and case_modes
+        else frozenset()
+    )
     if oracle_ok:
         for _si, st in enumerate(steps):
             if not oracle_ok:
@@ -1445,6 +1499,7 @@ def _transform_applied_proof_impl(
                 expr = _recipe_step_sql(
                     op, opts, expr, oracle_params,
                     src_type=src_type, dest_ddl=_step_ddl,
+                    unfaithful_case_modes=unfaithful_case_modes,
                     # NaN is null to the engine only on a raw float cell.
                     nan_is_null=(
                         scol not in oracle_exprs
