@@ -119,6 +119,56 @@ def test_connection(
         return False, humanize_http_error(exc, "influxdb")
 
 
+def _first_column(body: Any) -> list[str]:
+    """First column of every series row (SHOW MEASUREMENTS / TAG KEYS)."""
+    _headers, rows = _extract_rows(body)
+    return [row[0] for row in rows if row and str(row[0]).strip()]
+
+
+def list_measurements(
+    *,
+    host: str = "",
+    port: int = 8086,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> list[str]:
+    """Measurements in the database — the tables an InfluxDB source offers."""
+    body = _query(_url(host, port, ssl), database, "SHOW MEASUREMENTS", username, password)
+    return sorted(set(_first_column(body)))
+
+
+def measurement_schema(
+    *,
+    measurement: str,
+    host: str = "",
+    port: int = 8086,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> tuple[dict[str, str], list[str]]:
+    """Declared field types (``float``/``integer``/...) and tag keys of one measurement."""
+    url_base = _url(host, port, ssl)
+    quoted = measurement.replace('"', '\\"')
+    fields_body = _query(
+        url_base, database, f'SHOW FIELD KEYS FROM "{quoted}"', username, password  # nosec B608
+    )
+    _headers, rows = _extract_rows(fields_body)
+    idx_key = _headers.index("fieldKey") if "fieldKey" in _headers else 0
+    idx_type = _headers.index("fieldType") if "fieldType" in _headers else 1
+    fields = {
+        row[idx_key]: row[idx_type].strip().lower()
+        for row in rows
+        if len(row) > max(idx_key, idx_type) and row[idx_key]
+    }
+    tags_body = _query(
+        url_base, database, f'SHOW TAG KEYS FROM "{quoted}"', username, password  # nosec B608
+    )
+    return fields, _first_column(tags_body)
+
+
 def read_object(
     *,
     cfg: dict[str, Any],
