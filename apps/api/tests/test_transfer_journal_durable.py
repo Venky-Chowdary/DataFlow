@@ -165,3 +165,32 @@ def test_open_profiles_the_verified_stream_for_the_studio(tmp_path):
     assert client.post("/api/v1/journals/nope.1/open").status_code == 404
     assert client.delete(f"/api/v1/journals/{journal['journal_id']}").status_code == 200
     assert client.get("/api/v1/journals").json()["total"] == 0
+
+
+def test_stored_upload_reprofiles_with_the_same_file_id(tmp_path, monkeypatch):
+    """Jobs → Studio: a job's stored upload reopens as its Source, same bytes and id."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from services.file_parser import store_upload
+    from src.routers.connectors_router import router
+
+    from services import file_parser
+
+    monkeypatch.setenv("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    monkeypatch.setenv("DATAFLOW_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(file_parser, "REGISTRY_PATH", tmp_path / "upload_registry.json")
+    content = b"id,name\n1,a\n2,b\n3,c\n"
+    stored = store_upload("people.csv", content)
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    client = TestClient(app)
+    res = client.post(f"/api/v1/connectors/uploads/{stored['file_id']}/profile")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["file_id"] == stored["file_id"]
+    assert body["filename"] == "people.csv"
+    assert body["row_count"] == 3
+    assert body["columns"] == ["id", "name"]
+    missing = client.post("/api/v1/connectors/uploads/doesnotexist01/profile")
+    assert missing.status_code == 404
+    assert "Upload it again" in missing.json()["detail"]

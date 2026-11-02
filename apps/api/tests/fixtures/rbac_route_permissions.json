@@ -262,6 +262,7 @@
   "POST /api/v1/connectors/test": "connector.write",
   "POST /api/v1/connectors/transfer": "connector.write",
   "POST /api/v1/connectors/upload": "connector.write",
+  "POST /api/v1/connectors/uploads/{file_id}/profile": "connector.write",
   "POST /api/v1/contact-sales": "PUBLIC",
   "POST /api/v1/contracts": "connector.write",
   "POST /api/v1/contracts/from-transfer": "connector.write",

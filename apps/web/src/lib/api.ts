@@ -5135,6 +5135,16 @@ export interface ContinuityRebaselineResult {
 }
 
 /** Accept the current destination (or its removal) as the append-continuity baseline. Audited; reason required. */
+/** Re-profile a job's stored file source (same bytes, same file_id). */
+export async function profileStoredUpload(fileId: string): Promise<ParsedUpload & { filename?: string }> {
+  const res = await apiFetch(`${API_BASE}/connectors/uploads/${encodeURIComponent(fileId)}/profile`, {
+    method: "POST",
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "The job's source file could not be reopened"));
+  return res.json();
+}
+
 export async function listJournals(): Promise<JournalManifest[]> {
   const res = await apiFetch(`${API_BASE}/journals`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load journals"));

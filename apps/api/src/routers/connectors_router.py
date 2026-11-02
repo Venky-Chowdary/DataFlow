@@ -2610,7 +2610,9 @@ async def delete_connector(connector_id: str, request: Request):
 # FILE UPLOAD & TRANSFER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def profile_file_upload(content: bytes, filename: str, *, use_ocr: bool = False, read_options=None) -> dict:
+def profile_file_upload(
+    content: bytes, filename: str, *, use_ocr: bool = False, read_options=None, file_id: str = "",
+) -> dict:
     """Parse, profile and register file bytes — the one Source-step profile.
 
     ``/connectors/upload`` and journal replay (``/journals/{id}/open``) both
@@ -2671,14 +2673,15 @@ def profile_file_upload(content: bytes, filename: str, *, use_ocr: bool = False,
 
         sheets = list_excel_sheets(content)
 
-    stored_file_id = ""
-    try:
-        from services.file_parser import store_upload
+    stored_file_id = file_id
+    if not stored_file_id:
+        try:
+            from services.file_parser import store_upload
 
-        stored = store_upload(filename or "upload.csv", content)
-        stored_file_id = str(stored.get("file_id") or "")
-    except Exception:
-        stored_file_id = ""
+            stored = store_upload(filename or "upload.csv", content)
+            stored_file_id = str(stored.get("file_id") or "")
+        except Exception:
+            stored_file_id = ""
 
     return {
         "success": True,
@@ -2699,6 +2702,31 @@ def profile_file_upload(content: bytes, filename: str, *, use_ocr: bool = False,
         "ocr_status": ocr_dependency_status(),
     }
 
+
+
+@router.post("/uploads/{file_id}/profile")
+def profile_stored_upload(file_id: str) -> dict:
+    """Re-profile a stored upload — reopening a job's file source in Studio.
+
+    The same bytes the job read (and Validate scanned) are profiled again and
+    keep their ``file_id``, so nothing is re-uploaded and the population is
+    identical.
+    """
+    from pathlib import Path as _Path
+
+    from services.file_parser import get_file
+
+    record = get_file(file_id)
+    path = _Path(str((record or {}).get("path") or ""))
+    if not record or not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The source file of this job is no longer stored. Upload it again to re-run.",
+        )
+    filename = str(record.get("filename") or path.name)
+    profile = profile_file_upload(path.read_bytes(), filename, file_id=file_id)
+    profile["filename"] = filename
+    return profile
 
 
 @router.post("/upload")

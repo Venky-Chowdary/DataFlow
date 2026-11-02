@@ -87,6 +87,7 @@ import {
   type VectorRoutingPlan,
   rebaselineContinuity,
   openJournal,
+  profileStoredUpload,
 } from "../lib/api";
 import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
@@ -516,9 +517,14 @@ export function TransferPage({
   const [captureJournal, setCaptureJournal] = useState(false);
   /** Source is a verified capture-once journal stream, not an uploaded file. */
   const [replayJournal, setReplayJournal] = useState<(OpenedJournal["journal"] & { filename: string }) | null>(null);
-  const sourceFileName = file?.name ?? replayJournal?.filename;
+  /** Source reopened from a job's stored upload (no File object in this tab). */
+  const [restoredFileName, setRestoredFileName] = useState<string | null>(null);
+  const sourceFileName = file?.name ?? replayJournal?.filename ?? restoredFileName ?? undefined;
   useEffect(() => {
-    if (file || sourceKind !== "file" || !parsed) setReplayJournal(null);
+    if (file || sourceKind !== "file" || !parsed) {
+      setReplayJournal(null);
+      setRestoredFileName(null);
+    }
   }, [file, sourceKind, parsed]);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
   const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
@@ -2372,6 +2378,90 @@ export function TransferPage({
     setStep(STEP_SOURCE);
   }, [seedSourceConnector, connectors]);
 
+  /**
+   * Jobs → Studio: rebuild the job's route so Validate re-reads the same source
+   * the job read (stored upload, journal or connection) and the same destination.
+   */
+  const restoreRouteFromJob = async (job: unknown) => {
+    const tr = ((job as { transfer_request?: Record<string, unknown> } | null)?.transfer_request ?? {}) as Record<string, unknown>;
+    const src = (tr.source ?? {}) as Record<string, unknown>;
+    const dst = (tr.destination ?? {}) as Record<string, unknown>;
+    const srcExtra = (src.extra ?? {}) as Record<string, unknown>;
+    const text = (v: unknown) => (typeof v === "string" ? v : "");
+    if (text(tr.sync_mode)) setSyncMode(text(tr.sync_mode) as SyncMode);
+
+    const dstConn = text(dst.connector_id) ? connectors.find((c) => c.id === dst.connector_id) : undefined;
+    if (dstConn) applyConnectorSelection(dstConn.id);
+    if (text(dst.kind) === "file" || text(dst.output_path)) {
+      setDestKindMode("file_export");
+      if (text(dst.output_path)) setDestOutputPath(text(dst.output_path));
+      if (text(dst.format)) setExportFormat(text(dst.format));
+    } else {
+      setDestKindMode("database");
+      if (!dstConn && text(dst.format)) setDestType(text(dst.format));
+      const conn = text(dst.connection_string);
+      if (!dstConn && conn && !conn.includes("****")) setDestConnectionString(conn);
+      if (!dstConn && text(dst.database)) setTargetDb(text(dst.database));
+      const table = text(dst.table) || text(dst.collection);
+      if (table) setTargetCollection(table);
+    }
+
+    const srcConn = text(src.connector_id) ? connectors.find((c) => c.id === src.connector_id) : undefined;
+    if (srcConn) {
+      if (CLOUD_SOURCE_TYPES.has(srcConn.type)) setSourceKind("cloud");
+      else if (!FILE_FORMAT_SOURCE_TYPES.has(srcConn.type)) setSourceKind("database");
+      setSourceConnectorId(srcConn.id);
+      if (text(src.table)) setSourceTable(text(src.table));
+      if (text(src.collection)) setSourceCollection(text(src.collection));
+      return;
+    }
+    if (text(src.kind) !== "file") {
+      toast({
+        title: "Pick the source again",
+        message: "This job's source connection is not saved in this workspace, so it cannot be reopened. Mappings and settings are kept.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return;
+    }
+    if (text(srcExtra.journal_id)) {
+      await openJournalAsSource(text(srcExtra.journal_id), text(srcExtra.journal_stream));
+      return;
+    }
+    const fileId = text(srcExtra.file_id);
+    if (!fileId) {
+      toast({
+        title: "Source file not stored",
+        message: "This job's file was sent inline, so it cannot be reopened. Upload it again — mappings and settings are kept.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return;
+    }
+    setSourceKind("file");
+    setFile(null);
+    setUploading(true);
+    try {
+      const data = await profileStoredUpload(fileId);
+      const filename = data.filename || text(tr.source_filename) || "source";
+      setParsed(data);
+      setRestoredFileName(filename);
+      setActiveData({
+        name: filename.replace(/\.[^/.]+$/, ""),
+        filename,
+        columns: data.columns,
+        row_count: data.row_count,
+        samples: buildColumnSamples(data.columns, data.data ?? data.sample_data),
+        schema: data.schema,
+      });
+    } catch (e) {
+      toast({ title: "Source file not reopened", message: e instanceof Error ? e.message : String(e), tone: "warning" });
+      setStep(STEP_SOURCE);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   /** Replay: profile a verified journal stream server-side and make it the Source. */
   const openJournalAsSource = async (journalId: string, stream: string) => {
     setSourceKind("file");
@@ -2513,6 +2603,18 @@ export function TransferPage({
 
     if (seedStudioIntent.journalId) {
       void openJournalAsSource(seedStudioIntent.journalId, seedStudioIntent.journalStream || "");
+    }
+    if (
+      seedStudioIntent.jobId
+      && !seedStudioIntent.journalId
+      && !seedStudioIntent.sourceConnectorId
+      && !file
+      && !parsed
+      && !sourceConnectorId
+    ) {
+      void fetchJob(seedStudioIntent.jobId).then(restoreRouteFromJob).catch(() => {
+        toast({ title: "Job route not loaded", message: "Pick the source and destination again.", tone: "warning" });
+      });
     }
     const scheduleRoute = Boolean(seedStudioIntent.sourceConnectorId && seedStudioIntent.destConnectorId);
 
@@ -6860,7 +6962,21 @@ export function TransferPage({
                   onApply={applyReadWindow}
                 />
               )}
-              {replayJournal && parsed && !file ? (
+              {!replayJournal && restoredFileName && parsed && !file ? (
+                <div className="df2-upload-result df2-upload-result-compact" data-testid="restored-job-source">
+                  <div className="df2-upload-result-main">
+                    <span className="df2-badge df2-badge-live df2-badge-filename" title={restoredFileName}>
+                      <DtIcon name="check" size={14} /> {restoredFileName}
+                    </span>
+                    <span className="df2-upload-result-meta">
+                      {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns · the file this job read
+                    </span>
+                  </div>
+                  <label htmlFor="df2-source-file" className="df2-btn df2-btn-sm" aria-disabled={uploading} title="Replace source file">
+                    <DtIcon name="upload" size={14} /> Replace
+                  </label>
+                </div>
+              ) : replayJournal && parsed && !file ? (
                 <div className="df2-upload-result df2-upload-result-compact" data-testid="journal-replay-source">
                   <div className="df2-upload-result-main">
                     <span className="df2-badge df2-badge-live df2-badge-filename" title={replayJournal.sha256 ? `SHA-256 ${replayJournal.sha256}` : replayJournal.journal_id}>
@@ -6929,7 +7045,7 @@ export function TransferPage({
                   </button>
                 </div>
               )}
-              {(file || replayJournal) && parsed && (
+              {(file || replayJournal || restoredFileName) && parsed && (
                 <>
                   {["pdf", "docx", "html", "htm"].includes((parsed.file_type || "").toLowerCase()) && (
                     <p className="df2-label-hint" role="status">
