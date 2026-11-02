@@ -104,6 +104,7 @@ def copy_snowflake_to_snowflake(
     conn = snowflake_connect(dest_cfg)
     try:
         from connectors.snowflake_conn import (
+            resolve_or_fold_snowflake_table,
             resolve_snowflake_table_name,
             snowflake_qualified_table,
         )
@@ -134,6 +135,12 @@ def copy_snowflake_to_snowflake(
                 exists = False
             if not exists:
                 created_here = True
+                if not swap_at_end:
+                    # Create-new folds like every other Snowflake writer path,
+                    # so the same logical name lands as the same stored table.
+                    dest_ref = snowflake_qualified_table(
+                        dest_schema, resolve_or_fold_snowflake_table(cur, dest_schema, dest_table)
+                    )
                 snowflake_execute(
                     cur,
                     f"CREATE TABLE {dest_ref} AS SELECT {col_sql} FROM {src_ref}",  # nosec B608

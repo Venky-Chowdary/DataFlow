@@ -91,11 +91,15 @@ def _query(sql: str) -> list[tuple]:
 
 
 def _fq(table: str) -> str:
-    from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+    from connectors.snowflake_conn import (
+        resolve_or_fold_snowflake_table,
+        snowflake_qualified_table,
+    )
 
     conn = _connect()
     try:
-        return resolve_or_fold_snowflake_table(conn.cursor(), _schema(), table)
+        stored = resolve_or_fold_snowflake_table(conn.cursor(), _schema(), table)
+        return snowflake_qualified_table(_schema(), stored)
     finally:
         conn.close()
 
