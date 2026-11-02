@@ -31,6 +31,7 @@ export const PILOT_SCREEN_LABELS: Record<string, string> = {
   mcp: "MCP",
   docs: "Docs",
   benchmarks: "Proofs",
+  "transform-library": "Transform Library",
 };
 
 /**
@@ -45,6 +46,7 @@ const NAVIGABLE_SCREENS: readonly string[] = [
   "connectors",
   "schedules",
   "transforms",
+  "transform-library",
   "jobs",
   "contracts",
   "mcp",
@@ -240,10 +242,12 @@ export async function runPilotConfirm(
   if (action.type === "create_transform_recipe") {
     const res = await confirmPilotPending(action);
     if (res.kind !== "create_transform_recipe") throw new Error("Unexpected confirm result");
-    onNavigate?.("transforms");
+    // Recipes live in the Transform Library; "Transforms" is post-load SQL models.
+    window.dispatchEvent(new CustomEvent("df2:transform-library-changed"));
+    onNavigate?.("transform-library");
     toast({
       title: res.idempotent ? "Transform already created" : "Transform created",
-      message: `“${res.name}” (${res.steps} steps) is ready in Transforms.`,
+      message: `“${res.name}” (${res.steps} ${res.steps === 1 ? "step" : "steps"}) is ready in the Transform Library.`,
       tone: "success",
     });
     return "cleared";

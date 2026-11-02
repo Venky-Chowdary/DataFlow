@@ -89,6 +89,10 @@ export function TransformLibraryPage() {
 
   useEffect(() => {
     void load();
+    // A recipe saved from Pilot lands while this screen may already be mounted.
+    const onChanged = () => void load();
+    window.addEventListener("df2:transform-library-changed", onChanged);
+    return () => window.removeEventListener("df2:transform-library-changed", onChanged);
   }, [load]);
 
   const openEditor = useCallback((recipe: TransformLibraryRecipe | null) => {

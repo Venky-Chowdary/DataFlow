@@ -3617,7 +3617,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"{prev.get('description') or ''}\n"
                     f"{prev.get('steps') or 0} step(s)"
                     + (f" over {cols}" if cols else "")
-                    + ".\n\nConfirm below to save it to **Transforms**. Nothing is saved until you do."
+                    + ".\n\nConfirm below to save it to the **Transform Library** (Operations → Library). Nothing is saved until you do."
                 )
             elif tr.name == "create_connector" and tr.success:
                 prev = tr.output.get("preview") or {}

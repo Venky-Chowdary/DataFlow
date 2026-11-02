@@ -18,6 +18,7 @@ async function withFetch(
     value: {
       setTimeout: globalThis.setTimeout,
       clearTimeout: globalThis.clearTimeout,
+      dispatchEvent: () => true,
     } as unknown as Window,
   });
   globalThis.fetch = (async (input, init) => {
@@ -278,6 +279,26 @@ test("resolved CDC drift repair keeps the complete title", async () => {
 
       assert.equal(toasts[0].tone, "success");
       assert.equal(toasts[0].title, "CDC drift repair complete");
+    },
+  );
+});
+
+test("a confirmed transform recipe opens the Transform Library, not post-load Transforms", async () => {
+  await withFetch(
+    () => new Response(
+      JSON.stringify({ ok: true, idempotent: false, kind: "create_transform_recipe", recipe_id: "r1", name: "Dedupe Keep Latest", steps: 1 }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ),
+    async () => {
+      const navigated: string[] = [];
+      const toasts: Array<{ title: string; message: string }> = [];
+      const result = await runPilotConfirm(
+        { id: "t1", type: "create_transform_recipe", label: "Create transform", risk: "mutate", payload: { ack_id: "ack_t1" } } as CopilotPendingAction,
+        { confirm: async () => true, onNavigate: (screen) => navigated.push(screen), toast: (t) => toasts.push(t) },
+      );
+      assert.equal(result, "cleared");
+      assert.deepEqual(navigated, ["transform-library"]);
+      assert.equal(toasts[0].message, "“Dedupe Keep Latest” (1 step) is ready in the Transform Library.");
     },
   );
 });
