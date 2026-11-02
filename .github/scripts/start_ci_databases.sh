@@ -106,6 +106,14 @@ start_gcs() {
     -scheme http -port 4443 -public-host localhost -external-url http://localhost:4443
   wait_for "fake-gcs" 30 2 curl -fsS http://127.0.0.1:4443/storage/v1/b \
     || { docker logs dataflow-ci-fake-gcs || true; exit 1; }
+  # The live matrices write to bucket `dataflow-test`. Create it here so a
+  # shard never depends on another test having created it first.
+  curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"dataflow-test"}' \
+    'http://127.0.0.1:4443/storage/v1/b?project=dataflow-test' >/dev/null \
+    || curl -fsS http://127.0.0.1:4443/storage/v1/b/dataflow-test >/dev/null \
+    || { echo "fake-gcs: could not create bucket dataflow-test"; exit 1; }
+  echo "fake-gcs bucket dataflow-test ready"
 }
 
 start_adls() {
