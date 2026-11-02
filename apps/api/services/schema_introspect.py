@@ -645,6 +645,16 @@ def _introspect_schema_unscoped(
             table=table,
             ssl=ssl,
         )
+    if db_type == "couchbase":
+        return _introspect_couchbase(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            table=table,
+            ssl=ssl,
+        )
     if db_type == "influxdb":
         return _introspect_influxdb(
             host=host,
@@ -4751,6 +4761,43 @@ def _introspect_neo4j(**kwargs: Any) -> dict[str, Any]:
         for col in infer_columns_from_rows(list(batch.headers or []), list(batch.rows or []))
     ]
     return {"ok": True, "columns": columns, "tables": labels or [label], "schema": label}
+
+
+def _introspect_couchbase(**kwargs: Any) -> dict[str, Any]:
+    """List Couchbase keyspaces, and sample one keyspace's document keys."""
+    from connectors.couchbase import list_keyspaces, read_object
+
+    keyspace = str(kwargs.get("table") or kwargs.get("database") or "").strip()
+    common = {
+        "host": str(kwargs.get("host") or ""),
+        "port": int(kwargs.get("port") or 8093),
+        "username": str(kwargs.get("username") or ""),
+        "password": str(kwargs.get("password") or ""),
+        "ssl": bool(kwargs.get("ssl")),
+    }
+    try:
+        keyspaces = list_keyspaces(**common)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    if not keyspace:
+        return {"ok": True, "columns": [], "tables": keyspaces, "schema": ""}
+    try:
+        batch = read_object(cfg=common, object=keyspace, limit=20)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "columns": [],
+            "tables": keyspaces or [keyspace],
+        }
+    from services.schema_inference import infer_columns_from_rows
+
+    # Documents are schemaless: any key may be absent on a document.
+    columns = [
+        {**col, "nullable": True}
+        for col in infer_columns_from_rows(list(batch.headers or []), list(batch.rows or []))
+    ]
+    return {"ok": True, "columns": columns, "tables": keyspaces or [keyspace], "schema": keyspace}
 
 
 # InfluxDB declares one storage type per field; a sample cannot see wider

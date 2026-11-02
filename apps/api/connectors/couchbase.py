@@ -122,6 +122,20 @@ def test_connection(
         return False, humanize_http_error(exc, "couchbase")
 
 
+def list_keyspaces(
+    *,
+    host: str = "",
+    port: int = 8093,
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> list[str]:
+    """Buckets/collections the query service exposes — the source's tables."""
+    body = _n1ql(_url(host, port, ssl), username, password, "SELECT RAW name FROM system:keyspaces")
+    names = [str(n).strip() for n in (body or {}).get("results") or [] if str(n).strip()]
+    return sorted(set(names))
+
+
 def read_object(
     *,
     cfg: dict[str, Any],

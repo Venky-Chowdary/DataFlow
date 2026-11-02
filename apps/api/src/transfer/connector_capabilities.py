@@ -62,7 +62,7 @@ _DRIVER_CAPS: dict[str, dict[str, Any]] = {
     "rest_api": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "neo4j": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
-    "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "couchbase": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
 
