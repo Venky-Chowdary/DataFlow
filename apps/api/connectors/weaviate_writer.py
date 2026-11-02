@@ -26,6 +26,9 @@ from services.value_serializer import (
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 
 
+_RESERVED_PROPERTIES = ("id", "_id", "vector", "_additional", "class")
+
+
 def _requests_session() -> Any:
     import requests
     from requests.adapters import HTTPAdapter
@@ -195,7 +198,7 @@ def build_weaviate_objects(
             })
             continue
         props["chunk_index"] = chunk
-        for reserved in ("id", "_id", "vector", "_additional", "class"):
+        for reserved in _RESERVED_PROPERTIES:
             props.pop(reserved, None)
         vector, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or vector is None:
@@ -655,6 +658,12 @@ def write_mapped_rows(
             from connectors.writer_common import require_physical_types_for_existing_table
 
             effective = dict(live_prop_types)
+            # A mapped ``id`` is the object identity, carried by the
+            # ``source_id`` text property, never a class property of its own.
+            identity_carrier = effective.get("source_id")
+            for c in mapped_targets:
+                if c in _RESERVED_PROPERTIES and identity_carrier and not effective.get(c):
+                    effective[c] = identity_carrier
             if isinstance(studio_live, dict):
                 for c in mapped_targets:
                     if (
