@@ -2508,7 +2508,11 @@ class DataPilotTools:
         return ToolResult(name="confirm_action", success=True, output=body)
 
     def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
-        from .job_reads import job_list_workspace_scope, list_transfer_jobs
+        from .job_reads import (
+            job_list_workspace_scope,
+            list_transfer_jobs,
+            workspace_scope_unresolved,
+        )
 
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
             return ToolResult(
@@ -2521,6 +2525,17 @@ class DataPilotTools:
             workspace_id = job_list_workspace_scope(scope)
         except ValueError as exc:
             return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
+        if workspace_id == "" and workspace_scope_unresolved():
+            return ToolResult(
+                name="list_jobs",
+                success=False,
+                output=None,
+                error=(
+                    "This key can read every workspace and is not acting in one. "
+                    "Send X-Workspace-Id to list one workspace's jobs, or pass "
+                    "scope=all for every workspace."
+                ),
+            )
         summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
         # "How many jobs?" must be answered from the whole history for this scope.
         # The page we read here is only the window we can show.

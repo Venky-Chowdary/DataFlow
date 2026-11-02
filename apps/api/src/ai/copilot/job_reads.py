@@ -12,7 +12,12 @@ from typing import Any
 
 from services.job_list_scope import job_list_workspace_scope  # noqa: F401  # re-export
 from services.jobs import job_store
-from services.workspace_filter import bound_allows, current_workspace_filter
+from services.workspace_filter import (
+    WorkspaceFilter,
+    bound_allows,
+    current_workspace_filter,
+    current_workspace_stamp,
+)
 
 
 def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +203,15 @@ def _from_engine_store(
     return summaries, {"total": total, "by_status": by_status}
 
 
+def workspace_scope_unresolved() -> bool:
+    """True when "this workspace" names nothing: the caller may read every
+    workspace and this turn acts in none (a platform admin or platform key
+    with no X-Workspace-Id). A ``workspace`` census there would be every
+    workspace under the wrong label (D219)."""
+    visible = current_workspace_filter()
+    return visible is not None and visible.is_everything and not current_workspace_stamp()
+
+
 def list_transfer_jobs(
     limit: int = 10,
     workspace_id: str | None = None,
@@ -212,6 +226,14 @@ def list_transfer_jobs(
     # A Pilot/MCP turn reads only what its caller may see (D154); ``workspace_id``
     # narrows further only for system-scope callers.
     workspace_filter = current_workspace_filter()
+    if workspace_id == "":
+        # "This workspace" is the one the turn acts in. A platform admin's tenant
+        # filter is every workspace, which used to win over it (D219).
+        stamp = current_workspace_stamp()
+        if stamp:
+            workspace_filter = (workspace_filter or WorkspaceFilter.everything()).intersect(
+                WorkspaceFilter.only(stamp)
+            )
     try:
         from services.mongodb_service import get_mongodb_service
 
