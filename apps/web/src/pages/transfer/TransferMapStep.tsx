@@ -332,7 +332,7 @@ export function TransferMapStep({
             )}
           </p>
         )}
-        {extraSourceColumns.length > 0 && (
+        {destTableExists !== false && extraSourceColumns.length > 0 && (
           <details className="df2-map-stream-diverge is-compact" role="status">
             <summary>
               <DtIcon name="layers" size={16} />

@@ -483,7 +483,9 @@ def build_shape_gate(contract: dict[str, Any]) -> dict[str, Any]:
             "unaccounted_sources": contract.get("unaccounted_sources") or [],
             "false_friend_sources": contract.get("false_friend_sources") or [],
             "dest_only": contract.get("dest_only") or [],
-            "extra_source_columns": [
+            # Create-new has no destination to be "extra" against: every column
+            # is the CREATE, so G13 "remap or omit" does not apply.
+            "extra_source_columns": [] if shape == SHAPE_CREATE_NEW else [
                 str(c.get("source") or "")
                 for c in (contract.get("columns") or [])
                 if c.get("kind") in {COL_ADD, COL_PENDING, COL_UNACCOUNTED}

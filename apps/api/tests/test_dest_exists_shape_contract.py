@@ -243,3 +243,15 @@ def test_explain_gate_g15_uses_primary_action() -> None:
     assert confirm_g["suggested_actions"][0]["kind"] == "confirm_or_remap"
     assert confirm_g["suggested_actions"][0]["column"] == "order_qty"
     assert confirm_g["suggested_actions"][0]["label"] == "Confirm this pair"
+
+
+def test_create_new_reports_no_extra_source_columns():
+    from services.shape_contract import build_shape_gate, classify_dest_exists_shape
+
+    contract = classify_dest_exists_shape(
+        destination_table_exists=False,
+        source_columns=["id", "email", "age"],
+        dest_columns=[],
+        mappings=[{"source": c, "target": c} for c in ["id", "email", "age"]],
+    )
+    assert build_shape_gate(contract)["details"]["extra_source_columns"] == []

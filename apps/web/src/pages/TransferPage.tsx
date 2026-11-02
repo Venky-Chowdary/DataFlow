@@ -1766,7 +1766,8 @@ export function TransferPage({
         );
         const shape = (result as { shape_contract?: typeof shapeContract }).shape_contract;
         if (shape && typeof shape === "object") {
-          const extras = [
+          // Create-new has nothing to be "extra" against (G13 is dest-exists only).
+          const extras = (shape as { shape?: string }).shape === "create_new_table" ? [] : [
             ...((shape as { unaccounted_sources?: string[] }).unaccounted_sources || []),
             ...(((shape as { columns?: Array<{ source?: string; kind?: string }> }).columns || [])
               .filter((c) => c.kind === "add_proposed" || c.kind === "pending" || c.kind === "unaccounted")
