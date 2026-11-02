@@ -343,6 +343,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # route, gated by the permission that plans a transfer (an operator runs
     # approved plans, it does not author the recipe inside one). The draft read
     # is listed before the shape prefix so first-match does not inherit plan.
+    # Journals hold captured source rows: reading them is a job read; deleting
+    # or pruning them removes replayable evidence, so it is plan-level.
+    ("GET", "/api/v1/journals", Permission.JOB_READ),
+    ("*", "/api/v1/journals", Permission.JOB_PLAN),
     ("GET", "/api/v1/shape/catalog", Permission.JOB_READ),
     ("POST", "/api/v1/shape/profile", Permission.JOB_READ),
     ("GET", "/api/v1/shape/drafts", Permission.JOB_READ),

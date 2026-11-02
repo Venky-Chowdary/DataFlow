@@ -753,7 +753,51 @@ class UniversalTransferEngine:
         with egress_workspace(str(request.workspace_id or "")), endpoint_session_scope(
             engines=("sftp",)
         ):
-            return self._execute_tracked_in_workspace(request, job_id, resume)
+            from services import transfer_journal
+
+            if request.source.kind == "file":
+                from services.transfer_file_staging import hydrate_file_source
+
+                try:
+                    hydrate_file_source(request)
+                except transfer_journal.JournalError as exc:
+                    return self._refuse_journal_replay(request, job_id, exc)
+            journal, journal_skip = transfer_journal.begin_capture(
+                request, job_id, resume=resume
+            )
+            try:
+                result = self._execute_tracked_in_workspace(request, job_id, resume)
+            except BaseException:
+                transfer_journal.abort_capture(job_id, "the run raised")
+                raise
+            outcome = (
+                transfer_journal.finish_capture(job_id, result)
+                if journal is not None
+                else ({"captured": False, "reason": journal_skip} if journal_skip else None)
+            )
+            replay = (request.source.extra or {}).get("journal_replay")
+            if isinstance(result, TransferResult) and (outcome or replay):
+                summary = dict(result.source_summary or {})
+                if outcome:
+                    summary["journal"] = outcome
+                if replay:
+                    summary["journal_replay"] = replay
+                result.source_summary = summary
+            return result
+
+    def _refuse_journal_replay(
+        self, request: TransferRequest, job_id: str, exc: Exception
+    ) -> TransferResult:
+        message = str(exc)
+        try:
+            _job_store().update_job_status(
+                job_id, "failed", phase="validate", error=message, message=message
+            )
+        except Exception:
+            logger.exception("Could not record journal refusal on %s", job_id)
+        return TransferResult(
+            success=False, job_id=job_id, error=message, operation=request.operation
+        )
 
     def _execute_tracked_in_workspace(
         self, request: TransferRequest, job_id: str, resume: bool = False
@@ -1656,6 +1700,16 @@ class UniversalTransferEngine:
                 # rest. That is a correct no-op run, not an empty source.
                 return incremental_no_op_result(
                     request, job_id, incremental_bound.scope.watermark
+                )
+            if request.source.kind == "database":
+                from services.transfer_journal import capture_records
+
+                capture_records(
+                    job_id,
+                    str(request.source.table or request.source.collection or "records"),
+                    columns,
+                    records,
+                    schema,
                 )
             _settle_locales(request, records, columns)
             shape_runner = _open_shape_runner(request, columns, schema)

@@ -72,6 +72,7 @@ from .routers.schedules_router import router as schedules_router
 from .routers.signup_router import router as signup_router
 from .routers.rule_compiler_router import router as rule_compiler_router
 from .routers.shape_router import router as shape_router
+from .routers.journals_router import router as journals_router
 from .routers.training_agent_router import router as training_agent_router
 from .transfer.engine import DuplicateTransferSubmission
 from .routers.transfer_router import router as transfer_router
@@ -744,6 +745,7 @@ app.include_router(usage_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1")
 app.include_router(repair_router, prefix="/api/v1")
 app.include_router(shape_router, prefix="/api/v1")
+app.include_router(journals_router, prefix="/api/v1")
 app.include_router(rule_compiler_router, prefix="/api/v1")
 
 

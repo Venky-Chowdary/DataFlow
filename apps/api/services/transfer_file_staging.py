@@ -148,7 +148,15 @@ def persist_file_source(
 
 
 def hydrate_file_source(request: "TransferRequest") -> "TransferRequest":
-    """Ensure ``source_path`` exists for claim workers (materialize from URI)."""
+    """Ensure ``source_path`` exists for claim workers (materialize from URI).
+
+    A journal replay (``source.extra.journal_id``) resolves to the verified
+    journal file here; ``JournalError`` refuses a missing/foreign/corrupt one.
+    """
+    from services.transfer_journal import apply_replay_source
+
+    if apply_replay_source(request):
+        return request
     if getattr(request.source, "kind", "") != "file":
         return request
     path = (getattr(request, "source_path", None) or "").strip()

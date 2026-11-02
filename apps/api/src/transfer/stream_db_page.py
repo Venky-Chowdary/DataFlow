@@ -183,6 +183,11 @@ def _rows_after_watermark_matrix(
     return kept, unbounded
 
 
+def _journal_stream_name(cfg) -> str:
+    source = cfg.source
+    return str(getattr(source, "table", "") or getattr(source, "collection", "") or "records")
+
+
 def _filter_batch(run, batch):
     """Source filter, then the approved recipe — once per page.
 
@@ -293,6 +298,9 @@ def _filter_batch(run, batch):
                     "rows it dropped, so the run's source population cannot "
                     "be stated — refusing rather than miscounting them"
                 ) from exc
+    from services.transfer_journal import capture_batch
+
+    capture_batch(cfg.job_id, _journal_stream_name(cfg), batch)
     if cfg.source_filter and batch.rows:
         before = len(batch.rows)
         batch.rows = apply_row_filter_to_matrix(

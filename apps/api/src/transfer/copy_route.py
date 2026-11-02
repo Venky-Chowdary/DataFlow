@@ -590,6 +590,13 @@ def _try_copy_fast_path(
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
     """
+    from services.transfer_journal import active_journal
+
+    if active_journal(job_id) is not None:
+        # A capture-once run must see every row it moves; server-to-server
+        # copies never surface rows, so the journal takes the row path.
+        return None
+
     # Studio may set source.table to the procedure stream name (e.g. get_orders).
     # COPY of a colliding real table would move the wrong population — refuse.
     from services.copy_fast_path import note_copy_decline

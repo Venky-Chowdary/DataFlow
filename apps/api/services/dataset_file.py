@@ -70,7 +70,10 @@ def transfer_source_roots() -> list[Path]:
     """
     from services.brand_env import getenv_brand_str
 
+    from services.transfer_journal import journal_root
+
     roots = dataset_roots()
+    roots.append(journal_root())
     for raw in getenv_brand_str("SOURCE_PATH_ROOTS", "").split(os.pathsep):
         if raw.strip():
             roots.append(Path(raw.strip()))
