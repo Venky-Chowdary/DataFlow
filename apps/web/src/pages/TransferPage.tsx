@@ -192,6 +192,7 @@ import {
 } from "../lib/destSchemaRecreate";
 import {
   carryOperatorDecisions,
+  reapplySeededTargets,
   holdOutRowsAndContinue,
 } from "../lib/mappingDecisions";
 import {
@@ -620,6 +621,8 @@ export function TransferPage({
   const [mapIdentityBanner, setMapIdentityBanner] = useState<string | null>(null);
   const [seedRepairProposalId, setSeedRepairProposalId] = useState<string | null>(null);
   const appliedStudioIntentTokenRef = useRef<number | null>(null);
+  // A Jobs → Studio job's own mappings; re-applied once when Map re-proposes.
+  const jobSeedMappingsRef = useRef<EditableMapping[] | null>(null);
   const [runStartupProgress, setRunStartupProgress] = useState(0);
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
@@ -1704,7 +1707,11 @@ export function TransferPage({
             return identity;
           }
         }
-        const carried = stampCompiledWorkbookMappings(carryOperatorDecisions(next, prior));
+        const seed = jobSeedMappingsRef.current;
+        const carried = stampCompiledWorkbookMappings(
+          carryOperatorDecisions(reapplySeededTargets(next, seed), prior),
+        );
+        if (seed?.length) jobSeedMappingsRef.current = null;
         setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
@@ -2385,6 +2392,15 @@ export function TransferPage({
    */
   const restoreRouteFromJob = async (job: unknown) => {
     const plan = planJobStudioRoute(job, connectors);
+    // This job's route replaces whatever Studio held from an earlier job.
+    setFile(null);
+    setParsed(null);
+    setReplayJournal(null);
+    setRestoredFileName(null);
+    setSourceConnectorId("");
+    setSourceTable("");
+    setSourceCollection("");
+    setDestOutputPath("");
     if (plan.syncMode) setSyncMode(plan.syncMode as SyncMode);
 
     const dst = plan.destination;
@@ -2559,27 +2575,28 @@ export function TransferPage({
     }
 
     const maps = seedStudioIntent.mappings;
+    jobSeedMappingsRef.current = null;
     if (Array.isArray(maps) && maps.length > 0) {
-      setColumnMappings(
-        maps.map((m) => {
-          const xfRaw = m.transform
-            || (Array.isArray(m.transforms) && m.transforms[0]?.type)
-            || "none";
-          const xf = String(xfRaw) as EditableMapping["transform"];
-          return {
-            source: String(m.source || ""),
-            target: String(m.destination || m.source || ""),
-            confidence: 1,
-            destType: String(m.destination_type || m.target_type || ""),
-            approved: false,
-            requiresReview: true,
-            transform: xf && xf !== "none" ? xf : undefined,
-            reason: seedStudioIntent.jobId
-              ? `Seeded from job ${seedStudioIntent.jobId.slice(0, 8)}…`
-              : "Seeded from Jobs quarantine repair",
-          };
-        }).filter((m) => m.source),
-      );
+      const seededMaps: EditableMapping[] = maps.map((m) => {
+        const xfRaw = m.transform
+          || (Array.isArray(m.transforms) && m.transforms[0]?.type)
+          || "none";
+        const xf = String(xfRaw) as EditableMapping["transform"];
+        return {
+          source: String(m.source || ""),
+          target: String(m.destination || m.source || ""),
+          confidence: 1,
+          destType: String(m.destination_type || m.target_type || ""),
+          approved: false,
+          requiresReview: true,
+          transform: xf && xf !== "none" ? xf : undefined,
+          reason: seedStudioIntent.jobId
+            ? `Seeded from job ${seedStudioIntent.jobId.slice(0, 8)}…`
+            : "Seeded from Jobs quarantine repair",
+        };
+      }).filter((m) => m.source);
+      jobSeedMappingsRef.current = seededMaps;
+      setColumnMappings(seededMaps);
     }
 
     if (seedStudioIntent.repairProposalId) {
@@ -2611,9 +2628,6 @@ export function TransferPage({
       seedStudioIntent.jobId
       && !seedStudioIntent.journalId
       && !seedStudioIntent.sourceConnectorId
-      && !file
-      && !parsed
-      && !sourceConnectorId
     ) {
       void fetchJob(seedStudioIntent.jobId).then(restoreRouteFromJob).catch(() => {
         toast({ title: "Job route not loaded", message: "Pick the source and destination again.", tone: "warning" });
@@ -3217,10 +3231,11 @@ export function TransferPage({
     // something to show. That is only honest for a file export or a destination
     // whose columns were actually read — a database destination with no read
     // schema must stay pending until Map stamps a destination type.
+    const withJobTargets = reapplySeededTargets(seeded, jobSeedMappingsRef.current);
     setColumnMappings(
       destKindMode === "database" && !destColumns.length
-        ? seeded.map(markMappingDestUnread)
-        : seeded,
+        ? withJobTargets.map(markMappingDestUnread)
+        : withJobTargets,
     );
     void analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 })
       .then((dbAnalysis) => setAnalysis(dbAnalysis))
@@ -6621,6 +6636,7 @@ export function TransferPage({
     setPrimaryKeyField("");
     setStreamFields({});
     setColumnMappings([]);
+    jobSeedMappingsRef.current = null;
     setDestColumns([]);
     setDestSchemaMap({});
     setDestSchemaLoading(false);

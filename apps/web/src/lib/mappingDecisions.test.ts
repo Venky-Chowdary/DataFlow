@@ -286,3 +286,25 @@ describe("holdOutRowsAndContinue", () => {
     assert.equal(carried[0].target, "first_name");
   });
 });
+
+describe("reapplySeededTargets (Jobs → Studio source re-pick)", () => {
+  const m = (source: string, target: string, extra: Partial<EditableMapping> = {}): EditableMapping => ({
+    source, target, confidence: 0.9, destType: "TEXT", approved: false, ...extra,
+  } as EditableMapping);
+  it("the job's non-identity targets win over fresh name-identity proposals and stay pending review", async () => {
+    const { reapplySeededTargets } = await import("./mappingDecisions");
+    const seed = [m("id", "order_id", { destType: "BIGINT", reason: "Seeded from job 6ae8d59a…" }), m("item", "description")];
+    const out = reapplySeededTargets([m("id", "id", { approved: true }), m("ITEM", "item"), m("qty", "qty")], seed);
+    assert.deepEqual(out.map((x) => x.target), ["order_id", "description", "qty"]);
+    assert.equal(out[0].destType, "BIGINT");
+    assert.equal(out[0].approved, false);
+    assert.equal(out[0].requiresReview, true);
+    assert.equal(out[2].approved, false);
+    assert.equal(out[2].target, "qty");
+  });
+  it("no seed leaves proposals untouched", async () => {
+    const { reapplySeededTargets } = await import("./mappingDecisions");
+    const next = [m("id", "id")];
+    assert.equal(reapplySeededTargets(next, null), next);
+  });
+});

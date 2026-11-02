@@ -20,6 +20,14 @@ export function isGate8WritePassDestReadback(report: Gate8Reconciliation): boole
   return assurance === "write_pass_dest_readback" || phase.includes("write_pass");
 }
 
+/**
+ * Rows were counted but destination cells were never read back (file/object
+ * export, skipped read-back). An operational pass — never "Verified".
+ */
+export function isGate8CellFidelityUnproven(report: Gate8Reconciliation): boolean {
+  return report.unproven === true || report.skipped_readback === true;
+}
+
 /** True when evidence is writer-ack only — not independent source/target Verified. */
 export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
   const phase = String(report.phase || "").toLowerCase();

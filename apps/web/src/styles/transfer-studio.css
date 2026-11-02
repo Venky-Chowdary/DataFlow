@@ -10604,6 +10604,16 @@ button.df2-vd-assist-toggle:focus-visible {
   max-width: 220px;
   font-size: 11px;
 }
+/* Warnings and errors carry the address and the recovery step — a
+   one-line ellipsis hid both. Wrap them, bounded so the dock stays compact. */
+.df2-toast-dock .dt-toast--warning .dt-toast-message,
+.df2-toast-dock .dt-toast--error .dt-toast-message {
+  white-space: normal;
+  text-overflow: clip;
+  max-width: 420px;
+  max-height: 8.5em;
+  overflow-y: auto;
+}
 /* At <=1280 the chrome stacks as a flex column (D-BP-23); the dock becomes
    a full-width in-flow row of that column — a reserved lane inside the
    header band. An absolute overlay strip used to cover the content below

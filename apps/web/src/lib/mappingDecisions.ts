@@ -212,3 +212,33 @@ export function holdOutRowsAndContinue(
   });
   return { mappings: out, signed };
 }
+
+/**
+ * Re-apply a failed job's mapping targets after its source is re-picked.
+ *
+ * Picking the source again re-profiles it and the mapper proposes fresh
+ * targets; the job's own column → destination choices must win for the
+ * columns that still exist, and stay pending review — never silently
+ * replaced by name-identity proposals.
+ */
+export function reapplySeededTargets(
+  next: EditableMapping[],
+  seed: readonly EditableMapping[] | null | undefined,
+): EditableMapping[] {
+  if (!seed?.length || !next.length) return next;
+  const bySource = new Map(seed.map((m) => [m.source.trim().toLowerCase(), m]));
+  return next.map((m) => {
+    const s = bySource.get(m.source.trim().toLowerCase());
+    if (!s || isIntentionalOmit(m)) return m;
+    return {
+      ...m,
+      target: s.target,
+      destType: s.destType || (s.target === m.target ? m.destType : ""),
+      transform: s.transform ?? m.transform,
+      confidence: 1,
+      approved: false,
+      requiresReview: true,
+      reason: s.reason,
+    };
+  });
+}

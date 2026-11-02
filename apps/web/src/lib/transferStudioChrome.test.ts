@@ -468,7 +468,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(page, /businessRuleReportRef\.current/);
     assert.match(page, /mergeBusinessRules\(prev, businessRuleReportRef\.current/);
     assert.match(page, /stampCompiledWorkbookMappings/);
-    assert.match(page, /const carried = stampCompiledWorkbookMappings\(carryOperatorDecisions\(next, prior\)\)/);
+    assert.match(page, /const carried = stampCompiledWorkbookMappings\(\s*carryOperatorDecisions\(reapplySeededTargets\(next, seed\), prior\),?\s*\)/);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {

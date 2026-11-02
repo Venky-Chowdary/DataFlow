@@ -20,6 +20,7 @@ import {
   isGate8SampleVerified,
   isGate8WriterAckOnly,
   isGate8WritePassDestReadback,
+  isGate8CellFidelityUnproven,
 } from "./gate8Status";
 import type {
   Gate8Reconciliation,
@@ -226,6 +227,7 @@ export function Gate8ProofCard({
   const appendDelta = !preWrite && !sampleVerified && !keyedBatch && !lastStream && isGate8AppendDelta(report);
   const writerAck = !preWrite && !sampleVerified && !appendDelta && !keyedBatch && isGate8WriterAckOnly(report);
   const passed = Boolean(report.passed) && !preWrite && !writerAck;
+  const cellUnproven = !preWrite && !writerAck && isGate8CellFidelityUnproven(report);
   const simulationOk = Boolean(report.passed) && preWrite;
   const writerAckOk = Boolean(report.passed) && writerAck;
   const sourceRows = Number(report.source_rows ?? 0);
@@ -282,12 +284,12 @@ export function Gate8ProofCard({
     || Boolean(sampleError)
     || sampleSkipped;
 
-  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta && !keyedBatch && !lastStream;
+  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta && !keyedBatch && !lastStream && !cellUnproven;
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-fail")
-      : sampleVerified || identityUnproven || appendDelta || keyedBatch || lastStream
+      : sampleVerified || identityUnproven || appendDelta || keyedBatch || lastStream || cellUnproven
         ? "is-pending"
         : (fullChecksumPass ? "is-pass" : (passed ? "is-pending" : "is-fail"));
   const title = preWrite
@@ -308,6 +310,8 @@ export function Gate8ProofCard({
               ? "Append delta verified — whole-table checksums not comparable"
               : lastStream && passed
                 ? "Last stream checksum matches — not the whole job"
+              : cellUnproven && passed
+                ? "Rows counted — cell values not read back"
               : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
@@ -323,12 +327,14 @@ export function Gate8ProofCard({
               ? "Row count"
               : lastStream && passed
                 ? "Last stream"
+              : cellUnproven && passed
+                ? "Count only"
               : (fullChecksumPass ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
-      : identityUnproven || sampleVerified || ((appendDelta || keyedBatch || lastStream) && passed)
+      : identityUnproven || sampleVerified || ((appendDelta || keyedBatch || lastStream || cellUnproven) && passed)
         ? "is-pending"
         : (fullChecksumPass ? "is-ok" : "is-bad");
 

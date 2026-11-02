@@ -93,3 +93,25 @@ describe("Gate8ProofCard business rule checks", () => {
     assert.match(html, /Business rule uniq-order not verified: unsupported_destination/);
   });
 });
+
+describe("Gate8ProofCard file export", () => {
+  it("a file export with no cell read-back is never labeled Verified / Source and destination match", () => {
+    const html = renderToStaticMarkup(
+      <Gate8ProofCard
+        report={{
+          passed: true,
+          unproven: true,
+          skipped_readback: true,
+          migration_proven: false,
+          source_rows: 3,
+          target_rows: 3,
+          message: "File/object export wrote successfully — Gate-8 cell fidelity unproven (no destination cell read-back). Independent artifact record count is 3. Writer acknowledgement is diagnostic.",
+        }}
+      />,
+    );
+    assert.match(html, /Rows counted — cell values not read back/);
+    assert.match(html, /Count only/);
+    assert.doesNotMatch(html, /Source and destination match/);
+    assert.doesNotMatch(html, />Verified</);
+  });
+});

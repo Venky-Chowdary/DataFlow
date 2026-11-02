@@ -426,6 +426,37 @@ def _mask_endpoint_secrets(ep: dict | None) -> dict:
     return out
 
 
+def _endpoint_address(ep: dict) -> dict:
+    """Non-secret type/host/port/database of a stored endpoint.
+
+    Stored connection strings are ciphertext, so a client cannot match an
+    inline (MCP/API) endpoint to a saved connector without this projection.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    plain = _decrypt_endpoint_secrets(ep or {})
+    host = str(plain.get("host") or "")
+    try:
+        port = int(plain.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    database = str(plain.get("database") or "")
+    kind = str(plain.get("format") or plain.get("type") or plain.get("db_type") or "")
+    url = str(plain.get("connection_string") or "")
+    if "://" in url and not url.startswith("enc:"):
+        scheme, _, rest = url.partition("://")
+        netloc = rest.split("/", 1)[0].rsplit("@", 1)[-1].split(",", 1)[0]
+        try:
+            parts = urlsplit(f"http://{netloc}/{rest.split('/', 1)[1] if '/' in rest else ''}")
+            host = host or (parts.hostname or "")
+            port = port or (parts.port or 0)
+            database = database or unquote(parts.path.lstrip("/").split("/", 1)[0].split("?", 1)[0])
+        except ValueError:
+            pass
+        kind = kind or scheme.split("+", 1)[0]
+    return {"type": kind.lower(), "host": host.lower(), "port": port, "database": database}
+
+
 def sanitize_job_for_api(job: dict) -> dict:
     """Strip plaintext connector secrets from a job document before returning to clients."""
     import copy
@@ -433,10 +464,11 @@ def sanitize_job_for_api(job: dict) -> dict:
     out = copy.deepcopy(job or {})
     tr = out.get("transfer_request")
     if isinstance(tr, dict):
-        if isinstance(tr.get("source"), dict):
-            tr["source"] = _mask_endpoint_secrets(tr["source"])
-        if isinstance(tr.get("destination"), dict):
-            tr["destination"] = _mask_endpoint_secrets(tr["destination"])
+        for side in ("source", "destination"):
+            if isinstance(tr.get(side), dict):
+                address = _endpoint_address(tr[side])
+                tr[side] = _mask_endpoint_secrets(tr[side])
+                tr[side]["address"] = address
         out["transfer_request"] = tr
     _project_operator_quarantine(out)
     from src.ai.copilot.job_reads import job_lineage

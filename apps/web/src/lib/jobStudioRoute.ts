@@ -67,12 +67,20 @@ interface Address {
   database: string;
 }
 
-/** Host/port/database of an endpoint, from its fields or its (masked) URL. */
+function portOf(v: unknown): number {
+  return typeof v === "number" ? v : Number(text(v)) || 0;
+}
+
+/**
+ * Host/port/database of an endpoint: its fields, then the API's `address`
+ * projection (stored connection strings are ciphertext), then its masked URL.
+ */
 export function endpointAddress(ep: Endpoint): Address {
-  let type = normType(text(ep.format) || text(ep.type) || text(ep.db_type));
-  let host = text(ep.host);
-  let port = typeof ep.port === "number" ? ep.port : Number(text(ep.port)) || 0;
-  let database = text(ep.database);
+  const projected = (ep.address && typeof ep.address === "object" ? ep.address : {}) as Endpoint;
+  let type = normType(text(ep.format) || text(ep.type) || text(ep.db_type) || text(projected.type));
+  let host = text(ep.host) || text(projected.host);
+  let port = portOf(ep.port) || portOf(projected.port);
+  let database = text(ep.database) || text(projected.database);
   const url = text(ep.connection_string);
   if (url.includes("://")) {
     try {
@@ -135,7 +143,8 @@ function addressLabel(ep: Endpoint): string {
   return [a.type, where].filter(Boolean).join(" at ") || "the job's connection";
 }
 
-const isMasked = (url: string) => url.includes("****");
+/** A URL the browser cannot replay: masked password or vault ciphertext. */
+const isMasked = (url: string) => url.includes("****") || /^(enc:|sm:|byok:)/.test(url);
 
 export function planJobStudioRoute(job: unknown, connectors: readonly Connector[]): JobStudioRoutePlan {
   const tr = ((job as { transfer_request?: Endpoint } | null)?.transfer_request ?? {}) as Endpoint;

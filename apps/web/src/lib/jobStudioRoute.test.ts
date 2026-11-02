@@ -93,3 +93,40 @@ describe("matching rules", () => {
     assert.equal(matchSavedConnector({ format: "postgresql", host: "db.internal", database: "crm" }, [conn({})]).connector, undefined);
   });
 });
+
+describe("encrypted job connection strings (API address projection)", () => {
+  it("an inline source whose URL is vault ciphertext matches by the API's address projection", () => {
+    const plan = planJobStudioRoute(
+      job({
+        kind: "database", connection_string: "enc:v1:gAAAA-opaque", table: "qa_orders",
+        address: { type: "postgresql", host: "db.internal", port: 5432, database: "shop" },
+      }, { kind: "file_export", format: "csv" }),
+      [conn({ id: "other", database: "analytics" }), conn({ id: "pg1" })],
+    );
+    assert.equal(plan.source.kind === "connector" && plan.source.connectorId, "pg1");
+    assert.equal(plan.source.kind === "connector" && plan.source.table, "qa_orders");
+  });
+
+  it("an unmatched ciphertext source names its host and database in the warning", () => {
+    const plan = planJobStudioRoute(
+      job({
+        kind: "database", connection_string: "enc:v1:x",
+        address: { type: "postgresql", host: "db.internal", port: 5432, database: "nope" },
+      }, { kind: "file_export" }),
+      [conn({})],
+    );
+    assert.deepEqual(plan.source, { kind: "missing", reason: "unsaved_connection", label: "postgresql at db.internal/nope" });
+  });
+
+  it("a ciphertext destination URL is never replayed into the connection field", () => {
+    const plan = planJobStudioRoute(
+      job({ kind: "file", extra: { file_id: "f1" } }, {
+        kind: "database", connection_string: "enc:v1:x",
+        address: { type: "mysql", host: "m", port: 3306, database: "crm" },
+      }),
+      [],
+    );
+    assert.equal(plan.destination.kind === "database" && plan.destination.connectionString, "");
+    assert.equal(plan.destination.kind === "database" && plan.destination.missingLabel, "mysql at m/crm");
+  });
+});
