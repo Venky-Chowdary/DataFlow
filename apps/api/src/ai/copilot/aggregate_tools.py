@@ -1232,6 +1232,28 @@ def aggregate_connector_data(
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")
 
+    if metric_key == "count" and not (group_by or where or column or date_column):
+        try:
+            native = _native_object_count(conn, table)
+        except Exception as exc:  # noqa: BLE001 - reported, never a SQL fallback
+            return _tool_result(tool, success=False, error=f"Count failed: {str(exc)[:200]}")
+        if native is not None:
+            return _tool_result(
+                tool,
+                success=True,
+                output={
+                    "connector_id": cid,
+                    "connector_name": conn.get("name"),
+                    "type": ctype,
+                    "table": table,
+                    "metric": "count",
+                    "value": native,
+                    "basis": "engine_object_count",
+                    "exact": True,
+                    "read_only": True,
+                },
+            )
+
     try:
         columns = _introspect_columns(conn, table)
     except AmbiguousConnectorError as exc:
@@ -1819,6 +1841,52 @@ def _estimate_table_row_counts(
     return out
 
 
+def _native_object_count(conn: dict[str, Any], name: str) -> int | None:
+    """Objects in a vector collection/class, from the engine's own count.
+
+    Qdrant ``points_count`` and Weaviate ``Aggregate { meta { count } }``
+    count stored objects (chunks, if a layout split rows). Vector engines have
+    no SQL dialect, so the aggregation path refused them (D242). ``None`` for
+    every other engine; a failed native count raises.
+    """
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = resolve_driver_type(str(conn.get("type") or conn.get("format") or ""))
+    if driver not in {"qdrant", "weaviate"}:
+        return None
+    from src.transfer.adapters import resolve_connector_config
+
+    from .schema_tools import _endpoint_from_connector
+
+    cfg = resolve_connector_config(_endpoint_from_connector(conn))
+    if driver == "qdrant":
+        from connectors.qdrant_writer import _qdrant_points_count, qdrant_rest
+
+        session, base_url, hdrs = qdrant_rest(cfg)
+        resp = session.get(f"{base_url}/collections/{name}", headers=hdrs, timeout=15)
+        if resp.status_code == 404:
+            raise ValueError(f"Qdrant collection {name!r} does not exist")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Qdrant count failed: HTTP {resp.status_code}")
+        count = _qdrant_points_count(resp.json())
+    else:
+        from connectors import weaviate_writer as ww
+
+        base_url = ww._base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 8080),
+            bool(cfg.get("ssl", False)),
+            str(cfg.get("connection_string") or ""),
+        )
+        hdrs = ww._headers(str(cfg.get("api_key") or cfg.get("password") or ""))
+        count = ww._weaviate_aggregate_count(
+            ww._requests_session(), base_url, hdrs, ww._class_name(name)
+        )
+    if count is None:
+        raise RuntimeError(f"{driver} returned no object count for {name!r}")
+    return count
+
+
 def _direct_row_count(conn: dict[str, Any], name: str) -> int | None:
     """One ``SELECT COUNT(*)`` on the endpoint's session (PostgreSQL / MySQL).
 
@@ -1828,6 +1896,9 @@ def _direct_row_count(conn: dict[str, Any], name: str) -> int | None:
     counts them directly; other engines keep the aggregation path (``None``).
     A count that fails or is cancelled by its time budget raises.
     """
+    native = _native_object_count(conn, name)
+    if native is not None:
+        return native
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     from src.transfer.engine_family import family_or_kind
 
