@@ -66,6 +66,7 @@ def normalize_destination(dest: EndpointConfig, *, table_hint: str = "") -> Endp
     if kind == "file":
         if fmt in LIVE_DEST_FILE_FORMATS:
             dest.kind = "file_export"
+            dest.connector_id = None
             return dest
         raise ValueError(
             f"Destination kind 'file' with format {fmt or '(none)'!r} is not a "

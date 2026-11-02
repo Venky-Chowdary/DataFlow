@@ -125,6 +125,16 @@ describe("Transfer Studio chrome contracts", () => {
     assert.ok(css.includes(".df2-vd-xform {"), ".df2-vd-xform has no rule");
   });
 
+  it("Execute never sends a database connector or table for a file export", () => {
+    // QA job 6ae8e3ec62db5e71dd4d3507: DB → File export kept connector_id and
+    // the run was resolved as file_export/postgresql.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const run = page.slice(page.indexOf("const data = await runUniversalTransfer({"));
+    const body = run.slice(0, run.indexOf("destOutputPath:"));
+    assert.match(body, /\.\.\.\(destKindMode === "database" \? \{[\s\S]*destConnectorId: connectorId \|\| undefined,[\s\S]*\} : \{\}\)/);
+    assert.doesNotMatch(body.replace(/\.\.\.\(destKindMode === "database" \? \{[\s\S]*\} : \{\}\)/, ""), /destConnectorId|destTable:/);
+  });
+
   it("Map decides carriers from the transformed image, and the plan keeps source truth", () => {
     // Transform runs before Map by design: a column rounded to whole numbers is
     // no longer a lossy decimal, so mapping it against the raw carrier explains

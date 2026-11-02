@@ -5559,15 +5559,19 @@ export function TransferPage({
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
-        destSchema: destSchema || (destDriverType === "snowflake" ? "PUBLIC" : undefined),
-        destTable: destType !== "mongodb" ? targetCollection : undefined,
-        destCollection: destDriverType === "mongodb" ? targetCollection : targetCollection,
-        destConnectorId: connectorId || undefined,
-        destHost: !connectorId ? destHost : undefined,
-        destPort: !connectorId ? destPort : undefined,
-        destUsername: !connectorId ? destUsername || undefined : undefined,
-        destPassword: !connectorId ? destPassword || undefined : undefined,
-        destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
+        // A file export carries only format/folder/path — never the database
+        // destination's connector, table or credentials left in state.
+        ...(destKindMode === "database" ? {
+          destSchema: destSchema || (destDriverType === "snowflake" ? "PUBLIC" : undefined),
+          destTable: destType !== "mongodb" ? targetCollection : undefined,
+          destCollection: destDriverType === "mongodb" ? targetCollection : targetCollection,
+          destConnectorId: connectorId || undefined,
+          destHost: !connectorId ? destHost : undefined,
+          destPort: !connectorId ? destPort : undefined,
+          destUsername: !connectorId ? destUsername || undefined : undefined,
+          destPassword: !connectorId ? destPassword || undefined : undefined,
+          destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
+        } : {}),
         destOutputPath: destKindMode === "file_export" ? destOutputPath || undefined : undefined,
         destWarehouse:
           destDriverType === "snowflake"

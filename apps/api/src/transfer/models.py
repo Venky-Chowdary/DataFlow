@@ -42,6 +42,14 @@ class EndpointConfig:
     path_style: bool = False
     extra: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # A file export writes to the exports folder; it never dials a saved
+        # connector. A connector_id left over from a database destination would
+        # otherwise be expanded and overwrite the export format with the
+        # connector's driver type (file_export/postgresql).
+        if (self.kind or "").strip().lower() == "file_export" and self.connector_id:
+            self.connector_id = None
+
     @classmethod
     def from_dict(cls, kind: str, data: dict | None) -> "EndpointConfig":
         d = data or {}
