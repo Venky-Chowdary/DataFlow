@@ -1119,4 +1119,10 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(theater, /not platform-wide/);
     assert.doesNotMatch(theater, /exactly-once for every route/);
   });
+
+  it("run summary labels count-only export evidence instead of a pending checksum", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    assert.match(theater, /isGate8CellFidelityUnproven\(recon\)\) return "Count only"/);
+    assert.match(theater, /Rows counted — cell values not read back/);
+  });
 });

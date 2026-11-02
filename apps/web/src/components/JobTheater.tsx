@@ -23,7 +23,7 @@ import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
-import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
+import { gate8AppendIdentity, isGate8AppendDelta, isGate8CellFidelityUnproven, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
@@ -1821,6 +1821,7 @@ export function JobTheaterView({
                   return `${id.destBefore.toLocaleString()} → ${id.destAfter.toLocaleString()}`;
                 }
               }
+              if (recon && isGate8CellFidelityUnproven(recon)) return "Count only";
               if (job.reconciliation?.target_checksum) {
                 return String(job.reconciliation.target_checksum).slice(0, 12);
               }
@@ -1830,6 +1831,9 @@ export function JobTheaterView({
           <small>
             {(() => {
               const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
+              if (recon && isGate8CellFidelityUnproven(recon)) {
+                return "Rows counted — cell values not read back";
+              }
               if (recon && isGate8KeyedBatch(recon) && recon.passed) {
                 return "This run’s keys verified — extra dest rows outside proof";
               }
