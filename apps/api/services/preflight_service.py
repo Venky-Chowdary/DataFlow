@@ -2013,6 +2013,38 @@ def run_file_preflight(
             )
     pii_hash_blocked = bool(pii_hash_gate and pii_hash_gate["status"] == "block")
 
+    # D243: execute refuses a pre-load recipe on a route that merges against
+    # stored history. Preflight must refuse the same recipe, not pass it green.
+    from services.multi_stream_plan import history_shape_refusal
+
+    shape_route_gate: dict[str, Any] | None = None
+    active_steps = [
+        s
+        for s in (shape_recipe or {}).get("steps") or []
+        if isinstance(s, dict) and s.get("enabled") is not False
+    ]
+    shape_route_refusal = (
+        history_shape_refusal(sync_mode)
+        if active_steps and sync_mode != "scd2"
+        else ""
+    )
+    if shape_route_refusal:
+        shape_route_gate = {
+            "id": "g_shape_route",
+            "status": "block",
+            "message": shape_route_refusal,
+            "duration_ms": 0,
+            "details": {"sync_mode": sync_mode, "kind": "shape_route"},
+        }
+        blockers.append(
+            {
+                "id": "g_shape_route",
+                "message": shape_route_refusal,
+                "details": dict(shape_route_gate["details"]),
+            }
+        )
+    shape_route_blocked = shape_route_gate is not None
+
     # Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER)
     # are decidable before the write. Screening a preview and letting the writer
     # discover row 431 is how a 1M-row load ends with zero rows committed and a
@@ -2267,6 +2299,7 @@ def run_file_preflight(
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
+        + ([shape_route_gate] if shape_route_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
@@ -2278,7 +2311,8 @@ def run_file_preflight(
         # would describe a different database's carriers.
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
-        and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked,
+        and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked
+        and not shape_route_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),

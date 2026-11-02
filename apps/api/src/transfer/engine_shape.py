@@ -139,12 +139,9 @@ def _shape_stream_refusal(
         return ""
     sync = (effective_sync or "").lower()
     if sync in ("cdc", "full_refresh_mirror", "mirror"):
-        return (
-            f"Transform (pre-load) is not applied on the {sync} route: it merges "
-            "each row against history already stored on the destination, which was "
-            "not written by this recipe. Remove the transform recipe for this sync "
-            "mode, or use full refresh / incremental append and transform on the read."
-        )
+        from services.multi_stream_plan import history_shape_refusal
+
+        return history_shape_refusal(sync)
     if sync == "scd2":
         # The scd2 step IS the history contract — it declares the business
         # key, tracked columns and stamp names the merge honours, so a recipe
