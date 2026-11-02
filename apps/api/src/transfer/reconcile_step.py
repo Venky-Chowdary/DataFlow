@@ -3448,6 +3448,7 @@ def _schema_state_evidence(
     cfg: dict[str, Any],
     schema: str,
     table: str,
+    mappings: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Constraints, indexes, nullability and defaults, compared catalog to catalog.
 
@@ -3495,7 +3496,21 @@ def _schema_state_evidence(
         dest_cfg=cfg,
         dest_schema=schema,
         dest_table=table,
+        column_map=_source_to_dest_column_map(mappings),
     )
+
+
+def _source_to_dest_column_map(mappings: list[dict] | None) -> dict[str, str]:
+    """Source column → destination column for the columns this run wrote."""
+    from services.mapping_constraints import write_mappings
+
+    out: dict[str, str] = {}
+    for m in write_mappings(mappings):
+        src = str(m.get("source") or "").strip()
+        dst = str(m.get("target") or "").strip()
+        if src and dst and src not in out:
+            out[src] = dst
+    return out
 
 
 def _source_foreign_keys(
@@ -6365,6 +6380,7 @@ def _run_reconciliation_impl(
             cfg=cfg,
             schema=str(schema or ""),
             table=str(table_name or ""),
+            mappings=mappings,
         )
         if schema_state:
             physical_state["schema_objects"] = schema_state

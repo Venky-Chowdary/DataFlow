@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 import sqlalchemy as sa
@@ -2524,10 +2524,74 @@ def _render(value: Any) -> str:
     return str(value)
 
 
+def _rename_index_key(key: str, rename: Mapping[str, str]) -> str:
+    """Rename the column in ``email``, ``email desc`` or ``email(10)``; leave expressions."""
+    head, sep, tail = str(key).partition(" ")
+    base, paren, rest = head.partition("(")
+    if paren and not base:
+        return str(key)
+    return rename.get(_fold(base), base) + paren + rest + sep + tail
+
+
+def source_state_in_destination_names(
+    state: PhysicalState, column_map: Mapping[str, str] | None
+) -> PhysicalState:
+    """Source catalog spelled in the destination's column names.
+
+    A mapping that writes ``id`` into ``order_id`` carries the key; comparing
+    catalogs by raw name would report the primary key and NOT NULL as absent.
+    Only column-bearing aspects are renamed. CHECK predicates stay as written,
+    so a renamed column inside a predicate still surfaces as a difference.
+    """
+    rename = {
+        _fold(src): _fold(dst)
+        for src, dst in (column_map or {}).items()
+        if str(src or "").strip() and str(dst or "").strip() and _fold(src) != _fold(dst)
+    }
+    if not rename or not state.found:
+        return state
+
+    def col(name: str) -> str:
+        return rename.get(_fold(name), name)
+
+    def cols(names: Iterable[str]) -> tuple[str, ...]:
+        return tuple(col(n) for n in names)
+
+    return replace(
+        state,
+        primary_key=cols(state.primary_key),
+        unique_constraints=frozenset(cols(u) for u in state.unique_constraints),
+        foreign_key_facts=tuple(
+            (cols(child), schema, table, parent)
+            for child, schema, table, parent in state.foreign_key_facts
+        ),
+        indexes=frozenset(
+            ix._replace(
+                keys=tuple(_rename_index_key(k, rename) for k in ix.keys),
+                include=cols(ix.include),
+            )
+            for ix in state.indexes
+        ),
+        not_null=frozenset(col(n) for n in state.not_null),
+        defaults=frozenset((col(c), expr) for c, expr in state.defaults),
+        uniqueness_proof=tuple(
+            (cols(columns), gap) for columns, gap in state.uniqueness_proof
+        ),
+    )
+
+
 def compare_physical_state(
-    source: PhysicalState, destination: PhysicalState
+    source: PhysicalState,
+    destination: PhysicalState,
+    *,
+    column_map: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Per-aspect verdict, fail-closed when either catalog could not be read."""
+    """Per-aspect verdict, fail-closed when either catalog could not be read.
+
+    ``column_map`` is source column → destination column for the run's
+    mappings; the source catalog is compared in destination names.
+    """
+    source = source_state_in_destination_names(source, column_map)
     for side, state in (("source", source), ("destination", destination)):
         if state.found:
             continue
@@ -2784,6 +2848,7 @@ def verify_physical_state(
     dest_cfg: dict[str, Any],
     dest_schema: str = "",
     dest_table: str,
+    column_map: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Read both catalogs independently and report what survived the move."""
     src = read_physical_state(
@@ -2792,4 +2857,4 @@ def verify_physical_state(
     dst = read_physical_state(
         dest_db_type, dest_cfg, schema=dest_schema, table=dest_table
     )
-    return compare_physical_state(src, dst)
+    return compare_physical_state(src, dst, column_map=column_map)
