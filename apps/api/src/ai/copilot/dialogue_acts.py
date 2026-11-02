@@ -152,6 +152,10 @@ _CLOCK_ASK = re.compile(
     r"|date\s+today"
     r"|what\s+(?:day|date)\s+is\s+(?:it|today)"
     r"|what\s+is\s+today"
+    r"|how\s+many\s+days\s+(?:are\s+)?(?:there\s+)?(?:in|left\s+in)\s+(?:this|the|current|next|last)\s+(?:month|year)"
+    r"|what\s+(?:time\s+is\s+it|is\s+the\s+time)"
+    r"|what\s+(?:day|date)\s+(?:will\s+it\s+be|was\s+it)\b.*\b(?:days?|weeks?)\b"
+    r"|what\s+(?:month|year)\s+is\s+it"
     r")\b",
     re.I,
 )
@@ -582,3 +586,37 @@ def last_user_text(history: list[dict] | None) -> str:
         if text:
             return text
     return ""
+
+
+# "can you create a transform" asked what Pilot can do and got the Transfer
+# Studio procedure. It is a capability ask with a real answer: the starter
+# templates, staged behind Confirm.
+_CREATE_TRANSFORM_CAPABILITY = re.compile(
+    r"^\s*(?:(?:can|could|will|would)\s+you|how\s+(?:do|can)\s+i|i\s+(?:want|need)\s+to|help\s+me)\s+"
+    r"(?:please\s+)?(?:create|make|build|add|set\s*up|setup|write|design)\s+"
+    r"(?:me\s+)?(?:(?:a|an|the|new|data)\s+)*"
+    r"(?:transform(?:ation)?s?|recipes?)(?:\s+recipes?)?(?:\s+for\s+me)?(?:\s+please)?\s*[.!?]*\s*$",
+    re.I,
+)
+_TRANSFORM_TEMPLATES_ASK = re.compile(
+    r"^\s*(?:what|which|list|show)\b.*\btemplates?\b|\btransform(?:ation)?\s+templates?\b",
+    re.I,
+)
+_DO_THAT = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|so|then)[,\s]+)?(?:can|could|will|would)\s+you\s+(?:please\s+)?"
+    r"(?:do|make|create|build)\s+(?:that|it|this|one)(?:\s+for\s+me)?(?:\s+(?:please|now))?\s*[?.!]*\s*$",
+    re.I,
+)
+
+
+def is_create_transform_capability_ask(message: str) -> bool:
+    return bool(_CREATE_TRANSFORM_CAPABILITY.match(message or ""))
+
+
+def is_transform_templates_ask(message: str) -> bool:
+    return bool(_TRANSFORM_TEMPLATES_ASK.search(message or ""))
+
+
+def asks_to_do_that(message: str) -> bool:
+    """ "can you do that?" — consent phrased as a question about the last offer."""
+    return bool(_DO_THAT.match(message or ""))

@@ -904,6 +904,7 @@ _PROPOSAL_TOOLS = frozenset(
         "create_schedule",
         "run_schedule_now",
         "create_connector",
+        "create_transform_recipe",
         "remediate_validation",
         *(LIFECYCLE_TOOL_NAMES - {"test_connector"}),
     }
@@ -1820,6 +1821,19 @@ class DataPilotAgent:
             })
             return
 
+        if tr.name == "create_transform_recipe":
+            turn.pending_actions.append({
+                "id": f"create_transform_recipe:{out.get('ack_id') or len(turn.pending_actions)}",
+                "type": "create_transform_recipe",
+                "label": out.get("label") or "Create transform",
+                "risk": "mutate",
+                "payload": {
+                    "ack_id": out.get("ack_id"),
+                    "preview": out.get("preview") or {},
+                },
+            })
+            return
+
         if tr.name == "create_connector":
             turn.pending_actions.append({
                 "id": f"create_connector:{out.get('ack_id') or len(turn.pending_actions)}",
@@ -2213,6 +2227,19 @@ Draft answer:
         return compose_confirm_is_yours_response(proposal.label)
 
     def _plan_with_memory(
+        self,
+        message: str,
+        data_context: dict | None,
+        history: list[dict] | None = None,
+    ) -> list[tuple[str, dict]]:
+        """Plan this turn, then reroute status asks the router misread as data reads."""
+        from .workspace_intents import ground_plan
+
+        return ground_plan(
+            message, self._plan_from_memory(message, data_context, history), history
+        )
+
+    def _plan_from_memory(
         self,
         message: str,
         data_context: dict | None,
@@ -2773,18 +2800,38 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
             return compose_schedule_setup_response(ctx)
 
+        from .dialogue_acts import (
+            asks_to_do_that,
+            is_create_transform_capability_ask,
+            is_transform_templates_ask,
+            last_user_text,
+        )
+        from .followup import looks_like_consent
+
+        _continues_transform_ask = (
+            asks_to_do_that(message) or looks_like_consent(message)
+        ) and is_create_transform_capability_ask(last_user_text(history))
+        if (
+            is_create_transform_capability_ask(message)
+            or is_transform_templates_ask(message)
+            or _continues_transform_ask
+        ):
+            from .conversation_composer import compose_transform_capability_response
+
+            return compose_transform_capability_response(followup=_continues_transform_ask)
+
         if is_calendar_question(message):
             from .conversation_composer import compose_calendar, compose_calendar_response
             from src.ai.first_party.context_pack import pack_from_workspace
             from src.ai.first_party.engine import speak_with_lm
 
-            draft = compose_calendar(ctx)
+            draft = compose_calendar(ctx, message)
             spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
             if spoken:
-                resp = compose_calendar_response(ctx)
+                resp = compose_calendar_response(ctx, message)
                 resp.answer = spoken
                 return resp
-            return compose_calendar_response(ctx)
+            return compose_calendar_response(ctx, message)
         if is_create_connection_capability_ask(message):
             from .conversation_composer import (
                 compose_create_connection_capability,

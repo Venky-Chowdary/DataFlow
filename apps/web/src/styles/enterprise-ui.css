@@ -2033,7 +2033,7 @@
   }
   .df2-journals-drawer .df2-table td[data-label]::before {
     content: attr(data-label) " · ";
-    color: var(--df-text-muted, #64748b);
+    color: var(--df-text-muted);
     font-size: 12px;
   }
   .df2-journals-drawer .df2-journals-actions {

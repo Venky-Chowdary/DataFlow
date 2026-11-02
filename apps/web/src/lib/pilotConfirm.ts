@@ -18,6 +18,13 @@ export type PilotConfirmOutcome =
       connector_id?: string;
     }
   | {
+      kind: "create_transform_recipe";
+      idempotent: boolean;
+      recipe_id: string;
+      name: string;
+      steps: number;
+    }
+  | {
       kind: "start_transfer";
       idempotent: boolean;
       job_id: string;
@@ -150,6 +157,27 @@ export async function confirmPilotPending(
       remediation_kind: res.remediation_kind,
       run_id: res.run_id || undefined,
       label: res.label || undefined,
+    };
+  }
+
+  if (action.type === "create_transform_recipe") {
+    const ackId = String(payload.ack_id || "");
+    if (!ackId) {
+      throw new Error(
+        "This approval is missing a server ack_id. Ask Pilot to create the transform again.",
+      );
+    }
+    const res = await confirmCopilotAction({
+      ack_id: ackId,
+      actor: "pilot-ui",
+      reason: "operator confirmed create_transform_recipe",
+    });
+    return {
+      kind: "create_transform_recipe",
+      idempotent: Boolean(res.idempotent),
+      recipe_id: String(res.recipe_id || ""),
+      name: String(res.name || preview.name || "Transform"),
+      steps: Number(res.steps || preview.steps || 0),
     };
   }
 

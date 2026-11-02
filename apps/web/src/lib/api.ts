@@ -1267,6 +1267,9 @@ export async function confirmCopilotAction(payload: {
   /** create_connector */
   connector_id?: string;
   name?: string;
+  /** create_transform_recipe */
+  recipe_id?: string;
+  steps?: number;
   type?: string;
   /** start_transfer / run_schedule */
   job_id?: string;

@@ -734,6 +734,32 @@ async def copilot_confirm(
         )
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
+    if kind == "create_transform_recipe":
+        from services.effective_role import workspace_id_from_request_headers
+        from services.transform_library import get_transform_library
+        from services.transform_recipe_templates import clone_template
+
+        recipe = clone_template(
+            str(payload.get("template_key") or ""),
+            workspace_id=workspace_id_from_request_headers(http_request.headers) or "",
+        )
+        if recipe is None:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=404, detail="Transform template not found")
+        try:
+            saved = get_transform_library().save(recipe)
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to save transform: {exc}") from exc
+        result = {"recipe_id": saved.id, "name": saved.name, "steps": len(saved.steps)}
+        ledger.finalize(
+            ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
     if kind == "run_schedule":
         schedule_id = str(payload.get("schedule_id") or "").strip()
         if not schedule_id:

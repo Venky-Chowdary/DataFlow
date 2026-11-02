@@ -257,9 +257,57 @@ def compose_repair_prompt(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def compose_calendar(ctx: dict[str, Any] | None = None) -> str:
+def _calendar_fact(message: str, now: datetime) -> str:
+    """The specific clock fact asked for (days in month, time, date math)."""
+    import calendar
+    import re as _re
+    from datetime import timedelta
+
+    text = (message or "").lower()
+    m = _re.search(r"days\s+(?:are\s+)?(?:there\s+)?(in|left\s+in)\s+(?:this|the|current|(next|last))\s+(month|year)", text)
+    if m:
+        year, month = now.year, now.month
+        if m.group(3) == "month":
+            if m.group(2) == "next":
+                year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+            elif m.group(2) == "last":
+                year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+            total = calendar.monthrange(year, month)[1]
+            label = datetime(year, month, 1).strftime("%B %Y")
+            if m.group(1).startswith("left"):
+                return f"**{total - now.day}** days are left in {label} after today ({total} in total)."
+            return f"{label} has **{total}** days."
+        if m.group(2) == "next":
+            year += 1
+        elif m.group(2) == "last":
+            year -= 1
+        total = 366 if calendar.isleap(year) else 365
+        if m.group(1).startswith("left"):
+            left = (datetime(year, 12, 31, tzinfo=now.tzinfo) - now).days
+            return f"**{left}** days are left in {year} after today ({total} in total)."
+        return f"{year} has **{total}** days."
+    m = _re.search(r"(\d+)\s+(days?|weeks?)\s+(from\s+(?:now|today)|ago|later|before)", text)
+    if m:
+        n = int(m.group(1)) * (7 if m.group(2).startswith("week") else 1)
+        sign = -1 if m.group(3) in ("ago", "before") else 1
+        target = now + timedelta(days=sign * n)
+        return f"{m.group(1)} {m.group(2)} {m.group(3)} is **{target.strftime('%A, %d %B %Y')}** (UTC)."
+    if _re.search(r"\btime\b", text):
+        return f"It is **{now.strftime('%H:%M')} UTC** on {now.strftime('%A, %d %B %Y')}."
+    if _re.search(r"what\s+month", text):
+        return f"It is **{now.strftime('%B %Y')}**."
+    if _re.search(r"what\s+year", text):
+        return f"It is **{now.year}**."
+    return ""
+
+
+def compose_calendar(ctx: dict[str, Any] | None = None, message: str = "") -> str:
     """Answer a clock ask. Never retrieve DATE-type or transform docs."""
-    spoken = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
+    now = datetime.now(timezone.utc)
+    fact = _calendar_fact(message, now)
+    if fact:
+        return fact
+    spoken = now.strftime("%A, %d %B %Y")
     ctx = ctx or {}
     n_conn = len(ctx.get("connectors") or [])
     n_jobs = len(ctx.get("recent_jobs") or [])
@@ -275,9 +323,9 @@ def compose_calendar(ctx: dict[str, Any] | None = None) -> str:
     )
 
 
-def compose_calendar_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+def compose_calendar_response(ctx: dict[str, Any] | None = None, message: str = "") -> CopilotResponse:
     return CopilotResponse(
-        answer=compose_calendar(ctx),
+        answer=compose_calendar(ctx, message),
         intent="greeting",
         confidence=0.9,
         method="pilot_conversation",
@@ -908,3 +956,30 @@ def _clip(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     return text[: n - 1] + "…"
+
+
+def compose_transform_capability_response(*, followup: bool = False) -> CopilotResponse:
+    """What "can you create a transform" can actually get: a starter, staged behind Confirm."""
+    from services.transform_recipe_templates import list_templates
+
+    templates = list_templates()
+    lead = (
+        "Yes — tell me which starter and I will stage it:"
+        if followup
+        else "Yes. I can create a transform recipe from one of these starter templates:"
+    )
+    lines = [lead]
+    lines += [f"{i}. **{t['name']}** — {t['description']}" for i, t in enumerate(templates, 1)]
+    lines.append(
+        "Say e.g. *create the Dedupe Keep Latest transform*. I stage it and nothing is "
+        "saved until you press **Confirm**. The recipe then appears in "
+        "**Operations → Transforms**, and you attach it at the **Transform** step of a transfer."
+    )
+    return CopilotResponse(
+        answer="\n".join(lines),
+        intent="transform_help",
+        confidence=0.88,
+        method="pilot_conversation",
+        reasoning="Transform capability — real starter templates, Confirm-gated create",
+        suggested_prompts=[f"Create the {t['name']} transform" for t in templates[:3]],
+    )

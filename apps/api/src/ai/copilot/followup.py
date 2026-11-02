@@ -1470,7 +1470,9 @@ def looks_like_consent(message: str) -> bool:
         return False
     if text in _BARE_CONSENT:
         return True
-    return bool(_CONSENT_RE.match(text))
+    from .dialogue_acts import asks_to_do_that
+
+    return bool(_CONSENT_RE.match(text)) or asks_to_do_that(text)
 
 
 def looks_like_abandonment(message: str) -> bool:

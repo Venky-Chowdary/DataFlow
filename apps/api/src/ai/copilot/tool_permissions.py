@@ -87,6 +87,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "start_transfer": (Permission.JOB_RUN, MUTATE),
     "start_dataset_transfer": (Permission.JOB_RUN, MUTATE),
     "create_connector": (Permission.CONNECTOR_WRITE, MUTATE),
+    "create_transform_recipe": (Permission.CONNECTOR_WRITE, MUTATE),
     "run_schedule_now": (Permission.SCHEDULE_MANAGE, MUTATE),
     "create_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
     # One permission cannot cover every ack kind (an operator may confirm a
@@ -130,6 +131,7 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "start_transfer": Permission.JOB_RUN,
     "sync_now": Permission.JOB_RUN,
     "create_connector": Permission.CONNECTOR_WRITE,
+    "create_transform_recipe": Permission.CONNECTOR_WRITE,
     "run_schedule": Permission.SCHEDULE_MANAGE,
     "create_schedule": Permission.SCHEDULE_MANAGE,
     "cancel_job": Permission.JOB_MANAGE,

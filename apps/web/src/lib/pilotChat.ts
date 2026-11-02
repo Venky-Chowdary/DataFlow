@@ -237,6 +237,18 @@ export async function runPilotConfirm(
     return "cleared";
   }
 
+  if (action.type === "create_transform_recipe") {
+    const res = await confirmPilotPending(action);
+    if (res.kind !== "create_transform_recipe") throw new Error("Unexpected confirm result");
+    onNavigate?.("transforms");
+    toast({
+      title: res.idempotent ? "Transform already created" : "Transform created",
+      message: `“${res.name}” (${res.steps} steps) is ready in Transforms.`,
+      tone: "success",
+    });
+    return "cleared";
+  }
+
   if (action.type === "create_connector") {
     const res = await confirmPilotPending(action);
     if (res.kind !== "create_connector") throw new Error("Unexpected confirm result");

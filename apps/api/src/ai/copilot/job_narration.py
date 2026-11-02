@@ -63,6 +63,29 @@ def narrate_jobs(output: dict, message: str | None) -> str:
         j for j in jobs if str(j.get("status") or "").lower() in FAILED_STATUSES
     ]
 
+    from .workspace_intents import job_status_asked
+
+    asked = job_status_asked(message or "")
+    if asked and asked not in FAILED_STATUSES:
+        canon = {"canceled": "cancelled", "success": "completed", "succeeded": "completed"}
+
+        def _norm(s: object) -> str:
+            v = str(s or "").lower()
+            return canon.get(v, v)
+
+        here = [j for j in jobs if _norm(j.get("status")) == asked]
+        counted = sum(int(n or 0) for s, n in status_counts.items() if _norm(s) == asked)
+        counted = counted or len(here)
+        if not counted:
+            return f"None of your **{total:,}** job(s) are {asked}."
+        verb = "are" if asked in {"running", "queued", "pending"} else "were"
+        lines = [f"**{counted:,}** of your **{total:,}** job(s) {verb} {asked}:"]
+        lines += [_bullet(j) for j in here[:_SHOW_LIMIT]]
+        note = _window_note(min(len(here), _SHOW_LIMIT), counted)
+        if note:
+            lines.append(note)
+        return "\n".join(lines)
+
     if any(w in (message or "").lower() for w in _FAILURE_WORDS):
         if failed_total or failed_here:
             counted = failed_total or len(failed_here)

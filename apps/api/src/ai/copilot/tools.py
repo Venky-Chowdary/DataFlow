@@ -328,6 +328,19 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "create_transform_recipe",
+        "description": (
+            "Stage a transform recipe cloned from a starter template "
+            "(standardise-email-hash-pii, trim-title-case-names, safe-cast-numerics, "
+            "dedupe-keep-latest, scd2-history). Nothing is saved until the operator confirms."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"template_key": {"type": "string"}},
+            "required": ["template_key"],
+        },
+    },
+    {
         "name": "list_jobs",
         "description": (
             "List recent transfer jobs with status, IDs, and record counts. "
@@ -1656,6 +1669,7 @@ TOOL_FAMILIES: list[dict] = [
             "open_schedule",
             "start_transfer_studio",
             "create_connector",
+            "create_transform_recipe",
             "list_connectors",
             "cancel_job",
             "retry_job",
@@ -1829,6 +1843,7 @@ class DataPilotTools:
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
             "create_connector": self._create_connector,
+            "create_transform_recipe": self._create_transform_recipe,
             "confirm_action": self._confirm_action,
             "list_jobs": self._list_jobs,
             "get_job": self._get_job,
@@ -2435,6 +2450,47 @@ class DataPilotTools:
                 "ack_id": ack_id,
                 # Secrets stay on the server ledger — client only gets preview + ack_id.
                 "preview": safe_preview,
+            },
+        )
+
+    def _create_transform_recipe(self, template_key: str = "") -> ToolResult:
+        from services.transform_recipe_templates import TEMPLATES, list_templates
+
+        key = str(template_key or "").strip()
+        spec = TEMPLATES.get(key)
+        if spec is None:
+            names = ", ".join(t["name"] for t in list_templates())
+            return ToolResult(
+                name="create_transform_recipe",
+                success=False,
+                output={"templates": list_templates()},
+                error=f"Pick a starter template: {names}.",
+            )
+        preview = {
+            "template": key,
+            "name": spec["name"],
+            "description": spec["description"],
+            "steps": len(spec.get("steps") or []),
+            "input_columns": list(spec.get("input_columns") or []),
+            "output_columns": list(spec.get("output_columns") or []),
+        }
+        from .ack_ledger import get_ack_ledger
+
+        ack_id = get_ack_ledger().put(
+            kind="create_transform_recipe",
+            payload={"template_key": key},
+            preview=preview,
+        )
+        return ToolResult(
+            name="create_transform_recipe",
+            success=True,
+            output={
+                "action": "create_transform_recipe",
+                "label": f"Create transform “{spec['name']}”",
+                "risk": "mutate",
+                "requires_confirm": True,
+                "ack_id": ack_id,
+                "preview": preview,
             },
         )
 
@@ -6838,6 +6894,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Clock asks must not retrieve DATE-type / transform docs.
     if is_calendar_question(message):
         return []
+    from .workspace_intents import match_transform_template
+
+    _template = match_transform_template(message)
+    if _template:
+        return [("create_transform_recipe", {"template_key": _template})]
     # Creative writing has no documentation to cite, and retrieving one anyway
     # presented an Iceberg passage as the answer to "write me a poem about data".
     if asks_for_creative_writing(message):
