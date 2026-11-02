@@ -104,7 +104,10 @@ def test_http_dlq_does_not_name_sibling_workspace_events(client):
     assert "job-a" not in listed_b.text
 
 
-def test_http_dlq_refuses_workspace_caller_is_not_member_of(client):
+def test_http_dlq_refuses_workspace_caller_is_not_member_of(client, monkeypatch):
+    # Auth off means the single local operator sees everything (D154); the
+    # refusal is for a restricted (authenticated, non-admin) caller.
+    from services import tenant_scope
     own = _member_workspace("Acme")
     foreign = _foreign_workspace("Globex")
     dlq.append_dlq_event(
@@ -113,6 +116,17 @@ def test_http_dlq_refuses_workspace_caller_is_not_member_of(client):
         rows=5,
         workspace_id=foreign,
         details={"rejected_details": [{"ssn": "globex-secret-row"}]},
+    )
+
+    monkeypatch.setattr(
+        tenant_scope,
+        "_base_scope",
+        lambda _request: tenant_scope.TenantScope(
+            actor="member@acme.example",
+            unrestricted=False,
+            enforced=False,
+            memberships=((own, "editor"),),
+        ),
     )
 
     denied = client.get("/api/v1/ops/dlq?limit=50", headers={"X-Workspace-Id": foreign})

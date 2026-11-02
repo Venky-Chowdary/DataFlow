@@ -28,6 +28,7 @@ import pytest
 #: tool -> (method, concrete path of the REST route doing the same thing)
 REST_TWIN: dict[str, tuple[str, str]] = {
     "list_datasets": ("GET", "/api/v1/copilot/datasets"),
+    "create_transform_recipe": ("POST", "/api/v1/transform-library/templates/dedupe/clone"),
     "list_connectors": ("GET", "/api/v1/connectors/saved"),
     "search_connectors": ("GET", "/api/v1/connectors/saved"),
     "list_connector_objects": ("POST", "/api/v1/query/schemas"),

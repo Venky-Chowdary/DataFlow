@@ -29,7 +29,10 @@ _ADMIN_PASSWORD = "Bootstrap-Admin-2026"
 @pytest.fixture
 def scoped_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
-    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    # Service state lives apart from the tenants' SQLite files: the connector
+    # policy refuses a database file inside the service data directory.
+    (tmp_path / "state").mkdir()
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
     monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
     monkeypatch.delenv("DATAFLOW_REQUIRE_WORKSPACE", raising=False)

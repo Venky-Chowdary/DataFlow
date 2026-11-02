@@ -102,7 +102,10 @@ def test_flag_off_keeps_today_behaviour_and_audits_what_it_would_refuse(
     assert {e["details"]["kind"] for e in events} == {"sqlite"}
     assert events[1]["details"]["path"] == str(Path(off_volume).resolve())
     assert events[1]["details"]["would_be_root"] == str(production.resolve())
-    assert events[1]["details"]["flag"] == "DATAFLOW_CONFINE_LOCAL_FILES"
+    # Audit rows name the setting, not the server variable (would_apply_audit).
+    from services.would_apply_audit import setting_name
+
+    assert events[1]["details"]["flag"] == setting_name("DATAFLOW_CONFINE_LOCAL_FILES")
 
 
 def test_flag_off_still_refuses_service_data_internals_and_honours_explicit_roots(

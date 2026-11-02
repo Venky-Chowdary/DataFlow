@@ -48,6 +48,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `compare_datasets` | `workspace.read` | `read` |
 | `confirm_action` | `workspace.read` | `read` |
 | `create_connector` | `connector.write` | `mutate` |
+| `create_transform_recipe` | `connector.write` | `mutate` |
 | `create_schedule` | `schedule.manage` | `mutate` |
 | `delete_connector` | `connector.delete` | `mutate` |
 | `delete_schedule` | `schedule.manage` | `mutate` |

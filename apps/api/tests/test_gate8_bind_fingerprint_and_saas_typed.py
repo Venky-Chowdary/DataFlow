@@ -120,7 +120,10 @@ def test_saas_catalog_stays_planned_not_sku():
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
         assert row["transfer_ready"] is False, brand
-        assert row["certification_tier"] == "planned", brand
+        # SDK sources proven only on synthetic fixtures are a beta source tier,
+        # never a production SKU and never a destination.
+        assert row["certification_tier"] in {"planned", "source_only"}, brand
+        assert row.get("dest_ready") is not True, brand
 
     # Stripe earned an incremental ``created`` cursor SKU as a *source* only
     # (see test_catalog_honesty.test_dedicated_saas_drivers_activation_and_

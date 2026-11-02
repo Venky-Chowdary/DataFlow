@@ -591,6 +591,23 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
                 str(rec["id"]).ljust(id_w) + str(rec["amount"]).ljust(amt_w)
             )
         return ("\n".join(lines) + "\n").encode(), "data.fwf"
+    if fmt == "sqlite":
+        import sqlite3
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "data.sqlite"
+            conn = sqlite3.connect(db_file)
+            try:
+                conn.execute("CREATE TABLE records (id TEXT PRIMARY KEY, amount TEXT)")
+                conn.executemany(
+                    "INSERT INTO records (id, amount) VALUES (?, ?)",
+                    [(str(rec["id"]), str(rec["amount"])) for rec in RECORDS],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return db_file.read_bytes(), "data.sqlite"
     raise ValueError(f"Unsupported file format: {fmt}")
 
 

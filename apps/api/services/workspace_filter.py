@@ -43,6 +43,18 @@ class WorkspaceFilter:
         ws = norm_workspace_id(workspace_id)
         return cls(frozenset({ws}), False) if ws else cls(frozenset(), True)
 
+    def intersect(self, other: "WorkspaceFilter | None") -> "WorkspaceFilter":
+        """Rows both filters allow; ``None`` (system scope) narrows nothing."""
+        if other is None:
+            return self
+        if self.workspace_ids is None:
+            ids = other.workspace_ids
+        elif other.workspace_ids is None:
+            ids = self.workspace_ids
+        else:
+            ids = self.workspace_ids & other.workspace_ids
+        return WorkspaceFilter(ids, self.include_unscoped and other.include_unscoped)
+
     @property
     def is_everything(self) -> bool:
         return self.workspace_ids is None and self.include_unscoped

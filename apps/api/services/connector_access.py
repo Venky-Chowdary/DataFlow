@@ -14,6 +14,11 @@ deployment, which has no identity to scope by.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.workspace_filter import WorkspaceFilter
+
 import contextlib
 import contextvars
 import logging
@@ -69,6 +74,30 @@ class ConnectorCaller:
             self._header_readable = self._can_read(ws)
         return ws if self._header_readable else ""
 
+    def workspace_filter(self) -> "WorkspaceFilter | None":
+        """The store-side filter equivalent to :meth:`may_access` reads (None = all)."""
+        from services.team_store import list_memberships_for_user, require_workspace_isolation
+        from services.workspace_filter import WorkspaceFilter
+
+        if self.platform_admin:
+            return None
+        legacy = not require_workspace_isolation()
+        requested = (self.requested_workspace_id or "").strip()
+        if requested:
+            if not self.authorized_workspace_id():
+                return WorkspaceFilter.nothing()
+            return WorkspaceFilter(frozenset({requested}), legacy)
+        try:
+            members = frozenset(
+                str(m.get("workspace_id") or "").strip()
+                for m in list_memberships_for_user(self.actor)
+                if str(m.get("workspace_id") or "").strip()
+            )
+        except Exception as exc:
+            logger.warning("membership lookup failed closed: %s", type(exc).__name__)
+            return WorkspaceFilter.nothing()
+        return WorkspaceFilter(members, legacy)
+
     def may_access(self, resource_workspace_id: str | None, *, write: bool = False) -> bool:
         if self.platform_admin:
             return True
@@ -98,13 +127,33 @@ def current_caller() -> ConnectorCaller | None:
 
 @contextlib.contextmanager
 def bind_connector_caller(caller: ConnectorCaller | None) -> Iterator[None]:
-    """Bind ``caller`` for connector resolution; ``None`` keeps the current binding."""
+    """Bind ``caller`` for connector resolution; ``None`` keeps the current binding.
+
+    Stores consult the bound workspace filter (``services.workspace_filter``),
+    so the caller's scope is bound there too, intersected with any request
+    scope already bound — binding a caller can only narrow what is visible.
+    """
     if caller is None:
         yield
         return
+    from services.workspace_filter import (
+        bound_workspace_filter,
+        current_actor,
+        current_workspace_filter,
+        current_workspace_stamp,
+    )
+
+    current = current_workspace_filter()
+    narrowed = caller.workspace_filter()
+    combined = current if narrowed is None else narrowed.intersect(current)
     token = _CALLER.set(caller)
     try:
-        yield
+        with bound_workspace_filter(
+            combined,
+            stamp=current_workspace_stamp() or caller.authorized_workspace_id(),
+            actor=current_actor() or caller.actor,
+        ):
+            yield
     finally:
         _CALLER.reset(token)
 

@@ -538,7 +538,19 @@ def draft_client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.delenv("DATAFLOW_REQUIRE_WORKSPACE", raising=False)
     members = {"ws-acme", "ws-mallory"}
     monkeypatch.setattr(access, "can_read_workspace", lambda ws, _email: not ws or ws in members)
-    monkeypatch.setattr(access, "can_write_workspace", lambda ws, _email: not ws or ws in members)
+    # Writes resolve through the tenant scope: a restricted member of both.
+    import services.tenant_scope as tenant_scope
+
+    monkeypatch.setattr(
+        tenant_scope,
+        "_base_scope",
+        lambda _request: tenant_scope.TenantScope(
+            actor="mallory@example.com",
+            unrestricted=False,
+            enforced=tenant_scope.require_workspace_isolation(),
+            memberships=(("ws-mallory", "editor"), ("ws-acme", "editor")),
+        ),
+    )
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
     return TestClient(app)
@@ -592,7 +604,13 @@ def test_a_draft_in_a_workspace_the_caller_is_not_in_is_refused(draft_client):
     assert res.status_code == 403
 
 
-def test_an_unscoped_draft_request_is_refused_under_workspace_isolation(draft_client, monkeypatch):
+def test_an_unscoped_draft_request_lands_in_the_default_workspace_under_isolation(
+    draft_client, monkeypatch
+):
+    # D154: a header-less write lands in the caller's default workspace, never
+    # an unscoped row other tenants could read.
     monkeypatch.setenv("DATAFLOW_REQUIRE_WORKSPACE", "1")
-    assert _put_draft(draft_client, "", "email").status_code == 400
-    assert _get_draft(draft_client, "").status_code == 400
+    assert _put_draft(draft_client, "", "email").status_code == 200
+    stored = _get_draft(draft_client, "ws-mallory").json()["draft"]
+    assert stored["workspace_id"] == "ws-mallory"
+    assert _get_draft(draft_client, "ws-acme").json()["draft"] is None

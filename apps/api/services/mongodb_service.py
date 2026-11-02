@@ -242,6 +242,16 @@ def job_workspace_filter(
     return WorkspaceFilter.only(workspace_id)
 
 
+
+def _bound_connector_query(query: dict) -> dict:
+    """``query`` limited to the workspaces the bound request may touch."""
+    from services.workspace_filter import current_workspace_filter
+
+    scope = current_workspace_filter()
+    if scope is None or scope.is_everything:
+        return query
+    return {"$and": [query, scope.mongo_query()]}
+
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
 
@@ -417,7 +427,7 @@ class MongoDBService:
         updates = _encrypt_connector_secrets(updates)
         updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
-            {"$or": clauses},
+            _bound_connector_query({"$or": clauses}),
             {"$set": updates}
         )
         return result.matched_count > 0
@@ -432,7 +442,7 @@ class MongoDBService:
         if oid:
             clauses.insert(0, {"_id": oid})
 
-        result = collection.delete_one({"$or": clauses})
+        result = collection.delete_one(_bound_connector_query({"$or": clauses}))
         return result.deleted_count > 0
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1545,13 +1555,16 @@ class MemoryMongoDBService:
 
     def update_connector(self, connector_id: str, updates: dict) -> bool:
         rec = self._connectors.get(connector_id)
-        if not rec:
+        if not rec or not bound_allows(rec.get("workspace_id")):
             return False
         rec.update(_encrypt_connector_secrets(updates))
         rec["updated_at"] = datetime.now(timezone.utc)
         return True
 
     def delete_connector(self, connector_id: str) -> bool:
+        rec = self._connectors.get(connector_id)
+        if rec is None or not bound_allows(rec.get("workspace_id")):
+            return False
         return self._connectors.pop(connector_id, None) is not None
 
     def insert_data(
