@@ -3485,8 +3485,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         blank_clause = ""
         if file_blank_nulls:
             word = "blank" if len(file_blank_nulls) == 1 else "blanks"
+            origin = "spreadsheet" if file_load else "source"
             blank_clause = (
-                f"; {len(file_blank_nulls)} spreadsheet {word} stored as SQL NULL"
+                f"; {len(file_blank_nulls)} {origin} {word} stored as SQL NULL"
             )
         return _pass(
             GateId.G8_RECONCILIATION,

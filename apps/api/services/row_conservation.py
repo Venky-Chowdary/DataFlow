@@ -2372,9 +2372,9 @@ def write_refused_ledger(
     if held:
         note += f" {held:,} source row(s) are held out with a named cell finding."
     if blanks:
-        word = "blank" if blanks == 1 else "blanks"
+        word = "blank cell" if blanks == 1 else "blank cells"
         note += (
-            f" {blanks:,} spreadsheet {word} on nullable typed columns are "
+            f" {blanks:,} {word} on nullable typed columns are "
             "recorded as SQL NULL (absence), not as a value coerced away."
         )
     if is_append_sync(sync_mode):
