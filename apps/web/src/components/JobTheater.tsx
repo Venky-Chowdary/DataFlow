@@ -42,6 +42,7 @@ import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
+import { ContinuityRecoveryForm, stripContinuityRecoveryProse } from "./transfer/ContinuityRecoveryForm";
 import { StagingRollbackPanel, stagingDiscardRecorded } from "./transfer/StagingRollbackPanel";
 import { useConfirm } from "./ui/ConfirmDialog";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
@@ -491,8 +492,6 @@ export function JobTheaterView({
   onOpenJob,
 }: JobTheaterViewProps) {
   const { toast } = useToast();
-  const [rebaselineReason, setRebaselineReason] = useState("");
-  const [rebaselining, setRebaselining] = useState(false);
   const { ask } = useConfirm();
   const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   const total = job.total_rows ?? 0;
@@ -576,7 +575,7 @@ export function JobTheaterView({
   const continuityControls = continuityFailure && Boolean(onRebaselineContinuity || onRebuildFullRefresh);
   const failureText = job.error || job.message || "The job stopped before completing. Review the event log below and re-run.";
   // The engine's recovery prose names API routes; when the controls below exist, they are the recovery.
-  const shownFailureText = continuityControls ? failureText.split(/\s+To recover:/)[0] : failureText;
+  const shownFailureText = continuityControls ? stripContinuityRecoveryProse(failureText) : failureText;
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
@@ -833,56 +832,12 @@ export function JobTheaterView({
                   : "Transfer failed")}
             </strong>
             <p>{shownFailureText}</p>
-            {continuityFailure && onRebaselineContinuity && (
-              <form
-                className="df2-theater-v3-continuity"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const reason = rebaselineReason.trim();
-                  if (!reason || rebaselining) return;
-                  void (async () => {
-                    setRebaselining(true);
-                    try {
-                      await onRebaselineContinuity(reason);
-                    } catch (err) {
-                      toast({
-                        title: continuityMissing ? "Could not accept the removal" : "Could not accept the destination",
-                        message: (err as Error).message,
-                        tone: "error",
-                      });
-                    } finally {
-                      setRebaselining(false);
-                    }
-                  })();
-                }}
-              >
-                <label className="df2-field-label" htmlFor={`df2-continuity-reason-${jobId}`}>
-                  {continuityMissing
-                    ? "Table removed on purpose? Record why — the next append then starts a new verified history."
-                    : "Destination changed on purpose? Record why — it becomes the new verified baseline."}
-                </label>
-                <div className="df2-theater-v3-continuity-row">
-                  <input
-                    id={`df2-continuity-reason-${jobId}`}
-                    className="df2-input"
-                    value={rebaselineReason}
-                    maxLength={2000}
-                    placeholder="Reason (written to the audit log), e.g. INC-142 table rebuilt by DBA"
-                    onChange={(e) => setRebaselineReason(e.target.value)}
-                  />
-                  <button
-                    type="submit"
-                    className="df2-btn df2-btn-primary"
-                    disabled={!rebaselineReason.trim() || rebaselining}
-                  >
-                    <DtIcon name="shield" size={16} />{" "}
-                    {rebaselining ? "Recording…" : continuityMissing ? "Accept removal" : "Accept current destination"}
-                  </button>
-                </div>
-                {!rebaselineReason.trim() && (
-                  <p className="df2-field-hint">A reason is required before the baseline can move.</p>
-                )}
-              </form>
+            {continuityControls && (
+              <ContinuityRecoveryForm
+                missing={continuityMissing}
+                onAccept={onRebaselineContinuity}
+                onRebuild={onRebuildFullRefresh}
+              />
             )}
             {failureHint?.fix && !continuityControls && (
               <p className="df2-theater-v3-fail-fix">
@@ -902,11 +857,6 @@ export function JobTheaterView({
                   : "Re-run from Validate or start a new transfer — Resume needs a committed checkpoint."}
             </p>
             <div className="df2-theater-v3-alert-actions">
-              {continuityFailure && onRebuildFullRefresh && (
-                <button type="button" className="df2-btn" onClick={onRebuildFullRefresh}>
-                  <DtIcon name="refresh" size={16} /> Rebuild with full refresh
-                </button>
-              )}
               {duplicateKeyFailure && onBackToMap && (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
                   <DtIcon name="layers" size={16} /> Open Map · set PK

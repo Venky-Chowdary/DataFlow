@@ -121,7 +121,7 @@ def test_validate_gate_matches_execute_verdict(tmp_path, fake_store):
     assert run().success
 
     ok = _gate(dest)
-    assert ok["id"] == "g21_append_continuity" and ok["status"] == PASS
+    assert ok["id"] == "g24_append_continuity" and ok["status"] == PASS
     assert ok["details"]["found_rows"] == 10 and ok["details"]["scope"] == "row_count_only"
     assert "re-verifies the full value digest" in ok["message"]
     assert _gate(dest, sync="full_refresh_overwrite") is None

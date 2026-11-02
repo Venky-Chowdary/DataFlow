@@ -102,7 +102,7 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "snapshot_mode=never without a stored watermark blocks at Validate (same kernel Execute uses). initial / when_needed snapshot. CDC remains at-least-once upsert.",
   },
   {
-    id: "g21_append_continuity",
+    id: "g24_append_continuity",
     label: "Append continuity",
     icon: "shield",
     rule: "An append lands on top of a previously verified table. Validate checks the table still exists with the row count the last verified run left; Execute re-verifies the full value digest before writing. A dropped or edited destination blocks until the operator accepts it (audited) or rebuilds with full refresh.",

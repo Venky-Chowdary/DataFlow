@@ -12,6 +12,7 @@ import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
+import { CONTINUITY_GATE_ID } from "../components/transfer/ContinuityRecoveryForm";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { countGateStatuses } from "../lib/preflightGates";
@@ -5017,6 +5018,10 @@ export function TransferPage({
       };
     }
     if (!preflight) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    // G24: the recovery form in Suggested fixes owns the decision; Map cannot fix a dropped or edited destination.
+    if (preflight.blockers.some((b) => b.id === CONTINUITY_GATE_ID)) {
+      return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    }
     const firstBlocker = buildDisplayBlockers(preflight, syncMode)[0];
     const blockerBlob = `${firstBlocker?.message || ""} ${firstBlocker?.impact || ""} ${JSON.stringify(firstBlocker?.source?.details || {})}`;
     // Encoding beats generic gate-rulebook review_mappings so rail matches dashboard.
@@ -5687,6 +5692,24 @@ export function TransferPage({
   };
 
   /** Explicit leave only — completed Gate-8 and fail/cancel recovery stay on Theater. */
+  const continuityRecoveryAvailable = destKindMode !== "file_export";
+  // Validate must re-run on the render that sees the new sync mode, not the stale closure.
+  const [revalidateAfterSyncChange, setRevalidateAfterSyncChange] = useState(false);
+  useEffect(() => {
+    if (!revalidateAfterSyncChange) return;
+    setRevalidateAfterSyncChange(false);
+    void executePreflight();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revalidateAfterSyncChange, syncMode]);
+  const acceptContinuityBaseline = async (reason: string) => {
+    const out = await rebaselineContinuity(buildDestinationEndpoint() as Record<string, unknown>, reason);
+    toast({
+      title: out.destination_missing ? "Removal accepted" : "Destination accepted",
+      message: "Recorded in the audit log. Validate re-runs against the new baseline.",
+      tone: "success",
+    });
+  };
+
   const leaveTheaterToValidate = useCallback(() => {
     setActiveJobId(null);
     setTransferring(false);
@@ -8041,6 +8064,14 @@ export function TransferPage({
               (m) => m.transform === "strip_controls",
             )}
             onQuarantineAndRerun={quarantineAndRerun}
+            onRebaselineContinuity={continuityRecoveryAvailable ? async (reason) => {
+              await acceptContinuityBaseline(reason);
+              void executePreflight();
+            } : undefined}
+            onRebuildFullRefresh={continuityRecoveryAvailable ? () => {
+              setSyncMode("full_refresh_overwrite");
+              setRevalidateAfterSyncChange(true);
+            } : undefined}
             badDataFixOpen={badDataFixOpen}
             onBadDataFixOpenChange={setBadDataFixOpen}
             cellPreview={cellPreview}
@@ -8449,19 +8480,14 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
-              onRebaselineContinuity={destKindMode === "file_export" ? undefined : async (reason) => {
-                const out = await rebaselineContinuity(buildDestinationEndpoint() as Record<string, unknown>, reason);
-                toast({
-                  title: out.destination_missing ? "Removal accepted" : "Destination accepted",
-                  message: "Recorded in the audit log. Re-run Validate, then Execute.",
-                  tone: "success",
-                });
+              onRebaselineContinuity={continuityRecoveryAvailable ? async (reason) => {
+                await acceptContinuityBaseline(reason);
                 leaveTheaterToValidate();
-              }}
-              onRebuildFullRefresh={destKindMode === "file_export" ? undefined : () => {
+              } : undefined}
+              onRebuildFullRefresh={continuityRecoveryAvailable ? () => {
                 setSyncMode("full_refresh_overwrite");
                 leaveTheaterToValidate();
-              }}
+              } : undefined}
               onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onResumed={(nextId) => {
                 setActiveJobId(nextId);

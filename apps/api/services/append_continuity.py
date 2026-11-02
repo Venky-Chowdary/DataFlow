@@ -723,7 +723,7 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
     }
 
 
-CONTINUITY_GATE_ID = "g21_append_continuity"
+CONTINUITY_GATE_ID = "g24_append_continuity"
 
 
 def continuity_preflight_gate(

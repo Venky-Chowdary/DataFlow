@@ -5,6 +5,7 @@ import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
 import { useConfirm } from "../ui/ConfirmDialog";
 import { useToast } from "../Toast";
+import { CONTINUITY_GATE_ID, ContinuityRecoveryForm, stripContinuityRecoveryProse } from "./ContinuityRecoveryForm";
 import { explainPreflight, fetchRepairProposal, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { readSession } from "../../lib/session";
 import { SYNC_MODE_META } from "../../lib/transferConstants";
@@ -246,6 +247,10 @@ interface ValidateDashboardProps {
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced / identity column mappings. */
   onReviewMappings?: (opts?: { focusSource?: string }) => void;
+  /** G24 append-continuity block: accept the current destination (or its removal) — audited. */
+  onRebaselineContinuity?: (reason: string) => Promise<void>;
+  /** G24 append-continuity block: switch to full refresh and re-Validate. */
+  onRebuildFullRefresh?: () => void;
   /** Reload live destination types — G15 pending / dest_unknown. */
   onReloadDestSchema?: () => void;
   /**
@@ -778,6 +783,8 @@ export function ValidateDashboard({
   stripControlsApplied = false,
   formatControlCharsSeen = true,
   onQuarantineAndRerun,
+  onRebaselineContinuity,
+  onRebuildFullRefresh,
   cellPreview = null,
   onReviewMappings,
   onReloadDestSchema,
@@ -941,6 +948,9 @@ export function ValidateDashboard({
     || preflight?.gates.some((g) => g.status === "block" && isEncodingIntegritySignal(g.message)),
   );
   const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
+  const continuityBlocker = preflight?.blockers.find((b) => b.id === CONTINUITY_GATE_ID);
+  const continuityMissing = (continuityBlocker?.details as Record<string, unknown> | undefined)?.mismatch === "destination_missing";
+  const continuityControls = Boolean(continuityBlocker && (onRebaselineContinuity || onRebuildFullRefresh));
   const isFkOrphanBlock = Boolean(
     preflight?.blockers.some((b) =>
       (b.id === "constraint_fk" || /constraint_fk/i.test(b.id || ""))
@@ -1865,7 +1875,7 @@ export function ValidateDashboard({
                   <span className="df2-vd-exec-until-label">Cannot execute until</span>
                   <ul>
                     {executiveSummary.untilLines.map((line) => (
-                      <li key={line}>{line}</li>
+                      <li key={line}>{continuityControls ? stripContinuityRecoveryProse(line) : line}</li>
                     ))}
                   </ul>
                 </div>
@@ -2033,6 +2043,13 @@ export function ValidateDashboard({
           data-studio-primary-kind={_studioPrimary?.kind ?? "none"}
         >
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
+          {continuityControls && (
+            <ContinuityRecoveryForm
+              missing={continuityMissing}
+              onAccept={onRebaselineContinuity}
+              onRebuild={onRebuildFullRefresh}
+            />
+          )}
           <div className="df2-vd-fix-actions">
             {duplicateRoot ? (
               <>
@@ -2288,6 +2305,7 @@ export function ValidateDashboard({
                   && !isPrivilegeBlock
                   && !isConnectionBlock
                   && !isFkOrphanBlock
+                  && !continuityControls
                   && onReviewMappings && (
                   <Button
                     size="sm"
@@ -2300,7 +2318,7 @@ export function ValidateDashboard({
                     Open Map to fix
                   </Button>
                 )}
-                {!duplicateRoot && !isPrivilegeBlock && !isConnectionBlock && (
+                {!duplicateRoot && !isPrivilegeBlock && !isConnectionBlock && !continuityControls && (
                   <Button
                     size="sm"
                     variant="ghost"
