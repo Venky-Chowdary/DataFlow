@@ -97,6 +97,8 @@ export interface EditableMapping {
   approved: boolean;
   isPii?: boolean;
   reason?: string;
+  /** Destination name typed by the operator; survives Map regeneration. */
+  operatorTarget?: boolean;
   existsInDestination?: boolean;
   transform?: MappingTransform;
   /**
@@ -1262,6 +1264,7 @@ export function applyOperatorRemapDest(m: EditableMapping, target: string): Edit
   return {
     ...m,
     target: next,
+    operatorTarget: Boolean(next),
     approved: false,
     requiresReview: true,
     reviewKind: "generic",

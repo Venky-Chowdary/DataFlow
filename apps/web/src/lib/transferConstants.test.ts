@@ -124,6 +124,13 @@ describe("DEFAULT_SCHEMA_POLICY", () => {
 });
 
 describe("syncModeHonestyLine", () => {
+  it("file export never describes a table write", () => {
+    for (const mode of ["full_refresh_append", "full_refresh_overwrite", "incremental_append"]) {
+      const line = syncModeHonestyLine(mode, true, "postgresql", "file_export");
+      assert.match(line, /new export file/);
+      assert.doesNotMatch(line, /Inserts into the existing table|Replaces rows/);
+    }
+  });
   it("names leftover empty tables as dest-exists on Full append — no CREATE, no ALTER", () => {
     const line = syncModeHonestyLine("full_refresh_append", true);
     assert.match(line, /existing table/i);

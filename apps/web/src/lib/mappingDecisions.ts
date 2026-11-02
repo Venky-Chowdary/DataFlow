@@ -15,7 +15,9 @@
  * field itself, so it survives regeneration by source name together with its
  * G16 evidence. So is a hand-picked destination carrier: the operator chose it
  * for that column, and re-deriving the inferred type over it discarded the
- * choice on the way back from Validate.
+ * choice on the way back from Validate. A destination name the operator typed
+ * is the same kind of decision: regeneration re-proposes ``item → item`` and
+ * would otherwise turn ``item → description`` back into an ADD COLUMN.
  */
 
 import {
@@ -65,8 +67,12 @@ export function carryOperatorDecisions(
   const crosswalks = new Map<string, { table: Record<string, string>; system?: string }>();
   const declaredTypes = new Map<string, string>();
   const compiledDests = new Map<string, string>();
+  const operatorDests = new Map<string, EditableMapping>();
   for (const p of prior) {
     if (isIntentionalOmit(p)) omitted.set(p.source, p);
+    if (p.operatorTarget && (p.target || "").trim() && !isIntentionalOmit(p)) {
+      operatorDests.set(p.source, p);
+    }
     if (p.destTypeDeclared && !isIntentionalOmit(p)) {
       declaredTypes.set(p.source, p.destTypeDeclared);
     }
@@ -91,6 +97,7 @@ export function carryOperatorDecisions(
     && !crosswalks.size
     && !declaredTypes.size
     && !compiledDests.size
+    && !operatorDests.size
     && !prior.some((p) => typeof p.controlTotal === "boolean")
   ) {
     return next;
@@ -102,13 +109,14 @@ export function carryOperatorDecisions(
   return next.map((m) => {
     const dropped = omitted.get(m.source);
     if (dropped) return carryReduction(m, dropped);
+    const retargeted = carryOperatorTarget(m, operatorDests.get(m.source));
     // Replay the declaration before the fingerprint is read: an acknowledgement
     // signed for the declared carrier belongs to the row that carries it, and
     // fingerprinting the inferred type first would discard that signature too.
     const declared = declaredTypes.get(m.source);
-    const restored = declared && declared !== m.destTypeDeclared
-      ? applyDestTypeChange(m, declared)
-      : m;
+    const restored = declared && declared !== retargeted.destTypeDeclared
+      ? applyDestTypeChange(retargeted, declared)
+      : retargeted;
     const compiledDest = compiledDests.get(m.source);
     const destRestored = compiledDest && isAutoIdentityDest(restored)
       ? { ...restored, target: compiledDest }
@@ -135,6 +143,34 @@ export function carryOperatorDecisions(
       controlTotal,
     };
   });
+}
+
+/**
+ * Replay an operator-typed destination name onto a regenerated row.
+ *
+ * The destination-facing facts travel with the name (they describe that
+ * column, not the re-proposed one); source facts stay regenerated. Approval is
+ * not copied here — it is re-applied only through the decision fingerprint.
+ */
+function carryOperatorTarget(m: EditableMapping, prior: EditableMapping | undefined): EditableMapping {
+  if (!prior || (m.target || "").trim() === (prior.target || "").trim()) {
+    return prior ? { ...m, operatorTarget: true } : m;
+  }
+  return {
+    ...m,
+    target: prior.target,
+    operatorTarget: true,
+    destType: prior.destType,
+    existsInDestination: prior.existsInDestination,
+    createNew: prior.createNew,
+    createNewRisks: prior.createNewRisks,
+    fidelity: prior.fidelity,
+    typeNarrowing: prior.typeNarrowing,
+    reviewKind: prior.reviewKind,
+    reason: prior.reason,
+    approved: false,
+    requiresReview: true,
+  };
 }
 
 /**

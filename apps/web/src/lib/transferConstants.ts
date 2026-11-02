@@ -239,7 +239,15 @@ export function syncModeHonestyLine(
   mode: string,
   destTableExists: boolean | null,
   destDbType?: string | null,
+  destKind?: string | null,
 ): string {
+  // A file export writes a new artifact per run; table prose does not apply.
+  if (destKind === "file_export") {
+    return (
+      "Writes a new export file for this run. No table is created, appended to "
+      + "or altered, and earlier export files are left unchanged."
+    );
+  }
   if (mode === "full_refresh_append") {
     if (destTableExists === true) {
       return (

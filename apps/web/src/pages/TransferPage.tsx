@@ -6301,7 +6301,10 @@ export function TransferPage({
           },
         }
       : null,
-    { source: sourceLabel, dest: `${targetDb}.${targetCollection}` },
+    {
+      source: sourceLabel,
+      dest: destKindMode === "file_export" ? `${destinationLabel} export` : `${targetDb}.${targetCollection}`,
+    },
   );
   const destLabelShort = destSelected && (destKindMode === "file_export" || Boolean(destType))
     ? (selectedDestConnector
@@ -7976,7 +7979,7 @@ export function TransferPage({
                       {targetCollection.trim() ? <> — <code>{targetCollection.trim()}</code></> : null}
                       . This is not create-new. The object already exists
                       (even if a prior run wrote 0 rows).{" "}
-                      {syncModeHonestyLine(syncMode, destTableExists, destType)}
+                      {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
                       {" "}To start a new table, type a name that does not exist.
                       {syncMode === "full_refresh_overwrite"
                         ? " Open Advanced to switch append or incremental."
@@ -8089,7 +8092,7 @@ export function TransferPage({
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
               <p className="df2-label-hint">
-                {syncModeHonestyLine(syncMode, destTableExists, destType)}
+                {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
               </p>
               <p className="df2-label-hint">
                 {schemaPolicyHonestyLine(schemaPolicy)}
@@ -8938,7 +8941,7 @@ export function TransferPage({
         dateLocales={DATE_LOCALES}
         numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
-        syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists, destType)}
+        syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
         schemaHonestyLine={schemaPolicyHonestyLine(schemaPolicy)}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}

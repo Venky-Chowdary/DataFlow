@@ -1297,16 +1297,20 @@ def _account_keyed(
             "predicted (duplicate dest keys, or inserts the census missed)."
         )
     note += removal_note
-    if ack_delta:
-        sign = "more" if ack_delta > 0 else "fewer"
-        note += (
-            f" Writer acknowledged {ack:,}; dest COUNT(*) delta is "
-            f"{dest_delta:,} ({abs(ack_delta):,} {sign} than the writer claimed)."
-        )
     # COUNT(*) does not move when a key is updated. The operator-facing
     # rows_written is the rows this run inserted or updated. Conservation
     # still closes on dest_delta versus the census, not on that count.
     applied = int(census.inserts) + int(census.updates)
+    # A writer acknowledges every applied key (insert or update). Only an ack
+    # that differs from that census is a disagreement worth naming; an upsert
+    # of existing keys legitimately acks N with a COUNT(*) delta of 0.
+    if ack is not None and ack != applied:
+        sign = "more" if ack > applied else "fewer"
+        note += (
+            f" Writer acknowledged {ack:,}; the key census applied {applied:,} "
+            f"({census.inserts:,} insert(s) + {census.updates:,} update(s)) — "
+            f"{abs(ack - applied):,} {sign} than the census."
+        )
     return ConservationLedger(
         **base,
         rows_written=applied,

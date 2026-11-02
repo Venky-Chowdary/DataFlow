@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   acknowledgeMappingRisk,
+  applyOperatorRemapDest,
   applyDestTypeChange,
   mappingHasClearingRiskContract,
   mappingRequiresRiskAck,
@@ -45,6 +46,24 @@ function clean(over: Partial<EditableMapping> = {}): EditableMapping {
 }
 
 describe("carryOperatorDecisions", () => {
+  it("keeps an operator-typed destination name across regeneration", () => {
+    const typed = applyOperatorRemapDest(clean({ source: "item", target: "item" }), "description");
+    const approved = { ...typed, approved: true, requiresReview: false };
+    const regenerated = [clean({ source: "item", target: "item", createNew: true })];
+    const carried = carryOperatorDecisions(regenerated, [approved]);
+    assert.equal(carried[0].target, "description");
+    assert.equal(carried[0].operatorTarget, true);
+    assert.equal(carried[0].createNew, approved.createNew);
+    assert.equal(carried[0].approved, true);
+
+    const unapproved = carryOperatorDecisions(regenerated, [typed]);
+    assert.equal(unapproved[0].target, "description");
+    assert.equal(unapproved[0].approved, false);
+
+    const proposed = carryOperatorDecisions(regenerated, [clean({ source: "item", target: "description" })]);
+    assert.equal(proposed[0].target, "item");
+  });
+
   it("replays approvals and signed contracts onto regenerated mappings", () => {
     const signed = acknowledgeMappingRisk(lossy(), { executionPolicy: "QUARANTINE_ROW" });
     assert.equal(mappingHasClearingRiskContract(signed), true);

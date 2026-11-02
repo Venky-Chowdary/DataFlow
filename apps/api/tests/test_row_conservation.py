@@ -2059,6 +2059,31 @@ def test_keyed_census_closes_on_dest_delta_not_writer_ack():
     assert ledger.balanced is True
     assert ledger.writer_ack == 10
     assert ledger.writer_ack_delta == -9
+    # Ack 10 == 1 insert + 9 updates: an upsert of existing keys is not a
+    # writer/destination disagreement and must not be described as one.
+    assert "than the census" not in ledger.note
+    assert "than the writer claimed" not in ledger.note
+
+
+def test_keyed_census_names_ack_that_exceeds_applied_keys():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(unique_batch_keys=10, dest_preexisting=9)
+    ledger = account_population(
+        rows_read=10,
+        dest_count=31,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=30,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=12,
+        sync_mode="upsert",
+        census=census,
+    )
+    assert ledger.balanced is True
+    assert "Writer acknowledged 12; the key census applied 10" in ledger.note
+    assert "2 more than the census" in ledger.note
 
 
 def test_keyed_census_detects_dest_shortfall():

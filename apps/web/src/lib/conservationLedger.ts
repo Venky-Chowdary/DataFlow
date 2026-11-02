@@ -317,6 +317,12 @@ export function ledgerEquation(ledger: ConservationLedger): string {
 export function writerAckDisagrees(source: unknown): boolean {
   const ledger = resolveLedger(source);
   if (!ledger) return false;
+  // A keyed writer acknowledges every applied key; updates never move
+  // COUNT(*). The ack agrees when it equals inserts + updates from the census.
+  if (isKeyedLedger(ledger) && ledger.writer_ack != null
+    && ledger.inserts != null && ledger.updates != null) {
+    return ledger.writer_ack !== ledger.inserts + ledger.updates;
+  }
   if (ledger.writer_ack_delta != null) return ledger.writer_ack_delta !== 0;
   if (isAppendLedger(ledger) || isKeyedLedger(ledger)) {
     const identity = isAppendLedger(ledger) ? appendDeltaValue(ledger) : ledger.dest_delta;

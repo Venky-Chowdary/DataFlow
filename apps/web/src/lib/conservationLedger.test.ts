@@ -458,6 +458,22 @@ describe("mirror wording follows the delete mode the run applied (QA demo 1030)"
 });
 
 describe("keyed ledger shows events vs keys, never closes on event count", () => {
+  it("an upsert of existing keys is not a writer disagreement", () => {
+    const upsert = {
+      ...overwriteLedger,
+      conservation_kind: "keyed",
+      dest_delta: 0,
+      dest_count_before: 3,
+      dest_count: 3,
+      inserts: 0,
+      updates: 3,
+      deletes: 0,
+      writer_ack: 3,
+      writer_ack_delta: -3,
+    };
+    assert.equal(writerAckDisagrees({ row_accounting: upsert }), false);
+    assert.equal(writerAckDisagrees({ row_accounting: { ...upsert, writer_ack: 10_000 } }), true);
+  });
   it("surfaces 10 events and 3 keys from the engine census", () => {
     const keyedPayload = {
       ...overwriteLedger,

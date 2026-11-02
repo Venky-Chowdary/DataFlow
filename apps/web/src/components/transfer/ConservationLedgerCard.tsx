@@ -271,6 +271,8 @@ export function ConservationLedgerCard({
                     ? "Writer ack disagrees with identity COUNT"
                     : isAppend
                       ? "Writer ack disagrees with dest Δ"
+                    : isKeyed
+                      ? "Writer ack disagrees with the key census"
                     : "Writer ack disagrees with dest COUNT(*)"}
             </strong>
             <span>
@@ -282,6 +284,8 @@ export function ConservationLedgerCard({
                     ? `Dest holds ${dest.measured ? dest.value : "an unmeasured"} identit(ies). Writer counted ${writer.value} vector row(s). Physical chunk COUNT(*) is not source-row conservation — acknowledgement never closes conservation.`
                     : isAppend
                       ? `This run's dest growth is ${dest.measured ? dest.value : "unmeasured"}. Writer counted ${writer.value}. Pre-existing dest rows are not writer events — acknowledgement never closes conservation.`
+                    : isKeyed
+                      ? `The key census applied ${ledger?.inserts ?? "—"} insert(s) + ${ledger?.updates ?? "—"} update(s). Writer counted ${writer.value}. Acknowledgement never closes conservation.`
                     : `Dest holds ${dest.measured ? dest.value : "an unmeasured population"}. Writer counted ${writer.value}. That is the DMS Full Load / MISSING_TARGET hole — writer acknowledgement never closes conservation.`}
             </span>
           </div>
