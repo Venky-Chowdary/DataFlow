@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _PUBLIC_PREFIXES = (
     "/health",
     "/api/v1/health",
+    "/api/v1/status",
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
     "/api/v1/auth/bootstrap",

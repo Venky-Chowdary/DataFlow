@@ -221,6 +221,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
 # Paths that are always public, even when RBAC is enabled.
 _PUBLIC_PATHS = {
     "/health",
+    "/api/v1/status",
     "/docs",
     "/openapi.json",
     "/redoc",

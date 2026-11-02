@@ -29,6 +29,7 @@ import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
 import { ContactSalesPage } from "./ContactSalesPage";
 import { DemosPage } from "./DemosPage";
+import { StatusPage, SubprocessorsPage } from "./TrustPages";
 import {
   DataPilotPage,
   JobTheaterPage,
@@ -102,6 +103,12 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
       return <LegalPage kind="privacy" />;
     case "terms":
       return <LegalPage kind="terms" />;
+    case "dpa":
+      return <LegalPage kind="dpa" />;
+    case "subprocessors":
+      return <SubprocessorsPage />;
+    case "status":
+      return <StatusPage />;
     case "security":
       return <SecurityPage onNavigate={onNavigate} />;
     case "help":
@@ -685,7 +692,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   );
 }
 
-function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
+function LegalPage({ kind }: { kind: "privacy" | "terms" | "dpa" }) {
   const privacy = [
     {
       h: "Who we are",
@@ -713,7 +720,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Sharing and subprocessors",
-      p: "We share data with infrastructure providers that host the control plane, send transactional email, and (on Enterprise) your identity provider and KMS. We do not share connected datasets with other customers. A current subprocessor list is available on request from contact@datawrap.io.",
+      p: "We share data with infrastructure providers that host the control plane, send transactional email, and (on Enterprise) your identity provider and KMS. We do not share connected datasets with other customers. The current list is published on our Subprocessors page (datawrap.io/#/subprocessors).",
     },
     {
       h: "International transfers",
@@ -806,23 +813,43 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
       p: "We will post material changes on this page and update the date below. Continued use after the effective date constitutes acceptance, except that enterprise customers are governed by the notice terms in their order form. Questions: contact@datawrap.io.",
     },
   ];
-  const blocks = kind === "privacy" ? privacy : terms;
+  const dpa = [
+    { h: "Status of this document", p: "This is Datawrap's standard data processing addendum, published as a draft pending counsel review. The executed version is attached to your order form or master agreement, and the executed version controls." },
+    { h: "Roles and scope", p: "You are the controller of personal data contained in the sources, destinations, and workspace you connect. Datawrap is your processor and processes that data only to provide the service. Where you act as a processor for your own customers, Datawrap is your subprocessor on the same terms." },
+    { h: "Processing details", p: "Subject matter: data movement, mapping, validation, quarantine, and verification you configure. Duration: the term of your agreement plus the deletion period below. Data subjects and categories: whatever your connected datasets contain, plus workspace users' name, email, role, and audit events. Special-category data is processed only if you choose to connect it." },
+    { h: "Your instructions", p: "Datawrap processes personal data only on your documented instructions — your agreement, your workspace configuration, and the transfers, schedules, and exports you run. We will tell you if we believe an instruction breaks data-protection law." },
+    { h: "Confidentiality", p: "Everyone at Datawrap with access to customer personal data is bound by written confidentiality obligations and has access only as needed to operate and support the service." },
+    { h: "Security measures", p: "TLS in transit; connector credentials encrypted at rest and optionally wrapped with your own KMS key; workspace isolation on every store read; role-based access with capped API keys; SSO, SCIM, and MFA; a hash-chained, signed audit log; quarantine instead of silent drops; and post-write checksum verification. These measures are reviewed and may improve, but will not materially weaken during your term." },
+    { h: "Subprocessors", p: "You authorize the subprocessors on our Subprocessors page. We bind each to data-protection terms at least as protective as this addendum and remain responsible for them. We give 30 days' notice of a new subprocessor; you may object on reasonable data-protection grounds, and if we cannot address the objection you may terminate the affected service." },
+    { h: "Data subject requests", p: "We will promptly forward requests we receive about your data to you and, taking into account the nature of processing, help you respond through the workspace's export and deletion controls or by reasonable assistance." },
+    { h: "Personal data breach", p: "We will notify you without undue delay, and in any case within 72 hours, after becoming aware of a personal data breach affecting your data, with the information you need to meet your own notification duties, and we will keep you updated as we learn more." },
+    { h: "Assessments and audits", p: "We will provide information reasonably needed for your data-protection impact assessments and answer your security questionnaire. On reasonable written notice, no more than once a year unless required by a regulator or after a breach, we will support an audit of our compliance with this addendum." },
+    { h: "International transfers", p: "Where personal data leaves the EEA, UK, or Switzerland to a country without an adequacy decision, the Standard Contractual Clauses (and UK Addendum where relevant) apply and are incorporated by reference." },
+    { h: "Return and deletion", p: "At the end of the service you may export workspace data. We then delete customer personal data within 30 days, and from backups on their normal expiry cycle, unless the law requires us to keep it." },
+    { h: "Liability and order of precedence", p: "Liability under this addendum follows the limits in your agreement. If this addendum conflicts with the agreement on data protection, this addendum controls; the Standard Contractual Clauses control over both." },
+  ];
+  const blocks = kind === "privacy" ? privacy : kind === "dpa" ? dpa : terms;
+  const legalTitle = kind === "privacy" ? "Privacy policy" : kind === "dpa" ? "Data processing addendum" : "Terms of service";
 
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingInkHero
         tone="doc"
-        kicker={kind === "privacy" ? "Privacy" : "Terms"}
-        title={kind === "privacy" ? "Privacy policy" : "Terms of service"}
+        kicker={kind === "privacy" ? "Privacy" : kind === "dpa" ? "Legal" : "Terms"}
+        title={legalTitle}
         meta={
           kind === "privacy"
             ? "Last updated August 2026 · contact@datawrap.io · You are the controller of connected data"
-            : "Last updated August 2026 · contact@datawrap.io · A signed MSA supersedes where it conflicts"
+            : kind === "dpa"
+              ? "Draft pending legal review · Last updated November 2026 · contact@datawrap.io"
+              : "Last updated August 2026 · contact@datawrap.io · A signed MSA supersedes where it conflicts"
         }
         lead={
           kind === "privacy"
             ? "How Datawrap handles workspace data, credentials, and audit logs — written for security and legal review."
-            : "The agreement that governs use of Transfer Studio, pipelines, Pilot, and MCP."
+            : kind === "dpa"
+              ? "The processor terms that govern how Datawrap handles personal data in the workspaces and datasets you connect."
+              : "The agreement that governs use of Transfer Studio, pipelines, Pilot, and MCP."
         }
       />
 
@@ -855,7 +882,11 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
                 <p>{b.p}</p>
               </article>
             ))}
-            <p className="lp-mkt-footnote">Last updated August 2026. Enterprise customers receive a DPA and negotiated addenda with their order form.</p>
+            <p className="lp-mkt-footnote">
+              {kind === "dpa"
+                ? "Draft pending legal review. The DPA executed with your order form controls."
+                : "Last updated August 2026. Enterprise customers receive a DPA and negotiated addenda with their order form."}
+            </p>
           </div>
         </section>
       </MarketingReveal>

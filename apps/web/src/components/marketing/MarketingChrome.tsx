@@ -337,6 +337,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <h4>Resources</h4>
               <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>Documentation</a>
               <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
+              <a href={link("status")} onClick={(e) => { e.preventDefault(); go("status"); }}>Status</a>
               <a href={link("customers")} onClick={(e) => { e.preventDefault(); go("customers"); }}>Customers</a>
               <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact sales</a>
               <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
@@ -345,7 +346,8 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <h4>Legal</h4>
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
-              <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
+              <a href={link("dpa")} onClick={(e) => { e.preventDefault(); go("dpa"); }}>DPA</a>
+              <a href={link("subprocessors")} onClick={(e) => { e.preventDefault(); go("subprocessors"); }}>Subprocessors</a>
               <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
             </div>
           </div>

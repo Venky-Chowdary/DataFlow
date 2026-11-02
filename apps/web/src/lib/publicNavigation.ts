@@ -19,6 +19,9 @@ export type PublicRoute =
   | "privacy"
   | "terms"
   | "security"
+  | "status"
+  | "dpa"
+  | "subprocessors"
   | "help"
   | "product-transfer"
   | "product-pilot"
@@ -44,6 +47,9 @@ const BASE_HASH_TO_ROUTE: Record<string, Exclude<PublicRoute, HelpDocId>> = {
   privacy: "privacy",
   terms: "terms",
   security: "security",
+  status: "status",
+  dpa: "dpa",
+  subprocessors: "subprocessors",
   help: "help",
   docs: "help",
   guide: "help",
@@ -75,6 +81,9 @@ const BASE_ROUTE_TO_HASH: Record<Exclude<PublicRoute, HelpDocId>, string> = {
   privacy: "#/privacy",
   terms: "#/terms",
   security: "#/security",
+  status: "#/status",
+  dpa: "#/dpa",
+  subprocessors: "#/subprocessors",
   help: "#/help",
   "product-transfer": "#/product/transfer",
   "product-pilot": "#/product/pilot",
@@ -146,6 +155,24 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     description: "Workspace isolation, encrypted credentials with BYOK, SSO and SCIM, signed webhooks, and a hash-chained audit log in Datawrap.",
     keywords: "Datawrap security, BYOK, workspace isolation, SSO SAML OIDC, SCIM, signed webhooks, audit log",
     canonicalPath: "#/security",
+  },
+  status: {
+    title: "Service status",
+    description: "Live readiness of the hosted Datawrap API, control plane, file storage, and connector runtime.",
+    keywords: "Datawrap status, uptime, service health",
+    canonicalPath: "#/status",
+  },
+  dpa: {
+    title: "Data processing addendum",
+    description: "How Datawrap processes personal data as your processor: instructions, security measures, subprocessors, breach notice, transfers, and deletion.",
+    keywords: "Datawrap DPA, data processing agreement, GDPR processor terms",
+    canonicalPath: "#/dpa",
+  },
+  subprocessors: {
+    title: "Subprocessors",
+    description: "Third parties that process personal data on Datawrap's behalf to run the hosted service.",
+    keywords: "Datawrap subprocessors, GDPR subprocessor list",
+    canonicalPath: "#/subprocessors",
   },
   help: {
     title: "Docs & help",
