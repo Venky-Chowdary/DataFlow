@@ -10,6 +10,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from services.api_errors import ApiError
@@ -120,6 +121,11 @@ class TrainResponse(BaseModel):
     errors: list[str] = []
 
 
+_MAX_MESSAGE_CHARS = 8000
+_MAX_HISTORY_TURNS = 40
+_MAX_HISTORY_CHARS = 8000
+
+
 @router.post("/chat", response_model=CopilotChatResponse)
 async def copilot_chat(request: CopilotChatRequest, http_request: Request):
     """
@@ -138,7 +144,14 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         from services.workspace_access import tenant_scope
 
         agent = get_copilot_agent()
-        history = [{"role": m.role, "content": m.content} for m in request.history]
+        message = (request.message or "")[:_MAX_MESSAGE_CHARS]
+        # Only the recent turns steer follow-ups; an unbounded transcript would
+        # make every turn slower and lets a client stuff the context window.
+        history = [
+            {"role": m.role if m.role in ("user", "assistant") else "user",
+             "content": (m.content or "")[:_MAX_HISTORY_CHARS]}
+            for m in request.history[-_MAX_HISTORY_TURNS:]
+        ]
         role, _actor = _caller(http_request)
         data_context = dict(request.data_context or {})
         # The workspace the turn works in is the actor's, never a bare header:
@@ -148,8 +161,13 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
             data_context["workspace_id"] = ws
         else:
             data_context.pop("workspace_id", None)
-        with bind_request_principal(http_request, role):
-            result = agent.chat(request.message, history, data_context=data_context or None)
+        def _turn():
+            with bind_request_principal(http_request, role):
+                return agent.chat(message, history, data_context=data_context or None)
+
+        # A turn reads stores, connectors and maybe an LLM; on the event loop it
+        # would stall every other request the API is serving.
+        result = await run_in_threadpool(_turn)
         return CopilotChatResponse(
             answer=result.answer,
             intent=result.intent,
@@ -170,7 +188,13 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # The reason goes to the log; the chat shows a plain message, never a
+        # driver error, path or stack text.
+        _logger.exception("Pilot chat turn failed: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Pilot could not answer that just now. Try again, or rephrase the question.",
+        ) from e
 
 
 def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) -> None:
@@ -914,7 +938,8 @@ async def train_copilot(request: TrainRequest):
     try:
         from ..ai.training.training_agent import get_training_agent
         agent = get_training_agent()
-        run = agent.run_full_training(
+        run = await run_in_threadpool(
+            agent.run_full_training,
             include_embedding_tune=request.include_embedding_tune,
             force=request.force,
         )
@@ -925,7 +950,8 @@ async def train_copilot(request: TrainRequest):
             errors=run.errors,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _logger.exception("Pilot training run failed: %s", e)
+        raise HTTPException(status_code=500, detail="Training run failed; see the API log.") from e
 
 
 @router.get("/train/status")
