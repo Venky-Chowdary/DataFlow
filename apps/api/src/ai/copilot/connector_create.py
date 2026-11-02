@@ -409,11 +409,14 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
         )
     merged["type"] = ctype or "postgresql"
 
-    from src.transfer.connector_capabilities import effective_port
+    from src.transfer.connector_capabilities import effective_port, url_host_port
 
     # 0 and empty are "no port chosen". Redis is 6379, Elasticsearch 9200,
-    # Neo4j's HTTP Cypher port is 7474. An explicit port is kept.
-    merged["port"] = effective_port(merged["type"], merged.get("port"))
+    # Neo4j's HTTP Cypher port is 7474. An explicit port is kept; a URL-form
+    # host's own port is the one dialed.
+    merged["port"] = effective_port(
+        merged["type"], url_host_port(merged.get("host")) or merged.get("port")
+    )
 
     if not merged.get("name"):
         host = str(merged.get("host") or "db")

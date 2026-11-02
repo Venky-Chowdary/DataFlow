@@ -132,19 +132,20 @@ def _store_path() -> Path:
 _backend_choice: str | None = None
 
 
-def listen_port_for_connector(conn_type: str, raw: Any) -> int:
+def listen_port_for_connector(conn_type: str, raw: Any, host: Any = "") -> int:
     """Listen port stored on a connector.
 
     Delegates to :func:`stored_listen_port`, the same rule the dial path uses.
     Missing, ``0``, historical ``5432``, and Neo4j Bolt ``7687`` become the
-    driver port. An explicit other port is kept.
+    driver port. An explicit other port is kept. A URL-form host's own port
+    wins: it is the port the driver dials.
     """
     try:
-        from src.transfer.connector_capabilities import stored_listen_port
+        from src.transfer.connector_capabilities import stored_listen_port, url_host_port
     except ImportError:
-        from transfer.connector_capabilities import stored_listen_port
+        from transfer.connector_capabilities import stored_listen_port, url_host_port
 
-    return stored_listen_port(conn_type, raw)
+    return stored_listen_port(conn_type, url_host_port(host) or raw)
 
 
 # --- TLS requirement -------------------------------------------------------
@@ -295,7 +296,7 @@ class SavedConnector:
             type=conn_type,
             role=normalize_connector_role(conn_type, data.get("role")),
             host=str(lifted.get("host") or ""),
-            port=listen_port_for_connector(conn_type, lifted.get("port")),
+            port=listen_port_for_connector(conn_type, lifted.get("port"), lifted.get("host")),
             database=str(lifted.get("database") or ""),
             username=str(lifted.get("username") or ""),
             password=password,
@@ -801,7 +802,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         type=conn_type,
         role=normalize_connector_role(conn_type, data.get("role")),
         host=data.get("host", ""),
-        port=listen_port_for_connector(conn_type, data.get("port")),
+        port=listen_port_for_connector(conn_type, data.get("port"), data.get("host")),
         database=data.get("database", ""),
         username=data.get("username", ""),
         password=data.get("password", ""),

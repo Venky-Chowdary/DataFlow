@@ -404,6 +404,23 @@ def port_was_chosen(driver_type: str, raw: Any) -> bool:
     return True
 
 
+def url_host_port(host: Any) -> int:
+    """Port a URL-form host names (``http://h:4566`` -> 4566), else 0.
+
+    HTTP drivers dial the URL's own port, so it is the connector's port
+    whatever the form stamped (D239).
+    """
+    text = str(host or "").strip()
+    if "://" not in text:
+        return 0
+    from connectors.url_authority import parse_url_authority
+
+    try:
+        return int(parse_url_authority(text).port or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
 def stored_listen_port(driver_type: str, raw: Any) -> int:
     """Port to persist and to dial.
 

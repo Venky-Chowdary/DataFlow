@@ -857,6 +857,17 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
     host = str(conn.get("host") or "")
     port = int(conn.get("port") or 0)
     effective_host, effective_port = host, port
+    if "://" in host:
+        # A URL-form host is dialed on its own authority (D239).
+        try:
+            from connectors.url_authority import parse_url_authority
+
+            url = parse_url_authority(host)
+            if url.host:
+                effective_host = url.host
+                effective_port = url.port or effective_port
+        except Exception:
+            pass
     # A connection string overrides the stored host field — the probe dials
     # the URL's authority, so reporting the form's 'localhost' misreports the
     # real endpoint on failures (QA C04).
