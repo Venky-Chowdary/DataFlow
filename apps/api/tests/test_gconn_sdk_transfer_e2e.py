@@ -19,7 +19,7 @@ os.environ.setdefault("RETRY_JITTER", "false")
 import src.transfer.engine as engine_mod  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
-from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer  # noqa: E402
+from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer, RequestRecord  # noqa: E402
 from tests.test_property2_golden_path_never_blocked import _FakeMongo  # noqa: E402
 
 _FAILURE_COUNT = 20
@@ -233,7 +233,7 @@ _PAGE_TOKEN = re.compile(
 )
 
 
-def _carries_no_page_token(record: Any) -> bool:
+def _carries_no_page_token(record: RequestRecord) -> bool:
     """A page-one request: the engine may probe page one before reading."""
     return not _PAGE_TOKEN.search(record.target) and b"-cur" not in (record.body or b"")
 
