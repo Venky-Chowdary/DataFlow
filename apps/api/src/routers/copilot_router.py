@@ -21,6 +21,15 @@ _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
 
 
+def _confirm_failure(action: str, exc: BaseException) -> str:
+    """Plain Confirm failure text; the driver/host detail goes to the log only."""
+    _logger.exception("Pilot confirm failed to %s: %s", action, exc)
+    return (
+        f"Failed to {action}. Nothing was changed and the approval was released, "
+        "so you can press Confirm again. The cause is in the API log."
+    )
+
+
 def _caller(request: Request) -> tuple[str, str]:
     """Return ``(role, actor)`` for the authenticated caller.
 
@@ -284,10 +293,11 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
 
     try:
         # Staging mapped the source as it was then; Confirm checks it still is.
-        assert_source_schema_unchanged(request_obj)
+        # It re-reads the source schema, so it runs off the event loop.
+        await run_in_threadpool(assert_source_schema_unchanged, request_obj)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    job_id = engine._create_pending_job(request_obj)
+    job_id = await run_in_threadpool(engine._create_pending_job, request_obj)
     run_transfer_async(job_id, request_obj)
     if request_obj.source.kind == "file":
         source_label = request_obj.source_filename or request_obj.source.table or "file"
@@ -681,7 +691,7 @@ async def copilot_confirm(
             raise
         except Exception as exc:
             ledger.release_claim(ack_id)
-            raise HTTPException(status_code=400, detail=f"Failed to start transfer: {exc}") from exc
+            raise HTTPException(status_code=400, detail=_confirm_failure("start transfer", exc)) from exc
         _stamp_confirmation(
             str(result.get("job_id") or ""),
             ack_id=ack_id,
@@ -715,7 +725,7 @@ async def copilot_confirm(
             raise
         except Exception as exc:
             ledger.release_claim(ack_id)
-            raise HTTPException(status_code=400, detail=f"Failed to start sync: {exc}") from exc
+            raise HTTPException(status_code=400, detail=_confirm_failure("start sync", exc)) from exc
         if transfer_request is not None:
             from ..transfer.background import run_transfer_async
 
@@ -757,7 +767,7 @@ async def copilot_confirm(
             conn = create_connector(payload)
         except Exception as exc:
             ledger.release_claim(ack_id)
-            raise HTTPException(status_code=400, detail=f"Failed to save connector: {exc}") from exc
+            raise HTTPException(status_code=400, detail=_confirm_failure("save connector", exc)) from exc
         result = {
             "connector_id": conn.id,
             "name": conn.name,
@@ -787,7 +797,7 @@ async def copilot_confirm(
             saved = get_transform_library().save(recipe)
         except Exception as exc:
             ledger.release_claim(ack_id)
-            raise HTTPException(status_code=400, detail=f"Failed to save transform: {exc}") from exc
+            raise HTTPException(status_code=400, detail=_confirm_failure("save transform", exc)) from exc
         result = {"recipe_id": saved.id, "name": saved.name, "steps": len(saved.steps)}
         ledger.finalize(
             ack_id,
@@ -839,7 +849,7 @@ async def copilot_confirm(
             raise
         except Exception as exc:
             ledger.release_claim(ack_id)
-            raise HTTPException(status_code=400, detail=f"Failed to run pipeline: {exc}") from exc
+            raise HTTPException(status_code=400, detail=_confirm_failure("run pipeline", exc)) from exc
         result = {
             "job_id": job_id,
             "schedule_id": schedule_id,
@@ -867,7 +877,7 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(
-                status_code=400, detail=f"Failed to create pipeline: {exc}"
+                status_code=400, detail=_confirm_failure("create pipeline", exc)
             ) from exc
         result = {
             "schedule_id": sched.id,
@@ -897,7 +907,7 @@ async def copilot_confirm(
             raise
         except Exception as exc:
             ledger.release_claim(ack_id)
-            raise HTTPException(status_code=400, detail=f"Failed to {kind.replace('_', ' ')}: {exc}") from exc
+            raise HTTPException(status_code=400, detail=_confirm_failure(kind.replace('_', ' '), exc)) from exc
         ledger.finalize(
             ack_id,
             actor=actor,
