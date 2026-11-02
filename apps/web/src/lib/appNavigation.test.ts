@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   focusFromHash,
+  hashForScreen,
   isResetLinkRoute,
   resetLinkToken,
   isSignedInHelpHash,
@@ -89,4 +90,9 @@ describe("resetLinkToken", () => {
     assert.equal(resetLinkToken("/login", "#token=x"), "");
     assert.equal(resetLinkToken("/reset-passwords", "#token=x"), "");
   });
+});
+
+it("the Transform Library survives a reload and a shared link", () => {
+  assert.equal(screenFromHash(hashForScreen("transform-library")), "transform-library");
+  assert.equal(screenFromHash("#/library"), "transform-library");
 });

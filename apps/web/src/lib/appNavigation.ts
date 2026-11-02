@@ -10,6 +10,7 @@ const SCREENS: Screen[] = [
   "contracts",
   "schedules",
   "transforms",
+  "transform-library",
   "jobs",
   "mcp",
   "settings",
@@ -34,6 +35,7 @@ const HASH_ALIASES: Record<string, Screen> = {
   theater: "jobs",
   proofs: "benchmarks",
   proof: "benchmarks",
+  library: "transform-library",
 };
 
 export function screenFromHash(hash: string): Screen | null {
