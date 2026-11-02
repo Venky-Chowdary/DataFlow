@@ -5585,6 +5585,24 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-top: 4px;
 }
 
+.df2-theater-v3-continuity {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 4px;
+  max-width: 640px;
+}
+
+.df2-theater-v3-continuity-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-theater-v3-continuity-row .df2-input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
 .df2-theater-v3-alert.success {
   background: var(--df-success-bg);
   border-color: #a7f3d0;

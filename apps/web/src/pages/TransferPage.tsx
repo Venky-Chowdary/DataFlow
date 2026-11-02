@@ -84,6 +84,7 @@ import {
   type EmbeddingCacheStats,
   type VectorFieldRouting,
   type VectorRoutingPlan,
+  rebaselineContinuity,
 } from "../lib/api";
 import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
@@ -8448,6 +8449,19 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
+              onRebaselineContinuity={destKindMode === "file_export" ? undefined : async (reason) => {
+                const out = await rebaselineContinuity(buildDestinationEndpoint() as Record<string, unknown>, reason);
+                toast({
+                  title: out.destination_missing ? "Removal accepted" : "Destination accepted",
+                  message: "Recorded in the audit log. Re-run Validate, then Execute.",
+                  tone: "success",
+                });
+                leaveTheaterToValidate();
+              }}
+              onRebuildFullRefresh={destKindMode === "file_export" ? undefined : () => {
+                setSyncMode("full_refresh_overwrite");
+                leaveTheaterToValidate();
+              }}
               onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onResumed={(nextId) => {
                 setActiveJobId(nextId);

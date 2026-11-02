@@ -73,6 +73,10 @@ interface JobTheaterProps {
   onBackToValidate?: () => void;
   /** Return to Map to adjust columns after a stop. */
   onBackToMap?: () => void;
+  /** Append-continuity failure: accept the current destination (or its removal) — audited. */
+  onRebaselineContinuity?: (reason: string) => Promise<void>;
+  /** Append-continuity failure: switch the route to full refresh and return to Validate. */
+  onRebuildFullRefresh?: () => void;
   /** Persist the Validate-approved contract onto a schedule (completed Theater). */
   onSchedule?: () => void;
   /** Resume from last checkpoint without leaving Transfer Studio. */
@@ -170,6 +174,8 @@ export function JobTheater({
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
+  onRebaselineContinuity,
+  onRebuildFullRefresh,
   onSchedule,
   onResumed,
   onOpenJob,
@@ -428,6 +434,8 @@ export function JobTheater({
       onNewTransfer={onNewTransfer}
       onBackToValidate={onBackToValidate}
       onBackToMap={onBackToMap}
+      onRebaselineContinuity={onRebaselineContinuity}
+      onRebuildFullRefresh={onRebuildFullRefresh}
       onSchedule={onSchedule}
       onOpenJob={onOpenJob}
     />
@@ -452,6 +460,8 @@ interface JobTheaterViewProps {
   onNewTransfer?: () => void;
   onBackToValidate?: () => void;
   onBackToMap?: () => void;
+  onRebaselineContinuity?: (reason: string) => Promise<void>;
+  onRebuildFullRefresh?: () => void;
   onSchedule?: () => void;
   onOpenJob?: (jobId: string) => void;
 }
@@ -475,10 +485,14 @@ export function JobTheaterView({
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
+  onRebaselineContinuity,
+  onRebuildFullRefresh,
   onSchedule,
   onOpenJob,
 }: JobTheaterViewProps) {
   const { toast } = useToast();
+  const [rebaselineReason, setRebaselineReason] = useState("");
+  const [rebaselining, setRebaselining] = useState(false);
   const { ask } = useConfirm();
   const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   const total = job.total_rows ?? 0;
@@ -556,6 +570,13 @@ export function JobTheaterView({
     errorDetails: job.error_details || null,
   });
   const breakerFailure = failureHint?.code === "circuit_breaker_open" || Boolean(breakerContractId);
+  const failureDetails = (job.error_details || {}) as Record<string, unknown>;
+  const continuityFailure = isFailed && failureDetails.reason === "destination_continuity_mismatch";
+  const continuityMissing = continuityFailure && failureDetails.mismatch === "destination_missing";
+  const continuityControls = continuityFailure && Boolean(onRebaselineContinuity || onRebuildFullRefresh);
+  const failureText = job.error || job.message || "The job stopped before completing. Review the event log below and re-run.";
+  // The engine's recovery prose names API routes; when the controls below exist, they are the recovery.
+  const shownFailureText = continuityControls ? failureText.split(/\s+To recover:/)[0] : failureText;
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
@@ -811,8 +832,59 @@ export function JobTheaterView({
                   ? `Transfer failed during ${job.failed_at_phase}`
                   : "Transfer failed")}
             </strong>
-            <p>{job.error || job.message || "The job stopped before completing. Review the event log below and re-run."}</p>
-            {failureHint?.fix && (
+            <p>{shownFailureText}</p>
+            {continuityFailure && onRebaselineContinuity && (
+              <form
+                className="df2-theater-v3-continuity"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const reason = rebaselineReason.trim();
+                  if (!reason || rebaselining) return;
+                  void (async () => {
+                    setRebaselining(true);
+                    try {
+                      await onRebaselineContinuity(reason);
+                    } catch (err) {
+                      toast({
+                        title: continuityMissing ? "Could not accept the removal" : "Could not accept the destination",
+                        message: (err as Error).message,
+                        tone: "error",
+                      });
+                    } finally {
+                      setRebaselining(false);
+                    }
+                  })();
+                }}
+              >
+                <label className="df2-field-label" htmlFor={`df2-continuity-reason-${jobId}`}>
+                  {continuityMissing
+                    ? "Table removed on purpose? Record why — the next append then starts a new verified history."
+                    : "Destination changed on purpose? Record why — it becomes the new verified baseline."}
+                </label>
+                <div className="df2-theater-v3-continuity-row">
+                  <input
+                    id={`df2-continuity-reason-${jobId}`}
+                    className="df2-input"
+                    value={rebaselineReason}
+                    maxLength={2000}
+                    placeholder="Reason (written to the audit log), e.g. INC-142 table rebuilt by DBA"
+                    onChange={(e) => setRebaselineReason(e.target.value)}
+                  />
+                  <button
+                    type="submit"
+                    className="df2-btn df2-btn-primary"
+                    disabled={!rebaselineReason.trim() || rebaselining}
+                  >
+                    <DtIcon name="shield" size={16} />{" "}
+                    {rebaselining ? "Recording…" : continuityMissing ? "Accept removal" : "Accept current destination"}
+                  </button>
+                </div>
+                {!rebaselineReason.trim() && (
+                  <p className="df2-field-hint">A reason is required before the baseline can move.</p>
+                )}
+              </form>
+            )}
+            {failureHint?.fix && !continuityControls && (
               <p className="df2-theater-v3-fail-fix">
                 <strong>
                   {failureHint.confidence === "high" ? "Likely checks: " : failureHint.confidence === "medium" ? "Suggested checks: " : "Next step: "}
@@ -830,6 +902,11 @@ export function JobTheaterView({
                   : "Re-run from Validate or start a new transfer — Resume needs a committed checkpoint."}
             </p>
             <div className="df2-theater-v3-alert-actions">
+              {continuityFailure && onRebuildFullRefresh && (
+                <button type="button" className="df2-btn" onClick={onRebuildFullRefresh}>
+                  <DtIcon name="refresh" size={16} /> Rebuild with full refresh
+                </button>
+              )}
               {duplicateKeyFailure && onBackToMap && (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
                   <DtIcon name="layers" size={16} /> Open Map · set PK

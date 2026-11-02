@@ -42,7 +42,16 @@ RECOVERY_HINT = (
 )
 
 
+MISSING_RECOVERY_HINT = (
+    "To recover: if the table was removed on purpose, accept the removal "
+    f"({REBASELINE_REMEDY}; audited, a reason is required) so the next append "
+    "starts a new verified history, or re-run with full_refresh_overwrite to "
+    "rebuild it from the source."
+)
+
 _FILE_ENGINES = frozenset({"sqlite", "duckdb"})
+#: Engines whose catalog the shared SQLAlchemy object-identity probe can read.
+_SQL_PROBE_ENGINES = frozenset({"sqlite", "postgresql", "mysql", "mariadb", "sqlserver", "mssql"})
 
 
 def store_path() -> Path:
@@ -334,7 +343,11 @@ def effective_sync_mode(request: Any) -> str | None:
 
 
 def compare(
-    table: str, baseline: dict[str, Any], current: dict[str, Any] | None
+    table: str,
+    baseline: dict[str, Any],
+    current: dict[str, Any] | None,
+    *,
+    dest_missing: bool | None = None,
 ) -> ContinuityViolation | None:
     """Verifier: ``None`` when ``current`` equals the stored ``baseline``."""
     exp_rows = int(baseline.get("rows") or 0)
@@ -367,6 +380,22 @@ def compare(
         schema_violation = _schema_drift(table, baseline, current, details)
         if schema_violation is not None:
             return schema_violation
+    if current is None and dest_missing is True:
+        details.update(
+            found_rows=None,
+            found_checksum=None,
+            mismatch="destination_missing",
+            recovery=MISSING_RECOVERY_HINT,
+        )
+        return ContinuityViolation(
+            f"Verification failed for table '{table}': the table no longer "
+            f"exists, but the last verified run ({baseline.get('job_id')}) left "
+            f"{exp_rows} row{'s' if exp_rows != 1 else ''} in it. It was dropped, "
+            "or this run points at a different database. An append would "
+            "recreate it without that history and still report success. "
+            f"Nothing was written. {MISSING_RECOVERY_HINT}",
+            details,
+        )
     if current is None:
         details.update(found_rows=None, found_checksum=None, mismatch="unreadable")
         return ContinuityViolation(
@@ -481,6 +510,27 @@ def _upgrade_algo(target: ContinuityTarget, baseline: dict[str, Any]) -> None:
     save_baseline(target.key, fp, str(baseline.get("job_id") or "algo-upgrade"))
 
 
+def destination_missing(target: ContinuityTarget) -> bool | None:
+    """Whether the baselined table is gone — ``None`` when it cannot be decided.
+
+    File engines are checked on disk first: opening a missing SQLite path would
+    create an empty database, a write the caller has promised not to make.
+    """
+    if target.path:
+        if not os.path.exists(target.path):
+            return True
+        if target.db_type == "duckdb":
+            return None
+    if target.db_type not in _SQL_PROBE_ENGINES:
+        return None
+    from services.preflight_cursor_gate import dest_object_missing
+
+    cfg = dict(target.cfg)
+    if target.path:
+        cfg["database"] = target.path
+    return dest_object_missing(target.db_type, cfg, target.table)
+
+
 def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViolation | None:
     """Fail an append whose destination drifted since the last verified run."""
     if resume:
@@ -516,7 +566,13 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
     except Exception:  # noqa: BLE001
         logger.warning("continuity re-read failed for %s", target.table, exc_info=True)
         current = None
-    violation = compare(target.table, baseline, current)
+    missing = None
+    if current is None and not baseline.get("unreadable"):
+        try:
+            missing = destination_missing(target)
+        except Exception:  # noqa: BLE001 — unknown stays unknown
+            missing = None
+    violation = compare(target.table, baseline, current, dest_missing=missing)
     if violation is None:
         try:
             _upgrade_algo(target, baseline)
@@ -581,11 +637,21 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         raise RebaselineError(
             "This destination is not covered by append continuity verification."
         )
-    current = fingerprint(target)
+    try:
+        current = fingerprint(target)
+    except Exception:  # noqa: BLE001 — decided below: missing vs unreadable
+        logger.warning("rebaseline re-read failed for %s", target.table, exc_info=True)
+        current = None
+    removal = False
     if current is None:
-        raise RebaselineError(
-            f"Table '{target.table}' could not be re-read; the baseline was not changed."
-        )
+        if destination_missing(target) is not True:
+            raise RebaselineError(
+                f"Table '{target.table}' could not be re-read; the baseline was not changed."
+            )
+        # The operator accepts that the verified table is gone: the next append
+        # starts a new history. Same audit path; the baseline is cleared, not
+        # replaced with an invented fingerprint.
+        removal = True
     store_error = ""
     try:
         previous = load_baseline(target.key)
@@ -621,7 +687,8 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             "previous": prev_view,
             "previous_store_unreadable": bool(store_error),
             "store_error": store_error,
-            "current": dict(current),
+            "current": dict(current) if current else None,
+            "destination_missing": removal,
         },
     )
     if store_error:
@@ -634,7 +701,10 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             raise RebaselineError(
                 f"Continuity store could not be reset after audit: {exc}"
             ) from exc
-    save_baseline(target.key, current, rebaseline_id)
+    if removal:
+        clear_baseline(target.key)
+    else:
+        save_baseline(target.key, current, rebaseline_id)
     logger.warning(
         "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
         target.db_type,
@@ -642,11 +712,109 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         actor,
         rebaseline_id,
         prev_view and prev_view.get("rows"),
-        current.get("rows"),
+        "table removed" if removal else current.get("rows"),
     )
     return {
         "rebaseline_id": rebaseline_id,
         "table": target.table,
         "previous": prev_view,
-        "current": dict(current),
+        "current": dict(current) if current else None,
+        "destination_missing": removal,
+    }
+
+
+CONTINUITY_GATE_ID = "g21_append_continuity"
+
+
+def continuity_preflight_gate(
+    destination_endpoint: Any,
+    *,
+    sync: str,
+    contracts: list[dict[str, Any]] | None,
+    pass_status: str,
+    block_status: str,
+) -> dict[str, Any] | None:
+    """Validate-time view of the check Execute runs before an append writes.
+
+    Without it Validate reported execute-ready and the run then failed on a
+    dropped or edited destination. This is the cheap half: table existence and
+    row count against the baseline. The full value digest stays at Execute
+    (``check_before_write``) — a matching count is never reported as proof.
+    ``None`` when the route is not an append onto a baselined table.
+    """
+    from services.sync_cursor import is_append_sync
+
+    if len([c for c in contracts or [] if c.get("selected", True)]) > 1:
+        return None
+    if not sync or not is_append_sync(sync) or destination_endpoint is None:
+        return None
+    endpoint = destination_endpoint
+    if isinstance(endpoint, dict):
+        from src.transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig.from_dict(str(endpoint.get("kind") or "database"), endpoint)
+    target = resolve_target(endpoint)
+    if target is None:
+        return None
+    gate: dict[str, Any] = {"id": CONTINUITY_GATE_ID, "duration_ms": 0}
+    try:
+        baseline = load_baseline(target.key)
+    except ContinuityStoreCorrupt:
+        return {
+            **gate,
+            "status": block_status,
+            "message": (
+                f"The append continuity store could not be read, so '{target.table}' "
+                "cannot be proven unchanged since its last verified run."
+            ),
+            "details": {"table": target.table, "mismatch": "baseline_store_unreadable"},
+        }
+    if not baseline:
+        return None
+    missing = destination_missing(target)
+    violation: ContinuityViolation | None = None
+    found: int | None = None
+    if baseline.get("unreadable") or missing is True:
+        violation = compare(target.table, baseline, None, dest_missing=missing)
+    else:
+        from services.dest_precount import precount_table
+
+        try:
+            found = precount_table(target.db_type, target.cfg, target.table)
+        except Exception:  # noqa: BLE001 — an unknown count is not drift
+            found = None
+        expected = int(baseline.get("rows") or 0)
+        if found is not None and found != expected:
+            violation = compare(
+                target.table,
+                baseline,
+                {"rows": found, "checksum": "", "algo": baseline.get("algo") or LEGACY_ALGO},
+            )
+    if violation is not None:
+        return {
+            **gate,
+            "status": block_status,
+            "message": violation.message,
+            "details": dict(violation.details),
+        }
+    rows = int(baseline.get("rows") or 0)
+    held = (
+        f"still holds the {rows} row{'s' if rows != 1 else ''} its last verified run left"
+        if found is not None
+        else "has a verified baseline"
+    )
+    return {
+        **gate,
+        "status": pass_status,
+        "message": (
+            f"'{target.table}' {held}. Execute re-verifies the full value digest "
+            "before the append writes."
+        ),
+        "details": {
+            "table": target.table,
+            "expected_rows": rows,
+            "found_rows": found,
+            "baseline_job_id": baseline.get("job_id"),
+            "scope": "row_count_only",
+        },
     }

@@ -5126,6 +5126,28 @@ export async function resetContractBreaker(id: string): Promise<ContractBreaker>
   return res.json();
 }
 
+export interface ContinuityRebaselineResult {
+  rebaseline_id: string;
+  table: string;
+  previous: { rows?: number; checksum?: string; job_id?: string } | null;
+  current: { rows?: number; checksum?: string } | null;
+  destination_missing?: boolean;
+}
+
+/** Accept the current destination (or its removal) as the append-continuity baseline. Audited; reason required. */
+export async function rebaselineContinuity(
+  destination: Record<string, unknown>,
+  reason: string,
+): Promise<ContinuityRebaselineResult> {
+  const res = await apiFetch(`${API_BASE}/transfer/continuity/rebaseline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ destination, reason }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not accept the destination"));
+  return res.json();
+}
+
 export async function exportContract(id: string): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/export`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export contract"));

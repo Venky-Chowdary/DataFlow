@@ -97,6 +97,22 @@ def run_transfer_policy_gates(
         )
     )
 
+    try:
+        from services.append_continuity import continuity_preflight_gate
+
+        continuity_gate = continuity_preflight_gate(
+            destination_endpoint,
+            sync=sync,
+            contracts=contracts,
+            pass_status=GateStatus.PASS.value,
+            block_status=GateStatus.BLOCK.value,
+        )
+    except Exception:  # noqa: BLE001 — Execute still runs the authoritative check
+        logger.warning("append continuity Validate probe failed", exc_info=True)
+        continuity_gate = None
+    if continuity_gate is not None:
+        gates.append(continuity_gate)
+
     schema_issues: list[str] = []
     from services.schema_drift import SCHEMA_POLICIES as allowed_schema
     if schema not in allowed_schema:
