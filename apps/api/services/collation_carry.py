@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
 
+from services.dest_dialect_facts import _collation_compatible_with_dest
 from services.type_system import (
     is_accent_insensitive_collation,
     is_case_insensitive_collation,
@@ -294,7 +295,12 @@ def _mysql_dest_spelling(eq: EqualityClass, dialect: str = "mysql") -> tuple[str
         return charset, created_case_sensitive_collation(charset, dialect), ""
     if eq.case == "insensitive" and eq.accent == "insensitive":
         native = eq.native_name
-        if native and re.match(r"^[A-Za-z0-9_]+$", native) and "UTF8" in native.upper():
+        if (
+            native
+            and re.match(r"^[A-Za-z0-9_]+$", native)
+            and "UTF8" in native.upper()
+            and _collation_compatible_with_dest(dialect, native)
+        ):
             return charset, native, ""
         return charset, "utf8mb4_unicode_ci", ""
     if eq.case == "insensitive" and eq.accent == "sensitive":
@@ -342,6 +348,17 @@ def _prefixes(charset: str, collation: str, dest: str) -> list[str]:
 
 def _existing_collation(dest_type: str) -> str:
     return (parse_collation(dest_type) or "").strip().strip('"').strip("`")
+
+
+def _native_name_valid_on(dest: str, name: str) -> bool:
+    """A source collation name is carried verbatim only where the destination knows it.
+
+    A MariaDB 11 catalog read as ``mysql`` names ``utf8mb4_uca1400_ai_ci``;
+    MySQL rejects it with 1273 after a green preflight (D246).
+    """
+    if dest not in {"mysql", "mariadb"}:
+        return True
+    return _collation_compatible_with_dest(dest, name)
 
 
 def plan_collation_carry(
@@ -408,7 +425,12 @@ def plan_collation_carry(
         charset = ""
         collation = ""
         refusal = ""
-        if src == dest and eq.native_name and not existing:
+        if (
+            src == dest
+            and eq.native_name
+            and not existing
+            and _native_name_valid_on(dest, eq.native_name)
+        ):
             # Same engine: the source collation name is valid verbatim, so carry
             # it instead of an equality-class approximation. Latin1_General_BIN
             # is not Latin1_General_100_BIN2 — re-reading the destination then
