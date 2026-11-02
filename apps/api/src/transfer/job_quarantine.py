@@ -57,6 +57,24 @@ def rows_with_findings(details: list[dict[str, Any]]) -> int:
     )
 
 
+def quarantined_row_count(details: list[dict[str, Any]]) -> int:
+    """Source rows the findings quarantine: one row, however many bad cells.
+
+    A writer records one finding per refused cell, so a row with five bad
+    cells carries five details. A finding without a row number stands alone.
+    """
+    rows: set[Any] = set()
+    anonymous = 0
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        if d.get("row") is None:
+            anonymous += 1
+        else:
+            rows.add(d.get("row"))
+    return len(rows) + anonymous
+
+
 def align_reported_rejects(summary: dict[str, Any]) -> int:
     """Make the headline rejected count equal the rows the quarantine table stores.
 
@@ -74,7 +92,7 @@ def align_reported_rejects(summary: dict[str, Any]) -> int:
     try:
         from services.quarantine_dlq import replay_quarantine_details
 
-        stored = len(replay_quarantine_details(details))
+        stored = quarantined_row_count(replay_quarantine_details(details))
     except Exception:
         stored = rows_with_findings(details)
     # Shape-diverted rows are quarantined in the control-plane DLQ per page
@@ -110,6 +128,14 @@ def align_rejects_to_stored_table(
     written = dest_result.get("rows_written")
     if not isinstance(written, int) or written <= 0:
         return
+    # The table stores one record per finding; the headline counts rows.
+    from services.quarantine_dlq import replay_quarantine_details
+
+    findings = replay_quarantine_details(
+        [d for d in (summary.get("rejected_details") or []) if isinstance(d, dict)]
+    )
+    if findings:
+        written = quarantined_row_count(findings[:written])
     current = int(summary.get("rejected_rows") or 0)
     if written != current:
         summary["rejected_count_aligned_from"] = current
