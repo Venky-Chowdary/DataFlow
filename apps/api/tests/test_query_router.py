@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from src.routers.query_router import _is_safe_sql, _validate_mongodb_aggregate
+from src.routers.query_router import (
+    _is_safe_sql,
+    _validate_mongodb_aggregate,
+    _validate_mongodb_filter,
+)
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -106,6 +110,35 @@ def test_query_export_csv(test_client, tmp_path, monkeypatch):
     assert data["download_url"].startswith("/api/v1/transfer/download/")
 
 
+def test_query_export_refuses_overwrite_to_connector(test_client, tmp_path, monkeypatch):
+    """Playground export must not replace a table without Transfer Studio gates."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    src = connector_store.create_connector({
+        "name": "Query src",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    dest = connector_store.create_connector({
+        "name": "Query dest",
+        "type": "sqlite",
+        "role": "destination",
+        "connection_string": f"sqlite:///{tmp_path / 'dest.db'}",
+        "workspace_id": "",
+    })
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": src.id,
+        "query": "SELECT * FROM users",
+        "destination_connector_id": dest.id,
+        "destination": "users_copy",
+        "sync_mode": "overwrite",
+    })
+    assert response.status_code == 400, response.text
+    assert "cannot overwrite" in response.json()["detail"].lower()
+
+
 def test_safe_sql_guard():
     assert _is_safe_sql("SELECT * FROM users") is True
     assert _is_safe_sql("SELECT * FROM users;") is True
@@ -120,8 +153,548 @@ def test_safe_sql_guard():
     assert _is_safe_sql("INSERT INTO users VALUES (1)") is False
 
 
+def test_safe_sql_guard_blocks_side_effect_functions():
+    """QA R06 — a SELECT can still mutate session/server state through
+    volatile function calls. Read-only is a session guarantee, not a
+    keyword filter."""
+    # Session/config mutation
+    assert _is_safe_sql("SELECT set_config('log_statement','all',false)") is False
+    assert _is_safe_sql("SELECT set_config('transaction_read_only','off',true)") is False
+    # Sequence burn (persists even when the tx rolls back)
+    assert _is_safe_sql("SELECT nextval('orders_id_seq')") is False
+    # Backend control / DoS
+    assert _is_safe_sql("SELECT pg_sleep(30)") is False
+    assert _is_safe_sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity") is False
+    assert _is_safe_sql("SELECT pg_advisory_lock(1)") is False
+    # Side-channel drivers
+    assert _is_safe_sql("SELECT * FROM dblink('host=x','SELECT 1') t(a int)") is False
+    assert _is_safe_sql("SELECT lo_import('/etc/passwd')") is False
+    assert _is_safe_sql("SELECT get_lock('x', 10)") is False
+    # Server filesystem reads
+    assert _is_safe_sql("SELECT pg_read_file('/etc/postgresql/pg_hba.conf')") is False
+    # Same names inside a string literal are data, not calls — allowed.
+    assert _is_safe_sql("SELECT 'pg_sleep(5) is blocked'") is True
+    # Ordinary read functions stay allowed.
+    assert _is_safe_sql("SELECT now(), count(*) FROM orders") is True
+
+
+def test_copilot_sql_guard_is_stateless_for_fresh_schema():
+    """QA R24 — the allow-list is rebuilt from live introspection on every
+    query. A table created after the previous query must be allowed by the
+    next; the guard must not carry a stale module-level list."""
+    from services.copilot_sql_guard import (
+        assert_identifiers_allowed,
+        schema_allowlist,
+    )
+
+    before = schema_allowlist([{"name": "id"}], tables=["orders"])
+    sql = "SELECT id FROM new_orders"
+    try:
+        assert_identifiers_allowed(sql, allowed=before)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised, "unintrospected table should refuse"
+
+    # Introspection now sees the created table + its columns — same call
+    # shape the live path makes per query, no cached list.
+    after = schema_allowlist(
+        [{"name": "id"}, {"name": "total"}], tables=["orders", "new_orders"]
+    )
+    assert_identifiers_allowed(sql, allowed=after)  # must not raise
+
+
+def test_copilot_sql_guard_refuses_when_schema_unavailable():
+    """Fail closed: an empty allow-list means introspection could not run —
+    invented identifiers must not pass on a missing schema."""
+    from services.copilot_sql_guard import assert_identifiers_allowed
+
+    try:
+        assert_identifiers_allowed("SELECT id FROM orders", allowed=set())
+        raised = False
+    except ValueError as exc:
+        raised = "unavailable" in str(exc).lower()
+    assert raised
+
+
+def _typed_sqlite_db(tmp_path: Path) -> Path:
+    """A table whose columns span the type classes a console must distinguish."""
+    db_path = tmp_path / "typed.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE readings ("
+        " id INTEGER PRIMARY KEY,"
+        " big_val BIGINT,"
+        " ratio DOUBLE,"
+        " label TEXT,"
+        " seen_at TIMESTAMP,"
+        " ok BOOLEAN)"
+    )
+    conn.execute(
+        "INSERT INTO readings VALUES"
+        " (1, 9223372036854775807, 1.25, 'alpha', '2024-03-01 10:00:00', 1),"
+        " (2, 5000000000, 0.5, 'beta', '2024-03-02 11:30:00', 0)"
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _sqlite_connector(name: str, db_path: Path):
+    return connector_store.create_connector({
+        "name": name,
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+
+
+_NUMERIC_FAMILY = ("INT", "NUM", "DECIMAL", "FLOAT", "DOUBLE", "REAL", "BIGINT")
+
+
+def _is_numeric_type(logical: str) -> bool:
+    """Numeric family check for width-safe assertions.
+
+    A wider carrier than the source (BIGINT reported as DECIMAL(20,0)) is
+    acceptable — over-wide costs storage, under-wide loses data. What must
+    never happen is an integer column coming back as text.
+    """
+    return any(token in logical.upper() for token in _NUMERIC_FAMILY)
+
+
+def test_execute_reports_inferred_column_types_not_string(
+    test_client, tmp_path, monkeypatch
+):
+    """Regression: every column used to be reported as ``string``.
+
+    A type-fidelity product cannot label a BIGINT and a TEXT column
+    identically, so column_schema is now inferred through the canonical
+    schema_inference choke point.
+    """
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Typed SQLite", _typed_sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT id, big_val, ratio, label FROM readings ORDER BY id",
+        "limit": 100,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    schema = data["column_schema"]
+
+    assert set(schema) == {"id", "big_val", "ratio", "label"}
+    # The whole point: not every column is the same type any more.
+    assert len(set(schema.values())) > 1, schema
+    assert schema["label"] not in {"INTEGER", "BIGINT", "FLOAT", "DOUBLE"}, schema
+    # int64-max must stay numeric. It regressed to VARCHAR because one sample
+    # (5000000000) is 10 digits and classified as an epoch TIMESTAMP, mixing
+    # {INTEGER, TIMESTAMP} and widening to text — an integer key rendered as a
+    # string is exactly the fidelity failure this product sells against.
+    assert _is_numeric_type(schema["big_val"]), schema
+    assert "CHAR" not in schema["big_val"].upper(), schema
+
+
+def test_execute_labels_type_provenance_as_inferred(test_client, tmp_path, monkeypatch):
+    """Result-set types are inferred; the API must not imply source DDL."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Provenance SQLite", _typed_sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT id FROM readings",
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["column_type_source"] == "inferred_from_values"
+
+
+def test_execute_reports_duration(test_client, tmp_path, monkeypatch):
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Timing SQLite", _sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users",
+    })
+    assert response.status_code == 200, response.text
+    duration = response.json()["duration_ms"]
+    assert isinstance(duration, (int, float))
+    assert duration >= 0.0
+
+
+def test_execute_flags_truncation_at_limit(test_client, tmp_path, monkeypatch):
+    """A full page must be reported as truncated, not as the whole result."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Truncate SQLite", _sqlite_db(tmp_path))
+
+    capped = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users ORDER BY id",
+        "limit": 1,
+    })
+    assert capped.status_code == 200, capped.text
+    assert capped.json()["row_count"] == 1
+    assert capped.json()["truncated"] is True
+
+    full = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users ORDER BY id",
+        "limit": 100,
+    })
+    assert full.status_code == 200, full.text
+    assert full.json()["truncated"] is False
+
+
+def test_execute_empty_result_reports_unknown_types(test_client, tmp_path, monkeypatch):
+    """No rows on a base-table read still knows the declared types — only an
+    expression column with no catalog source stays 'unknown' (M20)."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Empty SQLite", _sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT id, name FROM users WHERE id < 0",
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["row_count"] == 0
+    assert data["truncated"] is False
+    assert data["column_schema"] == {"id": "INTEGER", "name": "TEXT"}
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT id + 1 AS derived FROM users WHERE id < 0",
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert set(data["column_schema"].values()) <= {"unknown"}
+
+
+def test_execute_binds_named_parameters(test_client, tmp_path, monkeypatch):
+    """`:name` placeholders must bind server-side, never be interpolated."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Params SQLite", _sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users WHERE name = :who",
+        "params": {"who": "bob"},
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["row_count"] == 1
+    assert data["rows"][0]["name"] == "bob"
+
+
+def test_export_binds_the_same_named_parameters_as_execute(test_client, tmp_path, monkeypatch):
+    """Export used to omit binds — Run of ``:who=bob`` then Export dumped every row."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Export Params SQLite", _sqlite_db(tmp_path))
+    query = "SELECT * FROM users WHERE name = :who"
+    params = {"who": "bob"}
+
+    executed = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": query,
+        "params": params,
+    })
+    assert executed.status_code == 200, executed.text
+    assert executed.json()["row_count"] == 1
+
+    exported = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": query,
+        "params": params,
+        "format": "csv",
+    })
+    assert exported.status_code == 200, exported.text
+    data = exported.json()
+    assert data["success"] is True, data
+    assert data["row_count"] == 1
+
+    unbound = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": query,
+        "format": "csv",
+    })
+    # A missing bind must fail closed — never dump the unfiltered table.
+    assert unbound.status_code == 400, unbound.text
+    assert "who" in unbound.text.lower() or "bind" in unbound.text.lower() or "parameter" in unbound.text.lower()
+
+
+def test_execute_bound_parameter_cannot_inject_sql(test_client, tmp_path, monkeypatch):
+    """A parameter value containing SQL stays a value, and the table survives."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = _sqlite_connector("Injection SQLite", db_path)
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users WHERE name = :who",
+        "params": {"who": "bob'; DROP TABLE users; --"},
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["row_count"] == 0
+
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 2
+    finally:
+        check.close()
+
+
+def test_schema_lists_objects_without_columns(test_client, tmp_path, monkeypatch):
+    """Phase one: objects only — expanding every table would not scale."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Schema SQLite", _typed_sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/schema", json={"connector_id": conn.id})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["connected"] is True
+    names = [o["name"] for o in data["objects"]]
+    assert any(n.split(".")[-1] == "readings" for n in names), names
+    assert all(o["columns"] == [] for o in data["objects"]), data["objects"]
+
+
+def test_schema_expands_requested_object_columns(test_client, tmp_path, monkeypatch):
+    """Phase two: the named object comes back with its columns and types."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Schema Expand SQLite", _typed_sqlite_db(tmp_path))
+
+    response = test_client.post("/api/v1/query/schema", json={
+        "connector_id": conn.id,
+        "object_name": "readings",
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    expanded = [o for o in data["objects"] if o["columns"]]
+    assert len(expanded) == 1, data["objects"]
+    cols = {c["name"]: c["type"] for c in expanded[0]["columns"]}
+    assert {"id", "big_val", "ratio", "label"} <= set(cols), cols
+    # Width must survive introspection — a narrowed or stringified key is the
+    # P0 this product exists to prevent.
+    assert _is_numeric_type(cols["big_val"]), cols
+    assert "CHAR" not in cols["big_val"].upper(), cols
+    assert data["type_source"] == "connector_introspection"
+
+
+def test_schemas_returns_one_configured_node(test_client, tmp_path, monkeypatch):
+    """A connector that does not list schemas still returns one honest node."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Catalog SQLite", _typed_sqlite_db(tmp_path))
+    response = test_client.post("/api/v1/query/schemas", json={"connector_id": conn.id})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["nodes"]
+    assert data["listed_live"] is False
+    assert data["nodes"][0]["kind"] in {"database", "schema"}
+
+
+def test_schema_reports_truncation_flag(test_client, tmp_path, monkeypatch):
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Truncation SQLite", _typed_sqlite_db(tmp_path))
+    response = test_client.post("/api/v1/query/schema", json={"connector_id": conn.id})
+    assert response.status_code == 200, response.text
+    assert response.json()["objects_truncated"] is False
+
+
+def test_schema_rejects_unknown_connector(test_client, tmp_path, monkeypatch):
+    _isolated_store(monkeypatch, tmp_path)
+    response = test_client.post("/api/v1/query/schema", json={"connector_id": "nope"})
+    assert response.status_code == 404
+
+
+def test_safe_sql_guard_blocks_additional_write_verbs():
+    """The gate must not be a SELECT-prefix check with a small deny list."""
+    assert _is_safe_sql("TRUNCATE TABLE users") is False
+    assert _is_safe_sql("GRANT ALL ON users TO bob") is False
+    assert _is_safe_sql("CREATE TABLE t (id INT)") is False
+    assert _is_safe_sql("ALTER TABLE users ADD COLUMN x INT") is False
+    assert _is_safe_sql("MERGE INTO users USING s ON 1=1") is False
+    assert _is_safe_sql("") is False
+    assert _is_safe_sql("   ") is False
+
+
 def test_aggregate_stage_guard_blocks_writes():
     _validate_mongodb_aggregate([{"$match": {}}])  # ok
     with pytest.raises(Exception) as exc:
         _validate_mongodb_aggregate([{"$match": {}}, {"$out": "stolen"}])
     assert "$out" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        [{"$match": {"$where": "sleep(1000)"}}],
+        [{"$match": {"$expr": {"$function": {"body": "function(){}", "args": [], "lang": "js"}}}}],
+        [
+            {
+                "$group": {
+                    "_id": None,
+                    "x": {
+                        "$accumulator": {
+                            "init": "function(){}",
+                            "accumulate": "function(){}",
+                            "merge": "function(){}",
+                            "lang": "js",
+                        }
+                    },
+                }
+            }
+        ],
+        [{"$mapReduce": {}}],
+        [{"$lookup": {"from": "o", "pipeline": [{"$match": {"$where": "true"}}], "as": "o"}}],
+        [{"$facet": {"a": [{"$match": {"$expr": {"$function": {}}}}]}}],
+        [{"$unionWith": {"coll": "o", "pipeline": [{"$merge": "stolen"}]}}],
+        [{"$facet": {"a": [{"$out": "stolen"}]}}],
+    ],
+)
+def test_aggregate_guard_blocks_server_side_js_and_nested_writes(pipeline):
+    with pytest.raises(Exception) as exc:
+        _validate_mongodb_aggregate(pipeline)
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+@pytest.mark.parametrize(
+    "query_filter",
+    [
+        {"$where": "sleep(1000)"},
+        {"$and": [{"a": 1}, {"$where": "while(true){}"}]},
+        {"$expr": {"$function": {"body": "function(){return true}", "args": [], "lang": "js"}}},
+        {"nested": {"$elemMatch": {"$where": "true"}}},
+    ],
+)
+def test_filter_guard_blocks_server_side_js(query_filter):
+    with pytest.raises(Exception) as exc:
+        _validate_mongodb_filter(query_filter)
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+def test_filter_guard_blocks_bson_code_values():
+    from bson.code import Code
+
+    with pytest.raises(Exception) as exc:
+        _validate_mongodb_filter({"a": Code("function(){}")})
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+def test_mongo_guards_allow_ordinary_read_queries():
+    _validate_mongodb_filter(
+        {"status": {"$in": ["a", "b"]}, "$or": [{"x": {"$gt": 1}}, {"where": 2}]}
+    )
+    _validate_mongodb_aggregate(
+        [
+            {"$match": {"$expr": {"$gt": ["$qty", 1]}}},
+            {"$lookup": {"from": "o", "pipeline": [{"$match": {"k": 1}}], "as": "o"}},
+            {"$group": {"_id": "$k", "n": {"$sum": 1}}},
+        ]
+    )
+
+
+def test_execute_rejects_mongo_where_filter_before_reaching_server(monkeypatch):
+    import src.routers.query_router as qr
+
+    calls = []
+
+    class _Coll:
+        def find(self, *a, **k):
+            calls.append(("find", a))
+            raise AssertionError("find must not run")
+
+        def aggregate(self, *a, **k):
+            calls.append(("aggregate", a))
+            raise AssertionError("aggregate must not run")
+
+    class _Db:
+        def __getitem__(self, _name):
+            return _Coll()
+
+    class _Client:
+        def __getitem__(self, _name):
+            return _Db()
+
+    monkeypatch.setattr(qr, "_mongo_client", lambda *_a, **_k: _Client())
+    connector = connector_store.SavedConnector(
+        id="m1",
+        name="mongo",
+        type="mongodb",
+        role="source",
+        connection_string="mongodb://localhost:27017/test",
+    )
+    for raw in (
+        '{"$where": "sleep(1000)"}',
+        '[{"$match": {"$expr": {"$function": {"body": "function(){}", "args": [], "lang": "js"}}}}]',
+    ):
+        body = qr.QueryExecuteRequest(connector_id="m1", query=raw, collection="c")
+        with pytest.raises(Exception) as exc:
+            qr._run_mongodb_query(connector, body)
+        assert getattr(exc.value, "status_code", None) == 400
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "output_path",
+    [
+        "../x.py",
+        "../src/routers/pwned.py",
+        "src/routers/pwned.py",
+        "../services/pwned.csv",
+        "/tmp/pwned.csv",
+        "../exports_evil/pwned.csv",
+    ],
+)
+def test_query_export_refuses_paths_outside_exports(test_client, tmp_path, monkeypatch, output_path):
+    """A client-chosen output_path must never land outside apps/api/exports."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = connector_store.create_connector({
+        "name": "Export confinement",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    before = {p for p in _API_ROOT.rglob("pwned*")}
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": "SELECT 'import os' AS line",
+        "format": "csv",
+        "output_path": output_path,
+    })
+    assert response.status_code == 400, response.text
+    assert "exports" in response.json()["detail"].lower() or "extension" in response.json()["detail"].lower()
+    assert {p for p in _API_ROOT.rglob("pwned*")} == before
+    assert not Path("/tmp/pwned.csv").exists()
+
+
+def test_query_export_named_file_lands_in_exports(test_client, tmp_path, monkeypatch):
+    import uuid
+
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = connector_store.create_connector({
+        "name": "Export named",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    name = f"q_{uuid.uuid4().hex[:10]}"
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users",
+        "format": "csv",
+        "output_path": name,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    target = _API_ROOT / "exports" / f"{name}.csv"
+    try:
+        assert data["success"] is True, data
+        assert Path(data["path"]) == target.resolve()
+        assert target.read_text().startswith("id,name")
+    finally:
+        if target.exists():
+            target.unlink()

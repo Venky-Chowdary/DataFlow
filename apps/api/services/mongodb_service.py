@@ -15,15 +15,68 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
-#: Statuses a job never leaves on its own. Progress writes that arrive after a
-#: job reaches one of these are stale by definition and must be dropped, not
-#: applied — otherwise a late write resurrects a cancelled or failed job.
-TERMINAL_JOB_STATUSES = frozenset(
-    {"completed", "completed_with_quarantine", "failed", "cancelled"}
-)
+
+# Callers import the terminal-status set from this module (cancel-race guard).
+from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
+from services.ops_events import emit_event
+from services.runtime_estimate import append_throughput_mark
+from services.workspace_filter import WorkspaceFilter, bound_allows
 
 
 logger = logging.getLogger(__name__)
+
+#: Holds an operator clears with one decision (approve/confirm/resume): INFO.
+_OPERATOR_HOLD_STATUSES = frozenset(
+    {"needs_approval", "needs_confirmation", "needs_review", "awaiting_approval", "paused"}
+)
+#: Holds that need a fix before the job can proceed: WARNING (``held`` default).
+_BLOCKED_HOLD_STATUSES = frozenset({"blocked"})
+
+
+def _job_status_outcome(status: str) -> tuple[str, int | None]:
+    """Map a job status to an ops_events outcome and optional level override."""
+    key = str(status or "").strip().lower()
+    if key == "failed":
+        return "failed", None
+    if key == "cancelled":
+        return "cancelled", None
+    if key in COMPLETED_STATUSES:
+        return "succeeded", None
+    if key == "retrying":
+        return "retrying", None
+    if key in _OPERATOR_HOLD_STATUSES:
+        return "held", logging.INFO
+    if key in _BLOCKED_HOLD_STATUSES:
+        return "held", None
+    return "started", None
+
+
+def emit_job_status_changed(
+    job_id: str,
+    previous_status: str | None,
+    status: str,
+    workspace_id: str | None = None,
+) -> None:
+    """Emit ``job.status.changed`` for a persisted transition (not progress ticks).
+
+    ``from_status`` comes from the read taken before the write, so two racing
+    writers can both report the same prior status; ``from_status_source`` says
+    so rather than paying for a compare-and-swap on every status write.
+    """
+    if str(previous_status or "") == str(status or ""):
+        return
+    outcome, level = _job_status_outcome(status)
+    emit_event(
+        logger,
+        "job.status.changed",
+        outcome=outcome,
+        level=level,
+        job_id=str(job_id),
+        workspace_id=str(workspace_id) if workspace_id else None,
+        from_status=str(previous_status) if previous_status else None,
+        from_status_source="prior_read",
+        to_status=str(status),
+    )
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -43,11 +96,14 @@ def _encrypt_connector_secrets(data: dict) -> dict:
     """Encrypt secret fields before persisting a connector document."""
     from services.secret_vault import encrypt_secret
 
+    from services.secret_vault import tenant_id_from_workspace
+
     out = dict(data)
+    tenant_id = tenant_id_from_workspace(str(out.get("workspace_id") or ""))
     for key in _CONNECTOR_SECRET_KEYS:
         val = out.get(key)
         if isinstance(val, str) and val and val != "****" and not val.startswith("["):
-            out[key] = encrypt_secret(val, label=f"connector-{key}")
+            out[key] = encrypt_secret(val, tenant_id=tenant_id, label=f"connector-{key}")
     return out
 
 
@@ -55,14 +111,15 @@ def _decrypt_connector_secrets(data: dict | None) -> dict | None:
     """Decrypt secret fields after loading a connector for internal use."""
     if not data:
         return data
-    from services.secret_vault import decrypt_secret
+    from services.secret_vault import decrypt_secret, tenant_id_from_workspace
 
     out = dict(data)
+    tenant_id = tenant_id_from_workspace(str(out.get("workspace_id") or ""))
     for key in _CONNECTOR_SECRET_KEYS:
         val = out.get(key)
         if isinstance(val, str) and val and val != "****":
             try:
-                out[key] = decrypt_secret(val)
+                out[key] = decrypt_secret(val, tenant_id=tenant_id)
             except Exception as exc:
                 logger.warning("Failed to decrypt connector field %s: %s", key, exc)
     return out
@@ -134,6 +191,29 @@ def _as_object_id(job_id: str):
         return None
 
 
+def job_key_filter(job_id: str) -> dict | None:
+    """Mongo filter matching a job by ObjectId **or** by its string id.
+
+    ``create_transfer_job`` honours a caller-supplied ``_id`` of any shape
+    (fleet claim, scheduler, CLI, ``execute_tracked(job_id=...)``), while the
+    write paths used to accept ObjectId-shaped ids only. A job created with an
+    external id was therefore readable but permanently un-updatable: its very
+    first checkpoint save returned False and the transfer aborted mid-write,
+    leaving committed rows at the destination with no resume token. One
+    resolver now serves every read and write so an id that is accepted at
+    creation stays addressable for the life of the job.
+    """
+    if not job_id:
+        return None
+    oid = _as_object_id(job_id)
+    clauses: list[dict] = []
+    if oid is not None:
+        clauses.append({"_id": oid})
+    clauses.append({"_id": job_id})
+    clauses.append({"job_id": job_id})
+    return clauses[0] if len(clauses) == 1 else {"$or": clauses}
+
+
 def _fresh_object_id_hex() -> str:
     """Return a fresh 24-character hex string that looks like an ObjectId.
 
@@ -143,6 +223,23 @@ def _fresh_object_id_hex() -> str:
     import os
 
     return os.urandom(12).hex()
+
+
+def job_workspace_filter(
+    workspace_id: str | None, workspace_filter: WorkspaceFilter | None = None
+) -> WorkspaceFilter:
+    """The job rows a list/count covers.
+
+    ``workspace_filter`` (the caller's tenant scope) wins; otherwise
+    ``workspace_id`` is an exact workspace and ``None`` is system scope. Legacy
+    unscoped jobs are no longer OR-ed into every workspace's view (D154): they
+    appear only when the filter says so.
+    """
+    if workspace_filter is not None:
+        return workspace_filter
+    if workspace_id is None:
+        return WorkspaceFilter.everything()
+    return WorkspaceFilter.only(workspace_id)
 
 
 class MongoDBService:
@@ -163,21 +260,37 @@ class MongoDBService:
         self.db_name = "datatransfer"
 
     def connect(self) -> bool:
-        """Establish connection to MongoDB"""
+        """Establish connection to MongoDB.
+
+        The client is published to ``self.client`` only once it has answered a
+        ping. Callers read a non-``None`` client as proof the store is reachable
+        and skip their file fallback on the strength of it — ``audit_log``
+        does — so publishing one mid-handshake hands them an object that then
+        blocks for a full server-selection window. An unverified client is a
+        local until it has earned the attribute.
+        """
+        client = None
         try:
             # Fail hung sockets instead of freezing the asyncio event loop
             # when sync pymongo is called from request handlers.
-            self.client = MongoClient(
+            client = MongoClient(
                 self.connection_string,
                 serverSelectionTimeoutMS=5000,
                 socketTimeoutMS=20000,
                 connectTimeoutMS=5000,
                 waitQueueTimeoutMS=10000,
             )
-            self.client.admin.command('ping')
+            client.admin.command('ping')
+            self.client = client
             return True
         except Exception as e:
             print(f"[ERROR] MongoDB connection failed: {e}")
+            if client is not None:
+                # Release the monitor threads the unverified client started.
+                try:
+                    client.close()
+                except Exception:
+                    pass
             self.client = None
             return False
 
@@ -199,7 +312,18 @@ class MongoDBService:
             raise ConnectionError(
                 f"MongoDB unavailable at {self.connection_string}"
             )
-        return self.client[db_name or self.db_name]
+        name = db_name or self.db_name
+        # Decimal has no BSON wire. Profiling stats and numeric coercion put
+        # Decimal('1') on the job document, and insert_one then raises
+        # InvalidDocument before the transfer can start. The codec is the
+        # one carrier for every collection opened through this database.
+        from services.value_serializer import control_plane_codec_options
+
+        base = self.client[name]
+        return self.client.get_database(
+            name,
+            codec_options=control_plane_codec_options(base.codec_options),
+        )
 
     def test_connection(self) -> dict:
         """Test connection and return server info"""
@@ -232,6 +356,16 @@ class MongoDBService:
         connector_data["created_at"] = datetime.now(timezone.utc)
         connector_data["updated_at"] = datetime.now(timezone.utc)
 
+        # ``_id`` is the identity every lookup queries. A payload that already
+        # carries ``id`` (uuid from the canonical store) must keep it as ``_id``
+        # — a divergent ``id`` field under a generated ``_id`` would be
+        # list-visible but unreachable by id.
+        public_id = str(connector_data.pop("id", "") or "").strip()
+        if "_id" in connector_data:
+            connector_data["_id"] = str(connector_data["_id"])
+        elif public_id:
+            connector_data["_id"] = public_id
+
         result = collection.insert_one(connector_data)
         return str(result.inserted_id)
 
@@ -241,10 +375,17 @@ class MongoDBService:
         collection = db["connectors"]
 
         oid = _as_object_id(connector_id)
-        if not oid:
-            return None
+        id_clauses: list[dict] = []
+        if oid:
+            id_clauses.append({"_id": oid})
+        # Non-ObjectId ids (uuid strings from the canonical store) live in
+        # ``_id`` verbatim; older docs may carry them in an ``id`` field.
+        id_clauses.append({"_id": connector_id})
+        id_clauses.append({"id": connector_id})
 
-        result = collection.find_one({"_id": oid})
+        result = collection.find_one({"$or": id_clauses})
+        if result and not bound_allows(result.get("workspace_id")):
+            return None
         if result:
             result["_id"] = str(result["_id"])
             return _decrypt_connector_secrets(result)
@@ -257,6 +398,8 @@ class MongoDBService:
 
         connectors = []
         for doc in collection.find().sort("created_at", -1):
+            if not bound_allows(doc.get("workspace_id")):
+                continue
             doc["_id"] = str(doc["_id"])
             connectors.append(_decrypt_connector_secrets(doc) or doc)
         return connectors
@@ -267,16 +410,17 @@ class MongoDBService:
         collection = db["connectors"]
 
         oid = _as_object_id(connector_id)
-        if not oid:
-            return False
+        clauses: list[dict] = [{"_id": connector_id}, {"id": connector_id}]
+        if oid:
+            clauses.insert(0, {"_id": oid})
 
         updates = _encrypt_connector_secrets(updates)
         updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
-            {"_id": oid},
+            {"$or": clauses},
             {"$set": updates}
         )
-        return result.modified_count > 0
+        return result.matched_count > 0
 
     def delete_connector(self, connector_id: str) -> bool:
         """Delete a connector"""
@@ -284,10 +428,11 @@ class MongoDBService:
         collection = db["connectors"]
 
         oid = _as_object_id(connector_id)
-        if not oid:
-            return False
+        clauses: list[dict] = [{"_id": connector_id}, {"id": connector_id}]
+        if oid:
+            clauses.insert(0, {"_id": oid})
 
-        result = collection.delete_one({"_id": oid})
+        result = collection.delete_one({"$or": clauses})
         return result.deleted_count > 0
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -319,7 +464,7 @@ class MongoDBService:
 
     def get_client_for_connector(self, connector_id: str):
         """Build MongoClient from saved connector config (file store or platform MongoDB)."""
-        from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
         from src.transfer.adapters import (
             _lookup_saved_connector,
             mongodb_connection_string,
@@ -329,7 +474,11 @@ class MongoDBService:
         if not connector:
             return None, None
         conn_str = mongodb_connection_string(connector)
-        return MongoClient(conn_str, serverSelectionTimeoutMS=10000), connector
+        return guarded_mongo_client(
+            conn_str,
+            workspace_id=str(connector.get("workspace_id") or ""),
+            serverSelectionTimeoutMS=10000,
+        ), connector
 
     def create_collection_from_schema(self, database: str, collection: str, schema: dict, client=None) -> dict:
         """Create a collection with optional schema validation"""
@@ -388,6 +537,12 @@ class MongoDBService:
 
         collection = db["transfer_jobs"]
 
+        # Honor caller-supplied job id (execute_tracked / resume / fleet claim).
+        explicit = job_data.get("_id") or job_data.get("job_id")
+        if explicit and "_id" not in job_data:
+            job_data = dict(job_data)
+            job_data["_id"] = str(explicit)
+
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
         job_data["started_at"] = None
@@ -417,9 +572,15 @@ class MongoDBService:
             return False
         collection = db["transfer_jobs"]
 
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
+
+        # Pop fence flags before they leak onto the job document.
+        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
+        only_from_status = kwargs.pop("only_from_status", None)
+        # An operator cancel is a control-plane command, not worker progress.
+        operator_command = bool(kwargs.pop("operator_command", False))
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
@@ -427,9 +588,10 @@ class MongoDBService:
         prev_doc = None
         try:
             prev_doc = collection.find_one(
-                {"_id": oid},
+                key,
                 {
                     "status": 1,
+                    "cancel_requested": 1,
                     "phases": 1,
                     "records_processed": 1,
                     "rejected_rows": 1,
@@ -438,35 +600,55 @@ class MongoDBService:
                     "cdc_lag_seconds": 1,
                     "cdc_lease_conflict": 1,
                     "destination_summary": 1,
+                    "quarantine_closure": 1,
                     "reconcile": 1,
                     "event_log": 1,
                     "message": 1,
                     "phase": 1,
+                    "throughput_marks": 1,
+                    "started_at": 1,
+                    "workspace_id": 1,
                 },
             )
         except Exception:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
+        _terminal_message_over_progress(status, updates, prev_doc)
+        from services.job_status import terminal_exit_resets
 
-        # Terminal statuses are final. A worker's next per-chunk progress write
-        # used to happily reset `status` from "cancelled" back to "running",
-        # so a cancel that landed between the worker's status read and its
-        # status write was erased — the UI flipped back to Running and the
-        # operator had to race the loop. `allow_terminal_exit=True` is the one
-        # documented way out, used by resume.
-        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
-        if (
-            previous_status in TERMINAL_JOB_STATUSES
-            and status not in TERMINAL_JOB_STATUSES
-            and not allow_terminal_exit
-        ):
+        for _key, _value in terminal_exit_resets(
+            previous_status, status, allow_terminal_exit
+        ).items():
+            updates.setdefault(_key, _value)
+
+        # One owner: services.job_status.refuse_job_status_write.
+        # Sticky terminal + cancel_requested so a late COPY `completed` cannot
+        # rewrite Cancel. `allow_terminal_exit=True` is resume's documented exit.
+        from services.job_status import refuse_job_status_write
+
+        refuse_reason = refuse_job_status_write(
+            previous_status=previous_status,
+            next_status=status,
+            cancel_requested=bool((prev_doc or {}).get("cancel_requested")),
+            allow_terminal_exit=allow_terminal_exit,
+        )
+        if refuse_reason:
             logging.getLogger(__name__).info(
-                "Ignoring %s update for job %s: already terminal (%s)",
+                "Ignoring %s update for job %s: %s",
                 status,
                 job_id,
-                previous_status,
+                refuse_reason,
             )
             return False
+        only_from_allowed: set[str] | None = None
+        if only_from_status is not None:
+            only_from_allowed = {
+                str(item).strip().lower()
+                for item in only_from_status
+                if str(item or "").strip()
+            }
+            if str(previous_status or "").strip().lower() not in only_from_allowed:
+                return False
 
         try:
             from services.job_trust import attach_trust_to_updates
@@ -475,17 +657,48 @@ class MongoDBService:
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        try:
+            from services.phase_profile import attach_phase_timings_to_updates
+
+            attach_phase_timings_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
         if status == "running":
-            updates.setdefault("started_at", datetime.now(timezone.utc))
-        elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+            # Heartbeats must not $set started_at to now — Theater elapsed
+            # became 0s on every progress write / SSE reconnect.
+            if (prev_doc or {}).get("started_at") and "started_at" not in kwargs:
+                updates.pop("started_at", None)
+            else:
+                updates.setdefault("started_at", datetime.now(timezone.utc))
+        elif status in TERMINAL_JOB_STATUSES:
             updates["completed_at"] = datetime.now(timezone.utc)
+
+        # Throughput evidence for the cutover-window estimate. Bounded to the
+        # trailing window the estimator reads, so the job doc cannot grow.
+        if "records_processed" in kwargs and "throughput_marks" not in updates:
+            marks = append_throughput_mark(
+                (prev_doc or {}).get("throughput_marks"),
+                kwargs.get("records_processed"),
+            )
+            if marks is not None:
+                updates["throughput_marks"] = marks
 
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
 
-        # Durable operator event log (Jobs Log tab). Cap to last 200 lines.
+        # Durable operator event log (Jobs Log tab). Keep the run from start.
         try:
             if "event_log" not in updates:
+                from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                 prev_log = list((prev_doc or {}).get("event_log") or [])
                 line_parts: list[str] = []
                 if phase_label and str(phase_label) != str((prev_doc or {}).get("phase") or ""):
@@ -509,7 +722,7 @@ class MongoDBService:
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    updates["event_log"] = prev_log[-200:]
+                    updates["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -524,7 +737,7 @@ class MongoDBService:
 
                 phases = (prev_doc or {}).get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
-                if status in ("completed", "completed_with_quarantine"):
+                if status in COMPLETED_STATUSES:
                     phases = complete_phases(phases, success=True, message=message or "")
                 elif status in ("failed", "cancelled"):
                     phases = complete_phases(phases, success=False, message=kwargs.get("error") or message or "")
@@ -536,29 +749,70 @@ class MongoDBService:
 
         # Fencing: reject stale worker progress when lease_fence is provided.
         fence = updates.pop("lease_fence", None)
-        if fence is None:
+        if operator_command:
+            fence = None
+        elif fence is None:
             try:
                 from services.worker_leases import active_fence
 
                 fence = active_fence(job_id)
             except Exception:
                 fence = None
-        filt: dict = {"_id": oid}
+        filt: dict = dict(key)
+        if only_from_allowed is not None:
+            # Compare-and-set: a worker that already left the queue must not
+            # be cancelled by a schedule slot that only replaces queued work.
+            filt = {"$and": [filt, {"status": {"$in": sorted(only_from_allowed)}}]}
         if fence is not None:
             updates["lease_fence"] = fence
-            # Allow first write (no fence yet) or matching fence only.
+            # Fencing tokens are monotonic: a newer lease supersedes the one
+            # the document last saw, and only a lower token is a stale
+            # writer. Equality-only froze a reclaimed job at the dead
+            # worker's progress. The key itself may already be an `$or`, so
+            # both go under `$and`.
             filt = {
-                "_id": oid,
-                "$or": [
-                    {"lease_fence": {"$exists": False}},
-                    {"lease_fence": None},
-                    {"lease_fence": fence},
-                ],
+                "$and": [
+                    filt,
+                    {
+                        "$or": [
+                            {"lease_fence": {"$exists": False}},
+                            {"lease_fence": None},
+                            {"lease_fence": {"$lte": fence}},
+                        ]
+                    },
+                ]
             }
 
-        result = collection.update_one(filt, {"$set": updates})
+        # Control-plane BSON budget — never let quarantine/checkpoint previews
+        # blow MongoDB's 16 MiB update command (Excel→SQL high-reject cliff).
+        try:
+            from services.job_document_budget import apply_job_update_with_budget
+
+            result = apply_job_update_with_budget(collection, filt, updates)
+        except Exception as budget_exc:
+            logging.getLogger(__name__).error(
+                "transfer_jobs update failed for %s: %s",
+                job_id,
+                budget_exc,
+                exc_info=budget_exc,
+            )
+            # Last ditch: status/error only so Theater still shows failure.
+            try:
+                from services.job_document_budget import emergency_strip_job_update
+
+                result = collection.update_one(
+                    filt, {"$set": emergency_strip_job_update(updates)}
+                )
+            except Exception:
+                return False
         ok = result.modified_count > 0 or result.matched_count > 0
         if ok:
+            emit_job_status_changed(
+                job_id,
+                previous_status,
+                status,
+                updates.get("workspace_id") or (prev_doc or {}).get("workspace_id"),
+            )
             try:
                 from services.ops_metrics import record_terminal_job_transition
 
@@ -573,6 +827,12 @@ class MongoDBService:
                     quarantined=int(updates.get("rejected_rows") or (prev_doc or {}).get("rejected_rows") or 0),
                     reconcile_ok=reconcile_ok,
                 )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            try:
+                from services.job_terminal_effects import apply_job_terminal_effects
+
+                apply_job_terminal_effects(job_id, status)
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ok
@@ -592,11 +852,11 @@ class MongoDBService:
             db = self.get_database()
         except ConnectionError:
             return False
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         result = db["transfer_jobs"].update_one(
-            {"_id": oid},
+            key,
             {
                 "$set": {
                     "cancel_requested": True,
@@ -613,11 +873,11 @@ class MongoDBService:
             db = self.get_database()
         except ConnectionError:
             return False
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         result = db["transfer_jobs"].update_one(
-            {"_id": oid},
+            key,
             {
                 "$unset": {"cancel_requested": "", "cancel_requested_at": ""},
                 "$set": {"updated_at": datetime.now(timezone.utc)},
@@ -635,15 +895,75 @@ class MongoDBService:
             db = self.get_database()
         except ConnectionError:
             return False
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         doc = db["transfer_jobs"].find_one(
-            {"_id": oid}, {"cancel_requested": 1, "status": 1}
+            key, {"cancel_requested": 1, "status": 1}
         )
         if not doc:
             return False
         return bool(doc.get("cancel_requested")) or doc.get("status") == "cancelled"
+
+    # Same-process fallback claim store. Mongo claims coordinate workers across
+    # processes; without Mongo the schedule runner and a manual submit share
+    # only this registry, and "allow on outage" let a schedule and an ad-hoc
+    # run write the same destination twice (QA DS08).
+    _LOCAL_CLAIMS: dict[str, tuple[str, datetime]] = {}
+    _LOCAL_CLAIMS_LOCK = threading.Lock()
+
+    @classmethod
+    def _local_claim(
+        cls,
+        key: str,
+        job_id: str,
+        expires_at: datetime,
+        status_lookup: Any = None,
+    ) -> tuple[bool, str]:
+        now = datetime.now(timezone.utc)
+        with cls._LOCAL_CLAIMS_LOCK:
+            for k, (_, exp) in list(cls._LOCAL_CLAIMS.items()):
+                if _as_utc(exp) <= now:
+                    cls._LOCAL_CLAIMS.pop(k, None)
+            holder, exp = cls._LOCAL_CLAIMS.get(key, ("", expires_at))
+            # A claim whose job already finished is a normal re-run. The
+            # caller supplies the status lookup — constructing a service here
+            # would pay a connect timeout inside the lock. A lookup that
+            # throws stays closed (treat as running) so an outage cannot
+            # start a second writer.
+            if holder:
+                holder_status = "running"
+                if callable(status_lookup):
+                    try:
+                        holder_status = status_lookup(holder)
+                    except Exception:
+                        holder_status = "running"
+                from services.job_idempotency import claim_still_blocks
+
+                if not claim_still_blocks(
+                    holder_id=holder,
+                    holder_status=holder_status,
+                    expired=False,
+                ):
+                    holder = ""
+            if holder:
+                return False, holder
+            cls._LOCAL_CLAIMS[key] = (job_id, expires_at)
+            return True, ""
+
+    @classmethod
+    def _local_bind(cls, key: str, from_job_id: str, to_job_id: str) -> None:
+        with cls._LOCAL_CLAIMS_LOCK:
+            entry = cls._LOCAL_CLAIMS.get(key)
+            if entry and entry[0] == from_job_id:
+                cls._LOCAL_CLAIMS[key] = (to_job_id, entry[1])
+
+    @classmethod
+    def _local_release(cls, key: str, job_id: str) -> None:
+        with cls._LOCAL_CLAIMS_LOCK:
+            entry = cls._LOCAL_CLAIMS.get(key)
+            if entry and (not job_id or entry[0] == job_id):
+                cls._LOCAL_CLAIMS.pop(key, None)
 
     def claim_job_idempotency(
         self,
@@ -665,15 +985,22 @@ class MongoDBService:
         same transfer later is normal — so it is taken over rather than
         rejected.
         """
-        from services.job_idempotency import claim_expiry
+        from services.job_idempotency import claim_expiry, claim_still_blocks
 
         if not key or not job_id:
             return True, "", ""
+        expires_at = claim_expiry(ttl_seconds)
         try:
             db = self.get_database()
         except ConnectionError:
-            # Without a shared store there is nothing to coordinate through.
-            # Allow the run rather than blocking all transfers on Mongo.
+            # Without a shared store the same-process registry is the only
+            # coordination: a scheduled beat and a manual run in this process
+            # still must not both write (QA DS08).
+            acquired, holder = self._local_claim(
+                key, job_id, expires_at, self._job_status
+            )
+            if not acquired:
+                return False, holder, self._job_status(holder)
             return True, "", ""
 
         claims = db["job_claims"]
@@ -683,29 +1010,37 @@ class MongoDBService:
             "_id": key,
             "job_id": job_id,
             "claimed_at": now,
-            "expires_at": claim_expiry(ttl_seconds),
+            "expires_at": expires_at,
         }
         try:
             claims.insert_one(doc)
+            # Mirror into the local registry so this process keeps deduping
+            # even if the shared store later drops out mid-run.
+            self._LOCAL_CLAIMS[key] = (job_id, expires_at)
             return True, "", ""
         except Exception as exc:
             if not _is_duplicate_key(exc):
-                # A claim store problem must not block data movement; log it and
-                # let the transfer proceed rather than failing closed on infra.
+                # A claim store problem must not block data movement; the
+                # same-process registry still dedupes within this worker.
                 logger.warning("idempotency claim failed for %s: %s", key, exc)
+                acquired, holder = self._local_claim(
+                    key, job_id, expires_at, self._job_status
+                )
+                if not acquired:
+                    return False, holder, self._job_status(holder)
                 return True, "", ""
 
         existing = claims.find_one({"_id": key}) or {}
         holder_id = str(existing.get("job_id") or "")
         holder_status = self._job_status(holder_id) if holder_id else ""
-        expires_at = existing.get("expires_at")
+        expires_raw = existing.get("expires_at")
+        expired = isinstance(expires_raw, datetime) and _as_utc(expires_raw) <= now
 
-        stale = (
-            not holder_id
-            or holder_status in TERMINAL_JOB_STATUSES
-            or (isinstance(expires_at, datetime) and _as_utc(expires_at) <= now)
-        )
-        if stale:
+        if not claim_still_blocks(
+            holder_id=holder_id,
+            holder_status=holder_status,
+            expired=expired,
+        ):
             # Take over: either the previous run finished, or it died without
             # releasing and its claim has aged out.
             result = claims.update_one(
@@ -732,10 +1067,11 @@ class MongoDBService:
         """
         if not key or not from_job_id or not to_job_id:
             return False
+        self._local_bind(key, from_job_id, to_job_id)
         try:
             db = self.get_database()
         except ConnectionError:
-            return False
+            return True
         try:
             result = db["job_claims"].update_one(
                 {"_id": key, "job_id": from_job_id},
@@ -759,10 +1095,11 @@ class MongoDBService:
         """
         if not key:
             return False
+        self._local_release(key, job_id)
         try:
             db = self.get_database()
         except ConnectionError:
-            return False
+            return True
         query: dict[str, Any] = {"_id": key}
         if job_id:
             query["job_id"] = job_id
@@ -789,20 +1126,31 @@ class MongoDBService:
         self._claim_indexes_ready = True
 
     def _job_status(self, job_id: str) -> str:
-        """Current status of a job, or '' when it cannot be read."""
-        oid = _as_object_id(job_id)
-        if not oid:
+        """Current status of a job.
+
+        A missing document is ``""`` so the claim can be reaped. A read that
+        throws is ``running`` so a store outage does not start a second writer.
+        """
+        key = job_key_filter(job_id)
+        if not key:
             return ""
         try:
-            doc = self.get_database()["transfer_jobs"].find_one(
-                {"_id": oid}, {"status": 1}
-            )
+            doc = self.get_database()["transfer_jobs"].find_one(key, {"status": 1})
         except Exception:
+            return "running"
+        if not doc:
             return ""
-        return str((doc or {}).get("status") or "")
+        return str(doc.get("status") or "")
 
-    def update_job_fields(self, job_id: str, fields: dict) -> bool:
-        """Patch job metadata without changing status (e.g. rename)."""
+    def update_job_fields(
+        self, job_id: str, fields: dict, *, touch_updated_at: bool = True
+    ) -> bool:
+        """Patch job metadata without changing status (e.g. rename).
+
+        ``touch_updated_at=False`` is for bookkeeping writes that are not job
+        progress (e.g. the stall watchdog's flag) — bumping ``updated_at``
+        would reset the quiet clock the watchdog measures.
+        """
         if not fields:
             return False
         try:
@@ -810,12 +1158,37 @@ class MongoDBService:
         except ConnectionError:
             return False
         collection = db["transfer_jobs"]
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
-        updates = {**fields, "updated_at": datetime.now(timezone.utc)}
-        result = collection.update_one({"_id": oid}, {"$set": updates})
+        updates = dict(fields)
+        if touch_updated_at:
+            updates["updated_at"] = datetime.now(timezone.utc)
+        result = collection.update_one(key, {"$set": updates})
         return result.matched_count > 0
+
+    def list_unscoped_jobs(self) -> list[dict]:
+        """Every job with no workspace — the legacy rows the D154 backfill assigns.
+
+        Only the fields that name an owner or a connector, never the page cap
+        ``list_jobs`` applies.
+        """
+        db = self.get_database()
+        projection = {
+            "_id": 1,
+            "triggered_by": 1,
+            "created_by": 1,
+            "schedule_id": 1,
+            "transfer_request.triggered_by": 1,
+            "transfer_request.schedule_id": 1,
+            "transfer_request.source.connector_id": 1,
+            "transfer_request.destination.connector_id": 1,
+        }
+        rows = []
+        for doc in db["transfer_jobs"].find(WorkspaceFilter.only("").mongo_query(), projection):
+            doc["_id"] = str(doc["_id"])
+            rows.append(doc)
+        return rows
 
     def is_job_name_taken(
         self,
@@ -872,34 +1245,53 @@ class MongoDBService:
             return None
         collection = db["transfer_jobs"]
 
-        result = None
-        oid = _as_object_id(job_id)
-        if oid is not None:
-            result = collection.find_one({"_id": oid})
-        # Fallback: some stores persist string ids / job_id field (memory→mongo, retries).
-        if result is None and job_id:
-            result = collection.find_one({"_id": job_id})
-        if result is None and job_id:
-            result = collection.find_one({"job_id": job_id})
+        key = job_key_filter(job_id)
+        result = collection.find_one(key) if key else None
         if result:
             result["_id"] = str(result["_id"])
         return result
 
-    def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+    @staticmethod
+    def _job_scope_query(
+        workspace_id: str | None, workspace_filter: WorkspaceFilter | None = None
+    ) -> dict[str, Any]:
+        """Mongo job filter; see :func:`job_workspace_filter`."""
+        return job_workspace_filter(workspace_id, workspace_filter).mongo_query()
+
+    def count_jobs(
+        self,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> dict[str, Any]:
+        """Job total and per-status breakdown over the whole history, not a page of it."""
+        db = self.get_database()
+        collection = db["transfer_jobs"]
+        query = self._job_scope_query(workspace_id, workspace_filter)
+        by_status: dict[str, int] = {}
+        for row in collection.aggregate(
+            ([{"$match": query}] if query else [])
+            + [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+        ):
+            by_status[str(row.get("_id") or "unknown")] = int(row.get("n") or 0)
+        return {"total": sum(by_status.values()), "by_status": by_status}
+
+    def list_jobs(
+        self,
+        limit: int = 50,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
+        from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
 
+        limit = bounded_job_list_limit(limit)
         db = self.get_database()
         collection = db["transfer_jobs"]
 
-        query: dict[str, Any] = {}
-        if workspace_id is not None:
-            # An empty workspace id shows only global jobs; a non-empty id shows
-            # that workspace plus global shared jobs.
-            allowed = [workspace_id, "", None]
-            if workspace_id == "":
-                allowed = ["", None]
-            query["$or"] = [{"workspace_id": w} for w in allowed if w is not None] + [{"workspace_id": {"$exists": False}}]
+        query: dict[str, Any] = self._job_scope_query(workspace_id, workspace_filter)
         jobs = []
         # Projection drops the heaviest arrays at the Mongo layer when possible.
         projection = {
@@ -927,6 +1319,88 @@ class MongoDBService:
                     doc[key] = doc[key].isoformat()
             jobs.append(slim_job_for_list(doc))
         return jobs
+
+    def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
+        """Every non-terminal job across workspaces, oldest heartbeat first.
+
+        Unlike :meth:`list_jobs` this keeps ``transfer_request`` and the
+        checkpoint, which resume needs, and is not a page of recent jobs.
+        """
+        from services.job_status import UNFINISHED_JOB_STATUSES
+
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return []
+        projection = {
+            "rejected_details": 0,
+            "logs": 0,
+            "log_lines": 0,
+            "events": 0,
+            "event_log": 0,
+            "mapping_proof": 0,
+            "sample_rows": 0,
+            "preview_rows": 0,
+            "quarantine_rows": 0,
+            "quarantine_samples": 0,
+            "preflight": 0,
+            "destination_summary.rejected_details": 0,
+            "destination_summary.sample_rows": 0,
+        }
+        out: list[dict] = []
+        cursor = (
+            db["transfer_jobs"]
+            .find({"status": {"$in": sorted(UNFINISHED_JOB_STATUSES)}}, projection)
+            .sort("updated_at", 1)
+            .limit(max(1, int(limit)))
+        )
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            out.append(doc)
+        return out
+
+
+_TERMINAL_MESSAGE_FALLBACK = {
+    "failed": "Failed",
+    "error": "Failed",
+    "cancelled": "Cancelled",
+    "completed": "Completed",
+    "completed_with_quarantine": "Completed with quarantined rows",
+    "completed_with_warnings": "Completed with warnings",
+}
+
+
+def _terminal_message_over_progress(
+    status: str, fields: dict, previous: dict | None = None
+) -> None:
+    """A finished job's message never keeps an in-flight progress text.
+
+    A terminal write that carries no ``message`` of its own would leave the last
+    progress copy on the record ("Validating mapping and schema…", "Connecting
+    to destination…") next to a failed or completed status. A failed job's
+    message names the failure (C23); any other terminal status gets a neutral
+    terminal line. The previous message is progress by construction when the
+    job was not terminal yet; a repeat terminal write keeps its own message.
+    ``cancelled``/``completed_with_quarantine`` callers that report committed
+    rows (D102) pass their own ``message`` and are untouched.
+    """
+    from services.job_status import is_terminal
+
+    status_l = str(status or "").lower()
+    if status_l not in _TERMINAL_MESSAGE_FALLBACK or "message" in fields:
+        return
+    if status_l in {"failed", "error"} and fields.get("error"):
+        fields["message"] = str(fields["error"])[:500]
+        return
+    prev = previous or {}
+    if str(prev.get("message") or "").strip() and not is_terminal(prev.get("status")):
+        fields["message"] = _TERMINAL_MESSAGE_FALLBACK[status_l]
+
+def _created_sort_stamp(value: Any) -> str:
+    """One comparable stamp. Memory jobs mix datetime and ISO strings."""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value or "")
 
 
 class MemoryMongoDBService:
@@ -977,7 +1451,7 @@ class MemoryMongoDBService:
         same way they would against the database, which is what makes the
         single-process test for this defect meaningful.
         """
-        from services.job_idempotency import claim_expiry
+        from services.job_idempotency import claim_expiry, claim_still_blocks
 
         if not key or not job_id:
             return True, "", ""
@@ -990,12 +1464,12 @@ class MemoryMongoDBService:
                     (self._jobs.get(holder_id) or {}).get("status") or ""
                 )
                 expires_at = existing.get("expires_at")
-                stale = (
-                    not holder_id
-                    or holder_status in TERMINAL_JOB_STATUSES
-                    or (isinstance(expires_at, datetime) and _as_utc(expires_at) <= now)
-                )
-                if not stale:
+                expired = isinstance(expires_at, datetime) and _as_utc(expires_at) <= now
+                if claim_still_blocks(
+                    holder_id=holder_id,
+                    holder_status=holder_status,
+                    expired=expired,
+                ):
                     return False, holder_id, holder_status
             self._claims[key] = {
                 "job_id": job_id,
@@ -1031,8 +1505,9 @@ class MemoryMongoDBService:
             return True
 
     def save_connector(self, connector_data: dict) -> str:
-        oid = self._new_id()
         rec = _encrypt_connector_secrets(dict(connector_data))
+        public_id = str(rec.pop("id", "") or "").strip()
+        oid = str(rec.get("_id") or public_id or self._new_id())
         rec["_id"] = oid
         rec.setdefault("created_at", datetime.now(timezone.utc))
         rec.setdefault("updated_at", datetime.now(timezone.utc))
@@ -1041,7 +1516,14 @@ class MemoryMongoDBService:
 
     def get_connector(self, connector_id: str) -> Optional[dict]:
         rec = self._connectors.get(connector_id)
-        if rec:
+        if rec is None:
+            # Mirror the live lookup: ids stored in an ``id`` field under a
+            # generated ``_id`` must still resolve.
+            rec = next(
+                (c for c in self._connectors.values() if str(c.get("id") or "") == str(connector_id)),
+                None,
+            )
+        if rec and bound_allows(rec.get("workspace_id")):
             rec = dict(rec)
             rec["_id"] = str(rec["_id"])
             return _decrypt_connector_secrets(rec)
@@ -1050,11 +1532,13 @@ class MemoryMongoDBService:
     def list_connectors(self) -> list[dict]:
         items = sorted(
             self._connectors.values(),
-            key=lambda c: c.get("created_at") or "",
+            key=lambda c: _created_sort_stamp(c.get("created_at")),
             reverse=True,
         )
         out = []
         for c in items:
+            if not bound_allows(c.get("workspace_id")):
+                continue
             row = dict(c, _id=str(c["_id"]))
             out.append(_decrypt_connector_secrets(row) or row)
         return out
@@ -1103,8 +1587,8 @@ class MemoryMongoDBService:
         return {"success": True, "document_count": 0, "sample_documents": []}
 
     def create_transfer_job(self, job_data: dict) -> str:
-        oid = self._new_id()
         job = dict(job_data)
+        oid = str(job.get("_id") or job.get("job_id") or self._new_id())
         job["_id"] = oid
         job.setdefault("status", "pending")
         job.setdefault("created_at", datetime.now(timezone.utc))
@@ -1119,12 +1603,52 @@ class MemoryMongoDBService:
         return oid
 
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+        only_from_status = kwargs.pop("only_from_status", None)
+        operator_command = bool(kwargs.pop("operator_command", False))
         rec = self._jobs.get(job_id)
-        if not rec:
+        if only_from_status is not None and rec is None:
             return False
+        if not rec:
+            # Fail-closed resume requires a job shell — mint one for programmatic
+            # execute_tracked(job_id=…) callers (memory store / tests / CLI).
+            self.create_transfer_job({"_id": job_id, "status": status or "pending"})
+            rec = self._jobs.get(job_id)
+            if not rec:
+                return False
+        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
         previous_status = rec.get("status")
+        from services.job_status import refuse_job_status_write, terminal_exit_resets
+
+        refuse_reason = refuse_job_status_write(
+            previous_status=previous_status,
+            next_status=status,
+            cancel_requested=bool(rec.get("cancel_requested")),
+            allow_terminal_exit=allow_terminal_exit,
+        )
+        if refuse_reason:
+            logging.getLogger(__name__).info(
+                "Ignoring %s update for job %s: %s",
+                status,
+                job_id,
+                refuse_reason,
+            )
+            return False
+        if only_from_status is not None:
+            allowed = {
+                str(item).strip().lower()
+                for item in only_from_status
+                if str(item or "").strip()
+            }
+            if str(previous_status or "").strip().lower() not in allowed:
+                return False
+        for _key, _value in terminal_exit_resets(
+            previous_status, status, allow_terminal_exit
+        ).items():
+            kwargs.setdefault(_key, _value)
         fence = kwargs.pop("lease_fence", None)
-        if fence is None:
+        if operator_command:
+            fence = None
+        elif fence is None:
             try:
                 from services.worker_leases import active_fence
 
@@ -1133,14 +1657,29 @@ class MemoryMongoDBService:
                 fence = None
         if fence is not None:
             existing_fence = rec.get("lease_fence")
-            if existing_fence is not None and existing_fence != fence:
+            if existing_fence is not None and int(existing_fence) > int(fence):
                 return False
             kwargs["lease_fence"] = fence
 
+        _terminal_message_over_progress(status, kwargs, rec)
         try:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.phase_profile import attach_phase_timings_to_updates
+
+            attach_phase_timings_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, kwargs, previous=rec)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1149,12 +1688,20 @@ class MemoryMongoDBService:
         prev_rows = int(rec.get("records_processed") or 0)
         prev_log = list(rec.get("event_log") or [])
 
+        prev_marks = rec.get("throughput_marks")
+
         rec.update(kwargs)
         rec["status"] = status
         rec["updated_at"] = datetime.now(timezone.utc)
+        if "records_processed" in kwargs and "throughput_marks" not in kwargs:
+            marks = append_throughput_mark(prev_marks, kwargs.get("records_processed"))
+            if marks is not None:
+                rec["throughput_marks"] = marks
         if status == "running":
-            rec.setdefault("started_at", datetime.now(timezone.utc))
-        elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+            # create_transfer_job seeds started_at=None; setdefault would keep it.
+            if not rec.get("started_at"):
+                rec["started_at"] = datetime.now(timezone.utc)
+        elif status in TERMINAL_JOB_STATUSES:
             rec["completed_at"] = datetime.now(timezone.utc)
 
         if "event_log" not in kwargs:
@@ -1177,10 +1724,12 @@ class MemoryMongoDBService:
                     except Exception as exc:
                         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 if line_parts:
+                    from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    rec["event_log"] = prev_log[-200:]
+                    rec["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1196,7 +1745,7 @@ class MemoryMongoDBService:
 
                 phases = rec.get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
-                if status in ("completed", "completed_with_quarantine"):
+                if status in COMPLETED_STATUSES:
                     phases = complete_phases(phases, success=True, message=kwargs.get("message", ""))
                 elif status in ("failed", "cancelled"):
                     phases = complete_phases(
@@ -1214,6 +1763,7 @@ class MemoryMongoDBService:
                 rec["phases"] = phases
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        emit_job_status_changed(job_id, previous_status, status, rec.get("workspace_id"))
         try:
             from services.ops_metrics import record_terminal_job_transition
 
@@ -1230,18 +1780,66 @@ class MemoryMongoDBService:
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        try:
+            from services.job_terminal_effects import apply_job_terminal_effects
+
+            apply_job_terminal_effects(job_id, status)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return True
 
-    def update_job_fields(self, job_id: str, fields: dict) -> bool:
-        """Patch job metadata without changing status (e.g. rename)."""
+    def request_job_cancel(self, job_id: str) -> bool:
+        """Record a durable cancellation request — same contract as MongoDBService."""
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        rec["cancel_requested"] = True
+        rec["cancel_requested_at"] = datetime.now(timezone.utc)
+        rec["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def clear_job_cancel(self, job_id: str) -> bool:
+        """Clear a cancellation request so a resumed job can run again."""
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        rec.pop("cancel_requested", None)
+        rec.pop("cancel_requested_at", None)
+        rec["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        return bool(rec.get("cancel_requested")) or rec.get("status") == "cancelled"
+
+    def update_job_fields(
+        self, job_id: str, fields: dict, *, touch_updated_at: bool = True
+    ) -> bool:
+        """Patch job metadata without changing status (e.g. rename).
+
+        See ``MongoDBService.update_job_fields`` — ``touch_updated_at=False``
+        keeps bookkeeping writes from reading as job progress.
+        """
         if not fields:
             return False
         rec = self._jobs.get(job_id)
         if not rec:
             return False
         rec.update(fields)
-        rec["updated_at"] = datetime.now(timezone.utc)
+        if touch_updated_at:
+            rec["updated_at"] = datetime.now(timezone.utc)
         return True
+
+    def list_unscoped_jobs(self) -> list[dict]:
+        """Every job with no workspace (see ``MongoDBService.list_unscoped_jobs``)."""
+        unscoped = WorkspaceFilter.only("")
+        return [
+            {**rec, "_id": str(rec["_id"])}
+            for rec in self._jobs.values()
+            if unscoped.matches(rec.get("workspace_id"))
+        ]
 
     def is_job_name_taken(
         self,
@@ -1278,19 +1876,39 @@ class MemoryMongoDBService:
             return rec
         return None
 
-    def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+    def count_jobs(
+        self,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> dict[str, Any]:
+        """Job total and per-status breakdown over the whole history, not a page of it."""
+        scope = job_workspace_filter(workspace_id, workspace_filter)
+        by_status: dict[str, int] = {}
+        for job in self._jobs.values():
+            if not scope.matches(job.get("workspace_id")):
+                continue
+            key = str(job.get("status") or "unknown")
+            by_status[key] = by_status.get(key, 0) + 1
+        return {"total": sum(by_status.values()), "by_status": by_status}
+
+    def list_jobs(
+        self,
+        limit: int = 50,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> list[dict]:
+        from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
 
+        limit = bounded_job_list_limit(limit)
+        scope = job_workspace_filter(workspace_id, workspace_filter)
         items = sorted(
-            self._jobs.values(),
-            key=lambda j: j.get("created_at") or "",
+            (j for j in self._jobs.values() if scope.matches(j.get("workspace_id"))),
+            key=lambda j: _created_sort_stamp(j.get("created_at")),
             reverse=True,
         )
-        if workspace_id is not None:
-            allowed = {workspace_id, "", None}
-            if workspace_id == "":
-                allowed = {"", None}
-            items = [j for j in items if j.get("workspace_id") in allowed]
         items = items[:limit]
         out = []
         for rec in items:
@@ -1301,6 +1919,19 @@ class MemoryMongoDBService:
                     job[key] = job[key].isoformat()
             out.append(slim_job_for_list(job))
         return out
+
+    def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
+        from services.job_status import UNFINISHED_JOB_STATUSES
+
+        items = [
+            dict(rec)
+            for rec in self._jobs.values()
+            if str(rec.get("status") or "") in UNFINISHED_JOB_STATUSES
+        ]
+        items.sort(key=lambda j: str(j.get("updated_at") or ""))
+        for job in items:
+            job["_id"] = str(job["_id"])
+        return items[: max(1, int(limit))]
 
 
 # Global instance

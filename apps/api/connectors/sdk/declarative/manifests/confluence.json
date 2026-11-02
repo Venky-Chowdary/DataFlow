@@ -1,0 +1,172 @@
+{
+ "name": "confluence",
+ "base_url": "https://{domain}.atlassian.net/wiki",
+ "auth": {
+  "type": "basic"
+ },
+ "defaults": {
+  "page_size": 100,
+  "max_pages": 10000
+ },
+ "streams": [
+  {
+   "name": "pages",
+   "method": "GET",
+   "path": "rest/api/content/search",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "_links.next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   },
+   "cursor": {
+    "field": "version.when",
+    "request_param": "cql",
+    "format": "iso8601",
+    "initial": "1970-01-01T00:00:00Z",
+    "request_template": "type=page AND lastmodified >= \"{cursor:%Y-%m-%d %H:%M}\" ORDER BY lastmodified ASC"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "version": {
+      "type": "object",
+      "properties": {
+       "when": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "spaces",
+   "method": "GET",
+   "path": "api/v2/spaces",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "_links.next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   }
+  },
+  {
+   "name": "blogposts",
+   "method": "GET",
+   "path": "rest/api/content/search",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "_links.next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   },
+   "cursor": {
+    "field": "version.when",
+    "request_param": "cql",
+    "format": "iso8601",
+    "initial": "1970-01-01T00:00:00Z",
+    "request_template": "type=blogpost AND lastmodified >= \"{cursor:%Y-%m-%d %H:%M}\" ORDER BY lastmodified ASC"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "version": {
+      "type": "object",
+      "properties": {
+       "when": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "attachments",
+   "method": "GET",
+   "path": "rest/api/content/search",
+   "records_path": "results",
+   "primary_key": [
+    "id"
+   ],
+   "paginator": {
+    "type": "next_url",
+    "next_url_path": "_links.next",
+    "page_size": 100,
+    "page_size_param": "limit"
+   },
+   "cursor": {
+    "field": "version.when",
+    "request_param": "cql",
+    "format": "iso8601",
+    "initial": "1970-01-01T00:00:00Z",
+    "request_template": "type=attachment AND lastmodified >= \"{cursor:%Y-%m-%d %H:%M}\" ORDER BY lastmodified ASC"
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "version": {
+      "type": "object",
+      "properties": {
+       "when": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     }
+    }
+   }
+  }
+ ]
+}

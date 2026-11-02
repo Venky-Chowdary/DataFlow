@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -9,6 +10,7 @@ from typing import Any, Callable
 from services.object_streaming import (
     download_for_object_store,
     download_object,
+    read_rows_and_schema_from_spill,
     read_rows_from_spill,
 )
 
@@ -20,22 +22,95 @@ __all__ = [
     "normalize_object_base_key",
     "object_parts_prefix",
     "object_run_token",
+    "object_staging_key",
     "object_store_read_keys",
     "purge_object_store_parts",
     "read_object_from_store",
+    "resolve_object_store_write_dest_types",
+    "resolve_object_store_export_format",
+    "ObjectStoreExport",
+    "serialize_object_store_body",
+    "serialize_object_store_export",
     "resolve_object_write_key",
     "resolve_object_write_layout",
     "_object_version_token",
 ]
 
-_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv)$", re.IGNORECASE)
+_OBJECT_FORMAT_EXT = {
+    "json": "json",
+    "jsonl": "jsonl",
+    "ndjson": "jsonl",
+    "csv": "csv",
+    "tsv": "tsv",
+    "parquet": "parquet",
+    "excel": "xlsx",
+    "xlsx": "xlsx",
+}
+OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".tsv", ".parquet", ".xlsx")
+_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|tsv|parquet|xlsx)$", re.IGNORECASE)
+
+# Suffix → encoder format. Unknown suffixes refuse — never CSV under another name.
+_OBJECT_STORE_EXPORT_FORMATS: dict[str, str] = {
+    "csv": "csv",
+    "tsv": "tsv",
+    "json": "json",
+    "jsonl": "jsonl",
+    "ndjson": "jsonl",
+    "parquet": "parquet",
+    "xlsx": "excel",
+    "xlsm": "excel",
+}
 
 
-def normalize_object_base_key(table_name: str, schema: str = "") -> str:
-    """Canonical object key from table/schema (single-chunk layout)."""
-    key = (table_name or schema or "exports/dataflow_export.json").strip()
-    if not key.endswith((".json", ".jsonl", ".csv")):
-        key = f"{key.rstrip('/')}/export.json"
+def resolve_object_store_export_format(filename: str) -> str | None:
+    """Encoder format for an object-store dest key, or ``None`` if unknown.
+
+    A missing suffix is not a format. Callers that want a default CSV must
+    say so — silently rewriting ``daily.xlsx`` to ``daily.xlsx.csv`` is D11.
+    """
+    name = (filename or "").rsplit("/", 1)[-1].strip().lower()
+    if "." not in name:
+        return None
+    ext = name.rsplit(".", 1)[-1]
+    return _OBJECT_STORE_EXPORT_FORMATS.get(ext)
+
+
+def _reject_object_key_traversal(key: str) -> None:
+    """Refuse ``..`` segments so a destination key cannot leave its prefix."""
+    parts = [part for part in (key or "").replace("\\", "/").split("/")]
+    if any(part == ".." for part in parts):
+        raise ValueError(
+            f"Object key {key!r} contains a '..' segment. "
+            "Destination keys cannot traverse outside the prefix."
+        )
+
+
+def normalize_object_base_key(
+    table_name: str, schema: str = "", file_format: str = ""
+) -> str:
+    """Canonical object key from table plus an optional connector prefix.
+
+    ``schema`` is the object-store prefix (``QA_R3``). It is applied in front
+    of the table key and is not dropped when the table is set. A key that
+    already starts with the prefix is left alone. A ``..`` segment is refused
+    (R4-032) before the key is joined.
+    """
+    _reject_object_key_traversal(table_name)
+    _reject_object_key_traversal(schema)
+    raw = (table_name or "").strip().lstrip("/")
+    prefix = (schema or "").strip().strip("/")
+    if prefix and raw and raw != prefix and not raw.startswith(prefix + "/"):
+        raw = f"{prefix}/{raw}"
+    elif not raw:
+        raw = prefix
+    key = (raw or "exports/dataflow_export.json").strip()
+    if not key.lower().endswith(OBJECT_STORE_EXPORT_EXTS):
+        # An extensionless key is a folder; the object in it takes the
+        # declared file_format (JSON when none is declared). The writer and
+        # every reader must pass the same format or they resolve different keys.
+        ext = _OBJECT_FORMAT_EXT.get(str(file_format or "").strip().lower(), "json")
+        key = f"{key.rstrip('/')}/export.{ext}"
+    _reject_object_key_traversal(key)
     return key
 
 
@@ -95,7 +170,12 @@ def resolve_object_write_key(
 
 @dataclass(frozen=True)
 class ObjectWriteLayout:
-    """Where one chunk writes, and what an overwrite must clear first."""
+    """Where one chunk writes, and what an overwrite must clear after commit.
+
+    ``should_purge`` is true on the *last* overwrite chunk only — writers must
+    promote staging→live successfully before deleting stale parts, so a failed
+    upload cannot leave the destination empty (Bugbot ADLS/S3/GCS class).
+    """
 
     base_key: str
     write_key: str
@@ -103,6 +183,61 @@ class ObjectWriteLayout:
     purge_prefix: str
     purge_legacy_key: str
     should_purge: bool
+    # When purging after a multi-part overwrite, keep part-00001..part-N.
+    keep_part_count: int = 0
+
+
+def object_staging_key(write_key: str) -> str:
+    """Sibling key for bytes that must land before the live object is replaced."""
+    key = (write_key or "").strip()
+    if not key:
+        return ".__df_staging__"
+    return f"{key}.__df_staging__"
+
+
+def object_append_backup_key(write_key: str) -> str:
+    """Sibling key holding the pre-append object image for undo/restore.
+
+    An incremental append/deduped merge rewrites the live object with prior
+    rows plus the new batch. When verification fails after the promote, the
+    rollback is restoring this image — deleting the live object would drop
+    the pre-run rows too (D116).
+    """
+    key = (write_key or "").strip()
+    if not key:
+        return ".__df_append_backup__"
+    return f"{key}.__df_append_backup__"
+
+
+def refuse_empty_object_replace(
+    *,
+    rows_written: int,
+    live_exists: bool,
+    sync_mode: str,
+    key: str,
+    allow_empty_replace: bool = False,
+    protect_landed_object: bool = False,
+) -> str | None:
+    """Why a 0-row export must not replace an object that already holds rows.
+
+    A quarantine replay that accepts nothing still serializes a header. Putting
+    that header on the live key deletes the rows that landed (R11-001). A
+    measured empty overwrite may still replace. A replay sets
+    ``protect_landed_object`` and is never that overwrite. A missing live key
+    may be created.
+    """
+    if int(rows_written or 0) > 0 or not live_exists:
+        return None
+    if not protect_landed_object:
+        from services.sync_cursor import is_overwrite_sync
+
+        if allow_empty_replace or is_overwrite_sync(sync_mode):
+            return None
+    shown = key or "the live object"
+    return (
+        f"Refusing to replace {shown} with a header-only export "
+        f"({int(rows_written or 0)} data rows). The existing object was left untouched."
+    )
 
 
 def resolve_object_write_layout(
@@ -113,19 +248,21 @@ def resolve_object_write_layout(
     file_batch_idx: int = 0,
     total_chunks: int = 1,
     job_id: str = "",
+    file_format: str = "",
 ) -> ObjectWriteLayout:
     """Single source of truth for S3/GCS/ADLS chunked object layout.
 
     Overwrite syncs reuse one stable part set and clear stale parts once, on
-    the first chunk. Append syncs isolate each run under a token so reruns
-    cannot interleave with a previous run's parts.
+    the *last* successful chunk (after staging→live promote). Append syncs
+    isolate each run under a token so reruns cannot interleave with a previous
+    run's parts.
 
     Raises ``ValueError`` when a multi-chunk append has no ``job_id`` to derive
     a run token from — writing colliding part keys would silently mix runs.
     """
     from services.sync_cursor import is_overwrite_sync
 
-    base = normalize_object_base_key(table_name or schema)
+    base = normalize_object_base_key(table_name, schema, file_format)
     total = max(1, int(total_chunks or 1))
     overwrite = is_overwrite_sync(sync_mode)
 
@@ -146,7 +283,9 @@ def resolve_object_write_layout(
         total_chunks=total,
         run_token=run_token,
     )
-    is_first_chunk = int(file_batch_idx or 0) in (0, 1)
+    idx = int(file_batch_idx or 0)
+    part_n = idx if idx >= 1 else 1
+    is_last_chunk = part_n >= total
     return ObjectWriteLayout(
         base_key=base,
         write_key=write_key,
@@ -155,7 +294,8 @@ def resolve_object_write_layout(
         # different chunk count (or a previous append run token) cannot survive.
         purge_prefix=object_parts_prefix(base),
         purge_legacy_key=base if total > 1 else "",
-        should_purge=overwrite and is_first_chunk,
+        should_purge=overwrite and is_last_chunk,
+        keep_part_count=total if (overwrite and total > 1) else 0,
     )
 
 
@@ -187,21 +327,37 @@ def purge_object_store_parts(
     delete_key: Callable[[str], None],
     parts_prefix: str,
     legacy_base_key: str = "",
+    keep_part_count: int = 0,
+    keep_keys: list[str] | tuple[str, ...] | None = None,
 ) -> list[str]:
     """Delete stale part objects (and optional legacy single-object key).
 
-    Called only on the first chunk of an overwrite sync so a smaller re-run
-    cannot leave orphaned parts from a larger previous run.
+    Called after a successful last-chunk overwrite promote so a failed upload
+    cannot wipe the previous export. ``keep_part_count`` preserves
+    ``part-00001``..``part-N`` from the run that just landed.
     """
     removed: list[str] = []
+    keep = {str(k) for k in (keep_keys or []) if k}
+    keep_n = max(0, int(keep_part_count or 0))
     if parts_prefix:
         for key in list_keys(parts_prefix):
+            if key in keep:
+                continue
             name = key.rsplit("/", 1)[-1]
             # Only delete part-* under the prefix — never wipe sibling objects.
-            if _PART_NAME_RE.match(name):
-                delete_key(key)
-                removed.append(key)
-    if legacy_base_key:
+            m = _PART_NAME_RE.match(name)
+            if not m:
+                continue
+            if keep_n > 0:
+                try:
+                    part_num = int(name[5:10])
+                except ValueError:
+                    part_num = -1
+                if 1 <= part_num <= keep_n:
+                    continue
+            delete_key(key)
+            removed.append(key)
+    if legacy_base_key and legacy_base_key not in keep:
         try:
             delete_key(legacy_base_key)
             removed.append(legacy_base_key)
@@ -244,6 +400,48 @@ def _object_version_token(store: str, cfg: dict[str, Any], bucket: str, key: str
     return ""
 
 
+def _single_object_key(store: str, cfg: dict[str, Any], bucket: str, key: str) -> str:
+    """The object a single-object read of ``key`` means.
+
+    A glob, prefix or dated pattern is not an object key: GET on ``in/*.csv``
+    is NoSuchKey, so samples, nullability, population and duplicate probes
+    all came back unread for a scheduled pattern (D34). One match is that
+    object; none is "file not arrived"; several cannot be stood for by one
+    object — the pickup reads them file by file.
+    """
+    from services.file_pickup import file_not_arrived, is_file_pattern, list_remote_files
+
+    if not is_file_pattern(key):
+        return key
+    listed = list_remote_files(store, cfg, bucket, key)
+    if len(listed) == 1:
+        return listed[0].name
+    if not listed:
+        raise file_not_arrived(key, cfg.get("extra"))
+    raise ValueError(
+        f"{key!r} matches {len(listed)} objects; a single-object read cannot "
+        "stand for the set (the pickup loads them file by file)"
+    )
+
+
+def materialize_store_spill(
+    store: str,
+    cfg: dict[str, Any],
+    bucket: str,
+    key: str,
+) -> Any:
+    """Download an object once. Uniqueness scans this path in a single pass."""
+    key = _single_object_key(store, cfg, bucket, key)
+    version = _object_version_token(store, cfg, bucket, key)
+    cache_key = f"{store}:{bucket}:{key}:{version or 'nov'}"
+    # No version ⇒ force download (refuse TTL reuse of potentially stale bytes).
+    return download_object(
+        cache_key,
+        lambda p: download_for_object_store(store, p, cfg, bucket, key),
+        force=not bool(version),
+    )
+
+
 def read_object_from_store(
     store: str,
     cfg: dict[str, Any],
@@ -258,19 +456,236 @@ def read_object_from_store(
     Spill cache keys include source version metadata when available so an overwritten
     object is never served as current under a stale TTL entry.
     """
-    version = _object_version_token(store, cfg, bucket, key)
-    cache_key = f"{store}:{bucket}:{key}:{version or 'nov'}"
-    # No version ⇒ force download (refuse TTL reuse of potentially stale bytes).
-    path = download_object(
-        cache_key,
-        lambda p: download_for_object_store(store, p, cfg, bucket, key),
-        force=not bool(version),
-    )
-    headers, rows, total = read_rows_from_spill(
+    path = materialize_store_spill(store, cfg, bucket, key)
+    headers, rows, total, declared = read_rows_and_schema_from_spill(
         path,
         key,
         offset=offset,
         limit=limit,
         known_total=known_total_rows,
     )
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    return ReadBatch(
+        headers=headers,
+        rows=rows,
+        offset=offset,
+        total_rows=total,
+        meta=object_native_types_meta(headers, rows, declared),
+    )
+
+
+def object_native_types_meta(
+    headers: list[str], rows: list[list[Any]], declared: dict[str, str] | None
+) -> dict[str, Any]:
+    """The file's own schema where it has one (Parquet), else a sampled profile.
+
+    A declared column type is a catalog fact; a type read off a page of rows
+    is a guess whose width the page cannot know (D62).
+    """
+    meta = sampled_native_types_meta(headers, rows)
+    if not declared:
+        return meta
+    from services.dest_schema_authority import CARRIER_DECLARED
+
+    types = dict(meta.get("native_types") or {})
+    authority = dict(meta.get("native_types_authority") or {})
+    for name in headers:
+        if declared.get(name):
+            types[name] = declared[name]
+            authority[name] = CARRIER_DECLARED
+    return {**meta, "native_types": types, "native_types_authority": authority}
+
+
+def inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str, str]:
+    """Column types read from the object's own rows.
+
+    An object store holds the same CSV/JSON/Parquet payload an upload does, but
+    the reader handed the engine bare strings and no types, so every column
+    landed as text: the identical file uploaded directly produced
+    ``bigint``/``numeric``/``date`` while the S3 copy produced three ``text``
+    columns. The transfer still reported success, which is the part that makes
+    it worth inferring here rather than leaving to the destination.
+
+    This is the same ``infer_columns_from_rows`` the file parser uses, so both
+    paths reach one answer instead of two, and readers already carry types to
+    the engine through ``meta['native_types']``. Every reader that parses rows
+    out of an opaque payload shares it — object stores and SFTP alike — so a
+    payload cannot land typed over one transport and all-text over another.
+    """
+    if not headers or not rows:
+        return {}
+    try:
+        from services.schema_inference import infer_columns_from_rows
+
+        return {
+            str(col["name"]): str(col.get("inferred_type") or "VARCHAR")
+            for col in infer_columns_from_rows(list(headers), list(rows))
+            if col.get("name")
+        }
+    except Exception as exc:  # noqa: BLE001 — types are an enrichment, not a gate
+        logging.getLogger(__name__).info(
+            "object payload type inference unavailable: %s", exc
+        )
+        return {}
+
+
+def sampled_native_types_meta(
+    headers: list[str], rows: list[list[Any]]
+) -> dict[str, Any]:
+    """ReadBatch.meta: inferred types tagged as a sampled profile, not a catalog."""
+    from services.dest_schema_authority import CARRIER_SAMPLED
+
+    types = inferred_native_types(headers, rows)
+    return {
+        "native_types": types,
+        "native_types_authority": {name: CARRIER_SAMPLED for name in types},
+    }
+
+
+def resolve_object_store_write_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+    *,
+    logical_types: list[str] | None = None,
+    destination_column_types: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], str | None]:
+    """Prefer Studio/probed live carriers over Map stamps for serialize.
+
+    S3/GCS/ADLS/SFTP must quarantine DECIMAL/BINARY/VARCHAR(n) against the
+    destination schema Studio probed — never ignore live types and soft-bind
+    Map VARCHAR (overflow / empty→null invent on JSON/CSV/Parquet export).
+
+    When Studio ``destination_column_types`` is present (non-empty), every mapped
+    column must be covered — partial Studio must not fall through to Map
+    VARCHAR invent. When Studio is absent, Map stamps are allowed for first-write
+    export (no live object schema to probe).
+
+    Returns ``(dest_types, None)`` or ``(partial, error)``.
+    """
+    from connectors.writer_common import resolve_studio_or_map_dest_types
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+
+    dest_types, err = resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        studio_types=destination_column_types,
+        product="Object-store",
+    )
+    if err:
+        return dest_types, err
+    # Studio/probed object-store types are a sampled profile (D1). Enforcing
+    # DECIMAL(2,2) measured from the first page would quarantine the source's
+    # declared DECIMAL(12,2) after Map went green. Declared operator ceilings
+    # still hold.
+    widened = apply_sampled_profile_to_dest_types(
+        dest_types,
+        mappings,
+        dest_db="s3",
+    )
+    return type(dest_types)(widened), None
+
+
+@dataclass
+class ObjectStoreExport:
+    """Serialized export that may live in RAM or on a rolled spool file."""
+
+    content_type: str
+    size: int
+    spilled: bool
+    _spool: Any = None
+
+    def rewind(self) -> None:
+        if self._spool is not None:
+            self._spool.seek(0)
+
+    def read_all(self) -> bytes:
+        self.rewind()
+        data = self._spool.read() if self._spool is not None else b""
+        self.rewind()
+        return data
+
+    def iter_parts(self, part_size: int):
+        """Yield 1-indexed ``(part_number, chunk)`` from the spool."""
+        from connectors.object_store_multipart import iter_object_store_parts
+
+        self.rewind()
+        yield from iter_object_store_parts(
+            part_size=part_size, source=self._spool, size=self.size
+        )
+
+    def close(self) -> None:
+        spool = self._spool
+        self._spool = None
+        if spool is None:
+            return
+        try:
+            spool.close()
+        except Exception:
+            pass
+
+    def copy_to(self, dest: Any, *, chunk_size: int = 1024 * 1024) -> int:
+        """Write the spool to ``dest.write`` one chunk at a time. Returns bytes written."""
+        self.rewind()
+        written = 0
+        for _, chunk in self.iter_parts(max(1, int(chunk_size))):
+            dest.write(chunk)
+            written += len(chunk)
+        return written
+
+
+def serialize_object_store_export(
+    *,
+    key: str,
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+    spill_max_size: int = 8 * 1024 * 1024,
+) -> ObjectStoreExport:
+    """Serialize JSON / JSONL / CSV / Parquet into a spool that rolls to disk.
+
+    Writers that still hold ``mapped_rows`` (tests, Iceberg helpers) go through
+    the same ``ObjectStoreEncoder`` as chunked materialize. Prefer
+    ``materialize_object_store_export`` on the S3/GCS/ADLS/SFTP/Email path so
+    the accepted-row list is never retained. ``data_rows`` stay in RAM.
+    """
+    from connectors.object_store_materialize import ObjectStoreEncoder
+
+    encoder = ObjectStoreEncoder(
+        key=key,
+        target_cols=target_cols,
+        dest_types=dest_types,
+        spill_max_size=spill_max_size,
+    )
+    try:
+        encoder.append_rows(mapped_rows)
+        return encoder.finish()
+    except Exception:
+        encoder.abort()
+        raise
+
+
+def serialize_object_store_body(
+    *,
+    key: str,
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """Serialize one object-store chunk — JSON / JSONL / CSV / Parquet.
+
+    Parquet uses the shared Arrow coerce SSOT (same cells as Iceberg). JSON/CSV
+    still omit ``DF_MISSING`` keys. Default extension remains JSON.
+    """
+    export = serialize_object_store_export(
+        key=key,
+        mapped_rows=mapped_rows,
+        target_cols=target_cols,
+        dest_types=dest_types,
+        spill_max_size=64 * 1024 * 1024,
+    )
+    try:
+        return export.read_all(), export.content_type
+    finally:
+        export.close()

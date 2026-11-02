@@ -7,7 +7,6 @@ times, is a regression of the exact defect this module exists to close.
 
 from __future__ import annotations
 
-import os
 import sys
 import threading
 from pathlib import Path
@@ -82,6 +81,20 @@ class TestEngineCacheKey:
         a = engine_cache_key({"type": "mysql", "host": "h", "database": "d", "table": "orders"})
         b = engine_cache_key({"type": "mysql", "host": "h", "database": "d", "table": "customers"})
         assert a == b
+
+    def test_tls_trust_flag_produces_distinct_key(self):
+        """ODBC Driver 18 verify-or-fail vs operator-declared trust is a different handshake."""
+        base = {
+            "type": "sqlserver",
+            "host": "127.0.0.1",
+            "port": 1433,
+            "database": "dataflow",
+            "username": "sa",
+            "password": "x",
+        }
+        a = engine_cache_key(base)
+        b = engine_cache_key({**base, "trust_server_certificate": True, "encrypt": "yes"})
+        assert a != b
 
 
 class TestEngineReuse:

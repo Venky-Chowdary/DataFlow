@@ -71,7 +71,7 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
           threshold,
           root: root ?? undefined,
           // Reveal a bit before fully centered — modern product-site feel
-          rootMargin: isMarketing ? "0px 0px -12% 0px" : "0px 0px -4% 0px",
+          rootMargin: isMarketing ? "0px 0px 0px 0px" : "0px 0px -4% 0px",
         },
       );
       observer.observe(el);

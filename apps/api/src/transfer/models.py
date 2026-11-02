@@ -55,15 +55,24 @@ class EndpointConfig:
         }
         nested = d.get("extra") if isinstance(d.get("extra"), dict) else {}
         flat_extra = {k: v for k, v in d.items() if k not in known}
+        from .object_path import normalize_object_source
+
+        # ``s3://bucket/key`` is a bucket plus a key, not a key (QA demo 1030).
+        database, table = normalize_object_source(
+            d.get("database", ""), d.get("table", d.get("table_name", ""))
+        )
         return cls(
             kind=kind,
             format=d.get("format", d.get("type", d.get("db_type", ""))),
             connector_id=d.get("connector_id"),
-            host=d.get("host", "localhost"),
+            # Missing host stays empty so a saved connector can fill it.
+            # Defaulting to localhost here made every job dial 127.0.0.1
+            # while Test still used the stored host.
+            host=d.get("host") or "",
             port=int(d.get("port", 0) or 0),
-            database=d.get("database", ""),
+            database=database,
             schema=d.get("schema", ""),
-            table=d.get("table", d.get("table_name", "")),
+            table=table,
             collection=d.get("collection", d.get("collection_name", "")),
             username=d.get("username", ""),
             password=d.get("password", ""),
@@ -94,8 +103,11 @@ class TransferRequest:
     source_filename: str = ""
     source_content: bytes = b""
     # Optional on-disk path for the source file.  Used for billion-row streaming
-    # when loading the whole file into memory would exhaust RAM.
+    # when loading the whole file into memory would exhaust RAM, and for
+    # claim-queue workers that reconstruct TransferRequest without in-memory bytes.
     source_path: str = ""
+    # Optional s3:// URI from object_store.stage_bytes (multi-replica hydrate).
+    source_object_uri: str = ""
     sync_mode: str = "full_refresh_append"
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
@@ -104,6 +116,29 @@ class TransferRequest:
     write_via_staging: bool = False
     # Optional row-level source filter (column predicates, and/or composition).
     source_filter: dict = field(default_factory=dict)
+    # Tabular read window (sheet, header row, head/tail skips). See
+    # services.read_options.ReadOptions — one declaration reaches the profiler,
+    # the source COUNT and the writer, so all three read the same population.
+    read_options: dict = field(default_factory=dict)
+    # Pre-write shaping recipe (services.shape_models.ShapeRecipe payload). Applied
+    # to every read row before mapping, so Map, the narrowing checks, the DDL
+    # identity and the writer all see the same shaped truth. Row-local and
+    # deterministic by construction — see services.shape_engine.
+    shape_recipe: dict = field(default_factory=dict)
+    # Recipe identity approved at Validate. Execute refuses when the recipe it was
+    # handed hashes to anything else (Validate≡Execute).
+    approved_shape_recipe_hash: str = ""
+    # Transform Library provenance: which library recipe produced shape_recipe,
+    # at what version, and under which parameters. Proof-pack material — the
+    # engine executes shape_recipe; it never re-reads the library mid-run.
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict = field(default_factory=dict)
+    # Set-graph identity approved at Validate. Empty matches a recipe with no
+    # set nodes. A different graph is refused, the same way a different row
+    # recipe is refused.
+    approved_set_hash: str = ""
     # Priority-first sync: sort source rows by this column before writing.
     priority_column: str = ""
     priority_direction: str = "desc"  # "asc" or "desc"
@@ -122,13 +157,58 @@ class TransferRequest:
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
     # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
     date_locale: str = ""
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''
+    # to fail closed on a lone 3-digit group. Currency marks still parse.
+    number_locale: str = ""
+    # True when number_locale is the run's US fallback for a sample that carried
+    # no grouping evidence, not an operator declaration. Proof must keep the
+    # difference: an assumption is reversible by switching the column to EU.
+    number_locale_assumed: bool = False
     # Client-supplied idempotency key. When set it replaces the derived request
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
     idempotency_key: str = ""
-    # CDC / stream delivery honesty — selectable set is enforced by
-    # ``assert_delivery_guarantee_allowed`` (exactly_once / at_most_once refused).
-    delivery_guarantee: str = "at_least_once"
+    # CDC / stream delivery. ``auto`` selects dest-owned exactly-once when the
+    # route can commit apply and the watermark together; otherwise at-least-once.
+    # An explicit at_least_once pin is not upgraded. exactly_once on an
+    # ineligible route fails closed.
+    delivery_guarantee: str = "auto"
+    # Operator acks from Validate — Execute must carry the same trail (Validate≡Execute).
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL disclosed at Validate — e.g. the
+    # unique index an upsert needs on an existing table (D101).
+    ddl_changes_acknowledged: bool = False
+    # Operator chose to overwrite a populated destination from a source that
+    # holds 0 rows — refused without it (D56).
+    empty_source_overwrite_acknowledged: bool = False
+    # Operator accepted a load far smaller than this route's history (the
+    # strict load-volume guard) - D82.
+    load_volume_acknowledged: bool = False
+    # Sync now / full re-sync. Empty scope runs the full gate set.
+    # ``drift_connectivity`` rechecks only drift and connectivity on a signed contract.
+    preflight_scope: str = ""
+    parent_job_id: str = ""
+    # rerun_of is the parent job id when this run was started as a re-run.
+    rerun_of: str = ""
+    # upsert | dedupe_skip | append. Empty keeps the sync-mode default, and
+    # append-with-a-key does not insert duplicates unless this is ``append``.
+    duplicate_policy: str = ""
+    allow_duplicates: bool = False
+    # Seconds a scheduled file pattern waits for a new object. 0 fails at once.
+    file_wait_seconds: int = 0
+    historical_resync: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    # Map→DDL fingerprint from Validate (or ledger proof). Required when
+    # skip_preflight + mappings so Execute still fail-closes on stamp drift.
+    approved_ddl_identity_hash: str = ""
+    # Phase C11 — Decision Artifact content_hash from Validate / ledger.
+    # Programmatic skip_preflight stamps inline when empty.
+    approved_decision_artifact_hash: str = ""
+    decision_artifact: dict = field(default_factory=dict)
+    source_timezone: str = ""
 
     @property
     def operation(self) -> str:
@@ -259,6 +339,15 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "backfill_new_fields": request.backfill_new_fields,
         "write_via_staging": request.write_via_staging,
         "source_filter": request.source_filter,
+        "read_options": request.read_options,
+        "shape_recipe": dict(request.shape_recipe or {}),
+        "approved_shape_recipe_hash": request.approved_shape_recipe_hash or "",
+        "transform_recipe_id": request.transform_recipe_id or "",
+        "transform_recipe_version": int(request.transform_recipe_version or 0),
+        "transform_recipe_version_mode": request.transform_recipe_version_mode
+        or "pin",
+        "transform_recipe_params": dict(request.transform_recipe_params or {}),
+        "approved_set_hash": request.approved_set_hash or "",
         "priority_column": request.priority_column,
         "priority_direction": request.priority_direction,
         "limit": request.limit,
@@ -270,10 +359,49 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "require_signed_contract": request.require_signed_contract,
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
+        "number_locale": request.number_locale,
+        "number_locale_assumed": bool(request.number_locale_assumed),
         "idempotency_key": request.idempotency_key,
         "delivery_guarantee": request.delivery_guarantee or "at_least_once",
-        "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
+        "compliance_acknowledged": bool(request.compliance_acknowledged),
+        "schema_drift_acknowledged": bool(request.schema_drift_acknowledged),
+        "fk_risk_acknowledged": bool(request.fk_risk_acknowledged),
+        "ddl_changes_acknowledged": bool(request.ddl_changes_acknowledged),
+        "empty_source_overwrite_acknowledged": bool(
+            request.empty_source_overwrite_acknowledged
+        ),
+        # Run semantics the persisted job must carry: rerun / retry / resume
+        # rebuild the request from this dict, and from_dict already restores
+        # them — leaving them out silently ran the rerun with the defaults.
+        "source_timezone": request.source_timezone or "",
+        "duplicate_policy": request.duplicate_policy or "",
+        "allow_duplicates": bool(request.allow_duplicates),
+        "file_wait_seconds": int(request.file_wait_seconds or 0),
+        "load_volume_acknowledged": bool(request.load_volume_acknowledged),
+        "preflight_scope": request.preflight_scope or "",
+        "parent_job_id": request.parent_job_id or "",
+        "historical_resync": bool(request.historical_resync),
+        "acknowledgment_actor": request.acknowledgment_actor or "",
+        "acknowledgment_reason": request.acknowledgment_reason or "",
+        "approved_ddl_identity_hash": request.approved_ddl_identity_hash or "",
+        "approved_decision_artifact_hash": request.approved_decision_artifact_hash or "",
+        "decision_artifact": dict(request.decision_artifact or {}),
+        # Path/URI are durable; never embed source_content bytes in Mongo.
+        "source_path": request.source_path or "",
+        "source_object_uri": request.source_object_uri or "",
+        "requires_file_reupload": _requires_file_reupload_flag(request),
     }
+
+
+def _requires_file_reupload_flag(request: TransferRequest) -> bool:
+    """True when claim/restart cannot recover file bytes from path or object URI.
+
+    In-memory ``source_content`` alone is not durable across claim-queue workers —
+    callers must :func:`persist_file_source` before serializing.
+    """
+    from services.transfer_file_staging import requires_file_reupload
+
+    return requires_file_reupload(request)
 
 
 def _mask_endpoint_secrets(ep: dict | None) -> dict:
@@ -310,7 +438,76 @@ def sanitize_job_for_api(job: dict) -> dict:
         if isinstance(tr.get("destination"), dict):
             tr["destination"] = _mask_endpoint_secrets(tr["destination"])
         out["transfer_request"] = tr
+    _project_operator_quarantine(out)
+    from src.ai.copilot.job_reads import job_lineage
+
+    lineage = job_lineage(out)
+    if lineage["rerun_of"]:
+        out["rerun_of"] = lineage["rerun_of"]
+    if lineage["parent_job_id"]:
+        out["parent_job_id"] = lineage["parent_job_id"]
     return out
+
+
+def _shown_wire_cell(value: object) -> object:
+    """A stored sample cell as a person should see it: wire NULL is null, an
+    escaped literal is the literal; any other value is left exactly as is."""
+    from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
+
+    if not isinstance(value, str):
+        return value
+    if value == SQL_NULL_SENTINEL:
+        return None
+    return unescape_wire_text(value)
+
+
+def _project_operator_quarantine(job: dict) -> None:
+    """Copy the job already. Show SQL NULL as null, not the transfer token.
+
+    Replay reads the stored job, which still carries the token so NULL and
+    an empty string stay distinct on the write path.
+    """
+    from services.dest_quarantine import project_operator_quarantine_details
+
+    if isinstance(job.get("rejected_details"), list):
+        job["rejected_details"] = project_operator_quarantine_details(job["rejected_details"])
+    summary = job.get("destination_summary")
+    if isinstance(summary, dict):
+        for key in ("rejected_details", "rejected_details_sample"):
+            if isinstance(summary.get(key), list):
+                summary[key] = project_operator_quarantine_details(summary[key])
+        if isinstance(summary.get("reconcile_sample"), list):
+            summary["reconcile_sample"] = [
+                {str(k): _shown_wire_cell(v) for k, v in row.items()} if isinstance(row, dict) else row
+                for row in summary["reconcile_sample"]
+            ]
+    checkpoint = job.get("checkpoint")
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("rejected_details"), list):
+        checkpoint["rejected_details"] = project_operator_quarantine_details(
+            checkpoint["rejected_details"]
+        )
+
+
+def _confined_source_path(raw: object) -> str:
+    """Keep a serialized ``source_path`` only when it lies under the upload roots.
+
+    A path outside them is dropped, so the request falls back to its stored
+    file id / object URI or reports that the file must be re-uploaded.
+    """
+    path = str(raw or "").strip()
+    if not path:
+        return ""
+    from services.dataset_file import confine_source_path
+
+    try:
+        return str(confine_source_path(path))
+    except ValueError:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "transfer request source_path refused: outside upload roots"
+        )
+        return ""
 
 
 def transfer_request_from_dict(data: dict) -> TransferRequest:
@@ -319,17 +516,35 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
     return TransferRequest(
         source=EndpointConfig.from_dict(src.get("kind", "database"), src),
         destination=EndpointConfig.from_dict(dst.get("kind", "database"), dst),
+        source_timezone=str(data.get("source_timezone") or "").strip(),
         mappings=data.get("mappings") or [],
         column_types=data.get("column_types") or {},
         skip_preflight=bool(data.get("skip_preflight")),
         source_filename=data.get("source_filename") or "",
         source_content=b"",
+        source_path=_confined_source_path(data.get("source_path")),
+        source_object_uri=str(data.get("source_object_uri") or "").strip(),
         sync_mode=data.get("sync_mode") or "full_refresh_append",
         schema_policy=data.get("schema_policy") or "manual_review",
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
         write_via_staging=bool(data.get("write_via_staging")),
         source_filter=data.get("source_filter") or {},
+        read_options=data.get("read_options") or {},
+        shape_recipe=data.get("shape_recipe") or {},
+        approved_shape_recipe_hash=str(
+            data.get("approved_shape_recipe_hash") or ""
+        ).strip(),
+        transform_recipe_id=str(data.get("transform_recipe_id") or "").strip(),
+        transform_recipe_version=int(data.get("transform_recipe_version") or 0),
+        transform_recipe_version_mode=(
+            str(data.get("transform_recipe_version_mode") or "pin").strip().lower()
+            or "pin"
+        ),
+        transform_recipe_params=dict(data.get("transform_recipe_params") or {})
+        if isinstance(data.get("transform_recipe_params"), dict)
+        else {},
+        approved_set_hash=str(data.get("approved_set_hash") or "").strip(),
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),
         limit=int(data.get("limit") or 0),
@@ -341,8 +556,38 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         require_signed_contract=bool(data.get("require_signed_contract", False)),
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
+        number_locale=(
+            loc
+            if (loc := (data.get("number_locale") or "").strip().upper()) in {"US", "EU"}
+            else ""
+        ),
+        number_locale_assumed=bool(data.get("number_locale_assumed")),
         idempotency_key=(data.get("idempotency_key") or "").strip(),
         delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
+        compliance_acknowledged=bool(data.get("compliance_acknowledged")),
+        schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged")),
+        fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
+        ddl_changes_acknowledged=bool(data.get("ddl_changes_acknowledged")),
+        empty_source_overwrite_acknowledged=bool(
+            data.get("empty_source_overwrite_acknowledged")
+        ),
+        load_volume_acknowledged=bool(data.get("load_volume_acknowledged")),
+        preflight_scope=str(data.get("preflight_scope") or "").strip(),
+        parent_job_id=str(data.get("parent_job_id") or "").strip(),
+        rerun_of=str(data.get("rerun_of") or "").strip(),
+        duplicate_policy=str(data.get("duplicate_policy") or "").strip().lower(),
+        allow_duplicates=bool(data.get("allow_duplicates")),
+        file_wait_seconds=max(0, int(data.get("file_wait_seconds") or 0)),
+        historical_resync=bool(data.get("historical_resync")),
+        acknowledgment_actor=str(data.get("acknowledgment_actor") or "").strip(),
+        acknowledgment_reason=str(data.get("acknowledgment_reason") or "").strip(),
+        approved_ddl_identity_hash=str(
+            data.get("approved_ddl_identity_hash") or ""
+        ).strip(),
+        approved_decision_artifact_hash=str(
+            data.get("approved_decision_artifact_hash") or ""
+        ).strip(),
+        decision_artifact=dict(data.get("decision_artifact") or {}),
     )
 
 
@@ -367,6 +612,8 @@ class TransferResult:
     elapsed_seconds: float = 0.0
     records_per_second: float = 0.0
     peak_memory_bytes: int = 0
+    # Independent dest COUNT(*) ledger — never closed by writer ack.
+    row_accounting: dict = field(default_factory=dict)
 
 
 @dataclass

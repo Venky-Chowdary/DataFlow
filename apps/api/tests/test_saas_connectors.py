@@ -19,38 +19,77 @@ import connectors.salesforce as salesforce  # noqa: E402
 import connectors.shopify_writer as shopify_writer  # noqa: E402
 import connectors.stripe as stripe  # noqa: E402
 
+# REST data APIs require the org instance host — login/test.salesforce.com refuse.
+_SF_INSTANCE = "https://acme.my.salesforce.com"
+_SF_CFG = {"api_key": "fake-token", "host": _SF_INSTANCE}
+
+
+def _airtable_meta_tables(
+    *,
+    base_id: str = "appXXX",
+    table_name: str = "Contacts",
+    fields: list[dict] | None = None,
+) -> None:
+    """Register Airtable Meta schema so reverse-ETL does not Map-VARCHAR invent."""
+    responses.add(
+        responses.GET,
+        re.compile(rf"https://api\.airtable\.com/v0/meta/bases/{re.escape(base_id)}/tables"),
+        json={
+            "tables": [
+                {
+                    "id": "tblContacts",
+                    "name": table_name,
+                    "fields": fields
+                    or [
+                        {"name": "name", "type": "singleLineText"},
+                        {"name": "email", "type": "email"},
+                        {"name": "id", "type": "singleLineText"},
+                    ],
+                }
+            ]
+        },
+        status=200,
+    )
+
 
 @responses.activate
 def test_salesforce_probe_success():
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/limits"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/limits"),
         json={"DailyApiRequests": {"Max": 1000, "Remaining": 999}},
         status=200,
     )
-    ok, msg = salesforce.test_salesforce(api_key="fake-token")
+    ok, msg = salesforce.test_salesforce(api_key="fake-token", host=_SF_INSTANCE)
     assert ok is True
     assert "reachable" in msg.lower()
+
+
+@responses.activate
+def test_salesforce_probe_refuses_login_host():
+    ok, msg = salesforce.test_salesforce(api_key="fake-token", host="https://login.salesforce.com")
+    assert ok is False
+    assert "instance" in msg.lower()
 
 
 @responses.activate
 def test_salesforce_probe_auth_failure():
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/limits"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/limits"),
         json=[{"message": "Session expired", "errorCode": "INVALID_SESSION_ID"}],
         status=401,
     )
-    ok, msg = salesforce.test_salesforce(api_key="bad-token")
+    ok, msg = salesforce.test_salesforce(api_key="bad-token", host=_SF_INSTANCE)
     assert ok is False
-    assert "authentication" in msg.lower()
+    assert "authentication" in msg.lower() or "session" in msg.lower() or "401" in msg.lower()
 
 
 @responses.activate
 def test_salesforce_read_object():
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/sobjects/Account/describe"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/sobjects/Account/describe"),
         json={
             "fields": [
                 {"name": "Id", "type": "id"},
@@ -62,7 +101,7 @@ def test_salesforce_read_object():
     )
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/query"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/query"),
         json={
             "totalSize": 2,
             "records": [
@@ -73,7 +112,7 @@ def test_salesforce_read_object():
         },
         status=200,
     )
-    batch = salesforce.read_object(cfg={"api_key": "fake-token"}, limit=500)
+    batch = salesforce.read_object(cfg=dict(_SF_CFG), limit=500)
     assert batch.headers == ["Id", "Name", "Industry"]
     assert len(batch.rows) == 2
     assert batch.total_rows == 2
@@ -83,12 +122,12 @@ def test_salesforce_read_object():
 def test_salesforce_describe_failure_fail_closed():
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/sobjects/Account/describe"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/sobjects/Account/describe"),
         json={"message": "INSUFFICIENT_ACCESS"},
         status=403,
     )
     with pytest.raises(RuntimeError, match="Describe is required"):
-        salesforce.read_object(cfg={"api_key": "fake-token"}, limit=10)
+        salesforce.read_object(cfg=dict(_SF_CFG), limit=10)
 
 
 @responses.activate
@@ -173,7 +212,7 @@ def test_hubspot_read_object():
 def test_salesforce_soql_orders_by_identity():
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/sobjects/Account/describe"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/sobjects/Account/describe"),
         json={
             "fields": [{"name": "Id", "type": "id"}, {"name": "Name", "type": "string"}]
         },
@@ -181,11 +220,11 @@ def test_salesforce_soql_orders_by_identity():
     )
     responses.add(
         responses.GET,
-        re.compile(r"https://login\.salesforce\.com/services/data/v58\.0/query"),
+        re.compile(r"https://acme\.my\.salesforce\.com/services/data/v58\.0/query"),
         json={"totalSize": 1, "records": [{"Id": "001", "Name": "Acme"}], "done": True},
         status=200,
     )
-    salesforce.read_object(cfg={"api_key": "fake-token"}, limit=10)
+    salesforce.read_object(cfg=dict(_SF_CFG), limit=10)
     q = responses.calls[1].request.params.get("q") or ""
     assert "ORDER BY Id" in q
 
@@ -290,7 +329,7 @@ def test_stripe_writer_creates_customers():
             {"source": "name", "target": "name", "transform": "direct"},
             {"source": "email", "target": "email", "transform": "direct"},
         ],
-        write_mode="upsert",
+        write_mode="insert",
     )
     assert r.ok
     assert r.rows_written == 2
@@ -346,12 +385,31 @@ def test_stripe_writer_quarantines_bad_rows():
         headers=["name"],
         data_rows=[["Bad"], ["Good"]],
         mappings=[{"source": "name", "target": "name", "transform": "direct"}],
-        write_mode="upsert",
+        write_mode="insert",
         error_policy="quarantine",
     )
     assert r.ok
     assert r.rows_written == 1
     assert r.rejected_rows == 1
+
+
+@responses.activate
+def test_stripe_upsert_without_conflict_refuses_create_invent():
+    import connectors.stripe_writer as stripe_writer
+
+    r = stripe_writer.write_mapped_rows(
+        api_key="sk_test_123",
+        table_name="customers",
+        headers=["name"],
+        data_rows=[["Alice"]],
+        mappings=[{"source": "name", "target": "name", "transform": "direct"}],
+        write_mode="upsert",
+        conflict_columns=[],
+        error_policy="fail",
+    )
+    assert r.ok is False
+    assert "refuse" in (r.error or "").lower()
+    assert len(responses.calls) == 0
 
 
 @responses.activate
@@ -370,7 +428,7 @@ def test_stripe_writer_auth_fails_closed():
         headers=["name"],
         data_rows=[["Alice"]],
         mappings=[{"source": "name", "target": "name", "transform": "direct"}],
-        write_mode="upsert",
+        write_mode="insert",
         error_policy="quarantine",
     )
     assert r.ok is False
@@ -379,6 +437,7 @@ def test_stripe_writer_auth_fails_closed():
 
 @responses.activate
 def test_airtable_writer_creates_records():
+    _airtable_meta_tables(fields=[{"name": "name", "type": "singleLineText"}])
     responses.add(
         responses.POST,
         re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
@@ -392,15 +451,22 @@ def test_airtable_writer_creates_records():
         headers=["name"],
         data_rows=[["Alice"]],
         mappings=[{"source": "name", "target": "name", "transform": "direct"}],
-        write_mode="upsert",
+        # insert → POST create; bare upsert without merge/id refuses create invent.
+        write_mode="insert",
     )
-    assert r.ok
+    assert r.ok, r.error
     assert r.rows_written == 1
     assert r.table_name == "Contacts"
 
 
 @responses.activate
 def test_airtable_writer_upserts_by_conflict_column():
+    _airtable_meta_tables(
+        fields=[
+            {"name": "email", "type": "email"},
+            {"name": "name", "type": "singleLineText"},
+        ]
+    )
     responses.add(
         responses.PATCH,
         re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
@@ -420,12 +486,18 @@ def test_airtable_writer_upserts_by_conflict_column():
         write_mode="upsert",
         conflict_columns=["email"],
     )
-    assert r.ok
+    assert r.ok, r.error
     assert r.rows_written == 1
 
 
 @responses.activate
 def test_airtable_writer_updates_by_record_id():
+    _airtable_meta_tables(
+        fields=[
+            {"name": "id", "type": "singleLineText"},
+            {"name": "name", "type": "singleLineText"},
+        ]
+    )
     responses.add(
         responses.PATCH,
         re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
@@ -444,12 +516,13 @@ def test_airtable_writer_updates_by_record_id():
         ],
         write_mode="upsert",
     )
-    assert r.ok
+    assert r.ok, r.error
     assert r.rows_written == 1
 
 
 @responses.activate
 def test_airtable_writer_auth_fails_closed():
+    _airtable_meta_tables(fields=[{"name": "name", "type": "singleLineText"}])
     responses.add(
         responses.POST,
         re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
@@ -463,7 +536,7 @@ def test_airtable_writer_auth_fails_closed():
         headers=["name"],
         data_rows=[["Alice"]],
         mappings=[{"source": "name", "target": "name", "transform": "direct"}],
-        write_mode="upsert",
+        write_mode="insert",
         error_policy="quarantine",
     )
     assert r.ok is False
@@ -488,9 +561,10 @@ def test_shopify_writer_creates_customer():
             {"source": "first_name", "target": "first_name", "transform": "direct"},
             {"source": "email", "target": "email", "transform": "direct"},
         ],
-        write_mode="upsert",
+        # insert → POST create; bare upsert without id refuses create invent.
+        write_mode="insert",
     )
-    assert r.ok
+    assert r.ok, r.error
     assert r.rows_written == 1
     assert r.table_name == "customers"
 

@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from services.type_system import (
+from services.column_case import column_type_or_none
+from services.decision_kernel import (
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+)
+from services.mapping_constraints import write_mappings
+from services.type_system import (
     resolve_mapping_target_type,
     specialty_carrier_base,
     specialty_wire_preserves_value,
     uuid_capacity_string_carrier,
+    uuid_carrier_is_dialect_equivalent,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def validate_mapping_coercions(
@@ -24,6 +32,10 @@ def validate_mapping_coercions(
     confidence_floor: float = 0.85,
     validation_mode: str = "strict",
     dest_db_type: str = "",
+    dest_table_exists: bool | None = None,
+    sample_rows: list | None = None,
+    samples_by_source: dict | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -32,23 +44,41 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Declared lossy coercions always block under strict unless a verified
-    continue-policy Migration Risk Contract clears the mapping (aligned with
-    G3/G4/G6). Boolean ``risk_acknowledged`` alone never softens. Balanced/
-    review may still warn for Map-time advisory without a contract.
+    Declared lossy coercions always block unless a verified continue-policy
+    Migration Risk Contract clears the mapping (aligned with G3/G4/G6 and the
+    data-rule matrix). Boolean ``risk_acknowledged`` alone never softens.
+    Balanced/review must not soft-green VARCHAR→NUMBER / precision collapses —
+    only a clearing Risk Contract demotes to warn.
 
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
     """
+    from services.timezone_policy import declared_source_column_types
+
+    # A declared source zone (assume_timezone:X) makes a naive column an
+    # instant. G3 already reads types this way; reading the raw TIMESTAMP here
+    # re-blocked the run the operator just answered (MX2-01).
+    declared = declared_source_column_types(source_types, mappings)
+    reprojected = sorted(c for c, t in declared.items() if t != source_types.get(c))
+    if reprojected:
+        _logger.info(
+            "coercion check reads declared source zone for column(s) %s", reprojected,
+        )
+    source_types = declared
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
     balanced = mode in {"balanced", "review"}
-    floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
-    for m in mappings:
+    # A declared omission has no destination type to coerce into; reading its
+    # empty target as "pending Studio/Map stamp" turned the operator's recorded
+    # decision into a data-integrity blocker.
+    for m in write_mappings(mappings):
         src = m.get("source", "")
         tgt = m.get("target", "")
-        src_type = source_types.get(src, "VARCHAR")
+        src_type = (
+            column_type_or_none(source_types, src)
+            or source_types.get(src, "VARCHAR")
+        )
         # Create-new stamps (e.g. BQ UUID→STRING) must win over missing live DDL.
         tgt_type = resolve_mapping_target_type(
             m,
@@ -56,6 +86,26 @@ def validate_mapping_coercions(
             source_type=src_type,
             dest_db_type=dest_db_type,
         )
+        if not str(tgt_type or "").strip():
+            # Match-existing without live/Map stamp — refuse source invent green.
+            # Always block (even balanced/review) — G3/analyze_coercion parity;
+            # soft-pass would false-green partial Studio invent cliffs.
+            issues.append({
+                "source": src,
+                "target": tgt,
+                "source_type": src_type,
+                "target_type": "",
+                "lossy": True,
+                "severity": "block",
+                "reason": (
+                    "Destination type pending Studio/Map stamp — refuse "
+                    "source_type invent for coercion green-path."
+                ),
+                "message": (
+                    f"{src} ({src_type}) → {tgt} (pending Studio/Map stamp)"
+                ),
+            })
+            continue
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
         # Width-safe UUID / ObjectId wires are value-preserving create-new sinks
@@ -63,16 +113,40 @@ def validate_mapping_coercions(
         specialty = specialty_carrier_base(src_type)
         wire_ok = (
             (src_logical == "uuid" and uuid_capacity_string_carrier(tgt_type))
+            # SQLite-class engines declare one untyped TEXT carrier: VARCHAR(36)
+            # would enforce nothing more, so TEXT is the value-preserving wire.
+            or uuid_carrier_is_dialect_equivalent(
+                src_type, tgt_type, dest_db=dest_db_type
+            )
             or (specialty and specialty_wire_preserves_value(specialty, tgt_type))
             or (specialty and specialty_carrier_base(tgt_type) == specialty)
         )
         if wire_ok and not type_locked:
             continue
+        population = _measured_population(
+            src, sample_rows=sample_rows, samples_by_source=samples_by_source
+        )
         precision_collapse = is_precision_collapse_coercion(
-            src_type, tgt_type, dest_db=dest_db_type
+            src_type,
+            tgt_type,
+            dest_db=dest_db_type,
+            dest_table_exists=dest_table_exists,
+            population=population,
+            source=src,
+            target=tgt,
+            proven=proven_width_narrowings,
         )
         lossy = (
-            is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            is_lossy_coercion(
+                src_type,
+                tgt_type,
+                dest_db=dest_db_type,
+                dest_table_exists=dest_table_exists,
+                population=population,
+                source=src,
+                target=tgt,
+                proven=proven_width_narrowings,
+            )
             or precision_collapse
         )
         # Same logical family can still be lossy (YEAR→SMALLINT, MONEY→DECIMAL,
@@ -87,10 +161,22 @@ def validate_mapping_coercions(
             and tgt_logical in {"string", "text"}
             and not uuid_capacity_string_carrier(tgt_type)
         )
+        locked_block = False
         if type_locked and (src_logical != tgt_logical or wire_ok):
             severity = "block"
+            locked_block = True
         elif type_locked and precision_collapse:
-            severity = "block"
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            # Logical-type change already blocked above. A same-family collapse
+            # (Latin-1 code page, width, DECIMAL scale) honors a verified
+            # continue-policy contract. Boolean ack never clears.
+            if mapping_has_clearing_risk_contract(m):
+                severity = "warn"
+                locked_block = False
+            else:
+                severity = "block"
+                locked_block = True
         elif uuid_string_create_new:
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
@@ -101,11 +187,9 @@ def validate_mapping_coercions(
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
             risk_cleared = mapping_has_clearing_risk_contract(m)
-            # Balanced Map-time advisory may warn; strict needs clearing contract.
-            if risk_cleared or balanced:
-                severity = "warn"
-            else:
-                severity = "block"
+            # Declared lossy always needs a clearing Risk Contract — balanced
+            # must not soft-green VARCHAR→NUMBER (data-rule matrix / G3 parity).
+            severity = "warn" if risk_cleared else "block"
         elif src_logical == tgt_logical:
             # Unreachable when precision_collapse is False (continued above).
             continue
@@ -123,7 +207,16 @@ def validate_mapping_coercions(
             "lossy": lossy,
             "severity": severity,
             "validation_mode": mode,
-            "message": f"{src} ({src_type}) → {tgt} ({tgt_type})",
+            "schema_policy": "type_locked" if type_locked else (schema_policy or ""),
+            "message": (
+                f"{src} ({src_type}) → {tgt} ({tgt_type})"
+                + (
+                    " — schema_policy=type_locked forbids changing the "
+                    "destination type"
+                    if locked_block
+                    else ""
+                )
+            ),
             "suggested_fix": (
                 f"Remap '{src}' to a compatible {tgt_logical} column, or change the "
                 f"target type — '{src}' ({src_logical}) does not safely become {tgt_logical}."
@@ -132,6 +225,22 @@ def validate_mapping_coercions(
             ),
         })
     return issues
+
+
+def _measured_population(
+    source: str,
+    *,
+    sample_rows: list | None,
+    samples_by_source: dict | None,
+) -> list | None:
+    """Cells already measured for ``source``, else None (unread stays a collapse)."""
+    from services.column_case import column_population, lookup_column
+
+    if samples_by_source:
+        hit = lookup_column(samples_by_source, source)
+        if isinstance(hit, (list, tuple)) and len(hit) > 0:
+            return list(hit)[:500]
+    return column_population(sample_rows, source)
 
 
 def coercion_blocks_transfer(issues: list[dict[str, Any]]) -> bool:

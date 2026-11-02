@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -15,7 +16,7 @@ def _norm(name: str) -> str:
 _OMIT_TRANSFORMS = frozenset({"omit", "intentional_omit", "drop", "exclude"})
 
 
-def is_intentional_omit(mapping: dict[str, Any] | None) -> bool:
+def is_intentional_omit(mapping: Mapping[str, Any] | None) -> bool:
     """True when the operator explicitly excluded this source from the write map."""
     if not mapping:
         return False
@@ -113,15 +114,129 @@ def detect_duplicate_targets(mappings: list[dict]) -> list[str]:
 
 
 def unmapped_sources(source_columns: list[str], mappings: list[dict]) -> list[str]:
-    """Sources with no map row and no intentional-omit policy."""
-    accounted = {
-        str(m.get("source") or "")
-        for m in mappings
-        if m.get("source") and (m.get("target") or is_intentional_omit(m))
+    """Sources with no write mapping and no intentional-omit policy.
+
+    A row that names a source but carries no target and no omission policy
+    used to count as accounted, so a mapping the pipeline had already dropped
+    kept its source out of this list and the column left silently.
+    """
+    return classify_source_coverage(source_columns, mappings)["unaccounted"]
+
+
+def classify_source_coverage(
+    source_columns: list[str] | None,
+    mappings: list[dict] | None,
+) -> dict[str, Any]:
+    """Account for every source column: written, declared omitted, or neither.
+
+    A source column the operator never mentioned is not a decision — it is an
+    unanswered question. Writing anyway drops it silently, which is the failure
+    mode this product exists to prevent (30 source columns into a 20-column
+    destination must not quietly become 20). Callers gate on
+    ``unaccounted``; ``omitted`` is the operator's recorded decision and
+    belongs in the decision artifact and proof bundle.
+    """
+    cols = [str(c) for c in (source_columns or []) if str(c).strip()]
+    written: list[str] = []
+    omitted: list[str] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        src = str(m.get("source") or "").strip()
+        if not src:
+            continue
+        if is_intentional_omit(m):
+            omitted.append(src)
+        elif str(m.get("target") or "").strip():
+            written.append(src)
+    written_l = {_norm(s) for s in written}
+    omitted_l = {_norm(s) for s in omitted}
+    unaccounted = [c for c in cols if _norm(c) not in written_l and _norm(c) not in omitted_l]
+    return {
+        "source_count": len(cols),
+        "written": written,
+        "omitted": omitted,
+        "unaccounted": unaccounted,
+        "accounted": len(cols) - len(unaccounted),
+        "complete": not unaccounted,
     }
-    # Also treat any mapping with a source as accounted — omit rows keep the source.
-    accounted |= {str(m.get("source") or "") for m in mappings if m.get("source")}
-    return [s for s in source_columns if s not in accounted]
+
+
+def dest_exists_write_column_names(
+    *,
+    target_schema: dict[str, Any] | None = None,
+    dest_extra: dict[str, Any] | None = None,
+) -> list[str]:
+    """Dest column names for dest-exists overwrite retain (G13).
+
+    Overwrite dest-exists clears live *types* so recreate is not typed against
+    the doomed carrier (``_destination_schema_probe`` returns ``{}``). Column
+    *names* still live on ``overwrite_replaced_column_types`` /
+    ``schema_nullability`` so extra source stays unaccounted instead of becoming
+    an invented dest column.
+    """
+    extra = dest_extra or {}
+    for src in (
+        target_schema,
+        extra.get("overwrite_replaced_column_types"),
+        extra.get("schema_types"),
+        extra.get("schema_nullability"),
+    ):
+        if isinstance(src, dict) and src:
+            names = [str(k).strip() for k in src.keys() if str(k).strip()]
+            if names:
+                return names
+        if isinstance(src, (list, tuple)):
+            names = [str(x).strip() for x in src if str(x).strip()]
+            if names:
+                return names
+    return []
+
+
+def retain_dest_exists_write_mappings(
+    mappings: list[dict] | None,
+    dest_columns: list[str] | None,
+) -> list[dict]:
+    """Dest-exists overwrite writes dest columns only.
+
+    Extra source columns stay unaccounted so G13 can block. Inventing a
+    create-new dest column from source position is the dest-exists jumble
+    (write by dest name — never source position).
+    """
+    from connectors.sql_identifiers import sanitize_identifier, sanitized_spellings
+
+    dest = {_norm(c) for c in (dest_columns or []) if str(c).strip()}
+    if not dest:
+        return list(mappings or [])
+    # The table DataFlow created holds sanitised names (``Café`` -> ``Caf_``).
+    # A source spelled differently from its column resolves through the
+    # sanitiser's own mapping, and the write targets the column that exists
+    # (D55) - otherwise drift reads the original spelling as a new column.
+    dest_by_sanitised = {
+        sanitize_identifier(str(c)).lower(): str(c).strip()
+        for c in (dest_columns or [])
+        if str(c).strip()
+    }
+    kept: list[dict] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        if is_intentional_omit(m):
+            kept.append(m)
+            continue
+        tgt = str(m.get("target") or "").strip()
+        if not tgt:
+            continue
+        # Run 1 may predate transliteration (``Caf_``) or follow it (``cafe``).
+        actual = next(
+            (dest_by_sanitised[k] for k in sorted(sanitized_spellings(tgt)) if k in dest_by_sanitised),
+            None,
+        )
+        if actual and actual != tgt:
+            kept.append({**m, "target": actual})
+        elif _norm(tgt) in dest:
+            kept.append(m)
+    return kept
 
 
 def mapping_plan_summary(

@@ -25,9 +25,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PROOF_DIR = (
-    Path(__file__).resolve().parents[1] / "data" / "proofs" / "pair_assurance"
-)
+def _proof_dir() -> Path:
+    from services.platform_config import data_dir
+
+    return data_dir() / "proofs" / "pair_assurance"
 
 # Logical carriers exercised as the offline type inventory (fixture population).
 # Every cell uses real ddl_type / create_new / lossy / risk / coercion APIs.
@@ -135,12 +136,12 @@ def evaluate_type_cell(
 ) -> TypeCellResult:
     """Evaluate one source carrier → dest create-new stamp using real engines."""
     from services.type_coercion_validator import validate_mapping_coercions
-    from services.type_system import (
-        assess_create_new_type_risk,
+    from services.decision_kernel import (
         create_new_mapping_target_type,
         ddl_type,
         is_lossy_coercion,
     )
+    from services.type_system import assess_create_new_type_risk
 
     try:
         stamped = create_new_mapping_target_type(source_type, dest_db)
@@ -414,8 +415,9 @@ def assess_pair(
     }
 
     if write_proof:
-        PROOF_DIR.mkdir(parents=True, exist_ok=True)
-        path = PROOF_DIR / f"{pair_id}.json"
+        proof_dir = _proof_dir()
+        proof_dir.mkdir(parents=True, exist_ok=True)
+        path = proof_dir / f"{pair_id}.json"
         # Omit full cell dump from on-disk proof to keep artifacts readable;
         # failures always retained.
         disk = dict(proof)
@@ -483,8 +485,9 @@ def run_committed_pair_assurance(
         ],
     }
     if write_proof:
-        PROOF_DIR.mkdir(parents=True, exist_ok=True)
-        (PROOF_DIR / "_summary.json").write_text(
+        proof_dir = _proof_dir()
+        proof_dir.mkdir(parents=True, exist_ok=True)
+        (proof_dir / "_summary.json").write_text(
             json.dumps(summary, indent=2, default=str), encoding="utf-8"
         )
     return summary

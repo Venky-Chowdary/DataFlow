@@ -1,14 +1,31 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { CopyIdChip } from "../ui/CopyIdChip";
-import { fetchScheduleHistory } from "../../lib/api";
+import { acceptScheduleSourceSchema, fetchScheduleHistory } from "../../lib/api";
+import { Button } from "../ui/Button";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
+import { formatJobRowMetric } from "../../lib/conservationLedger";
+import { historyPollMs, isOpenRun, runLabel, runReason } from "../../lib/scheduleRunStatus";
+import { createPoller, type Poller } from "../../lib/poller";
 
 interface ScheduleRunHistoryProps {
   scheduleId: string;
+  /** Re-read now when this changes (the schedule started/finished a run). */
+  refreshKey?: string;
   onOpenJob?: (jobId: string) => void;
+  /** Open this schedule's mapping so a drift finding can be acted on. */
+  onEditMapping?: () => void;
+}
+
+/**
+ * A run refused because the source changed shape is a finding the operator has
+ * to resolve, not just an error to read. Without a control the message asked
+ * for a review that nothing performed.
+ */
+function isSourceDriftError(message: string): boolean {
+  return /source schema changed since the last run/i.test(message);
 }
 
 function formatWhen(iso: string | null | undefined): string {
@@ -33,26 +50,57 @@ function formatDuration(seconds: number | undefined): string {
   return `${mins}m ${secs}s`;
 }
 
-export function ScheduleRunHistory({ scheduleId, onOpenJob }: ScheduleRunHistoryProps) {
+export function ScheduleRunHistory({ scheduleId, refreshKey, onOpenJob, onEditMapping }: ScheduleRunHistoryProps) {
+  const [accepting, setAccepting] = useState(false);
+  const [accepted, setAccepted] = useState<string | null>(null);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
   const [runs, setRuns] = useState<ScheduleRun[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const res = await fetchScheduleHistory(scheduleId, 25);
       setRuns(res.runs ?? []);
+      setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load run history");
+      if (!quiet) setError(e instanceof Error ? e.message : "Could not load run history");
     }
-    setLoading(false);
+    if (!quiet) setLoading(false);
   }, [scheduleId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Loaded once, the panel kept showing a run as it was when opened — a run
+  // that finished, failed or was declared "worker lost" never appeared. The
+  // poller re-arms after a failed read too, so one blip does not end refresh.
+  const runsRef = useRef<ScheduleRun[] | null>(null);
+  runsRef.current = runs;
+  const pollerRef = useRef<Poller | null>(null);
+  useEffect(() => {
+    if (loading || error) return;
+    const poller = createPoller<ScheduleRun[]>({
+      read: async () => (await fetchScheduleHistory(scheduleId, 25)).runs ?? [],
+      delayMs: (last) => historyPollMs(last ?? runsRef.current),
+      onResult: setRuns,
+    });
+    pollerRef.current = poller;
+    return () => {
+      poller.stop();
+      pollerRef.current = null;
+    };
+  }, [scheduleId, loading, error]);
+
+  // The schedule started or finished a run: read History now.
+  useEffect(() => {
+    pollerRef.current?.poke();
+  }, [refreshKey]);
 
   if (loading) {
     return (
@@ -81,58 +129,135 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob }: ScheduleRunHistory
 
   return (
     <div className="df2-sched-history">
-      <div className="df2-sched-history-table" role="table" aria-label="Run history">
-        <div className="df2-sched-history-row is-head" role="row">
-          <span role="columnheader">Status</span>
-          <span role="columnheader">Started</span>
-          <span role="columnheader">Duration</span>
-          <span role="columnheader">Rows</span>
-          <span role="columnheader">Rejected</span>
-          <span role="columnheader">Coerced NULL</span>
-          <span role="columnheader">Job</span>
-        </div>
+      <div className="df2-sched-run-list" role="list" aria-label="Run history">
         {runs.map((run, i) => {
           const rejected = run.rejected_rows ?? 0;
           const coerced = run.coerced_null_rows ?? 0;
+          const rows = formatJobRowMetric({
+            status: run.status,
+            records_processed: run.records_transferred,
+            records_transferred: run.records_transferred,
+            row_accounting: run.row_accounting,
+          });
+          const reason = runReason(run);
+          const showReason =
+            Boolean(run.error?.trim()) ||
+            (Boolean(reason) && !isOpenRun(run.status) && !/^completed/.test(run.status));
+          const drift = isSourceDriftError(reason);
           return (
-            <div className={`df2-sched-history-row${run.retry_scheduled ? " is-retry" : ""}`} role="row" key={`${run.job_id}-${run.attempt}-${i}`}>
-              <span role="cell" data-label="Status">
-                <span className={jobStatusBadgeClass(run.status)}>{jobStatusLabel(run.status)}</span>
+            <article
+              className={`df2-sched-run${run.retry_scheduled ? " is-retry" : ""}`}
+              role="listitem"
+              key={run.run_id || `${run.job_id}-${run.attempt}-${i}`}
+            >
+              <header className="df2-sched-run-head">
+                <span className={jobStatusBadgeClass(run.status)} title={reason || jobStatusLabel(run.status)}>
+                  {runLabel(run)}
+                </span>
                 {run.attempt > 0 && (
                   <span className="df2-sched-attempt" title={`Retry attempt #${run.attempt}`}>
                     <DtIcon name="trend" size={11} /> retry #{run.attempt}
                   </span>
                 )}
-                {run.retry_scheduled && <span className="df2-sched-attempt" title="A retry was scheduled after this attempt">retry queued</span>}
-              </span>
-              <span role="cell" data-label="Started">{formatWhen(run.started_at)}</span>
-              <span role="cell" data-label="Duration">{formatDuration(run.duration_seconds)}</span>
-              <span role="cell" data-label="Rows">{(run.records_transferred ?? 0).toLocaleString()}</span>
-              <span role="cell" data-label="Rejected" className={rejected > 0 ? "df2-sched-num-warn" : ""}>{rejected.toLocaleString()}</span>
-              <span role="cell" data-label="Coerced NULL" className={coerced > 0 ? "df2-sched-num-warn" : ""}>{coerced.toLocaleString()}</span>
-              <span role="cell" data-label="Job" className="df2-sched-job-cell">
-                {run.job_id ? (
-                  <>
-                    <CopyIdChip id={run.job_id} label="Job" compact />
-                    <button type="button" className="df2-sched-job-link" onClick={() => onOpenJob?.(run.job_id)} title="Open job in Jobs">
-                      View <DtIcon name="arrow-up-right" size={12} />
-                    </button>
-                  </>
-                ) : "—"}
-              </span>
-            </div>
+                {run.retry_scheduled && (
+                  <span className="df2-sched-attempt" title="A retry was scheduled after this attempt">retry queued</span>
+                )}
+                {run.failure_class?.kind === "deterministic" && (
+                  <span
+                    className="df2-sched-attempt is-blocked"
+                    title="This failure is decided by the configuration — a retry reaches the same verdict"
+                  >
+                    not retryable
+                  </span>
+                )}
+                <time className="df2-sched-run-when" dateTime={run.started_at || undefined}>
+                  {formatWhen(run.started_at)}
+                </time>
+                <span className="df2-sched-run-dur">{formatDuration(run.duration_seconds)}</span>
+              </header>
+              <dl className="df2-sched-run-metrics">
+                <div>
+                  <dt>{rows.label}</dt>
+                  <dd title={rows.title}>{rows.value}</dd>
+                </div>
+                <div>
+                  <dt>Rejected</dt>
+                  <dd className={rejected > 0 ? "df2-sched-num-warn" : undefined}>{rejected.toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>Coerced NULL</dt>
+                  <dd className={coerced > 0 ? "df2-sched-num-warn" : undefined}>{coerced.toLocaleString()}</dd>
+                </div>
+                <div className="df2-sched-run-job">
+                  <dt>Job</dt>
+                  <dd>
+                    {run.job_id ? (
+                      <>
+                        <CopyIdChip id={run.job_id} label="Job" compact />
+                        <button
+                          type="button"
+                          className="df2-sched-job-link"
+                          onClick={() => onOpenJob?.(run.job_id)}
+                          title="Open job in Jobs"
+                        >
+                          View <DtIcon name="arrow-up-right" size={12} />
+                        </button>
+                      </>
+                    ) : "—"}
+                  </dd>
+                </div>
+              </dl>
+              {showReason && (
+                <div className="df2-sched-run-error">
+                  <p title={reason}>{reason}</p>
+                  {run.failure_class?.corrective_action && (
+                    <p className="df2-sched-run-fix">{run.failure_class.corrective_action}</p>
+                  )}
+                  {drift && (
+                    <span className="df2-sched-history-error-actions">
+                      {onEditMapping && (
+                        <Button variant="ghost" size="sm" onClick={onEditMapping}>
+                          Review mapping
+                        </Button>
+                      )}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={accepting}
+                        onClick={async () => {
+                          setAccepting(true);
+                          setAcceptError(null);
+                          try {
+                            const res = await acceptScheduleSourceSchema(scheduleId);
+                            setAccepted(res.message || "Baseline updated.");
+                            await load();
+                          } catch (err) {
+                            const raw = err instanceof Error ? err.message : "";
+                            setAcceptError(
+                              /timed out/i.test(raw)
+                                ? "Accept stopped waiting for the source. The finding already has the compared shape — retry once, or check the Snowflake/MySQL connector is reachable."
+                                : raw || "Could not update the baseline",
+                            );
+                          } finally {
+                            setAccepting(false);
+                          }
+                        }}
+                      >
+                        {accepting ? "Recording…" : "Accept new source shape"}
+                      </Button>
+                    </span>
+                  )}
+                </div>
+              )}
+            </article>
           );
         })}
       </div>
-      {runs.some((r) => (r.error || "").trim()) && (
-        <ul className="df2-sched-history-errors">
-          {runs.filter((r) => (r.error || "").trim()).slice(0, 3).map((r, i) => (
-            <li key={`${r.job_id}-err-${i}`}>
-              <span className={jobStatusBadgeClass(r.status)}>{jobStatusLabel(r.status)}</span>
-              <span className="df2-sched-history-error-text" title={r.error}>{r.error}</span>
-            </li>
-          ))}
-        </ul>
+      {accepted && (
+        <p role="status" className="df2-sched-history-accepted">{accepted}</p>
+      )}
+      {acceptError && (
+        <p role="alert" className="df2-sched-history-error-text">{acceptError}</p>
       )}
     </div>
   );

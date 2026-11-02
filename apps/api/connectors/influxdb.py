@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
@@ -26,6 +26,9 @@ def _url(host: str, port: int, ssl: bool) -> str:
         parsed = urlparse(h)
         if not parsed.port:
             h = urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{port}"))
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(h, point="http_client")
     return h.rstrip("/")
 
 
@@ -36,7 +39,7 @@ def _query(url_base: str, database: str, q: str, username: str = "", password: s
     auth = (username, password) if username and password else None
     resp = requests.get(f"{url_base}/query", params=params, auth=auth, timeout=timeout)
     resp.raise_for_status()
-    return resp.json()
+    return load_http_json(resp)
 
 
 def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:

@@ -66,6 +66,48 @@ def test_resolve_stripe_dest_types_prefers_catalog():
     assert types["phone"] == "VARCHAR(20)"
 
 
+def test_resolve_stripe_shopify_omit_uncatalogued_without_map_invent():
+    from connectors.saas_write_carriers import merge_stripe_catalog_types
+
+    types = resolve_stripe_dest_types(
+        ["email", "invented_field"],
+        [
+            {"source": "e", "target": "email", "target_type": "VARCHAR"},
+            {"source": "i", "target": "invented_field", "target_type": "VARCHAR"},
+        ],
+        {},
+        object_type="customers",
+    )
+    assert "email" in types
+    assert "invented_field" not in types
+    # Studio still fills gaps when supplied to merge via resolve.
+    types2 = resolve_stripe_dest_types(
+        ["email", "invented_field"],
+        [],
+        {},
+        object_type="customers",
+        studio_types={"invented_field": "INTEGER"},
+    )
+    assert types2["invented_field"] == "INTEGER"
+
+    shop = resolve_shopify_dest_types(
+        ["email", "bogus_meta"],
+        [],
+        {},
+        object_type="customers",
+    )
+    assert "email" in shop
+    assert "bogus_meta" not in shop
+    # Pre-merged live_types from write path are returned as-is.
+    _live, err = merge_stripe_catalog_types(
+        "customers", ["email"], studio_types=None
+    )
+    assert err is None
+    assert resolve_stripe_dest_types(
+        ["email"], [], {}, live_types=_live
+    )["email"].startswith("VARCHAR")
+
+
 def test_stripe_quarantine_holds_email_and_phone_overflow():
     details: list[dict] = []
     out = apply_write_quarantine_matrix(

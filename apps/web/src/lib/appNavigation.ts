@@ -1,3 +1,4 @@
+import { helpDocFromSlug, isHelpDocRoute, type HelpDocId } from "./helpDocs";
 import type { Screen } from "./types";
 
 const SCREENS: Screen[] = [
@@ -22,7 +23,8 @@ export type AppHashFocus = {
   panel?: string;
 };
 
-/** Friendly URL aliases → Screen ids (nav label “Pipelines” uses schedules).
+/** Friendly URL aliases → Screen ids. `pipelines` stays readable so links
+ * shared before the workspace settled on “Schedules” keep resolving.
  * Do not alias `home` — that path is the public marketing route. */
 const HASH_ALIASES: Record<string, Screen> = {
   pipelines: "schedules",
@@ -53,9 +55,9 @@ export function focusFromHash(hash: string): AppHashFocus | null {
   return { screen, jobId, panel };
 }
 
-/** Prefer operator-facing path segments when writing the hash. */
+/** Prefer operator-facing path segments when writing the hash — the segment
+ * must match the label the operator sees, so `schedules` writes itself. */
 const HASH_WRITE: Partial<Record<Screen, string>> = {
-  schedules: "pipelines",
   dashboard: "overview",
 };
 
@@ -73,6 +75,63 @@ export function hashForScreen(screen: Screen, focus?: { jobId?: string; panel?: 
 export function readAppHash(): Screen | null {
   if (typeof window === "undefined") return null;
   return screenFromHash(window.location.hash);
+}
+
+/**
+ * Emailed password-reset links land on `/reset-password?token=…`; after the
+ * page strips the token the route lives on as `#/reset-password`. Both forms
+ * belong to the reset-link stage — the generic hash router must not bounce
+ * them back to landing/app.
+ */
+export function isResetLinkRoute(pathname: string, hash: string): boolean {
+  return pathname === "/reset-password"
+    || hash.split("?")[0] === "#/reset-password";
+}
+
+/**
+ * The emailed link is `/reset-password#token=…` — the token rides the URL
+ * fragment so it can never reach a server/CDN/proxy access log or a Referer
+ * header. Returns "" for any other route.
+ */
+export function resetLinkToken(pathname: string, hash: string): string {
+  if (pathname !== "/reset-password") return "";
+  return new URLSearchParams(hash.replace(/^#/, "")).get("token") ?? "";
+}
+
+/**
+ * Help hashes (`#/help`, `#/help/<slug>`, aliases) are public marketing when
+ * signed out. Signed-in operators must stay in the workspace Help screen —
+ * dumping them to MarketingSite was P2-5.
+ */
+export function isSignedInHelpHash(hash: string): boolean {
+  const raw = hash.replace(/^#\/?/, "").split("?")[0].trim().toLowerCase();
+  if (!raw) return false;
+  if (raw === "help" || raw === "guide" || raw === "documentation") return true;
+  if (raw.startsWith("help/")) return true;
+  if (raw.startsWith("help-")) return true;
+  return false;
+}
+
+/** Screen to open when a stored session exists. Help public hashes map to docs. */
+export function signedInScreenFromHash(hash: string): Screen | null {
+  const screen = screenFromHash(hash);
+  if (screen) return screen;
+  if (isSignedInHelpHash(hash)) return "docs";
+  return null;
+}
+
+/**
+ * Which operator-guide article a signed-in help hash should open.
+ * `#/help` is the space home; `#/help/<slug>` and `#/help-<id>` are articles.
+ * Returns null when the hash is not a help route (sidebar `#/docs` stays the walkthrough).
+ */
+export function signedInHelpArticleFromHash(hash: string): HelpDocId | "help" | null {
+  if (!isSignedInHelpHash(hash)) return null;
+  const raw = hash.replace(/^#\/?/, "").split("?")[0].split("#")[0].trim().toLowerCase();
+  const helpMatch = raw.match(/^help\/([a-z0-9-]+)$/);
+  if (helpMatch) return helpDocFromSlug(helpMatch[1]) ?? "help";
+  if (isHelpDocRoute(raw)) return raw;
+  return "help";
 }
 
 export function writeAppHash(screen: Screen, replace = false) {

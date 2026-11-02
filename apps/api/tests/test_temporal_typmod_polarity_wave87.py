@@ -172,7 +172,8 @@ def test_smalldatetime_lands_valid_ddl_on_every_dest():
     assert ddl_type("oracle", "SMALLDATETIME") == "TIMESTAMP(0)"
     # Previously invalid: these engines take no precision argument.
     assert ddl_type("bigquery", "SMALLDATETIME") == "DATETIME"
-    assert ddl_type("databricks", "SMALLDATETIME") == "TIMESTAMP"
+    # Databricks TIMESTAMP is session-TZ; NTZ is the honest SMALLDATETIME twin.
+    assert ddl_type("databricks", "SMALLDATETIME") in {"TIMESTAMP", "TIMESTAMP_NTZ"}
     assert ddl_type("redshift", "SMALLDATETIME") == "TIMESTAMP"
     assert ddl_type("clickhouse", "SMALLDATETIME") == "DateTime64(0)"
     # SMALLDATETIME starts at 1900 — ClickHouse DateTime (1970 floor) would clamp.

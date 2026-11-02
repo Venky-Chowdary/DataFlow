@@ -115,7 +115,7 @@ export function Drawer({
               {subtitle && <p className="df2-drawer-subtitle">{subtitle}</p>}
             </div>
           </div>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-drawer-close" onClick={onClose} aria-label="Close">
+          <button type="button" className="df2-close-btn df2-drawer-close" onClick={onClose} aria-label="Close">
             <DtIcon name="x" size={16} />
           </button>
         </div>

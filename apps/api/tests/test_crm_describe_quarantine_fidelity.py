@@ -138,3 +138,257 @@ def test_zendesk_quarantine_holds_subject_overflow():
     )
     assert out == [("ok subject",)]
     assert any("Zendesk" in d.get("reason", "") for d in details)
+
+
+def test_hubspot_zendesk_unknown_meta_refuse_varchar_invent():
+    """Unknown CRM Meta types must not soft-bind platform VARCHAR caps."""
+    from connectors.saas_common import merge_saas_live_types
+
+    assert hubspot_property_to_carrier({"type": "brand_new_hs_type_v99"}) == ""
+    assert hubspot_property_to_carrier({"type": "json"}) == "JSON"
+    assert zendesk_field_to_carrier({"type": "brand_new_zd_type_v99"}) == ""
+    assert zendesk_field_to_carrier({"type": "lookup"}) == "VARCHAR(64)"
+
+    live, err = merge_saas_live_types(
+        {
+            "email": hubspot_property_to_carrier(
+                {"type": "string", "fieldType": "text"}
+            ),
+            "mystery": hubspot_property_to_carrier({"type": "brand_new_hs_type_v99"}),
+        },
+        ["email", "mystery"],
+        studio_types=None,
+        product="HubSpot",
+    )
+    assert err is not None
+    assert "mystery" in err
+    live2, err2 = merge_saas_live_types(
+        {
+            "email": hubspot_property_to_carrier(
+                {"type": "string", "fieldType": "text"}
+            ),
+        },
+        ["email", "mystery"],
+        studio_types={"mystery": "INTEGER"},
+        product="HubSpot",
+    )
+    assert err2 is None
+    assert live2["mystery"] == "INTEGER"
+
+
+def test_resolve_hubspot_does_not_map_invent_unknown_describe():
+    types = resolve_hubspot_dest_types(
+        ["email", "mystery"],
+        [
+            {"source": "e", "target": "email", "target_type": "VARCHAR"},
+            {"source": "m", "target": "mystery", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_props=[
+            {"name": "email", "type": "string", "fieldType": "text"},
+            {"name": "mystery", "type": "brand_new_hs_type_v99"},
+        ],
+    )
+    assert types["email"].startswith("VARCHAR")
+    assert "mystery" not in types
+
+
+def test_resolve_airtable_notion_sf_no_map_invent_on_describe():
+    from connectors.airtable_writer import resolve_airtable_dest_types
+    from connectors.notion_writer import resolve_notion_dest_types
+    from connectors.salesforce_writer import resolve_salesforce_dest_types
+
+    at = resolve_airtable_dest_types(
+        ["Name", "Score"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "s", "target": "Score", "target_type": "VARCHAR"},
+        ],
+        {},
+        meta_fields=[
+            {"name": "Name", "type": "singleLineText"},
+            {"name": "Score", "type": "formula"},
+        ],
+    )
+    assert at["Name"].startswith("VARCHAR")
+    assert "Score" not in at
+
+    no = resolve_notion_dest_types(
+        ["Name", "Computed"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "c", "target": "Computed", "target_type": "VARCHAR"},
+        ],
+        {},
+        properties={"Name": "title", "Computed": "formula"},
+    )
+    assert no["Name"].startswith("VARCHAR")
+    assert "Computed" not in no
+
+    sf = resolve_salesforce_dest_types(
+        ["Name", "Weird__c"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "w", "target": "Weird__c", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=[
+            {"name": "Name", "type": "string", "length": 80},
+            {"name": "Weird__c", "type": "brand_new_soap_type"},
+        ],
+    )
+    assert sf["Name"] == "VARCHAR(80)"
+    assert "Weird__c" not in sf
+
+
+def test_resolve_studio_fills_refused_meta_carrier():
+    from connectors.airtable_writer import resolve_airtable_dest_types
+    from connectors.notion_writer import resolve_notion_dest_types
+
+    at = resolve_airtable_dest_types(
+        ["Name", "Score"],
+        [],
+        {},
+        meta_fields=[
+            {"name": "Name", "type": "singleLineText"},
+            {"name": "Score", "type": "formula"},
+        ],
+        studio_types={"Score": "INTEGER"},
+    )
+    assert at["Score"] == "INTEGER"
+
+    no = resolve_notion_dest_types(
+        ["id", "Name"],
+        [],
+        {},
+        properties={"id": "rich_text", "Name": "title"},
+    )
+    # Live property named id keeps Describe carrier (not page-UUID invent).
+    assert no["id"] != "VARCHAR(64)"
+    assert no["id"].startswith("VARCHAR")
+    assert no["Name"].startswith("VARCHAR")
+
+
+def test_resolve_partial_studio_without_describe_no_map_invent():
+    """Describe unavailable + partial Studio must not Map-fill gaps."""
+    from connectors.airtable_writer import resolve_airtable_dest_types
+    from connectors.salesforce_writer import resolve_salesforce_dest_types
+
+    hs = resolve_hubspot_dest_types(
+        ["email", "mystery"],
+        [
+            {"source": "e", "target": "email", "target_type": "VARCHAR"},
+            {"source": "m", "target": "mystery", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_props=None,
+        studio_types={"email": "VARCHAR(65536)"},
+    )
+    assert hs["email"].startswith("VARCHAR")
+    assert "mystery" not in hs
+
+    at = resolve_airtable_dest_types(
+        ["Name", "Score"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "s", "target": "Score", "target_type": "VARCHAR"},
+        ],
+        {},
+        meta_fields=None,
+        studio_types={"Name": "VARCHAR(100000)"},
+    )
+    assert "Name" in at
+    assert "Score" not in at
+
+    sf = resolve_salesforce_dest_types(
+        ["Name", "Weird__c"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "w", "target": "Weird__c", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types={"Name": "VARCHAR(80)"},
+    )
+    assert sf["Name"] == "VARCHAR(80)"
+    assert "Weird__c" not in sf
+
+    zd = resolve_zendesk_dest_types(
+        ["subject", "custom_gap"],
+        [
+            {"source": "s", "target": "subject", "target_type": "VARCHAR"},
+            {"source": "c", "target": "custom_gap", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types={"subject": "VARCHAR(255)"},
+    )
+    # System seed covers subject even when Studio stamp differs; gap stays refuse.
+    assert "subject" in zd
+    assert zd["subject"].startswith("VARCHAR")
+    assert "custom_gap" not in zd
+
+    zd_seed_only = resolve_zendesk_dest_types(
+        ["subject", "custom_gap"],
+        [
+            {"source": "s", "target": "subject", "target_type": "VARCHAR"},
+            {"source": "c", "target": "custom_gap", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types={"custom_gap": "INTEGER"},
+    )
+    assert "subject" in zd_seed_only
+    assert zd_seed_only["custom_gap"] == "INTEGER"
+
+    # No Describe + no Studio: system seeds still bind; custom stays refuse.
+    zd_seeds_only = resolve_zendesk_dest_types(
+        ["subject", "custom_gap"],
+        [
+            {"source": "s", "target": "subject", "target_type": "VARCHAR"},
+            {"source": "c", "target": "custom_gap", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types=None,
+    )
+    assert "subject" in zd_seeds_only
+    assert "custom_gap" not in zd_seeds_only
+
+
+def test_overlay_promotes_mysql_enum_set_over_map_varchar():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    overlaid = overlay_physical_bind_types(
+        ["status", "flags", "note"],
+        ["VARCHAR", "VARCHAR", "VARCHAR"],
+        {
+            "status": "enum('open','closed')",
+            "flags": "set('a','b','c')",
+            "note": "varchar(40)",
+        },
+    )
+    assert overlaid[0].lower().startswith("enum(")
+    assert overlaid[1].lower().startswith("set(")
+    # Bounded physical VARCHAR(n) beats Map bare VARCHAR.
+    assert overlaid[2].lower() == "varchar(40)"
+
+
+def test_overlay_promotes_bounded_varchar_over_map_soft_string():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    overlaid = overlay_physical_bind_types(
+        ["a", "b", "c", "d"],
+        ["VARCHAR", "TEXT", "VARCHAR(500)", "INTEGER"],
+        {
+            "a": "VARCHAR(40)",
+            "b": "NVARCHAR(20)",
+            "c": "CHAR(8)",
+            "d": "VARCHAR(40)",
+        },
+    )
+    assert overlaid[0] == "VARCHAR(40)"
+    assert overlaid[1] == "NVARCHAR(20)"
+    assert overlaid[2] == "CHAR(8)"
+    # Non-string Map stamp must not be rewritten to VARCHAR.
+    assert overlaid[3] == "INTEGER"

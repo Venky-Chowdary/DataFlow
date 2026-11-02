@@ -1,22 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
+import { isSqlNullQuarantineCell, nullWireLabel } from "../../lib/nullWire";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
+import { isReplayable, quarantineEvidenceSource, type QuarantineRow } from "./quarantineReplay";
 
-type QuarantineRow = {
-  row?: number;
-  column?: string;
-  target?: string;
-  value?: string;
-  reason?: string;
-  policy?: string;
-  values?: Record<string, string>;
-  chars?: string[];
-  suggested_transform?: string;
-  /** Destination DLQ row id — required to stamp `_df_promoted_at` after Promote. */
-  _df_qid?: string;
-};
+export { isReplayable };
+export type { QuarantineRow };
 
 export interface QuarantinePanelProps {
   jobId: string;
@@ -82,9 +73,19 @@ function buildTransformOverrides(rows: QuarantineRow[]): Record<string, string> 
   return out;
 }
 
+function isOpenFinding(row: QuarantineRow): boolean {
+  const status = (row.retry_status || "open").toLowerCase();
+  return status !== "promoted" && status !== "abandoned";
+}
+
 /** Make invisible format-control chars visible in the UI / CSV preview. */
 function formatQuarantineSample(value: unknown, chars?: string[]): string {
-  let text = String(value ?? "");
+  if (isSqlNullQuarantineCell(value)) return "NULL";
+  const labeled = nullWireLabel(value);
+  if (labeled) return labeled;
+  if (value == null) return "—";
+  let text = String(value);
+  if (text.trim() === "") return "(blank)";
   const replacements: Array<[RegExp, string]> = [
     [/\u200B/g, "⟦U+200B⟧"],
     [/\u200C/g, "⟦U+200C⟧"],
@@ -142,9 +143,13 @@ export function QuarantinePanel({
   const [remediatedPendingValidate, setRemediatedPendingValidate] = useState(false);
   const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
   const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
-  const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
+  const [source, setSource] = useState<string>(() => quarantineEvidenceSource(initialDetails));
+  const [rowsRolledBack, setRowsRolledBack] = useState(0);
+  const [destDlqDurable, setDestDlqDurable] = useState<boolean | null | undefined>(undefined);
+  const [rowsUnaccounted, setRowsUnaccounted] = useState(0);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editNull, setEditNull] = useState(false);
   const [applySuggested, setApplySuggested] = useState(true);
   const [replayResult, setReplayResult] = useState<{
     job_id: string;
@@ -158,9 +163,11 @@ export function QuarantinePanel({
       skipped?: boolean;
     };
   } | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
   const [destDlq, setDestDlq] = useState<import("../../lib/api").QuarantineInfo["dest_dlq"]>(undefined);
   const [quarantineDurable, setQuarantineDurable] = useState<boolean | null | undefined>(undefined);
   const [quarantineDlqError, setQuarantineDlqError] = useState<string | null | undefined>(undefined);
+  const [closure, setClosure] = useState<import("../../lib/api").QuarantineInfo["quarantine_closure"]>(undefined);
 
   const transformOverrides = useMemo(() => buildTransformOverrides(rows), [rows]);
   const hasStripSuggestion = Object.values(transformOverrides).some(
@@ -176,17 +183,25 @@ export function QuarantinePanel({
       setRows(next);
       setIssueCount(data.issue_count ?? next.length);
       setRowCount(data.rejected_rows ?? rejectedRows ?? next.length);
-      setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
+      setRowsRolledBack(data.rows_rolled_back ?? 0);
+      setDestDlqDurable(data.dest_dlq_durable);
+      setRowsUnaccounted(data.rows_unaccounted ?? 0);
+      setSource(
+        apiRows.length
+          ? (data.source || "write")
+          : quarantineEvidenceSource(initialDetails, data.source),
+      );
       setDestDlq(data.dest_dlq);
       setQuarantineDurable(data.quarantine_durable);
       setQuarantineDlqError(data.quarantine_dlq_error ?? null);
+      setClosure(data.quarantine_closure);
       setOpen(true);
       setLoaded(true);
     } catch (e) {
       if (initialDetails?.length) {
         setRows(initialDetails);
         setIssueCount(initialDetails.length);
-        setSource("job");
+        setSource(quarantineEvidenceSource(initialDetails));
         setOpen(true);
         setLoaded(true);
       }
@@ -227,19 +242,23 @@ export function QuarantinePanel({
   };
 
   const openEdit = (index: number) => {
+    const value = rows[index]?.value;
+    const sqlNull = isSqlNullQuarantineCell(value);
     setEditIndex(index);
-    setEditValue(String(rows[index]?.value ?? ""));
+    setEditNull(sqlNull);
+    setEditValue(sqlNull ? "" : String(value ?? ""));
   };
 
   const saveEdit = () => {
     if (editIndex == null) return;
+    const nextValue = editNull ? null : editValue;
     setRows((prev) =>
       prev.map((r, i) => {
         if (i !== editIndex) return r;
         const col = r.column || "";
         const values = { ...(r.values || {}) };
-        if (col) values[col] = editValue;
-        return { ...r, value: editValue, values };
+        if (col) values[col] = nextValue;
+        return { ...r, value: nextValue, values };
       }),
     );
     setEditIndex(null);
@@ -279,12 +298,13 @@ export function QuarantinePanel({
   const replay = async () => {
     setReplaying(true);
     setReplayResult(null);
+    setReplayError(null);
     try {
       const overrides = applySuggested && Object.keys(transformOverrides).length
         ? transformOverrides
         : undefined;
       const result = await replayJobQuarantine(jobId, {
-        rows,
+        rows: rows.filter(isOpenFinding),
         transform_overrides: overrides,
       });
       const promoted = result.dest_dlq_promoted;
@@ -314,6 +334,9 @@ export function QuarantinePanel({
               ? `DLQ rows stamped on ${destDlq.table}`
               : null,
           promoted?.error ? `DLQ stamp: ${promoted.error}` : null,
+          result.quarantine_closure?.verdict
+            ? `Ledger ${result.quarantine_closure.verdict} (${result.quarantine_closure.open_count ?? 0} open)`
+            : null,
         ]
           .filter(Boolean)
           .join(" · "),
@@ -322,23 +345,30 @@ export function QuarantinePanel({
       onReplayComplete?.(result.job_id);
       await load();
     } catch (e) {
+      // A toast disappears; a refused replay has to stay on screen, or the
+      // control reads as a silent no-op.
+      setReplayError((e as Error).message);
       toast({ title: "Replay failed", message: (e as Error).message, tone: "error" });
     } finally {
       setReplaying(false);
     }
   };
 
-  const topReasons = summarizeReasons(rows);
-  const topColumns = summarizeColumns(rows);
+  const topReasons = summarizeReasons(rows.filter(isOpenFinding));
+  const topColumns = summarizeColumns(rows.filter(isOpenFinding));
   const displayRowCount = rowCount || (rejectedRows ?? 0) || issueCount;
   const displayFindings = loaded ? issueCount : (rejectedRows ?? 0) || issueCount;
   const isWriteSource = source === "write" || source === "job";
   const isPreflight = source === "preflight";
-  // Replay needs a durable control-plane record of the rejected rows. When
-  // persist_rejected_rows failed the engine still lists them in memory, but
-  // a Replay click would rewrite nothing — block the button and say why.
   const durableLost = quarantineDurable === false;
-  const canReplay = isWriteSource && rows.length > 0 && !durableLost;
+  const openFindings = rows.filter(isOpenFinding);
+  const openCount = closure?.open_count ?? openFindings.length;
+  const promotedCount = closure?.promoted_count ?? Math.max(0, rows.length - openFindings.length);
+  const ledgerClosed = closure?.verdict === "closed" || (openCount === 0 && promotedCount > 0);
+  const replayableFindings = openFindings.filter(isReplayable);
+  const nothingToRebuild = loaded && openFindings.length > 0 && replayableFindings.length === 0;
+  const canReplay =
+    isWriteSource && openCount > 0 && !durableLost && !ledgerClosed && !nothingToRebuild;
 
   return (
     <div className="df2-quarantine-panel">
@@ -357,6 +387,23 @@ export function QuarantinePanel({
             <span className="df2-quarantine-explainer-count">
               <strong>{displayFindings.toLocaleString()}</strong> finding{displayFindings === 1 ? "" : "s"}
             </span>
+            {loaded && rowsRolledBack > 0 && (
+              <span
+                className="df2-quarantine-explainer-count"
+                title="A strict write unit is atomic: rows without a finding of their own were rolled back with the batch. They are not quarantine scraps and are not replayable — re-run them after the mapping is fixed."
+              >
+                <strong>{rowsRolledBack.toLocaleString()}</strong> row{rowsRolledBack === 1 ? "" : "s"} rolled back with the refused batch
+              </span>
+            )}
+            {loaded && rowsUnaccounted > 0 && (
+              <span
+                className="df2-quarantine-explainer-count"
+                role="alert"
+                title="The job's reject total exceeds the findings this build can retrieve, and the difference is not named as a rollback. Export the CSV and treat the total as unproven."
+              >
+                <strong>{rowsUnaccounted.toLocaleString()}</strong> row{rowsUnaccounted === 1 ? "" : "s"} counted with no retrievable finding
+              </span>
+            )}
             {coercedNullRows != null && coercedNullRows > 0 && (
               <span className="df2-quarantine-explainer-count">
                 <strong>{coercedNullRows.toLocaleString()}</strong> coerced to NULL
@@ -383,6 +430,13 @@ export function QuarantinePanel({
                 {destDlq.open_rows != null ? ` · ${destDlq.open_rows} open` : ""}
               </span>
             )}
+            {loaded && (openCount > 0 || promotedCount > 0 || ledgerClosed) && (
+              <span className="df2-quarantine-explainer-count" title={closure?.note || closure?.next_action || ""}>
+                Ledger: {ledgerClosed ? "closed" : (closure?.verdict || "open")}
+                {promotedCount > 0 ? ` · ${promotedCount} promoted` : ""}
+                {openCount > 0 ? ` · ${openCount} open` : ""}
+              </span>
+            )}
             {destDlq?.skipped && destDlq.reason && (
               <span className="df2-quarantine-explainer-count" title={destDlq.reason}>
                 Dest DLQ skipped (control-plane only)
@@ -401,6 +455,15 @@ export function QuarantinePanel({
       <div className="df2-quarantine-next" role="region" aria-label="Next remediation step">
         <div className="df2-quarantine-next-copy">
           <strong>Next step</strong>
+          {destDlqDurable === false ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              These findings are durable on the <strong>control plane only</strong> — the
+              destination DLQ table write failed
+              {destDlq?.error ? <> ({String(destDlq.error)})</> : null}, so the destination holds
+              no copy to query in SQL. Export the CSV for an off-platform record, and fix the DLQ
+              table before relying on destination-side quarantine evidence.
+            </p>
+          ) : null}
           {isPreflight ? (
             <p>
               Caught in Validate before write. Open Validate → <em>Fix bad data…</em> or fix
@@ -413,6 +476,21 @@ export function QuarantinePanel({
               {quarantineDlqError ? <> ({quarantineDlqError})</> : null}. Replay is disabled because
               it would rewrite nothing — export the CSV now, fix the DLQ store, and re-run the
               transfer so rejects are persisted.
+            </p>
+          ) : nothingToRebuild ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              {openFindings.length} open finding(s) name no column and carry no stored cell
+              values, so there is <strong>no row payload to rewrite</strong> and replay is
+              disabled. Export the CSV, fix the mapping or the source, then re-run the transfer —
+              a replay here would only be refused.
+            </p>
+          ) : ledgerClosed ? (
+            <p>
+              Quarantine ledger is <strong>closed</strong>
+              {promotedCount > 0 ? <> — {promotedCount} finding(s) Gate-8 promoted</> : null}.
+              Remediations landed by keyed upsert; this does <strong>not</strong> rewrite the
+              parent transfer&apos;s checksum. Replay is disabled so we do not bulk-drain
+              already-landed keys.
             </p>
           ) : canReplay ? (
             <p>
@@ -514,8 +592,9 @@ export function QuarantinePanel({
               <DtIcon name="warning" size={14} />
               <strong>Quarantined findings</strong>
               <span className="df2-quarantine-inspect-count">
-                {rows.length.toLocaleString()} shown
-                {displayRowCount > 0 ? ` · job reports ${displayRowCount.toLocaleString()} rejected row(s)` : ""}
+                {openFindings.length.toLocaleString()} open
+                {promotedCount > 0 ? ` · ${promotedCount.toLocaleString()} promoted` : ""}
+                {displayRowCount > 0 ? ` · job reports ${displayRowCount.toLocaleString()} original reject(s)` : ""}
               </span>
             </div>
             <div className="df2-job-log-actions">
@@ -526,7 +605,7 @@ export function QuarantinePanel({
             </div>
           </header>
 
-          {displayRowCount > 0 && rows.length > 0 && rows.length < displayRowCount && (
+          {displayRowCount > 0 && openFindings.length > 0 && openFindings.length < displayRowCount && truncatedDetails > 0 && (
             <div className="df2-alert df2-alert-warning" role="status">
               Job reports {displayRowCount.toLocaleString()} rejected row(s) but only {rows.length.toLocaleString()} finding(s)
               are stored for inspect. Export CSV for what we have; re-run the transfer after deploy to capture full row samples
@@ -549,6 +628,11 @@ export function QuarantinePanel({
             </div>
           )}
 
+          {replayError && (
+            <div className="df2-quarantine-durable-warn" role="alert">
+              Replay refused: {replayError}
+            </div>
+          )}
           {replayResult && (
             <div className="df2-quarantine-replay-result" role="status">
               <DtIcon name="check" size={14} />
@@ -611,8 +695,14 @@ export function QuarantinePanel({
                         {formatQuarantineSample(r.value, r.chars)}
                       </td>
                       <td>{r.reason || "—"}</td>
-                      <td className="df2-quarantine-fix" title={r.suggested_transform || ""}>
-                        {r.suggested_transform || "—"}
+                      <td
+                        className="df2-quarantine-fix"
+                        title={r.suggested_fix || r.suggested_target_type || r.suggested_transform || ""}
+                      >
+                        {r.suggested_fix
+                          || r.suggested_target_type
+                          || r.suggested_transform
+                          || "—"}
                       </td>
                       <td>{r.policy || "—"}</td>
                       <td>
@@ -650,10 +740,25 @@ export function QuarantinePanel({
             <input
               id="df2-quarantine-edit-input"
               className="df2-input"
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
+              value={editNull ? "" : editValue}
+              disabled={editNull}
+              onChange={(e) => {
+                setEditNull(false);
+                setEditValue(e.target.value);
+              }}
               autoFocus
             />
+            <label className="df2-quarantine-apply-suggested">
+              <input
+                type="checkbox"
+                checked={editNull}
+                onChange={(e) => {
+                  setEditNull(e.target.checked);
+                  if (e.target.checked) setEditValue("");
+                }}
+              />
+              SQL NULL — an empty field is an empty string
+            </label>
             <div className="df2-quarantine-edit-actions">
               <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setEditIndex(null)}>Cancel</button>
               <button type="button" className="df2-btn df2-btn-primary" onClick={saveEdit}>Save</button>
@@ -670,7 +775,7 @@ export function QuarantinePanel({
           setRemediatedPendingValidate(true);
           toast({
             title: "Repair applied — re-validate required",
-            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate to re-run G1–G9.`,
+            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate to re-run gates.`,
             tone: "success",
           });
           // Prefer parent closed-loop (Jobs seeds proposal id + mappings).

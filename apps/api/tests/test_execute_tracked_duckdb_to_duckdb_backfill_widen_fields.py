@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -20,8 +21,8 @@ from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 def test_duckdb_to_duckdb_backfill_widens_varchar_and_numeric():
     duckdb = pytest.importorskip("duckdb")
 
-    src_path = f"/tmp/duckdb_src_widen_{uuid.uuid4().hex[:8]}.duck"
-    dst_path = f"/tmp/duckdb_dst_widen_{uuid.uuid4().hex[:8]}.duck"
+    src_path = f"{tempfile.gettempdir()}/duckdb_src_widen_{uuid.uuid4().hex[:8]}.duck"
+    dst_path = f"{tempfile.gettempdir()}/duckdb_dst_widen_{uuid.uuid4().hex[:8]}.duck"
     src_table = f"src_widen_{uuid.uuid4().hex[:8]}"
     dst_table = f"dst_widen_{uuid.uuid4().hex[:8]}"
 

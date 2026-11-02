@@ -51,6 +51,8 @@ def test_array_wire_parses_json_and_pg_literals():
     assert parse_array_wire_elements('["a","b"]') == (["a", "b"], None)
     assert parse_array_wire_elements("[1,2,3]") == ([1, 2, 3], None)
     assert parse_array_wire_elements("[]") == ([], None)
+    # Postgres empty array `{}` is also valid JSON `{}` — keep the array.
+    assert parse_array_wire_elements("{}") == ([], None)
 
     # Postgres literal: unquoted NULL is a real NULL, quoted stays text.
     elements, err = parse_array_wire_elements("{a,b,NULL}")
@@ -163,7 +165,7 @@ def test_malformed_json_document_held_but_plain_scalar_allowed():
     """A broken document would silently become a JSON string — fail closed."""
     kept, details = _probe("JSON", '{"a": }', "Shopify")
     assert kept == []
-    assert "malformed document" in details[0]["reason"]
+    assert "malformed" in details[0]["reason"]
 
     # coerce_json_wire losslessly wraps bare scalars, so these are not losses.
     for value in ["plain text scalar", '{"a":1}', '[1,2,3]', '"quoted"']:
@@ -172,7 +174,9 @@ def test_malformed_json_document_held_but_plain_scalar_allowed():
         assert details == []
 
 
-def test_coerce_null_policy_nulls_cell_instead_of_dropping_row():
+def test_coerce_null_policy_omits_cell_instead_of_dropping_row():
+    from services.value_serializer import DF_MISSING_SENTINEL
+
     details: list[dict] = []
     kept = apply_write_quarantine_matrix(
         [('["not-a-number"]', "keep-me")],
@@ -182,18 +186,20 @@ def test_coerce_null_policy_nulls_cell_instead_of_dropping_row():
         policy="coerce_null",
         dialect_label="Shopify",
     )
-    assert kept == [(None, "keep-me")]
+    assert kept == [(DF_MISSING_SENTINEL, "keep-me")]
     assert details
 
 
-def test_fail_policy_leaves_rows_for_strict_driver_abort():
+def test_fail_policy_stamps_and_holds_out_unfit_arrays():
+    """Strict/fail must stamp unfit ARRAY cells before bind — never soft-driver hope."""
     details: list[dict] = []
     rows = [('["not-a-number"]',)]
     kept = quarantine_unfit_arrays(
         rows, ["arr"], ["ARRAY<BIGINT>"], details, "fail", dialect_label="Shopify"
     )
-    assert kept == rows
-    assert details == []
+    assert kept == []
+    assert details
+    assert details[0]["policy"] == "write_quarantine"
 
 
 def test_quarantine_detail_stamps_row_column_and_replay_values():

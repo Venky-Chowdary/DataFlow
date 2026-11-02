@@ -6,13 +6,14 @@ proof only — not a live network reconcile.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_enterprise.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 DEST_FAMILIES = (
     "snowflake",

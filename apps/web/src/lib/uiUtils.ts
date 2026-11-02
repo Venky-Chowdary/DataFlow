@@ -1,11 +1,16 @@
 /** Shared UI helpers — single source for status badges and formatting */
 
 /** Success terminal statuses (data landed in the destination). */
-export const JOB_SUCCESS_STATUSES = ["completed", "completed_with_quarantine"] as const;
+export const JOB_SUCCESS_STATUSES = ["completed", "completed_with_quarantine", "success", "succeeded"] as const;
 
 /** True when the job succeeded — includes the success-with-warnings state. */
 export function isJobSuccess(status: string | undefined): boolean {
-  return status === "completed" || status === "completed_with_quarantine";
+  return (
+    status === "completed"
+    || status === "completed_with_quarantine"
+    || status === "success"
+    || status === "succeeded"
+  );
 }
 
 /** True when the job will no longer emit progress (success, failure, or cancel). */
@@ -13,8 +18,26 @@ export function isJobTerminal(status: string | undefined): boolean {
   return (
     status === "completed"
     || status === "completed_with_quarantine"
+    || status === "success"
+    || status === "succeeded"
     || status === "failed"
     || status === "cancelled"
+  );
+}
+
+/**
+ * Parked on an operator decision or a fix: the job is not finished, but nothing
+ * runs until someone acts, so its clock must not keep counting. Mirrors the
+ * API's hold statuses (services/mongodb_service.py).
+ */
+export function isJobParked(status: string | undefined): boolean {
+  return (
+    status === "needs_approval"
+    || status === "needs_confirmation"
+    || status === "needs_review"
+    || status === "awaiting_approval"
+    || status === "paused"
+    || status === "blocked"
   );
 }
 
@@ -22,6 +45,8 @@ export function isJobTerminal(status: string | undefined): boolean {
 export function jobStatusLabel(status: string): string {
   switch (status) {
     case "completed":
+    case "success":
+    case "succeeded":
       return "Completed";
     case "completed_with_quarantine":
       return "Completed with quarantine";
@@ -33,6 +58,8 @@ export function jobStatusLabel(status: string): string {
       return "Pending";
     case "cancelled":
       return "Cancelled";
+    case "needs_approval":
+      return "Needs approval";
     default:
       return status ? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ") : "Unknown";
   }
@@ -44,10 +71,25 @@ export function jobStatusBadgeClass(status: string): string {
   if (status === "completed_with_quarantine") return "df2-badge df2-badge-warn";
   if (status === "failed") return "df2-badge df2-badge-error";
   if (status === "running" || status === "pending") return "df2-badge df2-badge-run";
+  // Parked on a decision: not a failure, but nothing moves until someone answers.
+  if (status === "needs_approval") return "df2-badge df2-badge-warn";
   return "df2-badge df2-badge-muted";
 }
 
+/** Stable React list key when identities can collide or be missing. */
+export function uniqueListKey(
+  id: string | number | null | undefined,
+  index: number,
+  prefix = "row",
+): string {
+  const raw = String(id ?? "").trim();
+  return raw ? `${prefix}:${raw}:${index}` : `${prefix}:${index}`;
+}
+
 export function connectorHealthLabel(status: string, lastTestOk?: boolean): string {
-  if (status === "error" || lastTestOk === false) return "Action needed";
+  // Probe result wins — a green last_test_ok must never read as "Action needed"
+  // just because a stale status string still says error.
+  if (lastTestOk === true) return "Ready";
+  if (lastTestOk === false || status === "error") return "Action needed";
   return "Ready";
 }

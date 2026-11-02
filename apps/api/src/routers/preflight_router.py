@@ -4,13 +4,29 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from services.transfer_policy_values import PolicyFieldsModel
+
+from services.acknowledgment_contract import (
+    AcknowledgmentRefused,
+    audit_acknowledgments,
+    resolve_acknowledgments,
+)
+from services.fk_parent_preflight import with_fk_route_option
+from services.preflight_cursor_gate import resolve_read_scope
+from services.shape_preflight import (
+    ShapePreflightRefused,
+    shaped_population_rows,
+    shaped_preflight_image,
+)
 
 from ..services.preflight_service import (
     apply_policy_gates,
     confidence_threshold_for_mode,
     inspect_destination_for_preflight,
+    resolve_preflight_source_kind,
     run_file_preflight,
     run_transfer_policy_gates,
 )
@@ -27,6 +43,15 @@ class MappingItem(BaseModel):
     transform: str | None = None
     target_type: str | None = None
     source_type: str | None = None
+
+    @field_validator("target_type")
+    @classmethod
+    def _type_stamp_is_a_type(cls, value: str | None) -> str | None:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        if value is not None and value.strip():
+            validate_mapping_type_stamps([{"target_type": value}], context="Map")
+        return value
     requires_review: bool = False
     score_gap: float = 1.0
     user_override: bool = False
@@ -39,23 +64,49 @@ class MappingItem(BaseModel):
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Array normalize/hybrid — must survive Validate → Execute.
+    structural_class: str | None = None
+    child_table_spec: dict[str, Any] | None = None
     # Map Accept risk must survive /preflight/run — stripping these left G3/G4/G9
     # blocking after the operator already acknowledged lossy TEXT→INTEGER (etc.).
     fidelity: str | None = None
     type_narrowing: bool = False
     risk_acknowledged: bool = False
     intentional_omit: bool = False
+    # Field Reduction Ledger (G16) evidence for an omitted column. Dropping these
+    # on the wire would leave every UI-declared reduction unexplained.
+    omit_reason: str | None = None
+    omit_reason_text: str | None = None
+    archive_reference: str | None = None
+    retention_until: str | None = None
+    omit_approved_by: str | None = None
+    omit_approved_at: str | None = None
     # Migration Risk Contract draft/signed — Execute-approve authority.
     risk_contract: dict[str, Any] | None = None
+    # G20 — operator-declared source→target code map. Extra=ignore would
+    # drop this on Validate, so Execute would be the first place an unmapped
+    # population code is seen. Empty dict is still a declaration.
+    code_crosswalk: dict[str, str] | None = None
+    code_crosswalk_system: str | None = None
+    # Execute-enforced business-rule contracts attached to this write.
+    rule_contracts: list[dict[str, Any]] | None = None
+    # Compiled-rule evidence (rule_id, report_fingerprint) — must survive
+    # Validate → Execute so the job can link back to the compiled audit event.
+    business_rule: dict[str, Any] | None = None
+    # G21 — opt-in independent SUM of this monetary column after write.
+    # Must survive Validate → Execute; extra=ignore would drop it.
+    control_total: bool | None = None
 
 
-class PreflightRequest(BaseModel):
+class PreflightRequest(PolicyFieldsModel):
     columns: list[str]
     column_types: dict[str, str] = Field(default_factory=dict)
     row_count: int = 0
     mappings: list[MappingItem]
     connector_id: str | None = None
     source_connector_id: str | None = None
+    # Ad-hoc / inline source endpoint when no saved connector — uniqueness + orphan probes.
+    source_config: dict[str, Any] | None = None
     source_kind: str = "file"
     source_type: str | None = None
     source_table: str | None = None
@@ -78,6 +129,8 @@ class PreflightRequest(BaseModel):
     destination_column_types: dict[str, str] = Field(default_factory=dict)
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
+    number_locale: str = ""
     dest_schema: str | None = None
     dest_warehouse: str | None = None
     dest_auth_source: str | None = None
@@ -93,6 +146,9 @@ class PreflightRequest(BaseModel):
     schema_drift_acknowledged: bool = False
     # Operator acknowledged destination FK mapping risk (schema coverage only).
     fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL the plan discloses for this run —
+    # e.g. the unique index an upsert needs on an existing table (D101).
+    ddl_changes_acknowledged: bool = False
     # Module 11 — opt-in full-table population orphan scan (only path to RI proven).
     run_population_orphan_scan: bool = False
     # Optional acknowledgment trail (who / why). Timestamp is stamped server-side.
@@ -100,6 +156,41 @@ class PreflightRequest(BaseModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # Execute-applied sort + cap. Validate names the cap (G17); type-fit stays uncapped.
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
+    # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
+    dest_extra: dict[str, Any] | None = None
+    # CDC delivery — auto selects dest-owned exactly-once on an eligible route.
+    delivery_guarantee: str = "auto"
+    # Approved pre-load transform recipe. Execute shapes rows on the read, so the
+    # gates must judge the transformed image, not the raw source.
+    shape_recipe: dict[str, Any] | None = None
+    # Persisted upload from /connectors/upload. Studio posts a preview; when
+    # this id is set, Validate scans the stored population (same bytes Execute
+    # will stream). Browser-local CSV fallback has no file_id — stay sampled.
+    source_file_id: str | None = None
+
+    @model_validator(mode="after")
+    def _object_url_source(self) -> "PreflightRequest":
+        """``s3://bucket/key`` is a bucket and a key, as on Execute (QA demo 1030)."""
+        from ..transfer.object_path import split_object_url
+
+        for attr in ("source_table", "source_collection"):
+            split = split_object_url(getattr(self, attr) or "")
+            if split is None:
+                continue
+            bucket, key = split
+            cfg = dict(self.source_config or {})
+            current = str(cfg.get("database") or "").strip()
+            if current and current != bucket:
+                continue
+            cfg.setdefault("database", bucket)
+            cfg["database"] = cfg["database"] or bucket
+            self.source_config = cfg
+            setattr(self, attr, key)
+        return self
 
 
 def _schema_default(db_type: str) -> str:
@@ -146,15 +237,112 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
 
 
 @router.post("/run")
-async def run_preflight(body: PreflightRequest):
+async def run_preflight(body: PreflightRequest, http_request: Request):
     """
     Run core G1–G9 preflight gates before a transfer.
     Blocks transfer if any gate fails — no mocked pass when connectors or samples are missing.
+
+    The gates dial customer systems with blocking drivers. They run off the
+    event loop, under the preflight deadline (QA round 11: an Ensembl MySQL
+    Validate held the loop for more than five minutes). Past the deadline the
+    answer is a blocked preflight that names what was still waiting.
     """
+    import asyncio
+
+    from starlette.concurrency import run_in_threadpool
+
+    from ..ai.copilot.tool_deadline import (
+        ANSWER_RESERVE_SECONDS,
+        _Progress,
+        deadline_scope,
+        deadline_timeout_message,
+        preflight_deadline_seconds,
+    )
+
+    seconds = preflight_deadline_seconds()
+    progress = _Progress(limit=seconds)
+
+    def _bounded() -> Any:
+        from services.catalog_statement_cap import (
+            attach_budget_findings,
+            collect_budget_findings,
+        )
+
+        with deadline_scope(seconds, progress), collect_budget_findings() as found:
+            return attach_budget_findings(_run_preflight_blocking(body, http_request), found)
+
+    work = asyncio.ensure_future(run_in_threadpool(_bounded))
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(work), timeout=seconds + ANSWER_RESERVE_SECONDS
+        )
+    except asyncio.TimeoutError:
+        return _preflight_deadline_refusal(
+            body, deadline_timeout_message("Preflight", seconds, progress), seconds
+        )
+
+
+def _preflight_deadline_refusal(body: PreflightRequest, message: str, seconds: float) -> dict:
+    """A blocked preflight the operator can read, never a hung request."""
+    from services.preflight_run_store import save_preflight_run
+
+    gate = {
+        "id": "preflight_deadline",
+        "status": "block",
+        "message": message,
+        "duration_ms": int(seconds * 1000),
+        "details": {"deadline_seconds": seconds},
+    }
+    gated = {
+        "passed": False,
+        "gates": [gate],
+        "blockers": [{"id": "preflight_deadline", "message": message, "details": gate["details"]}],
+        "warnings": [],
+        "passed_count": 0,
+        "total_gates": 1,
+        "readiness_score": 0.0,
+    }
+    return save_preflight_run(
+        gated,
+        source_label=body.source_type or body.source_kind or "source",
+        dest_label=str(body.dest_table or body.dest_type or body.dest_kind or "destination"),
+        validation_mode=body.validation_mode,
+        route={
+            "source_kind": body.source_kind,
+            "source_type": body.source_type,
+            "source_connector_id": body.source_connector_id,
+            "dest_type": body.dest_type,
+            "dest_connector_id": body.connector_id,
+            "dest_table": body.dest_table,
+        },
+    )
+
+
+def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
+    """The gates themselves: blocking I/O, run by :func:`run_preflight` off the loop."""
+    from services.workspace_access import assert_connector_accessible
+
+    # Preflight probes and introspects saved connectors with their stored
+    # credentials: authorize each against its own workspace first (404).
+    assert_connector_accessible(http_request, body.connector_id)
+    assert_connector_accessible(http_request, body.source_connector_id)
     if not body.columns:
         raise HTTPException(status_code=400, detail="No columns provided for preflight")
     if not body.mappings:
         raise HTTPException(status_code=400, detail="No column mappings provided")
+
+    # Refuse an unattributed attestation before any gate consumes it.
+    try:
+        ack = resolve_acknowledgments(
+            compliance=body.compliance_acknowledged,
+            schema_drift=body.schema_drift_acknowledged,
+            fk_risk=body.fk_risk_acknowledged,
+            ddl_changes=body.ddl_changes_acknowledged,
+            actor=body.acknowledgment_actor,
+            reason=body.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     destination_connected = False
     dest_error: str | None = None
@@ -179,6 +367,7 @@ async def run_preflight(body: PreflightRequest):
         dest_api_key=body.dest_api_key,
         dest_service_account=body.dest_service_account,
         dest_kind=body.dest_kind,
+        dest_extra=dict(body.dest_extra or {}),
     )
 
     if body.dest_kind == "file_export" or dest_meta.get("connected"):
@@ -196,25 +385,123 @@ async def run_preflight(body: PreflightRequest):
         if not source_connected:
             source_error = msg
 
+    # Validate must score the mappings against the schema Execute will read.
+    # Live source introspection wins over the browser's Map stamps; anything it
+    # cannot answer keeps the posted declaration.
+    from services.source_schema_authority import (
+        live_source_column_types,
+        reconcile_source_types,
+        restamp_mapping_source_types,
+    )
+
+    source_column_types, source_type_drift = reconcile_source_types(
+        body.column_types,
+        live_source_column_types(
+            source_connector_id=body.source_connector_id or "",
+            source_table=body.source_table or "",
+            source_collection=body.source_collection or "",
+            source_config=body.source_config if isinstance(body.source_config, dict) else None,
+        ),
+    )
+    # The write never sees the raw source when a recipe is approved: shape the
+    # image first so a gate cannot block on a value the transform removes.
+    from services.preflight_source_kind import shape_typed_values
+
+    # Same value model as Execute's runner: a database's '' is a value.
+    shape_typed = shape_typed_values(
+        body.source_kind,
+        body.source_type,
+        source_connector_id=body.source_connector_id,
+    )
+    try:
+        shaped_image = shaped_preflight_image(
+            body.shape_recipe,
+            columns=body.columns,
+            column_types=source_column_types,
+            sample_rows=body.sample_rows,
+            typed_values=shape_typed,
+        )
+    except ShapePreflightRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    preflight_columns = shaped_image.columns
+    source_column_types = shaped_image.column_types
+    preflight_sample_rows = shaped_image.sample_rows
+    if int(body.row_limit or 0) > 0 or str(body.priority_column or "").strip():
+        try:
+            from src.transfer.engine import _apply_priority_and_limit
+        except ImportError:
+            from transfer.engine import _apply_priority_and_limit
+
+        preflight_sample_rows = _apply_priority_and_limit(
+            list(preflight_sample_rows or []),
+            str(body.priority_column or "").strip(),
+            str(body.priority_direction or "desc"),
+            int(body.row_limit or 0),
+        )
+
+    from services.file_parser import iter_stored_upload_rows
+
+    source_file_id = str(body.source_file_id or "").strip()
+    stored_population = iter_stored_upload_rows(source_file_id) if source_file_id else None
+    if stored_population is not None and shaped_image.applied:
+        # The recipe reads the upload's own columns, not its shaped image.
+        stored_population = shaped_population_rows(
+            body.shape_recipe,
+            stored_population,
+            source_columns=body.columns,
+            typed_values=shape_typed,
+        )
+
+    preflight_mappings = restamp_mapping_source_types(
+        [m.model_dump() for m in body.mappings],
+        source_column_types,
+    )
+
     dest_column_types = dest_meta.get("column_types") or {}
-    # Prefer live introspect. Studio map is a fallback only when meta is empty
-    # and the table is known to exist — never override live types with stale UI state.
-    if not dest_column_types and dest_meta.get("table_exists") is True:
-        dest_column_types = body.destination_column_types or {}
-    elif not dest_column_types and dest_meta.get("table_exists") is None:
+    # Prefer live introspect. Never fall back to Studio Map stamps when the
+    # table exists but live schema is empty — that greens empties as VARCHAR.
+    if not dest_column_types and dest_meta.get("table_exists") is None:
         # Unknown existence: accept Studio types only as a hint for G6 width checks
         # when non-empty; drift path still treats unknown as non-live.
         dest_column_types = body.destination_column_types or {}
+    # table_exists True + empty live → keep {} (fail-closed Validate probe)
 
-    from services.primary_key import extract_contract_primary_key
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
 
-    contract_pk = extract_contract_primary_key(
-        body.stream_contracts,
-        stream_name=body.dest_table or body.dest_collection or "",
+    dest_db_for_recreate = (
+        dest_meta.get("db_type") or body.dest_type or "postgresql"
+    ).lower()
+    dest_recreated = is_overwrite_sync(body.sync_mode) and dest_schema_is_recreated_on_overwrite(
+        dest_db_for_recreate
     )
-    # Prefer primary stream contract when dest name does not match a stream name.
-    if not contract_pk:
-        contract_pk = extract_contract_primary_key(body.stream_contracts)
+    # G19 is the one gate that must see the doomed live carrier. Execute already
+    # passes this separately after clearing destination_column_types; Validate
+    # must do the same so a later G3/G6 hygiene clear cannot hide the replacement.
+    destination_live_column_types = (
+        dict(dest_column_types) if dest_recreated and dest_column_types else None
+    )
+
+    from services.primary_key import extract_contract_primary_key_columns
+
+    # Full composite — never truncate to first column (source probe + G9 SSOT).
+    # Exact stream match; single-contract Studio may omit matching names.
+    _stream_name = body.dest_table or body.dest_collection or ""
+    contract_pk_cols = extract_contract_primary_key_columns(
+        body.stream_contracts,
+        stream_name=_stream_name,
+        fallback_first=False,
+    )
+    if not contract_pk_cols:
+        selected = [
+            c
+            for c in (body.stream_contracts or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        if len(selected) == 1:
+            contract_pk_cols = extract_contract_primary_key_columns(selected)
+    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else None
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -237,111 +524,127 @@ async def run_preflight(body: PreflightRequest):
         else __import__("contextlib").nullcontext()
     ):
         result = run_file_preflight(
-            columns=body.columns,
-            column_types=body.column_types,
+            columns=preflight_columns,
+            column_types=source_column_types,
             row_count=body.row_count,
-            mappings=[m.model_dump() for m in body.mappings],
+            mappings=preflight_mappings,
             destination_connected=destination_connected,
             destination_error=dest_error,
             source_connected=source_connected,
             source_error=source_error,
-            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=source_file_id,
+            ),
             source_format=body.source_type or body.source_kind,
             sync_mode=body.sync_mode,
-            sample_rows=body.sample_rows,
+            sample_rows=preflight_sample_rows,
             estimated_bytes=body.estimated_bytes,
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
+            # Execute passes the request's mode here too (engine.py); without it
+            # every Validate judged as strict and disagreed with Execute (QA r12).
+            validation_mode=body.validation_mode,
             destination_column_types=dest_column_types,
+            destination_live_column_types=destination_live_column_types,
             destination_column_nullability=dest_meta.get("column_nullability") or {},
+            destination_column_defaults=dest_meta.get("column_defaults") or {},
+            destination_identity_columns=dest_meta.get("identity_columns") or [],
+            destination_generated_columns=dest_meta.get("generated_columns") or [],
             destination_table_exists=dest_meta.get("table_exists"),
             destination_can_create=dest_meta.get("can_create_table"),
             destination_can_write=dest_meta.get("can_write"),
             privilege_probe=dest_meta.get("privilege_probe"),
+            redshift_staging_probe=dest_meta.get("redshift_staging_probe"),
             destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
             source_connector_id=body.source_connector_id or "",
+            source_config=body.source_config,
             source_table=(body.source_table or body.source_collection or ""),
             destination_table=(body.dest_table or body.dest_collection or ""),
             source_filename="",
+            source_file_id=source_file_id,
+            population_rows=stored_population,
+            rows_are_population=stored_population is not None,
+            shape_recipe=body.shape_recipe,
             schema_policy=body.schema_policy,
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+            destination_dynamo_key_schema=dest_meta.get("dynamo_key_schema") or [],
+            destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+            destination_check_constraints=dest_meta.get("check_constraints") or [],
+            destination_config=with_fk_route_option(
+                dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
+            ),
+            stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
-            compliance_acknowledged=bool(body.compliance_acknowledged),
-            schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
-            fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+            number_locale=body.number_locale,
+            compliance_acknowledged=ack.compliance,
+            schema_drift_acknowledged=ack.schema_drift,
+            fk_risk_acknowledged=ack.fk_risk,
+            ddl_changes_acknowledged=ack.ddl_changes,
             run_population_orphan_scan=bool(body.run_population_orphan_scan),
-            acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
-            acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
+            acknowledgment_actor=ack.actor,
+            acknowledgment_reason=ack.reason,
         )
-    if (
-        body.compliance_acknowledged
-        or body.schema_drift_acknowledged
-        or body.fk_risk_acknowledged
-    ):
-        actor = str(body.acknowledgment_actor or "").strip()
-        reason = str(body.acknowledgment_reason or "").strip()
-        if len(actor) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="acknowledgment_actor is required when acknowledging compliance, schema drift, or FK risk",
+    try:
+        audit_acknowledgments(
+            ack,
+            resource="preflight",
+            details={
+                "source_type": body.source_type,
+                "dest_type": body.dest_type,
+                "schema_policy": body.schema_policy,
+                "validation_mode": body.validation_mode,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not record acknowledgment audit event — acknowledgment not accepted",
+        ) from exc
+    dest_identity = dest_meta.get("destination_identity")
+    if isinstance(dest_identity, dict) and dest_identity.get("database"):
+        # Show the effective destination before Execute — the write must never be
+        # the first place the operator learns which value won.
+        result["destination_identity"] = dest_identity
+        if dest_identity.get("conflict") and dest_identity.get("note"):
+            bucket = result.setdefault("warnings", [])
+            note = str(dest_identity["note"])
+            if note not in bucket:
+                bucket.append(note)
+    if shaped_image.applied:
+        # Say which image the gates judged. A verdict on transformed rows that
+        # reads as a verdict on the source is how an operator loses the thread.
+        result["transform_image"] = {
+            "recipe_hash": shaped_image.recipe_hash,
+            "columns": shaped_image.columns,
+            # The carriers the gates judged — the ones Execute's writer uses.
+            "column_types": shaped_image.column_types,
+            "sample_rows_in": shaped_image.rows_in,
+            "sample_rows_out": shaped_image.rows_out,
+            "sample_rows_removed": shaped_image.rows_removed,
+            "sample_rows_diverted": shaped_image.rows_diverted,
+            "retyped_columns": shaped_image.retyped_columns,
+        }
+        note = shaped_image.note()
+        bucket = result.setdefault("warnings", [])
+        if note and note not in bucket:
+            bucket.append(note)
+    if source_type_drift:
+        # The operator's Map rows disagreed with the live source. Gates already
+        # ran on the live truth — say so instead of silently rescoring.
+        result["source_schema_drift"] = source_type_drift
+        bucket = result.setdefault("warnings", [])
+        for d in source_type_drift:
+            note = (
+                f"Source type re-read from live connector: {d['column']} "
+                f"{d['declared']} → {d['live']} (Map stamp was stale)"
             )
-        if len(reason) < 8:
-            raise HTTPException(
-                status_code=400,
-                detail="acknowledgment_reason is required (at least 8 characters)",
-            )
-        try:
-            from services.audit_log import append_audit_event
-
-            if body.compliance_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_compliance",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "validation_mode": body.validation_mode,
-                        "reason": reason,
-                    },
-                )
-            if body.schema_drift_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_schema_drift",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "schema_policy": body.schema_policy,
-                        "validation_mode": body.validation_mode,
-                        "reason": reason,
-                    },
-                )
-            if body.fk_risk_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_fk_risk",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "validation_mode": body.validation_mode,
-                        "coverage": "destination_fk_metadata",
-                        "population_orphan_proven": False,
-                        "reason": reason,
-                    },
-                )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail="Could not record acknowledgment audit event — acknowledgment not accepted",
-            ) from exc
+            if note not in bucket:
+                bucket.append(note)
     # Advisory catalog honesty from destination introspect (warn-only).
     for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
         note = str(w).strip()
@@ -350,6 +653,38 @@ async def run_preflight(body: PreflightRequest):
         bucket = result.setdefault("warnings", [])
         if note not in bucket:
             bucket.append(note)
+    catalog_pk: list[str] | None = None
+    try:
+        from services.preflight_cursor_gate import (
+            MODES_REQUIRING_PRIMARY_KEY,
+            contract_declares_primary_key,
+        )
+        from services.sync_cursor import normalize_sync_mode
+
+        sync_norm = normalize_sync_mode(body.sync_mode or "", default="")
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError):
+        sync_norm = ""
+    if sync_norm in MODES_REQUIRING_PRIMARY_KEY:
+        selected_contracts = [
+            c
+            for c in (body.stream_contracts or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        needs_catalog = (not selected_contracts) or any(
+            not contract_declares_primary_key(c) for c in selected_contracts
+        )
+        if needs_catalog and (body.source_connector_id or "").strip():
+            from services.source_schema_authority import live_source_primary_key_columns
+
+            src_cfg = body.source_config if isinstance(body.source_config, dict) else {}
+            catalog_pk = live_source_primary_key_columns(
+                source_connector_id=body.source_connector_id or "",
+                source_table=body.source_table or "",
+                source_collection=body.source_collection or "",
+                source_schema=str(src_cfg.get("schema") or ""),
+                source_database=str(src_cfg.get("database") or ""),
+                source_config=src_cfg or None,
+            )
     gated = apply_policy_gates(
         result,
         run_transfer_policy_gates(
@@ -358,12 +693,53 @@ async def run_preflight(body: PreflightRequest):
             validation_mode=body.validation_mode,
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
-            source_columns=body.columns,
+            source_columns=preflight_columns,
             dest_type=body.dest_type
             or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else None),
             source_type=body.source_type,
-            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=str(body.source_file_id or ""),
+            ),
             write_via_staging=bool(body.write_via_staging),
+            priority_column=str(body.priority_column or ""),
+            priority_direction=str(body.priority_direction or "desc"),
+            row_limit=int(body.row_limit or 0),
+            source_read_mode=str(
+                ((body.source_config or {}).get("source_read_mode")
+                 or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
+                 or "")
+            ),
+            # A stored watermark belongs to the column it was measured on;
+            # Validate refuses a repointed cursor rather than letting Run
+            # apply one column's value to another.
+            catalog_primary_key_columns=catalog_pk,
+            mappings=list(body.mappings or []),
+            source_table=str(body.source_table or body.source_collection or ""),
+            source_config=body.source_config if isinstance(body.source_config, dict) else None,
+            read_scope=resolve_read_scope(
+                sync_mode=body.sync_mode,
+                stream_contracts=body.stream_contracts,
+                source_format=body.source_type or "",
+                source_config=body.source_config,
+                source_connector_id=body.source_connector_id or "",
+                source_table=(body.source_table or body.source_collection or ""),
+                destination_db_type=str(
+                    body.dest_type
+                    or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else "")
+                    or ""
+                ),
+                destination_config=dest_meta.get("_probe_cfg") or None,
+                destination_table=(body.dest_table or body.dest_collection or ""),
+            ),
+            delivery_guarantee=body.delivery_guarantee or "auto",
+            allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
+            source_endpoint=body.source_config,
+            destination_endpoint={
+                "format": body.dest_type or "",
+                **dict(body.dest_extra or {}),
+            },
         ),
         validation_mode=body.validation_mode,
     )
@@ -415,10 +791,15 @@ async def get_preflight_run(run_id: str):
     return record
 
 
-class ExplainRequest(BaseModel):
-    """A preflight result to explain (as returned by POST /preflight/run)."""
+class ExplainRequest(PolicyFieldsModel):
+    """A preflight result to explain (as returned by POST /preflight/run).
 
-    preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
+    Prefer ``run_id`` plus a slimed payload. The full Validate result is not
+    required and must not be posted after a 1M-row scan (nginx client_temp warn).
+    """
+
+    preflight: dict[str, Any] = Field(default_factory=dict, description="Slimed preflight result dict")
+    run_id: str | None = None
     dest_type: str | None = None
     validation_mode: str = "strict"
     use_llm: bool = Field(True, description="Reuse Datawrap Pilot LLM for a natural-language narrative when available")
@@ -433,11 +814,19 @@ async def explain_preflight(body: ExplainRequest):
     ``suggested_actions``. Works deterministically offline; reuses the Data
     Pilot LLM only to add a friendlier narrative when a provider is configured.
     """
-    from services.validation_assistant import explain_validation
+    from services.validation_assistant import explain_validation, slim_preflight_for_explain
 
+    payload = body.preflight if isinstance(body.preflight, dict) else {}
+    run_id = str(body.run_id or payload.get("run_id") or "").strip()
+    if run_id and not payload.get("blockers") and "passed" not in payload:
+        from services.preflight_run_store import get_preflight_run as _get
+
+        record = _get(run_id)
+        if isinstance(record, dict):
+            payload = record.get("result") or record.get("preflight") or record
     try:
         return explain_validation(
-            body.preflight,
+            slim_preflight_for_explain(payload),
             dest_kind=(body.dest_type or "").lower(),
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,
@@ -446,18 +835,25 @@ async def explain_preflight(body: ExplainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class SchemaDriftRequest(BaseModel):
+class SchemaDriftRequest(PolicyFieldsModel):
     old_schema: dict[str, Any] = Field(default_factory=dict)
     new_schema: dict[str, Any] = Field(default_factory=dict)
+    dest_db: str = ""
+    schema_policy: str = "manual_review"
 
 
 @router.post("/schema-drift")
 async def classify_schema_drift(body: SchemaDriftRequest):
-    """Classify schema evolution as additive vs breaking (approve/reject UX)."""
-    from services.schema_drift import classify_schema_change
+    """Classify schema evolution and stamp compatibility + pause/propagate/review."""
+    from services.schema_drift import classify_schema_evolution_report
 
     try:
-        return classify_schema_change(body.old_schema, body.new_schema)
+        return classify_schema_evolution_report(
+            body.old_schema,
+            body.new_schema,
+            dest_db=body.dest_db or "",
+            schema_policy=body.schema_policy or "manual_review",
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -469,30 +865,88 @@ class CellPreviewRequest(BaseModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     sample_size: int = Field(25, ge=1, le=200)
     date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] | None = None
+    # Same owner as /preflight/run and Execute: a typed source's numbers read
+    # canonically (WIRE) when the operator declared no locale.
+    source_kind: str = "file"
+    source_type: str | None = None
 
 
 @router.post("/preview-cells")
 async def preview_quarantine_cells(body: CellPreviewRequest):
-    """Cell-level quarantine/coerce preview before transfer run."""
+    """Cell-level quarantine/coerce preview before transfer run.
+
+    The recipe travels with the request for the same reason it travels with
+    ``/preflight/run``: Execute transforms on the read, so a cell preview that
+    scans raw values reports findings on values no writer will ever bind —
+    ``Invalid integer: '22.43'`` on a column the approved recipe rounds to 22.
+    """
     from services.transform_engine import preview_quarantine_cells as _preview
 
     try:
         from services.transform_engine import (
             reset_active_date_locale,
+            reset_active_number_locale,
             set_active_date_locale,
+            set_active_number_locale,
         )
 
+        from ..transfer.connector_capabilities import typed_wire_number_locale
+
+        number_locale = body.number_locale or typed_wire_number_locale(
+            body.source_kind, body.source_type or ""
+        )
         locale_token = set_active_date_locale(body.date_locale)
+        number_token = set_active_number_locale(number_locale)
         try:
             rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
-            return _preview(
-                headers=body.headers,
+            headers = list(body.headers)
+            column_types = dict(body.column_types)
+            try:
+                image = shaped_preflight_image(
+                    body.shape_recipe,
+                    columns=headers,
+                    column_types=column_types,
+                    sample_rows=[dict(zip(headers, row)) for row in rows],
+                )
+            except ShapePreflightRefused as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if image.applied:
+                headers = image.columns
+                column_types = image.column_types
+                rows = [
+                    [("" if row.get(h) is None else str(row.get(h))) for h in headers]
+                    for row in (image.sample_rows or [])
+                ]
+            resolved_kind = resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=getattr(body, "source_connector_id", None),
+                source_file_id=getattr(body, "source_file_id", None),
+            )
+            file_source = resolved_kind == "file"
+            result = _preview(
+                headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
-                column_types=body.column_types,
+                column_types=column_types,
                 sample_size=body.sample_size,
+                empty_cells_as_null=file_source,
+                database_extract=resolved_kind == "database",
             )
+            if image.applied:
+                result["transform_image"] = {
+                    "recipe_hash": image.recipe_hash,
+                    "sample_rows_in": image.rows_in,
+                    "sample_rows_out": image.rows_out,
+                    "sample_rows_removed": image.rows_removed,
+                    "retyped_columns": image.retyped_columns,
+                }
+            return result
         finally:
+            reset_active_number_locale(number_token)
             reset_active_date_locale(locale_token)
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))

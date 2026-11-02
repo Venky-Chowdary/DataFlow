@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "results": [
+    {
+      "object": "page",
+      "id": "59833787-2cf9-4fdf-8782-e53db20768a5",
+      "created_time": "2024-01-02T00:00:00.000Z",
+      "last_edited_time": "2024-01-02T01:00:00.000Z",
+      "archived": false,
+      "properties": {}
+    }
+  ],
+  "next_cursor": null,
+  "has_more": false,
+  "type": "page_or_database",
+  "page_or_database": {}
+}

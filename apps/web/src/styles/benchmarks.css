@@ -1,7 +1,7 @@
 /* Benchmarks page — layered on existing design tokens */
 
 .df2-page-benchmarks {
-  background: var(--df-bg-canvas, #f4f6f8);
+  background: var(--df-bg-canvas);
 }
 
 .df2-page-benchmarks-workspace {
@@ -16,7 +16,7 @@
 
 .df2-page-benchmarks-intro {
   margin: 0 0 16px;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 14px;
   line-height: 1.5;
 }
@@ -68,19 +68,19 @@
 .df2-page-benchmarks-section h3 {
   margin: 0 0 8px;
   font-size: 15px;
-  font-weight: 650;
-  color: var(--df-ink-primary, #0f172a);
+  font-weight: 600;
+  color: var(--df-ink-primary);
 }
 
 .df2-page-benchmarks-note {
   margin: 0 0 12px;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 12px;
 }
 
 .df2-page-benchmarks-table-wrap {
   overflow-x: auto;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 10px;
 }
 
@@ -88,21 +88,21 @@
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-page-benchmarks-table th,
 .df2-page-benchmarks-table td {
   padding: 10px 12px;
   text-align: left;
-  border-bottom: 1px solid var(--df-line, #e2e8f0);
+  border-bottom: 1px solid var(--df-line);
   white-space: nowrap;
 }
 
 .df2-page-benchmarks-table th {
-  background: var(--df-surface-2, #f8fafc);
+  background: var(--df-surface-2);
   font-weight: 600;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -112,17 +112,51 @@
   border-bottom: none;
 }
 
+/* Proof surfaces are long identifiers (quarantine_panel + rejected_details).
+   Held on one line they pushed the column past the container and the evidence
+   read as a truncated token behind a scrollbar — the one cell that must be
+   readable in full. Wrap it instead of scrolling the table. */
+.df2-page-benchmarks-table td code {
+  white-space: normal;
+  /* break-word, not anywhere: wrap at the `+` and space boundaries between
+     artifacts, and only split a single artifact name if it cannot fit at all. */
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.df2-page-benchmarks-table td:has(code) {
+  white-space: normal;
+  /* Wide enough for the longest artifact name we emit
+     (`proof_ledger.run_fidelity_proof`) to stay one unbroken token. */
+  min-width: 34ch;
+}
+
+/* Route (`postgresql → snowflake`) and the check list are open-ended, and held
+   on one line they pushed the artifact ledger 1383px past its container at
+   1280. They wrap; timestamps, tier and counts stay on one line. */
+.df2-page-benchmarks-table td.df2-page-benchmarks-cell-wrap {
+  white-space: normal;
+  overflow-wrap: break-word;
+  min-width: 18ch;
+}
+
+/* Sentence columns kept the table wider than its container, so the evidence
+   column paid for it with a scrollbar. Prose wraps; the artifact names do not. */
+.df2-page-benchmarks-table--prose td {
+  white-space: normal;
+}
+
 .df2-page-benchmarks-product strong {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
 }
 
 .df2-page-benchmarks-list {
   margin: 0;
   padding-left: 18px;
-  color: var(--df-ink-secondary, #334155);
+  color: var(--df-ink-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -137,12 +171,12 @@
   align-items: center;
   gap: 8px;
   padding: 40px 0;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 13px;
 }
 
 .df2-page-benchmarks .df2-empty-state svg {
-  color: var(--df-ink-muted, #94a3b8);
+  color: var(--df-ink-muted);
 }
 
 @media (max-width: 767px) {

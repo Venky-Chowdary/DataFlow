@@ -19,7 +19,7 @@ import struct
 from typing import Any
 from urllib.parse import quote
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 CONFLUENT_MAGIC = 0
 
@@ -60,6 +60,8 @@ def fetch_schema(registry_url: str, schema_id: int, *, timeout: float = 15.0) ->
     except ImportError as exc:
         raise SchemaRegistryError("requests is required for Schema Registry access") from exc
 
+    _guard_registry(base)
+
     url = f"{base}/schemas/ids/{int(schema_id)}"
     try:
         resp = requests.get(
@@ -96,6 +98,8 @@ def fetch_latest_subject_schema(
         import requests
     except ImportError as exc:
         raise SchemaRegistryError("requests is required for Schema Registry access") from exc
+
+    _guard_registry(base)
 
     url = f"{base}/subjects/{quote(subject, safe='')}/versions/latest"
     try:
@@ -134,6 +138,8 @@ def register_json_schema(
         import requests
     except ImportError as exc:
         raise SchemaRegistryError("requests is required for Schema Registry access") from exc
+
+    _guard_registry(base)
 
     url = f"{base}/subjects/{subject}/versions"
     try:
@@ -198,7 +204,7 @@ def decode_with_registered_schema(schema_doc: dict[str, Any], body: bytes) -> An
     schema_type, parsed = _parse_registered_schema(schema_doc)
     if schema_type == "JSON":
         try:
-            return json.loads(body.decode("utf-8"))
+            return json_loads_exact(body.decode("utf-8"), keep_literals=True)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SchemaRegistryError(f"JSON Schema Registry payload is not valid JSON: {exc}") from exc
     if schema_type == "AVRO":
@@ -225,21 +231,37 @@ def schema_map_from_registry_doc(schema_doc: dict[str, Any]) -> dict[str, str]:
         if isinstance(props, dict) and props:
             out: dict[str, str] = {}
             for name, prop in props.items():
-                if isinstance(prop, dict):
-                    jtype = str(prop.get("type") or "string").lower()
-                    out[str(name)] = {
-                        "string": "TEXT",
-                        "integer": "INTEGER",
-                        "number": "DECIMAL",
-                        "boolean": "BOOLEAN",
-                        "array": "ARRAY",
-                        "object": "JSON",
-                        "null": "TEXT",
-                    }.get(jtype, "TEXT")
-                else:
-                    out[str(name)] = "TEXT"
+                out[str(name)] = _logical_from_json_schema_prop(prop)
             return out
     return {}
+
+
+def _logical_from_json_schema_prop(prop: Any) -> str:
+    """Map a JSON Schema property object to a Datawrap logical carrier."""
+    if not isinstance(prop, dict):
+        return "TEXT"
+    if str(prop.get("contentMediaType") or "").lower() in {
+        "application/x-decimal",
+        "text/x-decimal",
+    }:
+        return "DECIMAL"
+    if str(prop.get("contentEncoding") or "").lower() == "base64":
+        return "BINARY"
+    raw_type = prop.get("type")
+    if isinstance(raw_type, list):
+        types = [str(t).lower() for t in raw_type if str(t).lower() != "null"]
+        jtype = types[0] if types else "string"
+    else:
+        jtype = str(raw_type or "string").lower()
+    return {
+        "string": "TEXT",
+        "integer": "INTEGER",
+        "number": "FLOAT",
+        "boolean": "BOOLEAN",
+        "array": "ARRAY",
+        "object": "JSON",
+        "null": "TEXT",
+    }.get(jtype, "TEXT")
 
 
 def decode_kafka_value(
@@ -260,7 +282,7 @@ def decode_kafka_value(
         if not text:
             return ""
         try:
-            return json.loads(text)
+            return json_loads_exact(text, keep_literals=True)
         except json.JSONDecodeError:
             return raw
 
@@ -275,7 +297,7 @@ def decode_kafka_value(
             return decode_with_registered_schema(schema_doc, body)
         # No registry URL — only accept UTF-8 JSON bodies (legacy JSON subjects).
         try:
-            return json.loads(body.decode("utf-8"))
+            return json_loads_exact(body.decode("utf-8"), keep_literals=True)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SchemaRegistryError(
                 f"Confluent payload for schema id {schema_id} is not valid JSON and "
@@ -288,6 +310,15 @@ def decode_kafka_value(
     except UnicodeDecodeError:
         return {"_kafka_value_b64": data.hex()}
     try:
-        return json.loads(text)
+        return json_loads_exact(text, keep_literals=True)
     except json.JSONDecodeError:
         return text
+
+
+def _guard_registry(base: str) -> None:
+    from services.egress_guard import EgressRefused, assert_connector_dial_allowed
+
+    try:
+        assert_connector_dial_allowed(base, point="http_client")
+    except EgressRefused as exc:
+        raise SchemaRegistryError(str(exc)) from exc

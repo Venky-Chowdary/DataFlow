@@ -94,6 +94,25 @@ def test_integrity_skips_bigquery_advisory_pk_on_append():
     assert "duplicate" in warnings.lower()
 
 
+def test_informational_engine_ignores_a_stray_enforced_flag():
+    """The engine rule wins. A catalog bit that says True cannot override it."""
+    from services.data_integrity import _unique_constraint_enforced
+
+    key = {"name": "PRIMARY", "columns": ["id"], "primary": True, "enforced": True}
+    assert _unique_constraint_enforced(key, dest_kind="bigquery") is False
+    assert _unique_constraint_enforced(key, dest_kind="snowflake_aws") is False
+    assert _unique_constraint_enforced(key, dest_kind="amazon_redshift") is False
+    assert _unique_constraint_enforced(key, dest_kind="databricks_sql") is False
+    assert _unique_constraint_enforced(key, dest_kind="sqlite") is True
+    assert (
+        _unique_constraint_enforced(
+            {"name": "uq", "columns": ["email"], "enforced": False},
+            dest_kind="postgresql",
+        )
+        is False
+    )
+
+
 def test_integrity_blocks_sqlite_enforced_unique():
     from services.data_integrity import _check_duplicate_keys
 
@@ -132,6 +151,29 @@ def test_sqlite_fetch_unique_keys_from_pragma():
     names = {u["name"]: u for u in meta["unique_keys"]}
     assert names["PRIMARY"]["enforced"] is True
     assert names["uq_email"]["columns"] == ["email"]
+    assert names["uq_email"]["filter_predicate"] == ""
+    assert names["uq_email"]["case_insensitive"] is False
+    executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "sqlite_master" not in executed
+
+
+def test_sqlite_short_index_list_does_not_invent_a_partial_predicate():
+    """A four-column PRAGMA row did not measure partial. Do not query WHERE."""
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [(0, "uq_email", 1, "u")],
+        [(0, 0, "email")],
+    ]
+    info_rows = [
+        (0, "id", "INTEGER", 1, None, 1),
+        (1, "email", "TEXT", 0, None, 0),
+    ]
+    meta = _sqlite_fetch_unique_keys(cur, '"users"', info_rows)
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["uq_email"]["filter_predicate"] == ""
+    assert names["uq_email"]["enforced"] is True
+    executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "sqlite_master" not in executed
 
 
 def test_sqlite_refuses_utf8_invent_on_invalid_base64():

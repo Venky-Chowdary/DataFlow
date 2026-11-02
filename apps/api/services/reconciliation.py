@@ -4,29 +4,79 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import heapq
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 import re
-import struct
-import tempfile
+import uuid
+import sys
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
+from datetime import timedelta
 from datetime import timezone
-from decimal import Decimal, InvalidOperation, Overflow
-from typing import Any, Callable, Iterable
+from decimal import Decimal, InvalidOperation, Overflow, localcontext
+from functools import lru_cache
+from typing import Any, Final, Iterable, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
+from services.decision_kernel.findings import (
+    typed_cast_incompatible_with_text_sink,
+)
+from services.readback_projection import project_readback
+from services.reconcile_sftp import verify_sftp_object
+from services.reconcile_coverage import (
+    CDC_SOURCE_IMAGE_COUNT,
+    CDC_SOURCE_IMAGE_VALUES,
+    NO_OP_DEST_UNCHANGED,
+    ROUTE_PARTITIONED,
+    SOURCE_DIGEST_WRITE_PASS,
+    SOURCE_DIGEST_WRITER_ACK,
+    WRITTEN_BATCH_KEYS,
+    append_row_count_report,
+    extra_rows_note,
+    is_sample_authority,
+    is_unproven_export,
+    is_writer_ack_only,
+    row_count_scope_stamp,
+)
+
+_reconciliation = sys.modules[__name__]
 from services.transform_engine import (
     _DATE_LIKE_RE,
+    _STRICT_BOOL_FALSE,
+    _STRICT_BOOL_TRUE,
     _parse_date,
     _parse_datetime,
+    NUMBER_LOCALE_WIRE,
     apply_transform,
+    decimal_wire_value,
+    reset_active_number_locale,
+    reset_strict_number_reading,
+    set_active_number_locale,
+    set_strict_number_reading,
 )
-from services.value_serializer import json_default
+from services.type_system import instant_date_carrier, normalize_logical_type
+from services.value_serializer import (
+    cell_to_string,
+    is_explicit_null,
+    is_missing_sentinel,
+    is_reader_null_cell,
+    json_default,
+    canonical_json_text,
+    json_loads_exact,
+    load_http_json,
+    operator_binary_cell_text,
+    unescape_wire_text,
+    WireLiteral,
+)
+
+# Fingerprinting runs once per cell on both the write and the read-back pass, so
+# resolving these names inside the function costs a module lookup per cell.
+from connectors.sql_bind import normalize_sql_bind_value
+from services.carrier_instant import quantize_instant_for_carrier
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +84,175 @@ SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
 # normalize_cell.  Most string columns (names, emails, codes) are clearly not
-# numbers or dates, so we can skip the exception-heavy Decimal constructor and
-# the date regex for them.
+# numbers or dates, so we can skip the write-path parser and the date regex.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+# Currency / grouping marks the write path may still bind (or Auto-refuse).
+_NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
+_NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
+# A clock with a fraction ('03:04:05.250000', MySQL TIME up to 838 hours).
+_CLOCK_FRACTION_RE = re.compile(r"^-?\d{1,3}:[0-5]\d:[0-5]\d\.\d{1,9}$")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
+_TEXT_FAMILY_DDL_RE = re.compile(
+    r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|TEXT|TINYTEXT|"
+    r"MEDIUMTEXT|LONGTEXT|NTEXT|CLOB|NCLOB|CHARACTER|STRING|ENUM|SET\b",
+    re.I,
+)
+
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NULL_SENTINEL = "\x00NULL\x00"
 
+_INTERVAL_DDL_RE = re.compile(r"interval", re.I)
 
+_PG_INTERVAL_PART_RE = re.compile(
+    r"([+-]?\d+(?:\.\d+)?)\s*(years?|mons?|months?|weeks?|days?|hours?|mins?|minutes?|secs?|seconds?)",
+    re.I,
+)
+_PG_INTERVAL_HMS_RE = re.compile(
+    r"([+-])?(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)"
+)
+
+
+def _interval_canonical_text(months: int, seconds: float) -> str:
+    """Canonical interval fingerprint: months distinct, days folded into seconds.
+
+    Matches PG comparison semantics: '1 day 02:00:00' == '26:00:00' (days are
+    24h) but '1 mon' != '30 days' (months are their own field).
+    """
+    if abs(seconds - round(seconds, 6)) < 1e-9:
+        seconds = round(seconds, 6)
+    return f"{months}M+{seconds}S"
+
+
+def _canonical_interval_text(value: str) -> str | None:
+    """Parse a PG-style interval literal to (months, seconds) canonical text.
+
+    Accepts verbose spans ('1 year 2 mons 3 days 04:05:06', '1 day 02:00:00'),
+    bare 'HH:MM:SS[.ffffff]', and python timedelta text ('1 day, 2:00:00').
+    Returns None when the value is not interval-shaped.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    months = 0.0
+    seconds = 0.0
+    matched_any = False
+    for m in _PG_INTERVAL_PART_RE.finditer(text):
+        n = float(m.group(1))
+        unit = m.group(2).lower()
+        if unit.startswith("year"):
+            months += n * 12
+        elif unit.startswith("mon") or unit.startswith("month"):
+            months += n
+        elif unit.startswith("week"):
+            seconds += n * 7 * 86400
+        elif unit.startswith("day"):
+            seconds += n * 86400
+        elif unit.startswith("hour"):
+            seconds += n * 3600
+        elif unit.startswith("min"):
+            seconds += n * 60
+        elif unit.startswith("sec"):
+            seconds += n
+        matched_any = True
+    rest = _PG_INTERVAL_PART_RE.sub("", text).replace(",", " ").strip()
+    hms = _PG_INTERVAL_HMS_RE.search(rest)
+    if hms:
+        sign = -1.0 if hms.group(1) == "-" else 1.0
+        seconds += sign * (
+            int(hms.group(2)) * 3600
+            + int(hms.group(3)) * 60
+            + float(hms.group(4))
+        )
+        matched_any = True
+        rest = _PG_INTERVAL_HMS_RE.sub("", rest).strip()
+    if not matched_any:
+        return None
+    # Leftover 'ago' / stray words => not the forms we understand; stay raw.
+    leftover = re.sub(r"[\s.:-]+", "", rest)
+    if leftover and leftover not in {"ago"}:
+        return None
+    return _interval_canonical_text(int(months), seconds)
+# SQL / CSV scale padding: one dot, digits only. Not ``1,000`` and not ``1.000.000``.
+_PLAIN_SQL_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+\.\d+|\d+\.|\.\d+)$")
+# Numeric-family DDL where two spellings of one value ('1.50E-8' vs
+# '0.0000000150') are the same cell, not a mismatch (X-26).
+_NUMERIC_FAMILY_DDL_RE = re.compile(
+    r"\b(?:NUMERIC|DECIMAL|DEC|INT|INTEGER|BIGINT|SMALLINT|TINYINT|NUMBER|"
+    r"FLOAT|DOUBLE|REAL|MONEY|SERIAL|BIGSERIAL|INT2|INT4|INT8|BOOLEAN|BOOL)\b",
+    re.I,
+)
+
+
+def _looks_like_numeric_wire(text: str) -> bool:
+    """True when ``text`` might be a number the write path binds or Auto-refuses.
+
+    ASCII scientific / plain decimals stay on the cheap ``_NUMERIC_RE`` path.
+    Locale money and grouped forms (``$1,234.56`` / ``1,234.56``) must also
+    reach ``decimal_wire_value`` so Gate-8 matches the dest DECIMAL, without
+    running the parser on every name or email.
+    """
+    if not text:
+        return False
+    if text[0] in "+-0123456789." and _NUMERIC_RE.match(text):
+        return True
+    if any(mark in text for mark in _NUMERIC_WIRE_MARKS):
+        return True
+    upper = text.upper()
+    if any(code in upper for code in _NUMERIC_WIRE_CODES):
+        return True
+    return text[0] in "+-0123456789(" and "," in text
+
+
+@dataclass(frozen=True, slots=True)
+class _TextFoldPlan:
+    """How a destination column's text is canonicalized for a checksum.
+
+    Every decision here follows from the column's DDL type alone, so it is
+    resolved once per type instead of once per cell — a 1M-row × 10-column
+    table asked the same eleven type questions 10M times.
+    """
+
+    keep_trailing_spaces: bool
+    rstrip_blank_pad: bool
+    fold_width: bool
+    fold_kana: bool
+    fold_variation: bool
+    fold_accent: bool
+    casefold: bool
+    uuid_carrier: bool
+
+
+@lru_cache(maxsize=8192)
+def _text_fold_plan(ddl_type: str) -> _TextFoldPlan:
+    """Compile the checksum text rules for one destination DDL type."""
+    from services.type_system import (
+        is_accent_insensitive_collation,
+        is_case_insensitive_collation,
+        is_fixed_width_char_carrier,
+        is_kana_insensitive_collation,
+        is_variation_insensitive_collation,
+        is_width_insensitive_collation,
+    )
+
+    fixed_width = is_fixed_width_char_carrier(ddl_type)
+    logical = normalize_logical_type(ddl_type)
+    return _TextFoldPlan(
+        keep_trailing_spaces=not fixed_width and logical in {"string", "text"},
+        rstrip_blank_pad=fixed_width,
+        fold_width=is_width_insensitive_collation(ddl_type),
+        fold_kana=is_kana_insensitive_collation(ddl_type),
+        fold_variation=is_variation_insensitive_collation(ddl_type),
+        fold_accent=is_accent_insensitive_collation(ddl_type),
+        casefold=is_case_insensitive_collation(ddl_type),
+        uuid_carrier=logical == "uuid"
+        or bool(re.search(r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I)),
+    )
+
+
+@lru_cache(maxsize=256)
 def destination_empty_string_is_null(engine: str | None) -> bool:
     """True when the write destination collapses '' → NULL (Oracle VARCHAR2).
 
@@ -84,12 +292,88 @@ class ReconciliationReport:
     checksum_match: bool | None = None
     population_proof: bool = False
     assurance_level: str = ""
+    # Set when the digests cover different populations (see reconcile_coverage).
+    checksum_scope: str = ""
+    # Pre-write dest COUNT(*) — append identity is dest_after − dest_before.
+    target_rows_before: int | None = None
+    # Rows this run physically landed/upserted (writer-acknowledged). For
+    # routed upsert re-runs the net growth is 0 while rows_written is the
+    # upserted count — the ledger measures it instead of "unmeasured" (RT-7).
+    rows_written: int | None = None
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
 
 
+def attach_dest_readback(report: dict[str, Any]) -> dict[str, Any]:
+    """Stamp dest-engine COUNT + checksum for Theater — never invent a count.
+
+    ``verify_target`` already produced these. The UI must not treat writer ack
+    as dest population. Sample Gate-8 stays a separate field.
+    """
+    out = dict(report or {})
+    raw = out.get("target_rows")
+    if raw is None:
+        return out
+    try:
+        dest_count = int(raw)
+    except (TypeError, ValueError):
+        return out
+    if dest_count < 0:
+        return out
+    before = out.get("target_rows_before")
+    try:
+        dest_before = int(before) if before is not None else None
+    except (TypeError, ValueError):
+        dest_before = None
+    out["dest_readback"] = {
+        "dest_count": dest_count,
+        "dest_count_before": dest_before,
+        "dest_checksum": str(out.get("target_checksum") or ""),
+        "source": "gate8_dest_readback",
+        "coverage": str(out.get("coverage") or ""),
+        "assurance_level": str(out.get("assurance_level") or ""),
+    }
+    return out
+
+
+_COMPARE_MODE_BY_COVERAGE = {
+    "full_checksum": "independent source vs destination digests over all rows",
+    "write_pass_dest_readback": "write-pass fingerprint vs destination read-back over all rows",
+    "sample": "keyed destination sample only",
+    "writer_ack": "writer acknowledgment only (no read-back)",
+    "quarantine_excluded": "independent digests over non-quarantined rows",
+    "none": "no compare ran",
+}
+
+
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
+    out = _stamp_post_write_phase_impl(report)
+    # Plain statement of which compare ran, so a large-run "verified" can
+    # never read as a stronger claim than it is (pairwise vs digest).
+    out["compare_mode"] = _COMPARE_MODE_BY_COVERAGE.get(
+        str(out.get("coverage") or "none"), "no compare ran"
+    )
+    if out["compare_mode"] == "no compare ran" and out.get("checksum_match") is False:
+        src = str(out.get("source_checksum") or "").strip()
+        tgt = str(out.get("target_checksum") or "").strip()
+        if src and tgt:
+            if _COUNT_TOKEN_RE.match(src):
+                out["compare_mode"] = (
+                    "keyed row-count join proof only (values not compared)"
+                )
+            else:
+                out["compare_mode"] = (
+                    "independent source vs destination digests over all rows "
+                    "(mismatch)"
+                )
+    return out
+
+
+_COUNT_TOKEN_RE = re.compile(r"^(?:dest_count|pk_join_count):\d+$")
+
+
+def _stamp_post_write_phase_impl(report: dict[str, Any]) -> dict[str, Any]:
     """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
 
     Also stamps ``coverage``, ``checksum_match``, ``population_proof``,
@@ -108,20 +392,131 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     passed = bool(out.get("passed"))
+    scoped = row_count_scope_stamp(out)
+    if scoped is not None:
+        return scoped
     src = str(out.get("source_checksum") or "").strip()
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
     independent_match = bool(src and tgt and src == tgt)
+    if (
+        independent_match
+        and src == EMPTY_POPULATION_DIGEST
+        and str(out.get("checksum_scope") or "") == WRITTEN_BATCH_KEYS
+        and int(out.get("rejected_rows") or 0)
+    ):
+        # QA MX3-12: an empty written set matches itself — not a checksum proof.
+        independent_match = False
+    # Quarantine already left the count identity. The source digest still
+    # includes those rows, so the digests differ while the landed cells match.
+    # Forcing passed=False here rolled the good rows back (R5-003).
+    if passed and str(out.get("assurance_level") or "") == "quarantine_excluded":
+        out["phase"] = "post_write_quarantine_excluded"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "quarantine_excluded"
+        out["assurance_level"] = "quarantine_excluded"
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = None
+        return out
+    if str(out.get("checksum_scope") or "") == ROUTE_PARTITIONED:
+        # The router partitioned the population — no single dest digest can
+        # equal the source digest, so ``independent_match`` is meaningless
+        # here. The report's own checksum_match already carries the per-route
+        # digest result (each comparable route's read-back vs its write-pass
+        # fingerprint); population_proof is the conservation verdict.
+        _route_cm = out.get("checksum_match")
+        route_matched = bool(out.get("passed")) and bool(_route_cm)
+        # A measured digest mismatch or cross-route key duplication is a
+        # verification-failed outcome in EVERY validation mode — never a
+        # *_verified phase. Balanced/lenient keeps the rows (passed stays
+        # true) but anything reading passed/phase/verdict (UI badge,
+        # get_job, MCP, alerting) must not see "verified".
+        _was_passed = bool(out.get("passed"))
+        out["verification_verdict"] = (
+            "failed" if (_route_cm is False or not _was_passed) else "passed"
+        )
+        if _route_cm is False:
+            # A measured digest mismatch/key-duplication is a verification
+            # failure, never the writer-failure bucket.
+            out["phase"] = "post_write_verification_failed"
+        elif not _was_passed:
+            out["phase"] = "post_write_failed"
+        else:
+            out["phase"] = "post_write_verified"
+        # P3: anything keying on `passed` (UI badge, get_job, MCP, schedule
+        # alerting) must see the failed verdict — the rows stay landed under
+        # balanced/lenient, but the run did NOT verify.
+        if out["verification_verdict"] == "failed":
+            out["passed"] = False
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = ROUTE_PARTITIONED
+        out["assurance_level"] = ROUTE_PARTITIONED
+        out["migration_proven"] = False
+        out["population_proof"] = bool(out.get("passed"))
+        # Tri-state preserved: None = digest unproven (append into occupied
+        # tables with no additive evidence) — a successful run must not report
+        # checksum_match=false it never measured.
+        out["checksum_match"] = None if _route_cm is None else route_matched
+        return out
+
     # Module 4: always stamp checksum honesty; never invent population RI proof.
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
-    if "file export" in msg or ("skipped" in msg and "reconciliation skipped" in msg):
+    if str(out.get("assurance_level") or "") == NO_OP_DEST_UNCHANGED:
+        # Quiet incremental poll — dest-before equals dest-after. Digests from
+        # a prior write-pass must not upgrade this to full_checksum.
+        out["phase"] = "post_write_no_op"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = NO_OP_DEST_UNCHANGED
+        out["assurance_level"] = NO_OP_DEST_UNCHANGED
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = False
+        return out
+
+    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_VALUES:
+        # Source-row fingerprints found on the dest. Dest extras are allowed.
+        # This is not full_checksum and not platform exactly-once.
+        matched = bool(out.get("passed")) and bool(out.get("checksum_match"))
+        out["phase"] = "post_write_verified" if matched else "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = CDC_SOURCE_IMAGE_VALUES if matched else "none"
+        out["assurance_level"] = CDC_SOURCE_IMAGE_VALUES if matched else "none"
+        out["migration_proven"] = False
+        out["population_proof"] = matched
+        out["checksum_match"] = matched
+        return out
+
+    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+        # Row count is not a cell proof. Never upgrade to full_checksum and
+        # never call the phase verified — a matching COUNT completed jobs
+        # whose destination cells had already been corrupted.
+        out["phase"] = "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = False
+        return out
+
+    if is_unproven_export(out, msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "none"
         out["assurance_level"] = "none"
+        out["unproven"] = True
+        out["skipped_readback"] = True
+        out["migration_proven"] = False
+        out["checksum_match"] = False
         return out
 
     if not passed:
@@ -132,11 +527,8 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["assurance_level"] = "none"
         return out
 
-    writer_only = (
-        not tgt
-        or "verified by writer" in msg
-        or "read-back verifier not available" in msg
-        or "read-back" in msg and "unavailable" in msg
+    writer_only = is_writer_ack_only(
+        msg, tgt, source_provenance=str(out.get("source_checksum_provenance") or "")
     )
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
@@ -152,13 +544,8 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["checksum_match"] = False
         return out
 
-    sample_authority = sample_ok and (
-        writer_only
-        or not tgt
-        or "sample-verified" in msg
-        or "sample verified" in msg
-        or "key-aligned" in msg
-        or "sample-only assurance" in msg
+    sample_authority = sample_ok and is_sample_authority(
+        msg, tgt, writer_only=writer_only
     )
     if passed and sample_authority and not (src and tgt):
         out["phase"] = "post_write_sample_verified"
@@ -169,6 +556,31 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     if independent_match and not writer_only:
+        from services.signed_proof_pack import apply_fidelity_veto
+
+        vetoed = apply_fidelity_veto(out)
+        if vetoed.get("coverage") == "coerced" or vetoed.get("phase") == "post_write_failed":
+            return vetoed
+        provenance = str(out.get("source_checksum_provenance") or "")
+        # Write-pass fingerprints hash remapped cells in-process. Dest may be
+        # independently SELECT'd, but the source warehouse was not re-read —
+        # Fivetran/HVR Compare would not call that full_checksum / migration_proven.
+        if provenance in {SOURCE_DIGEST_WRITE_PASS, SOURCE_DIGEST_WRITER_ACK}:
+            rows = out.get("target_rows") or out.get("source_rows") or 0
+            out["phase"] = "post_write_write_pass"
+            out["post_write_pending"] = False
+            out["preview"] = False
+            out["coverage"] = "write_pass_dest_readback"
+            out["assurance_level"] = "write_pass_dest_readback"
+            out["migration_proven"] = False
+            out["population_proof"] = False
+            if str(out.get("message") or "").lower().startswith("row fidelity verified"):
+                out["message"] = (
+                    f"Gate-8 verified — destination read-back matches the "
+                    f"write-pass fingerprint ({rows} rows); source warehouse "
+                    "was not independently re-read (migration_proven=false)."
+                )
+            return out
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False
@@ -204,6 +616,107 @@ def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:
     return None
 
 
+def overlay_physical_dest_types(
+    logical: dict[str, str], physical: dict[str, Any] | None
+) -> dict[str, str]:
+    """Steer read-back digests by the carrier rows landed in, not Map's intent.
+
+    A pre-existing column can contradict the plan (declared DATETIME(6),
+    physical datetime), so the writer's stamped physical type wins — except a
+    text carrier over an empty or non-text declaration (SQLite has no DECIMAL
+    affinity and degrades columns to TEXT). Steered as TEXT that column hashes
+    its literal spelling, and ``'1000'`` on the write pass never equals
+    ``'1000.00'`` read back — repr coercion by the declared type would
+    false-fail.
+    """
+    out = dict(logical)
+    if not isinstance(physical, dict):
+        return out
+    for k, v in physical.items():
+        if not v:
+            continue
+        key = str(k)
+        prior = out.get(key, "")
+        if _TEXT_FAMILY_DDL_RE.match(str(v).strip()) and (
+            not _TEXT_FAMILY_DDL_RE.match((prior or "").strip())
+        ):
+            # Physical text carrier over an empty or non-text declaration —
+            # the writer rendered per declared semantics (or inference), so
+            # a literal text compare would false-fail repr coercion like
+            # '1000' -> '1000.00' (SQLite TEXT degrade class).
+            continue
+        out[key] = str(v)
+    return out
+
+
+@lru_cache(maxsize=4096)
+def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
+    """Normalize a destination type stamp before it steers a fingerprint.
+
+    The two sides of Gate-8 learn the destination type from different places:
+    the writer knows the DDL it emitted (``DATETIME(6)``, ``varchar(255)``)
+    while the read-back reads the live catalog (``TIMESTAMP_NTZ(6)``,
+    ``VARCHAR(255) COLLATE utf8mb4_0900_ai_ci``). Those name the same physical
+    column, so fingerprinting on the raw spelling made an identical population
+    hash differently and Gate-8 failed a correct write. Both sides now
+    canonicalize through the same materializer. SQL type names are
+    case-insensitive, so the canonical form is upper case — ``bigint`` and
+    ``BIGINT`` must not steer two different fingerprints.
+    """
+    if not ddl:
+        return ""
+    try:
+        from services.decision_kernel.types import materialize_dest_ddl
+
+        physical = str(materialize_dest_ddl(engine, ddl) or ddl).upper()
+    except Exception:
+        return ddl.upper()
+    if physical == "TEXT" and _is_numeric_logical(ddl):
+        # A TEXT carrier for an exact decimal (SQLite) still holds a number.
+        # Steered as TEXT the digest followed the spelling — a typed
+        # Decimal('1.000') folded to 1 while the read-back text ``1.000`` did
+        # not — and an identical population hashed twice.
+        return ddl.upper()
+    return physical
+
+
+def _is_numeric_logical(ddl: str) -> bool:
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        normalize_logical_type,
+    )
+
+    return normalize_logical_type(ddl) in {
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+    }
+
+
+def _column_fingerprint_ddl(
+    column: str, eng: str, types: dict[str, str] | None
+) -> str:
+    """Resolve the canonical DDL that steers one column's fingerprint.
+
+    Everything here depends on the column and the destination catalog, never on
+    the cell, so a row loop must resolve it once per column rather than once per
+    value. Done per cell it cost more than the canonicalization it was steering.
+    """
+    ddl = ""
+    lookup = types or {}
+    if column and lookup:
+        ddl = str(lookup.get(column) or lookup.get(column.lower()) or "")
+        if not ddl:
+            needle = column.lower()
+            for k, v in lookup.items():
+                if str(k).lower() == needle:
+                    ddl = str(v or "")
+                    break
+    return _canonical_fingerprint_ddl(eng, ddl)
+
+
 def _fingerprint_cell(
     value: Any,
     *,
@@ -213,15 +726,12 @@ def _fingerprint_cell(
 ) -> str:
     """Cell fingerprint — bind-aware when destination types are known."""
     eng = (dest_db_type or "").strip().lower()
-    types = dest_types or {}
-    ddl = ""
-    if column and types:
-        ddl = str(types.get(column) or types.get(column.lower()) or "")
-        if not ddl:
-            for k, v in types.items():
-                if str(k).lower() == column.lower():
-                    ddl = str(v or "")
-                    break
+    ddl = _column_fingerprint_ddl(column, eng, dest_types)
+    return _fingerprint_with_ddl(value, ddl, eng)
+
+
+def _fingerprint_with_ddl(value: Any, ddl: str, eng: str) -> str:
+    """Fingerprint one cell against an already-resolved column DDL."""
     if eng:
         try:
             # Defined later in this module; resolved at call time.
@@ -247,16 +757,53 @@ def _iter_fingerprints(
     """
     eng = (dest_db_type or "").strip().lower()
     types = dest_types or {}
+    # Column facts resolved once for the whole scan. These depend on the
+    # destination catalog, not on any cell, and resolving them per value cost
+    # more than the canonicalization they steer.
+    _ddl_cache: dict[str, str] = {}
+
+    def _ddl_for(col: str) -> str:
+        ddl = _ddl_cache.get(col)
+        if ddl is None:
+            ddl = _column_fingerprint_ddl(col, eng, types)
+            _ddl_cache[col] = ddl
+        return ddl
+
+    # Cell fingerprints are a pure function of (value, ddl, engine): real
+    # tables repeat values massively (currencies, statuses, categories), so a
+    # per-scan memo turns 360k normalize calls into #unique-cells calls. The
+    # key carries type(value) so int 1 and bool True never share a slot; a cap
+    # keeps a pathological all-unique scan bounded instead of cached forever.
+    _MISS = object()
+    _memo: dict = {}
+    _memo_full = False
+    _MEMO_CAP = 500_000
+
+    def _fp_cell(val: Any, ddl: str) -> str:
+        nonlocal _memo_full
+        try:
+            key = (type(val), val, ddl)
+            cached = _memo.get(key, _MISS)
+        except TypeError:
+            return _fingerprint_with_ddl(val, ddl, eng)
+        if cached is not _MISS:
+            return cached
+        out = _fingerprint_with_ddl(val, ddl, eng)
+        if not _memo_full:
+            _memo[key] = out
+            _memo_full = len(_memo) >= _MEMO_CAP
+        return out
 
     def _fp(val: Any, col: str = "") -> str:
-        return _fingerprint_cell(
-            val, column=col, dest_db_type=eng, dest_types=types
-        )
+        return _fp_cell(val, _ddl_for(col))
 
     if columns is not None:
         cols = columns
         sorted_cols = sorted(cols, key=lambda x: x.lower())
         col_index = {c: i for i, c in enumerate(cols)}
+        # Pair each emitted column with its lowered label and resolved DDL so the
+        # row loop does no per-cell lookup at all.
+        emit_plan = [(c, c.lower(), _ddl_for(c)) for c in sorted_cols]
         sort_idx = -1
         if sort_key:
             sort_key_lower = sort_key.lower()
@@ -267,7 +814,8 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 parts = [
-                    f"{c.lower()}={_fp(row.get(c), c)}" for c in sorted_cols
+                    f"{label}={_fp_cell(row.get(c), ddl)}"
+                    for c, label, ddl in emit_plan
                 ]
                 if sort_key:
                     row_key = _fp(row.get(sort_key), sort_key)
@@ -279,9 +827,11 @@ def _iter_fingerprints(
                 else:
                     row_key = ""
             else:
+                n = len(row)
                 parts = [
-                    f"{c.lower()}={_fp(row[col_index[c]] if col_index[c] < len(row) else None, c)}"
-                    for c in sorted_cols
+                    f"{label}="
+                    f"{_fp_cell(row[col_index[c]] if col_index[c] < n else None, ddl)}"
+                    for c, label, ddl in emit_plan
                 ]
                 row_key = (
                     _fp(
@@ -310,110 +860,14 @@ def _iter_fingerprints(
             yield (row_key, fingerprint)
 
 
-class FingerprintAccumulator:
-    """Streaming, order-independent checksum accumulator for arbitrary row counts.
-
-    Keeps fingerprints in memory until ``DATAFLOW_FINGERPRINT_SPILL_THRESHOLD``
-    is reached, then spills sorted chunks to disk and merges them at the end.
-    This lets the engine compute a strict source checksum for billion-row files
-    without holding every row's fingerprint in RAM.
-    """
-
-    def __init__(self, threshold: int | None = None) -> None:
-        self.threshold = threshold or SPILL_THRESHOLD
-        self.buffer: list[tuple[str, str]] = []
-        self.chunk_files: list[str] = []
-        self.total = 0
-        self._tempdir: tempfile.TemporaryDirectory | None = None
-
-    def add(self, key: str, fingerprint: str) -> None:
-        self.buffer.append((key, fingerprint))
-        self.total += 1
-        if len(self.buffer) >= self.threshold:
-            self._spill()
-
-    def add_many(self, fingerprints: Iterable[tuple[str, str]]) -> None:
-        for key, fingerprint in fingerprints:
-            self.add(key, fingerprint)
-
-    def _spill(self) -> None:
-        if not self.buffer:
-            return
-        self.buffer.sort(key=lambda x: (x[0], x[1]))
-        if self._tempdir is None:
-            self._tempdir = tempfile.TemporaryDirectory(prefix="dataflow_fp_")
-        fd, path = tempfile.mkstemp(dir=self._tempdir.name, suffix=".chk")
-        with os.fdopen(fd, "wb") as f:
-            for key, fp in self.buffer:
-                key_b = key.encode("utf-8")
-                fp_b = fp.encode("utf-8")
-                f.write(struct.pack(">I", len(key_b)))
-                f.write(key_b)
-                f.write(struct.pack(">I", len(fp_b)))
-                f.write(fp_b)
-        self.chunk_files.append(path)
-        self.buffer = []
-
-    def _read_chunk(self, path: str) -> Iterable[tuple[str, str]]:
-        with open(path, "rb") as f:
-            while True:
-                key_len_b = f.read(4)
-                if not key_len_b:
-                    break
-                key_len = struct.unpack(">I", key_len_b)[0]
-                key = f.read(key_len).decode("utf-8")
-                fp_len_b = f.read(4)
-                if not fp_len_b:
-                    break
-                fp_len = struct.unpack(">I", fp_len_b)[0]
-                fp = f.read(fp_len).decode("utf-8")
-                yield (key, fp)
-
-    def _sorted_stream(self) -> Iterable[tuple[str, str]]:
-        if not self.chunk_files:
-            self.buffer.sort(key=lambda x: (x[0], x[1]))
-            yield from self.buffer
-            return
-        if self.buffer:
-            self._spill()
-        streams = [self._read_chunk(p) for p in self.chunk_files]
-        yield from heapq.merge(*streams, key=lambda x: (x[0], x[1]))
-
-    def digest(self) -> str:
-        h = hashlib.sha256()
-        for _, fp in self._sorted_stream():
-            h.update(fp.encode("utf-8"))
-        self.close()
-        return h.hexdigest()[:16]
-
-    def close(self) -> None:
-        if self._tempdir is not None:
-            self._tempdir.cleanup()
-            self._tempdir = None
-        self.chunk_files = []
-        self.buffer = []
-
-
-def fingerprint_checksum(fingerprints: Iterable[tuple[str, str]]) -> str:
-    """Hash a list/iterable of (row_key, fingerprint) tuples.
-
-    For small inputs the in-memory sort+hash path is used; for large or
-    streaming inputs an ``FingerprintAccumulator`` spills to disk so the
-    checksum stays memory-bounded.
-    """
-    if isinstance(fingerprints, list) and len(fingerprints) <= SPILL_THRESHOLD:
-        return _hash_fingerprints(fingerprints)
-    acc = FingerprintAccumulator()
-    acc.add_many(fingerprints)
-    return acc.digest()
-
-
-def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
-    fingerprints.sort(key=lambda x: (x[0], x[1]))
-    h = hashlib.sha256()
-    for _, fp in fingerprints:
-        h.update(fp.encode("utf-8"))
-    return h.hexdigest()[:16]
+# Accumulating fingerprints into a digest lives in its own module (size budget);
+# re-exported here because this module is the reconciliation surface callers
+# import from.
+from services.fingerprint_accumulator import (  # noqa: E402,F401 — re-export
+    FingerprintAccumulator,
+    fingerprint_checksum,
+    _hash_fingerprints,
+)
 
 
 def canonical_checksum(
@@ -436,7 +890,7 @@ def canonical_checksum(
     read-back share write-path bind fingerprints (bool/JSON parity).
     """
     if not rows:
-        return hashlib.sha256(b"").hexdigest()[:16]
+        return hashlib.sha256(b"").hexdigest()
     return _hash_fingerprints(
         list(
             _iter_fingerprints(
@@ -486,7 +940,93 @@ def canonical_checksum_from_iter(
         if limit and i >= limit:
             break
         acc.add(row_key, fp)
-    return acc.digest()
+    digest = acc.digest()
+    from services.column_digest import note_readback
+
+    note_readback(digest, acc.columns.snapshot())
+    return digest
+
+
+#: Hits per Elasticsearch read-back page while paging a whole index.
+_ES_RECONCILE_PAGE: Final[int] = 10_000
+
+#: Rows a hosted-API read-back will pull when the caller asked for the whole
+#: population (``limit=0``). These connectors page internally up to the limit
+#: they are given, so the number is a ceiling on the read-back, not a page.
+_SAAS_RECONCILE_MAX_ROWS: Final[int] = 100_000
+
+
+def _saas_readback_limit(limit: int) -> int:
+    """Rows to request for a hosted read-back, and never a silent 500.
+
+    ``limit=0`` means "the whole destination population". Asking these
+    connectors for 500 rows and hashing them against the source's whole-table
+    digest reports a mismatch for every object holding more than 500 records
+    even when every row landed intact — and returns 500 as the destination
+    count for a population nobody counted. One extra row is requested so a
+    population larger than the ceiling is *detectable* rather than silently
+    truncated.
+    """
+    scoped = max(int(limit or 0), 0)
+    return scoped if scoped else _SAAS_RECONCILE_MAX_ROWS + 1
+
+
+def _saas_readback_truncated(driver: str, limit: int, rows: int) -> bool:
+    """True when the read-back could not see the whole population.
+
+    A truncated read-back has no verdict to give: its digest covers a prefix of
+    the destination, so reporting it as the destination checksum would either
+    fail a correct load or pass a partial one. Gate-8 is told "unproven"
+    instead.
+    """
+    if int(limit or 0):
+        return False
+    if rows <= _SAAS_RECONCILE_MAX_ROWS:
+        return False
+    logger.warning(
+        "%s read-back holds more than %d rows — refusing a prefix digest as "
+        "destination proof; scope the reconcile with an explicit limit or key set",
+        driver,
+        _SAAS_RECONCILE_MAX_ROWS,
+    )
+    return True
+
+
+# Digest every checksum path produces for a population with no rows. Both
+# sides fold zero fingerprints into SHA-256, so this value is a proof of
+# emptiness rather than the absence of a digest.
+EMPTY_POPULATION_DIGEST: Final[str] = hashlib.sha256().hexdigest()
+
+
+def additive_checksum_from_iter(
+    rows: Iterable[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """(count, additive digest) — sum of per-row fingerprint hashes mod 2^256.
+
+    Same fingerprints as ``canonical_checksum``, so the two digests describe
+    the same row content; the additive form stays comparable when a table
+    holds prior rows plus this run's append: post − pre must equal the run.
+    """
+    total = 0
+    n = 0
+    for _rk, fp in _iter_fingerprints(
+        rows,
+        columns,
+        sort_key=sort_key,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    ):
+        total = (
+            total
+            + int.from_bytes(hashlib.sha256(fp.encode("utf-8")).digest(), "big")
+        ) % (1 << 256)
+        n += 1
+    return n, format(total, "064x")
 
 
 def checksum_rows(
@@ -532,9 +1072,41 @@ def reconcile(
     sample_compare: dict[str, Any] | None = None,
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
+    target_rows_before: int | None = None,
+    checksum_scope: str = "",
+    keyed_expected_delta: int | None = None,
+    route_digest_match: bool | None = None,
+    rows_written: int | None = None,
+    retained_rows: int = 0,
 ) -> ReconciliationReport:
+    """Compare source and destination evidence into one Gate-8 verdict.
+
+    ``keyed_expected_delta`` is the writer's key census for a merge into an
+    occupied destination (``inserts - deletes``). A keyed write does not grow
+    the destination by the batch size — a batch of 1,141 events that updated
+    1,041 existing keys grows it by 100 — so when the batch digest cannot be
+    re-scoped by key the census is the cardinality identity, never the batch.
+
+    ``checksum_scope`` names the population the target digest covers. It is
+    :data:`WRITTEN_BATCH_KEYS` when the destination was re-read by written key,
+    which is the only comparable digest for an append into a table that already
+    held rows — the whole-table count still goes in the report, but the digest
+    must not be described as covering it.
+
+    Strict vs balanced does not make incomparable populations comparable.
+    Whole-table digest mismatch on append/upsert into a larger sink uses the
+    dest-before delta identity (``append_row_count_report``). A keyed-batch
+    digest that still disagrees is a real cell failure and still fails Gate-8.
+    Sample compare never upgrades that to ``full_checksum``.
+    """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
+    rows_shaped_out = max(int(rows_shaped_out or 0), 0)
+    rows_source_filtered = max(int(rows_source_filtered or 0), 0)
+    rows_expanded = max(int(rows_expanded or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
     # not lower the expected row count — only genuinely DROPPED / held-out rows do.
     # Under quarantine, bad rows are held out of the primary write (rejected >
@@ -542,11 +1114,223 @@ def reconcile(
     # Under fail, coerced == 0 so dropped == rejected.
     # Skipped rows are neither dropped nor written (e.g. stale CDC LSN
     # redelivery) and must be excluded from the expected destination count.
+    # Rows an approved shaping recipe removed on the read (filtered or diverted)
+    # were read and are deliberately absent from the destination. They are a
+    # declared effect of the recipe, not a loss and not a quarantine finding, so
+    # they lower the expected count exactly like a hold-out does.
+    # A declared source row filter removes rows on the read for the same reason:
+    # they were counted in the source population and were never candidates for
+    # the destination.
+    # SCD2 with close_missing=False: keys absent from the snapshot stay
+    # current on the destination — retained, not written by this run. The
+    # expected-current count is source rows plus those retained keys.
+    retained_rows = max(int(retained_rows or 0), 0)
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
-    expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
+    expected_rows = max(
+        source_rows
+        + rows_expanded
+        + retained_rows
+        - dropped_rows
+        - rows_skipped
+        - rows_shaped_out
+        - rows_source_filtered,
+        0,
+    )
+    if (
+        not source_checksum
+        and expected_rows == 0
+        and target_rows == 0
+        and target_checksum in {"", EMPTY_POPULATION_DIGEST}
+        and not keyed_expected_delta
+    ):
+        # Every source row was held out, so this run's projection is the empty
+        # population — a digest that is defined, not missing. The writer had no
+        # rows to hash and returned "", which then read as a mismatch against
+        # the destination's empty digest and failed an all-quarantined run that
+        # behaved exactly as the policy asked.
+        # A key census that still expects new rows did not hold those keys out.
+        # Pairing that delta with the empty digest reported checksum_match
+        # while rows_written stayed 0.
+        source_checksum = target_checksum
+    if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
+        # A matching COUNT does not see an in-place update. Completing the job
+        # here is how a corrupted cell (qty=-1) shipped as "completed" while
+        # the message said value fidelity was not compared. Dest extras are
+        # still not a merge-delete, and a short COUNT is still a fail — but
+        # neither outcome is a cell proof, so the job does not pass.
+        dest_short = target_rows < expected_rows
+        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
+        short_note = (
+            " Destination is short of the live source image." if dest_short else ""
+        )
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
+                f"COUNT={expected_rows:,}{extra}{short_note}. Last-batch writer "
+                "checksum is diagnostic — not a source-image population digest. "
+                "Value fidelity was not compared. "
+                "Leftover MERGE is a no-op on CDC. At-least-once upsert. "
+                "Not platform exactly-once."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=False,
+            population_proof=False,
+            assurance_level=CDC_SOURCE_IMAGE_COUNT,
+            checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+            target_rows_before=target_rows_before,
+        )
+    if checksum_scope == CDC_SOURCE_IMAGE_VALUES:
+        dest_short = target_rows < expected_rows
+        checksum_match = bool(source_checksum) and source_checksum == target_checksum
+        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
+        short_note = (
+            " Destination is short of the live source image." if dest_short else ""
+        )
+        value_note = (
+            " Mapped source-row fingerprints are present on the destination."
+            if checksum_match
+            else " One or more source-row fingerprints are missing on the destination."
+        )
+        return ReconciliationReport(
+            passed=(not dest_short) and checksum_match,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
+                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note} "
+                "Dest extras are not a failure. At-least-once upsert. "
+                "Not platform exactly-once."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=checksum_match and not dest_short,
+            population_proof=checksum_match and not dest_short,
+            assurance_level=CDC_SOURCE_IMAGE_VALUES,
+            checksum_scope=CDC_SOURCE_IMAGE_VALUES,
+            target_rows_before=target_rows_before,
+        )
+    if checksum_scope == ROUTE_PARTITIONED:
+        # The router split the population into per-route tables. Each route
+        # table was read back independently (rows + digest recorded in the
+        # run's route_verification ledger); the comparable proof is
+        # conservation — every source row landed in exactly one route or was
+        # diverted — because a single source digest cannot equal the digest
+        # of a partitioned destination.
+        ok = target_rows == expected_rows or (
+            allow_extra_rows and target_rows >= expected_rows
+        )
+        if ok and route_digest_match is False and strict_checksum:
+            # A measured route digest mismatch under strict validation is a
+            # failed post-write proof — the job must fail (and the restore
+            # guard rolls the write back), never report a clean success
+            # alongside checksum_match=false (P1-A).
+            return ReconciliationReport(
+                passed=False,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Gate-8 refused under strict validation: at least one "
+                    f"route table's value digest does not equal what this "
+                    f"run wrote ({target_rows:,} row(s) across route "
+                    f"tables vs expected {expected_rows:,})."
+                ),
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+                checksum_match=False,
+                population_proof=True,
+                assurance_level=ROUTE_PARTITIONED,
+                checksum_scope=ROUTE_PARTITIONED,
+                target_rows_before=target_rows_before,
+                rows_written=rows_written,
+            )
+        return ReconciliationReport(
+            passed=ok,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                (
+                    "VALUE VERIFICATION FAILED — at least one route table's "
+                    "value digest does not equal what this run wrote or a "
+                    "key exists in more than one route table (see the route "
+                    f"ledger). {target_rows:,} row(s) landed across route "
+                    f"tables vs expected {expected_rows:,}."
+                    if route_digest_match is False
+                    else f"Routed output verified: {target_rows:,} row(s) "
+                    f"across the route tables vs expected "
+                    f"{expected_rows:,}. Each route table's row count was "
+                    "read back independently"
+                    + (
+                        " and every comparable route's value digest matched "
+                        "the write-pass fingerprint"
+                        if route_digest_match
+                        else "; per-route digests are in the route ledger"
+                    )
+                )
+                if ok
+                else f"Row count mismatch across route tables: {target_rows:,} "
+                f"vs expected {expected_rows:,}."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            # Tri-state: True (comparable routes matched), False (a compared
+            # route diverged), None (nothing was comparable — unproven, never
+            # a false alarm on a successful run).
+            checksum_match=route_digest_match,
+            population_proof=ok,
+            assurance_level=ROUTE_PARTITIONED,
+            checksum_scope=ROUTE_PARTITIONED,
+            target_rows_before=target_rows_before,
+            rows_written=rows_written,
+        )
+    keyed_identity = (
+        keyed_expected_delta is not None
+        and allow_extra_rows
+        and checksum_scope != WRITTEN_BATCH_KEYS
+    )
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )
+    if (
+        keyed_identity
+        and target_rows_before is not None
+        and target_rows - int(target_rows_before) != int(keyed_expected_delta)
+    ):
+        return append_row_count_report(
+            source_rows=source_rows,
+            target_rows=target_rows,
+            target_rows_before=target_rows_before,
+            expected_rows=expected_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            sample_note="",
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            keyed_expected_delta=int(keyed_expected_delta),
+        )
+    if keyed_identity and target_rows_before is not None:
+        row_count_ok = True
     if not row_count_ok:
         extra_note = (
             f" (target has {target_rows - expected_rows} extra rows)"
@@ -561,7 +1345,9 @@ def reconcile(
             target_checksum=target_checksum,
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
-                f"skipped {rows_skipped}, expected target {expected_rows} vs target {target_rows}{extra_note}"
+                f"skipped {rows_skipped}, removed by transform {rows_shaped_out}, "
+                f"filtered out {rows_source_filtered}, expanded by transform {rows_expanded}, "
+                f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
@@ -570,7 +1356,16 @@ def reconcile(
 
     if sample_compare and not sample_compare.get("passed", True):
         mismatches = sample_compare.get("mismatches") or []
-        detail = mismatches[0] if mismatches else "value mismatch in read-back sample"
+        first = mismatches[0] if mismatches else None
+        if isinstance(first, dict):
+            key = first.get("key")
+            where = f"row {key} " if key not in (None, "") else ""
+            detail = (
+                f"{where}column {first.get('source')}→{first.get('target')}: "
+                f"source={first.get('source_value')!r} dest={first.get('target_value')!r}"
+            )
+        else:
+            detail = first if first else "value mismatch in read-back sample"
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -585,24 +1380,30 @@ def reconcile(
         )
 
     if source_checksum != target_checksum:
-        # Enterprise GA: checksum mismatch always fails Gate-8.
-        # Sample compare may attach diagnostics only — never green-pass / override.
+        # Comparable checksum mismatch always fails Gate-8. Sample compare may
+        # attach diagnostics only — never green-pass / override. Incomparable
+        # append/upsert into a larger sink is not a checksum: dest-before delta
+        # is the identity. Strict does not invent comparability.
         compared = int((sample_compare or {}).get("compared") or 0)
         sample_ok = (
             bool(sample_compare)
             and bool(sample_compare.get("passed", False))
             and compared > 0
         )
-        extra_note = ""
-        if allow_extra_rows and target_rows > expected_rows:
-            extra_note = (
-                f" Destination has {target_rows - expected_rows} extra row(s) "
-                "(append/upsert); whole-table digests are not comparable."
-            )
+        has_extra = allow_extra_rows and (target_rows > expected_rows or keyed_identity)
+        extra_note = extra_rows_note(target_rows, expected_rows) if has_extra else ""
         sample_note = ""
         if sample_ok:
+            # ``compared`` is a count of cells; naming it rows over-stated the
+            # evidence by the column count of the projection.
+            sample_rows = int((sample_compare or {}).get("rows_compared") or 0)
+            scope = (
+                f"{sample_rows:,} row(s) / {compared:,} cell(s)"
+                if sample_rows
+                else f"{compared:,} cell(s)"
+            )
             sample_note = (
-                f" Key-aligned sample compared {compared} row(s) without value "
+                f" Key-aligned sample compared {scope} without value "
                 "mismatches — diagnostic only; does NOT override checksum failure."
             )
         elif sample_compare:
@@ -611,6 +1412,70 @@ def reconcile(
                 "soften checksum mismatch."
             )
         mode_label = "strict" if strict_checksum else "balanced"
+        # The row-count identity already removed quarantined rows. The source
+        # digest often still hashes them, so it cannot equal the destination
+        # digest of the rows that landed. A clean key-aligned sample means the
+        # landed cells match; failing here used to roll the good rows back and
+        # leave the table empty (R5-003). A digest already scoped to the
+        # written keys is a real cell disagreement and still fails.
+        # Occupied tables compare by delta. A written-key or CDC value digest stays strict.
+        occupied_table = (
+            allow_extra_rows
+            and target_rows_before is not None
+            and int(target_rows_before) > 0
+            and checksum_scope not in {
+                WRITTEN_BATCH_KEYS, CDC_SOURCE_IMAGE_VALUES, CDC_SOURCE_IMAGE_COUNT,
+            }
+        )
+        # An occupied table's digest covers rows earlier runs wrote: the
+        # quarantine basis would leave that digest "comparable" and skip the
+        # delta, so the ladder graded every old row against the batch (D205).
+        if (
+            dropped_rows > 0
+            and sample_ok
+            and checksum_scope != WRITTEN_BATCH_KEYS
+            and not occupied_table
+        ):
+            return ReconciliationReport(
+                passed=True,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Landed rows match. {dropped_rows} quarantined row(s) are in "
+                    f"the source digest and not in the destination, so the digests "
+                    f"differ ({source_checksum} vs {target_checksum}) without a "
+                    f"differing cell in the {scope} that were compared. "
+                    "Quarantined rows stay in the ledger for replay."
+                ),
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+                checksum_match=None,
+                population_proof=False,
+                assurance_level="quarantine_excluded",
+            )
+        if occupied_table or (has_extra and checksum_scope != WRITTEN_BATCH_KEYS):
+            if occupied_table:
+                delta = int(keyed_expected_delta) if keyed_expected_delta is not None else None
+            else:
+                delta = int(keyed_expected_delta) if keyed_identity else None
+            return append_row_count_report(
+                source_rows=source_rows,
+                target_rows=target_rows,
+                target_rows_before=target_rows_before,
+                expected_rows=expected_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                sample_note=sample_note,
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+                keyed_expected_delta=delta,
+            )
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -630,6 +1495,35 @@ def reconcile(
             population_proof=False,
             assurance_level="none",
         )
+    if checksum_scope == WRITTEN_BATCH_KEYS and expected_rows == 0 and rejected_rows:
+        # QA MX3-12: two digests of the empty written set always match. That is
+        # no evidence — a replay that re-rejected every row reported
+        # full_checksum while its own L1-L5 ladder failed.
+        logger.warning(
+            "Gate-8: keyed run wrote 0 rows and rejected %d — no fidelity claim",
+            rejected_rows,
+        )
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"Nothing was verified: this run wrote 0 row(s) and rejected "
+                f"{rejected_rows}. The destination still holds {target_rows} "
+                "row(s) from earlier runs. Fix the rejected values and replay."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=None,
+            population_proof=False,
+            assurance_level="none",
+            checksum_scope=checksum_scope,
+            target_rows_before=target_rows_before,
+        )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed
         # coercion is applied when re-reading the source for its checksum. That
@@ -641,6 +1535,15 @@ def reconcile(
         )
         if rejected_rows and rejected_rows != coerced_null_rows:
             message += f"; {rejected_rows} row(s) rejected"
+    elif checksum_scope == WRITTEN_BATCH_KEYS and target_rows > expected_rows:
+        message = (
+            f"Row fidelity verified for the {expected_rows} row(s) this run wrote "
+            f"— destination digest re-read by written key. Destination holds "
+            f"{target_rows} row(s) in total; rows written by earlier runs are "
+            "outside this proof."
+        )
+        if rejected_rows:
+            message += f" {rejected_rows} row(s) rejected."
     else:
         message = f"Row fidelity verified — source and target checksums match ({target_rows} rows)"
         if rejected_rows:
@@ -658,7 +1561,9 @@ def reconcile(
         sample_compare=sample_compare,
         checksum_match=True,
         population_proof=False,
-        assurance_level="full_checksum",
+        assurance_level="coerced" if coerced_null_rows else "full_checksum",
+        checksum_scope=checksum_scope,
+        target_rows_before=target_rows_before,
     )
 
 
@@ -670,6 +1575,285 @@ def _iter_fetchmany(cur, batch_size: int = 5000):
             break
         for row in rows:
             yield row
+
+
+READBACK_ITERSIZE: Final[int] = 5000
+
+
+@contextmanager
+def streaming_readback_cursor(conn: Any, *, engine: str) -> Iterator[Any]:
+    """Cursor that streams a whole-table read-back instead of buffering it.
+
+    ``fetchmany`` alone does not stream: psycopg2 and PyMySQL both pull the
+    entire result set into client memory when the statement executes, so the
+    Gate-8 proof was the largest allocation of the migration — a measured
+    2.0 GB RSS to verify 10M rows, and linear from there. A PostgreSQL named
+    (server-side) cursor and a PyMySQL ``SSCursor`` hold one batch at a time
+    (39 MB for the same read), which is what lets the proof scale past the
+    table it is proving.
+
+    Engines whose drivers already stream (SQLite, DuckDB, FreeTDS, Snowflake,
+    Oracle) fall through to a plain cursor.
+    """
+    cur = None
+    try:
+        if engine in {"postgresql", "redshift", "timescaledb", "cockroachdb"}:
+            # Named cursors are WITHOUT HOLD: they need an open transaction,
+            # which an autocommit connection does not have.
+            if not getattr(conn, "autocommit", False):
+                cur = conn.cursor(name=f"df_readback_{uuid.uuid4().hex}")
+                cur.itersize = READBACK_ITERSIZE
+        elif engine == "mysql":
+            import pymysql.cursors
+
+            cur = conn.cursor(pymysql.cursors.SSCursor)
+        if cur is None:
+            cur = conn.cursor()
+        yield cur
+    finally:
+        if cur is not None:
+            # A server-side cursor dies with its transaction; a close failure
+            # here must not mask the verdict the read-back just produced.
+            with suppress(Exception):
+                cur.close()
+
+
+def dbapi_streaming_rows(
+    cur: Any, *, batch_size: int = READBACK_ITERSIZE
+) -> tuple[list[str], Iterator[Any]]:
+    """Return ``(column_names, rows)`` for an already-executed DBAPI cursor.
+
+    A psycopg2 server-side cursor has no ``description`` until the first block
+    is fetched, so the names must be read *after* priming — reading them first
+    fingerprints zero columns and yields the digest of an empty table.
+    """
+    first = cur.fetchmany(batch_size)
+    names = [d[0] for d in cur.description] if cur.description else []
+
+    def _rows() -> Iterator[Any]:
+        batch = first
+        while batch:
+            yield from batch
+            batch = cur.fetchmany(batch_size)
+
+    return names, _rows()
+
+
+def sa_streaming_result(
+    conn: Any, statement: Any, *, itersize: int = READBACK_ITERSIZE
+) -> tuple[list[str], Iterator[Any]]:
+    """Return ``(column_names, rows)`` where rows arrive a block at a time.
+
+    Drivers without server-side cursors ignore ``stream_results`` and buffer as
+    before — no engine is made worse, and those that can stream stop paying for
+    the whole table.
+
+    The option is set on the *statement*, not the connection:
+    ``Connection.execution_options()`` mutates the connection in place, so every
+    later statement on it inherited streaming. PostgreSQL then compiled a
+    following ``DROP TABLE`` as ``DECLARE ... CURSOR FOR DROP TABLE`` and raised
+    a syntax error — which is how mirror key-staging tables survived their own
+    cleanup and accumulated in the customer's schema.
+    """
+    try:
+        stmt = statement.execution_options(
+            stream_results=True, max_row_buffer=itersize
+        )
+    except AttributeError:  # a raw string has no execution_options
+        stmt = statement
+    result = conn.execute(stmt)
+    names = [str(k) for k in result.keys()]
+
+    def _rows() -> Iterator[Any]:
+        for partition in result.partitions(itersize):
+            yield from partition
+
+    return names, _rows()
+
+
+def iter_select_row_dicts(
+    conn: Any,
+    statement: Any,
+    columns: list[str],
+    *,
+    itersize: int = READBACK_ITERSIZE,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield dict batches from one SELECT. Full-population drain — never OFFSET.
+
+    ``page_clause`` remains the owner for *windowed* preview reads that have a
+    stable ORDER BY. A complete scan (SCD2 staging, mirror key walk, active-row
+    digest) must be one cursor. Microsoft: OFFSET/FETCH is a new independent
+    query per page and requires a unique ORDER BY; without it SQL Server
+    errors and Oracle/DB2 reject LIMIT (ORA-03047). OFFSET is also O(n²).
+
+    Dest-engine ``HASH_AGG`` / ``CHECKSUM_AGG`` pushdown is a future
+    enhancement of this kernel, not a second path — those aggregates are not
+    type-portable (CHECKSUM_AGG ignores NULL; HASH_AGG is Snowflake-only).
+    """
+    _names, raw = sa_streaming_result(conn, statement, itersize=itersize)
+    batch: list[dict[str, Any]] = []
+    size = max(1, int(itersize))
+    for row in raw:
+        # ``columns`` is the statement's own select list, so position is the
+        # exact key. A name lookup is not: SQLAlchemy's Snowflake dialect
+        # reports a stored ``ID`` as ``id``, and every value read as None (D47).
+        batch.append(dict(zip(columns, row)))
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def stream_select_checksum(
+    conn: Any,
+    statement: Any,
+    columns: list[str],
+    *,
+    itersize: int = READBACK_ITERSIZE,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Order-independent checksum of a full SELECT, streamed.
+
+    Same Gate-8 fingerprint kernel as dest read-back
+    (``sa_streaming_result`` + ``canonical_checksum_from_iter``). Empty
+    population returns ``(0, "")`` — the SCD2/mirror writer contract (blank
+    digest, not sha256 of empty). This digest does not by itself close
+    Gate-8 or claim ``migration_proven``.
+    """
+    count = 0
+
+    def _rows() -> Iterator[Any]:
+        nonlocal count
+        for batch in iter_select_row_dicts(
+            conn, statement, columns, itersize=itersize
+        ):
+            for row in batch:
+                count += 1
+                yield row
+
+    digest = canonical_checksum_from_iter(
+        _rows(),
+        columns,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
+    return count, (digest if count else "")
+
+
+# Cap on keys fetched back per batch proof: bounded so a 10M-row append does
+# not build a 10M-term IN list, and matched by the writer's stashed id sample.
+KEYED_READBACK_ID_CAP: Final[int] = 500
+
+# Text carrier per dialect. The keys arrive from writer meta as strings; an
+# uncast bigint/uuid column aborts the read-back, and an aborted read-back is
+# not a soft failure — it is silently *no* proof at all.
+_KEYED_TEXT_CAST: Final[dict[str, str]] = {
+    "mysql": "CHAR",
+    "mariadb": "CHAR",
+    "sqlserver": "NVARCHAR(4000)",
+    "mssql": "NVARCHAR(4000)",
+    "oracle": "VARCHAR2(4000)",
+    "clickhouse": "String",
+    "databricks": "STRING",
+}
+
+_KEYED_QUOTE_CHAR: Final[dict[str, str]] = {
+    "mysql": "`",
+    "mariadb": "`",
+    "clickhouse": "`",
+    "sqlserver": "[",
+    "mssql": "[",
+}
+
+
+# Destinations whose verifier re-reads only ``written_ids``. Anything absent
+# here falls back to a whole-table digest, which an append into a populated
+# sink cannot compare — the honest verdict is row-count scope, not a mismatch.
+KEYED_READBACK_ENGINES: Final[frozenset[str]] = frozenset(
+    {
+        "sqlite",
+        "duckdb",
+        "postgresql",
+        "redshift",
+        "timescaledb",
+        "cockroachdb",
+        "mysql",
+        "mariadb",
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+        "oracle",
+        "clickhouse",
+        "snowflake",
+        "databricks",
+        "generic_sql",
+        "mongodb",
+        # Redis addresses every write by ``prefix:identity``, so re-reading one
+        # batch's keys is exact. Without it an upsert into a keyspace holding
+        # any other key compared whole-prefix digests and reported a correct
+        # write as a mismatch.
+        "redis",
+    }
+)
+
+
+def keyed_readback_scope(
+    written_ids: list[str] | None,
+    pk_column: str | None,
+    *,
+    cap: int = KEYED_READBACK_ID_CAP,
+) -> tuple[list[str], str]:
+    """Normalize ``(written_ids, pk_column)`` into a usable batch scope.
+
+    Returns ``([], "")`` when the batch cannot be keyed, which every caller
+    treats as "fingerprint the whole table" — the honest fallback.
+    """
+    ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][:cap]
+    pk = (pk_column or "").strip()
+    return (ids, pk) if ids and pk else ([], "")
+
+
+def keyed_readback_where(
+    pk: str, ids: list[str], *, dialect: str, placeholders: list[str]
+) -> str:
+    """``WHERE CAST(pk AS <text>) IN (...)`` for proving one appended batch.
+
+    Append or upsert into a non-empty table makes whole-table digests
+    incomparable — the destination legitimately holds rows this job never
+    wrote. Re-scoping the destination digest to the written keys is what turns
+    that from a row-count-only verdict back into full-population proof of the
+    batch.
+    """
+    dial = (dialect or "").strip().lower()
+    pk_q = quote_sql_identifier(pk, _KEYED_QUOTE_CHAR.get(dial, '"'))
+    cast = _KEYED_TEXT_CAST.get(dial, "VARCHAR(4000)")
+    expr = _KEYED_EXACT_COMPARE.get(dial, "{0}").format(f"CAST({pk_q} AS {cast})")
+    return f"WHERE {expr} IN ({','.join(placeholders[: len(ids)])})"
+
+
+# The read-back must select the written keys exactly. A bare CAST takes the
+# session's default collation (MySQL 8 utf8mb4_0900_ai_ci, SQL Server CI_AS),
+# so batch key 'A' also fetched the untouched row 'a' and a correct upsert into
+# a binary-collated key failed Gate-8 (D205 family: distinct keys merged).
+_KEYED_EXACT_COMPARE: Final[dict[str, str]] = {
+    "mysql": "CAST({0} AS BINARY)",
+    "mariadb": "CAST({0} AS BINARY)",
+    "sqlserver": "{0} COLLATE Latin1_General_100_BIN2",
+    "mssql": "{0} COLLATE Latin1_General_100_BIN2",
+}
+
+
+def keyed_readback_sa_clause(
+    pk: str, ids: list[str], *, dialect: str
+) -> tuple[str, dict[str, str]]:
+    """SQLAlchemy flavour of :func:`keyed_readback_where` with bound keys."""
+    params = {f"k{i}": v for i, v in enumerate(ids)}
+    where = keyed_readback_where(
+        pk, ids, dialect=dialect, placeholders=[f":{k}" for k in params]
+    )
+    return where, params
 
 
 def verify_postgres_table(
@@ -686,7 +1870,84 @@ def verify_postgres_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    try:
+        from connectors.postgresql_conn import get_connection
+
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        from connectors.sql_identifiers import quote_table_ref
+
+        table_ref = quote_table_ref(
+            table_name, schema or "public", dialect="postgresql"
+        )
+        from connectors.postgresql_reader import text_carry_select_sql
+
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+            count = int(cur.fetchone()[0])
+            # Digest what the source reader digests: json/jsonb, ranges, bit
+            # strings … as engine text, not psycopg2's decode (D75/D80).
+            select_list = text_carry_select_sql(cur, schema, table_name) or "*"
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
+            if ids:
+                pk_q = quote_sql_identifier(pk)
+                # Ids are text; an uncast bigint/uuid key aborts the read-back.
+                cur.execute(
+                    f"SELECT {select_list} FROM {table_ref} "  # nosec B608
+                    f"WHERE CAST({pk_q} AS text) = ANY(%s)",
+                    (ids,),
+                )
+            else:
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
+            names, rows = dbapi_streaming_rows(cur)
+            columns, projected = project_readback(names, target_columns, rows)
+            checksum = canonical_checksum_from_iter(
+                projected,
+                columns,
+                limit=limit,
+                dest_db_type="postgresql",
+                dest_types=dest_types,
+            )
+        conn.close()
+        return count, checksum
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_postgres_route_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table_name: str,
+    dest_types: dict[str, str] | None = None,
+    target_columns: list[str] | None = None,
+) -> tuple[int, str, str]:
+    """(count, canonical checksum, additive checksum) for one route table.
+
+    One read-back scan produces both digests — the additive form proves an
+    append into an occupied route table (post − pre == this run), which the
+    canonical whole-table digest cannot (RT-6). ``target_columns`` narrows the
+    digested population to the columns the run wrote; pre- and post-write
+    scans must pass the same list for the additive delta to hold.
+    """
     try:
         from connectors.postgresql_conn import get_connection
 
@@ -707,21 +1968,94 @@ def verify_postgres_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
             cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+            names, rows = dbapi_streaming_rows(cur)
+            # Restrict the digest to the columns the run wrote — a
+            # customer-owned route table may carry extra columns (defaults,
+            # generated values) that were never part of the write and must
+            # not enter the compared digest (P0-G1 loaded_at case).
+            columns, projected = project_readback(names, target_columns, rows)
+            acc = FingerprintAccumulator()
+            for rk, fp in _iter_fingerprints(
+                projected,
                 columns,
-                limit=limit,
                 dest_db_type="postgresql",
                 dest_types=dest_types,
-            )
+            ):
+                acc.add(rk, fp)
+            canonical = acc.digest()
+            additive = acc.additive_digest()
         conn.close()
-        return count, checksum
+        return count, canonical, additive
     except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
+        logger.warning("Route read-back failed: %s", exc, exc_info=exc)
+        return -1, "", ""
+
+
+def verify_pg_route_key_uniqueness(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    route_tables: list[tuple[str, list[str]]],
+    limit: int = 25,
+) -> list[tuple] | None:
+    """Keys present in more than one route table, or ``None`` when unproven.
+
+    A keyed routed run (incremental_deduped/upsert/mirror) must hold each key
+    in exactly one route table — the engine deletes the key from every other
+    route in the same transaction before upserting (P1-B). ``route_tables``
+    is ``[(table_name, [pk column names in that table]), ...]``; tables where
+    the pk is absent (a mapped route that drops the key column) are excluded
+    by the caller. Returns [] when every key lives in one route table, a
+    bounded list of duplicate key tuples otherwise, and ``None`` when the
+    check itself could not run — never silently "unique".
+    """
+    parts = [(t, [str(c) for c in cols]) for t, cols in route_tables if t and all(cols)]
+    if not parts:
+        return []
+    try:
+        from connectors.postgresql_conn import get_connection
+        from connectors.sql_identifiers import quote_table_ref
+
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        try:
+            selects = []
+            for tbl, cols in parts:
+                col_list = ", ".join(quote_sql_identifier(c, '"') for c in cols)
+                selects.append(
+                    f"SELECT {col_list} FROM "
+                    + quote_table_ref(tbl, schema or "public", dialect="postgresql")
+                )
+            union = " UNION ALL ".join(selects)
+            nkey = len(parts[0][1])
+            key_sel = ", ".join(f"k{i}" for i in range(nkey))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {key_sel}, COUNT(*) FROM ({union}) q({key_sel}) "
+                    f"GROUP BY {key_sel} HAVING COUNT(*) > 1 "
+                    f"LIMIT {int(limit)}"
+                )  # nosec B608
+                return [tuple(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Route key-uniqueness check failed: %s", exc, exc_info=exc)
+        return None
 
 
 def verify_pgvector_table(
@@ -758,404 +2092,39 @@ def verify_pgvector_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
             cur.execute(f"SELECT source_id, metadata FROM {table_ref}")  # nosec B608
-            names = (
-                [d[0] for d in cur.description]
-                if cur.description
-                else ["source_id", "metadata"]
+            names, raw_rows = dbapi_streaming_rows(cur)
+            names = names or ["source_id", "metadata"]
+
+            def _source_shaped_rows():
+                for raw in raw_rows:
+                    rec = dict(zip(names, raw))
+                    source_id = rec.get("source_id", "")
+                    from services.target_sample_vector import load_pgvector_metadata
+
+                    metadata = load_pgvector_metadata(rec.get("metadata"))
+                    # Reconstruct a source-shaped row from metadata; fall back
+                    # to source_id for 'id'.
+                    row: dict[str, Any] = dict(metadata)
+                    if target_columns:
+                        for col in target_columns:
+                            if col not in row and col.lower() == "id" and source_id:
+                                row[col] = source_id
+                        row = {k: v for k, v in row.items() if k in target_columns}
+                    elif source_id and "id" not in {c.lower() for c in row}:
+                        row["id"] = source_id
+                    yield row
+
+            checksum = canonical_checksum_from_iter(
+                _source_shaped_rows(),
+                columns=target_columns or None,
+                limit=limit,
             )
-            rows: list[dict[str, Any]] = []
-            for raw in _iter_fetchmany(cur):
-                rec = dict(zip(names, raw))
-                source_id = rec.get("source_id", "")
-                metadata = rec.get("metadata") or {}
-                if isinstance(metadata, str):
-                    try:
-                        metadata = json.loads(metadata)
-                    except Exception:
-                        metadata = {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                # Reconstruct a source-shaped row from metadata; fall back to source_id for 'id'.
-                row: dict[str, Any] = dict(metadata)
-                if target_columns:
-                    for col in target_columns:
-                        if col not in row and col.lower() == "id" and source_id:
-                            row[col] = source_id
-                    row = {k: v for k, v in row.items() if k in target_columns}
-                elif source_id and "id" not in {c.lower() for c in row}:
-                    row["id"] = source_id
-                rows.append(row)
         conn.close()
-        checksum = canonical_checksum_from_iter(
-            iter(rows),
-            columns=target_columns or None,
-            limit=limit,
-        )
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_pinecone_namespace(
-    *,
-    host: str = "",
-    connection_string: str = "",
-    username: str = "",
-    password: str = "",
-    api_key: str = "",
-    namespace: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    written_ids: list[str] | None = None,
-) -> tuple[int, str]:
-    """Independent Pinecone stats + metadata fetch for Gate-8 (embeddings opaque)."""
-    try:
-        from connectors.pinecone_writer import _headers, _index_url, _requests_session
-
-        index_url = _index_url(host, connection_string)
-        key = api_key or password or username or ""
-        if not index_url or not key:
-            return -1, ""
-        session = _requests_session()
-        hdrs = _headers(key)
-        ns = (namespace or "").strip()
-        stats = session.post(
-            f"{index_url}/describe_index_stats",
-            data=json.dumps({}),
-            headers=hdrs,
-            timeout=30,
-        )
-        if stats.status_code not in {200, 201}:
-            return -1, ""
-        body = stats.json() if stats.content else {}
-        namespaces = body.get("namespaces") or {}
-        if ns:
-            count = int((namespaces.get(ns) or {}).get("vector_count") or 0)
-        else:
-            count = int(body.get("totalVectorCount") or body.get("total_vector_count") or 0)
-            if not count and isinstance(namespaces, dict):
-                count = sum(int((v or {}).get("vector_count") or 0) for v in namespaces.values())
-
-        dict_rows: list[dict[str, Any]] = []
-        # limit=0 means "full batch" for Gate-8 — still cap fetch for API safety.
-        id_cap = int(limit) if limit and int(limit) > 0 else 500
-        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
-        if ids:
-            params = [("ids", i) for i in ids]
-            if ns:
-                params.append(("namespace", ns))
-            # requests supports list of tuples for repeated ids=
-            fetch = session.get(
-                f"{index_url}/vectors/fetch",
-                params=params,
-                headers=hdrs,
-                timeout=30,
-            )
-            if fetch.status_code in {200, 201}:
-                vectors = (fetch.json() or {}).get("vectors") or {}
-                for vid, payload in vectors.items():
-                    meta = payload.get("metadata") if isinstance(payload, dict) else {}
-                    if not isinstance(meta, dict):
-                        meta = {}
-                    dict_rows.append({"id": vid, **meta})
-        columns = target_columns or (
-            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
-        )
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="pinecone",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Pinecone reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_qdrant_collection(
-    *,
-    host: str = "",
-    port: int = 6333,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    collection: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    written_ids: list[str] | None = None,
-) -> tuple[int, str]:
-    """Independent Qdrant collection count + payload scroll/retrieve for Gate-8."""
-    try:
-        from connectors.qdrant_writer import _base_url, _headers, _requests_session
-
-        api_key = password or username or ""
-        base_url = connection_string.rstrip("/") if connection_string else _base_url(host, port, ssl)
-        session = _requests_session()
-        hdrs = _headers(api_key)
-        info = session.get(f"{base_url}/collections/{collection}", headers=hdrs, timeout=15)
-        if info.status_code != 200:
-            return -1, ""
-        body = info.json() or {}
-        result = body.get("result") or body
-        count = int(
-            (result.get("points_count") if isinstance(result, dict) else None)
-            or (result.get("indexed_vectors_count") if isinstance(result, dict) else None)
-            or 0
-        )
-        id_cap = int(limit) if limit and int(limit) > 0 else 500
-        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
-        dict_rows: list[dict[str, Any]] = []
-        if ids:
-            retrieve = session.post(
-                f"{base_url}/collections/{collection}/points",
-                data=json.dumps({
-                    "ids": ids,
-                    "with_payload": True,
-                    "with_vector": False,
-                }),
-                headers=hdrs,
-                timeout=30,
-            )
-            if retrieve.status_code in {200, 201}:
-                points = (retrieve.json() or {}).get("result") or []
-                for pt in points:
-                    if not isinstance(pt, dict):
-                        continue
-                    payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
-                    dict_rows.append({"id": pt.get("id"), **payload})
-        if not dict_rows:
-            scroll = session.post(
-                f"{base_url}/collections/{collection}/points/scroll",
-                data=json.dumps({
-                    "limit": max(1, id_cap if ids else int(limit or 100) or 100),
-                    "with_payload": True,
-                    "with_vector": False,
-                }),
-                headers=hdrs,
-                timeout=30,
-            )
-            if scroll.status_code in {200, 201}:
-                points = ((scroll.json() or {}).get("result") or {}).get("points") or []
-                for pt in points:
-                    if not isinstance(pt, dict):
-                        continue
-                    payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
-                    dict_rows.append({"id": pt.get("id"), **payload})
-        columns = target_columns or (
-            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
-        )
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="qdrant",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Qdrant reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_weaviate_class(
-    *,
-    host: str = "",
-    port: int = 8080,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    api_key: str = "",
-    class_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    written_ids: list[str] | None = None,
-) -> tuple[int, str]:
-    """Independent Weaviate aggregate + object list for Gate-8."""
-    try:
-        from connectors.weaviate_writer import (
-            _base_url,
-            _class_name,
-            _headers,
-            _requests_session,
-        )
-
-        key = api_key or password or username or ""
-        base_url = _base_url(host, port, ssl, connection_string)
-        cls = _class_name(class_name)
-        session = _requests_session()
-        hdrs = _headers(key)
-        id_cap = int(limit) if limit and int(limit) > 0 else 500
-        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
-        dict_rows: list[dict[str, Any]] = []
-        if ids:
-            for oid in ids:
-                resp = session.get(
-                    f"{base_url}/v1/objects/{cls}/{oid}",
-                    headers=hdrs,
-                    timeout=15,
-                )
-                if resp.status_code not in {200, 201}:
-                    # Older Weaviate: /v1/objects/{uuid}
-                    resp = session.get(
-                        f"{base_url}/v1/objects/{oid}",
-                        headers=hdrs,
-                        timeout=15,
-                    )
-                if resp.status_code not in {200, 201}:
-                    continue
-                obj = resp.json() or {}
-                if not isinstance(obj, dict):
-                    continue
-                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
-                dict_rows.append({"id": obj.get("id") or oid, **props})
-        if not dict_rows:
-            agg = session.get(
-                f"{base_url}/v1/objects",
-                params={"class": cls, "limit": max(1, int(limit or 100) or 100)},
-                headers=hdrs,
-                timeout=30,
-            )
-            if agg.status_code not in {200, 201}:
-                return -1, ""
-            body = agg.json() or {}
-            objects = body.get("objects") or []
-            count = int(body.get("totalResults") or len(objects))
-            for obj in objects:
-                if not isinstance(obj, dict):
-                    continue
-                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
-                dict_rows.append({"id": obj.get("id"), **props})
-        else:
-            count = len(dict_rows)
-            # Prefer class cardinality when list endpoint works.
-            try:
-                agg = session.get(
-                    f"{base_url}/v1/objects",
-                    params={"class": cls, "limit": 1},
-                    headers=hdrs,
-                    timeout=15,
-                )
-                if agg.status_code in {200, 201}:
-                    count = int((agg.json() or {}).get("totalResults") or count)
-            except Exception:
-                pass
-        columns = target_columns or (
-            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
-        )
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="weaviate",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Weaviate reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_milvus_collection(
-    *,
-    host: str = "",
-    port: int = 19530,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    api_key: str = "",
-    database: str = "",
-    collection: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    written_ids: list[str] | None = None,
-) -> tuple[int, str]:
-    """Independent Milvus get_collection_stats + query for Gate-8."""
-    try:
-        from connectors.milvus_writer import (
-            _auth_token,
-            _base_url,
-            _collection_name,
-            _headers,
-            _ok_response,
-            _requests_session,
-        )
-
-        coll = _collection_name(collection)
-        db_name = (database or "").strip()
-        if db_name.lower() in {"", "test_db", "default", "public"}:
-            db_name = ""
-        token = _auth_token(api_key=api_key, username=username, password=password)
-        base_url = _base_url(host, port, ssl, connection_string)
-        session = _requests_session()
-        hdrs = _headers(token)
-        stats_payload: dict[str, Any] = {"collectionName": coll}
-        if db_name:
-            stats_payload["dbName"] = db_name
-        stats = session.post(
-            f"{base_url}/v2/vectordb/collections/get_stats",
-            data=json.dumps(stats_payload),
-            headers=hdrs,
-            timeout=30,
-        )
-        body = stats.json() if stats.content else {}
-        if not _ok_response(body if isinstance(body, dict) else {}, stats.status_code):
-            return -1, ""
-        data = body.get("data") if isinstance(body, dict) else {}
-        count = int(
-            (data or {}).get("rowCount")
-            or (data or {}).get("row_count")
-            or (data or {}).get("row_num")
-            or 0
-        )
-        id_cap = int(limit) if limit and int(limit) > 0 else 500
-        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
-        query_payload: dict[str, Any] = {
-            "collectionName": coll,
-            "outputFields": ["id", "content", "source_id", "chunk_index"],
-            "limit": max(1, id_cap if ids else int(limit or 100) or 100),
-        }
-        if ids:
-            # Prefer keyed filter when writer stamped identities.
-            quoted = ", ".join(json.dumps(i) for i in ids)
-            query_payload["filter"] = f"id in [{quoted}]"
-        else:
-            query_payload["filter"] = ""
-        if db_name:
-            query_payload["dbName"] = db_name
-        query = session.post(
-            f"{base_url}/v2/vectordb/entities/query",
-            data=json.dumps(query_payload),
-            headers=hdrs,
-            timeout=30,
-        )
-        qbody = query.json() if query.content else {}
-        dict_rows: list[dict[str, Any]] = []
-        if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
-            rows = qbody.get("data") if isinstance(qbody, dict) else []
-            if isinstance(rows, list):
-                for row in rows:
-                    if isinstance(row, dict):
-                        dict_rows.append({k: v for k, v in row.items() if k != "vector"})
-        columns = target_columns or (
-            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
-        )
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="milvus",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Milvus reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -1172,7 +2141,15 @@ def verify_mysql_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    """Independent MySQL/MariaDB read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys
+    while ``count`` stays whole-table, so an append into a populated table can
+    still prove per-cell fidelity of what it wrote.
+    """
     try:
         from connectors.mysql_conn import get_connection
 
@@ -1184,18 +2161,55 @@ def verify_mysql_table(
             password=password,
             connection_string=connection_string,
             ssl=ssl,
+            purpose="reconcile",
         )
-        from connectors.sql_identifiers import quote_table_ref
+        from connectors.mysql_conn import enable_autocommit
+        from connectors.sql_identifiers import quote_column_list, quote_table_ref
 
+        enable_autocommit(conn)
         table_ref = quote_table_ref(table_name, dialect="mysql")
         with conn.cursor() as cur:
+            # A metadata lock from the writer must fail closed, not sit at 99%.
+            # max_execution_time is MySQL milliseconds; MariaDB uses
+            # max_statement_time in seconds. Either name may be absent.
+            for session_sql in (
+                "SET SESSION lock_wait_timeout = 120",
+                "SET SESSION innodb_lock_wait_timeout = 120",
+                "SET SESSION max_execution_time = 1800000",
+                "SET SESSION max_statement_time = 1800",
+            ):
+                try:
+                    cur.execute(session_sql)
+                except Exception:  # noqa: BLE001 — MariaDB and MySQL name this differently
+                    logger.debug("MySQL reconcile session guard skipped", exc_info=True)
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        select_list = "*"
+        wanted = [str(c) for c in (target_columns or []) if str(c).strip()]
+        if wanted:
+            try:
+                select_list = quote_column_list(wanted, quote_char="`")
+            except Exception:  # noqa: BLE001 — bad identifier falls back to SELECT *
+                select_list = "*"
+        with streaming_readback_cursor(conn, engine="mysql") as cur:
+            # One statement on the streaming cursor. A failed projected select
+            # must not be retried on the same cursor — PyMySQL's SSCursor
+            # waits on the unread result and the job sits at 99%.
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="mysql", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(
+                    f"SELECT {select_list} FROM {table_ref} {where}",  # nosec B608
+                    ids,
+                )
+            else:
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
+            names, rows = dbapi_streaming_rows(cur)
+            columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="mysql",
@@ -1221,8 +2235,13 @@ def verify_sqlserver_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile."""
+    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import pymssql
 
@@ -1243,11 +2262,22 @@ def verify_sqlserver_table(
         try:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            from connectors.sqlserver_tick import full_precision_select_list
+
+            # DATETIME2(7): pymssql keeps six digits; read the seventh as text.
+            select_list = full_precision_select_list(cur, table_ref, None)
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="sqlserver", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT {select_list} FROM {table_ref} {where}", tuple(ids))  # nosec B608
+            else:
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="sqlserver",
@@ -1275,513 +2305,27 @@ def verify_oracle_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent Oracle read-back for Gate-8 (write-location ''≡NULL fingerprints)."""
-    try:
-        import sqlalchemy as sa
+    """Oracle Gate-8 read-back — see :mod:`services.reconciliation_oracle`."""
+    from services.reconciliation_oracle import verify_oracle_table as _verify
 
-        from connectors.generic_sql import get_sqlalchemy_engine
-        from connectors.sql_identifiers import quote_table_ref
-
-        cfg: dict[str, Any] = {
-            "type": "oracle",
-            "host": host or "",
-            "port": int(port or 1521),
-            "database": database or "",
-            "username": username or "",
-            "password": password or "",
-            "connection_string": connection_string or "",
-            "schema": schema or "",
-        }
-        engine = get_sqlalchemy_engine(cfg)
-        sch = (schema or username or "").strip() or None
-        table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
-        with engine.connect() as conn:
-            count = int(
-                conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
-                or 0
-            )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
-                columns,
-                limit=limit,
-                dest_db_type="oracle",
-                dest_types=dest_types,
-            )
-        return count, checksum
-    except Exception as exc:
-        logger.warning("Oracle reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_bigquery_table(
-    *,
-    project_id: str,
-    dataset_id: str,
-    connection_string: str,
-    host: str = "",
-    port: int = 0,
-    table_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-) -> tuple[int, str]:
-    try:
-        from connectors.bigquery_conn import get_client
-
-        client = get_client(
-            project_id=project_id,
-            credentials_path=connection_string,
-            host=host,
-            port=port,
-        )
-        table_id = f"{project_id}.{dataset_id}.{table_name}"
-        table = client.get_table(table_id)
-        count = table.num_rows or 0
-        field_names = [field.name for field in table.schema] if table.schema else []
-        columns = field_names or target_columns or []
-
-        def _row_iter():
-            yielded = 0
-            for row in client.list_rows(table_id):
-                if limit and yielded >= limit:
-                    break
-                yield list(row.values()) if hasattr(row, "values") else list(row)
-                yielded += 1
-
-        return int(count), canonical_checksum_from_iter(
-            _row_iter(), columns, limit=limit
-        )
-    except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def _rows_from_object_bytes(
-    body: bytes, key: str, columns: list[str] | None = None
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse S3/GCS object payload (JSON, JSONL, CSV) into dict rows and headers."""
-    import csv
-    import io
-
-    text = body.decode("utf-8", errors="replace")
-    lower_key = (key or "").lower()
-
-    if lower_key.endswith(".csv"):
-        reader = csv.DictReader(io.StringIO(text))
-        rows = list(reader)
-        headers = reader.fieldnames or []
-        return rows, headers
-
-    if lower_key.endswith(".jsonl"):
-        rows: list[dict[str, Any]] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                rows.append(parsed)
-            else:
-                rows.append({"value": parsed})
-        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
-        return rows, headers or (columns or [])
-
-    # Default: JSON array or single JSON object.
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = []
-    if isinstance(data, list):
-        rows = [r for r in data if isinstance(r, dict)]
-        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
-        return rows, headers or (columns or [])
-    if isinstance(data, dict):
-        return [data], sorted(data.keys())
-    return [], columns or []
-
-
-def verify_s3_object(
-    *,
-    bucket: str,
-    key: str,
-    host: str,
-    port: int,
-    username: str,
-    password: str,
-    connection_string: str,
-    ssl: bool,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-) -> tuple[int, str]:
-    """Reconcile an S3 object by downloading and parsing its contents.
-
-    Multi-chunk writers emit ``part-*`` keys under a stem prefix; aggregate
-    those parts when present so Gate-8 does not fall through to writer-ack
-    while most rows live only in part objects.
-    """
-    try:
-        from connectors.aws_common import boto3_client
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
-        from connectors.s3_reader import list_objects
-
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "ssl": ssl,
-            "database": bucket,
-        }
-        client = boto3_client("s3", cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = client.get_object(Bucket=bucket, Key=obj_key)["Body"].read()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
-    except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_sftp_object(
-    *,
-    host: str = "",
-    port: int = 22,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    database: str = "",
-    table_name: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent SFTP download + parse for Gate-8 (parity with S3/GCS/ADLS)."""
-    try:
-        from connectors.sftp_common import connect_sftp, parse_sftp_config
-
-        cfg = parse_sftp_config(
-            connection_string=connection_string,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            database=database,
-            table=table_name,
-        )
-        if not cfg.host or not cfg.path:
-            return -1, ""
-        transport, sftp = connect_sftp(cfg)
-        try:
-            with sftp.file(cfg.path, "rb") as fh:
-                body = fh.read()
-        finally:
-            sftp.close()
-            transport.close()
-        rows, headers = _rows_from_object_bytes(body, cfg.path, target_columns)
-        columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(
-            rows,
-            columns,
-            limit=limit,
-            dest_db_type="sftp",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("SFTP reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_gcs_blob(
-    *,
-    bucket: str,
-    key: str,
-    host: str,
-    port: int,
-    connection_string: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-) -> tuple[int, str]:
-    """Reconcile a GCS blob by downloading and parsing its contents."""
-    try:
-        from connectors.gcs_common import gcs_client
-        from connectors.gcs_reader import list_objects
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
-
-        cfg = {
-            "host": host,
-            "port": port,
-            "connection_string": connection_string,
-        }
-        client = gcs_client(cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        bucket_obj = client.bucket(bucket)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = bucket_obj.blob(obj_key).download_as_bytes()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
-    except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_adls_blob(
-    *,
-    container: str,
-    key: str,
-    host: str = "",
-    port: int = 0,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    service_account: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Azure Blob / ADLS Gen2 read-back (parity with S3/GCS Gate-8)."""
-    try:
-        from connectors.adls_common import blob_service_client
-        from connectors.adls_reader import list_objects
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
-
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "service_account": service_account,
-            "database": container,
-        }
-        client = blob_service_client(cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, container, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = client.get_blob_client(container, obj_key).download_blob().readall()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(
-            all_rows,
-            columns,
-            limit=limit,
-            dest_db_type="adls",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("ADLS reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_hubspot_object(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    object_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent HubSpot CRM read-back for Gate-8 (reverse-ETL honesty)."""
-    try:
-        from connectors.hubspot import read_object
-
-        cfg = {
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "table": object_name,
-            "database": object_name,
-        }
-        batch = read_object(
-            cfg=cfg,
-            object=object_name,
-            limit=max(int(limit or 500), 1),
-        )
-        headers = list(batch.headers or target_columns or [])
-        rows = list(batch.rows or [])
-        # Convert matrix rows to dicts when ReadBatch stores tuples.
-        dict_rows: list[Any] = []
-        for row in rows:
-            if isinstance(row, dict):
-                dict_rows.append(row)
-            elif headers:
-                dict_rows.append(
-                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-                )
-            else:
-                dict_rows.append(row)
-        columns = headers or target_columns or (
-            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
-        )
-        return len(dict_rows), canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="hubspot",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("HubSpot reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_salesforce_object(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    api_key: str = "",
-    object_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Salesforce SOQL read-back for Gate-8 reverse-ETL."""
-    try:
-        from connectors.salesforce import read_object
-
-        cfg = {
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "api_key": api_key,
-            "table": object_name,
-            "database": object_name,
-        }
-        batch = read_object(
-            cfg=cfg,
-            object=object_name,
-            limit=max(int(limit or 500), 1),
-        )
-        headers = list(batch.headers or target_columns or [])
-        dict_rows: list[Any] = []
-        for row in batch.rows or []:
-            if isinstance(row, dict):
-                # Strip Salesforce attributes envelope when present.
-                d = {k: v for k, v in row.items() if k != "attributes"}
-                dict_rows.append(d)
-            elif headers:
-                dict_rows.append(
-                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-                )
-        columns = headers or target_columns or (
-            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
-        )
-        return len(dict_rows), canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="salesforce",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Salesforce reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_airtable_table(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    api_key: str = "",
-    base_id: str,
-    table_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Airtable read-back — flatten fields for Gate-8 fingerprints."""
-    try:
-        from connectors.airtable import read_object
-        from connectors.saas_typed_schema import flatten_airtable_record
-
-        cfg = {
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string or base_id,
-            "api_key": api_key,
-            "database": base_id,
-            "table": table_name,
-            "type": "airtable",
-        }
-        batch = read_object(
-            cfg=cfg,
-            object=table_name,
-            limit=max(int(limit or 500), 1),
-        )
-        dict_rows: list[Any] = []
-        for row in batch.rows or []:
-            if isinstance(row, dict):
-                flat, _schema = flatten_airtable_record(row)
-                dict_rows.append(flat)
-            elif batch.headers:
-                headers = list(batch.headers)
-                dict_rows.append(
-                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-                )
-        columns = target_columns or (
-            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
-        )
-        return len(dict_rows), canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="airtable",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Airtable reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
+    return _verify(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+        schema=schema,
+        table_name=table_name,
+        target_columns=target_columns,
+        limit=limit,
+        dest_types=dest_types,
+        written_ids=written_ids,
+        pk_column=pk_column,
+    )
 
 
 def _verify_saas_read_object(
@@ -1800,8 +2344,10 @@ def _verify_saas_read_object(
         batch = read_object(
             cfg=cfg,
             object=object_name,
-            limit=max(int(limit or 500), 1),
+            limit=_saas_readback_limit(limit),
         )
+        if _saas_readback_truncated(driver, limit, len(batch.rows or [])):
+            return -1, ""
         headers = list(batch.headers or target_columns or [])
         dict_rows: list[Any] = []
         for row in batch.rows or []:
@@ -1827,263 +2373,6 @@ def _verify_saas_read_object(
         return -1, ""
 
 
-def verify_stripe_object(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    api_key: str = "",
-    object_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Stripe API read-back for Gate-8 reverse-ETL."""
-    from connectors.stripe import read_object
-
-    return _verify_saas_read_object(
-        driver="stripe",
-        read_object=read_object,
-        cfg={
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "api_key": api_key,
-            "table": object_name,
-            "database": object_name,
-            "type": "stripe",
-        },
-        object_name=object_name or "customers",
-        target_columns=target_columns,
-        limit=limit,
-        dest_types=dest_types,
-    )
-
-
-def verify_shopify_object(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    api_key: str = "",
-    object_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Shopify Admin REST read-back for Gate-8 reverse-ETL."""
-    from connectors.shopify import read_object
-
-    return _verify_saas_read_object(
-        driver="shopify",
-        read_object=read_object,
-        cfg={
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "api_key": api_key,
-            "table": object_name,
-            "database": object_name,
-            "shop": host,
-            "type": "shopify",
-        },
-        object_name=object_name or "customers",
-        target_columns=target_columns,
-        limit=limit,
-        dest_types=dest_types,
-    )
-
-
-def verify_zendesk_object(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    api_key: str = "",
-    object_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Zendesk Support API read-back for Gate-8 reverse-ETL."""
-    from connectors.zendesk import read_object
-
-    return _verify_saas_read_object(
-        driver="zendesk",
-        read_object=read_object,
-        cfg={
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "api_key": api_key,
-            "table": object_name,
-            "database": object_name,
-            "type": "zendesk",
-        },
-        object_name=object_name or "tickets",
-        target_columns=target_columns,
-        limit=limit,
-        dest_types=dest_types,
-    )
-
-
-def verify_notion_object(
-    *,
-    host: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    api_key: str = "",
-    object_name: str,
-    database_id: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Notion database/page read-back for Gate-8 reverse-ETL."""
-    from connectors.notion import read_object
-
-    return _verify_saas_read_object(
-        driver="notion",
-        read_object=read_object,
-        cfg={
-            "host": host,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "api_key": api_key,
-            "table": object_name,
-            "database": database_id or object_name,
-            "type": "notion",
-        },
-        object_name=object_name or database_id or "",
-        target_columns=target_columns,
-        limit=limit,
-        dest_types=dest_types,
-    )
-
-
-def verify_kafka_topic(
-    *,
-    host: str = "",
-    port: int = 0,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    topic: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    schema_registry_url: str = "",
-) -> tuple[int, str]:
-    """Bounded Kafka consume for Gate-8 — sample proof, not topic cardinality."""
-    try:
-        from connectors.kafka_reader import read_topic_batch
-
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "database": topic,
-            "table": topic,
-            "group_id": f"dataflow-gate8-verify-{abs(hash(topic)) % 10_000_000}",
-            "auto_offset_reset": "earliest",
-            "schema_registry_url": schema_registry_url,
-        }
-        batch, _cursor = read_topic_batch(
-            cfg=cfg,
-            topic=topic,
-            columns=target_columns,
-            limit=max(int(limit or 500), 1),
-        )
-        headers = list(batch.headers or target_columns or [])
-        rows = list(batch.rows or [])
-        dict_rows: list[Any] = []
-        for row in rows:
-            if isinstance(row, dict):
-                dict_rows.append(row)
-            elif headers:
-                dict_rows.append(
-                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-                )
-        columns = headers or target_columns or []
-        return len(dict_rows), canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="kafka",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Kafka reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_databricks_table(
-    *,
-    host: str,
-    port: int,
-    database: str,
-    username: str,
-    password: str,
-    connection_string: str,
-    schema: str = "",
-    table_name: str,
-    http_path: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Databricks SQL warehouse read-back for Gate-8."""
-    try:
-        import sqlalchemy as sa
-
-        from connectors.generic_sql import get_sqlalchemy_engine
-        from connectors.sql_identifiers import quote_table_ref
-
-        cfg: dict[str, Any] = {
-            "type": "databricks",
-            "host": host or "",
-            "port": int(port or 443),
-            "database": database or "",
-            "username": username or "",
-            "password": password or "",
-            "connection_string": connection_string or "",
-            "schema": schema or "",
-            "http_path": http_path or "",
-        }
-        engine = get_sqlalchemy_engine(cfg)
-        sch = (schema or database or "").strip() or None
-        table_ref = quote_table_ref(table_name, schema=sch, dialect="ansi")
-        with engine.connect() as conn:
-            count = int(
-                conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
-                or 0
-            )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
-                columns,
-                limit=limit,
-                dest_db_type="databricks",
-                dest_types=dest_types,
-            )
-        return count, checksum
-    except Exception as exc:
-        logger.warning("Databricks reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
 def verify_sqlite_table(
     *,
     connection_string: str,
@@ -2092,8 +2381,19 @@ def verify_sqlite_table(
     host: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a SQLite target by reading the local file."""
+    """Reconcile a SQLite target by reading the local file.
+
+    When ``written_ids`` + ``pk_column`` are set (upsert/append batch proof),
+    the checksum fingerprints only those keys while ``count`` remains the
+    full-table cardinality for operator visibility. ``dest_types`` steers the
+    digest exactly as the write pass was steered: SQLite hands an exact decimal
+    back as TEXT, and an unsteered read-back hashes ``'0.002'`` as a string
+    while the write pass hashed a number.
+    """
     try:
         import sqlite3
 
@@ -2109,11 +2409,24 @@ def verify_sqlite_table(
         cur = conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
         count = cur.fetchone()[0]
-        cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        if ids:
+            pk_q = quote_sql_identifier(pk)
+            placeholders = ",".join("?" for _ in ids)
+            cur.execute(
+                f"SELECT * FROM {table_ref} WHERE {pk_q} IN ({placeholders})",  # nosec B608
+                ids,
+            )
+        else:
+            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
-        columns = names or target_columns or []
+        columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
         checksum = canonical_checksum_from_iter(
-            _iter_fetchmany(cur), columns, limit=limit
+            projected,
+            columns,
+            limit=limit,
+            dest_db_type="sqlite",
+            dest_types=dest_types,
         )
         conn.close()
         return int(count), checksum
@@ -2125,404 +2438,6 @@ def verify_sqlite_table(
         return -1, ""
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_duckdb_table(
-    *,
-    connection_string: str,
-    database: str,
-    table_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-) -> tuple[int, str]:
-    """Reconcile a DuckDB target by reading the local file."""
-    try:
-        import duckdb
-
-        path = connection_string or database
-        if not path:
-            return -1, ""
-        from connectors.sql_identifiers import quote_table_ref
-
-        table_ref = quote_table_ref(table_name, dialect="duckdb")
-        conn = duckdb.connect(str(path))
-        count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]  # nosec B608
-        cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-        names = [d[0] for d in cur.description] if cur.description else []
-        columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(
-            _iter_fetchmany(cur), columns, limit=limit
-        )
-        conn.close()
-        return int(count), checksum
-    except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_clickhouse_table(
-    *,
-    host: str = "",
-    port: int = 9000,
-    database: str = "",
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    schema: str = "",
-    ssl: bool = False,
-    table_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent ClickHouse read-back with ``SELECT … FINAL`` (Airbyte-class).
-
-    ReplacingMergeTree upsert is lazy — Gate-8 without FINAL would fingerprint
-    duplicate keys and false-fail checksum reconcile.
-    """
-    try:
-        import sqlalchemy as sa
-
-        from connectors.generic_sql import (
-            clickhouse_final_table_sql,
-            get_sqlalchemy_engine,
-        )
-        from connectors.sql_identifiers import quote_table_ref
-
-        cfg: dict[str, Any] = {
-            "type": "clickhouse",
-            "host": host or "",
-            "port": int(port or 9000),
-            "database": database or "",
-            "username": username or "",
-            "password": password or "",
-            "connection_string": connection_string or "",
-            "schema": schema or "",
-            "ssl": bool(ssl),
-        }
-        engine = get_sqlalchemy_engine(cfg)
-        table_ref = quote_table_ref(
-            table_name,
-            schema=schema or None,
-            dialect="clickhouse",
-        )
-        from_sql = clickhouse_final_table_sql(table_ref)
-        with engine.connect() as conn:
-            count = int(
-                conn.execute(
-                    sa.text(f"SELECT count() FROM {from_sql}")  # nosec B608
-                ).scalar()
-                or 0
-            )
-            result = conn.execute(sa.text(f"SELECT * FROM {from_sql}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
-                columns,
-                limit=limit,
-                dest_db_type="clickhouse",
-                dest_types=dest_types,
-            )
-        return count, checksum
-    except Exception as exc:
-        logger.warning("ClickHouse reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_generic_sql_table(
-    *,
-    dest: dict[str, Any],
-    schema: str = "",
-    table_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    engine_hint: str = "",
-) -> tuple[int, str]:
-    """Independent SQLAlchemy read-back for catalog ``generic_sql`` engines.
-
-    Covers Teradata / HANA / Vertica / Informix / Trino / Firebird / Netezza and
-    other SQLAlchemy-backed SKUs that share ``get_sqlalchemy_engine``. Returns
-    ``(-1, "")`` only when the engine cannot connect or the table is missing —
-    never invent a checksum from writer rowcounts (Gate-8 honesty).
-    """
-    try:
-        import sqlalchemy as sa
-
-        from connectors.generic_sql import get_sqlalchemy_engine
-        from connectors.sql_identifiers import quote_table_ref
-
-        hint = (
-            (engine_hint or dest.get("type") or dest.get("engine") or "generic_sql")
-            .strip()
-            .lower()
-        )
-        cfg = dict(dest)
-        cfg["type"] = hint if hint and hint != "generic_sql" else (
-            str(dest.get("type") or "generic_sql")
-        )
-        engine = get_sqlalchemy_engine(cfg)
-        dialect = (
-            getattr(getattr(engine, "dialect", None), "name", None) or hint or "ansi"
-        ).lower()
-        sch = (schema or dest.get("schema") or "").strip() or None
-        table_ref = quote_table_ref(table_name, schema=sch, dialect=dialect)
-        with engine.connect() as conn:
-            count = int(
-                conn.execute(
-                    sa.text(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
-                ).scalar()
-                or 0
-            )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
-                columns,
-                limit=limit,
-                dest_db_type=hint or dialect,
-                dest_types=dest_types,
-            )
-        return count, checksum
-    except Exception as exc:
-        logger.warning(
-            "generic_sql reconciliation read-back failed (%s): %s",
-            engine_hint or dest.get("type"),
-            exc,
-            exc_info=exc,
-        )
-        return -1, ""
-
-
-def verify_iceberg_table(
-    *,
-    connection_string: str = "",
-    warehouse: str = "",
-    table_name: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-) -> tuple[int, str]:
-    """Reconcile an Iceberg table by scanning the catalog and fingerprinting rows."""
-    try:
-        from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
-
-        endpoint = {
-            "connection_string": connection_string or "",
-            "warehouse": warehouse or "",
-            "table": table_name,
-            "table_name": table_name,
-        }
-        cfg = parse_iceberg_catalog_config(endpoint)
-        catalog = load_catalog(endpoint)
-        identifier = cfg["namespace"] + (cfg["table_name"],)
-        tbl = catalog.load_table(identifier)
-        count = tbl.scan().count()
-        arrow = tbl.scan().to_arrow()
-        if limit and len(arrow) > limit:
-            arrow = arrow.slice(0, limit)
-        rows = arrow.to_pylist()
-        columns = target_columns or list(arrow.column_names)
-        checksum = fingerprint_checksum(_iter_fingerprints(rows, columns))
-        return int(count), checksum
-    except Exception as exc:
-        logger.warning("Iceberg reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_mongodb_collection(
-    *,
-    host: str = "",
-    port: int = 27017,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    database: str = "",
-    ssl: bool = False,
-    auth_source: str = "",
-    table_name: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Reconcile a MongoDB target by counting and fingerprinting documents."""
-    try:
-        from connectors.mongodb_common import (
-            _mongo_client,
-            normalize_mongodb_connection_string,
-        )
-
-        conn_str = normalize_mongodb_connection_string(
-            connection_string or "",
-            database=database,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            ssl=ssl,
-            auth_source=auth_source,
-        )
-        client = _mongo_client(conn_str)
-        db = client[database or "test"]
-        coll = db[table_name]
-        count = coll.count_documents({})
-
-        def _doc_iter():
-            yielded = 0
-            for doc in coll.find({}):
-                if limit and yielded >= limit:
-                    break
-                yield doc
-                yielded += 1
-
-        columns = target_columns or sorted(
-            set(k for doc in coll.find({}).limit(100) for k in doc.keys())
-        )
-        checksum = canonical_checksum_from_iter(
-            _doc_iter(),
-            columns,
-            limit=limit,
-            dest_db_type="mongodb",
-            dest_types=dest_types,
-        )
-        return int(count), checksum
-    except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_redis_prefix(
-    *,
-    host: str,
-    port: int,
-    database: str,
-    username: str,
-    password: str,
-    connection_string: str,
-    ssl: bool,
-    prefix: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-) -> tuple[int, str]:
-    """Reconcile Redis keys under ``prefix:*`` (writer key layout)."""
-    try:
-        from connectors.redis_reader import _decode, _redis_client
-
-        client = _redis_client(
-            {
-                "host": host,
-                "port": port,
-                "database": database,
-                "username": username,
-                "password": password,
-                "connection_string": connection_string,
-                "ssl": ssl,
-            }
-        )
-        pattern = f"{prefix}:*" if prefix else "*"
-        keys: list[str] = []
-        cursor = 0
-        while True:
-            cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
-            for raw in batch:
-                keys.append(raw.decode() if isinstance(raw, bytes) else str(raw))
-            if cursor == 0:
-                break
-
-        def _row_iter():
-            for key in keys:
-                raw = client.get(key)
-                text = _decode(raw)
-                try:
-                    payload = (
-                        json.loads(text) if text.startswith("{") else {"value": text}
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"value": text}
-                if isinstance(payload, dict):
-                    yield payload
-                else:
-                    yield {"value": text}
-
-        columns = target_columns or []
-        if not columns and keys:
-            sample = next(_row_iter(), {})
-            columns = sorted(sample.keys()) if sample else ["value"]
-        checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
-        return len(keys), checksum
-    except Exception as exc:
-        logger.warning("Redis reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_elasticsearch_index(
-    *,
-    host: str = "",
-    port: int = 9200,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    api_key: str = "",
-    index: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Elasticsearch search read-back for Gate-8."""
-    try:
-        from connectors.elasticsearch_reader import read_index_batch
-
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "ssl": ssl,
-            "api_key": api_key,
-        }
-        batch, _ = read_index_batch(
-            cfg=cfg,
-            index=index,
-            columns=target_columns,
-            limit=max(int(limit or 500), 1),
-        )
-        headers = list(batch.headers or target_columns or [])
-        dict_rows: list[Any] = []
-        for row in batch.rows or []:
-            if isinstance(row, dict):
-                dict_rows.append(row)
-            elif headers:
-                dict_rows.append(
-                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-                )
-        columns = headers or target_columns or (
-            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
-        )
-        # Prefer index cardinality when available (batch may be LIMIT-capped).
-        count = len(dict_rows)
-        try:
-            from connectors.elasticsearch_reader import _client
-
-            es = _client(cfg)
-            try:
-                count = int(es.count(index=index).get("count", count))
-            finally:
-                es.close()
-        except Exception:
-            pass
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="elasticsearch",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Elasticsearch reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -2539,13 +2454,22 @@ def verify_snowflake_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    """Independent Snowflake read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         from connectors.snowflake_conn import (
             get_connection,
             normalize_account,
             resolve_or_fold_snowflake_table,
+            snowflake_column_name,
+            snowflake_physical_name_map,
             snowflake_qualified_table,
+            snowflake_select_list,
         )
 
         conn = get_connection(
@@ -2577,11 +2501,31 @@ def verify_snowflake_table(
             qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            physical = snowflake_physical_name_map(
+                cur, schema or "PUBLIC", resolved
+            )
+            select_list = (
+                snowflake_select_list(target_columns, physical)
+                if target_columns
+                else "*"
+            )
+            if ids:
+                where = keyed_readback_where(
+                    snowflake_column_name(pk, physical),
+                    ids,
+                    dialect="snowflake",
+                    placeholders=["%s"] * len(ids),
+                )
+                cur.execute(
+                    f"SELECT {select_list} FROM {qualified_name} {where}", ids
+                )  # nosec B608
+            else:
+                cur.execute(f"SELECT {select_list} FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="snowflake",
@@ -2589,60 +2533,6 @@ def verify_snowflake_table(
             )
         conn.close()
         return count, checksum
-    except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_dynamodb_table(
-    *,
-    connection_string: str,
-    database: str,
-    table_name: str,
-    username: str = "local",
-    password: str = "local",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Reconcile a DynamoDB target by Scan count and item fingerprint."""
-    try:
-        import boto3
-        from boto3.dynamodb.types import TypeDeserializer
-
-        endpoint = connection_string or "http://localhost:8000"
-        client = boto3.client(
-            "dynamodb",
-            endpoint_url=endpoint,
-            aws_access_key_id=username.strip() or "local",
-            aws_secret_access_key=password.strip() or "local",
-            region_name="us-east-1",
-        )
-        paginator = client.get_paginator("scan")
-        count = sum(
-            page["Count"]
-            for page in paginator.paginate(TableName=table_name, Select="COUNT")
-        )
-
-        deserializer = TypeDeserializer()
-
-        def _item_iter():
-            yielded = 0
-            for page in paginator.paginate(TableName=table_name):
-                for item in page.get("Items", []):
-                    if limit and yielded >= limit:
-                        break
-                    yield {k: deserializer.deserialize(v) for k, v in item.items()}
-                    yielded += 1
-
-        columns = target_columns or []
-        return int(count), canonical_checksum_from_iter(
-            _item_iter(),
-            columns,
-            limit=limit,
-            dest_db_type="dynamodb",
-            dest_types=dest_types,
-        )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -2660,25 +2550,37 @@ def verify_target(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     """Independent destination read-back for Gate-8.
 
     ``written_ids`` (from writer meta) enables keyed fetch for vector / SaaS
     destinations where full-table scan is unavailable — Fivetran HVR Compare
     class: prove the batch we wrote, not an opaque index count alone.
+
+    For SQL upsert/append, ``written_ids`` + ``pk_column`` fingerprint only the
+    batch keys while returning full-table cardinality.
     """
     # Prefer explicit arg; allow dest cfg stash from reconcile_step.
     ids = written_ids
     if ids is None and isinstance(dest.get("written_ids"), list):
         ids = [str(x) for x in dest["written_ids"] if x is not None]
+    pk = (pk_column or dest.get("pk_column") or dest.get("gate8_pk_column") or "")
+    pk = str(pk).strip() or None
 
     if db_type == "iceberg":
+        extra = dest.get("extra") if isinstance(dest.get("extra"), dict) else None
         count, chk = verify_iceberg_table(
             connection_string=dest.get("connection_string", ""),
-            warehouse=dest.get("warehouse", ""),
+            warehouse=dest.get("warehouse", "") or dest.get("database", ""),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            schema=schema or dest.get("schema", "") or "",
+            database=dest.get("database", ""),
+            host=dest.get("host", "") or "",
+            extra=extra,
+            dest_types=dest_types,
         )
     elif db_type == "mongodb":
         count, chk = verify_mongodb_collection(
@@ -2694,6 +2596,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "dynamodb":
         from connectors.aws_common import resolve_endpoint_url
@@ -2717,6 +2621,9 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "duckdb":
         count, chk = verify_duckdb_table(
@@ -2725,6 +2632,9 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "generic_sql":
         # Route local file engines / Oracle / ClickHouse by URL or dest.type.
@@ -2739,6 +2649,9 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif "duckdb" in conn or conn.endswith(".duckdb") or conn.endswith(".duck"):
             count, chk = verify_duckdb_table(
@@ -2747,6 +2660,9 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif conn.startswith("oracle") or engine_hint.startswith("oracle"):
             count, chk = verify_oracle_table(
@@ -2761,6 +2677,8 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
                 dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif "clickhouse" in engine_hint or "clickhouse" in conn:
             count, chk = verify_clickhouse_table(
@@ -2776,6 +2694,8 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
                 dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         else:
             # Teradata / HANA / Vertica / Informix / Trino / Firebird / …
@@ -2788,6 +2708,8 @@ def verify_target(
                 limit=limit,
                 dest_types=dest_types,
                 engine_hint=engine_hint,
+                written_ids=ids,
+                pk_column=pk,
             )
     elif db_type == "clickhouse":
         count, chk = verify_clickhouse_table(
@@ -2803,6 +2725,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "pgvector":
         # pgvector tables store an opaque embedding; reconstruct source rows from
@@ -2837,6 +2761,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "redis":
         count, chk = verify_redis_prefix(
@@ -2850,9 +2776,13 @@ def verify_target(
             prefix=table_name,
             target_columns=target_columns,
             limit=limit,
+            written_ids=ids,
+            pk_column=pk,
+            dest_db_type=db_type,
+            dest_types=dest_types,
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
-        count, chk = verify_elasticsearch_index(
+        count, chk = _reconciliation.verify_elasticsearch_index(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 9200),
             username=dest.get("username", ""),
@@ -2878,6 +2808,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "mysql":
         count, chk = verify_mysql_table(
@@ -2892,6 +2824,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {"sqlserver", "mssql", "azure_sql"}:
         count, chk = verify_sqlserver_table(
@@ -2906,6 +2840,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {
         "oracle",
@@ -2927,6 +2863,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
@@ -2938,6 +2876,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "s3":
         count, chk = verify_s3_object(
@@ -2951,6 +2890,8 @@ def verify_target(
             ssl=bool(dest.get("ssl", False)),
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -2961,6 +2902,8 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
         )
     elif db_type in {
         "adls",
@@ -2980,8 +2923,11 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
         )
     elif db_type == "sftp":
+        from connectors.sftp_common import host_key_settings
+
         count, chk = verify_sftp_object(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 22),
@@ -2993,6 +2939,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
+            **host_key_settings(dest),
         )
     elif db_type in {
         "databricks",
@@ -3015,6 +2963,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "hubspot":
         count, chk = verify_hubspot_object(
@@ -3102,6 +3052,8 @@ def verify_target(
             dest_types=dest_types,
         )
     elif db_type == "kafka":
+        from services.copy_kafka_common import kafka_security_options
+
         count, chk = verify_kafka_topic(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 9092),
@@ -3115,6 +3067,7 @@ def verify_target(
             schema_registry_url=str(
                 dest.get("schema_registry_url") or dest.get("registry_url") or ""
             ),
+            security_options=kafka_security_options(dest),
         )
     elif db_type == "pinecone":
         count, chk = verify_pinecone_namespace(
@@ -3144,7 +3097,7 @@ def verify_target(
             written_ids=ids,
         )
     elif db_type == "weaviate":
-        count, chk = verify_weaviate_class(
+        count, chk = _reconciliation.verify_weaviate_class(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 8080),
             username=dest.get("username", ""),
@@ -3159,7 +3112,7 @@ def verify_target(
             written_ids=ids,
         )
     elif db_type == "milvus":
-        count, chk = verify_milvus_collection(
+        count, chk = _reconciliation.verify_milvus_collection(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 19530),
             username=dest.get("username", ""),
@@ -3204,6 +3157,8 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             engine_hint=db_type,
+            written_ids=ids,
+            pk_column=pk,
         )
     else:
         count, chk = -1, ""
@@ -3219,25 +3174,94 @@ def fingerprint_for_reconcile(
     ddl_type: str = "",
     engine: str = "",
     transform: str | None = None,
+    source_locale: str = "",
 ) -> str:
     """Canonical Gate-8 fingerprint: transform → destination bind → normalize_cell.
 
     Source samples and destination read-back must share this path so Mongo
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
-    from services.transform_engine import apply_transform
-    from services.value_serializer import cell_to_string
-
+    ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
+    absent_field = is_missing_sentinel(value)
+    if absent_field:
+        # An absent field is NULL to every SQL destination — that is what the
+        # writer stores and what the read-back returns. Only the ``Missing``
+        # *object* reached this path untranslated (its string spelling was
+        # already handled downstream), and ``cell_to_string`` renders it as an
+        # empty string. That made a sparse Mongo/DynamoDB/Redis document
+        # fingerprint as ``''`` against a destination NULL, failing Gate-8 on a
+        # correct transfer — and, in the other direction, matching a destination
+        # that really did store an empty string.
+        wire = None
+        value = None
+    if wire is not None and type(wire).__name__ == "JsonNullToken" and ddl_type:
+        # A file read-back hands a present JSONL ``null`` over as the JSON-null
+        # token. Only a document column can hold JSON null as a value; on
+        # every other column the file's ``null`` is the SQL NULL the writer
+        # emitted for it (D144 — the key is no longer dropped).
+        from services.type_system import normalize_logical_type
+
+        if normalize_logical_type(ddl_type) not in {
+            "json", "array", "object", "struct", "map",
+        }:
+            wire = None
+            value = None
+    if is_explicit_null(value):
+        # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
+        wire = None
+        value = None
+    if isinstance(wire, str):
+        # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
+        # literal ``x`` (one layer — the recursive escape stays provable), so
+        # a colliding literal fingerprints as itself on both sides.
+        wire = unescape_wire_text(wire)
+        value = wire
+    if is_reader_null_cell(wire):
+        # The NULL wire spellings (``__DF_SQL_NULL__`` / ``__df_ddb_null__``)
+        # are NULL, not a colliding literal — without this the transform stage
+        # below re-escapes the sentinel through ``cell_to_string`` and a
+        # transformed NULL fingerprints as ``"__DF_ESC____DF_SQL_NULL__"``
+        # against a destination NULL (duckdb JSON-column regression).
+        wire = None
+        value = None
     tname = (transform or "").strip().lower()
+    if _json_text_fingerprints_raw(wire, tname, ddl_type, engine):
+        # D192: the JSON carrier transform and bind are meant to be lossless,
+        # so the source side is fingerprinted as the document it IS, not as
+        # what the bind made of it. Replaying the bind on both sides hid a
+        # write that turned ``1.10`` into ``1.1`` behind a matching checksum.
+        return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
-        if value is None:
+        if absent_field:
+            # An absent field stays NULL; nothing was written for the recipe to act on.
             converted, err = None, None
         else:
-            converted, err = apply_transform(
-                cell if cell is not None else "", transform or "none"
+            # A real NULL goes through the same ``apply_transform`` as the
+            # writer: ``default:`` turns it into the literal, every other
+            # transform maps NULL to NULL (D175).
+            # The writer ran this transform under the run's number locale,
+            # and a raw source cell ('1,234' text from a DB driver) must be
+            # fingerprinted the same way — ``source_locale`` carries it.
+            # A canonical cell (file-reader output: '1.234') must NOT be
+            # re-interpreted — its caller leaves source_locale unset and WIRE
+            # reads the canonical form as itself.
+            locale_token = set_active_number_locale(
+                source_locale or NUMBER_LOCALE_WIRE
             )
+            # The fingerprint reproduces what the writer *bound*, and the
+            # write-path bind is not strict-gated — the run-wide
+            # set_strict_number_reading(True) pin (strict validation with no
+            # declared locale) must not refuse a cell here that the writer
+            # already accepted ('2.000,50' -> 2000.5), or the source side
+            # fingerprints NULL against a faithful destination value.
+            strict_token = set_strict_number_reading(False)
+            try:
+                converted, err = apply_transform(cell, transform or "none")
+            finally:
+                reset_strict_number_reading(strict_token)
+                reset_active_number_locale(locale_token)
         if err:
             # Quarantine / coerce_null write path stores SQL NULL for failed cells.
             # Fingerprint must match that — not the raw bad wire — or Gate-8
@@ -3245,17 +3269,90 @@ def fingerprint_for_reconcile(
             wire = None
         else:
             wire = converted
-    elif value is not None and not isinstance(value, (str, int, float, bool, bytes)):
+    elif value is not None and not isinstance(
+        value, (str, int, float, bool, bytes, Decimal)
+    ):
+        # A driver Decimal stays typed: rendered as text, ``1.000`` becomes a
+        # locale-ambiguous literal that ``_canonicalize_number`` refuses to fold,
+        # so a DECIMAL(12,3) read-back of 1.000 fingerprinted as "1.000" against
+        # the write pass's "1" and a faithful mirror failed its own digest.
         wire = cell_to_string(value, preserve_sql_null=True)
 
     if ddl_type:
+        # Dest read-back is storage-canonical. Re-applying the transfer locale
+        # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
+        # WIRE reads that canonical form as itself — ``20.500`` out of
+        # ``NUMERIC(12,3)`` is 20.5, not a refusal that left one side of the
+        # compare unquantized and reported a faithful row as corruption.
+        # A *source* cell is the same shape: raw driver values get the run
+        # locale the writer bound under; canonical (reader-parsed) cells get
+        # WIRE so '1.234' stays '1.234' — ``source_locale or`` picks per caller.
+        token = set_active_number_locale(source_locale or NUMBER_LOCALE_WIRE)
         try:
-            from connectors.sql_bind import normalize_sql_bind_value
-
-            wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
-        except Exception:
-            pass
+            try:
+                wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
+            except Exception:
+                pass
+        finally:
+            reset_active_number_locale(token)
+        # Fingerprint the instant at the granularity the carrier keeps, or a
+        # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
+        # a whole-column checksum mismatch with no column named.
+        wire = quantize_instant_for_carrier(wire, ddl_type=ddl_type, engine=engine)
     return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
+
+
+def operator_cell_text(fingerprint: str) -> str:
+    """Operator spelling of a fingerprint. The internal null marker stays internal.
+
+    Gate-8 compares ``\\x00NULL\\x00``. A read-back or mismatch the operator
+    sees says ``null``, which is distinct from an empty string (R7-001).
+    """
+    if fingerprint == _NULL_SENTINEL:
+        return "null"
+    return fingerprint
+
+
+_JSON_SCALE_ENGINES = frozenset({"postgresql", "postgres"})
+#: A text column holds the JSON tokens DataFlow wrote, scale included.
+_JSON_TEXT_CARRIER_RE = re.compile(
+    r"^(?:N|LONG|MEDIUM|TINY)?(?:VAR)?(?:CHAR|TEXT|CLOB)|^(?:N)?CLOB|^STRING|^CHARACTER", re.I
+)
+_JSON_LOSSLESS_TRANSFORMS = frozenset({"", "none", "identity", "passthrough", "json", "jsonb"})
+
+
+def _json_keeps_scale_for(ddl_type: str, engine: str) -> bool:
+    """Does this destination store a JSON number with its scale (D192)?"""
+    ddl = str(ddl_type or "").strip()
+    if ddl and _JSON_TEXT_CARRIER_RE.match(ddl):
+        return True
+    if str(engine or "").strip().lower() not in _JSON_SCALE_ENGINES:
+        return False
+    if not ddl:
+        return True
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(ddl) == "json"
+
+
+def _json_text_fingerprints_raw(wire: Any, tname: str, ddl_type: str, engine: str) -> bool:
+    """A JSON object/array text bound for a scale-keeping column, unchanged by its transform."""
+    if not isinstance(wire, str) or tname not in _JSON_LOSSLESS_TRANSFORMS:
+        return False
+    head = wire.lstrip()[:1]
+    if head not in ("{", "["):
+        return False
+    if not ddl_type or not _json_keeps_scale_for(ddl_type, engine):
+        return False
+    try:
+        json.loads(wire, parse_float=Decimal, parse_constant=_reject_json_constant)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(token)
 
 
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
@@ -3270,39 +3367,109 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     VARCHAR2 semantics / HVR write-location compare rules). Postgres/MySQL keep
     NULL and ``""`` distinct.
     """
-    if value is None:
+    if value is None or is_explicit_null(value):
         # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
         return _NULL_SENTINEL
     # Dense write materializes absent schemaless fields as SQL NULL; fingerprint
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
-    from services.value_serializer import is_missing_sentinel
-
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
-    if isinstance(value, str) and value.strip().lower() in {
-        "__df_sql_null__",
-        "__df_ddb_null__",
-        "__df_missing__",
-    }:
+    if (
+        isinstance(value, str)
+        and not isinstance(value, WireLiteral)
+        and value.strip().lower()
+        in {
+            "__df_sql_null__",
+            "__df_ddb_null__",
+            "__df_missing__",
+        }
+    ):
+        # A decoded ``WireLiteral`` is source *text* that spells a sentinel
+        # (the reader escaped it). Reading it as NULL let a destination that
+        # stored the literal ``__DF_SQL_NULL__`` where the source held NULL
+        # fingerprint as a match.
         return _NULL_SENTINEL
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.
     if destination_empty_string_is_null(engine) and isinstance(value, str) and value == "":
         return _NULL_SENTINEL
     if isinstance(value, bool):
         return "1" if value else "0"
+    _text_declared = bool(ddl_type) and bool(
+        _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip())
+    )
+    # PostgreSQL json/jsonb and a JSON-as-text column store a number with its
+    # scale; there ``1.10`` -> ``1.1`` is a changed value Gate-8 must see (D192).
+    _json_keeps_scale = _text_declared or _json_keeps_scale_for(ddl_type, engine)
+    if _text_declared and isinstance(value, (int, float, Decimal)):
+        # Declared TEXT carrier: compare the bound repr, not a canonicalized
+        # number — '1000.00' the writer rendered equals read-back '1000.00',
+        # while '01' vs '1' stays a real change. Decimal needs format(d, "f"):
+        # writers bind fixed-point text ('0.0000000150') but str(Decimal) is
+        # scientific ('1.5E-8') — the reprs of the same value must agree
+        # (X-26 live: tiny decimals flagged 'did not apply as declared').
+        return format(value, "f") if isinstance(value, Decimal) else str(value)
     if isinstance(value, _datetime):
+        from connectors.sqlserver_tick import tick_of
+
+        tick = tick_of(value)
         if value.tzinfo is not None:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
         # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
         # sources match NTZ sinks that stored the same UTC components, while
         # offset-aware values still differ from a different naive wall clock.
-        if value.microsecond:
-            return value.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return value.strftime("%Y-%m-%dT%H:%M:%S")
+        # A DATETIME2(7) seventh digit is compared too.
+        return _wall_clock_text(value, tick)
     if isinstance(value, _date):
         return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
+    if isinstance(value, _time):
+        # X-4: TIME columns — DuckDB/PG drivers hand back datetime.time while
+        # MySQL drivers hand back timedelta; both must fingerprint identically
+        # ("01:23:45" on both sides) or every cross-engine TIME cell drifts.
+        if value.microsecond:
+            return value.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return value.strftime("%H:%M:%S")
+    if isinstance(value, timedelta):
+        if ddl_type and _INTERVAL_DDL_RE.search(str(ddl_type)):
+            return _interval_canonical_text(0, value.total_seconds())
+        # MySQL TIME read-back is timedelta; normalize to the same wall-clock
+        # form as datetime.time (TIME is a clock value, not an interval — the
+        # carry can exceed 24h on interval semantics but DDL TIME is <=23:59:59).
+        total = value.total_seconds()
+        sign = "-" if total < 0 else ""
+        total = abs(total)
+        hh = int(total // 3600)
+        rem = total - hh * 3600
+        mm = int(rem // 60)
+        ss = rem - mm * 60
+        if abs(ss - round(ss)) > 1e-9:
+            return f"{sign}{hh:02d}:{mm:02d}:{ss:09.6f}".rstrip("0").rstrip(".")
+        return f"{sign}{hh:02d}:{mm:02d}:{int(ss):02d}"
+    if (
+        isinstance(value, str)
+        and ddl_type
+        and _INTERVAL_DDL_RE.search(str(ddl_type))
+    ):
+        # PG renders intervals as '1 day 02:00:00' while drivers/read-backs
+        # hand back '26:00:00' or timedelta — the same span must fingerprint
+        # identically. Canonical = (months, seconds): days fold into seconds
+        # (PG equates '1 day' = '24 hours') while months/years stay distinct
+        # (PG does NOT equate '1 mon' = '30 days').
+        canon = _canonical_interval_text(value)
+        if canon is not None:
+            return canon
+    if (
+        ddl_type
+        and not isinstance(value, bool)
+        and isinstance(value, (float, int, Decimal, str))
+        and _single_precision_carrier(ddl_type, engine)
+    ):
+        _f32_text = _float32_cell_text(value)
+        if _f32_text is not None:
+            return _f32_text
     if isinstance(value, float):
-        return _canonicalize_number(str(value)) or "nan"
+        # Pass the float through — str(float) keeps IEEE residue and false-fails
+        # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).
+        return _canonicalize_number(value) or "nan"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, Decimal):
@@ -3321,65 +3488,105 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             logger.debug("Raw bytes are not valid base64; encoding as base64 for checksum")
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
+        # Same canonical form as the string-JSON branch below — compact,
+        # key-sorted, numbers normalized — so a decoded dict fingerprints
+        # identically to its wire text.
+        # A decoded dict already lost the document's number spelling, so it
+        # compares by value (keep_scale applies to JSON *text* only).
+        canon = canonical_json_text(json.dumps(value, default=json_default))
+        if canon is not None:
+            return canon
         return json.dumps(value, sort_keys=True, default=json_default)
     raw_text = str(value)
     if ddl_type:
         try:
-            from services.type_system import (
-                fold_diacritics,
-                fold_kana,
-                fold_variation_selectors,
-                fold_width_forms,
-                is_accent_insensitive_collation,
-                is_case_insensitive_collation,
-                is_fixed_width_char_carrier,
-                is_kana_insensitive_collation,
-                is_variation_insensitive_collation,
-                is_width_insensitive_collation,
-                normalize_logical_type,
-            )
-
-            if is_fixed_width_char_carrier(ddl_type):
+            plan = _text_fold_plan(ddl_type)
+            if plan.rstrip_blank_pad:
                 # Blank-pad only — do not strip leading spaces (rare but significant).
                 text = raw_text.rstrip(" ")
-            elif normalize_logical_type(ddl_type) in {"string", "text"}:
+            elif plan.keep_trailing_spaces:
                 # VARCHAR/TEXT: preserve trailing spaces (significant payload).
                 text = raw_text
             else:
                 text = raw_text.strip()
             # Collation equality must match the destination engine (CI/AI/WI/KI/VSS).
-            if is_width_insensitive_collation(ddl_type):
+            if plan.fold_width:
+                from services.type_system import fold_width_forms
+
                 text = fold_width_forms(text)
-            if is_kana_insensitive_collation(ddl_type):
+            if plan.fold_kana:
+                from services.type_system import fold_kana
+
                 text = fold_kana(text)
-            if is_variation_insensitive_collation(ddl_type):
+            if plan.fold_variation:
+                from services.type_system import fold_variation_selectors
+
                 text = fold_variation_selectors(text)
-            if is_accent_insensitive_collation(ddl_type):
+            if plan.fold_accent:
+                from services.type_system import fold_diacritics
+
                 text = fold_diacritics(text)
-            if is_case_insensitive_collation(ddl_type):
+            if plan.casefold:
                 text = text.casefold()
             # UUID / UNIQUEIDENTIFIER / CHAR(36) UUID carriers — canonicalize
             # braces / 32-hex / case so source wire and dest read-back match
             # (Fivetran HVR compare class: destination storage rules win).
-            try:
-                from services.type_system import normalize_logical_type
+            if plan.uuid_carrier:
+                try:
+                    from connectors.sql_bind import coerce_uuid_wire
 
-                if normalize_logical_type(ddl_type) == "uuid" or re.search(
-                    r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I
-                ):
-                    try:
-                        from connectors.sql_bind import coerce_uuid_wire
-
-                        text = coerce_uuid_wire(text) or text
-                    except ValueError:
-                        if _UUID_RE.match(text):
-                            text = text.lower()
-            except Exception:
-                pass
+                    text = coerce_uuid_wire(text) or text
+                except ValueError:
+                    if _UUID_RE.match(text):
+                        text = text.lower()
         except Exception:
             text = raw_text.strip()
     else:
         text = raw_text.strip()
+    if _CLOCK_FRACTION_RE.match(text):
+        # D224: '03:04:05.250000' and '03:04:05.25' are one clock — the same
+        # trailing-zero fold the time/timedelta branches above apply, so a
+        # TIME(6) read back as text compares to the driver value at full
+        # precision whichever spelling the writer or digest used.
+        text = text.rstrip("0").rstrip(".")
+    # Type-driven honesty: on a declared TEXT-family column the cell IS text —
+    # '01' vs '1', 'A' vs 'A ', and '30.99' vs '30.990' are real value changes
+    # and must not collapse under the numeric/bool folds below. Format-variant
+    # domains a writer legitimately re-renders (a datetime instant stored as
+    # '2024-06-01 00:00:00' vs '2024-06-01T00:00:00', or a re-serialized JSON
+    # document) still fold — they carry the same value in a different repr.
+    if ddl_type and _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip()):
+        if text.startswith(("{", "[")):
+            try:
+                canon = canonical_json_text(text, keep_scale=True)
+                if canon is not None and canon.startswith(("{", "[")):
+                    return canon
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if (
+            text
+            and text[0].isdigit()
+            and len(text) >= 8
+            and _DATE_LIKE_CHARS.intersection(text)
+            and _DATE_LIKE_RE.search(text)
+        ):
+            dtm = _parse_datetime(text)
+            if dtm:
+                return _checksum_datetime_utc_wall(
+                    dtm if isinstance(dtm, str) else str(dtm), original=text
+                )
+            dt = _parse_date(text)
+            if dt:
+                return f"{dt}T00:00:00"
+        # Strict bool tokens still fold on a declared text column — a writer
+        # that bound a boolean into TEXT renders 'true', which is the same
+        # value as source 1/true. Status enums ('active'…) stay literal.
+        _tl = text.lower()
+        if _tl in _STRICT_BOOL_TRUE:
+            return "1"
+        if _tl in _STRICT_BOOL_FALSE:
+            return "0"
+        return text
     # Boolean and empty fast paths.
     if not text:
         return ""
@@ -3387,15 +3594,15 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # Align with transform_engine strict boolean tokens only. Status enums
     # ("active"/"enabled"/…) must NOT collide with true/false in checksums —
     # that falsely claimed 100% fidelity when status strings met bool columns.
-    from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
-
     if lowered in _STRICT_BOOL_TRUE:
         return "1"
     if lowered in _STRICT_BOOL_FALSE:
         return "0"
-    # Numeric fast path: only attempt Decimal normalization for strings that look
-    # like numbers, avoiding the expensive exception path for names, emails, codes.
-    if text[0] in "+-0123456789" and _NUMERIC_RE.match(text):
+    # Numeric fast path: write-path bind only. Auto-ambiguous ``1,234`` /
+    # ``1.234`` / ``1.000`` stay opaque text — ``Decimal(text)`` is a second
+    # algorithm and invented ``1.000`` → ``1``. Locale money the write path
+    # binds still folds so Gate-8 matches the dest DECIMAL.
+    if _looks_like_numeric_wire(text):
         canonical = _canonicalize_number(text)
         if canonical is not None:
             return canonical
@@ -3403,9 +3610,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            parsed = json.loads(text)
-            if isinstance(parsed, (dict, list)):
-                return json.dumps(parsed, sort_keys=True, default=json_default)
+            canon = canonical_json_text(text, keep_scale=_json_keeps_scale)
+            if canon is not None and canon.startswith(("{", "[")):
+                return canon
         except (json.JSONDecodeError, TypeError):
             pass
     # Date/time normalization: cheap heuristic first to avoid running the date
@@ -3461,9 +3668,10 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
             else:
                 obj = obj.astimezone(timezone.utc)
             obj = obj.replace(tzinfo=None)
-        if obj.microsecond:
-            return obj.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return obj.strftime("%Y-%m-%dT%H:%M:%S")
+        from connectors.sqlserver_tick import tick_from_text
+
+        # fromisoformat keeps six digits; DATETIME2(7) text spells a seventh.
+        return _wall_clock_text(obj, tick_from_text(iso))
     except ValueError:
         # Fall back: strip invented trailing Z from transform parser.
         if text.endswith("Z") and not aware_or_epoch:
@@ -3473,20 +3681,227 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         return text
 
 
+def _wall_clock_text(value: _datetime, tick: int = 0) -> str:
+    """``YYYY-MM-DDTHH:MM:SS[.f…]``: trailing zeros folded, up to 7 digits."""
+    fraction = (f"{value.microsecond:06d}" + (str(tick) if tick else "")).rstrip("0")
+    base = value.strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{base}.{fraction}" if fraction else base
+
+
 def _checksum_datetime_utc_z(iso_text: str) -> str:
     """Backward-compatible alias — checksums use wall-clock UTC, not Z."""
     return _checksum_datetime_utc_wall(iso_text)
 
 
-def _canonicalize_number(value: Any) -> str | None:
-    """Return a canonical string for numeric values so 9.5 == 9.5000000000."""
+def _single_precision_carrier(ddl_type: str, engine: str) -> bool:
+    """True when ``ddl_type`` is an IEEE-754 binary32 carrier on ``engine``.
+
+    ``float_mantissa_bits`` resolves the unambiguous single-precision tokens
+    (``REAL`` off the double-REAL dialects, ``FLOAT4``/``FLOAT32``/
+    ``BINARY_FLOAT``, ``FLOAT(p≤24)``) but reports bare ``FLOAT`` as
+    width-unknown. Bare ``FLOAT`` IS binary32 on MySQL/MariaDB and DuckDB,
+    so those engines resolve it here; everywhere else bare FLOAT stays
+    unknown and no float32 fold applies (PG ``float`` is float8, MSSQL
+    ``float`` is float8, Snowflake ``FLOAT`` is float8).
+    """
+    from services.numeric_fit import float_mantissa_bits
+
+    bits = float_mantissa_bits(ddl_type, dest_db=engine)
+    if bits is not None:
+        return bits == 24
+    eng = (engine or "").strip().lower()
+    raw = re.sub(r"\s+", "", str(ddl_type or "").upper())
+    raw = raw.replace("UNSIGNED", "")
+    return raw == "FLOAT" and eng in {"mysql", "mariadb", "duckdb"}
+
+
+def _float32_cell_text(value: Any) -> str | None:
+    """Canonical text of a cell at IEEE-754 binary32 granularity.
+
+    A single-precision carrier keeps 24 significand bits, so the same stored
+    value reads back as ``0.33333334`` from one driver and
+    ``0.3333333432674408`` (the float64 widening) from another. The fold
+    rounds through ``struct.pack('f')`` and emits the shortest decimal that
+    round-trips that float32 — the same contract
+    ``_decimal_from_ieee_float`` (.15g) gives doubles. ``-0.0`` folds to
+    ``"0"`` for parity with the double path's zero handling. Returns ``None``
+    for values that cannot take the float path so the caller falls through to
+    the generic branches.
+    """
+    import math
+    import struct
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            f = float(text)
+        except ValueError:
+            return None
+    elif isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        try:
+            f = float(value)
+        except (OverflowError, ValueError, TypeError):
+            return None
+    else:
+        return None
+    if math.isnan(f):
+        return "nan"
+    if math.isinf(f):
+        return "Infinity" if f > 0 else "-Infinity"
     try:
-        d = Decimal(value) if not isinstance(value, Decimal) else value
+        packed = struct.pack("f", f)
+    except (OverflowError, struct.error):
+        return None
+    v32 = struct.unpack("f", packed)[0]
+    if v32 == 0:
+        return "0"
+    # Shortest decimal that round-trips the float32 (9 significant digits is
+    # always enough for binary32).
+    for precision in range(1, 10):
+        candidate = format(v32, f".{precision}g")
+        try:
+            if struct.pack("f", float(candidate)) == packed:
+                return candidate
+        except (ValueError, OverflowError, struct.error):
+            continue
+    return format(v32, ".9g")
+
+
+def _decimal_from_ieee_float(value: float) -> Decimal | None:
+    """Collapse IEEE binary residue (Excel ``106.60000000000001`` → ``106.6``).
+
+    Double has ~15–17 significant digits; formatting with 15 significant figures
+    matches Airbyte/Fivetran-class compare and avoids Gate-8 false fails when
+    DECIMAL sinks store the human value.
+
+    Residue lives in the *fraction*. An integer-valued double carries no such
+    tail, so 15 significant figures there would rewrite the number itself:
+    ``9007199254740994`` (2^53 + 2, exactly representable) would fingerprint as
+    ``9007199254740990`` and report a faithful big-integer transfer as corrupt.
+    """
+    import math
+
+    if math.isnan(value):
+        return None
+    if math.isinf(value):
+        return Decimal("Infinity") if value > 0 else Decimal("-Infinity")
+    if value.is_integer():
+        return Decimal(int(value))
+    return Decimal(format(value, ".15g"))
+
+
+def _normalize_exact(d: Decimal) -> Decimal:
+    """Strip trailing zeros without the 28-digit rounding of the default context.
+
+    ``Decimal.normalize`` honours the ambient context precision, so a value
+    carrying more than 28 significant digits is quietly rounded. Inside a
+    checksum that is a correctness bug in both directions: it can fail a clean
+    transfer, and it can map two genuinely different decimals onto one digest,
+    reporting corrupted data as verified.
+    """
+    if not d.is_finite():
+        return d
+    with localcontext() as ctx:
+        ctx.prec = max(len(d.as_tuple().digits), 28)
+        return d.normalize()
+
+
+def _is_exact_double(d: Decimal) -> bool:
+    """True when ``d`` is precisely the value of some IEEE double.
+
+    This is the licence to round a mantissa down to 15 significant digits. When
+    it holds, the long tail is the double's own decimal expansion and dropping it
+    recovers the human value (``106.60000000000001`` → ``106.6``). When it fails,
+    the digits carry information no double can hold — ``12345678901234567890.123``
+    or ``-999999999999999999.999999`` — and rounding would corrupt the very value
+    Gate-8 is comparing, either failing a clean transfer or, worse, letting two
+    genuinely different decimals collapse onto one checksum.
+    """
+    import math
+
+    try:
+        f = float(d)
+    except (OverflowError, ValueError):
+        return False
+    if not math.isfinite(f):
+        return False
+    try:
+        return Decimal(repr(f)) == _normalize_exact(d)
+    except (InvalidOperation, Overflow, ValueError):
+        return False
+
+
+def _canonicalize_number(value: Any) -> str | None:
+    """Return a canonical string for numeric values so 9.5 == 9.5000000000.
+
+    Strings go through ``decimal_wire_value`` — the same parser the write path
+    binds. Auto-ambiguous ``1,234`` / ``1.234`` / ``1.000`` return ``None`` so
+    Gate-8 cannot invent ``1.000`` → ``1``. Locale money and both-separator
+    forms still fold. IEEE residue still collapses when information-free.
+    """
+    try:
+        if isinstance(value, float):
+            d = _decimal_from_ieee_float(value)
+            if d is None:
+                return None
+        elif isinstance(value, Decimal):
+            d = value
+            # Decimal(float(...)) keeps binary noise — collapse long mantissas.
+            if d.is_finite():
+                digits = d.as_tuple().digits
+                exp = d.as_tuple().exponent
+                # Only a fractional tail can be binary residue. A large integer
+                # (Dynamo ``N``, Mongo ``long``, BIGINT beyond 2^53) has real
+                # low-order digits, and collapsing them is data loss inside the
+                # ruler that is supposed to detect data loss.
+                has_fraction = isinstance(exp, int) and exp < 0
+                if (
+                    has_fraction
+                    and (len(digits) > 15 or exp < -12)
+                    and _is_exact_double(d)
+                ):
+                    try:
+                        d = _decimal_from_ieee_float(float(d)) or d
+                    except (OverflowError, ValueError):
+                        pass
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            # Checksum dest text is already storage-canonical. Re-applying the
+            # transfer locale turns EU ``1.234`` (from ``1,234``) into 1234.
+            # Auto also keeps an ambiguous form opaque here on purpose: the
+            # digest must not read ``1.000`` as 1 and match a destination that
+            # really holds a different number. Carrier-aware quantization is
+            # the fingerprint path's job, not the digest's.
+            token = set_active_number_locale("")
+            try:
+                parsed = decimal_wire_value(text)
+            finally:
+                reset_active_number_locale(token)
+            if parsed is None:
+                # Write path refused (Auto ``1,234`` / ``1.234`` / ``1.000``).
+                # Decimal(text) invented a different number (``1.000`` → ``1``).
+                # A numeric DDL fingerprint folds scale through
+                # ``normalize_sql_bind_value``; this digest must not.
+                return None
+            d = parsed
+            # String form of float residue (common from Excel/CSV readers).
+            if d.is_finite() and ("." in text or "e" in text.lower() or "," in text):
+                head = text.split("e")[0].split("E")[0]
+                frac = head.split(".")[-1] if "." in head else ""
+                if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
+                    try:
+                        d = _decimal_from_ieee_float(float(d)) or d
+                    except (OverflowError, ValueError):
+                        pass
         if d.is_nan():
             return None
         from services.value_serializer import safe_decimal_text
 
-        s = safe_decimal_text(d.normalize() if d.is_finite() else d)
+        s = safe_decimal_text(_normalize_exact(d) if d.is_finite() else d)
         if s is None:
             return None
         if "." in s and "e" not in s.lower():
@@ -3504,6 +3919,7 @@ def build_reconciliation_proof(
     primary_key: str | None = None,
     sample_size: int = 50,
     dest_db_type: str = "",
+    source_locale: str = "",
     dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic proof object for row-level transfer verification.
@@ -3584,6 +4000,7 @@ def build_reconciliation_proof(
             sort_key=None,
             dest_db_type=dest_db_type,
             dest_types=dest_types,
+            source_locale=source_locale,
         )
         sample_compare = {
             **sample_compare,
@@ -3617,6 +4034,7 @@ def build_reconciliation_proof(
         sort_key=key_col,
         dest_db_type=dest_db_type,
         dest_types=dest_types,
+        source_locale=source_locale,
     )
 
     matched_key_count = len(matched_keys)
@@ -3654,179 +4072,32 @@ def build_reconciliation_proof(
     }
 
 
-
-def _bucket_member_order(
-    idxs: list[int], *, seed: str, bucket_name: str
-) -> list[int]:
-    """Deterministic intra-bucket order (stable across process restarts)."""
-    import hashlib
-
-    return sorted(
-        idxs,
-        key=lambda i: hashlib.sha256(
-            f"{seed}:{bucket_name}:{i}".encode()
-        ).hexdigest(),
-    )
+# Sample selection lives in its own module (size budget); re-exported because
+# this module is the reconciliation surface callers import from.
+from services.sample_strategy import (  # noqa: E402,F401 — re-export
+    _auto_stratify_source_column,
+    _bucket_member_order,
+    _stratified_sample_indices,
+)
 
 
-def _stratified_sample_indices(
-    records: list[dict[str, Any]],
+def _skip_kept_existing_key(
+    duplicate_policy: str,
     *,
-    stratify_col: str,
-    sample_size: int,
-    seed: str = "",
-) -> list[int]:
-    """Deterministic per-bucket quota sampling for skewed categoricals.
+    key: Any,
+    inserted_keys: set[str] | list[str] | None,
+) -> bool:
+    """Skip keeps the first image. A key this run inserted must still match."""
+    if not str(duplicate_policy or "").strip() or not key:
+        return False
+    from services.duplicate_policy import normalize_duplicate_policy
 
-    Rare classes get a guaranteed slot when buckets fit in ``sample_size``.
-    When bucket count exceeds ``sample_size``, prefer the *smallest* buckets
-    (rare classes) — never hash-trim across buckets (that reintroduces the
-    first-N trap stratification exists to prevent).
-
-    Still a **sample** plan — never population proof.
-    """
-    import hashlib
-
-    if sample_size <= 0 or not records or not stratify_col:
-        return list(range(min(max(sample_size, 0), len(records))))
-    buckets: dict[str, list[int]] = {}
-    for i, rec in enumerate(records):
-        if not isinstance(rec, dict):
-            continue
-        raw = rec.get(stratify_col)
-        key = normalize_cell(raw) if raw is not None else ""
-        buckets.setdefault(key or "<null>", []).append(i)
-    names = sorted(buckets.keys())
-    if not names:
-        return list(range(min(sample_size, len(records))))
-
-    n_buckets = len(names)
-
-    # More strata than slots: keep rare (smallest) buckets — 1 row each.
-    if n_buckets > sample_size:
-        ranked = sorted(
-            names,
-            key=lambda name: (
-                len(buckets[name]),
-                hashlib.sha256(f"{seed}:bucket:{name}".encode()).hexdigest(),
-                name,
-            ),
-        )
-        picked: list[int] = []
-        for name in ranked[:sample_size]:
-            scored = _bucket_member_order(
-                buckets[name], seed=seed, bucket_name=name
-            )
-            if scored:
-                picked.append(scored[0])
-        return picked[:sample_size]
-
-    # Proportional quota with floor 1 (always possible when n_buckets <= sample_size).
-    base = sample_size // n_buckets
-    rem = sample_size % n_buckets
-    picked = []
-    for bi, name in enumerate(names):
-        scored = _bucket_member_order(buckets[name], seed=seed, bucket_name=name)
-        take = base + (1 if bi < rem else 0)
-        take = min(max(take, 1), len(scored))
-        picked.extend(scored[:take])
-
-    # Shrink from largest buckets only — never drop a bucket entirely.
-    while len(picked) > sample_size:
-        # Count current picks per bucket
-        membership: dict[str, list[int]] = {n: [] for n in names}
-        for i in picked:
-            rec = records[i] if i < len(records) else {}
-            raw = rec.get(stratify_col) if isinstance(rec, dict) else None
-            key = normalize_cell(raw) if raw is not None else ""
-            membership.setdefault(key or "<null>", []).append(i)
-        # Drop one row from the largest bucket that still has >1
-        candidates = [
-            (len(idxs), name)
-            for name, idxs in membership.items()
-            if len(idxs) > 1
-        ]
-        if not candidates:
-            # Should not happen when n_buckets <= sample_size; fail closed trim.
-            picked = picked[:sample_size]
-            break
-        _, drop_name = max(
-            candidates,
-            key=lambda t: (
-                t[0],
-                hashlib.sha256(f"{seed}:drop:{t[1]}".encode()).hexdigest(),
-            ),
-        )
-        drop_idxs = membership[drop_name]
-        # Drop the last in deterministic bucket order
-        ordered = _bucket_member_order(drop_idxs, seed=seed, bucket_name=drop_name)
-        drop_i = ordered[-1]
-        picked = [i for i in picked if i != drop_i]
-
-    if len(picked) < sample_size:
-        used = set(picked)
-        for i in range(len(records)):
-            if i not in used and isinstance(records[i], dict):
-                picked.append(i)
-                used.add(i)
-            if len(picked) >= sample_size:
-                break
-    return picked[:sample_size]
-
-
-def _auto_stratify_source_column(
-    source_records: list[dict[str, Any]],
-    mappings: list[dict[str, Any]],
-    *,
-    sort_key: str | None,
-    source_sort_key: str | None,
-) -> str | None:
-    """Heuristic stratum: skewed low-cardinality mapped column (not the PK).
-
-    Returns ``None`` when no safe candidate exists — caller falls back to
-    keyed/positional sample. Never claims population coverage.
-    """
-    from collections import Counter
-
-    exclude = {
-        str(sort_key or "").strip().lower(),
-        str(source_sort_key or "").strip().lower(),
-        "id",
-        "_id",
-        "pk",
-        "uuid",
-        "guid",
-    }
-    exclude.discard("")
-    best_col: str | None = None
-    best_key: tuple[float, int, str] | None = None
-    for m in mappings:
-        src_col = str(m.get("source") or "").strip()
-        tgt_col = str(m.get("target") or "").strip()
-        if not src_col:
-            continue
-        if src_col.lower() in exclude or tgt_col.lower() in exclude:
-            continue
-        vals: list[str] = []
-        for r in source_records:
-            raw = r.get(src_col)
-            cell = normalize_cell(raw) if raw is not None else ""
-            vals.append(cell or "<null>")
-        if not vals:
-            continue
-        n_classes = len(set(vals))
-        if not (2 <= n_classes <= 20):
-            continue
-        counts = Counter(vals)
-        skew = max(counts.values()) / len(vals)
-        # Require imbalance so uniform enums don't pretend to stratify.
-        if skew < 0.55:
-            continue
-        key = (skew, n_classes, src_col.lower())
-        if best_key is None or key > best_key:
-            best_key = key
-            best_col = src_col
-    return best_col
+    if normalize_duplicate_policy(duplicate_policy) != "dedupe_skip":
+        return False
+    if inserted_keys is None:
+        return True
+    inserted = {str(normalize_cell(item) or "") for item in inserted_keys}
+    return str(key) not in inserted
 
 
 def sample_compare_rows(
@@ -3840,16 +4111,28 @@ def sample_compare_rows(
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
     stratify_by: str | None = None,
+    rows_are_paired: bool = False,
+    duplicate_policy: str = "",
+    inserted_keys: set[str] | list[str] | None = None,
+    source_locale: str = "",
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
-    Rows are aligned by a stable key (e.g. primary key) when available, so upserts
-    and out-of-order writes compare correctly. Falls back to sorted index alignment.
+    Rows are aligned by a unique key, so upserts and out-of-order writes compare
+    correctly. Without one the comparison is declined rather than guessed.
+
+    ``rows_are_paired`` is for the caller that can vouch the two collections are
+    the same rows in the same order — the row at index *i* on each side really is
+    the same row. Gate-8 cannot: its source rows are the batch the pass held and
+    its destination rows are the first N of the table by ``ORDER BY 1``, two
+    independent draws. Pairing those by index reports unrelated rows as
+    corruption, which is why it is opt-in and off by default.
 
     When ``dest_db_type`` / ``dest_types`` are provided, both sides are fingerprinted
     through the same write-path bind helpers as MySQL/Postgres/Snowflake writers
     (``fingerprint_for_reconcile``) so Gate-8 does not false-fail on bool/JSON wire.
     """
+    from services.code_crosswalk import apply_code_crosswalk, declared_crosswalk
     if not source_records or not target_rows or not mappings:
         return {"passed": True, "compared": 0, "mismatches": [], "skipped": True}
 
@@ -3879,27 +4162,108 @@ def sample_compare_rows(
                 break
 
     target_by_key: dict[str, dict[str, Any]] = {}
+    duplicate_alignment_key = ""
     if sort_key:
         for d in target_dicts:
             key = normalize_cell(d.get(sort_key))
-            if key and key not in target_by_key:
-                target_by_key[key] = d
+            if not key:
+                continue
+            if key in target_by_key:
+                # Two destination rows answer to the same key, so the key does
+                # not identify a row and cannot align one. Keeping the first and
+                # comparing every later row against it reports the difference
+                # between two *different rows* as corruption.
+                duplicate_alignment_key = sort_key
+                break
+            target_by_key[key] = d
+        if not duplicate_alignment_key:
+            seen_source_keys: set[str] = set()
+            for rec in source_records:
+                if not isinstance(rec, dict):
+                    continue
+                key = normalize_cell(
+                    rec.get(source_sort_key) if source_sort_key else None
+                )
+                if not key:
+                    continue
+                if key in seen_source_keys:
+                    duplicate_alignment_key = sort_key
+                    break
+                seen_source_keys.add(key)
 
-    def _fingerprint(raw: Any, *, transform: str | None, tgt_col: str) -> str:
+    if duplicate_alignment_key:
+        # Nothing here is evidence of a bad write, so nothing here may fail the
+        # transfer. ``_sort_key_for_columns`` falls back to the first mapped
+        # column when no identity column exists, which for an ordinary export —
+        # a region, a status, a date — repeats on almost every row. Declining is
+        # the honest answer: the sample proved nothing, and says so.
+        return {
+            "passed": True,
+            "compared": 0,
+            "mismatches": [],
+            "skipped": True,
+            "alignment": "declined",
+            "reason": (
+                f"No unique identity key for read-back alignment: "
+                f"`{duplicate_alignment_key}` repeats, so it cannot say which "
+                "destination row corresponds to which source row. Map a primary "
+                "key to enable per-row sample compare."
+            ),
+        }
+
+    def _fingerprint(
+        raw: Any, *, transform: str | None, tgt_col: str, source_locale: str = ""
+    ) -> str:
         ddl = (
             dest_types.get(tgt_col)
             or dest_types.get(tgt_col.lower())
             or ""
         )
-        if not ddl:
-            for m in mappings:
-                if str(m.get("target") or "") == tgt_col:
-                    ddl = str(m.get("target_type") or m.get("inferredType") or "")
-                    break
+        declared = ""
+        for m in mappings:
+            if str(m.get("target") or "") == tgt_col:
+                declared = str(
+                    m.get("target_type")
+                    or m.get("inferredType")
+                    or m.get("type")
+                    or ""
+                )
+                break
+        if (
+            declared
+            and ddl
+            and _TEXT_FAMILY_DDL_RE.match(ddl.strip())
+            and not _TEXT_FAMILY_DDL_RE.match(declared.strip())
+        ):
+            # The physical carrier degraded to TEXT (e.g. SQLite has no
+            # DECIMAL affinity) while the write rendered per the declared
+            # type — compare under declared semantics. The degrade itself
+            # is reported separately (X-4).
+            ddl = declared
+        elif not ddl:
+            ddl = declared
+        if ddl and typed_cast_incompatible_with_text_sink(
+            transform or "", normalize_logical_type(ddl)
+        ):
+            # A text carrier holds whichever of the two the write produced: the
+            # converted value when the cast succeeded ('$1,000.00' → '1000.00'),
+            # or the token verbatim when it failed ('Y' against boolean, which
+            # otherwise made Gate-8 report corruption on a row that landed
+            # correctly). Only the failing case may retire the cast.
+            try:
+                _, cast_err = apply_transform(raw, transform or "")
+            except Exception:
+                cast_err = "transform_failed"
+            if cast_err:
+                transform = None
         if eng and ddl:
             try:
                 return fingerprint_for_reconcile(
-                    raw, ddl_type=ddl, engine=eng, transform=transform
+                    raw,
+                    ddl_type=ddl,
+                    engine=eng,
+                    transform=transform,
+                    source_locale=source_locale,
                 )
             except Exception:
                 pass
@@ -3913,6 +4277,64 @@ def sample_compare_rows(
         else:
             converted = raw
         return normalize_cell(converted)
+
+    def _numeric_equal_on_numeric_column(
+        a: str,
+        b: str,
+        *,
+        tgt_col: str,
+        mappings: list[dict[str, Any]],
+        dest_types: dict[str, str],
+        raw_source: Any = None,
+    ) -> bool:
+        """Two fingerprints render the same number differently ('1.50E-8' vs
+        '0.0000000150' — a str() of a Decimal vs the stored text). On a
+        numeric-family column they are equal at the declared scale; on a text
+        column '001' vs '1' must still mismatch (X-26)."""
+        ddl = (
+            dest_types.get(tgt_col)
+            or dest_types.get(tgt_col.lower())
+            or ""
+        )
+        declared = ""
+        for m in mappings:
+            if str(m.get("target") or "") == tgt_col:
+                declared = str(
+                    m.get("target_type")
+                    or m.get("inferredType")
+                    or m.get("type")
+                    or ""
+                )
+                break
+        if (
+            declared
+            and ddl
+            and _TEXT_FAMILY_DDL_RE.match(ddl.strip())
+            and not _TEXT_FAMILY_DDL_RE.match(declared.strip())
+        ):
+            # Same degrade rule as _fingerprint: a TEXT carrier (sqlite has no
+            # DECIMAL affinity) still compares under the declared type.
+            ddl = declared
+        elif not ddl:
+            ddl = declared
+        numeric_column = bool(_NUMERIC_FAMILY_DDL_RE.search(ddl or ""))
+        if not numeric_column:
+            # No declared type at all: a TEXT carrier holding a value the
+            # source driver delivered as a Decimal/int is still a numeric
+            # column — the carrier is storage, not the type. A str '001'
+            # source has no numeric provenance and stays strict.
+            numeric_column = (
+                bool(ddl)
+                and bool(_TEXT_FAMILY_DDL_RE.match(ddl.strip()))
+                and isinstance(raw_source, (Decimal, int, float))
+                and not isinstance(raw_source, bool)
+            )
+        if not numeric_column:
+            return False
+        try:
+            return Decimal(a) == Decimal(b)
+        except Exception:
+            return False
 
     def _row_key(rec: Any, *, source_side: bool = False) -> Any:
         if isinstance(rec, dict):
@@ -3942,10 +4364,10 @@ def sample_compare_rows(
             except Exception:
                 return (1, str(value))
         text = str(value).strip()
-        try:
-            return (0, Decimal(text))
-        except Exception:
-            return (1, text.lower())
+        parsed = decimal_wire_value(text)
+        if parsed is not None:
+            return (0, parsed)
+        return (1, text.lower())
 
     import hashlib
 
@@ -4017,32 +4439,133 @@ def sample_compare_rows(
         "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
     }
 
+    if not (sort_key and target_by_key) and not rows_are_paired:
+        # Without a key there is nothing to join on, and the two sides are not
+        # the same draw: the source rows are the batch this pass held, while the
+        # destination read is the first N of the whole table by ``ORDER BY 1``.
+        # Lining those up by index compares unrelated rows and calls the
+        # difference corruption. A sample that cannot be aligned proves nothing,
+        # which is a different statement from the data being wrong.
+        return {
+            "passed": True,
+            "compared": 0,
+            "mismatches": [],
+            "skipped": True,
+            "alignment": "declined",
+            "sample_seed": sample_seed,
+            "reason": (
+                "No identity key to align the read-back sample: source rows and "
+                "the destination read are drawn independently, so position does "
+                "not pair them. Map a primary key to enable per-row compare."
+            ),
+        }
+
     mismatches: list[dict[str, str]] = []
     compared = 0
-    target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
+    rows_compared = 0
+    rows_excluded_quarantined = 0
+    keyed = bool(sort_key and target_by_key)
+    # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
+    target_paired = list(target_dicts) if not keyed else []
+
+    def _row_write_refused(src: Any) -> bool:
+        # Replay the write pipeline on every mapped cell — transform → code
+        # crosswalk → rule contracts, the same order as
+        # writer_common._convert_mapped_cell (mirrored, not imported: that
+        # module imports this one). A row the writer refused is quarantined
+        # at write, so it must not enter the comparison — its absence from
+        # the destination read-back is expected, and a stale row still
+        # holding its key is not corruption evidence.
+        if not isinstance(src, dict):
+            return False
+        for m in mappings:
+            src_col = str(m.get("source") or "")
+            tgt_col = str(m.get("target") or "")
+            if not src_col or not tgt_col:
+                continue
+            if src_col not in src:
+                # Sparse documents may legitimately lack a column — keep the
+                # old behaviour (the cell compares as NULL) rather than
+                # excluding the row and hiding corruption evidence.
+                continue
+            raw_src = src.get(src_col)
+            if is_missing_sentinel(raw_src):
+                continue
+            transform = m.get("transform")
+            if not transform or str(transform).strip().lower() in {
+                "",
+                "none",
+                "identity",
+                "passthrough",
+            }:
+                try:
+                    from services.transform_resolver import resolve_transform
+
+                    transform = resolve_transform(
+                        m,
+                        column_types={},
+                        dest_types=dest_types,
+                    )
+                except Exception:
+                    transform = m.get("transform")
+            try:
+                converted, err = apply_transform(raw_src, transform or "none")
+            except Exception:
+                err = "transform_failed"
+            if not err and declared_crosswalk(m) is not None:
+                _xval, xerr = apply_code_crosswalk(converted, m)
+                if xerr:
+                    err = xerr
+            if not err and isinstance(m.get("rule_contracts"), list):
+                from services.rule_compiler.apply import evaluate_contract
+
+                for contract in m["rule_contracts"]:
+                    if evaluate_contract(converted, contract, missing=False):
+                        err = "business rule refused"
+                        break
+            if err:
+                return True
+        return False
 
     def _result(*, passed: bool) -> dict[str, Any]:
+        # ``compared`` counts *cells*, and every operator-facing line rendered it
+        # as "compared N row(s)" — a 500-cell, 50-row sample read as ten times
+        # the evidence it was. Both denominators are reported so a match
+        # percentage can name the population it is a percentage of.
         return {
             "passed": passed,
             "compared": compared,
+            "cells_compared": compared,
+            "rows_compared": rows_compared,
+            "rows_excluded_quarantined": rows_excluded_quarantined,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
-            "alignment": "keyed" if (sort_key and target_by_key) else "positional",
+            "alignment": "keyed" if keyed else "paired_by_caller",
         }
 
     for idx, src in enumerate(source_sorted):
-        if sort_key and target_by_key:
+        key = ""
+        if _row_write_refused(src):
+            rows_excluded_quarantined += 1
+            continue
+        if keyed:
             key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
             if not key and sort_key:
                 key = normalize_cell(src.get(sort_key))
             tgt = target_by_key.get(key) if key else None
+            if tgt is None:
+                # This key is not in the destination read-back window. That is a
+                # scope miss, not a missing row, and falling back to the row at
+                # the same index would compare two unrelated rows.
+                continue
         else:
-            tgt = target_fallback[idx] if idx < len(target_fallback) else None
+            tgt = target_paired[idx] if idx < len(target_paired) else None
         if tgt is None:
             continue
 
         # Case-insensitive target lookup — MySQL/Snowflake cursors may fold names.
         tgt_keys = {str(k).lower(): k for k in tgt.keys()}
+        rows_compared += 1
 
         for m in mappings:
             src_col = str(m.get("source") or "")
@@ -4072,23 +4595,80 @@ def sample_compare_rows(
                     )
                 except Exception:
                     transform = m.get("transform")
-            src_val = _fingerprint(
-                src.get(src_col), transform=transform, tgt_col=tgt_col
-            )
+            # Sparse CDC / STOP_COLUMN / coerce_null: source DF_MISSING means
+            # omit-from-SET — skip compare (do not fingerprint as NULL).
+            # Destination DF_MISSING is a leak and must still mismatch.
+            raw_src = src.get(src_col) if isinstance(src, dict) else None
+            if is_missing_sentinel(raw_src):
+                continue
+            raw_tgt = tgt.get(physical_tgt)
+
+            # Same order as writer_common: transform, then the declared
+            # crosswalk. Comparing the source token to the rewritten dest cell
+            # as identity is a false Gate-8 failure of a correct conversion.
+            rule_contracts = m.get("rule_contracts")
+            if declared_crosswalk(m) is not None or rule_contracts:
+                converted, err = apply_transform(raw_src, transform or "none")
+                if not err and declared_crosswalk(m) is not None:
+                    converted, xwalk_err = apply_code_crosswalk(converted, m)
+                    if xwalk_err:
+                        converted = None
+                if not err and isinstance(rule_contracts, list):
+                    # Rows a rule contract rejects are quarantined at write —
+                    # never in the dest image. Fingerprint the value the
+                    # writer saw; a failing row must not read as a Gate-8 miss.
+                    from services.rule_compiler.apply import evaluate_contract
+
+                    for contract in rule_contracts:
+                        if evaluate_contract(converted, contract, missing=False):
+                            converted = None
+                            break
+                src_val = _fingerprint(
+                    converted,
+                    transform=None,
+                    tgt_col=tgt_col,
+                    source_locale=source_locale,
+                )
+            else:
+                src_val = _fingerprint(
+                    raw_src,
+                    transform=transform,
+                    tgt_col=tgt_col,
+                    source_locale=source_locale,
+                )
             # Destination already applied bind at write — fingerprint without
             # re-transform so read-back bools/JSON match source write-path form.
             tgt_val = _fingerprint(
-                tgt.get(physical_tgt), transform=None, tgt_col=tgt_col
+                raw_tgt, transform=None, tgt_col=tgt_col
             )
             compared += 1
-            if src_val != tgt_val:
+            if (
+                src_val != tgt_val
+                and not _numeric_equal_on_numeric_column(
+                    src_val, tgt_val, tgt_col=tgt_col,
+                    mappings=mappings, dest_types=dest_types,
+                    raw_source=raw_src,
+                )
+                and not _skip_kept_existing_key(
+                    duplicate_policy,
+                    key=key if keyed else "",
+                    inserted_keys=inserted_keys,
+                )
+            ):
                 mismatches.append(
                     {
                         "row": str(idx),
+                        "key": str(key) if keyed else "",
                         "source": src_col,
                         "target": tgt_col,
-                        "source_value": src_val[:120],
-                        "target_value": tgt_val[:120],
+                        "source_value": operator_binary_cell_text(
+                            operator_cell_text(src_val),
+                            str((dest_types or {}).get(tgt_col) or ""),
+                        )[:120],
+                        "target_value": operator_binary_cell_text(
+                            operator_cell_text(tgt_val),
+                            str((dest_types or {}).get(tgt_col) or ""),
+                        )[:120],
                     }
                 )
                 if len(mismatches) >= 10:
@@ -4107,53 +4687,6 @@ class TargetSampleUnavailable(RuntimeError):
     """
 
 
-def _object_store_target_sample(
-    *,
-    table_name: str,
-    list_keys: Callable[[str], list[str]],
-    fetch_bytes: Callable[[str], bytes],
-    cols: list[str],
-    limit: int,
-    sort_key: str,
-    keys: Iterable[Any] | None,
-) -> list[dict[str, Any]]:
-    """Gate-8 sample read shared by S3, GCS and ADLS destinations.
-
-    Object stores have no WHERE clause, so the sample is assembled by reading
-    the part objects (or the single legacy object) and filtering in memory.
-    Reading every part matters: a multi-chunk write keeps most rows outside the
-    base key, and sampling only the base key would compare against a fraction
-    of the data while reporting a clean Gate-8.
-    """
-    from connectors.object_store_common import (
-        normalize_object_base_key,
-        object_parts_prefix,
-        object_store_read_keys,
-    )
-
-    base = normalize_object_base_key(table_name)
-    listed = list_keys(object_parts_prefix(base))
-    read_keys = object_store_read_keys(base, listed)
-    lim = max(1, int(limit or 50))
-    wanted = {str(k) for k in keys} if keys else set()
-    projection = None if cols == ["*"] else cols
-
-    rows: list[dict[str, Any]] = []
-    for obj_key in read_keys:
-        part_rows, _headers = _rows_from_object_bytes(
-            fetch_bytes(obj_key), obj_key, projection
-        )
-        if wanted and sort_key:
-            # Key-targeted sample: keep only the rows Gate-8 asked about, but
-            # keep scanning parts because a key can live in any part.
-            rows.extend(r for r in part_rows if str(r.get(sort_key)) in wanted)
-        else:
-            rows.extend(part_rows)
-        if len(rows) >= lim and not wanted:
-            break
-    return rows[:lim]
-
-
 def read_target_sample(
     db_type: str,
     dest: dict[str, Any],
@@ -4165,1599 +4698,64 @@ def read_target_sample(
     sort_key: str | None = None,
     key_values: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Read a small ordered sample from destination for value reconciliation.
+    """Read a small ordered sample from the destination for value reconciliation.
 
-    When ``key_values`` is provided with ``sort_key``, prefer a keyed ``IN (...)``
-    read so append/upsert Gate-8 can prove fidelity against pre-existing rows
-    (ORDER BY … LIMIT alone often misses the batch keys in a large table).
-
-    Returns an empty list only when the destination is genuinely empty (or the
-    keyed ``IN`` matched nothing). Read failures raise
-    :class:`TargetSampleUnavailable` — never ``[]``.
+    Implemented in :mod:`services.target_sample`; kept here as the stable entry
+    point Gate-8 and the transfer engine already import.
     """
-    from connectors.sql_identifiers import (
-        quote_column_list,
-        quote_sql_identifier,
-        quote_table_ref,
-        require_safe_identifier,
+    from services.target_sample import read_target_sample as _read
+
+    return _read(
+        db_type,
+        dest,
+        schema=schema,
+        table_name=table_name,
+        columns=columns,
+        limit=limit,
+        sort_key=sort_key,
+        key_values=key_values,
     )
 
-    cols = columns or ["*"]
-    keys = [k for k in (key_values or []) if k is not None and k != ""][
-        : max(1, int(limit or 50))
-    ]
+_VECTOR_VERIFY_EXPORTS = frozenset(
+    {
+        "verify_elasticsearch_index",
+        "verify_milvus_collection",
+        "verify_weaviate_class",
+    }
+)
 
-    def _row_names(description: Any) -> list[str]:
-        # When explicit columns were requested, trust the caller's keys so
-        # downstream mapping/reconciliation matches by the mapping target names.
-        # Cursor.description names may differ in case (e.g. fakesnow lower-cases
-        # quoted identifiers), which would make dict lookups fail for CURRENCY.
-        if cols and cols != ["*"]:
-            return list(cols)
-        return [d[0] for d in (description or [])]
 
-    def _ssl_flag(default: bool = False) -> bool:
-        # Match list/probe defaults — ssl=True here previously emptied samples on
-        # local / non-TLS hosts while verify_target still counted rows.
-        return bool(dest.get("ssl", default))
+def __getattr__(name: str):
+    if name in _VECTOR_VERIFY_EXPORTS:
+        from services import reconciliation_vector_verify
 
-    try:
-        if db_type in ("postgresql", "redshift"):
-            # Redshift speaks the Postgres wire protocol; local CI and many
-            # managed endpoints use the PG driver. Checksum verify already
-            # treated them as one family — sample compare must too, or Gate-8
-            # fails closed with "no sample reader" after a successful write.
-            from connectors.postgresql_conn import get_connection
+        value = getattr(reconciliation_vector_verify, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-            col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            table_ref = quote_table_ref(
-                table_name, schema or "public", dialect="postgresql"
-            )
-            order_sql = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            ssl_flag = _ssl_flag(False)
-            last_exc: Exception | None = None
-            for attempt_ssl in (ssl_flag, not ssl_flag):
-                try:
-                    conn = get_connection(
-                        host=dest.get("host", ""),
-                        port=dest.get("port", 5432),
-                        database=dest.get("database", ""),
-                        username=dest.get("username", ""),
-                        password=dest.get("password", ""),
-                        connection_string=dest.get("connection_string", ""),
-                        ssl=attempt_ssl,
-                    )
-                    with conn.cursor() as cur:
-                        if keys and sort_key:
-                            key_col = quote_sql_identifier(
-                                require_safe_identifier(sort_key, preserve_case=True)
-                            )
-                            placeholders = ",".join(["%s"] * len(keys))
-                            cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {key_col} IN ({placeholders}) "
-                                f"ORDER BY {order_sql} LIMIT %s",
-                                (*keys, int(limit)),
-                            )
-                        else:
-                            cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
-                                (limit,),
-                            )
-                        names = _row_names(cur.description)
-                        rows = cur.fetchall()
-                    conn.close()
-                    return [dict(zip(names, row)) for row in rows]
-                except Exception as exc:
-                    last_exc = exc
-                    continue
-            if last_exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
-                ) from last_exc
-            raise TargetSampleUnavailable(
-                f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                "postgresql connection failed for both SSL modes"
-            )
 
-        if db_type == "mysql":
-            from connectors.mysql_conn import get_connection
-
-            mysql_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols],
-                    quote_char="`",
-                )
-            )
-            table_ref = quote_table_ref(table_name, dialect="mysql")
-            mysql_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True), "`"
-                )
-                if sort_key
-                else "1"
-            )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=int(dest.get("port", 3306)),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=dest.get("ssl", False),
-            )
-            with conn.cursor() as cur:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True), "`"
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {mysql_order} LIMIT %s",
-                        (*keys, int(limit)),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",  # nosec B608
-                        (limit,),
-                    )
-                names = _row_names(cur.description)
-                rows = cur.fetchall()
-            conn.close()
-            return [dict(zip(names, row)) for row in rows]
-
-        if db_type in {"sqlserver", "mssql", "azure_sql"}:
-            import pymssql
-
-            lim = max(1, int(limit or 50))
-            if cols == ["*"]:
-                ss_col_sql = "*"
-            else:
-                ss_col_sql = ", ".join(
-                    f"[{require_safe_identifier(c, preserve_case=True).replace(']', ']]')}]"
-                    for c in cols
-                )
-            sch = (schema or dest.get("schema") or "dbo").strip() or "dbo"
-            table_ref = quote_table_ref(table_name, schema=sch, dialect="sqlserver")
-            ss_order = (
-                f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
-                if sort_key
-                else "1"
-            )
-            conn = pymssql.connect(
-                server=dest.get("host") or "127.0.0.1",
-                port=int(dest.get("port") or 1433),
-                user=dest.get("username") or "sa",
-                password=dest.get("password") or "",
-                database=dest.get("database") or "master",
-                login_timeout=10,
-                timeout=30,
-            )
-            cur = conn.cursor()
-            try:
-                if keys and sort_key:
-                    key_col = (
-                        f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    cur.execute(
-                        f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {ss_order}",
-                        tuple(keys),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
-                        f"ORDER BY {ss_order}"
-                    )
-                names = _row_names(cur.description)
-                rows = cur.fetchall()
-            finally:
-                cur.close()
-                conn.close()
-            return [dict(zip(names, row)) for row in rows]
-
-        if db_type in {
-            "oracle",
-            "oracledb",
-            "oracle_db",
-            "oracle_autonomous",
-            "oracle_autonomous_warehouse",
-            "amazon_rds_oracle",
-        } or (
-            db_type == "generic_sql"
-            and (dest.get("connection_string") or "").lower().startswith("oracle")
-        ):
-            import sqlalchemy as sa
-
-            from connectors.generic_sql import get_sqlalchemy_engine
-
-            lim = max(1, int(limit or 50))
-            ora_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            sch = (schema or dest.get("schema") or dest.get("username") or "").strip() or None
-            table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
-            ora_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            engine = get_sqlalchemy_engine(
-                {
-                    "type": "oracle",
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 1521),
-                    "database": dest.get("database", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "schema": schema or dest.get("schema") or "",
-                }
-            )
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
-                    params["lim"] = lim
-                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
-                    sql = (
-                        f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
-                    )
-                else:
-                    params = {"lim": lim}
-                    sql = (
-                        f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
-                        f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
-                    )
-                result = conn.execute(sa.text(sql), params)
-                names = (
-                    list(cols)
-                    if cols and cols != ["*"]
-                    else list(result.keys())
-                )
-                rows = result.fetchall()
-                return [dict(zip(names, tuple(row))) for row in rows]
-
-        if db_type == "duckdb" or (
-            db_type == "generic_sql"
-            and (
-                "duckdb"
-                in (dest.get("connection_string") or dest.get("database") or "").lower()
-                or (dest.get("connection_string") or dest.get("database") or "")
-                .lower()
-                .endswith((".duckdb", ".duck"))
-            )
-        ):
-            import sqlalchemy as sa
-            from connectors.generic_sql import get_sqlalchemy_engine
-
-            path = dest.get("connection_string") or dest.get("database", "")
-            if not path:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "duckdb path missing (connection_string/database)"
-                )
-            duckdb_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            table_ref = quote_table_ref(table_name, dialect="duckdb")
-            duckdb_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            try:
-                engine = get_sqlalchemy_engine(
-                    {"type": "duckdb", "connection_string": path}
-                )
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
-                    params["lim"] = int(limit)
-                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
-                    sql = (
-                        f"SELECT {duckdb_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {duckdb_order} LIMIT :lim"
-                    )
-                else:
-                    params = {"lim": int(limit)}
-                    sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"  # nosec B608
-                try:
-                    result = conn.execute(sa.text(sql), params)
-                    rows = result.mappings().all()
-                    # DuckDB returns column labels using the sanitized (underscore)
-                    # form of names like "fields.Name".  Re-label them with the
-                    # requested target column names so reconciliation keys match
-                    # the engine's mapping targets.
-                    if cols and cols != ["*"]:
-                        return [
-                            {cols[i]: list(row.values())[i] for i in range(len(cols))}
-                            for row in rows
-                        ]
-                    return [dict(row) for row in rows]
-                except TargetSampleUnavailable:
-                    raise
-                except Exception as exc:
-                    raise TargetSampleUnavailable(
-                        f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                    ) from exc
-
-        if db_type == "mongodb":
-            from connectors.mongodb_common import (
-                _mongo_client,
-                normalize_mongodb_connection_string,
-            )
-
-            try:
-                conn_str = normalize_mongodb_connection_string(
-                    dest.get("connection_string", ""),
-                    database=dest.get("database", ""),
-                    host=dest.get("host", ""),
-                    port=int(dest.get("port") or 27017),
-                    username=dest.get("username", ""),
-                    password=dest.get("password", ""),
-                    ssl=bool(dest.get("ssl", False)),
-                    auth_source=dest.get("auth_source", ""),
-                )
-                client = _mongo_client(conn_str)
-                db = client[dest.get("database") or "test"]
-                coll = db[table_name]
-                query_filter: dict[str, Any] = {}
-                if keys and sort_key:
-                    # Mongo $in is type-sensitive; widened key set matches strings,
-                    # integers, and decimals that the writer may have produced.
-                    widened: set[Any] = set()
-                    for k in keys:
-                        widened.add(k)
-                        try:
-                            if str(k).isdigit():
-                                widened.add(int(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        try:
-                            widened.add(float(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        # ObjectId keys from schemaless sources are serialized as hex strings.
-                        try:
-                            from bson import ObjectId
-
-                            if (
-                                isinstance(k, str)
-                                and len(k) == 24
-                                and all(c in "0123456789abcdefABCDEF" for c in k)
-                            ):
-                                widened.add(ObjectId(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                    query_filter = {sort_key: {"$in": list(widened)}}
-                cursor = coll.find(query_filter)
-                if sort_key:
-                    cursor = cursor.sort(sort_key, 1)
-                return list(cursor.limit(int(limit)))
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type == "sqlite" or (
-            db_type == "generic_sql"
-            and (
-                "sqlite"
-                in (dest.get("connection_string") or dest.get("database") or "").lower()
-                or (dest.get("connection_string") or dest.get("database") or "")
-                .lower()
-                .endswith((".db", ".sqlite"))
-            )
-        ):
-            import sqlite3
-
-            from connectors.sqlite_common import sqlite_file_path
-
-            path = sqlite_file_path(
-                dest.get("database") or "",
-                dest.get("connection_string") or "",
-                dest.get("host") or "",
-            )
-            if not path:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "sqlite path missing"
-                )
-            sqlite_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            table_ref = quote_table_ref(table_name, dialect="sqlite")
-            sqlite_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            conn = sqlite3.connect(str(path))
-            try:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    placeholders = ",".join(["?"] * len(keys))
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
-                    cur = conn.execute(sql, [*keys, int(limit)])
-                else:
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
-                    cur = conn.execute(sql, (int(limit),))
-                rows = cur.fetchall()
-                names = _row_names(cur.description)
-                return [dict(zip(names, row)) for row in rows]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-            finally:
-                conn.close()
-
-        if db_type == "redis":
-            from connectors.redis_reader import _decode, _redis_client
-            from connectors.sql_identifiers import sanitize_identifier
-
-            prefix = table_name or "dataflow"
-            cfg = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 6379),
-                "database": dest.get("database", "0"),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-            }
-            try:
-                client = _redis_client(cfg)
-                rows_out: list[dict[str, Any]] = []
-                if keys and sort_key:
-                    # Writer stores keys as ``prefix:<sanitized_id>``.
-                    key_names = [
-                        f"{prefix}:{sanitize_identifier(str(k), preserve_case=True)}"
-                        for k in keys
-                    ]
-                    for raw in client.mget(key_names):
-                        text = _decode(raw)
-                        if not text:
-                            continue
-                        try:
-                            payload = json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            payload = {"value": text}
-                        if isinstance(payload, dict):
-                            rows_out.append(payload)
-                        else:
-                            rows_out.append({"value": payload})
-                        if len(rows_out) >= limit:
-                            break
-                else:
-                    pattern = f"{prefix}:*" if prefix else "*"
-                    cursor = 0
-                    while True:
-                        cursor, batch = client.scan(
-                            cursor=cursor, match=pattern, count=500
-                        )
-                        for raw_key in batch:
-                            key = (
-                                raw_key.decode()
-                                if isinstance(raw_key, bytes)
-                                else str(raw_key)
-                            )
-                            raw = client.get(key)
-                            text = _decode(raw)
-                            try:
-                                payload = (
-                                    json.loads(text)
-                                    if text.startswith("{")
-                                    else {"value": text}
-                                )
-                            except (json.JSONDecodeError, TypeError):
-                                payload = {"value": text}
-                            if isinstance(payload, dict):
-                                rows_out.append(payload)
-                            else:
-                                rows_out.append({"value": payload})
-                            if len(rows_out) >= limit:
-                                break
-                        if cursor == 0 or len(rows_out) >= limit:
-                            break
-                if columns:
-                    rows_out = [
-                        {k: v for k, v in row.items() if k in columns}
-                        for row in rows_out
-                    ]
-                return rows_out[:limit]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type in {"elasticsearch", "opensearch", "elastic"}:
-            from connectors.elasticsearch_reader import read_index_batch
-
-            cfg = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 9200),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-                "api_key": str(dest.get("api_key") or dest.get("service_account") or ""),
-            }
-            try:
-                batch, _ = read_index_batch(
-                    cfg=cfg,
-                    index=table_name,
-                    columns=None if cols == ["*"] else cols,
-                    limit=max(1, int(limit or 50)),
-                )
-                headers = list(batch.headers or [])
-                rows_out: list[dict[str, Any]] = []
-                for row in batch.rows or []:
-                    if isinstance(row, dict):
-                        payload = row
-                    elif headers:
-                        payload = {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                    else:
-                        continue
-                    if keys and sort_key:
-                        sk = str(payload.get(sort_key, ""))
-                        if sk not in {str(k) for k in keys}:
-                            continue
-                    rows_out.append(payload)
-                    if len(rows_out) >= limit:
-                        break
-                if columns and columns != ["*"]:
-                    rows_out = [
-                        {k: v for k, v in row.items() if k in columns}
-                        for row in rows_out
-                    ]
-                return rows_out[:limit]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type == "snowflake":
-            from connectors.snowflake_conn import (
-                get_connection,
-                normalize_account,
-                resolve_or_fold_snowflake_table,
-                snowflake_qualified_table,
-            )
-
-            try:
-                conn = get_connection(
-                    account=normalize_account(dest.get("host", "")),
-                    username=dest.get("username", ""),
-                    password=dest.get("password", ""),
-                    database=dest.get("database", ""),
-                    schema=schema or "PUBLIC",
-                    warehouse=dest.get("warehouse", ""),
-                    connection_string=dest.get("connection_string", ""),
-                )
-                from connectors.sql_identifiers import (
-                    quote_sql_identifier,
-                    require_safe_identifier,
-                )
-
-                with conn.cursor() as cur:
-                    resolved = resolve_or_fold_snowflake_table(
-                        cur, schema or "PUBLIC", table_name
-                    )
-                    qualified_name = snowflake_qualified_table(
-                        schema or "PUBLIC", resolved
-                    )
-                    sf_col_sql = (
-                        "*"
-                        if cols == ["*"]
-                        else quote_column_list(
-                            [
-                                require_safe_identifier(c, preserve_case=True)
-                                for c in cols
-                            ]
-                        )
-                    )
-                    sf_order = (
-                        quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        if sort_key
-                        else "1"
-                    )
-                    if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
-                        widened: set[Any] = set()
-                        for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        placeholders = ",".join(["%s"] * len(widened))
-                        cur.execute(
-                            f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
-                            f"ORDER BY {sf_order} LIMIT %s",
-                            (*widened, int(limit)),
-                        )
-                    else:
-                        cur.execute(
-                            f"SELECT {sf_col_sql} FROM {qualified_name} ORDER BY {sf_order} LIMIT %s",  # nosec B608
-                            (int(limit),),
-                        )
-                    names = _row_names(cur.description)
-                    rows = cur.fetchall()
-                conn.close()
-                return [dict(zip(names, row)) for row in rows]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type == "bigquery":
-            from connectors.bigquery_conn import get_client, _is_local_endpoint
-
-            project_id = dest.get("database", "")
-            dataset_id = schema or "dataflow"
-            is_local, _ = _is_local_endpoint(
-                dest.get("host", ""), dest.get("connection_string", "")
-            )
-            try:
-                client = get_client(
-                    project_id=project_id,
-                    credentials_path=dest.get("connection_string", ""),
-                    service_account=dest.get("service_account", ""),
-                    host=dest.get("host", ""),
-                    port=int(dest.get("port") or 0),
-                    connection_string=dest.get("connection_string", ""),
-                )
-                table_id = f"{project_id}.{dataset_id}.{table_name}"
-                if is_local:
-                    # Emulator path: scan rows and filter in-process; avoids
-                    # query().result() hangs on the goccy emulator for some jobs.
-                    out: list[dict[str, Any]] = []
-                    scan_limit = (limit or 50) * 10 if (keys and sort_key) else (limit or 50)
-                    widened = set()
-                    if keys and sort_key:
-                        for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to int: %s", k, exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to float: %s", k, exc)
-                    for row in client.list_rows(table_id, max_results=scan_limit):
-                        d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
-                        if cols and cols != ["*"]:
-                            d = {k: v for k, v in d.items() if k in cols}
-                        if keys and sort_key:
-                            if d.get(sort_key) in widened:
-                                out.append(d)
-                        else:
-                            out.append(d)
-                        if len(out) >= (limit or 50):
-                            break
-                    return out
-                # Production: use a real BigQuery query with a bounded timeout.
-                col_sql = (
-                    "*"
-                    if cols == ["*"]
-                    else quote_column_list(
-                        [require_safe_identifier(c, preserve_case=True) for c in cols]
-                    )
-                )
-                bq_order = (
-                    quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    if sort_key
-                    else "1"
-                )
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    sql = (
-                        f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {bq_order} LIMIT %s"
-                    )
-                    params = (*keys, int(limit))
-                else:
-                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT %s"  # nosec B608
-                    params = (int(limit),)
-                res = client.query(sql, timeout=60).result()
-                names = list(res.schema) if res.schema else cols
-                if names and names[0] and not isinstance(names[0], str):
-                    names = [f.name for f in names]
-                return [
-                    {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
-                    for row in res
-                ]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type in {
-            "adls",
-            "azure_blob_storage",
-            "azure_data_lake",
-            "azure_data_lake_storage",
-        }:
-            from connectors.adls_common import blob_service_client
-            from connectors.adls_reader import list_objects
-
-            container = (dest.get("database") or schema or "").strip()
-            if not container or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "ADLS container or blob path missing"
-                )
-            cfg_adls = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "database": container,
-            }
-            client = blob_service_client(cfg_adls)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_adls, container, prefix),
-                fetch_bytes=lambda k: (
-                    client.get_blob_client(container, k).download_blob().readall()
-                ),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"s3", "minio", "s3_compatible", "aws_s3"}:
-            from connectors.aws_common import boto3_client
-            from connectors.s3_reader import list_objects
-
-            bucket = (dest.get("database") or schema or "").strip()
-            if not bucket or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "S3 bucket or object key missing"
-                )
-            cfg_s3 = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-                "database": bucket,
-                "endpoint_url": dest.get("endpoint_url", "") or "",
-                "path_style": bool(dest.get("path_style", False)),
-                "region": dest.get("region", "") or "",
-            }
-            client = boto3_client("s3", cfg_s3)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_s3, bucket, prefix),
-                fetch_bytes=lambda k: client.get_object(Bucket=bucket, Key=k)["Body"].read(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"gcs", "google_cloud_storage"}:
-            from connectors.gcs_common import gcs_client
-            from connectors.gcs_reader import list_objects
-
-            bucket = (dest.get("database") or schema or "").strip()
-            if not bucket or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "GCS bucket or object key missing"
-                )
-            cfg_gcs = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "password": dest.get("password", ""),
-            }
-            bucket_obj = gcs_client(cfg_gcs).bucket(bucket)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_gcs, bucket, prefix),
-                fetch_bytes=lambda k: bucket_obj.blob(k).download_as_bytes(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {
-            "databricks",
-            "databricks_sql",
-            "delta",
-            "delta_lake",
-            "unity_catalog",
-            "spark",
-        }:
-            import sqlalchemy as sa
-
-            from connectors.generic_sql import get_sqlalchemy_engine
-
-            lim = max(1, int(limit or 50))
-            db_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            sch = (schema or dest.get("schema") or dest.get("database") or "").strip() or None
-            table_ref = quote_table_ref(table_name, schema=sch, dialect="ansi")
-            db_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            engine = get_sqlalchemy_engine(
-                {
-                    "type": "databricks",
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 443),
-                    "database": dest.get("database", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "schema": schema or dest.get("schema") or "",
-                    "http_path": str(dest.get("http_path") or dest.get("warehouse") or ""),
-                }
-            )
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    params = {f"k{i}": k for i, k in enumerate(keys)}
-                    params["lim"] = lim
-                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
-                    sql = (
-                        f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {db_order} LIMIT :lim"
-                    )
-                else:
-                    params = {"lim": lim}
-                    sql = (
-                        f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
-                        f"ORDER BY {db_order} LIMIT :lim"
-                    )
-                result = conn.execute(sa.text(sql), params)
-                names = list(cols) if cols and cols != ["*"] else list(result.keys())
-                return [dict(zip(names, tuple(row))) for row in result.fetchall()]
-
-        if db_type == "hubspot":
-            from connectors.hubspot import read_object
-
-            batch = read_object(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "table": table_name,
-                    "database": table_name,
-                },
-                object=table_name or "contacts",
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or (cols if cols != ["*"] else []) or [])
-            out_rows: list[dict[str, Any]] = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = dict(row)
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "salesforce":
-            from connectors.salesforce import read_object
-
-            batch = read_object(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "api_key": dest.get("api_key", ""),
-                    "table": table_name,
-                    "database": table_name,
-                },
-                object=table_name or "Account",
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or [])
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = {k: v for k, v in row.items() if k != "attributes"}
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "airtable":
-            from connectors.airtable import read_object
-            from connectors.saas_typed_schema import flatten_airtable_record
-
-            batch = read_object(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "api_key": dest.get("api_key", ""),
-                    "database": dest.get("database") or schema or "",
-                    "table": table_name,
-                    "type": "airtable",
-                },
-                object=table_name,
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d, _ = flatten_airtable_record(row)
-                elif batch.headers:
-                    headers = list(batch.headers)
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type in {"stripe", "shopify", "zendesk", "notion"}:
-            if db_type == "stripe":
-                from connectors.stripe import read_object as _saas_read
-            elif db_type == "shopify":
-                from connectors.shopify import read_object as _saas_read
-            elif db_type == "zendesk":
-                from connectors.zendesk import read_object as _saas_read
-            else:
-                from connectors.notion import read_object as _saas_read
-
-            batch = _saas_read(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "api_key": dest.get("api_key", ""),
-                    "table": table_name,
-                    "database": dest.get("database") or schema or table_name,
-                    "shop": dest.get("host", ""),
-                    "type": db_type,
-                },
-                object=table_name
-                or (
-                    "customers"
-                    if db_type in {"stripe", "shopify"}
-                    else ("tickets" if db_type == "zendesk" else "")
-                ),
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or [])
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = dict(row)
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "kafka":
-            from connectors.kafka_reader import read_topic_batch
-
-            batch, _ = read_topic_batch(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 9092),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "database": table_name,
-                    "table": table_name,
-                    "group_id": f"dataflow-gate8-sample-{abs(hash(table_name)) % 10_000_000}",
-                    "auto_offset_reset": "earliest",
-                    "schema_registry_url": str(
-                        dest.get("schema_registry_url") or dest.get("registry_url") or ""
-                    ),
-                },
-                topic=table_name,
-                columns=None if cols == ["*"] else cols,
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or [])
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = dict(row)
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "pinecone":
-            from connectors.pinecone_writer import _headers, _index_url, _requests_session
-
-            index_url = _index_url(dest.get("host", ""), dest.get("connection_string", ""))
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
-            if not index_url or not key:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "pinecone index URL or API key missing"
-                )
-            session = _requests_session()
-            hdrs = _headers(key)
-            ns = (table_name or dest.get("schema") or "").strip()
-            ids = [str(k) for k in keys] if keys else []
-            if not ids:
-                return []
-            params = [("ids", i) for i in ids[: max(1, int(limit or 50))]]
-            if ns:
-                params.append(("namespace", ns))
-            fetch = session.get(
-                f"{index_url}/vectors/fetch",
-                params=params,
-                headers=hdrs,
-                timeout=30,
-            )
-            if fetch.status_code not in {200, 201}:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    f"pinecone fetch HTTP {fetch.status_code}"
-                )
-            vectors = (fetch.json() or {}).get("vectors") or {}
-            out_rows = []
-            for vid, payload in vectors.items():
-                meta = payload.get("metadata") if isinstance(payload, dict) else {}
-                if not isinstance(meta, dict):
-                    meta = {}
-                row = {"id": vid, **meta}
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "qdrant":
-            from connectors.qdrant_writer import _base_url, _headers, _requests_session
-
-            api_key = dest.get("password") or dest.get("username") or ""
-            base_url = (
-                dest.get("connection_string", "").rstrip("/")
-                if dest.get("connection_string")
-                else _base_url(
-                    dest.get("host", ""),
-                    int(dest.get("port") or 6333),
-                    bool(dest.get("ssl", False)),
-                )
-            )
-            collection = table_name or dest.get("database") or "dataflow_vectors"
-            session = _requests_session()
-            hdrs = _headers(str(api_key))
-            out_rows: list[dict[str, Any]] = []
-            if keys:
-                retrieve = session.post(
-                    f"{base_url}/collections/{collection}/points",
-                    data=json.dumps({
-                        "ids": [str(k) for k in keys[: max(1, int(limit or 50))]],
-                        "with_payload": True,
-                        "with_vector": False,
-                    }),
-                    headers=hdrs,
-                    timeout=30,
-                )
-                points = (
-                    (retrieve.json() or {}).get("result") or []
-                    if retrieve.status_code in {200, 201}
-                    else []
-                )
-            else:
-                scroll = session.post(
-                    f"{base_url}/collections/{collection}/points/scroll",
-                    data=json.dumps({
-                        "limit": max(1, int(limit or 50)),
-                        "with_payload": True,
-                        "with_vector": False,
-                    }),
-                    headers=hdrs,
-                    timeout=30,
-                )
-                points = (
-                    ((scroll.json() or {}).get("result") or {}).get("points") or []
-                    if scroll.status_code in {200, 201}
-                    else []
-                )
-            for pt in points:
-                if not isinstance(pt, dict):
-                    continue
-                payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
-                row = {"id": pt.get("id"), **payload}
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "weaviate":
-            from connectors.weaviate_writer import (
-                _base_url,
-                _class_name,
-                _headers,
-                _requests_session,
-            )
-
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
-            base_url = _base_url(
-                dest.get("host", ""),
-                int(dest.get("port") or 8080),
-                bool(dest.get("ssl", False)),
-                dest.get("connection_string", ""),
-            )
-            cls = _class_name(table_name or dest.get("database") or "DataflowChunk")
-            session = _requests_session()
-            hdrs = _headers(key)
-            out_rows = []
-            if keys:
-                for oid in keys[: max(1, int(limit or 50))]:
-                    resp = session.get(
-                        f"{base_url}/v1/objects/{cls}/{oid}",
-                        headers=hdrs,
-                        timeout=15,
-                    )
-                    if resp.status_code not in {200, 201}:
-                        resp = session.get(
-                            f"{base_url}/v1/objects/{oid}",
-                            headers=hdrs,
-                            timeout=15,
-                        )
-                    if resp.status_code not in {200, 201}:
-                        continue
-                    obj = resp.json() or {}
-                    if not isinstance(obj, dict):
-                        continue
-                    props = (
-                        obj.get("properties")
-                        if isinstance(obj.get("properties"), dict)
-                        else {}
-                    )
-                    row = {"id": obj.get("id") or oid, **props}
-                    if cols and cols != ["*"]:
-                        row = {k: row.get(k) for k in cols}
-                    out_rows.append(row)
-            else:
-                agg = session.get(
-                    f"{base_url}/v1/objects",
-                    params={"class": cls, "limit": max(1, int(limit or 50))},
-                    headers=hdrs,
-                    timeout=30,
-                )
-                if agg.status_code in {200, 201}:
-                    for obj in (agg.json() or {}).get("objects") or []:
-                        if not isinstance(obj, dict):
-                            continue
-                        props = (
-                            obj.get("properties")
-                            if isinstance(obj.get("properties"), dict)
-                            else {}
-                        )
-                        row = {"id": obj.get("id"), **props}
-                        if cols and cols != ["*"]:
-                            row = {k: row.get(k) for k in cols}
-                        out_rows.append(row)
-                        if len(out_rows) >= int(limit or 50):
-                            break
-            return out_rows
-
-        if db_type == "milvus":
-            from connectors.milvus_writer import (
-                _auth_token,
-                _base_url,
-                _collection_name,
-                _headers,
-                _ok_response,
-                _requests_session,
-            )
-
-            coll = _collection_name(table_name or "dataflow_chunks")
-            db_name = (dest.get("database") or schema or "").strip()
-            if db_name.lower() in {"", "test_db", "default", "public"}:
-                db_name = ""
-            token = _auth_token(
-                api_key=str(dest.get("api_key") or ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-            )
-            base_url = _base_url(
-                dest.get("host", ""),
-                int(dest.get("port") or 19530),
-                bool(dest.get("ssl", False)),
-                dest.get("connection_string", ""),
-            )
-            session = _requests_session()
-            hdrs = _headers(token)
-            query_payload: dict[str, Any] = {
-                "collectionName": coll,
-                "outputFields": ["id", "content", "source_id", "chunk_index"],
-                "limit": max(1, int(limit or 50)),
-            }
-            if keys:
-                quoted = ", ".join(json.dumps(str(k)) for k in keys[: max(1, int(limit or 50))])
-                query_payload["filter"] = f"id in [{quoted}]"
-            else:
-                query_payload["filter"] = ""
-            if db_name:
-                query_payload["dbName"] = db_name
-            query = session.post(
-                f"{base_url}/v2/vectordb/entities/query",
-                data=json.dumps(query_payload),
-                headers=hdrs,
-                timeout=30,
-            )
-            qbody = query.json() if query.content else {}
-            out_rows = []
-            if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
-                for row in (qbody.get("data") if isinstance(qbody, dict) else []) or []:
-                    if not isinstance(row, dict):
-                        continue
-                    d = {k: v for k, v in row.items() if k != "vector"}
-                    if cols and cols != ["*"]:
-                        d = {k: d.get(k) for k in cols}
-                    out_rows.append(d)
-                    if len(out_rows) >= int(limit or 50):
-                        break
-            return out_rows
-
-        _engine_hint = str(dest.get("type") or dest.get("engine") or "").lower()
-        _conn_hint = str(dest.get("connection_string") or dest.get("database") or "").lower()
-        if db_type == "clickhouse" or (
-            db_type == "generic_sql"
-            and ("clickhouse" in _engine_hint or "clickhouse" in _conn_hint)
-        ):
-            import sqlalchemy as sa
-
-            from connectors.generic_sql import (
-                clickhouse_final_table_sql,
-                get_sqlalchemy_engine,
-            )
-            from connectors.sql_identifiers import (
-                quote_sql_identifier,
-                quote_table_ref,
-                require_safe_identifier,
-            )
-
-            engine = get_sqlalchemy_engine(
-                {
-                    "type": "clickhouse",
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 9000),
-                    "database": dest.get("database", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "schema": schema or dest.get("schema") or "",
-                    "ssl": bool(dest.get("ssl", False)),
-                }
-            )
-            table_ref = quote_table_ref(
-                table_name,
-                schema=schema or dest.get("schema") or None,
-                dialect="clickhouse",
-            )
-            from_sql = clickhouse_final_table_sql(table_ref)
-            col_sql = (
-                "*"
-                if cols == ["*"]
-                else ", ".join(
-                    quote_sql_identifier(
-                        require_safe_identifier(c, preserve_case=True), "`"
-                    )
-                    for c in cols
-                )
-            )
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True), "`"
-                    )
-                    placeholders = ", ".join(f":k{i}" for i in range(len(keys)))
-                    params = {f"k{i}": k for i, k in enumerate(keys)}
-                    result = conn.execute(
-                        sa.text(
-                            f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
-                            f"LIMIT {int(limit or 50)}"
-                        ),
-                        params,
-                    )
-                else:
-                    result = conn.execute(
-                        sa.text(
-                            f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
-                            f"LIMIT {int(limit or 50)}"
-                        )
-                    )
-                names = list(result.keys()) if result.keys() else (
-                    list(cols) if cols != ["*"] else []
-                )
-                return [dict(zip(names, row)) for row in result.fetchall()]
-
-        if db_type == "pgvector":
-            from connectors.postgresql_conn import get_connection
-            from connectors.sql_identifiers import (
-                quote_sql_identifier,
-                quote_table_ref,
-                require_safe_identifier,
-            )
-
-            table_ref = quote_table_ref(
-                table_name, schema or "public", dialect="postgresql"
-            )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=dest.get("port", 5432),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=bool(dest.get("ssl", False)),
-            )
-            try:
-                with conn.cursor() as cur:
-                    if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        placeholders = ",".join(["%s"] * len(keys))
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} WHERE {key_col} IN ({placeholders}) LIMIT %s",
-                            (*keys, int(limit or 50)),
-                        )
-                    else:
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} LIMIT %s",
-                            (int(limit or 50),),
-                        )
-                    names = [d[0] for d in cur.description] if cur.description else []
-                    out_rows = []
-                    for raw in cur.fetchall():
-                        rec = dict(zip(names, raw))
-                        meta = rec.get("metadata") or {}
-                        if isinstance(meta, str):
-                            try:
-                                meta = json.loads(meta)
-                            except Exception:
-                                meta = {}
-                        if not isinstance(meta, dict):
-                            meta = {}
-                        row = {
-                            "id": rec.get("id"),
-                            "content": rec.get("content"),
-                            "source_id": rec.get("source_id"),
-                            "chunk_index": rec.get("chunk_index"),
-                            **meta,
-                        }
-                        if cols and cols != ["*"]:
-                            row = {k: row.get(k) for k in cols}
-                        out_rows.append(row)
-                    return out_rows
-            finally:
-                conn.close()
-
-        if db_type == "sftp":
-            from connectors.sftp_common import connect_sftp, parse_sftp_config
-
-            cfg = parse_sftp_config(
-                connection_string=dest.get("connection_string", ""),
-                host=dest.get("host", ""),
-                port=int(dest.get("port") or 22),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                database=dest.get("database", "") or schema or "",
-                table=table_name,
-            )
-            if not cfg.host or not cfg.path:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "sftp host or path missing"
-                )
-            transport, sftp = connect_sftp(cfg)
-            try:
-                with sftp.file(cfg.path, "rb") as fh:
-                    body = fh.read()
-            finally:
-                sftp.close()
-                transport.close()
-            rows, headers = _rows_from_object_bytes(
-                body, cfg.path, None if cols == ["*"] else cols
-            )
-            out_rows: list[dict[str, Any]] = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    if headers:
-                        row = {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                    else:
-                        continue
-                if keys and sort_key and row.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-    except TargetSampleUnavailable:
-        raise
-    except Exception as exc:
-        raise TargetSampleUnavailable(
-            f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-        ) from exc
-    raise TargetSampleUnavailable(
-        f"No sample reader is wired for destination type {db_type!r} "
-        f"(table {table_name!r}); refusing to treat as empty"
-    )
+from services.reconciliation_readback import (  # noqa: E402,F401 - re-export
+    verify_pinecone_namespace,
+    verify_qdrant_collection,
+    verify_bigquery_table,
+    verify_s3_object,
+    verify_gcs_blob,
+    verify_adls_blob,
+    verify_hubspot_object,
+    verify_salesforce_object,
+    verify_airtable_table,
+    verify_stripe_object,
+    verify_shopify_object,
+    verify_zendesk_object,
+    verify_notion_object,
+    verify_kafka_topic,
+    verify_databricks_table,
+    verify_mongodb_collection,
+    verify_redis_prefix,
+    verify_dynamodb_table,
+    verify_iceberg_table,
+    verify_clickhouse_table,
+    verify_generic_sql_table,
+    verify_duckdb_table,
+)

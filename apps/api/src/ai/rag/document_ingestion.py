@@ -12,6 +12,7 @@ from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.synonyms import SYNONYM_DICTIONARY
 from ..knowledge.type_conversions import TYPE_CONVERSION_MATRIX
+from .product_docs import product_doc_documents
 from .vector_store import get_vector_store
 
 
@@ -79,6 +80,14 @@ class DataTransferDocumentIngestion:
             })
             ids.append(f"conv_{src}")
 
+        # Operator documentation: the knowledge base otherwise holds only
+        # column-mapping material, so a question about quarantine, CDC setup or
+        # proof had nothing in the corpus that could answer it.
+        doc_texts, doc_metas, doc_ids = product_doc_documents()
+        texts.extend(doc_texts)
+        metadatas.extend(doc_metas)
+        ids.extend(doc_ids)
+
         self.vector_store.add_documents(texts, metadatas, ids)
         self._knowledge_loaded = True
 
@@ -88,6 +97,7 @@ class DataTransferDocumentIngestion:
             "synonyms": len(SYNONYM_DICTIONARY),
             "industries": len(INDUSTRY_SCHEMAS),
             "type_conversions": len(TYPE_CONVERSION_MATRIX),
+            "product_docs": len(doc_texts),
         }
 
     def ingest_schema(

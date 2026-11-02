@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": 8102,
+      "name": "Fixture Product Page Two",
+      "sku": "FIX-P2",
+      "price": 19.99,
+      "date_created": "2024-01-01T00:00:00+00:00",
+      "date_modified": "2024-01-02T00:00:00+00:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "total": 251,
+      "count": 1,
+      "per_page": 250,
+      "current_page": 2,
+      "total_pages": 2
+    }
+  }
+}

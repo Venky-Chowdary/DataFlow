@@ -286,6 +286,9 @@ def test_transfer_matrix_pg_mysql_mongo(seeded):
             source=mongo_src,
             destination=pg_dst,
             mappings=[
+                # Mongo's server-assigned ``_id`` is a real source column, so it
+                # has to be declared omitted rather than silently dropped.
+                {"source": "_id", "target": "", "intentional_omit": True},
                 {"source": "email", "target": "email", "confidence": 1.0},
                 {"source": "amount", "target": "amount", "confidence": 1.0},
             ],

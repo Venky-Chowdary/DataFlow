@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from services.file_parser import store_upload
-from services.schema_inference import infer_columns_from_rows, infer_type
+from services.schema_inference import infer_columns_from_rows, infer_schema_map, infer_type
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -17,7 +17,9 @@ class TestInferType:
         "samples,expected",
         [
             (["1", "2", "100"], "INTEGER"),
-            (["1.5", "2.0", "100.99"], "DECIMAL"),
+            # Source inference and dest invent share the exact envelope
+            # (3 int digits + scale 2). Extra dest scale is forbidden.
+            (["1.5", "2.0", "100.99"], "DECIMAL(5,2)"),
             (["true", "false"], "BOOLEAN"),
             (["0", "1"], "INTEGER"),
             (["2024-01-15"], "DATE"),
@@ -44,7 +46,7 @@ class TestInferType:
         assert infer_type(samples) == expected
 
     def test_mixed_numeric_defaults_decimal(self) -> None:
-        assert infer_type(["1", "2.5", "3"]) == "DECIMAL"
+        assert infer_type(["1", "2.5", "3"]).startswith("DECIMAL")
 
     def test_empty_samples_varchar(self) -> None:
         assert infer_type(["", "  "]) == "VARCHAR"
@@ -71,9 +73,64 @@ class TestInferType:
         b = "[" + ",".join(["0.2"] * 9) + "]"
         assert infer_type([a, b]) == "ARRAY"
 
+    def test_epoch_shaped_digits_mixed_with_short_ints_stay_numeric(self) -> None:
+        # 10-digit values classify per-value as TIMESTAMP; mixed with ordinary
+        # integers that produced {INTEGER, TIMESTAMP} and fell through to
+        # VARCHAR, landing an integer key column as text on Mongo/CSV → SQL.
+        assert infer_type(["1234567890", "5"], field_name="order_id") == "INTEGER"
+        assert infer_type(["1705312200000", "5"], field_name="seq") == "INTEGER"
+        assert infer_type(["1234567890", "5"]) == "INTEGER"
+
+    def test_epoch_recovery_widens_rather_than_narrowing(self) -> None:
+        # Beyond int64 the carrier widens; it must never narrow or go to text.
+        assert infer_type(
+            ["1234567890", "9223372036854775807"], field_name="big_id"
+        ).startswith("DECIMAL")
+
+    def test_temporal_named_epoch_column_is_still_a_timestamp(self) -> None:
+        assert infer_type(["1705312200000"], field_name="updated_epoch_ms") == "TIMESTAMP"
+        assert infer_type(["1705312200000"], field_name="created_at") == "TIMESTAMP"
+
+    def test_non_digit_samples_are_not_recovered_as_numeric(self) -> None:
+        assert infer_type(["1234567890", "abc"], field_name="code") == "VARCHAR"
+
     def test_never_invents_vector_1536(self) -> None:
         # Sparse / short sample must not invent a warehouse default dim.
         assert "1536" not in infer_type(["[0.1,0.2]"], field_name="embedding")
+
+
+def test_mixed_aware_and_zoneless_temporal_samples_infer_timestamptz() -> None:
+    schema, _intel = infer_schema_map(
+        {
+            "created_at": [
+                "2024-01-01T00:00:00+00:00",
+                "2024-06-01",
+            ]
+        }
+    )
+
+    assert schema["created_at"] == "TIMESTAMPTZ"
+
+
+def test_all_aware_temporal_samples_infer_timestamptz() -> None:
+    schema, _intel = infer_schema_map(
+        {
+            "created_at": [
+                "2024-01-01T00:00:00+00:00",
+                "2024-06-01T12:30:00+00:00",
+            ]
+        }
+    )
+
+    assert schema["created_at"] == "TIMESTAMPTZ"
+
+
+def test_all_zoneless_dates_infer_date() -> None:
+    schema, _intel = infer_schema_map(
+        {"created_at": ["2024-01-01", "2024-06-01"]}
+    )
+
+    assert schema["created_at"] == "DATE"
 
 
 class TestSchemaTypesFixture:
@@ -82,8 +139,10 @@ class TestSchemaTypesFixture:
         record = store_upload("sample_schema_types.csv", path.read_bytes())
         types = {c["name"]: c["inferred_type"] for c in record["columns"]}
         assert types["row_id"] == "INTEGER"
-        assert types["amount"] == "DECIMAL"
-        assert types["is_active"] == "BOOLEAN"
+        assert str(types["amount"]).startswith("DECIMAL")
+        # Fixture mixes true/false/1 with informal yes/no — must not invent
+        # BOOLEAN dest the write path cannot bind.
+        assert types["is_active"] == "VARCHAR"
         assert types["created_at"] == "TIMESTAMPTZ"
         assert types["birth_date"] == "DATE"
         assert types["txn_yyyymmdd"] == "DATE"

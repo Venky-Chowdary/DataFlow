@@ -11,7 +11,20 @@ import type { PhaseProfileReport } from "../../lib/types";
  * parallelism, tune the destination batch size, or accept that strict
  * verification costs a re-read.
  */
-export function PhaseProfileCard({ profile }: { profile?: PhaseProfileReport | null }) {
+export function PhaseProfileCard({
+  profile,
+  engineSeconds,
+  scopeNote,
+}: {
+  profile?: PhaseProfileReport | null;
+  /** Monotonic execute clock from the engine. Distinct from the phase span. */
+  engineSeconds?: number | null;
+  /**
+   * Set when this profile is the last stream of a multi-table run.
+   * Its row totals include a re-read and are not the job population.
+   */
+  scopeNote?: string | null;
+}) {
   const view = buildPhaseProfileView(profile);
   // Omitting the section entirely beats rendering an empty card: a ragged grid
   // of placeholder panels is worse than a dense one.
@@ -24,6 +37,7 @@ export function PhaseProfileCard({ profile }: { profile?: PhaseProfileReport | n
         <strong>Where the time went</strong>
         <span>{view.headline}</span>
       </header>
+      {scopeNote ? <p className="df2-result-phase-note">{scopeNote}</p> : null}
 
       <ul className="df2-result-phase-list">
         {view.rows.map((row) => (
@@ -38,7 +52,7 @@ export function PhaseProfileCard({ profile }: { profile?: PhaseProfileReport | n
             <div
               className="df2-result-phase-bar"
               role="img"
-              aria-label={`${row.label}: ${row.percent}% of engine time`}
+              aria-label={`${row.label}: ${row.percent}% of measured phase time`}
             >
               <span style={{ width: `${Math.max(row.percent, 1.5)}%` }} />
             </div>
@@ -47,7 +61,7 @@ export function PhaseProfileCard({ profile }: { profile?: PhaseProfileReport | n
               {row.rows > 0 && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span>{row.rows.toLocaleString()} rows</span>
+                  <span>{row.rows.toLocaleString()} {scopeNote ? "phase rows" : "rows"}</span>
                   <span aria-hidden="true">·</span>
                   <span>{row.throughputLabel}</span>
                 </>
@@ -59,8 +73,12 @@ export function PhaseProfileCard({ profile }: { profile?: PhaseProfileReport | n
 
       <footer className="df2-result-phase-foot">
         <span>
-          Engine time {formatSeconds(view.busySeconds)} · wall clock{" "}
-          {formatSeconds(view.elapsedSeconds)}
+          Measured phases {formatSeconds(view.busySeconds)}
+          {engineSeconds != null && Number.isFinite(engineSeconds)
+            ? ` · execute ${formatSeconds(engineSeconds)}`
+            : view.elapsedSeconds > 0
+              ? ` · profile span ${formatSeconds(view.elapsedSeconds)}`
+              : ""}
         </span>
         {view.overlapNote && <span className="df2-result-phase-note">{view.overlapNote}</span>}
       </footer>

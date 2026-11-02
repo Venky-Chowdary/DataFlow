@@ -109,6 +109,7 @@ def test_pipeline_preserves_declared_types_end_to_end():
         {"name": "id", "inferred_type": "INTEGER", "samples": ["1", "2"]},
         {"name": "amount", "inferred_type": "DECIMAL(12,2)", "samples": ["10.50", "20.25"]},
         {"name": "ratio", "inferred_type": "FLOAT", "samples": ["1.5", "2.25"]},
+        {"name": "narrow", "inferred_type": "REAL", "samples": ["1.5", "2.25"]},
     ]
     result = run_mapping_pipeline(
         [r["name"] for r in rows],
@@ -126,7 +127,11 @@ def test_pipeline_preserves_declared_types_end_to_end():
     )
     by_source = {m["source"]: m for m in result["mappings"]}
     assert by_source["amount"]["target_type"] == "DECIMAL(12,2)"
-    assert by_source["ratio"]["target_type"] == "FLOAT"
+    # Bare FLOAT does not declare a width, and Property 1 forbids reading one out
+    # of the spelling, so it invents IEEE-64 rather than silently narrowing to a
+    # 24-bit mantissa. A source that means single precision says so.
+    assert by_source["ratio"]["target_type"] == "DOUBLE"
+    assert by_source["narrow"]["target_type"] == "FLOAT"
 
 
 # --------------------------------------------------------------------------
@@ -392,6 +397,21 @@ def _expected_rows() -> list[tuple]:
     ]
 
 
+# Destinations whose temporal carrier stores an *instant* only. A zoneless
+# source column has no instant, so the route stays refused until the operator
+# declares the zone the source recorded — the engine must not pick UTC for them.
+_INSTANT_ONLY_DESTINATIONS = frozenset({"mongodb"})
+
+
+def _zone_kwargs(dest_engine: str) -> dict[str, str]:
+    """The operator's zone declaration, for destinations that require one."""
+    return (
+        {"source_timezone": "UTC"}
+        if dest_engine in _INSTANT_ONLY_DESTINATIONS
+        else {}
+    )
+
+
 def _routes() -> list:
     out = []
     if _MYSQL_UP:
@@ -413,6 +433,7 @@ def test_live_cross_engine_plan_preserves_declared_types(matrix_env, dest_engine
         "source_table": matrix_env["src"],
         "dest_connector_id": matrix_env["saved"][dest_engine].id,
         "dest_table": matrix_env["dst"],
+        **_zone_kwargs(dest_engine),
     })
     assert planned.success, planned.error
     plan = planned.output
@@ -425,9 +446,13 @@ def test_live_cross_engine_plan_preserves_declared_types(matrix_env, dest_engine
         c["source_column"]: c["from_type"] for c in plan["type_conversions"]
     }
     # The source side of every conversion is the declared Postgres type, never
-    # a re-guess from the sampled values.
-    assert from_types.get("amount", "DECIMAL(12,2)") == "DECIMAL(12,2)"
-    assert from_types.get("ratio", "FLOAT") == "FLOAT"
+    # a re-guess from the sampled values. The defaults are deliberately absent:
+    # with one, a plan that reported no conversion at all satisfied this by
+    # falling back to the expected string.
+    assert from_types["amount"] == "DECIMAL(12,2)"
+    # _SOURCE_DDL declares `ratio DOUBLE PRECISION`, and that is what must be
+    # carried — 1.5 and 2.25 would sample as a narrow DECIMAL.
+    assert from_types["ratio"] == "DOUBLE PRECISION"
 
     gate_ids = {g["id"] for g in plan["preflight"]["gates"]}
     assert len(gate_ids) >= 8, f"expected the full gate suite, got {sorted(gate_ids)}"
@@ -439,16 +464,28 @@ def test_live_cross_engine_plan_preserves_declared_types(matrix_env, dest_engine
 @pytest.mark.parametrize("dest_engine", _routes())
 def test_live_cross_engine_confirm_moves_every_row_intact(matrix_env, dest_engine):
     """End to end: chat stages it, Confirm runs it, the values survive."""
-    import asyncio
-
+    from conftest import spend_pilot_ack
     from src.ai.copilot.tools import DataPilotTools
-    from src.routers.copilot_router import ConfirmActionRequest, copilot_confirm
 
-    staged = DataPilotTools().execute("start_transfer", {
+    route = {
         "source_connector_id": matrix_env["saved"]["postgresql"].id,
         "source_table": matrix_env["src"],
         "dest_connector_id": matrix_env["saved"][dest_engine].id,
         "dest_table": matrix_env["dst"],
+    }
+
+    if dest_engine in _INSTANT_ONLY_DESTINATIONS:
+        # Refused first, and the refusal names the operator's exit. A guessed UTC
+        # here moves every business day for a source that was not UTC.
+        refused = DataPilotTools().execute("start_transfer", dict(route))
+        blocked = str(refused.error or "") + str(refused.output or "")
+        assert "created_at" in blocked, blocked
+        assert "assume_timezone" in blocked or "zone" in blocked.lower(), blocked
+        assert _read_back(dest_engine, matrix_env["dst"]) == []
+
+    staged = DataPilotTools().execute("start_transfer", {
+        **route,
+        **_zone_kwargs(dest_engine),
     })
     assert staged.success, staged.error
     assert staged.output["requires_confirm"] is True
@@ -456,9 +493,7 @@ def test_live_cross_engine_confirm_moves_every_row_intact(matrix_env, dest_engin
     # Nothing may exist at the destination before the operator confirms.
     assert _read_back(dest_engine, matrix_env["dst"]) == []
 
-    confirmed = asyncio.get_event_loop().run_until_complete(
-        copilot_confirm(ConfirmActionRequest(ack_id=staged.output["ack_id"], actor="wave93"))
-    )
+    confirmed = spend_pilot_ack(staged.output["ack_id"], "wave93")
     assert confirmed["ok"] is True
     job_id = confirmed["job_id"]
 

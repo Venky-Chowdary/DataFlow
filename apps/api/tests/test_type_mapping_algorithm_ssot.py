@@ -325,7 +325,9 @@ def test_materialize_dest_ddl_honors_map_stamps():
     assert materialize_dest_ddl("bigquery", "TIMESTAMP") == "TIMESTAMP"
     # Blind ddl_type still treats bare TIMESTAMP as NTZ → DATETIME on BQ.
     assert ddl_type("bigquery", "TIMESTAMP") == "DATETIME"
-    assert materialize_dest_ddl("mysql", "FLOAT") == "FLOAT"
+    # Bare FLOAT is ambiguous (Property 1) — rematerialize IEEE-64; FLOAT32 stays.
+    assert materialize_dest_ddl("mysql", "FLOAT") == ddl_type("mysql", "FLOAT")
+    assert materialize_dest_ddl("mysql", "FLOAT32") == "FLOAT"
     assert materialize_dest_ddl("postgresql", "FLOAT") == ddl_type("postgresql", "FLOAT")
     assert materialize_dest_ddl("postgresql", "JSONB") == "JSONB"
     assert materialize_dest_ddl("oracle", "NVARCHAR2(50)").upper().startswith("NVARCHAR2")
@@ -377,10 +379,18 @@ def test_iceberg_and_generic_materialize_honor_stamps():
     from services.type_system import materialize_dest_ddl, ddl_type
     from connectors.iceberg_writer import _logical_to_iceberg_type
 
-    assert _logical_to_iceberg_type("ARRAY<FLOAT>") in {"ARRAY<FLOAT>", "list<float>"}
-    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    # Unambiguous FLOAT32 leaf stays single; bare FLOAT invents double (P1).
+    assert _logical_to_iceberg_type("ARRAY<FLOAT32>") in {
+        "ARRAY<FLOAT>",
+        "ARRAY<FLOAT32>",
+        "list<float>",
+    }
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT32>").lower()
     assert materialize_dest_ddl("duckdb", "REAL") == "REAL"
-    assert materialize_dest_ddl("databricks", "ARRAY<FLOAT>") == "ARRAY<FLOAT>"
+    assert materialize_dest_ddl("databricks", "ARRAY<FLOAT32>").upper() in {
+        "ARRAY<FLOAT>",
+        "ARRAY<FLOAT32>",
+    }
 
 
 def test_sa_float_stamp_not_always_double():
@@ -395,11 +405,16 @@ def test_sa_float_stamp_not_always_double():
 def test_iceberg_array_float_create_new_keeps_float_leaf():
     from services.type_system import create_new_mapping_target_type, ddl_type
 
-    stamped = create_new_mapping_target_type("ARRAY<FLOAT>", "iceberg")
+    # Property 1: bare FLOAT leaf invents double; FLOAT32 keeps single.
+    stamped = create_new_mapping_target_type("ARRAY<FLOAT32>", "iceberg")
     assert "double" not in stamped.lower(), stamped
     assert "float" in stamped.lower(), stamped
-    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
-    assert create_new_mapping_target_type("ARRAY<FLOAT>", "databricks").upper() == "ARRAY<FLOAT>"
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT32>").lower()
+    assert "double" in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    assert create_new_mapping_target_type("ARRAY<FLOAT32>", "databricks").upper() in {
+        "ARRAY<FLOAT>",
+        "ARRAY<FLOAT32>",
+    }
 
 def test_create_new_stamps_not_self_lossy():
     from services.type_system import (
@@ -427,10 +442,13 @@ def test_create_new_stamps_not_self_lossy():
         )
 
 
-def test_objectid_bare_string_still_collapses_on_bq():
+def test_objectid_bare_string_preserves_hex_wire_on_bq():
     from services.type_system import is_lossy_coercion
 
-    assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is True
+    # Unbounded STRING holds ObjectId hex (Airbyte/Fivetran-class). Narrow STRING(n<24) collapses.
+    assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is False
+    assert is_lossy_coercion("OBJECTID", "STRING(12)", dest_db="bigquery") is True
+    assert is_lossy_coercion("OBJECTID", "STRING(24)", dest_db="bigquery") is False
 
 def test_create_new_false_self_blocks_cleared():
     from services.type_system import (
@@ -472,8 +490,9 @@ def test_create_new_false_self_blocks_cleared():
         ("VECTOR(768)", "duckdb"),
         ("VECTOR(768)", "clickhouse"),
         ("VECTOR(768)", "iceberg"),
-        ("STRUCT<a:INT>", "clickhouse"),
-        ("STRUCT<a:INT>", "duckdb"),
+        # INT4 — unambiguous 32-bit; bare INT invents 64 (Property 1).
+        ("STRUCT<a:INT4>", "clickhouse"),
+        ("STRUCT<a:INT4>", "duckdb"),
     ]
     for src, dest in cases:
         stamp = create_new_mapping_target_type(src, dest)
@@ -510,8 +529,10 @@ def test_mapping_proof_uses_dest_db_for_timestamptz_instant_sinks():
 def test_iceberg_materialize_array_vector_spelling():
     from services.type_system import materialize_dest_ddl
 
-    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT>").lower() == "list<float>"
-    assert materialize_dest_ddl("iceberg", "FLOAT[]").lower() == "list<float>"
+    # Property 1: bare FLOAT invents double; FLOAT32 / vector leaf stay float.
+    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT>").lower() == "list<double>"
+    assert materialize_dest_ddl("iceberg", "FLOAT[]").lower() == "list<double>"
+    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT32>").lower() == "list<float>"
     assert materialize_dest_ddl("iceberg", "VECTOR(768)").lower() == "list<float>"
     assert materialize_dest_ddl("iceberg", "list<float>").lower() == "list<float>"
 
@@ -528,17 +549,25 @@ def test_dest_db_aliases_normalize_inside_lossy_ssot():
             "TIMESTAMPTZ", "TIMESTAMP", dest_db=dest
         ) is False, dest
     assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP") is True
-    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is True
+    # MySQL DATETIME(6) stores the UTC-normalized instant. TIMESTAMP(6) would
+    # refuse every year outside 1970..2038.
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+    assert is_lossy_coercion(
+        "TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql"
+    ) is True
 
 
-def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():
+def test_oracle_time_lossy_and_iceberg_objectid_hex_wire():
     from services.type_system import create_new_mapping_target_type, is_lossy_coercion
 
     oracle_time = create_new_mapping_target_type("TIME(6)", "oracle")
     assert "VARCHAR2" in oracle_time.upper()
     assert is_lossy_coercion("TIME(6)", oracle_time, dest_db="oracle") is True
+    # Iceberg create-new ObjectId → unbounded string holds hex (not a collapse).
     iceberg_oid = create_new_mapping_target_type("OBJECTID", "iceberg")
-    assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is True
+    assert iceberg_oid.upper() == "STRING" or iceberg_oid.lower() == "string"
+    assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is False
+    assert is_lossy_coercion("OBJECTID", "VARCHAR(12)", dest_db="iceberg") is True
 
 
 def test_spanner_does_not_invent_bigquery_types():
@@ -587,3 +616,61 @@ def test_interval_ym_bq_and_postgis_geography_create_new_not_self_lossy():
     geo = create_new_mapping_target_type("GEOGRAPHY(POINT,4326)", "postgresql")
     assert "POINT" in geo.upper()
     assert "GEOMETRY," not in geo.upper().replace(" ", "")
+
+
+def test_mapping_pipeline_existing_mysql_datetime_is_physical_not_lattice():
+    """POST /map match-existing must return DATETIME(6), not TIMESTAMP_NTZ(6)."""
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["ts_utc"],
+        target_columns=["ts_utc"],
+        source_schemas=[
+            {
+                "name": "ts_utc",
+                "inferred_type": "TIMESTAMPTZ",
+                "samples": ["2024-12-31T23:59:59+00:00"],
+            }
+        ],
+        target_schemas=[
+            {"name": "ts_utc", "inferred_type": "TIMESTAMP_NTZ(6)", "samples": []}
+        ],
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        use_llm=False,
+    )
+    row = result["mappings"][0]
+    tgt = str(row.get("target_type") or "")
+    assert "DATETIME" in tgt.upper(), row
+    assert "TIMESTAMP_NTZ" not in tgt.upper(), row
+    native = str(row.get("dest_native_type") or "")
+    assert "DATETIME" in native.upper(), row
+    proof_row = (result.get("mapping_proof") or {}).get("mappings") or []
+    if proof_row:
+        proof_tgt = str(proof_row[0].get("target_type") or "")
+        proof_native = str(proof_row[0].get("dest_native_type") or "")
+        assert "TIMESTAMP_NTZ" not in proof_tgt.upper()
+        assert "DATETIME" in (proof_native or proof_tgt).upper()
+
+
+def test_mapping_pipeline_existing_pg_timestamptz_keeps_native_spelling():
+    """Lattice legalize must not rewrite dest-native TIMESTAMPTZ on PostgreSQL."""
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["ts_utc"],
+        target_columns=["ts_utc"],
+        source_schemas=[
+            {"name": "ts_utc", "inferred_type": "TIMESTAMPTZ", "samples": []}
+        ],
+        target_schemas=[
+            {"name": "ts_utc", "inferred_type": "TIMESTAMPTZ", "samples": []}
+        ],
+        destination_db_type="postgresql",
+        destination_table_exists=True,
+        use_llm=False,
+    )
+    tgt = str(result["mappings"][0].get("target_type") or "")
+    compact = tgt.upper().replace(" ", "_")
+    assert "TIMESTAMPTZ" in compact or "WITH_TIME_ZONE" in compact, tgt
+    assert "TIMESTAMP_NTZ" not in compact

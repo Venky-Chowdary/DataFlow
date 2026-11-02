@@ -45,7 +45,10 @@ def _hold_invented_transform(
     if base is not None and ("transform" in base or "transformation" in base):
         pick["transform"] = base.get("transform", base.get("transformation"))
     else:
-        pick["transform"] = None
+        # Do not stamp transform=None — that forces Execute to "none" and blocks
+        # deterministic type-driven transforms (integer/decimal). Leave unset.
+        pick.pop("transform", None)
+        pick.pop("transformation", None)
     pick["requires_review"] = True
     note = (
         f"LLM suggested transform '{suggested}' — human accept required before Execute"
@@ -85,10 +88,21 @@ def _build_prompt(
     target_columns: list[str],
     source_samples: dict[str, list[str]] | None,
     baseline: list[dict[str, Any]],
+    *,
+    source_types: dict[str, str] | None = None,
+    source_profiles: dict[str, dict[str, int | bool]] | None = None,
 ) -> str:
     from src.ai.llm.prompts import COLUMN_MAPPING_PROMPT
 
-    sanitized_samples = _sanitize_samples(source_samples)
+    from services.ai_egress import (
+        column_profiles_without_cells,
+        metadata_only_enabled,
+    )
+
+    meta_only = metadata_only_enabled()
+    sanitized_samples: dict[str, list[str]] = {}
+    if not meta_only:
+        sanitized_samples = _sanitize_samples(source_samples)
 
     context_lines = []
     if baseline:
@@ -97,6 +111,29 @@ def _build_prompt(
             context_lines.append(
                 f"  {m.get('source')} -> {m.get('target')} "
                 f"(conf={m.get('confidence', 0):.2f}, review={m.get('requires_review', False)})"
+            )
+    types = {
+        str(k): str(v)
+        for k, v in dict(source_types or {}).items()
+        if k and str(v or "").strip()
+    }
+    if types:
+        context_lines.append("Source types (declared/inferred; no cell values):")
+        for col in source_columns[:40]:
+            if col in types:
+                context_lines.append(f"  {col}: {types[col]}")
+    profiles = dict(source_profiles or {})
+    if not profiles and source_samples:
+        profiles = column_profiles_without_cells(source_samples)
+    if profiles:
+        context_lines.append("Column profiles (aggregates only; no cell values):")
+        for col in source_columns[:40]:
+            prof = profiles.get(col)
+            if not isinstance(prof, dict):
+                continue
+            context_lines.append(
+                f"  {col}: n={prof.get('n', 0)} nonempty={prof.get('non_empty', 0)} "
+                f"max_len={prof.get('max_len', 0)} numeric={prof.get('looks_numeric', False)}"
             )
     if sanitized_samples:
         for col in source_columns[:12]:
@@ -107,7 +144,11 @@ def _build_prompt(
     return COLUMN_MAPPING_PROMPT.format(
         source_columns=source_columns,
         target_columns=target_columns,
-        source_samples=sanitized_samples,
+        source_samples=(
+            "[withheld: metadata-only]"
+            if meta_only
+            else sanitized_samples
+        ),
         context="\n".join(context_lines) if context_lines else "None",
     )
 
@@ -192,14 +233,25 @@ def refine_mappings_with_llm(
     target_columns: list[str],
     *,
     source_samples: dict[str, list[str]] | None = None,
+    source_types: dict[str, str] | None = None,
     enabled: bool = True,
+    job_id: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Merge LLM suggestions over BM25/Hungarian baseline. Returns (mappings, meta)."""
+    from services.ai_egress import (
+        column_profiles_without_cells,
+        egress_scope,
+        last_manifest,
+        metadata_only_enabled,
+    )
+
     meta: dict[str, Any] = {
         "llm_used": False,
         "llm_provider": None,
         "llm_error": None,
         "strategy": "deterministic_only",
+        "ai_metadata_only": metadata_only_enabled(),
+        "ai_egress": None,
     }
 
     if not enabled or not is_llm_enabled() or not target_columns or not source_columns:
@@ -219,8 +271,24 @@ def refine_mappings_with_llm(
         from src.ai.llm.fallback import DataTransferFallbackChain
 
         chain = DataTransferFallbackChain()
-        prompt = _build_prompt(source_columns, target_columns, source_samples, baseline_mappings)
-        response = chain.generate(prompt, system=_LLM_SYSTEM)
+        profiles = column_profiles_without_cells(source_samples)
+        outbound_samples = None if metadata_only_enabled() else source_samples
+        prompt = _build_prompt(
+            source_columns,
+            target_columns,
+            outbound_samples,
+            baseline_mappings,
+            source_types=source_types,
+            source_profiles=profiles,
+        )
+        with egress_scope(
+            job_id=job_id,
+            purpose="column_mapping",
+            column_names=source_columns,
+            source_types=source_types,
+        ):
+            response = chain.generate(prompt, system=_LLM_SYSTEM)
+        meta["ai_egress"] = last_manifest()
         if not response.success:
             meta["llm_error"] = "generation_failed"
             return baseline_mappings, meta
@@ -242,61 +310,75 @@ def refine_mappings_with_llm(
             meta["llm_error"] = "no_valid_mappings"
             return baseline_mappings, meta
 
+        # ITEM 1 — LLM never decides fidelity. Baseline (deterministic Map) is
+        # the authority for source→target and Execute transform. LLM output is
+        # attached as suggestions only; operators must approve remaps on Map.
         merged: list[dict[str, Any]] = []
         used_targets: set[str] = set()
         baseline_by_source = {m["source"]: m for m in baseline_mappings}
+        suggestion_count = 0
 
-        # Module 13 — never silently overwrite operator-locked baseline rows.
         from services.mapping_engine_contract import is_operator_locked
 
         for src in source_columns:
             base = baseline_by_source.get(src)
             llm = llm_by_source.get(src)
-            if base and is_operator_locked(base):
-                kept = dict(base)
-                if llm and (
-                    str(llm.get("target") or "") != str(base.get("target") or "")
-                    or str(llm.get("transform") or "") != str(base.get("transform") or "none")
-                ):
-                    kept["engine_suggestion"] = {
-                        "target": llm.get("target"),
-                        "transform": llm.get("transform"),
-                        "confidence": llm.get("confidence"),
-                        "reasoning": llm.get("reasoning"),
-                        "suppressed": True,
-                        "reason": "operator_locked_mapping_not_silently_overwritten",
-                    }
-                merged.append(kept)
-                tgt = str(kept.get("target") or "").lower()
-                if tgt:
-                    used_targets.add(tgt)
+            if not base:
+                # No deterministic row — do not invent a mapping from LLM alone.
                 continue
-            if llm and llm["target"].lower() not in used_targets:
-                pick = {**(base or {}), **llm}
-                if base and llm["confidence"] < base.get("confidence", 0):
-                    pick = {**llm, **base, "reasoning": f"{llm['reasoning']} · baseline={base.get('confidence', 0):.0%}"}
-                score_gap, requires_review = _compute_llm_review(src, llm, base)
-                pick["score_gap"] = score_gap
-                pick["requires_review"] = requires_review
-                pick = _hold_invented_transform(pick, base, llm)
-                pick["method"] = "hybrid_llm"
-                pick["agent"] = "LLMMappingAgent"
+            pick = dict(base)
+            tgt = str(pick.get("target") or "").lower()
+            if tgt:
+                used_targets.add(tgt)
+            if not llm:
                 merged.append(pick)
-                used_targets.add(pick["target"].lower())
-            elif base:
-                merged.append(base)
+                continue
 
-        for src, llm in llm_by_source.items():
-            if src not in {m["source"] for m in merged} and llm["target"].lower() not in used_targets:
-                held = _hold_invented_transform(dict(llm), None, llm)
-                merged.append(held)
-                used_targets.add(held["target"].lower())
+            llm_tgt = str(llm.get("target") or "")
+            base_tgt = str(base.get("target") or "")
+            differs = (
+                llm_tgt.lower() != base_tgt.lower()
+                or (
+                    _norm_transform(llm.get("transform"))
+                    not in _IDENTITY_TRANSFORMS
+                    and _norm_transform(llm.get("transform"))
+                    != _norm_transform(base.get("transform") or base.get("transformation"))
+                )
+            )
+            if differs or is_operator_locked(base):
+                pick["engine_suggestion"] = {
+                    "target": llm.get("target"),
+                    "transform": llm.get("transform"),
+                    "confidence": llm.get("confidence"),
+                    "reasoning": llm.get("reasoning"),
+                    "suppressed": True,
+                    "reason": (
+                        "operator_locked_mapping_not_silently_overwritten"
+                        if is_operator_locked(base)
+                        else "llm_suggest_only_deterministic_decides"
+                    ),
+                }
+                if llm_tgt and llm_tgt.lower() != base_tgt.lower():
+                    pick["suggested_target"] = llm_tgt
+                suggestion_count += 1
+                pick["requires_review"] = True
+            score_gap, _review = _compute_llm_review(src, llm, base)
+            pick["score_gap"] = score_gap
+            pick = _hold_invented_transform(pick, base, llm)
+            pick["llm_consulted"] = True
+            pick["method"] = str(base.get("method") or "deterministic")
+            # Telemetry only — agent tag must not imply LLM owned the decision.
+            if pick.get("agent") in {None, "", "LLMMappingAgent"}:
+                pick["agent"] = base.get("agent") or "DeterministicMapper"
+            merged.append(pick)
 
         meta.update({
             "llm_used": True,
             "llm_provider": response.provider,
-            "strategy": "hybrid_llm_bm25",
+            "strategy": "llm_suggest_deterministic_decide",
             "llm_mapping_count": len(llm_by_source),
+            "llm_suggestion_count": suggestion_count,
+            "llm_decides": False,
         })
         return merged or baseline_mappings, meta
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from services.value_serializer import is_reader_null_cell
+
 REQUIRED_QUARANTINE_FIELDS = (
     "original_value",
     "expected_type",
@@ -41,6 +43,11 @@ REQUIRED_QUARANTINE_FIELDS = (
 RETRY_STATUSES = frozenset(
     {"open", "pending_replay", "promoted", "replay_failed", "abandoned"}
 )
+#: Still in the operator replay set — Kafka/Uber DLQ "not yet merged".
+RETRY_OPEN_STATUSES = frozenset({"open", "pending_replay", "replay_failed"})
+#: Left the replay set. ``promoted`` is Gate-8 child proof, not parent
+#: migration_proven. ``abandoned`` is an explicit operator drop of a poison pill.
+RETRY_CLOSED_STATUSES = frozenset({"promoted", "abandoned"})
 
 
 class QuarantineRowContractError(ValueError):
@@ -59,6 +66,12 @@ def _suggest_recovery(reason: str, *, transform: str | None = None) -> str:
         return "Fix parent keys / mapping, run sample orphan probe, or acknowledge FK risk with a signed contract."
     if "confidence" in low:
         return "Remap on Map, Approve override, or accept a Risk Contract — G4 owns the hard block."
+    if "empty value cannot coerce" in low:
+        return (
+            "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+            "A NOT NULL column needs a source value or a nullability change — "
+            "replay cannot invent a typed value from an empty cell."
+        )
     if any(k in low for k in ("cast", "coercion", "lossy", "decimal", "overflow", "truncat")):
         return (
             "Widen destination type, add an explicit transform, or CAST_AND_CONTINUE / "
@@ -89,18 +102,74 @@ def _extract_original_value(row: dict[str, Any]) -> Any:
     return None
 
 
+def _column_name_list(value: Any) -> list[str] | None:
+    """Writer ``primary_key`` is column names, not the row identity."""
+    if isinstance(value, (list, tuple)) and value:
+        names = [str(x).strip() for x in value]
+        if all(names) and all(isinstance(x, str) for x in value):
+            return names
+    return None
+
+
+def _pk_from_named_columns(row: dict[str, Any], cols: list[str]) -> Any:
+    bags: list[dict[str, Any]] = []
+    raw_pk = row.get("pk_value")
+    if isinstance(raw_pk, dict):
+        bags.append(raw_pk)
+    for bag_key in ("source_values", "values"):
+        bag = row.get(bag_key)
+        if isinstance(bag, dict):
+            bags.append(bag)
+    for bag in bags:
+        if not all(c in bag for c in cols):
+            continue
+        vals = [bag.get(c) for c in cols]
+        # A '' key is a key (D53); only NULL / Missing is "no identity".
+        if any(is_reader_null_cell(v) for v in vals):
+            continue
+        return vals[0] if len(vals) == 1 else vals
+    return None
+
+
 def _extract_pk(row: dict[str, Any], *, side: str) -> Any:
+    """Return the row's PK *value*. Column-name lists are not an identity.
+
+    Writers stamp ``primary_key=["id"]`` plus ``pk_value={"id": 2}``. Treating
+    the column list as ``source_pk`` made every finding share ``pk:['id']``,
+    so one Promote closed the whole ledger.
+    """
     key = "source_pk" if side == "source" else "destination_pk"
-    if row.get(key) is not None and str(row.get(key)) != "":
-        return row.get(key)
+    stored = row.get(key)
+    cols = _column_name_list(stored)
+    if cols:
+        resolved = _pk_from_named_columns(row, cols)
+        if resolved is not None:
+            return resolved
+        stored = None
+    if stored is not None and str(stored) != "":
+        return stored
     aliases = (
-        ("source_pk", "pk", "primary_key", "id")
+        ("pk", "id")
         if side == "source"
-        else ("destination_pk", "dest_pk", "target_pk")
+        else ("dest_pk", "target_pk")
     )
     for a in aliases:
-        if row.get(a) is not None and str(row.get(a)) != "":
-            return row.get(a)
+        raw = row.get(a)
+        if raw is None or str(raw) == "":
+            continue
+        if _column_name_list(raw):
+            continue
+        return raw
+    pk_cols = row.get("primary_key")
+    names = _column_name_list(pk_cols)
+    if names:
+        resolved = _pk_from_named_columns(row, names)
+        if resolved is not None:
+            return resolved
+    if isinstance(pk_cols, str) and pk_cols.strip():
+        resolved = _pk_from_named_columns(row, [pk_cols.strip()])
+        if resolved is not None:
+            return resolved
     for bag_key in ("source_values", "values"):
         bag = row.get(bag_key)
         if not isinstance(bag, dict):

@@ -120,8 +120,10 @@ def test_catalog_allowlist_honesty():
 
 
 def test_redshift_and_gcs_routes():
-    ok, _ = validate_transfer("database", "redshift", "database", "postgresql")
-    assert ok
+    # Honesty: Redshift stays Planned until PRODUCTION_SKU — route must refuse.
+    ok, msg = validate_transfer("database", "redshift", "database", "postgresql")
+    assert ok is False
+    assert "planned" in msg.lower() or "not available" in msg.lower()
     ok, _ = validate_transfer("file", "parquet", "database", "gcs")
     assert ok
     ok, _ = validate_transfer("database", "gcs", "database", "s3")

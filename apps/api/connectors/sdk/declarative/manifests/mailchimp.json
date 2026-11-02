@@ -1,0 +1,127 @@
+{
+  "name": "mailchimp",
+  "docs": "https://mailchimp.com/developer/marketing/api/",
+  "base_url": "https://{dc}.api.mailchimp.com/3.0",
+  "auth": {
+    "type": "basic",
+    "username": "datawrap"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "lists",
+      "path": "lists",
+      "records_path": "lists",
+      "primary_key": ["id"],
+      "request_params": {
+        "sort_field": "date_created",
+        "sort_dir": "ASC"
+      },
+      "cursor": {
+        "field": "date_created",
+        "request_param": "since_date_created",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "count",
+        "offset_param": "offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "stats": {
+            "type": "object",
+            "properties": {
+              "member_count": {"type": ["integer", "null"]},
+              "unsubscribe_count": {"type": ["integer", "null"]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "campaigns",
+      "path": "campaigns",
+      "records_path": "campaigns",
+      "primary_key": ["id"],
+      "request_params": {
+        "sort_field": "create_time",
+        "sort_dir": "ASC"
+      },
+      "cursor": {
+        "field": "create_time",
+        "request_param": "since_create_time",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "count",
+        "offset_param": "offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "type": {"type": "string"},
+          "status": {"type": "string"},
+          "create_time": {"type": "string", "format": "date-time"},
+          "send_time": {"type": ["string", "null"], "format": "date-time"},
+          "settings": {
+            "type": "object",
+            "properties": {
+              "subject_line": {"type": ["string", "null"]},
+              "title": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "templates",
+      "path": "templates",
+      "records_path": "templates",
+      "primary_key": ["id"],
+      "request_params": {
+        "sort_field": "date_created",
+        "sort_dir": "ASC"
+      },
+      "cursor": {
+        "field": "date_created",
+        "request_param": "since_date_created",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "count",
+        "offset_param": "offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "type": {"type": "string"},
+          "name": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "active": {"type": ["boolean", "null"]}
+        }
+      }
+    }
+  ]
+}

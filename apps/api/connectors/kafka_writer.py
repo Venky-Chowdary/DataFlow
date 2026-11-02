@@ -11,21 +11,167 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import ssl
 from typing import Any, Callable
 
 from services.value_serializer import json_default
 
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
+    _coerced_null_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
-    resolve_mapping_dest_types,
+    mapped_row_to_json_record,
     resolve_target_columns,
     transform_error_policy,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def kafka_produce_key(raw_key: Any) -> str | None:
+    """Dest-canonical Kafka message key, or None when identity is absent.
+
+    ``str(True)`` is ``True``; dest and compaction use ``true``. Reader-null
+    / blank must not become ``__DF_SQL_NULL__`` or DuckDB-null keys.
+    """
+    from services.cdc_identity import is_present_cdc_row_key
+    from services.value_serializer import present_cell_text
+
+    if not is_present_cdc_row_key(raw_key):
+        return None
+    return present_cell_text(raw_key)
+
+
+def kafka_json_payload(
+    row: Any,
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """JSON produce body. Reader-null is JSON null, not the extract token.
+
+    The produce loop only dropped ``Missing``. After extract emits
+    ``SQL_NULL_SENTINEL``, that spelling was a JSON string. ``to_json_value``
+    already binds reader-null to ``None``. 0 / false stay present.
+    """
+    if isinstance(row, dict):
+        cells = tuple(row.get(c) for c in target_cols)
+    else:
+        cells = tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
+    return mapped_row_to_json_record(cells, target_cols, dest_types)
+
+
+def _fetch_kafka_physical_types(
+    registry_url: str,
+    topic: str,
+    target_cols: list[str],
+) -> tuple[dict[str, str], int | None, bool]:
+    """Probe Schema Registry for live subject carriers + schema id.
+
+    Returns ``(physical, schema_id, subject_exists)``.
+    Missing subject (HTTP 404) → ``({}, None, False)``.
+    Auth/other probe failures raise ``SchemaRegistryError`` (fail-closed).
+    """
+    from connectors.confluent_schema_registry import (
+        SchemaRegistryError,
+        fetch_latest_subject_schema,
+        schema_map_from_registry_doc,
+    )
+
+    subjects = [f"{topic}-value", topic]
+    saw_404 = False
+    for subject in subjects:
+        try:
+            doc = fetch_latest_subject_schema(registry_url, subject)
+        except SchemaRegistryError as exc:
+            msg = str(exc).lower()
+            # Only HTTP 404 counts as absent — never treat auth bodies as missing.
+            if "http 404" in msg or "returned http 404" in msg:
+                saw_404 = True
+                continue
+            raise
+        schema_map = schema_map_from_registry_doc(doc)
+        physical: dict[str, str] = {}
+        wanted = {str(c) for c in target_cols if c}
+        lower_map = {str(k).lower(): str(v) for k, v in schema_map.items() if k and v}
+        for col in target_cols:
+            hit = schema_map.get(col) or lower_map.get(str(col).lower())
+            if not hit:
+                continue
+            physical[col] = hit
+            physical.setdefault(col.lower(), hit)
+            physical.setdefault(col.upper(), hit)
+        # Keep unmapped registry fields for case aliases when wanted is empty.
+        if not wanted:
+            for name, carrier in schema_map.items():
+                physical[name] = carrier
+                physical.setdefault(name.lower(), carrier)
+                physical.setdefault(name.upper(), carrier)
+        schema_id = int(doc.get("id") or 0) or None
+        return (
+            physical,
+            schema_id if schema_id and schema_id > 0 else None,
+            True,
+        )
+    if saw_404:
+        return {}, None, False
+    return {}, None, False
+
+
+def _kafka_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    force_remap: bool = False,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows when live Registry carriers differ from Map stamps.
+
+    ``force_remap`` covers deferred Map under partial Studio (invent risk).
+    """
+    from connectors.writer_common import rematerialize_live_dest_types
+
+    # Live Registry∩Studio carriers only — never soft-fill Map VARCHAR for gaps
+    # (require_physical already fail-closed on existing subjects).
+    live_dest_types = rematerialize_live_dest_types(
+        physical, list(target_cols or []), product="Kafka Schema Registry"
+    )
+    if live_dest_types is None:
+        return None
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ and not force_remap:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=live_dest_types,
+        preserve_case=True,
+        dest_kind="kafka",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
 
 
 def _bootstrap(host: str, port: int, connection_string: str) -> str:
@@ -82,35 +228,25 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
 
     from connectors.confluent_schema_registry import encode_confluent_json
 
-    bootstrap = _bootstrap(
-        str(cfg.get("host") or ""),
-        int(cfg.get("port") or 9092),
-        str(cfg.get("connection_string") or ""),
-    )
-
     def _serialize_value(v: Any) -> bytes:
         if schema_id is not None and schema_id > 0:
             return encode_confluent_json(schema_id, v)
         return json.dumps(v, default=json_default).encode("utf-8")
 
+    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_client_kwargs
+
     kwargs: dict[str, Any] = {
-        "bootstrap_servers": bootstrap.split(","),
+        **kafka_client_kwargs(cfg),
         "value_serializer": _serialize_value,
         "key_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
         "acks": "all",
         "retries": 3,
+        # Idempotent producer: broker dedupes retried batches per partition, so
+        # a produce retry cannot publish the same record twice (C26/D90).
+        "enable_idempotence": True,
     }
-    security = str(cfg.get("schema") or cfg.get("security_protocol") or "").upper()
-    username = str(cfg.get("username") or "")
-    password = str(cfg.get("password") or cfg.get("api_key") or "")
-    if username and password:
-        kwargs["security_protocol"] = security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL"
-        kwargs["sasl_mechanism"] = str(cfg.get("database") or "PLAIN")  # PLAIN | SCRAM-SHA-256
-        kwargs["sasl_plain_username"] = username
-        kwargs["sasl_plain_password"] = password
-        if kwargs["security_protocol"] == "SASL_SSL":
-            kwargs["ssl_context"] = ssl.create_default_context()
-    return KafkaProducer(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        return KafkaProducer(**kwargs)
 
 
 def test_kafka(
@@ -127,19 +263,30 @@ def test_kafka(
     schema: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
+    cfg = {
+        "host": host,
+        "port": port or 9092,
+        "connection_string": connection_string,
+        "username": username,
+        "password": password or api_key,
+        "api_key": api_key,
+        "schema": schema or ("SASL_SSL" if ssl else ""),
+        "database": database,
+        "security_protocol": str(_kwargs.get("security_protocol") or ""),
+        "sasl_mechanism": str(_kwargs.get("sasl_mechanism") or ""),
+        "extra": _kwargs.get("extra") if isinstance(_kwargs.get("extra"), dict) else {},
+    }
+    from services import copy_kafka_common
+
+    check = copy_kafka_common.kafka_sasl_check(cfg)
+    if check is not None and check.outcome not in {"ok", "inconclusive"}:
+        return False, check.message
     try:
-        producer = _producer({
-            "host": host,
-            "port": port or 9092,
-            "connection_string": connection_string,
-            "username": username,
-            "password": password or api_key,
-            "api_key": api_key,
-            "schema": schema or ("SASL_SSL" if ssl else ""),
-            "database": database,
-        })
+        producer = _producer(cfg)
         producer.close()
-        return True, f"Kafka broker reachable at {_bootstrap(host, port or 9092, connection_string)}"
+        from connectors.kafka_reader import _bootstrap as _dial_bootstrap
+
+        return True, f"Kafka broker reachable at {_dial_bootstrap(cfg)}"
     except Exception as exc:
         return False, f"Kafka connection failed: {exc}"
 
@@ -193,27 +340,302 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True
     )
     policy = transform_error_policy(error_policy)
+    live_dest = _kwargs.get("destination_column_types")
+    registry = (
+        schema_registry_url
+        or str(_kwargs.get("registry_url") or "")
+        or (connection_string if "http" in (connection_string or "") else "")
+    )
     # JSON wire still serializes via json_default, but quarantine must catch
     # DECIMAL/BOOLEAN/BINARY/VARCHAR(n) unfit before produce invents bad events
     # (Schema Registry + compaction consumers assume typed fidelity).
-    dest_types = resolve_mapping_dest_types(
+    from connectors.writer_common import resolve_studio_or_map_dest_types
+
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        default="VARCHAR",
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Kafka",
     )
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=dest_types,
-        preserve_case=True,
-    )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+
+    registered_schema_id: int | None = None
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+
+    if registry.startswith("http"):
+        from connectors.confluent_schema_registry import (
+            SchemaRegistryError,
+            register_json_schema,
+        )
+
+        try:
+            physical, live_schema_id, subject_exists = _fetch_kafka_physical_types(
+                registry, topic, target_cols
+            )
+        except SchemaRegistryError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=topic,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                driver="kafka",
+            )
+
+        mapped_data_cols = [c for c in target_cols if c]
+        studio_live = isinstance(live_dest, dict) and all(
+            str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+        )
+        if subject_exists:
+            # Live subject wins — never register Map-invented schema over it.
+            if (
+                mapped_data_cols
+                and not physical
+                and not studio_live
+            ):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Kafka Schema Registry subject for topic {topic!r} exists "
+                        "but live field types were unavailable for mapped columns — "
+                        "refuse Map VARCHAR bind / register invent. Re-run destination "
+                        "schema introspect and retry."
+                    ),
+                    driver="kafka",
+                )
+            # Partial Registry coverage: Studio may fill; else require_physical.
+            if mapped_data_cols and physical:
+                from connectors.writer_common import require_physical_types_for_existing_table
+
+                effective_physical = dict(physical)
+                if isinstance(live_dest, dict):
+                    for c in mapped_data_cols:
+                        if (
+                            effective_physical.get(c)
+                            or effective_physical.get(str(c).lower())
+                            or effective_physical.get(str(c).upper())
+                        ):
+                            continue
+                        st = str(live_dest.get(c) or "").strip()
+                        if st:
+                            effective_physical[c] = st
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective_physical,
+                    dialect_label="Kafka Schema Registry",
+                    target_cols=mapped_data_cols,
+                )
+                if phys_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=topic,
+                        target_schema="",
+                        checksum="",
+                        chunks_completed=0,
+                        error=phys_err,
+                        driver="kafka",
+                    )
+                physical = effective_physical
+            _force_remap = bool(studio_err)
+            remat = _kafka_rematerialize_if_physical_differs(
+                physical=physical,
+                dest_types=dest_types,
+                target_cols=target_cols,
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                column_types=column_types,
+                logical_types=logical_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+                force_remap=_force_remap,
+            )
+            if remat is not None:
+                mapped_rows, transform_errors, rejected_details, dest_types = remat
+            elif _force_remap:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema=host or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Kafka Schema Registry live carriers incomplete for "
+                        "mapped fields — refuse Map VARCHAR rematerialize invent. "
+                        "Re-run destination schema introspect and retry."
+                    ),
+                )
+            else:
+                mapped_rows, transform_errors, rejected_details = (
+                    build_mapped_rows_with_details(
+                        headers=headers,
+                        data_rows=data_rows,
+                        mappings=mappings,
+                        target_cols=target_cols,
+                        column_types=column_types,
+                        error_policy=policy,
+                        dest_types=dest_types,
+                        preserve_case=True,
+                        dest_kind="kafka",
+                        destination_pk_columns=list(conflict_columns or []) or None,
+                        destination_column_nullability=_kwargs.get(
+                            "destination_column_nullability"
+                        ),
+                    )
+                )
+            registered_schema_id = live_schema_id
+        else:
+            # Subject missing — Map/Studio carriers authoritative for first register.
+            # Partial Studio must not soft-fill Map/logical VARCHAR for gaps.
+            if studio_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
+                    driver="kafka",
+                )
+            if mapped_data_cols and not studio_live and not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Kafka Schema Registry subject for topic {topic!r} is "
+                        "missing and create_table is disabled — refuse Map "
+                        "VARCHAR register invent. Enable create or register the "
+                        "subject first."
+                    ),
+                    driver="kafka",
+                )
+            mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                error_policy=policy,
+                dest_types=dest_types,
+                preserve_case=True,
+                dest_kind="kafka",
+                destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+            # First-register: Map stamp → logical → refuse. Never prefer soft
+            # VARCHAR defaults from resolve_mapping_dest_types over typed logicals
+            # (that invents open "string" JSON Schema for BOOLEAN/DECIMAL).
+            from services.mapping_constraints import write_mappings as _wm
+
+            by_tgt_reg: dict[str, dict] = {}
+            for mapping in _wm(list(mappings or [])):
+                tgt = str(mapping.get("target") or "").strip()
+                if tgt and tgt not in by_tgt_reg:
+                    by_tgt_reg[tgt] = mapping
+                    by_tgt_reg.setdefault(tgt.lower(), mapping)
+            missing_reg: list[str] = []
+            reg_props: dict[str, Any] = {}
+            for i, c in enumerate(target_cols):
+                if not c:
+                    continue
+                mapping = by_tgt_reg.get(c) or by_tgt_reg.get(str(c).lower()) or {}
+                explicit = str(
+                    mapping.get("target_type") or mapping.get("dest_type") or ""
+                ).strip()
+                logical = str(
+                    logical_types[i] if i < len(logical_types) else ""
+                ).strip()
+                carrier = explicit or logical
+                if not carrier:
+                    missing_reg.append(c)
+                    continue
+                reg_props[c] = _json_schema_property_for_logical(carrier)
+            if missing_reg:
+                sample = ", ".join(repr(c) for c in missing_reg[:12])
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Kafka Schema Registry first-register field(s) {sample} "
+                        "lack Map/logical carriers — refuse open string invent. "
+                        "Stamp Map target_type or load destination schema."
+                    ),
+                    driver="kafka",
+                )
+            schema_obj = {
+                "type": "object",
+                "properties": reg_props,
+            }
+            try:
+                registered_schema_id = register_json_schema(
+                    registry, f"{topic}-value", json.dumps(schema_obj)
+                )
+            except SchemaRegistryError as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc),
+                    driver="kafka",
+                )
+    else:
+        # Schemaless JSON topic — partial Studio must not soft-bind Map VARCHAR.
+        if studio_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=topic,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
+                driver="kafka",
+            )
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=policy,
+            dest_types=dest_types,
+            preserve_case=True,
+            dest_kind="kafka",
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+        )
+
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -223,47 +645,16 @@ def write_mapped_rows(
         dialect_label="Kafka",
         mappings=mappings,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Kafka', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False, rows_written=0, table_name=topic, target_schema="",
             checksum="", chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details, driver="kafka",
         )
 
-    registry = (
-        schema_registry_url
-        or str(_kwargs.get("registry_url") or "")
-        or (connection_string if "http" in (connection_string or "") else "")
-    )
-    registered_schema_id: int | None = None
-    if registry.startswith("http"):
-        from connectors.confluent_schema_registry import (
-            SchemaRegistryError,
-            register_json_schema,
-        )
-
-        schema_obj = {
-            "type": "object",
-            "properties": {
-                c: _json_schema_property_for_logical(
-                    dest_types.get(c)
-                    or (logical_types[i] if i < len(logical_types) else "string")
-                )
-                for i, c in enumerate(target_cols)
-            },
-        }
-        try:
-            registered_schema_id = register_json_schema(
-                registry, f"{topic}-value", json.dumps(schema_obj)
-            )
-        except SchemaRegistryError as exc:
-            return WriteResult(
-                ok=False, rows_written=0, table_name=topic, target_schema="",
-                checksum="", chunks_completed=0,
-                error=str(exc),
-                driver="kafka",
-            )
+    from services.copy_kafka_common import kafka_security_options
 
     try:
         producer = _producer(
@@ -278,6 +669,8 @@ def write_mapped_rows(
                 "database": database if database and database.upper() in {
                     "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
                 } else "PLAIN",
+                # Declared protocol / mechanism outrank the form slots (D83).
+                **kafka_security_options(_kwargs),
             },
             schema_id=registered_schema_id,
         )
@@ -289,17 +682,19 @@ def write_mapped_rows(
 
     written = 0
     digest = hashlib.sha256()
-    key_col = (conflict_columns or [None])[0]
+    key_cols = (
+        list(conflict_columns or [])
+        or list(_kwargs.get("message_key_columns") or [])
+        or list(_kwargs.get("primary_key_columns") or [])
+    )
+    key_col = key_cols[0] if key_cols else None
     null_key_rejected = 0
     produced_sample: list[dict[str, Any]] = []
     try:
         for idx, row in enumerate(mapped_rows):
-            if isinstance(row, dict):
-                payload = row
-            else:
-                payload = {c: row[i] if i < len(row) else None for i, c in enumerate(target_cols)}
+            payload = kafka_json_payload(row, target_cols, dest_types)
             raw_key = payload.get(key_col) if key_col else None
-            if key_col and (raw_key is None or str(raw_key).strip() == ""):
+            if key_col and kafka_produce_key(raw_key) is None:
                 null_key_rejected += 1
                 rejected_details.append({
                     "row": idx + 1,
@@ -327,7 +722,7 @@ def write_mapped_rows(
                         driver="kafka",
                     )
                 continue
-            key = str(raw_key) if key_col and raw_key is not None else None
+            key = kafka_produce_key(raw_key) if key_col else None
             fut = producer.send(topic, value=payload, key=key)
             fut.get(timeout=30)
             written += 1
@@ -351,20 +746,33 @@ def write_mapped_rows(
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     fail_closed = policy == "fail" and null_key_rejected > 0 and written == 0
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Kafka")
+    if _final_abort or fail_closed:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=topic,
+            target_schema="",
+            checksum=digest.hexdigest()[:16] if written else "",
+            chunks_completed=1,
+            error=_final_abort
+            or (
+                f"Kafka produce blocked: {null_key_rejected} row(s) missing key `{key_col}`"
+            ),
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+            driver="kafka",
+        )
     return WriteResult(
-        ok=not fail_closed,
+        ok=True,
         rows_written=written,
         table_name=topic,
         target_schema="",
         checksum=digest.hexdigest()[:16] if written else "",
         chunks_completed=1,
-        error=(
-            f"Kafka produce blocked: {null_key_rejected} row(s) missing key `{key_col}`"
-            if fail_closed
-            else None
-        ),
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
+        coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         driver="kafka",
         meta={
             "reconcile_sample": produced_sample,

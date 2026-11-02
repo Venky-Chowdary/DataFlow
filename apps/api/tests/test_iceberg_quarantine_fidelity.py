@@ -30,6 +30,25 @@ def test_iceberg_type_carrier_preserves_fixed_and_int():
     assert _iceberg_type_to_logical_carrier("fixed[16]") == "BINARY(16)"
     assert _iceberg_type_to_logical_carrier("int") == "INT"
     assert _iceberg_type_to_logical_carrier("long") == "BIGINT"
+    # double must stay float64 — never collapse to float32 via "float".
+    assert _iceberg_type_to_logical_carrier("double") == "DOUBLE"
+    assert _iceberg_type_to_logical_carrier("float") == "FLOAT"
+
+
+def test_iceberg_arrow_double_is_float64_not_float32():
+    pa = __import__("pyarrow")
+    assert pa.types.is_float64(_logical_to_arrow_type("DOUBLE", pa))
+    assert pa.types.is_float32(_logical_to_arrow_type("FLOAT", pa))
+
+
+def test_iceberg_reader_bytes_are_base64_not_utf8_replace():
+    import base64
+
+    from connectors.iceberg_reader import _stringify
+
+    raw = bytes([0xFF, 0xFE, 0x00])
+    assert _stringify(raw) == base64.b64encode(raw).decode("ascii")
+
 
 
 def test_iceberg_arrow_fixed_binary():

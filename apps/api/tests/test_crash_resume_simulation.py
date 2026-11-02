@@ -34,10 +34,19 @@ def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
 
 @pytest.fixture(autouse=True)
 def _small_chunk_size(monkeypatch):
+    # Durable checkpoints require an accepting job store (memory is fine in CI).
+    # Reset the process-global singleton so a prior non-memory service cannot
+    # reject checkpoint writes (suite pollution).
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
+    monkeypatch.setenv("DATAWRAP_JOB_STORE", "memory")
+    import services.mongodb_service as mongo_mod
+
+    monkeypatch.setattr(mongo_mod, "_mongodb_service", None)
     old = file_stream.CHUNK_SIZE
     monkeypatch.setattr(file_stream, "CHUNK_SIZE", 2)
     yield
     monkeypatch.setattr(file_stream, "CHUNK_SIZE", old)
+    monkeypatch.setattr(mongo_mod, "_mongodb_service", None)
 
 
 def test_csv_to_sqlite_upsert_resumes_without_duplicates(tmp_path: Path) -> None:
@@ -71,20 +80,22 @@ def test_csv_to_sqlite_upsert_resumes_without_duplicates(tmp_path: Path) -> None
     engine = UniversalTransferEngine()
     job_id = uuid.uuid4().hex[:24]
 
+    # Integer-looking amounts (no fractional suffix) — DECIMAL→INTEGER audit is
+    # fail-closed and would block this resume proof for the wrong reason.
     first = engine.execute_tracked(make_request([
-        {"id": "1", "amount": "1000.00"},
-        {"id": "2", "amount": "2000.00"},
+        {"id": "1", "amount": "1000"},
+        {"id": "2", "amount": "2000"},
     ]), job_id)
     assert first.success, first.error
     assert first.records_transferred == 2
     assert first.reconciliation.get("target_rows") == 2
 
     full = make_request([
-        {"id": "1", "amount": "1000.00"},
-        {"id": "2", "amount": "2000.00"},
-        {"id": "3", "amount": "3000.00"},
-        {"id": "4", "amount": "4000.00"},
-        {"id": "5", "amount": "5000.00"},
+        {"id": "1", "amount": "1000"},
+        {"id": "2", "amount": "2000"},
+        {"id": "3", "amount": "3000"},
+        {"id": "4", "amount": "4000"},
+        {"id": "5", "amount": "5000"},
     ])
     result = engine.execute_tracked(full, job_id, resume=True)
     assert result.success, result.error

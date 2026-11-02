@@ -1,25 +1,44 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
+import { FilterTabs } from "../components/ui/FilterTabs";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
-import { FilterTabs } from "../components/ui/FilterTabs";
-import { FilterBar } from "../components/ui/FilterBar";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
+import { CONTINUITY_GATE_ID } from "../components/transfer/ContinuityRecoveryForm";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
+import { countGateStatuses } from "../lib/preflightGates";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
+import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/DestProcedurePanel";
+import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
+import {
+  TransferSourceSchemaPanel,
+  useSqlInsertTarget,
+} from "../components/transfer/TransferSourceSchemaPanel";
+import { useStudioFlags } from "../lib/useStudioFlags";
+import { StudioFlagBanner } from "../components/transfer/StudioFlagBanner";
 import { Button } from "../components/ui/Button";
+import { ButtonGroup } from "../components/ui/ButtonGroup";
+import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
+import { ContractBindField } from "../components/contracts/ContractBindField";
+import { contractBindFromPolicies } from "../lib/contractBind";
+import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
+import { jobEndpointLabels } from "../lib/jobEvidence";
+import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -39,6 +58,7 @@ import {
   buildColumnSamples,
   createContractFromTransfer,
   createSchedule,
+  updateSchedule,
   createTransferPlan,
   fetchJob,
   fetchTransferCapabilities,
@@ -46,6 +66,8 @@ import {
   mapTransferColumns,
   mapTransferPlan,
   preflightTransferPlan,
+  isTransportFailure,
+  validateTransportMessage,
   previewQuarantineCells,
   resumeJob,
   runPreflight,
@@ -53,6 +75,9 @@ import {
   syncTransferPlanMappings,
   updateTransferPlan,
   uploadFile,
+  fetchShapeDraft,
+  saveShapeDraft,
+  deleteShapeDraft,
   fetchVectorRouting,
   fetchEmbeddingCacheStats,
   clearEmbeddingCache,
@@ -60,198 +85,241 @@ import {
   type EmbeddingCacheStats,
   type VectorFieldRouting,
   type VectorRoutingPlan,
+  rebaselineContinuity,
 } from "../lib/api";
+import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import {
   defaultSchemaForDriver,
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
+import { icebergDestExtra, inferIcebergCatalogKind, type IcebergCatalogKind } from "../lib/icebergDestCatalog";
+import {
+  bindNamesFromSql,
+  callableSourceExtra,
+  dialectOffersProcedures,
+  dialectOffersQuery,
+  dialectOffersSqlExtract,
+  destWriteReady,
+  isCallableDestMode,
+  isCallableSourceMode,
+  destStreamPlaceholder,
+  procedureHint,
+  procedureStreamName,
+  queryHint,
+  sourceExtractReady,
+  statementKind,
+  streamExtractPlaceholder,
+  type SourceReadMode,
+} from "../lib/sourceReadMode";
+import {
+  describeDestRoute,
+  destRouteKey,
+  runResultDescribesRoute,
+} from "../lib/runRouteScope";
+import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
   DATE_LOCALES,
+  NUMBER_LOCALES,
+  DEFAULT_SCHEMA_POLICY,
+  PREFLIGHT_SAMPLE_LIMIT,
   SCHEMA_POLICIES,
   SYNC_MODES,
   VALIDATION_MODES,
   type DateLocaleId,
+  type NumberLocaleId,
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
-  multiStreamScd2MirrorBlockCopy,
-  MULTI_STREAM_SCD2_MIRROR_BLOCK,
+  schemaPolicyHonestyLine,
+  syncModeHonestyLine,
 } from "../lib/transferConstants";
+import {
+  jobStudioDataRules,
+  namedStudioSchemaPolicy,
+  namedStudioValidationMode,
+  schemaPolicyBackfills,
+  studioScheduleCdcExtras,
+  studioSchedulePolicies,
+  writeViaStagingSupported as destSupportsWriteViaStaging,
+} from "../lib/studioDataRules";
+import {
+  buildValidateContractKey as composeValidateContractKey,
+  studioScheduleValidateIdentity,
+} from "../lib/studioValidateIdentity";
+import {
+  CDC_DELIVERY_AT_LEAST_ONCE,
+  exactlyOnceWiredDest,
+  jobStudioDeliveryGuarantee,
+  namedCdcDeliveryGuarantee,
+  studioDeliveryGuarantee,
+  type CdcDeliveryGuarantee,
+} from "../lib/cdcExactlyOnce";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
   parseStreamNames,
   primaryStreamName,
+  summarizeStreamReadFailures,
   type StreamSchemaPreview,
 } from "../lib/sourceStreams";
 import {
   approveMappingsHonestly,
+  confirmFalseFriendsBySource,
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
+  markMappingDestUnread,
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
   mappingRequiresRiskAck,
   mergeSignedRiskContracts,
+  mergeStampedTargetTypes,
   uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
   type EditableMapping,
   type MappingTransform,
 } from "../lib/mapping";
-
-/** Remediations must not clear fidelity/STRUCT risk without Accept risk. */
-function sealRemediationApproval(m: EditableMapping): EditableMapping {
-  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
-    return { ...m, approved: false, requiresReview: true };
-  }
-  return m;
-}
+import {
+  liveCarrierIsDoomedOnThisRun,
+  stampLiveCarrierDoomed,
+} from "../lib/destSchemaRecreate";
+import {
+  carryOperatorDecisions,
+  holdOutRowsAndContinue,
+} from "../lib/mappingDecisions";
 import {
   Connector,
   EnhancedAnalysis,
   ParsedUpload,
   PreflightResult,
+  SourceReadOptions,
   TransferPlan,
   TransferResult,
   JobProgress,
   ValidationSuggestedAction,
 } from "../lib/types";
+import { standingAcknowledgmentReason } from "../lib/acknowledgments";
+import {
+  DEST_PROBE_FAILURE_COOLDOWN_MS,
+  DEST_PROBE_TIMEOUT_MS,
+  destProbeSpeedClass,
+  shouldSkipAutoDestProbe,
+} from "../lib/destProbeTimeout";
+import {
+  destCatalogExists,
+  destProbeSettled,
+  sameColumnList,
+  sameSchemaMap,
+} from "../lib/destSchemaIdentity";
+import {
+  createDestinationSchemaProbe,
+  destinationSchemaProbeKey,
+  INLINE_DESTINATION_PROBE_DEBOUNCE_MS,
+  isInlineDestinationConfigured,
+  type DestinationProbeEndpoint,
+  type DestinationSchemaProbeController,
+} from "../lib/destinationSchemaProbe";
+import {
+  SourceReadWindowPanel,
+  offersReadWindow,
+} from "../components/transfer/SourceReadWindowPanel";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
-import { runLocalPreflight } from "../lib/localPreflight";
+import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
+import {
+  canPersistStudioSchedule,
+  keepTheaterMountedOnStatus,
+  routeBarLiveWhileWriting,
+  showStudioResultDashboard,
+} from "../lib/theaterMount";
+import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import {
   buildDisplayBlockers,
   findDuplicateKeyRoot,
   isEncodingIntegritySignal,
+  rankAndDedupeSuggestedActions,
 } from "../lib/validateIssueGrouping";
+import { schemaDriftAckRecorded, schemaDriftRequiresRemap } from "../lib/validateHonestyControls";
+import {
+  promoteBlockedPrimaryFix,
+  resolveValidateStudioPrimary,
+  type PromotedPrimaryFix,
+} from "../lib/validateStudioPrimary";
+import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
+import { createNewFitWidenActions, createNewFitWidenLabel } from "../lib/populationFit";
 import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
+  firstStreamContractIssue,
+  resolveStreamFields,
   seedStreamFieldsFromCandidates,
-  streamContractsNeedReview,
   type StreamFieldContract,
 } from "../lib/streamContracts";
-
-interface TransferPageProps {
-  connectors: Connector[];
-  /** True while the first connectors fetch has not settled yet. */
-  connectorsLoading?: boolean;
-  onTransferComplete: () => void;
-  onOpenSchedules?: () => void;
-  /** Jump to Contracts after Save as contract so the draft is visible immediately. */
-  onOpenContracts?: () => void;
-  /** Remount studio and clear prior transfer cache (source, map, result). */
-  onFreshTransfer?: () => void;
-  /** Pre-select a saved connection as the Transfer Studio source (from Connectors drawer). */
-  seedSourceConnector?: { connectorId: string; token: number } | null;
-  /** Jobs → Studio deep-link: land on Validate/Map with optional repair + mappings. */
-  seedStudioIntent?: {
-    token: number;
-    step?: "validate" | "map" | "source";
-    repairProposalId?: string;
-    jobId?: string;
-    preflight?: import("../lib/types").PreflightResult;
-    validationMode?: string;
-    mappings?: Array<{
-      source?: string;
-      destination?: string;
-      destination_type?: string;
-      target_type?: string;
-      transform?: string;
-      transforms?: { type?: string }[];
-      [key: string]: unknown;
-    }>;
-  } | null;
-}
-
-/** File formats are never listed as database sources. */
-const FILE_FORMAT_SOURCE_TYPES = new Set([
-  "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
-  "pdf", "docx", "html",
-]);
-
-const STEP_SOURCE = 1;
-const STEP_DESTINATION = 2;
-const STEP_MAP = 3;
-const STEP_VALIDATE = 4;
-const STEP_RUN = 5;
-
-const STEPS = [
-  { n: STEP_SOURCE, label: "Source", shortLabel: "Src", icon: "upload" },
-  { n: STEP_DESTINATION, label: "Destination", shortLabel: "Dest", icon: "connectors" },
-  { n: STEP_MAP, label: "Map", shortLabel: "Map", icon: "sparkle" },
-  { n: STEP_VALIDATE, label: "Validate", shortLabel: "Gate", icon: "gate" },
-  { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
-];
-
-const RUN_LAUNCH_STAGES = [
-  "Submitting governed job request",
-  "Locking approved mapping revision",
-  "Provisioning destination writer",
-  "Opening live telemetry stream",
-] as const;
-
-const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_blob", "adls"]);
-
-const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
-const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl"] as const;
-
-const ACCEPTED_UPLOAD_EXTENSIONS = new Set([
-  "csv", "json", "jsonl", "tsv", "parquet", "pdf", "docx", "html", "htm", "xlsx", "xls", "xml",
-]);
-const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
-const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Excel", "Parquet", "PDF", "DOCX", "HTML"] as const;
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
+import { foreignKeysDestExtra, type ForeignKeysMode } from "../lib/foreignKeysMode";
+import type { TransferPageProps } from "./transfer/TransferPageProps";
+import {
+  ACCEPTED_UPLOAD_EXTENSIONS,
+  CLOUD_SOURCE_TYPES,
+  FALLBACK_DEST_TYPES,
+  FALLBACK_EXPORT_FORMATS,
+  FILE_FORMAT_SOURCE_TYPES,
+  MAX_UPLOAD_BYTES,
+  RUN_LAUNCH_STAGES,
+  STEP_DESTINATION,
+  STEP_MAP,
+  STEP_RUN,
+  STEP_SHAPE,
+  STEP_SOURCE,
+  STEP_VALIDATE,
+  STEPS,
+  UPLOAD_FORMATS,
+} from "./transfer/studioConstants";
+import { transferWizardReducer, WIZARD_START } from "./transfer/transferWizard";
+import { TransferTransformStep } from "./transfer/TransferTransformStep";
+import type { TransformRecipeBinding } from "../components/transfer/TransformLibraryPicker";
+import {
+  acceptRuleAsDirect,
+  mergeBusinessRules,
+  mergeCompiledShapeSteps,
+  ruleReportSummary,
+  type RuleCompileReport,
+} from "../lib/businessRules";
+import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
+import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
+import {
+  analysisFromPipeline,
+  destinationCatalogLoadsOnStep,
+  destinationCatalogRetriesOnStep,
+  fileExtension,
+  findColumn,
+  formatFileSize,
+  sealRemediationApproval,
+  studioSourceLabel,
+  destinationContinueBlocker,
+  rowsContainFormatControlChars,
+  FILE_DATABASE_ENGINES,
+  fileDatabasePathFromUrl,
+} from "./transfer/studioHelpers";
 
 type SyncMode = SyncModeId;
 type SchemaPolicy = SchemaPolicyId;
 type ValidationMode = ValidationModeId;
 
-function findColumn(columns: string[], patterns: RegExp[]) {
-  return columns.find((col) => patterns.some((pattern) => pattern.test(col))) || "";
-}
-
-function fileExtension(name: string) {
-  return name.split(".").pop()?.toLowerCase() ?? "";
-}
-
-function analysisFromPipeline(
-  columns: string[],
-  schema: Record<string, string>,
-  pipelineColumns: { source: string; target: string; confidence: number; reasoning?: string }[],
-): EnhancedAnalysis {
-  const bySource = Object.fromEntries(pipelineColumns.map((m) => [m.source, m]));
-  return {
-    columns: columns.map((column_name) => ({
-      column_name,
-      inferred_type: schema[column_name] || "string",
-      confidence: bySource[column_name]?.confidence ?? 0.7,
-      is_pii: /email|phone|ssn|name/i.test(column_name),
-      compliance: [],
-      reasoning_steps: [bySource[column_name]?.reasoning || "Semantic mapping pipeline"],
-      method: "mapping_pipeline",
-    })),
-    pii_columns: columns.filter((c) => /email|phone|ssn/i.test(c)),
-    quality_score: pipelineColumns.length
-      ? Math.round(
-          (pipelineColumns.reduce((s, m) => s + m.confidence, 0) / pipelineColumns.length) * 100,
-        )
-      : 70,
-    recommendations: ["Review column mappings before executing."],
-    method: "mapping_pipeline",
-  };
+/** Gate key for one stream's extract. Half-typed text does not replace the table read. */
+function streamExtractToken(name: string, sql: string | undefined): string {
+  const text = String(sql || "").trim();
+  const kind = statementKind(text);
+  if (kind === "query" || kind === "procedure" || kind === "dest_dml") return `${name}=${text}`;
+  if (/^\s*create\b/i.test(text)) return `${name}=CREATE`;
+  return `${name}=`;
 }
 
 export function TransferPage({
@@ -264,7 +332,8 @@ export function TransferPage({
   seedSourceConnector = null,
   seedStudioIntent = null,
 }: TransferPageProps) {
-  const { toast } = useToast();
+  const { toast, dismissMatching } = useToast();
+  const jobRun = useWriteGate(PERMISSIONS.jobRun);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
@@ -274,31 +343,96 @@ export function TransferPage({
   const routeAnalyzedKeyRef = useRef("");
   const { setActiveData } = useActiveData();
   const { registerStudioHandler } = useStudioActions();
-  const [step, setStep] = useState(STEP_SOURCE);
+  const canvasNav = useRef(false);
+  const [wizard, dispatchWizard] = useReducer(transferWizardReducer, WIZARD_START);
+  const step = wizard.step;
+  const transformOpen = wizard.transformOpen;
+  const setStep = useCallback((next: number) => {
+    dispatchWizard({ type: "go", step: next });
+  }, []);
+  const setTransformOpen = useCallback((open: boolean) => {
+    dispatchWizard({ type: open ? "open-transform" : "close-transform" });
+  }, []);
+  const backWizard = useCallback(() => {
+    dispatchWizard({ type: "back", canvas: canvasNav.current });
+  }, []);
   const [sourceKind, setSourceKind] = useState<SourceKind>("file");
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
+  const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
+  const studioFlags = useStudioFlags();
+  canvasNav.current = studioFlags.canvas;
+  const { bindSqlInsert, insertSql } = useSqlInsertTarget();
+  const [procedureCall, setProcedureCall] = useState("");
+  const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
+  const [destWriteMode, setDestWriteMode] = useState<DestWriteMode>("table");
+  const [destProcedureCall, setDestProcedureCall] = useState("");
+  const [destQuerySql, setDestQuerySql] = useState("");
+  const [destProcedureParams, setDestProcedureParams] = useState<Record<string, string>>({});
+  const [destProcedureBefore, setDestProcedureBefore] = useState("");
+  const [destProcedureAfter, setDestProcedureAfter] = useState("");
+  const [destProcedureParamMap, setDestProcedureParamMap] = useState<Record<string, string>>({});
+  const [shapeContract, setShapeContract] = useState<{
+    shape?: string;
+    extra_source_columns?: string[];
+    headline?: string;
+    primary_action?: string;
+    unaccounted_sources?: string[];
+  } | null>(null);
+  /**
+   * The recipe composed on the Transform (pre-load) step, and the identity the engine
+   * gave it. The hash is what Execute is held to: if the recipe changes after
+   * Validate, the run is refused rather than quietly running a different one.
+   */
+  const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
+  /** Which Transform Library recipe produced shapeSteps (provenance only). */
+  const [recipeBinding, setRecipeBinding] = useState<TransformRecipeBinding | null>(null);
+  const [shapeIdentity, setShapeIdentity] = useState<TransformImage | null>(null);
+  const [businessRuleReport, setBusinessRuleReport] = useState<RuleCompileReport | null>(null);
+  const businessRuleReportRef = useRef<RuleCompileReport | null>(null);
+  businessRuleReportRef.current = businessRuleReport;
+  /**
+   * Read inside `applyPipelineMappings` without making the transformed image a
+   * dependency of it: Map must ask about the transformed image, but re-running
+   * every mapping on each preview keystroke is not what the operator asked for.
+   */
+  const shapeIdentityRef = useRef<TransformImage | null>(null);
+  shapeIdentityRef.current = shapeIdentity;
+  /** Sample rows from the last connector introspect, for Transform profile/preview. */
+  const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedLocaleFocus, setAdvancedLocaleFocus] = useState<"date" | "number" | null>(null);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
   const [badDataFixOpen, setBadDataFixOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [parsed, setParsed] = useState<ParsedUpload | null>(null);
   /** Opt-in Tesseract OCR for scanned/image-only PDFs. */
   const [enableOcr, setEnableOcr] = useState(false);
+  /** Declared source read window — the same one the run reads and reconciles. */
+  const [readOptions, setReadOptions] = useState<SourceReadOptions>({});
   const [ocrStatus, setOcrStatus] = useState<{ available?: boolean; message?: string } | null>(null);
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  /** Last transport / start failure — Validate must not look "Not run". */
+  const [preflightError, setPreflightError] = useState("");
   /** Fingerprint of Map/sync/PK that produced the current preflight result. */
   const [validatedContractKey, setValidatedContractKey] = useState<string | null>(null);
+  /** Destination route of the run on screen. */
+  const [executedRouteKey, setExecutedRouteKey] = useState<string | null>(null);
   const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
+  const [mappingError, setMappingError] = useState<string | null>(null);
+  const analyzingRef = useRef(false);
+  analyzingRef.current = analyzing;
+  const mappingRunRef = useRef(0);
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
+  const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
   /** Per-stream schema previews for comma-separated multi-stream sources. */
   const [streamPreviews, setStreamPreviews] = useState<StreamSchemaPreview[]>([]);
   const [activeStreamTab, setActiveStreamTab] = useState("");
@@ -309,25 +443,49 @@ export function TransferPage({
   });
   const sourceIntrospectGenRef = useRef(0);
   const destSchemaGenRef = useRef(0);
+  const destSchemaIdentityRef = useRef("");
+  const inlineDestinationProbeRef = useRef<DestinationSchemaProbeController<void> | null>(null);
+  /** Last destination identity whose probe failed — throttles automatic re-probes. */
+  const destProbeFailureRef = useRef<{ key: string; at: number } | null>(null);
+  /**
+   * Probes in flight. "Reading destination…" follows this count, not the newest
+   * generation: a superseded probe's cleanup used to be skipped, so overlapping
+   * probes could leave the control disabled after every request had settled.
+   */
+  const destProbeInflightRef = useRef(0);
+  /** Re-arms the unreachable-destination re-check timer. */
+  const [destProbeRetryTick, setDestProbeRetryTick] = useState(0);
   /** Last table key that successfully owned ``destColumns`` — blocks cross-table stickiness. */
   const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
+  const [validateProgress, setValidateProgress] = useState<ValidateProgress | null>(null);
   const [savingContract, setSavingContract] = useState(false);
+  const [boundContractId, setBoundContractId] = useState("");
+  const [requireSignedContract, setRequireSignedContract] = useState(false);
+  const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  /** True when the last error refused a declared read window, not the file. */
+  const [readWindowRefused, setReadWindowRefused] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [connectorId, setConnectorId] = useState("");
   /** Empty until the operator picks a destination — never default to MongoDB. */
   const [destType, setDestType] = useState<string>("");
   const [destKindMode, setDestKindMode] = useState<"database" | "file_export">("database");
   const destDriverType = destType ? resolveDriverType(destType) : "";
+  const isFileDatabase = FILE_DATABASE_ENGINES.has(destDriverType);
+  // Map must tell the engine where the source types came from. Without this the
+  // pipeline treated a warehouse's declared DDL as a guess and let sample
+  // profiling re-infer it, so the same Snowflake DATE column projected DATE on
+  // one Map and DATETIME(6) on the next depending on how the sample rendered.
+  const mapSourceKind = sourceKind === "cloud" ? "object_store" : sourceKind;
   const destSelected = destKindMode === "file_export" || Boolean(destType);
   const [exportFormat, setExportFormat] = useState("json");
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
-  const [targetDb, setTargetDb] = useState("dataflow_test");
+  const [targetDb, setTargetDb] = useState("");
   const [targetCollection, setTargetCollection] = useState("");
   const [destHost, setDestHost] = useState("");
   const [destPort, setDestPort] = useState(0);
@@ -337,11 +495,12 @@ export function TransferPage({
   const [destConnectionString, setDestConnectionString] = useState("");
   const [destOutputPath, setDestOutputPath] = useState("");
   const [destWarehouse, setDestWarehouse] = useState("");
+  const [destIcebergCatalogMode, setDestIcebergCatalogMode] = useState<IcebergCatalogKind>("filesystem");
   const [transferring, setTransferring] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<TransferResult | null>(null);
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
-  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
+  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>(DEFAULT_SCHEMA_POLICY);
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
@@ -349,14 +508,27 @@ export function TransferPage({
   /** Module 16 — opt-in population orphan scan (only path to RI proven). */
   const [runPopulationOrphanScan, setRunPopulationOrphanScan] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
+  const [numberLocale, setNumberLocale] = useState<NumberLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
+  const [captureJournal, setCaptureJournal] = useState(false);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
   const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
   const [vectorMetadataColumns, setVectorMetadataColumns] = useState("");
   const [vectorEmbeddingModel, setVectorEmbeddingModel] = useState("");
+  const [vectorEmbeddingApiKey, setVectorEmbeddingApiKey] = useState("");
+  const [vectorEmbeddingBaseUrl, setVectorEmbeddingBaseUrl] = useState("");
+  const [vectorEmbeddingEndpoint, setVectorEmbeddingEndpoint] = useState("");
   const [vectorChunkSize, setVectorChunkSize] = useState(512);
   const [vectorChunkOverlap, setVectorChunkOverlap] = useState(50);
+  const [vectorChunkStrategy, setVectorChunkStrategy] = useState<
+    "recursive" | "fixed" | "token" | "markdown"
+  >("recursive");
+  const [vectorChunkUnit, setVectorChunkUnit] = useState<"chars" | "tokens">("chars");
+  const [vectorTextTemplate, setVectorTextTemplate] = useState("");
+  const [vectorSkipUnchanged, setVectorSkipUnchanged] = useState(true);
+  const [vectorIndex, setVectorIndex] = useState<"none" | "hnsw">("none");
+  const [vectorStorage, setVectorStorage] = useState<"vector" | "halfvec">("vector");
   const [vectorExcludePiiColumns, setVectorExcludePiiColumns] = useState("");
   const [vectorRoutingFields, setVectorRoutingFields] = useState<VectorFieldRouting[]>([]);
   const [vectorRoutingLoading, setVectorRoutingLoading] = useState(false);
@@ -364,11 +536,22 @@ export function TransferPage({
   const [embeddingCacheStats, setEmbeddingCacheStats] = useState<EmbeddingCacheStats | null>(null);
   const [embeddingCacheBusy, setEmbeddingCacheBusy] = useState(false);
   const [cursorField, setCursorField] = useState("");
+  // What the cursor column means in the source. Only ever set by the operator:
+  // a column name cannot establish whether the source moves the value when a
+  // row changes, and assuming it silently loses updates and backdated inserts.
+  const [cursorSemantics, setCursorSemantics] = useState("");
   const [primaryKeyField, setPrimaryKeyField] = useState("");
   const [priorityColumn, setPriorityColumn] = useState("");
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
   const [rowLimit, setRowLimit] = useState(0);
   const [snapshotMode, setSnapshotMode] = useState("initial");
+  // Mirror: soft delete unless the operator explicitly picks a hard DELETE.
+  const [mirrorDeleteMode, setMirrorDeleteMode] = useState<MirrorDeleteMode>("soft");
+  // Round 11: route option for source foreign keys (carry | guard | ignore).
+  const [foreignKeysMode, setForeignKeysMode] = useState<ForeignKeysMode>("carry");
+  const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
+    CDC_DELIVERY_AT_LEAST_ONCE,
+  );
   const [allowAppendOnly, setAllowAppendOnly] = useState(false);
   const [multiSubnetFailover, setMultiSubnetFailover] = useState(false);
   /** SQL Server CDC TVF row filter: all | all update old | net. */
@@ -376,6 +559,10 @@ export function TransferPage({
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
+  // Regeneration (step change, dest schema reload) must not wipe operator
+  // approvals — carryOperatorDecisions replays them by decision fingerprint.
+  const columnMappingsRef = useRef<EditableMapping[]>([]);
+  columnMappingsRef.current = columnMappings;
   /** Per-stream column mappings when source lists multiple tables. */
   const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
   const [mapActiveStream, setMapActiveStream] = useState<string | null>(null);
@@ -386,6 +573,20 @@ export function TransferPage({
   /** Table/collection names from the last destination introspect (picker + exists check). */
   const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
   const [destTableExists, setDestTableExists] = useState<boolean | null>(null);
+  /**
+   * Last existence verdict the destination catalog actually returned.
+   *
+   * `setDestTableExists` does not flush before the plan payload is rebuilt, so a
+   * probe that just proved the table absent was still persisted as "unknown" —
+   * Map then mapped against `null`, left every `target_type` empty and printed
+   * `T → T loses fidelity` instead of a CREATE.  Written synchronously with the
+   * state so both readers see the same fact within one tick.
+   */
+  const destTableExistsRef = useRef<boolean | null>(null);
+  const proveDestTableExists = useCallback((verdict: boolean | null) => {
+    destTableExistsRef.current = verdict;
+    setDestTableExists(verdict);
+  }, []);
   const [destConnected, setDestConnected] = useState<boolean | null>(null);
   const [destConnectionError, setDestConnectionError] = useState<string>("");
   const [liveSourceTypes, setLiveSourceTypes] = useState<string[]>([]);
@@ -408,6 +609,14 @@ export function TransferPage({
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
+  useEffect(() => {
+    const doomed = liveCarrierIsDoomedOnThisRun({
+      syncMode,
+      destDbType: destType,
+      destTableExists,
+    });
+    setColumnMappings((prev) => stampLiveCarrierDoomed(prev, doomed));
+  }, [syncMode, destType, destTableExists]);
   const mappingReviewCount = columnMappings.filter((m) =>
     needsMappingReview(m, confidenceThreshold),
   ).length;
@@ -420,6 +629,21 @@ export function TransferPage({
   );
 
   const buildSourceSamples = useCallback((): Record<string, string[]> => {
+    // Sampled values are evidence for the mapping engine, so once a Transform
+    // (pre-load) recipe is declared they must be the transformed values: sending
+    // the raw ones would let the engine re-infer the carrier the transform just
+    // replaced.
+    const image = shapeIdentityRef.current;
+    if (image && image.columns.length && image.sampleRows.length) {
+      const shaped: Record<string, string[]> = {};
+      for (const col of image.columns) {
+        shaped[col] = image.sampleRows
+          .slice(0, 8)
+          .map((r) => String(r[col] ?? ""))
+          .filter((v) => v.length > 0);
+      }
+      return shaped;
+    }
     const rows = (parsed?.data ?? parsed?.sample_data ?? []) as Record<string, unknown>[];
     const cols =
       parsed?.columns ??
@@ -442,6 +666,7 @@ export function TransferPage({
     setAnalysis(null);
     setTransferPlan(null);
     setPreflight(null);
+    setPreflightError("");
     setValidatedContractKey(null);
     setPersistedPlanId(null);
     setParsed(null);
@@ -456,6 +681,7 @@ export function TransferPage({
   }, [sourceConnectorId, sourceKind]);
 
   const buildDestinationEndpoint = () => {
+    const provenDestTableExists = destTableExists ?? destTableExistsRef.current;
     const isMongo = destDriverType === "mongodb";
     const isDynamo = destDriverType === "dynamodb";
     const isIceberg = destDriverType === "iceberg";
@@ -490,37 +716,99 @@ export function TransferPage({
       connection_string: isIceberg
         ? (destConnectionString || undefined)
         : (destConnectionString || undefined),
-      warehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+      warehouse:
+        destDriverType === "snowflake"
+        || (destDriverType === "iceberg" && destIcebergCatalogMode === "rest")
+          ? destWarehouse || undefined
+          : undefined,
       auth_source: selectedDestConnector?.auth_source || undefined,
       auth_mode: selectedDestConnector?.auth_mode || undefined,
       auth_role: selectedDestConnector?.auth_role || undefined,
       api_key: selectedDestConnector?.api_key || undefined,
       service_account: selectedDestConnector?.service_account || undefined,
-      // Tri-state existence for plan Validate≡Map (never invent create-new).
-      table_exists: destTableExists,
-      ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
-      ...(isVector
-        ? {
-            ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
-            ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
-            ...(metadataCols.length ? { metadata_columns: metadataCols } : {}),
-            ...(vectorExcludePiiColumns
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean).length
-              ? {
-                  exclude_pii_columns: vectorExcludePiiColumns
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                }
-              : {}),
-            ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
-            chunk_size: vectorChunkSize,
-            chunk_overlap: vectorChunkOverlap,
-            durable_embedding_cache: vectorDurableCache,
-          }
+      // Dual-write: nested extra is SSOT for EndpointConfig / writers; flat root
+      // keeps transfer-plan Map/preflight readers that still look at dest.table_exists.
+      // `?? ref` only fills the *unknown* case, so a just-proven verdict is never
+      // downgraded to unknown by an unflushed setState.
+      ...(provenDestTableExists === null || provenDestTableExists === undefined
+        ? {}
+        : { table_exists: provenDestTableExists }),
+      ...(provenDestTableExists === true && Object.keys(destSchemaMap).length
+        ? { schema_types: destSchemaMap }
         : {}),
+      extra: {
+        ...(provenDestTableExists === null || provenDestTableExists === undefined
+          ? {}
+          : { table_exists: provenDestTableExists }),
+        ...(provenDestTableExists === true && Object.keys(destSchemaMap).length
+          ? { schema_types: destSchemaMap }
+          : {}),
+        ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
+        ...foreignKeysDestExtra(foreignKeysMode),
+        ...(isVector
+          ? {
+              ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
+              ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
+              ...(metadataCols.length ? { metadata_columns: metadataCols } : {}),
+              ...(vectorExcludePiiColumns
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean).length
+                ? {
+                    exclude_pii_columns: vectorExcludePiiColumns
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  }
+                : {}),
+              ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
+              ...(vectorEmbeddingBaseUrl ? { embedding_base_url: vectorEmbeddingBaseUrl } : {}),
+              ...(vectorEmbeddingEndpoint ? { embedding_endpoint: vectorEmbeddingEndpoint } : {}),
+              chunk_size: vectorChunkSize,
+              chunk_overlap: vectorChunkOverlap,
+              chunk_strategy: vectorChunkStrategy,
+              chunk_unit: vectorChunkUnit,
+              ...(vectorTextTemplate ? { text_template: vectorTextTemplate } : {}),
+              vector_skip_unchanged: vectorSkipUnchanged,
+              ...(destDriverType === "pgvector"
+                ? { vector_index: vectorIndex, vector_storage: vectorStorage }
+                : {}),
+              durable_embedding_cache: vectorDurableCache,
+            }
+          : {}),
+        ...(destWriteMode === "procedure"
+          ? {
+              dest_write_mode: "procedure",
+              dest_procedure_call: destProcedureCall.trim(),
+              ...(Object.keys(destProcedureParamMap).length
+                ? { dest_procedure_param_map: destProcedureParamMap }
+                : {}),
+              ...(Object.keys(destProcedureParams).length
+                ? { dest_procedure_params: destProcedureParams }
+                : {}),
+            }
+          : destWriteMode === "query"
+            ? {
+                dest_write_mode: "query",
+                dest_query_sql: destQuerySql.trim(),
+                ...(Object.keys(destProcedureParamMap).length
+                  ? { dest_procedure_param_map: destProcedureParamMap }
+                  : {}),
+                ...(Object.keys(destProcedureParams).length
+                  ? { dest_procedure_params: destProcedureParams }
+                  : {}),
+              }
+            : {}),
+        ...(destProcedureBefore.trim()
+          ? { dest_procedure_before: destProcedureBefore.trim() }
+          : {}),
+        ...(destProcedureAfter.trim()
+          ? { dest_procedure_after: destProcedureAfter.trim() }
+          : {}),
+        ...(destDriverType === "iceberg"
+          ? icebergDestExtra(destIcebergCatalogMode, destWarehouse)
+          : {}),
+      },
     };
   };
 
@@ -531,16 +819,28 @@ export function TransferPage({
     destDriverType === "pinecone" ||
     destDriverType === "milvus";
 
-  const writeViaStagingSupported = [
-    "postgresql", "mysql", "sqlite", "sqlserver", "mssql", "oracle",
-    "snowflake", "redshift", "bigquery", "duckdb", "generic_sql",
-  ].includes(destDriverType);
+  const writeViaStagingSupported = destSupportsWriteViaStaging(destDriverType);
+  const captureJournalBlockedReason =
+    syncMode === "cdc"
+      ? "Unavailable for CDC — change streams keep their own durable log."
+      : sourceKind === "file" || sourceKind === "database"
+        ? ""
+        : "Unavailable for this source — files and database/SaaS sources only.";
 
   useEffect(() => {
     if (!writeViaStagingSupported && writeViaStaging) {
       setWriteViaStaging(false);
     }
   }, [writeViaStagingSupported, writeViaStaging]);
+
+  useEffect(() => {
+    if (
+      deliveryGuarantee === "exactly_once"
+      && !exactlyOnceWiredDest(destDriverType || destType)
+    ) {
+      setDeliveryGuarantee("at_least_once");
+    }
+  }, [deliveryGuarantee, destDriverType, destType]);
 
   const applyVectorRoutingPlan = (plan: VectorRoutingPlan) => {
     if (plan.content_column) setVectorContentColumn(plan.content_column);
@@ -701,6 +1001,22 @@ export function TransferPage({
     }
   }, [toast]);
 
+  // Keep-alive leaves Studio mounted. A deleted or workspace-switched
+  // connection must not keep a selected id the list no longer holds.
+  useEffect(() => {
+    if (connectorsLoading) return;
+    if (sourceConnectorId && !connectors.some((c) => c.id === sourceConnectorId)) {
+      setSourceConnectorId("");
+    }
+  }, [connectors, connectorsLoading, sourceConnectorId]);
+
+  useEffect(() => {
+    if (connectorsLoading) return;
+    if (connectorId && !connectors.some((c) => c.id === connectorId)) {
+      setConnectorId("");
+    }
+  }, [connectors, connectorsLoading, connectorId]);
+
   useEffect(() => {
     // Never invent a destination type. Only coerce when an already-chosen type
     // disappeared from the live capability list.
@@ -772,6 +1088,10 @@ export function TransferPage({
     return {};
   })();
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
+  /** Rows Transform profiles and previews against — file preview or connector sample. */
+  const shapeSampleRows = (
+    sourceKind === "file" ? samplePreviewRows : connectorSampleRows
+  ) as Record<string, unknown>[];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
 
   useEffect(() => {
@@ -798,6 +1118,13 @@ export function TransferPage({
       })),
       column_types: (currentSourceSchema || {}) as Record<string, string>,
       sample_size: 25,
+      // Same image as the gates: the recipe runs on the read, so scanning the
+      // raw cell reports a finding on a value the writer never binds.
+      shape_recipe: recipePayload(shapeSteps),
+      date_locale: dateLocale,
+      number_locale: numberLocale,
+      source_kind: sourceKind,
+      source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -808,8 +1135,10 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale, sourceKind, sourceConnector?.type]);
 
+  // A name-matched column is a starting point for the operator, never a claim
+  // about the column's behaviour — the declaration beside it carries that.
   const cursorCandidate = findColumn(currentSourceColumns, [
     /^updated_at$/i,
     /^modified_at$/i,
@@ -838,15 +1167,16 @@ export function TransferPage({
       : sourceCollection || sourceTable || "source_stream";
   // Comma-separated tables → multi-stream contracts (each gets its own watermark).
   const sourceStreamInputRaw = sourceKind === "database"
-    ? (sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable)
+    ? (sourceConnector?.type === "mongodb"
+      ? sourceCollection
+      : isCallableSourceMode(sourceReadMode)
+        ? procedureStreamName(procedureCall)
+        : sourceTable)
     : "";
   const multiStreamNames = parseStreamNames(sourceStreamInputRaw);
   /** First named stream — API table/collection field (never the raw CSV string). */
   const primarySourceStream = primaryStreamName(sourceStreamInputRaw);
   const isMultiStreamSource = multiStreamNames.length > 1;
-  /** SCD2/mirror multi-stream not supported yet — full/incremental/CDC are. */
-  const multiStreamUnsupportedMode =
-    isMultiStreamSource && (syncMode === "scd2" || syncMode === "mirror");
   const advancedStreamNames = isMultiStreamSource ? multiStreamNames : [sourceStreamName];
   const routeSyncModes = useMemo(
     () =>
@@ -855,8 +1185,10 @@ export function TransferPage({
         sourceDriver: resolveDriverType(sourceConnector?.type || "") || "",
         sourceKind,
         isMultiStream: isMultiStreamSource,
+        sourceReadMode,
+        destWriteMode,
       }),
-    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource],
+    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource, sourceReadMode, destWriteMode],
   );
   // Client deploy: never leave an engine-unsupported mode selected after route change.
   useEffect(() => {
@@ -903,8 +1235,10 @@ export function TransferPage({
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
+    defaultCursorSemantics: cursorSemantics,
     streamFields,
     snapshotMode: syncMode === "cdc" ? snapshotMode : undefined,
+    mirrorDeleteMode: syncMode === "mirror" ? mirrorDeleteMode : undefined,
     streamMappings: isMultiStreamSource
       ? {
           ...streamMappings,
@@ -912,7 +1246,7 @@ export function TransferPage({
         }
       : undefined,
   });
-  const streamNeedsReview = streamContractsNeedReview({
+  const streamContractIssue = firstStreamContractIssue({
     streamNames: advancedStreamNames,
     sourceColumns: currentSourceColumns,
     sourceColumnsByStream,
@@ -920,8 +1254,12 @@ export function TransferPage({
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
+    defaultCursorSemantics: cursorSemantics,
     streamFields,
+    syncMode,
+    validationMode,
   });
+  const streamNeedsReview = streamContractIssue !== null;
   const syncModeLabel =
     routeSyncModes.find((m) => m.id === syncMode)?.label
     ?? SYNC_MODES.find((m) => m.id === syncMode)?.label
@@ -937,6 +1275,10 @@ export function TransferPage({
       ),
     [samplePreviewRows, currentSourceColumns, primaryKeyField],
   );
+  const formatControlCharsSeen = useMemo(
+    () => rowsContainFormatControlChars(shapeSampleRows),
+    [shapeSampleRows],
+  );
   const compositeKeySuggestions = useMemo(
     () =>
       suggestCompositeUniqueKeyCandidates(
@@ -949,6 +1291,7 @@ export function TransferPage({
 
   /** Opens Advanced drawer in-place — never navigates away from Map / Validate. */
   const openIdentitySettings = useCallback(() => {
+    setAdvancedLocaleFocus(null);
     setAdvancedOpen(true);
     toast({
       title: "Advanced settings",
@@ -957,6 +1300,23 @@ export function TransferPage({
       tone: "info",
     });
   }, [toast]);
+
+  /** Validate Set date/number locale — open Advanced and land on that control. */
+  const openLocaleSettings = useCallback(
+    (kind: "date" | "number") => {
+      setAdvancedLocaleFocus(kind);
+      setAdvancedOpen(true);
+      toast({
+        title: kind === "date" ? "Date locale" : "Number locale",
+        message:
+          kind === "date"
+            ? "Set DMY or MDY. Auto will not guess 01/02/2024. Re-run Validate after you choose."
+            : "Set US or EU. Auto will not guess 1,234. Re-run Validate after you choose.",
+        tone: "info",
+      });
+    },
+    [toast],
+  );
 
   // Fix-bad-data is Validate-only — close if the operator leaves the step.
   useEffect(() => {
@@ -995,6 +1355,7 @@ export function TransferPage({
         kind: "file",
         format: parsed?.file_type ?? file?.name.split(".").pop() ?? "csv",
         filename: file?.name,
+        ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
       };
     }
     if (!sourceConnector) return { kind: "database", format: "", connector_id: sourceConnectorId };
@@ -1006,12 +1367,14 @@ export function TransferPage({
       : (isDynamo
         ? (primarySourceStream || sourceConnector.database || "")
         : primarySourceStream);
+    const callable = isCallableSourceMode(sourceReadMode) && !isMongo && !isDynamo;
+    const procName = callable ? procedureStreamName(procedureCall) : "";
     return {
       kind: "database",
       format: sourceConnector.type,
       connector_id: sourceConnectorId,
       database: isDynamo ? tableOrPath : sourceConnector.database,
-      table: isMongo ? undefined : tableOrPath || undefined,
+      table: isMongo ? undefined : (callable ? procName : tableOrPath) || undefined,
       collection: isMongo ? tableOrPath : undefined,
       auth_source: sourceConnector.auth_source || undefined,
       auth_mode: sourceConnector.auth_mode || undefined,
@@ -1020,6 +1383,20 @@ export function TransferPage({
       service_account: sourceConnector.service_account || undefined,
       ...(syncMode === "cdc" && multiSubnetFailover
         ? { multi_subnet_failover: true }
+        : {}),
+      ...(callable
+        ? {
+            source_read_mode: sourceReadMode,
+            procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : undefined,
+            source_query: sourceReadMode === "query" ? procedureCall.trim() : undefined,
+            procedure_params: Object.keys(procedureParams).length ? procedureParams : undefined,
+            extra: {
+              source_read_mode: sourceReadMode,
+              procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+              source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+              procedure_params: procedureParams,
+            },
+          }
         : {}),
     };
   };
@@ -1042,9 +1419,23 @@ export function TransferPage({
       schema_policy: schemaPolicy,
       validation_mode: validationMode,
       date_locale: dateLocale,
+      number_locale: numberLocale,
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
+      priority_column: priorityColumn || "",
+      priority_direction: priorityColumn ? priorityDirection : "desc",
+      row_limit: rowLimit > 0 ? rowLimit : 0,
       stream_contracts: streamContracts,
+      ...(() => {
+        const bind = contractBindFromPolicies({
+          contract_id: boundContractId,
+          require_signed_contract: requireSignedContract,
+        });
+        return {
+          contract_id: bind.contractId,
+          require_signed_contract: bind.requireSigned,
+        };
+      })(),
     },
   }), [
     file,
@@ -1056,6 +1447,8 @@ export function TransferPage({
     sourceConnectorId,
     sourceCollection,
     sourceTable,
+    sourceReadMode,
+    procedureCall,
     primarySourceStream,
     cloudPath,
     destKindMode,
@@ -1069,8 +1462,12 @@ export function TransferPage({
     schemaPolicy,
     validationMode,
     dateLocale,
+    numberLocale,
     backfillNewFields,
     writeViaStaging,
+    priorityColumn,
+    priorityDirection,
+    rowLimit,
     streamContracts,
     connectorId,
     destType,
@@ -1082,8 +1479,18 @@ export function TransferPage({
     destConnectionString,
     destOutputPath,
     destWarehouse,
+    destIcebergCatalogMode,
     targetCollection,
     destTableExists,
+    destWriteMode,
+    destProcedureCall,
+    destQuerySql,
+    destProcedureParams,
+    destProcedureBefore,
+    destProcedureAfter,
+    destProcedureParamMap,
+    boundContractId,
+    requireSignedContract,
   ]);
 
   const ensurePersistedPlan = useCallback(async (
@@ -1167,6 +1574,31 @@ export function TransferPage({
   }, [parsed, transferPlan, destColumns]);
 
   const mappingGenRef = useRef(0);
+  /**
+   * Latest `loadDestinationSchema`. Map runs before that function is declared and
+   * must not close over a stale render's copy, so it is reached through a ref.
+   */
+  const loadDestSchemaRef = useRef<
+    ((opts?: { force?: boolean; endpoint?: DestinationProbeEndpoint }) => Promise<{
+      columns: string[];
+      schema: Record<string, string>;
+      tableExists: boolean | null;
+      connected: boolean | null;
+      message: string;
+    }>) | null
+  >(null);
+
+  /** Rematch invents identity dests. Stamp compiled workbook names after every commit. */
+  const stampCompiledWorkbookMappings = useCallback(
+    (mappings: EditableMapping[], sourceTable?: string) => {
+      const report = businessRuleReportRef.current;
+      if (!report || !mappings.length) return mappings;
+      return mergeBusinessRules(mappings, report, {
+        sourceTable: sourceTable || primarySourceStream || undefined,
+      });
+    },
+    [primarySourceStream],
+  );
 
   const applyPipelineMappings = useCallback(
     async (
@@ -1183,22 +1615,71 @@ export function TransferPage({
         ?? [];
       if (!sourceCols.length) return [];
       const threshold = confidenceThresholdForMode(validationMode);
-      const sourceSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      const declaredSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      // Transform (pre-load) runs on the read, before Map. So the columns and
+      // carriers Map decides fidelity from are the ones the recipe produces, not
+      // the raw source they replaced — otherwise a column rounded to whole
+      // numbers is still explained as a lossy decimal the writer would refuse.
+      // The plan keeps declared source truth: the recipe is applied once, by the
+      // engine, on the read.
+      const image = shapeIdentityRef.current;
+      const transformed = Boolean(image && image.columns.length);
+      const mapSourceCols = transformed && image ? image.columns : sourceCols;
+      const mapSourceSchema = transformed && image
+        ? Object.fromEntries(
+            mapSourceCols.map((column) => [
+              column,
+              image.columnTypes[column] ?? declaredSchema[column] ?? "VARCHAR",
+            ]),
+          )
+        : declaredSchema;
       const gen = ++mappingGenRef.current;
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
-      const existsForMap =
+      let existsForMap =
         destinationTableExistsOverride !== undefined
           ? destinationTableExistsOverride
-          : destTableExists;
+          : (destTableExists ?? destTableExistsRef.current);
+      let mapTargetCols = targetCols;
+      let mapTargetSchema = targetSchema;
+      // Destination existence is a fact the catalog can settle, not an unknown to
+      // map against. Mapping with `null` left every target_type empty, so Map
+      // showed ten columns of "loses fidelity (T → T)" behind a Risk Contract that
+      // no signature could clear. Probe once here: the answer is either real
+      // destination types or proof of absence, i.e. a CREATE plan.
+      if (
+        existsForMap == null
+        && destKindMode === "database"
+        && (Boolean(connectorId) || isInlineDestinationConfigured(buildDestinationEndpoint()))
+        && Boolean(targetCollection.trim())
+      ) {
+        try {
+          const probed = await loadDestSchemaRef.current?.();
+          if (probed) {
+            existsForMap = probed.tableExists;
+            if (probed.tableExists === true && probed.columns.length && !targetCols?.length) {
+              mapTargetCols = probed.columns;
+              mapTargetSchema = probed.schema;
+            }
+          }
+        } catch {
+          // Probe failed — existence stays unknown and the engine stays fail-closed.
+        }
+      }
       const commitMappings = (
         next: EditableMapping[],
         llmUsed: boolean,
         proof: import("../components/MappingProofDrawer").MappingProof | null,
       ) => {
         if (gen !== mappingGenRef.current) return next;
+        const prior = columnMappingsRef.current;
         if (!next.length && sourceCols.length) {
-          const identity = buildMappingsFromSource(analysisCols, targetCols);
+          const identity = stampCompiledWorkbookMappings(
+            carryOperatorDecisions(
+              buildMappingsFromSource(analysisCols, targetCols),
+              prior,
+            ),
+          );
           if (identity.length) {
             setColumnMappings(identity);
             setLlmMappingUsed(false);
@@ -1206,22 +1687,29 @@ export function TransferPage({
             return identity;
           }
         }
-        setColumnMappings(next);
+        const carried = stampCompiledWorkbookMappings(carryOperatorDecisions(next, prior));
+        setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
-        return next;
+        return carried;
       };
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
-        const useDirect = Boolean(targetCols?.length) || !persistedPlanId;
+        // A declared transform is also a reason to map directly: the persisted
+        // plan holds declared source truth, not the transformed image, so only
+        // the direct call can be asked about the columns the writer will see.
+        const useDirect = Boolean(mapTargetCols?.length) || !persistedPlanId || transformed;
         let result: Awaited<ReturnType<typeof mapTransferColumns>>;
         if (!useDirect) {
+          // The plan records declared source truth — the engine applies the
+          // recipe on the read, so persisting the transformed image here would
+          // apply it twice.
           const planId = await ensurePersistedPlan(undefined, {
             source_columns: sourceCols,
-            source_schema: sourceSchema,
-            target_columns: targetCols,
-            target_schema: targetSchema,
+            source_schema: declaredSchema,
+            target_columns: mapTargetCols,
+            target_schema: mapTargetSchema,
           });
           if (planId) {
             result = await mapTransferPlan(planId, {
@@ -1231,10 +1719,10 @@ export function TransferPage({
             });
           } else {
             result = await mapTransferColumns({
-              source_columns: sourceCols,
-              source_schema: sourceSchema,
-              target_columns: targetCols?.length ? targetCols : undefined,
-              target_schema: targetSchema,
+              source_columns: mapSourceCols,
+              source_schema: mapSourceSchema,
+              target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
+              target_schema: mapTargetSchema,
               validation_mode: validationMode,
               file_format: parsed?.file_type
                 ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -1243,16 +1731,17 @@ export function TransferPage({
               source_samples: buildSourceSamples(),
               destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
               sync_mode: syncMode,
+              source_kind: mapSourceKind,
               destination_table_exists:
                 destKindMode === "database" ? existsForMap : false,
             });
           }
         } else {
           result = await mapTransferColumns({
-            source_columns: sourceCols,
-            source_schema: sourceSchema,
-            target_columns: targetCols?.length ? targetCols : undefined,
-            target_schema: targetSchema,
+            source_columns: mapSourceCols,
+            source_schema: mapSourceSchema,
+            target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
+            target_schema: mapTargetSchema,
             validation_mode: validationMode,
             file_format: parsed?.file_type
               ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -1261,6 +1750,7 @@ export function TransferPage({
             source_samples: buildSourceSamples(),
             destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
             sync_mode: syncMode,
+            source_kind: mapSourceKind,
             destination_table_exists:
               destKindMode === "database" ? existsForMap : false,
           });
@@ -1272,10 +1762,27 @@ export function TransferPage({
         const mapped = editableFromPipelineMappings(
           result.mappings ?? [],
           rows,
-          targetCols,
+          mapTargetCols,
           threshold,
-          targetSchema,
+          mapTargetSchema,
         );
+        const shape = (result as { shape_contract?: typeof shapeContract }).shape_contract;
+        if (shape && typeof shape === "object") {
+          // Create-new has nothing to be "extra" against (G13 is dest-exists only).
+          const extras = (shape as { shape?: string }).shape === "create_new_table" ? [] : [
+            ...((shape as { unaccounted_sources?: string[] }).unaccounted_sources || []),
+            ...(((shape as { columns?: Array<{ source?: string; kind?: string }> }).columns || [])
+              .filter((c) => c.kind === "add_proposed" || c.kind === "pending" || c.kind === "unaccounted")
+              .map((c) => c.source || "")
+              .filter(Boolean)),
+          ];
+          setShapeContract({
+            ...shape,
+            extra_source_columns: [...new Set(extras)],
+          });
+        } else {
+          setShapeContract(null);
+        }
         return commitMappings(
           mapped,
           Boolean(result.llm?.llm_used),
@@ -1283,11 +1790,23 @@ export function TransferPage({
         );
       } catch (e) {
         console.error("Mapping pipeline failed:", e);
-        const fallback = buildMappingsFromSource(analysisCols, targetCols);
+        let fallback = buildMappingsFromSource(analysisCols, mapTargetCols);
+        // Without the pipeline nothing has projected a destination type. For a
+        // database destination whose columns were never read, the source type is
+        // not an answer — echoing it printed "VARCHAR(16777216) → VARCHAR(16777216)"
+        // and let the operator approve a destination that was never inspected.
+        const destSchemaUnread =
+          destKindMode === "database" && !(mapTargetCols?.length ?? destColumns.length);
+        if (destSchemaUnread) {
+          fallback = fallback.map(markMappingDestUnread);
+        }
         if (fallback.length) {
           toast({
-            title: "Using fallback mappings",
-            message: "Semantic pipeline unavailable — showing AI-classified column pairs. Review before transfer.",
+            title: destSchemaUnread ? "Destination schema not read" : "Using fallback mappings",
+            message: destSchemaUnread
+              ? "The mapping engine could not be reached, so no destination type was projected. "
+                + "Reload the destination schema on Map before continuing."
+              : "Semantic pipeline unavailable — showing AI-classified column pairs. Review before transfer.",
             tone: "warning",
           });
         }
@@ -1312,6 +1831,10 @@ export function TransferPage({
       destType,
       syncMode,
       destTableExists,
+      destColumns,
+      connectorId,
+      targetCollection,
+      stampCompiledWorkbookMappings,
     ],
   );
 
@@ -1340,26 +1863,37 @@ export function TransferPage({
           source_samples: buildColumnSamples(sourceCols, rows ?? []),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
+          source_kind: mapSourceKind,
+          destination_table_exists:
+            destKindMode === "database"
+              ? (destTableExists ?? destTableExistsRef.current)
+              : false,
         });
-        return editableFromPipelineMappings(
-          result.mappings,
-          rows,
-          targetCols,
-          threshold,
-          targetSchema,
+        return stampCompiledWorkbookMappings(
+          editableFromPipelineMappings(
+            result.mappings,
+            rows,
+            targetCols,
+            threshold,
+            targetSchema,
+          ),
+          streamName,
         );
       } catch (e) {
         console.error(`Stream mapping failed for ${streamName}:`, e);
-        return sourceCols.map((col) => ({
-          source: col,
-          target: col,
-          confidence: 0.5,
-          approved: false,
-          requiresReview: true,
-          existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
-          reason: "Fallback identity mapping (stream rematch unavailable)",
-          transform: "none" as const,
-        }));
+        return stampCompiledWorkbookMappings(
+          sourceCols.map((col) => ({
+            source: col,
+            target: col,
+            confidence: 0.5,
+            approved: false,
+            requiresReview: true,
+            existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
+            reason: "Fallback identity mapping (stream rematch unavailable)",
+            transform: "none" as const,
+          })),
+          streamName,
+        );
       }
     },
     [
@@ -1373,6 +1907,8 @@ export function TransferPage({
       exportFormat,
       destType,
       syncMode,
+      destTableExists,
+      stampCompiledWorkbookMappings,
     ],
   );
 
@@ -1380,14 +1916,45 @@ export function TransferPage({
     await applyPipelineMappings(targetCols, targetSchema);
   };
 
-  const loadDestinationSchema = async (): Promise<{
+  /**
+   * Publish a probe result only when it differs from what Studio already holds.
+   * Map depends on these two values by identity, and Map probes the destination,
+   * so re-publishing an equal answer was a self-feeding probe loop.
+   */
+  const commitDestSchema = (columns: string[], schema: Record<string, string>) => {
+    if (!sameColumnList(destColumns, columns)) setDestColumns(columns);
+    if (!sameSchemaMap(destSchemaMap, schema)) setDestSchemaMap(schema);
+  };
+
+  const currentDestinationEndpoint = buildDestinationEndpoint();
+  const currentDestinationProbeKey = destinationSchemaProbeKey(currentDestinationEndpoint, connectorId);
+  destSchemaIdentityRef.current = currentDestinationProbeKey;
+
+  const loadDestinationSchema = async (opts?: {
+    force?: boolean;
+    endpoint?: DestinationProbeEndpoint;
+  }): Promise<{
     columns: string[];
     schema: Record<string, string>;
     tableExists: boolean | null;
     connected: boolean | null;
     message: string;
   }> => {
-    if (destKindMode !== "database" || !connectorId) {
+    const endpoint = opts?.endpoint ?? buildDestinationEndpoint();
+    if (
+      destKindMode !== "database"
+      || (!connectorId && !isInlineDestinationConfigured(endpoint))
+    ) {
+      return {
+        columns: destColumns,
+        schema: destSchemaMap,
+        tableExists: destCatalogExists(destKindMode, destTableExists),
+        connected: null,
+        message: "",
+      };
+    }
+    const tableKey = destinationSchemaProbeKey(endpoint, connectorId);
+    if (tableKey !== destSchemaIdentityRef.current) {
       return {
         columns: destColumns,
         schema: destSchemaMap,
@@ -1396,17 +1963,35 @@ export function TransferPage({
         message: "",
       };
     }
+    if (
+      !opts?.force
+      && shouldSkipAutoDestProbe(destProbeFailureRef.current, tableKey, Date.now())
+    ) {
+      return {
+        columns: destColumns,
+        schema: destSchemaMap,
+        tableExists: destTableExists,
+        connected: false,
+        message: destConnectionError,
+      };
+    }
     const gen = ++destSchemaGenRef.current;
-    const tableKey = `${connectorId}|${destType}|${targetDb}|${destSchema}|${targetCollection.trim()}`;
+    destProbeInflightRef.current += 1;
     setDestSchemaLoading(true);
     try {
       // Destination-only probe: stub file source so we do not re-sample Mongo/SQL
       // (that was hanging the Destination step for minutes on large collections).
-      const { destination } = await introspectTransferEndpoints({
-        source: { kind: "file", format: "csv" },
-        destination: buildDestinationEndpoint(),
-      });
-      if (gen !== destSchemaGenRef.current) {
+      const { destination } = await introspectTransferEndpoints(
+        {
+          source: { kind: "file", format: "csv" },
+          destination: { ...endpoint },
+        },
+        // A warehouse can cold-start for minutes; an unreachable OLTP host must not
+        // hold "Reading destination…" for three minutes with no way back. Bound the
+        // wait so the operator reaches the unknown-destination state and can retry.
+        { timeoutMs: DEST_PROBE_TIMEOUT_MS[destProbeSpeedClass(destType)] },
+      );
+      if (gen !== destSchemaGenRef.current || tableKey !== destSchemaIdentityRef.current) {
         return {
           columns: destColumns,
           schema: destSchemaMap,
@@ -1425,9 +2010,8 @@ export function TransferPage({
 
       // No table typed yet — only refresh the picker list.
       if (!targetCollection.trim()) {
-        setDestColumns([]);
-        setDestSchemaMap({});
-        setDestTableExists(null);
+        commitDestSchema([], {});
+        proveDestTableExists(null);
         destSchemaTableKeyRef.current = tableKey;
         return { columns: [], schema: {}, tableExists: null, connected, message: (destination.message as string) || "" };
       }
@@ -1482,9 +2066,15 @@ export function TransferPage({
         && (resolvedExists === true || destTableExists === true || destColumns.length > 0);
       const nextColumns = resolvedExists === false ? [] : (keepPrior ? destColumns : columns);
       const nextSchema = resolvedExists === false ? {} : (keepPrior ? destSchemaMap : schema);
-      setDestColumns(nextColumns);
-      setDestSchemaMap(nextSchema);
-      setDestTableExists(resolvedExists);
+      // A probe that cannot settle existence is not a reading Studio can act on,
+      // and the automatic probe must back off from it exactly as it does from a
+      // thrown error — an unreachable host answers "not connected" through the
+      // success path, which is how the re-probe loop survived the first fix.
+      destProbeFailureRef.current = destProbeSettled(connected, resolvedExists)
+        ? null
+        : { key: tableKey, at: Date.now() };
+      commitDestSchema(nextColumns, nextSchema);
+      proveDestTableExists(resolvedExists);
       destSchemaTableKeyRef.current = tableKey;
       if (keepPrior && resolvedExists === true && destColumns.length === 0) {
         const metaKey = `meta:${tableKey}`;
@@ -1514,7 +2104,7 @@ export function TransferPage({
         message: (destination.message as string) || "",
       };
     } catch (e) {
-      if (gen !== destSchemaGenRef.current) {
+      if (gen !== destSchemaGenRef.current || tableKey !== destSchemaIdentityRef.current) {
         return {
           columns: destColumns,
           schema: destSchemaMap,
@@ -1523,10 +2113,27 @@ export function TransferPage({
           message: "",
         };
       }
-      // Keep last-known schema on transient errors so the demo does not blank out.
+      // A transient error on the *same* table keeps its last-known schema so the
+      // panel does not blank out. A different table has no schema of its own —
+      // showing the previous table's DDL for it is a false read.
+      destProbeFailureRef.current = { key: tableKey, at: Date.now() };
+      console.error("Destination schema introspection failed:", e);
+      const sameTable = destSchemaTableKeyRef.current === tableKey;
+      const keptColumns = sameTable ? destColumns : [];
+      const keptSchema = sameTable ? destSchemaMap : {};
+      // Re-setting an already-empty schema still hands Map a new object identity,
+      // which re-ran Map, which re-probed — the loop that pinned the reload
+      // control on "Reading destination…" for as long as the host stayed down.
+      if (!sameTable) commitDestSchema([], {});
       // Do not force "table missing" — unknown is safer than a false create promise.
-      setDestTableExists(null);
-      const errMsg = e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.";
+      proveDestTableExists(null);
+      const rawMsg = e instanceof Error ? e.message : "";
+      const timedOut = /timed out/i.test(rawMsg);
+      const errMsg = timedOut
+        ? `Destination did not answer within `
+          + `${Math.round(DEST_PROBE_TIMEOUT_MS[destProbeSpeedClass(destType)] / 1000)}s — existence unknown. `
+          + "Check the destination is reachable, then reload the destination schema."
+        : rawMsg || "Retry or continue — existence will be rechecked on Validate.";
       setDestConnected(false);
       setDestConnectionError(errMsg);
       toast({
@@ -1534,11 +2141,21 @@ export function TransferPage({
         message: errMsg,
         tone: "warning",
       });
-      return { columns: destColumns, schema: destSchemaMap, tableExists: null, connected: false, message: errMsg };
+      return { columns: keptColumns, schema: keptSchema, tableExists: null, connected: false, message: errMsg };
     } finally {
-      if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
+      destProbeInflightRef.current = Math.max(0, destProbeInflightRef.current - 1);
+      if (destProbeInflightRef.current === 0) setDestSchemaLoading(false);
     }
   };
+  loadDestSchemaRef.current = loadDestinationSchema;
+  if (!inlineDestinationProbeRef.current) {
+    inlineDestinationProbeRef.current = createDestinationSchemaProbe<void>({
+      delayMs: INLINE_DESTINATION_PROBE_DEBOUNCE_MS,
+      load: async (endpoint) => {
+        await loadDestSchemaRef.current?.({ endpoint });
+      },
+    });
+  }
 
   useEffect(() => {
     if (!analysis?.columns.length || step !== STEP_MAP || analyzing) return;
@@ -1551,16 +2168,49 @@ export function TransferPage({
     ) {
       return;
     }
+    // Rematch is identity on CREATE. commitMappings stamps compiled dest names
+    // so this effect cannot wipe fname → first_name back to fname → fname.
     void applyPipelineMappings(destColumns.length ? destColumns : undefined, destSchemaMap);
   }, [validationMode, step, destColumns, destSchemaMap, destTableExists, destKindMode, analyzing]);
 
   useEffect(() => {
-    if (destKindMode !== "database" || !connectorId) return;
+    if (
+      destKindMode !== "database"
+      || (!connectorId && !isInlineDestinationConfigured(currentDestinationEndpoint))
+    ) {
+      inlineDestinationProbeRef.current?.cancel();
+      return;
+    }
     // Load object list as soon as a connector is chosen; refine when table is set.
-    if (step !== STEP_DESTINATION && step !== STEP_MAP && step !== STEP_VALIDATE) return;
+    // Connect stays on Source while the destination panel is on screen, so the
+    // flagged studio must probe there too. Otherwise the table list stays empty.
+    if (!destinationCatalogLoadsOnStep(step, studioFlags.canvas)) return;
+    if (!connectorId) {
+      void inlineDestinationProbeRef.current?.schedule(currentDestinationEndpoint);
+      return () => inlineDestinationProbeRef.current?.cancel();
+    }
     const t = window.setTimeout(() => { void loadDestinationSchema(); }, 350);
     return () => window.clearTimeout(t);
-  }, [step, destKindMode, targetCollection, connectorId, destType, targetDb, destHost, destPort, destSchema, destWarehouse]);
+  }, [step, destKindMode, connectorId, currentDestinationProbeKey, studioFlags.canvas]);
+
+  // An unreachable destination is re-checked on a fixed cadence, not as fast as
+  // Map can re-render: the operator gets automatic recovery when the host comes
+  // back, and a host that stays down costs four probes a minute instead of
+  // twenty. Reload and Validate still probe on demand.
+  useEffect(() => {
+    if (
+      destKindMode !== "database"
+      || (!connectorId && !isInlineDestinationConfigured(currentDestinationEndpoint))
+    ) return;
+    if (!destinationCatalogRetriesOnStep(step, studioFlags.canvas)) return;
+    if (destConnected !== false || destSchemaLoading) return;
+    const t = window.setTimeout(() => {
+      void loadDestinationSchema({ force: true }).finally(() => {
+        setDestProbeRetryTick((n) => n + 1);
+      });
+    }, DEST_PROBE_FAILURE_COOLDOWN_MS);
+    return () => window.clearTimeout(t);
+  }, [step, destKindMode, connectorId, currentDestinationProbeKey, destConnected, destSchemaLoading, destProbeRetryTick, studioFlags.canvas]);
 
   useEffect(() => {
     if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {
@@ -1596,11 +2246,12 @@ export function TransferPage({
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPreflight(null);
+    setPreflightError("");
     setValidatedContractKey(null);
     setCellPreview(null);
     setDestColumns([]);
     setDestSchemaMap({});
-    setDestTableExists(null);
+    proveDestTableExists(null);
     setDestObjectNames([]);
     destSchemaTableKeyRef.current = "";
     routeAnalyzedKeyRef.current = "";
@@ -1628,6 +2279,10 @@ export function TransferPage({
       setDestConnectionString(conn.connection_string || "");
       setDestSchema(conn.database || conn.schema || "");
       setTargetDb(conn.database || "");
+      setDestWarehouse(conn.warehouse || "");
+      setDestIcebergCatalogMode(
+        inferIcebergCatalogKind(conn.connection_string || "", conn.auth_mode === "connection_string" ? "rest" : ""),
+      );
     } else {
       setDestConnectionString(conn.connection_string || "");
     }
@@ -1662,7 +2317,20 @@ export function TransferPage({
 
   useEffect(() => {
     autoSelectedSourceConnector.current = false;
+    if (sourceKind !== "file") {
+      setFile(null);
+      setParsed(null);
+    }
   }, [sourceKind]);
+
+  useEffect(() => {
+    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector?.type)) {
+      setSourceReadMode(dialectOffersQuery(sourceConnector?.type) ? "query" : "table");
+    }
+    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector?.type)) {
+      setSourceReadMode("table");
+    }
+  }, [sourceConnector?.type, sourceReadMode]);
 
   // Carry selected connection from Connectors drawer into Transfer Studio source step.
   // Apply once per seed token — do not re-run on connectors list refresh (that would
@@ -1689,6 +2357,8 @@ export function TransferPage({
     appliedSeedTokenRef.current = seedSourceConnector.token;
     autoSelectedSourceConnector.current = true;
     setSourceConnectorId(seeded.id);
+    setFile(null);
+    setParsed(null);
     setStep(STEP_SOURCE);
   }, [seedSourceConnector, connectors]);
 
@@ -1696,6 +2366,7 @@ export function TransferPage({
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
+    if (!studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
 
     setCellPreview(null);
@@ -1712,11 +2383,21 @@ export function TransferPage({
       void fetchJob(seedStudioIntent.jobId)
         .then((job) => {
           if (job?.preflight) setPreflight(job.preflight as typeof preflight);
-          const mode = (job as { transfer_request?: { validation_mode?: string } })
-            ?.transfer_request?.validation_mode;
-          if (mode === "balanced" || mode === "strict" || mode === "maximum") {
-            setValidationMode(mode);
+          const rules = jobStudioDataRules(job as {
+            validation_mode?: string;
+            schema_policy?: string;
+            transfer_request?: { validation_mode?: string; schema_policy?: string };
+          });
+          if (rules.validationMode) setValidationMode(rules.validationMode);
+          if (rules.schemaPolicy) {
+            setSchemaPolicy(rules.schemaPolicy);
+            setBackfillNewFields(schemaPolicyBackfills(rules.schemaPolicy));
           }
+          const delivery = jobStudioDeliveryGuarantee(job as {
+            delivery_guarantee?: string;
+            transfer_request?: { delivery_guarantee?: string };
+          });
+          setDeliveryGuarantee(delivery);
         })
         .catch(() => {
           /* keep null — operator can Re-run */
@@ -1725,12 +2406,15 @@ export function TransferPage({
       setPreflight(null);
     }
 
-    if (
-      seedStudioIntent.validationMode === "balanced"
-      || seedStudioIntent.validationMode === "strict"
-      || seedStudioIntent.validationMode === "maximum"
-    ) {
-      setValidationMode(seedStudioIntent.validationMode);
+    const seededMode = namedStudioValidationMode(seedStudioIntent.validationMode);
+    if (seededMode) setValidationMode(seededMode);
+    const seededPolicy = namedStudioSchemaPolicy(seedStudioIntent.schemaPolicy);
+    if (seededPolicy) {
+      setSchemaPolicy(seededPolicy);
+      setBackfillNewFields(schemaPolicyBackfills(seededPolicy));
+    }
+    if (seedStudioIntent.deliveryGuarantee) {
+      setDeliveryGuarantee(namedCdcDeliveryGuarantee(seedStudioIntent.deliveryGuarantee));
     }
 
     const maps = seedStudioIntent.mappings;
@@ -1763,9 +2447,27 @@ export function TransferPage({
       setSeedRepairProposalId(null);
     }
 
+    const seededSource = seedStudioIntent.sourceConnectorId
+      ? connectors.find((c) => c.id === seedStudioIntent.sourceConnectorId)
+      : undefined;
+    if (seededSource) {
+      if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
+      else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
+      setSourceConnectorId(seededSource.id);
+      setFile(null);
+      setParsed(null);
+    }
+    if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
+    if (seedStudioIntent.destConnectorId) {
+      applyConnectorSelection(seedStudioIntent.destConnectorId);
+    }
+    if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
+
+    const scheduleRoute = Boolean(seedStudioIntent.sourceConnectorId && seedStudioIntent.destConnectorId);
+
     if (seedStudioIntent.step === "map") {
       setStep(STEP_MAP);
-    } else if (seedStudioIntent.step === "source") {
+    } else if (seedStudioIntent.step === "source" || scheduleRoute) {
       setStep(STEP_SOURCE);
     } else {
       setStep(STEP_VALIDATE);
@@ -1775,15 +2477,17 @@ export function TransferPage({
       ? ` from job ${seedStudioIntent.jobId.slice(0, 8)}…`
       : "";
     toast({
-      title: "Opened Validate in Studio",
-      message: seedStudioIntent.repairProposalId
-        ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`
-        : seedStudioIntent.preflight
-          ? `Job gates loaded${jobHint}. Review results — Re-run only if you changed mappings.`
-          : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
+      title: scheduleRoute ? "Opened Transfer Studio from the schedule" : "Opened Validate in Studio",
+      message: scheduleRoute
+        ? "Source and destination are prefilled. Continue through Map and Validate, then Schedule from the footer so the beat has a mapping contract."
+        : seedStudioIntent.repairProposalId
+          ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`
+          : seedStudioIntent.preflight
+            ? `Job gates loaded${jobHint}. Review results — Re-run only if you changed mappings.`
+            : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
       tone: "info",
     });
-  }, [seedStudioIntent, toast]);
+  }, [seedStudioIntent, toast, connectors]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");
@@ -1935,6 +2639,7 @@ export function TransferPage({
           source_samples: buildColumnSamples(data.columns, rows),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
+          source_kind: mapSourceKind,
         });
         const pipelineAnalysis = analysisFromPipeline(data.columns, data.schema ?? {}, pipeline.mappings);
         setAnalysis(pipelineAnalysis);
@@ -1974,7 +2679,14 @@ export function TransferPage({
     }
   };
 
-  const processFile = async (selected: File) => {
+  const processFile = async (
+    selected: File,
+    opts: { readOptions?: SourceReadOptions } = {},
+  ) => {
+    // A window belongs to the file it was declared on, so a newly chosen file
+    // starts from the default (active sheet, header on row 1).
+    const window = opts.readOptions ?? {};
+    const windowDeclared = Object.keys(window).length > 0;
     const ext = fileExtension(selected.name);
     if (!ACCEPTED_UPLOAD_EXTENSIONS.has(ext)) {
       toast({
@@ -1992,11 +2704,19 @@ export function TransferPage({
       });
       return;
     }
+    // Re-profiling the same file through a new window keeps the panel mounted so
+    // the operator can see which declaration is being applied; unmounting it mid
+    // request left the controls to disappear under the cursor. Everything derived
+    // from the old profile is still dropped, and Source cannot be left while the
+    // re-read is in flight.
+    const reprofiling = opts.readOptions !== undefined && selected === file;
     setUploadError(null);
+    setReadWindowRefused(false);
     setFile(selected);
-    setParsed(null);
+    if (!reprofiling) setParsed(null);
     setAnalysis(null);
     setPreflight(null);
+    setPreflightError("");
     setPersistedPlanId(null);
     setLlmMappingUsed(false);
     setMappingProof(null);
@@ -2004,10 +2724,12 @@ export function TransferPage({
     try {
       let data: ParsedUpload;
       try {
-        data = await uploadFile(selected, { enableOcr });
+        data = await uploadFile(selected, { enableOcr, readOptions: window });
       } catch (uploadErr) {
         const ext = fileExtension(selected.name);
-        if (ext === "csv" || ext === "tsv") {
+        // Browser parsing cannot honour a declared window — never profile a
+        // different population than the one that was asked for.
+        if ((ext === "csv" || ext === "tsv") && !windowDeclared) {
           const text = await selected.text();
           data = parseCsvTextForPreview(text);
           toast({
@@ -2025,6 +2747,7 @@ export function TransferPage({
         );
       }
       setParsed(data);
+      setReadOptions(data.read_options ?? window);
       if (data.ocr_status) {
         setOcrStatus(data.ocr_status);
       }
@@ -2058,12 +2781,29 @@ export function TransferPage({
     } catch (e) {
       const message = e instanceof Error ? e.message : "Check file format and try again.";
       setUploadError(message);
-      setFile(null);
-      setParsed(null);
-      toast({ title: "Upload failed", message, tone: "error" });
+      setReadWindowRefused(reprofiling);
+      // A refused *window* keeps the file and its last good profile: the
+      // declaration is wrong, not the upload, and forcing a re-upload to correct
+      // a sheet name discards work the operator already did.
+      if (!reprofiling) {
+        setFile(null);
+        setParsed(null);
+        setReadOptions({});
+      }
+      toast({
+        title: windowDeclared ? "Read window refused" : "Upload failed",
+        message,
+        tone: "error",
+      });
       console.error(e);
     }
     setUploading(false);
+  };
+
+  /** Re-profile the current file through a newly declared window. */
+  const applyReadWindow = (next: SourceReadOptions) => {
+    if (!file || uploading) return;
+    void processFile(file, { readOptions: next });
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2096,6 +2836,15 @@ export function TransferPage({
   };
 
   const explainSourceGap = () => {
+    if (sourceKind === "file" && uploading) {
+      toast({
+        title: "Source still being read",
+        message: "The declared read window is being applied — the columns and row count on screen are the previous read.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
     if (sourceKind === "file" && !parsed) {
       toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet file to continue.", tone: "warning" });
       setStep(STEP_SOURCE);
@@ -2112,7 +2861,18 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return true;
     }
-    if (sourceKind === "database" && !(sourceTable || sourceCollection)) {
+    if (sourceKind === "database" && isCallableSourceMode(sourceReadMode) && !procedureCall.trim()) {
+      toast({
+        title: sourceReadMode === "query" ? "SQL query required" : "Stored procedure required",
+        message: sourceReadMode === "query"
+          ? "Paste one read-only SELECT/WITH to inspect the result set."
+          : "Paste a single CALL / EXEC (or a PostgreSQL SELECT * FROM func()) to inspect the result set.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
+    if (sourceKind === "database" && !isCallableSourceMode(sourceReadMode) && !(sourceTable || sourceCollection)) {
       toast({ title: "Source stream required", message: "Enter the table or collection name to inspect.", tone: "warning" });
       setStep(STEP_SOURCE);
       return true;
@@ -2122,25 +2882,81 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return true;
     }
+    if (
+      sourceKind === "database"
+      && isMultiStreamSource
+      && streamPreviews.length > 0
+      && !streamPreviews.some((s) => s.status === "ok" && (s.columns?.length ?? 0) > 0)
+    ) {
+      toast({
+        title: "No stream schema was read",
+        message: sourceIntrospectError
+          || "Fix the connector or the table names, then retry. Destination stays closed until one stream reads.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
     return false;
   };
 
   const explainDestinationGap = () => {
     if (explainSourceGap()) return true;
-    if (destKindMode === "database" && !targetDb.trim()) {
+    if (destKindMode === "database" && isCallableDestMode(destWriteMode)) {
+      const sql = destWriteMode === "query" ? destQuerySql : destProcedureCall;
+      if (!sql.trim()) {
+        toast({
+          title: destWriteMode === "query" ? "Destination query required" : "Destination procedure required",
+          message: destWriteMode === "query"
+            ? "Paste one INSERT / MERGE / UPDATE with :binds."
+            : "Paste one CALL / EXEC. Each row is one statement; failed rows quarantine.",
+          tone: "warning",
+        });
+        setStep(STEP_DESTINATION);
+        return true;
+      }
+      const boundForDiag = {
+        ...destProcedureParams,
+        ...Object.fromEntries(
+          Object.entries(destProcedureParamMap)
+            .filter(([, col]) => Boolean(col))
+            .map(([name]) => [name, "mapped"]),
+        ),
+      };
+      const diagnosis = diagnoseSql(sql, {
+        mode: destWriteMode === "query" ? "dest_dml" : "procedure",
+        dialect: destDriverType || destType,
+        bound: boundForDiag,
+      });
+      if (!diagnosis.ok) {
+        toast({
+          title: "Destination SQL needs a fix",
+          message: diagnosis.error,
+          tone: "warning",
+        });
+        setStep(STEP_DESTINATION);
+        return true;
+      }
+      if (!targetCollection.trim()) {
+        setTargetCollection(procedureStreamName(sql));
+      }
+    }
+    if (destKindMode === "database" && !isCallableDestMode(destWriteMode) && !targetDb.trim()) {
       toast({ title: "Destination database required", message: "Enter the target database or project.", tone: "warning" });
       setStep(STEP_DESTINATION);
       return true;
     }
-    if (destKindMode === "database" && !targetCollection.trim()) {
+    if (destKindMode === "database" && !isCallableDestMode(destWriteMode) && !targetCollection.trim()) {
       toast({ title: "Destination table required", message: "Enter the target table or collection.", tone: "warning" });
       setStep(STEP_DESTINATION);
       return true;
     }
-    if (streamNeedsReview) {
+    if (streamContractIssue) {
+      // One cause, one action, and the stream it belongs to — the engine refuses
+      // per stream, so a generic "contract incomplete" would hide which one.
       toast({
         title: "Stream contract needs review",
-        message: `${requiresCursor && !cursorField ? "Select a cursor field. " : ""}${requiresPrimaryKey && !primaryKeyField ? "Select a primary key." : ""}`.trim(),
+        message: `${streamContractIssue.reason} ${streamContractIssue.action}`,
         tone: "warning",
       });
       setStep(STEP_DESTINATION);
@@ -2156,16 +2972,25 @@ export function TransferPage({
       schema?: Record<string, string>;
       schema_intelligence?: Record<string, { semantic_role?: string; logical_type?: string; notes?: string[] }>;
       row_estimate?: number;
+      row_estimate_uncertain?: boolean;
       data?: Record<string, unknown>[];
       sample_data?: Record<string, unknown>[];
       message?: string;
     },
   ) => {
     if (!sourceConnector) return;
-    if (intro.row_estimate != null && intro.row_estimate > 0) {
+    // Never stamp a 100-row preview as the transfer volume.
+    if (
+      !intro.row_estimate_uncertain
+      && intro.row_estimate != null
+      && intro.row_estimate > 0
+    ) {
       setSourceRowEstimate(intro.row_estimate);
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
+    // Kept so Transform can profile and preview a connector source without a second
+    // round-trip — the same rows Map was seeded from.
+    setConnectorSampleRows(sampleRows);
     const columnSamples = Object.fromEntries(
       intro.columns.map((col) => [
         col,
@@ -2181,17 +3006,22 @@ export function TransferPage({
       source_columns: intro.columns,
       source_schema: intro.schema ?? {},
     }));
+    const population = (
+      intro.row_estimate_uncertain
+      || intro.row_estimate == null
+      || intro.row_estimate <= 0
+    ) ? 0 : intro.row_estimate;
     setActiveData({
       name: streamName || sourceConnector.name,
       columns: intro.columns,
-      row_count: intro.row_estimate ?? 0,
+      row_count: population,
       samples: columnSamples,
       schema: intro.schema ?? {},
     });
     setParsed({
       columns: intro.columns,
       schema: intro.schema ?? {},
-      row_count: intro.row_estimate ?? 0,
+      row_count: population,
       data: intro.data ?? intro.sample_data ?? [],
       file_type: sourceConnector.type,
     });
@@ -2226,7 +3056,15 @@ export function TransferPage({
       }),
       sampleRows,
     );
-    setColumnMappings(seeded);
+    // The seed above uses the *source* logical type on both sides so the grid has
+    // something to show. That is only honest for a file export or a destination
+    // whose columns were actually read — a database destination with no read
+    // schema must stay pending until Map stamps a destination type.
+    setColumnMappings(
+      destKindMode === "database" && !destColumns.length
+        ? seeded.map(markMappingDestUnread)
+        : seeded,
+    );
     void analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 })
       .then((dbAnalysis) => setAnalysis(dbAnalysis))
       .catch((aiErr) => {
@@ -2234,7 +3072,7 @@ export function TransferPage({
       });
   }, [sourceConnector, setActiveData]);
 
-  const introspectOneStream = useCallback(async (streamName: string) => {
+  const introspectOneStream = useCallback(async (streamName: string, statement = "") => {
     if (!sourceConnector) {
       return { ok: false as const, error: "No source connector selected" };
     }
@@ -2247,15 +3085,56 @@ export function TransferPage({
     };
     if (isMongo) sourceEndpoint.collection = streamName;
     else sourceEndpoint.table = streamName;
+    const perStream = statement.trim();
+    if (isCallableSourceMode(sourceReadMode) && !isMongo) {
+      sourceEndpoint.source_read_mode = sourceReadMode;
+      if (sourceReadMode === "procedure") sourceEndpoint.procedure_call = procedureCall.trim();
+      if (sourceReadMode === "query") sourceEndpoint.source_query = procedureCall.trim();
+      if (Object.keys(procedureParams).length) sourceEndpoint.procedure_params = procedureParams;
+      sourceEndpoint.extra = {
+        source_read_mode: sourceReadMode,
+        procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+        source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+        procedure_params: procedureParams,
+      };
+    } else if (perStream && !isMongo && streamExtractToken(streamName, perStream) !== `${streamName}=`) {
+      const kind = statementKind(perStream);
+      if (kind === "dest_dml") {
+        return {
+          ok: false as const,
+          error: `${streamName}: this statement writes rows. A source extract is a CALL or a read-only SELECT.`,
+        };
+      }
+      if (kind !== "query" && kind !== "procedure") {
+        return {
+          ok: false as const,
+          error: `${streamName}: paste a CALL or a read-only SELECT. A CREATE statement is the object's definition, not the extract.`,
+        };
+      }
+      const mode = kind === "query" ? "query" : "procedure";
+      sourceEndpoint.source_read_mode = mode;
+      sourceEndpoint.procedure_call = mode === "procedure" ? perStream : "";
+      sourceEndpoint.source_query = mode === "query" ? perStream : "";
+      sourceEndpoint.extra = {
+        source_read_mode: mode,
+        procedure_call: mode === "procedure" ? perStream : "",
+        source_query: mode === "query" ? perStream : "",
+      };
+    }
 
     const { source: intro } = await introspectTransferEndpoints({
       source: sourceEndpoint,
       destination: { kind: "file_export", format: "json" },
     });
+    const objects = (intro.objects ?? [])
+      .map((o) => (o.name || "").trim())
+      .filter(Boolean);
+    if (objects.length) setSourceObjectNames(objects);
     if (!intro.connected || !intro.columns?.length) {
       return {
         ok: false as const,
         error: intro.message || `“${streamName}” was not found or could not be read on this connector.`,
+        objects,
       };
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
@@ -2270,8 +3149,8 @@ export function TransferPage({
         tone: "warning",
       });
     }
-    return { ok: true as const, intro };
-  }, [sourceConnector, sourceConnectorId, toast]);
+    return { ok: true as const, intro, objects };
+  }, [sourceConnector, sourceConnectorId, toast, sourceReadMode, procedureCall, procedureParams]);
 
   const introspectConnectorSource = useCallback(async () => {
     if (!sourceConnector) return null;
@@ -2288,6 +3167,30 @@ export function TransferPage({
         return null;
       }
       applyPrimaryStreamSchema(tableOrPath, result.intro);
+      setSourceIntrospectError(null);
+      return result.intro;
+    }
+
+    if (isCallableSourceMode(sourceReadMode) && !isMongo) {
+      const call = procedureCall.trim();
+      if (!call) return null;
+      const streamName = procedureStreamName(call);
+      setStreamPreviews([{
+        name: streamName,
+        status: "loading",
+        columns: [],
+        schema: {},
+        rows: [],
+      }]);
+      setActiveStreamTab(streamName);
+      setSourceIntrospectError(null);
+      const result = await introspectOneStream(streamName);
+      if (!result.ok) {
+        setSourceIntrospectError(result.error);
+        toast({ title: "Could not execute stored procedure", message: result.error, tone: "error" });
+        return null;
+      }
+      applyPrimaryStreamSchema(streamName, result.intro);
       setSourceIntrospectError(null);
       return result.intro;
     }
@@ -2310,7 +3213,10 @@ export function TransferPage({
     const settled = await Promise.all(
       names.map(async (name) => {
         try {
-          const result = await introspectOneStream(name);
+          const result = await introspectOneStream(
+            name,
+            streamFields[name]?.sourceProcedure || "",
+          );
           if (!result.ok) {
             return {
               name,
@@ -2349,12 +3255,26 @@ export function TransferPage({
     const failed = settled.filter((s) => s.status === "error");
 
     if (!primaryOk) {
-      const detail = failed.map((f) => `${f.name}: ${f.error}`).join(" · ");
       const message = names.length > 1
-        ? `None of the ${names.length} streams could be read. ${detail}`
+        ? summarizeStreamReadFailures(failed.map((f) => ({ name: f.name, error: f.error })))
         : (failed[0]?.error || "Could not read source schema.");
       setSourceIntrospectError(message);
-      toast({ title: "Could not read source schema", message, tone: "error" });
+      // A failed read must not keep the previous table's columns, or Continue
+      // opens Destination against a schema this selection never produced.
+      setParsed(null);
+      setAnalysis(null);
+      setConnectorSampleRows([]);
+      setSourceRowEstimate(null);
+      setActiveData(null);
+      setTransferPlan((prev) => (
+        prev
+          ? { ...prev, source_columns: [], source_schema: {}, message }
+          : null
+      ));
+      // Several streams already show the failure on the schema card. A toast
+      // on top of that card hides the extract boxes.
+      if (names.length > 1) dismissMatching("Could not read source schema");
+      else toast({ title: "Could not read source schema", message, tone: "error" });
       return null;
     }
 
@@ -2369,10 +3289,10 @@ export function TransferPage({
         : undefined,
     });
 
+    dismissMatching("Could not read source schema");
     if (failed.length) {
       const warn = `${failed.length} of ${names.length} streams failed (${failed.map((f) => f.name).join(", ")}). Preview tabs show details; remove or fix those names before run.`;
       setSourceIntrospectError(warn);
-      toast({ title: "Partial stream schema", message: warn, tone: "warning" });
     } else {
       setSourceIntrospectError(null);
     }
@@ -2392,9 +3312,14 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
     introspectOneStream,
     applyPrimaryStreamSchema,
     toast,
+    dismissMatching,
+    streamFields,
+    setActiveData,
   ]);
 
   const introspectConnectorSourceRef = useRef(introspectConnectorSource);
@@ -2405,17 +3330,29 @@ export function TransferPage({
   useEffect(() => {
     if (sourceKind !== "database" && sourceKind !== "cloud") return;
     if (!sourceConnectorId || !sourceConnector) return;
+    const callable = sourceKind === "database"
+      && isCallableSourceMode(sourceReadMode)
+      && sourceConnector.type !== "mongodb";
     const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+      : callable
+        ? procedureCall.trim()
+        : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    const names = sourceKind === "cloud"
+      ? (rawPath ? [rawPath] : [])
+      : callable
+        ? (rawPath ? [procedureStreamName(rawPath)] : [])
+        : parseStreamNames(rawPath);
     if (!names.length) {
       setStreamPreviews([]);
       return;
     }
 
     // Gate on the full stream list so adding/removing a name re-reads schemas.
-    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
+    const extractKey = !callable
+      ? names.map((name) => streamExtractToken(name, streamFields[name]?.sourceProcedure)).join("||")
+      : "";
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}|${extractKey}`;
     const gate = sourceIntrospectGateRef.current;
     if (gate.key === key && (gate.status === "ok" || gate.status === "error" || gate.status === "running")) {
       return;
@@ -2469,6 +3406,9 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
+    streamFields,
   ]);
 
   const retrySourceIntrospect = useCallback(() => {
@@ -2477,14 +3417,24 @@ export function TransferPage({
     setSourceIntrospectError(null);
     setSourceIntrospecting(false);
     setAnalyzing(false);
-    // Nudge effect by clearing then relying on current collection key — force via
-    // a microtask re-entry of the same inputs.
+    const callable = sourceKind === "database"
+      && isCallableSourceMode(sourceReadMode)
+      && sourceConnector?.type !== "mongodb";
     const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+      : callable
+        ? procedureCall.trim()
+        : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    const names = sourceKind === "cloud"
+      ? (rawPath ? [rawPath] : [])
+      : callable
+        ? (rawPath ? [procedureStreamName(rawPath)] : [])
+        : parseStreamNames(rawPath);
     if (!sourceConnectorId || !names.length) return;
-    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
+    const extractKey = !callable
+      ? names.map((name) => streamExtractToken(name, streamFields[name]?.sourceProcedure)).join("||")
+      : "";
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}|${extractKey}`;
     const gen = ++sourceIntrospectGenRef.current;
     sourceIntrospectGateRef.current = { key, status: "running" };
     setSourceIntrospecting(true);
@@ -2519,8 +3469,41 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
     introspectConnectorSource,
+    streamFields,
   ]);
+
+  // List existing source objects so a missing name (sample) is a picker, not invented Map.
+  useEffect(() => {
+    if (sourceKind !== "database" || !sourceConnector || !sourceConnectorId) return;
+    if (isCallableSourceMode(sourceReadMode) && sourceConnector.type !== "mongodb") return;
+    let cancelled = false;
+    const sourceEndpoint: Record<string, unknown> = {
+      kind: "database",
+      format: sourceConnector.type,
+      connector_id: sourceConnectorId,
+      database: sourceConnector.database,
+    };
+    void introspectTransferEndpoints({
+      source: sourceEndpoint,
+      destination: { kind: "file_export", format: "json" },
+    })
+      .then(({ source: intro }) => {
+        if (cancelled) return;
+        const names = (intro.objects ?? [])
+          .map((o) => (o.name || "").trim())
+          .filter(Boolean);
+        setSourceObjectNames(names);
+      })
+      .catch(() => {
+        /* picker stays empty — typed name still introspects */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceConnector?.database, sourceReadMode]);
 
   const proceedToDestination = async () => {
     if (explainSourceGap()) return;
@@ -2542,23 +3525,82 @@ export function TransferPage({
     setStep(STEP_DESTINATION);
   };
 
+  const acceptWorkbookRuleAsDirect = (index: number) => {
+    const current = businessRuleReportRef.current;
+    if (!current) return;
+    const next = acceptRuleAsDirect(current, index);
+    if (next === current) return;
+    setBusinessRuleReport(next);
+    const primary = primarySourceStream || sourceTable || undefined;
+    setColumnMappings((prev) => mergeBusinessRules(prev, next, { sourceTable: primary }));
+    setStreamMappings((prev) => {
+      const copy = { ...prev };
+      for (const name of multiStreamNames) {
+        copy[name] = mergeBusinessRules(copy[name] || [], next, { sourceTable: name });
+      }
+      return copy;
+    });
+    const rule = next.rules[index];
+    toast({
+      title: "Accepted as Direct map",
+      message: rule ? `${rule.source_column} → ${rule.dest_column} is on Map` : "Rule accepted",
+      tone: "success",
+    });
+  };
+
+  const apiChecksPassedCopy = (pf: PreflightResult): string => {
+    const skipped = countGateStatuses(pf.gates).skipped;
+    const head = skipped > 0
+      ? `${pf.passed_count} of ${pf.total_gates} API checks passed (${skipped} skipped — not counted)`
+      : `All ${pf.total_gates} API checks passed`;
+    return `${head}. Review the gate cards, then Execute when ready.`;
+  };
+
+  const hintEgress = (msg: string): string =>
+    withEgressHint(
+      msg,
+      destKindMode === "database" ? selectedDestConnector?.host : undefined,
+      sourceConnector?.host,
+    );
+
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
+    setMappingError(null);
     setAnalyzing(true);
+    const startedAt = Date.now();
+    mappingRunRef.current = startedAt;
+    window.setTimeout(() => {
+      if (analyzingRef.current && mappingRunRef.current === startedAt) {
+        setAnalyzing(false);
+        setMappingProgress(0);
+        setMappingError(mappingTimeoutCopy);
+      }
+    }, MAPPING_TIMEOUT_MS);
     const bump = (pct: number, phase: string) => {
       setMappingProgress(pct);
       setMappingPhase(phase);
     };
     try {
-      bump(8, "Preparing schema context…");
+      let mappingUnitsDone = 0;
+      const mappingUnits =
+        (destKindMode === "database" ? 1 : 0)
+        + 1
+        + 1
+        + (isMultiStreamSource && multiStreamNames.length > 1 ? 1 : 0);
+      const mark = (phase: string) => {
+        mappingUnitsDone += 1;
+        bump(stagePercent(mappingUnitsDone, mappingUnits + 1), phase);
+      };
+      mark("Preparing schema context…");
       let freshDestCols = destColumns;
       let freshDestSchema = destSchemaMap;
       let loadedTableExists: boolean | null = destTableExists;
       let loadedConnected: boolean | null = null;
+      let loadedSchemaMessage = "";
       if (destKindMode === "database") {
-        bump(22, "Loading destination schema…");
-        let loaded = await loadDestinationSchema();
+        mark("Loading destination schema…");
+        let loaded = await loadDestinationSchema({ force: true });
         // One retry — SSL / metadata races often succeed on the second probe.
         if (
           loaded.columns.length === 0
@@ -2566,7 +3608,7 @@ export function TransferPage({
           && targetCollection.trim()
           && loaded.connected !== false
         ) {
-          bump(28, "Retrying destination schema…");
+          bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Retrying destination schema…");
           await new Promise((r) => window.setTimeout(r, 400));
           loaded = await loadDestinationSchema();
         }
@@ -2574,8 +3616,9 @@ export function TransferPage({
         freshDestSchema = loaded.schema;
         loadedTableExists = loaded.tableExists;
         loadedConnected = loaded.connected;
+        loadedSchemaMessage = loaded.message || destConnectionError || "";
       }
-      bump(42, "Building transfer plan…");
+      mark("Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
       // Create-new only when the destination object is confirmed missing (or file export).
@@ -2631,13 +3674,13 @@ export function TransferPage({
               : loadedTableExists;
         if (sourceKind === "file" && parsed) {
           if (!analysis?.columns.length || !columnMappings.length) {
-            bump(58, "Profiling source columns…");
+            bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Profiling source columns…");
             await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
           }
-          bump(72, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mark(schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
           mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else if (analysis?.columns.length || currentSourceColumns.length) {
-          bump(65, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mark(schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
           mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else {
           toast({
@@ -2650,13 +3693,13 @@ export function TransferPage({
         }
       } else if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
-          bump(58, "Profiling source columns…");
-          await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
-        }
-        bump(72, "Matching source to destination fields…");
+            bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Profiling source columns…");
+            await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
+          }
+          mark("Matching source to destination fields…");
         mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else if (analysis?.columns.length || currentSourceColumns.length) {
-        bump(65, "Matching source to destination fields…");
+          mark("Matching source to destination fields…");
         mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else {
         toast({
@@ -2670,7 +3713,7 @@ export function TransferPage({
 
       // Multi-stream: seed per-stream mappings (copy when schemas match; rematch when they diverge).
       if (isMultiStreamSource && multiStreamNames.length > 1) {
-        bump(85, "Mapping each source stream…");
+        mark("Mapping each source stream…");
         const primary = primarySourceStream;
         setMapActiveStream(primary);
         // Read latest primary mappings from a dedicated rematch of primary stream columns.
@@ -2702,17 +3745,40 @@ export function TransferPage({
         }
       }
 
+      if (businessRuleReportRef.current) {
+        setColumnMappings((prev) => mergeBusinessRules(prev, businessRuleReportRef.current, {
+          sourceTable: primarySourceStream || undefined,
+        }));
+        setStreamMappings((prev) => {
+          const next: Record<string, EditableMapping[]> = {};
+          for (const [name, rows] of Object.entries(prev || {})) {
+            next[name] = mergeBusinessRules(rows, businessRuleReportRef.current, { sourceTable: name });
+          }
+          return next;
+        });
+      }
+
       bump(100, "Mapping ready");
+      await new Promise((r) => window.setTimeout(r, 220));
       if (!mapped.length) {
+        const detail = hintEgress(
+          loadedSchemaMessage || "Retry mapping, or go back and confirm the destination table schema is reachable."
+        );
+        setMappingError(detail);
+        // D-BP-16: the full refusal renders inline on the step (with a
+        // collapsible Details block) — the toast stays a short pointer, not a
+        // second copy of the same ~80-word message.
         toast({
           title: "Mappings did not load",
-          message: "Retry mapping, or go back and confirm the destination table schema is reachable.",
+          message: "See the error on the Map step.",
           tone: "warning",
         });
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
-      toast({ title: "Mapping setup failed", message, tone: "error" });
+      const detail = hintEgress(message);
+      setMappingError(detail);
+      toast({ title: "Mapping setup failed", message: "See the error on the Map step.", tone: "error" });
       console.error(e);
     } finally {
       setAnalyzing(false);
@@ -2771,6 +3837,77 @@ export function TransferPage({
 
   const approveAllMappings = () => {
     setColumnMappings((prev) => approveMappingsHonestly(prev));
+  };
+
+  /**
+   * Validate's forward door — sign holdout Risk Contracts in place and re-run,
+   * instead of bouncing to Map. Failing rows go to the DLQ for replay; nothing
+   * is written lossily and nothing is silently dropped.
+   */
+  const holdOutRowsAndRevalidate = async () => {
+    const { mappings: next, signed } = holdOutRowsAndContinue(columnMappings, {
+      rowsSampled: parsed?.data?.length ?? parsed?.sample_data?.length ?? 0,
+      estimatedRows: parsed?.row_count ?? sourceRowEstimate ?? null,
+      planId: persistedPlanId || undefined,
+      table: targetCollection || "",
+    });
+    if (!signed.length) {
+      toast({
+        title: "Nothing to hold out",
+        message: "No column is blocking on unacknowledged fidelity risk.",
+        tone: "warning",
+      });
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "Running with rows held out",
+      message: `Signed a quarantine Risk Contract for ${signed.length} column(s): ${signed
+        .slice(0, 3)
+        .join(", ")}${signed.length > 3 ? "…" : ""}. Failing rows go to quarantine for replay — re-validating…`,
+      tone: "success",
+    });
+    await executePreflight(next);
+  };
+
+  /**
+   * G15 Validate door — stamp false_friend_confirmed in place and re-run.
+   * Approve eligible must not call this. Remap still lives on Map.
+   */
+  const confirmFalseFriendsAndRevalidate = async (sources?: string[]) => {
+    const { mappings: next, confirmed, blocked, unmatched } = confirmFalseFriendsBySource(
+      columnMappings,
+      sources,
+    );
+    if (blocked.length && !confirmed.length) {
+      toast({
+        title: "Cannot confirm this pair yet",
+        message: `${blocked.slice(0, 3).join(", ")} still needs Accept risk or a type remap on Map.`,
+        tone: "warning",
+      });
+      if (blocked[0]) setMapFocusSource(blocked[0]);
+      setStep(STEP_MAP);
+      return;
+    }
+    if (!confirmed.length) {
+      toast({
+        title: unmatched.length ? "Column is not a false-friend" : "No false-friend pair to confirm",
+        message: unmatched.length
+          ? `${unmatched.slice(0, 3).join(", ")} is not waiting on Confirm this pair. Open Map to remap.`
+          : "Open Map to remap, or re-run Validate if the pair was already confirmed.",
+        tone: "warning",
+      });
+      if (unmatched[0] || sources?.[0]) setMapFocusSource(unmatched[0] || sources?.[0] || "");
+      setStep(STEP_MAP);
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "Pair confirmed — re-validating",
+      message: `Confirmed ${confirmed.slice(0, 3).join(", ")}${confirmed.length > 3 ? "…" : ""}. Re-running Validate.`,
+      tone: "success",
+    });
+    await executePreflight(next);
   };
 
   const approveAllAndPreflight = async () => {
@@ -2917,6 +4054,62 @@ export function TransferPage({
     };
   };
 
+  const applyCreateNewTypeWidens = (actions: ValidationSuggestedAction[]) => {
+    const widens = actions.filter((a) => (
+      a.kind === "change_target_type"
+      && a.to_type
+      && a.requires_ddl !== true
+      && a.mapping_applyable !== false
+      && a.apply_proven !== false
+    ));
+    if (!widens.length) return;
+    let hit = 0;
+    const next = columnMappings.map((m) => {
+      const action = widens.find(
+        (a) => (a.target && m.target === a.target) || (a.column && m.source === a.column),
+      );
+      if (!action?.to_type) return m;
+      if (m.existsInDestination === true) return m;
+      hit += 1;
+      const widenClearsCast =
+        /varchar|text|string|char|longtext|double|float|decimal|numeric|number|real/i.test(
+          action.to_type || "",
+        );
+      const nextTransform =
+        widenClearsCast
+        && (m.transform === "cast_integer"
+          || m.transform === "cast_number"
+          || m.transform === "cast_boolean"
+          || m.transform === "date_iso"
+          || m.transform === "time_iso")
+          ? "none"
+          : m.transform;
+      return sealRemediationApproval({
+        ...m,
+        destType: action.to_type,
+        transform: nextTransform,
+        approved: true,
+        requiresReview: false,
+      });
+    });
+    if (!hit) {
+      setStep(STEP_MAP);
+      toast({
+        title: "Open Map to widen types",
+        message: "These columns already exist on the destination — Map type cannot ALTER live DDL.",
+        tone: "warning",
+      });
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "CREATE types updated — re-validating",
+      message: `Updated ${hit} Map type(s) so the new table can hold the source. The destination is not written yet.`,
+      tone: "success",
+    });
+    void executePreflight(next);
+  };
+
   /** Map an AI `suggested_action` onto the real Studio controls. */
   const applySuggestedAction = (action: ValidationSuggestedAction) => {
     const matches = (m: EditableMapping) =>
@@ -2933,9 +4126,25 @@ export function TransferPage({
           if (!matches(m)) return m;
           hit = true;
           if (m.existsInDestination === false) {
+            // Widen create-new type must clear typed casts — cast_integer on
+            // LONGTEXT/DOUBLE keeps Invalid integer after Apply (Validate lie).
+            const widenClearsCast =
+              /varchar|text|string|char|longtext|double|float|decimal|numeric|number|real/i.test(
+                action.to_type || "",
+              );
+            const nextTransform =
+              widenClearsCast
+              && (m.transform === "cast_integer"
+                || m.transform === "cast_number"
+                || m.transform === "cast_boolean"
+                || m.transform === "date_iso"
+                || m.transform === "time_iso")
+                ? "none"
+                : m.transform;
             return sealRemediationApproval({
               ...m,
               destType: action.to_type,
+              transform: nextTransform,
               approved: true,
               requiresReview: false,
             });
@@ -2944,9 +4153,15 @@ export function TransferPage({
             // Unknown / pending schema — do not invent create-new type rewrite.
             return m;
           }
-          // Existing DDL cannot be widened by mapping alone — remappoint to a free text
-          // column, or invent a new VARCHAR target (ADD / create on write).
-          const freeText = destColumns.find((c) => {
+          // Existing DDL cannot be widened by mapping alone.
+          // A NUMBER/DECIMAL dest-widen must not dump clock/money values into
+          // a leftover TEXT sibling — that is a fidelity collapse.
+          const isNumericWiden = /^(number|decimal|numeric|bignumeric)\b/i.test(
+            (action.to_type || "").trim(),
+          );
+          const freeText = isNumericWiden
+            ? undefined
+            : destColumns.find((c) => {
             const lower = c.toLowerCase();
             if (usedTargets.has(lower) && lower !== m.target.toLowerCase()) return false;
             return isTextType(destSchemaMap[c] || "");
@@ -2979,7 +4194,7 @@ export function TransferPage({
             || destColumns.some((c) => c.toLowerCase() === name.toLowerCase());
           if (!candidate || isTaken(candidate)) {
             const base = (m.source || "field").replace(/[^\w]+/g, "_").replace(/^_+|_+$/g, "") || "field";
-            candidate = `${m.source.startsWith("_") ? m.source : base}_text`;
+            candidate = `${m.source.startsWith("_") ? m.source : base}${isNumericWiden ? "_wide" : "_text"}`;
             if (isTaken(candidate)) {
               candidate = `src_${base}`;
             }
@@ -3001,7 +4216,11 @@ export function TransferPage({
             createNew: true,
             assignmentStrategy: "create_compatible_new",
             transform:
-              m.transform === "cast_number" || m.transform === "cast_boolean"
+              m.transform === "cast_number"
+              || m.transform === "cast_boolean"
+              || m.transform === "cast_integer"
+              || m.transform === "date_iso"
+              || m.transform === "time_iso"
                 ? "none"
                 : m.transform,
             approved: true,
@@ -3142,6 +4361,53 @@ export function TransferPage({
           tone: "info",
         });
         break;
+      case "confirm_or_remap":
+        void confirmFalseFriendsAndRevalidate(action.column ? [action.column] : undefined);
+        break;
+      case "confirm_add":
+        if (action.column) setMapFocusSource(action.column);
+        setStep(STEP_MAP);
+        toast({
+          title: "Opened Map step",
+          message: "Review ADD COLUMN proposals, then re-run Validate.",
+          tone: "info",
+        });
+        break;
+      case "reload_dest_schema":
+        void loadDestinationSchema();
+        toast({
+          title: "Reloading destination schema",
+          message: "Re-introspecting dest columns, then return to Validate.",
+          tone: "info",
+        });
+        break;
+      case "continue_validate":
+        void executePreflight();
+        break;
+      case "run_population_orphan_scan": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        if (!plan) break;
+        setRunPopulationOrphanScan(true);
+        toast({
+          title: plan.toastTitle,
+          message: plan.toastMessage,
+          tone: plan.toastTone,
+        });
+        void executePreflight(undefined, undefined, { runPopulationOrphanScan: true });
+        break;
+      }
+      case "fix_orphans": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        if (!plan) break;
+        if (plan.focusSource) setMapFocusSource(plan.focusSource);
+        if (plan.goToMap) setStep(STEP_MAP);
+        toast({
+          title: plan.toastTitle,
+          message: plan.toastMessage,
+          tone: plan.toastTone,
+        });
+        break;
+      }
       case "check_connection":
         window.location.hash = "#/connectors";
         toast({
@@ -3163,6 +4429,8 @@ export function TransferPage({
       schemaDriftAcknowledged?: boolean;
       fkRiskAcknowledged?: boolean;
       acknowledgmentReason?: string;
+      runPopulationOrphanScan?: boolean;
+      stayOnReview?: boolean;
     },
   ) => {
     const activeMappings = overrideMappings ?? columnMappings;
@@ -3171,7 +4439,12 @@ export function TransferPage({
     const ackSchemaDrift = opts?.schemaDriftAcknowledged ?? schemaDriftAcknowledged;
     const ackFkRisk = opts?.fkRiskAcknowledged ?? fkRiskAcknowledged;
     const ackActor = readSession()?.email || readSession()?.name || "";
-    const ackReason = opts?.acknowledgmentReason || "";
+    const ackReason = (opts?.acknowledgmentReason || "").trim()
+      || standingAcknowledgmentReason({
+        compliance: ackCompliance,
+        schemaDrift: ackSchemaDrift,
+        fkRisk: ackFkRisk,
+      });
     if (
       (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
       && (!ackActor || ackActor.length < 2)
@@ -3194,6 +4467,61 @@ export function TransferPage({
       });
       return;
     }
+    const ackClaimed = Boolean(
+      opts?.complianceAcknowledged
+      || opts?.schemaDriftAcknowledged
+      || opts?.fkRiskAcknowledged,
+    );
+    // An attestation sticks only when the API says it recorded one. Claiming it
+    // optimistically shows "PII approved" over a run that is still blocked.
+    const commitAcknowledgments = (pf: PreflightResult | null) => {
+      if (opts?.complianceAcknowledged) {
+        const recorded = pf?.proof_bundle?.compliance?.acknowledged === true;
+        setComplianceAcknowledged(recorded);
+        toast(recorded
+          ? {
+            title: "PII approval recorded",
+            message: pf?.proof_bundle?.transfer_decision?.decision === "approve"
+              ? "Governance approval accepted — Execute is unlocked."
+              : "Governance approval accepted. Remaining blockers still hold Execute.",
+            tone: pf?.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
+          }
+          : {
+            title: "PII approval not recorded",
+            message: "The API did not return an acknowledged compliance record — Execute stays locked.",
+            tone: "error",
+          });
+      }
+      if (opts?.schemaDriftAcknowledged) {
+        const recorded = schemaDriftAckRecorded(pf);
+        setSchemaDriftAcknowledged(recorded);
+        toast(recorded
+          ? {
+            title: "Schema drift acknowledged",
+            message: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve"
+              ? "Existing mappings kept for this run. Execute is unlocked."
+              : "The attestation is recorded. Remaining blockers still hold Execute.",
+            tone: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
+          }
+          : {
+            title: "Schema drift acknowledgment not recorded",
+            message: "Validate did not accept the attestation — Execute stays locked.",
+            tone: "error",
+          });
+      }
+      if (opts?.fkRiskAcknowledged) setFkRiskAcknowledged(Boolean(pf));
+    };
+    const stampValidatedContract = (
+      maps: EditableMapping[],
+      pf: PreflightResult | null | undefined,
+    ) => {
+      const nextDrift = opts?.schemaDriftAcknowledged
+        ? schemaDriftAckRecorded(pf)
+        : schemaDriftAcknowledged;
+      setValidatedContractKey(buildValidateContractKey(maps, {
+        schemaDriftAcknowledged: nextDrift,
+      }));
+    };
     const threshold = confidenceThresholdForMode(activeValidation);
     if (
       sourceKind === "file"
@@ -3233,14 +4561,6 @@ export function TransferPage({
       });
       return;
     }
-    if (multiStreamUnsupportedMode) {
-      toast({
-        title: "Sync mode not supported",
-        message: "SCD2 and Mirror are not available for multi-stream transfers. Switch to full refresh, incremental, or CDC.",
-        tone: "error",
-      });
-      return;
-    }
     if (!routeSyncModes.some((m) => m.id === syncMode)) {
       toast({
         title: "Sync mode not supported",
@@ -3250,15 +4570,19 @@ export function TransferPage({
       return;
     }
     setPreflighting(true);
-    setStep(STEP_VALIDATE);
+    setValidateProgress(null);
+    if (!opts?.stayOnReview) setStep(STEP_VALIDATE);
     setPreflight(null);
+    setPreflightError("");
     setValidatedContractKey(null);
+    // Resolved outside try so a transport catch can name the same count
+    // the run already computed — `number | null` is the Studio estimate type.
+    let rowCount = 0;
     try {
       let columns: string[] = [];
       let columnTypes: Record<string, string> = {};
       let mappings: { source: string; target: string; confidence: number; reason?: string }[] = [];
       let sampleRows: Record<string, unknown>[] | undefined;
-      let rowCount = 0;
       let estimatedBytes = file?.size ?? 0;
 
       if (sourceKind === "file") {
@@ -3275,7 +4599,7 @@ export function TransferPage({
         columns = parsed.columns;
         columnTypes = parsed.schema || {};
         rowCount = parsed.row_count;
-        sampleRows = (parsed.data ?? parsed.sample_data)?.slice(0, 100);
+        sampleRows = (parsed.data ?? parsed.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT);
         mappings = buildPreflightMappings(
           analysis?.columns ?? [],
           activeMappings.length ? activeMappings : columnMappings,
@@ -3310,7 +4634,7 @@ export function TransferPage({
           columns = cachedColumns;
           columnTypes = cachedSchema;
           rowCount = parsed?.row_count ?? sourceRowEstimate ?? 0;
-          sampleRows = (parsed?.data ?? parsed?.sample_data)?.slice(0, 100);
+          sampleRows = (parsed?.data ?? parsed?.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT);
           mappings = buildPreflightMappings(
             analysis?.columns ?? cachedColumns.map((c) => ({
               column_name: c,
@@ -3370,7 +4694,20 @@ export function TransferPage({
       if (planId) {
         try {
           await syncTransferPlanMappings(planId, mappings);
-          const pf = await preflightTransferPlan(planId);
+          // The plan transport must carry the attestation — a body-less call
+          // cannot clear a PII/drift/FK gate, and Execute would stay locked.
+          const pf = await preflightTransferPlan(
+            planId,
+            {
+              compliance_acknowledged: ackCompliance,
+              schema_drift_acknowledged: ackSchemaDrift,
+              fk_risk_acknowledged: ackFkRisk,
+              acknowledgment_actor: ackActor,
+              acknowledgment_reason: ackReason,
+            },
+            recipePayload(shapeSteps),
+            setValidateProgress,
+          );
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
@@ -3378,7 +4715,9 @@ export function TransferPage({
             await approveTransferPlan(planId);
           }
           setPreflight(pf);
-          setValidatedContractKey(buildValidateContractKey(activeMappings));
+          stampValidatedContract(activeMappings, pf as PreflightResult);
+          commitAcknowledgments(pf as PreflightResult);
+          if (ackClaimed) return;
           if (!pf.passed) {
             toast({
               title: "Validation incomplete",
@@ -3390,7 +4729,7 @@ export function TransferPage({
             toast({
               title: decision === "approve" ? "Preflight passed" : "Review-grade preflight",
               message: decision === "approve"
-                ? `All ${pf.total_gates} API checks passed. Review gate cards, then Execute when ready.`
+                ? apiChecksPassedCopy(pf)
                 : "Checks completed with review-grade decision — re-run or fix blockers before Execute unlocks.",
               tone: decision === "approve" ? "success" : "warning",
             });
@@ -3413,8 +4752,31 @@ export function TransferPage({
           dest_kind: destKindMode,
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
-          source_table: isConnectorSource && sourceKind === "database" && sourceConnector?.type !== "mongodb"
-            ? (sourceTable || undefined)
+          source_table: isConnectorSource
+            ? (
+              sourceKind === "cloud"
+                ? (cloudPath.trim() || undefined)
+                : sourceKind === "database" && sourceConnector?.type !== "mongodb"
+                  && sourceReadMode === "table"
+                  ? (sourceTable || undefined)
+                  : undefined
+            )
+            : undefined,
+          source_config: isConnectorSource && (sourceKind === "database" || sourceKind === "cloud")
+            ? {
+                type: sourceConnector?.type,
+                db_type: sourceConnector?.type,
+                source_read_mode: sourceReadMode,
+                procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : undefined,
+                source_query: sourceReadMode === "query" ? procedureCall.trim() : undefined,
+                procedure_params: Object.keys(procedureParams).length ? procedureParams : undefined,
+                extra: {
+                  source_read_mode: sourceReadMode,
+                  procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+                  source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+                  procedure_params: procedureParams,
+                },
+              }
             : undefined,
           source_collection: isConnectorSource && sourceKind === "database" && sourceConnector?.type === "mongodb"
             ? (sourceCollection || undefined)
@@ -3430,10 +4792,17 @@ export function TransferPage({
           dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
           dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
           dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-          dest_schema: destKindMode === "database" && !connectorId
+          // Always send Studio schema — even with a saved connector. Omitting it
+          // made Validate inspect public/default while Map/Execute used railway
+          // (false create-new / "Projected CREATE · not dest-proven").
+          dest_schema: destKindMode === "database"
             ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
             : undefined,
-          dest_warehouse: destKindMode === "database" && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          dest_warehouse: destKindMode === "database"
+            && (destDriverType === "snowflake"
+              || (destDriverType === "iceberg" && destIcebergCatalogMode === "rest"))
+            ? destWarehouse || undefined
+            : undefined,
           dest_auth_source: destKindMode === "database"
             ? (selectedDestConnector?.auth_source || undefined)
             : undefined,
@@ -3456,23 +4825,71 @@ export function TransferPage({
             && Object.keys(destSchemaMap).length
               ? destSchemaMap
               : undefined,
+          // Validate must score the rows the write will carry: the run shapes on
+          // the read, so a gate judging the raw source refuses values the
+          // transform already removed.
+          shape_recipe: recipePayload(shapeSteps),
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,
+          delivery_guarantee: studioDeliveryGuarantee({
+            syncMode,
+            deliveryGuarantee,
+            allowAppendOnly,
+            callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+          }),
+          dest_extra: {
+            allow_append_only: allowAppendOnly,
+            ...foreignKeysDestExtra(foreignKeysMode),
+            ...(destWriteMode === "procedure"
+              ? {
+                  dest_write_mode: "procedure",
+                  dest_procedure_call: destProcedureCall.trim(),
+                  ...(Object.keys(destProcedureParamMap).length
+                    ? { dest_procedure_param_map: destProcedureParamMap }
+                    : {}),
+                  ...(Object.keys(destProcedureParams).length
+                    ? { dest_procedure_params: destProcedureParams }
+                    : {}),
+                }
+              : destWriteMode === "query"
+                ? {
+                    dest_write_mode: "query",
+                    dest_query_sql: destQuerySql.trim(),
+                    ...(Object.keys(destProcedureParamMap).length
+                      ? { dest_procedure_param_map: destProcedureParamMap }
+                      : {}),
+                    ...(Object.keys(destProcedureParams).length
+                      ? { dest_procedure_params: destProcedureParams }
+                      : {}),
+                  }
+                : {}),
+            ...(destDriverType === "iceberg"
+              ? icebergDestExtra(destIcebergCatalogMode, destWarehouse)
+              : {}),
+          },
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
           date_locale: dateLocale,
+          number_locale: numberLocale,
           backfill_new_fields: backfillNewFields,
           stream_contracts: streamContracts,
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
           fk_risk_acknowledged: ackFkRisk,
-          run_population_orphan_scan: runPopulationOrphanScan,
+          run_population_orphan_scan: resolvePopulationOrphanScanFlag(
+            opts?.runPopulationOrphanScan,
+            runPopulationOrphanScan,
+          ),
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
+          priority_column: priorityColumn || undefined,
+          priority_direction: priorityColumn ? priorityDirection : undefined,
+          row_limit: rowLimit > 0 ? rowLimit : undefined,
           source_kind: sourceKind,
           source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
+          ...(parsed?.file_id ? { source_file_id: parsed.file_id } : {}),
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -3483,6 +4900,11 @@ export function TransferPage({
             sampleRows,
             confidenceThreshold: threshold,
             destKind: destKindMode,
+            sourceReadMode,
+            destWriteMode,
+            syncMode,
+            numberLocale,
+            dateLocale,
           });
           toast({
             title: "Validated locally",
@@ -3494,11 +4916,23 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
-      // Echo signed Risk Contracts from Validate onto Map — Execute verifies signatures.
-      if (Array.isArray(pf.signed_mappings) && pf.signed_mappings.length) {
-        setColumnMappings((prev) => mergeSignedRiskContracts(prev, pf.signed_mappings));
+      commitAcknowledgments(isApiPreflight(pf) ? pf : null);
+      // Echo Kernel stamps + signed Risk Contracts from Validate onto Map.
+      // Contract key MUST use post-hydrate mappings or Execute stays locked /
+      // invalidation clears a green preflight when destType stamps change.
+      let hydrateMaps = activeMappings;
+      if (
+        (Array.isArray(pf.stamped_mappings) && pf.stamped_mappings.length)
+        || (Array.isArray(pf.signed_mappings) && pf.signed_mappings.length)
+      ) {
+        hydrateMaps = mergeSignedRiskContracts(
+          mergeStampedTargetTypes(activeMappings, pf.stamped_mappings),
+          pf.signed_mappings,
+        );
+        setColumnMappings(hydrateMaps);
       }
-      setValidatedContractKey(buildValidateContractKey(activeMappings));
+      stampValidatedContract(hydrateMaps, pf);
+      if (ackClaimed) return;
       if (!pf.passed) {
         toast({
           title: "Validation incomplete",
@@ -3506,7 +4940,7 @@ export function TransferPage({
           tone: "warning",
         });
       } else {
-        const isLocal = String(pf.run_id || "").startsWith("pf_local_");
+        const isLocal = !isApiPreflight(pf);
         const decision = pf.proof_bundle?.transfer_decision?.decision;
         if (isLocal || decision === "review") {
           toast({
@@ -3519,7 +4953,7 @@ export function TransferPage({
         } else {
           toast({
             title: "Preflight passed",
-            message: `All ${pf.total_gates} API checks passed. Review the gate cards, then Execute when ready.`,
+            message: apiChecksPassedCopy(pf),
             tone: "success",
           });
         }
@@ -3531,12 +4965,17 @@ export function TransferPage({
           columns: parsed.columns,
           rowCount: parsed.row_count,
           mappings: overrideMappings ?? columnMappings,
-          sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, 100),
+          sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT),
           confidenceThreshold: threshold,
           destKind: destKindMode,
+          sourceReadMode,
+          destWriteMode,
+          syncMode,
+          numberLocale,
+          dateLocale,
         });
         setPreflight(pf);
-        setValidatedContractKey(buildValidateContractKey(activeMappings));
+        stampValidatedContract(activeMappings, pf);
         if (pf.passed) {
           toast({
             title: "Validated locally",
@@ -3551,8 +4990,17 @@ export function TransferPage({
           });
         }
       } else {
-        const message = e instanceof Error ? e.message : "Validation could not complete.";
-        toast({ title: "Preflight failed", message, tone: "error" });
+        const raw = e instanceof Error ? e.message : "Validation could not complete.";
+        const message = validateTransportMessage(
+          raw,
+          rowCount > 0 ? rowCount : sourceRowEstimate,
+        );
+        setPreflightError(message);
+        toast({
+          title: isTransportFailure(raw) ? "Validate timed out" : "Preflight failed",
+          message,
+          tone: "error",
+        });
         console.error(e);
       }
     } finally {
@@ -3570,6 +5018,10 @@ export function TransferPage({
       };
     }
     if (!preflight) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    // G24: the recovery form in Suggested fixes owns the decision; Map cannot fix a dropped or edited destination.
+    if (preflight.blockers.some((b) => b.id === CONTINUITY_GATE_ID)) {
+      return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    }
     const firstBlocker = buildDisplayBlockers(preflight, syncMode)[0];
     const blockerBlob = `${firstBlocker?.message || ""} ${firstBlocker?.impact || ""} ${JSON.stringify(firstBlocker?.source?.details || {})}`;
     // Encoding beats generic gate-rulebook review_mappings so rail matches dashboard.
@@ -3580,15 +5032,116 @@ export function TransferPage({
         primaryFixLabel: "Fix bad data…",
       };
     }
-    const action = firstBlocker?.suggested_actions?.[0];
-    if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    const applyPromoted = (promoted: PromotedPrimaryFix) => {
+      switch (promoted.destination) {
+        case "map":
+          return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: promoted.label };
+        case "connectors":
+          return {
+            onPrimaryFix: () => { window.location.hash = "#/connectors"; },
+            primaryFixLabel: promoted.label,
+          };
+        case "ack_drift":
+          return {
+            onPrimaryFix: () => {
+              toast({
+                title: "Submitting schema-drift acknowledgment",
+                message: "Re-running Validate — existing mappings kept for this run (exception recorded).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                schemaDriftAcknowledged: true,
+                acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
+              });
+            },
+            primaryFixLabel: promoted.label,
+          };
+        case "ack_pii":
+          return {
+            onPrimaryFix: () => {
+              toast({
+                title: "Submitting PII approval",
+                message: "Re-running Validate with governance approval for detected PII fields.",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                complianceAcknowledged: true,
+                acknowledgmentReason: "Governance policy allows moving detected PII for this transfer",
+              });
+            },
+            primaryFixLabel: promoted.label,
+          };
+        case "ack_fk":
+          return {
+            onPrimaryFix: () => {
+              toast({
+                title: "Submitting FK-risk acknowledgment",
+                message: "Re-running Validate — FK mapping risk accepted for this run (RI not proven).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                fkRiskAcknowledged: true,
+                acknowledgmentReason: "Accept destination FK mapping risk for this run; population orphans not proven",
+              });
+            },
+            primaryFixLabel: promoted.label,
+          };
+        default:
+          return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+      }
+    };
+
+    const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
+    const ranked = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions);
+    const widens = createNewFitWidenActions(preflight);
+    if (widens.length > 0) {
+      return {
+        onPrimaryFix: () => applyCreateNewTypeWidens(widens),
+        primaryFixLabel: createNewFitWidenLabel(widens),
+      };
+    }
+    const action = ranked[0]
+      || (g15Cta
+        ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
+        : undefined);
+    if (!action) return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
 
     switch (action.kind) {
       case "review_mappings":
       case "change_target_type":
       case "add_transform":
-      case "map_column":
-        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
+      case "map_column": {
+        const details = firstBlocker?.source?.details ?? null;
+        const label = schemaDriftRequiresRemap(details)
+          ? "Open Map to fix breaking change"
+          : action.label;
+        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: label };
+      }
+      case "confirm_or_remap":
+        return {
+          onPrimaryFix: () => {
+            void confirmFalseFriendsAndRevalidate(action.column ? [action.column] : undefined);
+          },
+          primaryFixLabel: action.label || "Confirm this pair",
+        };
+      case "confirm_add":
+        return {
+          onPrimaryFix: () => {
+            if (action.column) setMapFocusSource(action.column);
+            setStep(STEP_MAP);
+          },
+          primaryFixLabel: action.label,
+        };
+      case "reload_dest_schema":
+        return {
+          onPrimaryFix: () => { void loadDestinationSchema(); },
+          primaryFixLabel: action.label,
+        };
+      case "continue_validate":
+        return {
+          onPrimaryFix: () => { void executePreflight(); },
+          primaryFixLabel: action.label,
+        };
       case "normalize_control_chars":
       case "open_bad_data_fix":
         return {
@@ -3622,6 +5175,11 @@ export function TransferPage({
           onPrimaryFix: () => setBadDataFixOpen(true),
           primaryFixLabel: "Fix bad data…",
         };
+      case "open_advanced":
+        return {
+          onPrimaryFix: openIdentitySettings,
+          primaryFixLabel: action.label || "Open Advanced — set snapshot mode",
+        };
       case "check_connection":
         return {
           onPrimaryFix: () => {
@@ -3631,23 +5189,50 @@ export function TransferPage({
         };
       case "fix_source_keys":
         return { onPrimaryFix: openIdentitySettings, primaryFixLabel: action.label };
+      case "run_population_orphan_scan": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        return {
+          onPrimaryFix: () => {
+            if (!plan) return;
+            setRunPopulationOrphanScan(true);
+            toast({
+              title: plan.toastTitle,
+              message: plan.toastMessage,
+              tone: plan.toastTone,
+            });
+            void executePreflight(undefined, undefined, { runPopulationOrphanScan: true });
+          },
+          primaryFixLabel: action.label,
+        };
+      }
+      case "fix_orphans": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        return {
+          onPrimaryFix: () => {
+            if (!plan) return;
+            if (plan.focusSource) setMapFocusSource(plan.focusSource);
+            if (plan.goToMap) setStep(STEP_MAP);
+            toast({
+              title: plan.toastTitle,
+              message: plan.toastMessage,
+              tone: plan.toastTone,
+            });
+          },
+          primaryFixLabel: action.label,
+        };
+      }
       default:
-        return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+        return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
     }
-  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast]);
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast, columnMappings]);
 
   const executeTransfer = async () => {
-    if (multiStreamUnsupportedMode) {
-      toast({
-        title: "Multi-stream not supported for this mode",
-        message: multiStreamScd2MirrorBlockCopy("toast"),
-        tone: "error",
-      });
-      setStep(STEP_DESTINATION);
+    if (!jobRun.allowed) {
+      toast({ title: "No write permission", message: jobRun.reason, tone: "warning" });
       return;
     }
     const needsDbTarget = destKindMode === "database";
-    if (sourceKind === "file" && !file) {
+    if (sourceKind === "file" && !file && !parsed?.file_id) {
       toast({ title: "Source file required", message: "Upload a file before executing.", tone: "warning" });
       setStep(STEP_SOURCE);
       return;
@@ -3663,7 +5248,8 @@ export function TransferPage({
       return;
     }
     const decision = preflight?.proof_bundle?.transfer_decision?.decision;
-    const localPf = String(preflight?.run_id || "").startsWith("pf_local_");
+    // No run id is not an API run: an unidentifiable verdict never unlocks Execute.
+    const localPf = !isApiPreflight(preflight);
     if (!preflight?.passed || decision !== "approve" || localPf) {
       toast({
         title: localPf || decision === "review" ? "API Validate required" : "Preflight required",
@@ -3690,18 +5276,56 @@ export function TransferPage({
       return;
     }
 
+    if (replayScheduleId && isConnectorSource && destKindMode === "database") {
+      // The schedule replays the contract this run executes — persist it first.
+      const persisted = await handleScheduleRoute({ quiet: true });
+      if (!persisted) return;
+    }
+
     const enforcePreflight = true;
+    const approvedDecisionArtifactHash = String(
+      preflight?.proof_bundle?.decision_artifact_hash
+        || preflight?.proof_bundle?.decision_artifact?.content_hash
+        || "",
+    ).trim();
+    // Map→DDL fingerprint Validate stamped over these same Map rows. Execute
+    // checks the operator contract against it instead of re-deriving its own.
+    const approvedDdlIdentityHash = String(
+      preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || "",
+    ).trim();
+    if (contractBlockReason) {
+      toast({
+        title: "Signed contract required",
+        message: contractBlockReason,
+        tone: "warning",
+      });
+      return;
+    }
+    if (
+      enforcePreflight
+      && (!approvedDecisionArtifactHash || approvedDecisionArtifactHash.length !== 64)
+    ) {
+      toast({
+        title: "Re-run Validate",
+        message:
+          "Execute requires the Decision Artifact hash from Validate. "
+          + "Run Validate again before starting the transfer.",
+        tone: "warning",
+      });
+      return;
+    }
 
     setTransferring(true);
     setStep(STEP_RUN);
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
-    setRunStartupProgress(12);
+    setExecutedRouteKey(currentDestRouteKey);
+    setRunStartupProgress(stagePercent(1, RUN_LAUNCH_STAGES.length));
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
-    // Prefer Validate-echoed signed contracts over Map drafts (setState race).
+    // Prefer Validate-echoed Kernel stamps + signed contracts over Map drafts.
     const mappingsForExecute = mergeSignedRiskContracts(
-      columnMappings,
+      mergeStampedTargetTypes(columnMappings, preflight?.stamped_mappings),
       preflight?.signed_mappings,
     );
     const transferMappings = mappingsForExecute.length
@@ -3730,7 +5354,7 @@ export function TransferPage({
           }
         }
       }
-      setRunStartupProgress(24);
+      setRunStartupProgress(stagePercent(2, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
@@ -3758,80 +5382,164 @@ export function TransferPage({
         destPassword: !connectorId ? destPassword || undefined : undefined,
         destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
         destOutputPath: destKindMode === "file_export" ? destOutputPath || undefined : undefined,
-        destWarehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+        destWarehouse:
+          destDriverType === "snowflake"
+          || (destDriverType === "iceberg" && destIcebergCatalogMode === "rest")
+            ? destWarehouse
+            : undefined,
         destAuthSource: selectedDestConnector?.auth_source,
         skipPreflight: !enforcePreflight,
         mappings: transferMappings,
         syncMode,
         schemaPolicy,
         validationMode,
+        deliveryGuarantee: studioDeliveryGuarantee({
+          syncMode,
+          deliveryGuarantee,
+          allowAppendOnly,
+          callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+        }),
         dateLocale,
+        numberLocale,
         backfillNewFields,
         writeViaStaging,
         enableOcr,
+        readOptions: sourceKind === "file" ? readOptions : undefined,
+        shapeRecipe: recipePayload(shapeSteps),
+        approvedShapeRecipeHash: shapeIdentity?.hash || undefined,
+        ...(recipeBinding ? {
+          transformRecipeId: recipeBinding.recipe_id,
+          transformRecipeVersion: recipeBinding.version,
+          transformRecipeVersionMode: recipeBinding.version_mode,
+          transformRecipeParams: recipeBinding.params,
+        } : {}),
         sourceExtra: (() => {
-          if (syncMode !== "cdc") return undefined;
-          const extra: Record<string, unknown> = {};
-          if (multiSubnetFailover) extra.multi_subnet_failover = true;
-          const sqlServerCdc = [
-            "sqlserver",
-            "mssql",
-            "azure_sql_database",
-            "microsoft_sql_server",
-            "amazon_rds_sql_server",
-          ].includes(resolveDriverType(sourceConnector?.type || ""));
-          if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
-            extra.cdc_row_filter = cdcRowFilter;
+          const extra: Record<string, unknown> = {
+            ...(sourceKind === "database"
+              ? callableSourceExtra(sourceReadMode, procedureCall, procedureParams) || {}
+              : {}),
+            ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
+          };
+          if (captureJournal && !captureJournalBlockedReason) extra.journal_capture = true;
+          if (syncMode === "cdc") {
+            if (multiSubnetFailover) extra.multi_subnet_failover = true;
+            const sqlServerCdc = [
+              "sqlserver",
+              "mssql",
+              "azure_sql_database",
+              "microsoft_sql_server",
+              "amazon_rds_sql_server",
+            ].includes(resolveDriverType(sourceConnector?.type || ""));
+            if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
+              extra.cdc_row_filter = cdcRowFilter;
+            }
           }
           return Object.keys(extra).length ? extra : undefined;
         })(),
-        destExtra:
-          destDriverType === "pgvector" ||
-          destDriverType === "qdrant" ||
-          destDriverType === "weaviate" ||
-          destDriverType === "pinecone" ||
-          destDriverType === "milvus"
-            ? {
-                ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
-                ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
-                ...(vectorMetadataColumns
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean).length
-                  ? {
-                      metadata_columns: vectorMetadataColumns
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    }
-                  : {}),
-                ...(vectorExcludePiiColumns
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean).length
-                  ? {
-                      exclude_pii_columns: vectorExcludePiiColumns
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    }
-                  : {}),
-                ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
-                chunk_size: vectorChunkSize,
-                chunk_overlap: vectorChunkOverlap,
-                durable_embedding_cache: vectorDurableCache,
-                ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
-              }
-            : syncMode === "cdc" && allowAppendOnly
-              ? { allow_append_only: true }
-              : undefined,
+        destExtra: (() => {
+          const extra: Record<string, unknown> = {};
+          const provenExists = destTableExists ?? destTableExistsRef.current;
+          if (provenExists !== null && provenExists !== undefined) {
+            extra.table_exists = provenExists;
+          }
+          if (provenExists === true && Object.keys(destSchemaMap).length) {
+            // Live DDL must ride multipart dest_extra — form fields alone omit it.
+            extra.schema_types = destSchemaMap;
+          }
+          if (syncMode === "cdc" && allowAppendOnly) {
+            extra.allow_append_only = true;
+          }
+          Object.assign(extra, foreignKeysDestExtra(foreignKeysMode));
+          if (destWriteMode === "procedure") {
+            extra.dest_write_mode = "procedure";
+            extra.dest_procedure_call = destProcedureCall.trim();
+            if (Object.keys(destProcedureParamMap).length) {
+              extra.dest_procedure_param_map = { ...destProcedureParamMap };
+            }
+            if (Object.keys(destProcedureParams).length) {
+              extra.dest_procedure_params = { ...destProcedureParams };
+            }
+          }
+          if (destWriteMode === "query") {
+            extra.dest_write_mode = "query";
+            extra.dest_query_sql = destQuerySql.trim();
+            if (Object.keys(destProcedureParamMap).length) {
+              extra.dest_procedure_param_map = { ...destProcedureParamMap };
+            }
+            if (Object.keys(destProcedureParams).length) {
+              extra.dest_procedure_params = { ...destProcedureParams };
+            }
+          }
+          if (destProcedureBefore.trim()) extra.dest_procedure_before = destProcedureBefore.trim();
+          if (destProcedureAfter.trim()) extra.dest_procedure_after = destProcedureAfter.trim();
+          if (destDriverType === "iceberg") {
+            Object.assign(extra, icebergDestExtra(destIcebergCatalogMode, destWarehouse));
+          }
+          const isVectorDestRun =
+            destDriverType === "pgvector" ||
+            destDriverType === "qdrant" ||
+            destDriverType === "weaviate" ||
+            destDriverType === "pinecone" ||
+            destDriverType === "milvus";
+          if (isVectorDestRun) {
+            if (vectorContentColumn) extra.content_column = vectorContentColumn;
+            if (vectorEmbeddingColumn) extra.embedding_column = vectorEmbeddingColumn;
+            const meta = vectorMetadataColumns
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (meta.length) extra.metadata_columns = meta;
+            const excludePii = vectorExcludePiiColumns
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (excludePii.length) extra.exclude_pii_columns = excludePii;
+            if (vectorEmbeddingModel) extra.embedding_model = vectorEmbeddingModel;
+            if (vectorEmbeddingApiKey) {
+              extra.embedding_api_key = vectorEmbeddingApiKey;
+              setVectorEmbeddingApiKey("");
+            }
+            if (vectorEmbeddingBaseUrl) extra.embedding_base_url = vectorEmbeddingBaseUrl;
+            if (vectorEmbeddingEndpoint) extra.embedding_endpoint = vectorEmbeddingEndpoint;
+            extra.chunk_size = vectorChunkSize;
+            extra.chunk_overlap = vectorChunkOverlap;
+            extra.chunk_strategy = vectorChunkStrategy;
+            extra.chunk_unit = vectorChunkUnit;
+            if (vectorTextTemplate) extra.text_template = vectorTextTemplate;
+            extra.vector_skip_unchanged = vectorSkipUnchanged;
+            if (destDriverType === "pgvector") {
+              extra.vector_index = vectorIndex;
+              extra.vector_storage = vectorStorage;
+            }
+            extra.durable_embedding_cache = vectorDurableCache;
+          }
+          return Object.keys(extra).length ? extra : undefined;
+        })(),
         streamContracts,
         planId: runPlanId,
         priorityColumn: priorityColumn || undefined,
         priorityDirection,
         limit: rowLimit > 0 ? rowLimit : undefined,
+        complianceAcknowledged,
+        schemaDriftAcknowledged,
+        fkRiskAcknowledged,
+        acknowledgmentActor: readSession()?.email || readSession()?.name || undefined,
+        acknowledgmentReason: standingAcknowledgmentReason({
+          compliance: complianceAcknowledged,
+          schemaDrift: schemaDriftAcknowledged,
+          fkRisk: fkRiskAcknowledged,
+        }) || undefined,
+        approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
+        approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
+        contractId: boundContractId.trim() || undefined,
+        requireSignedContract: Boolean(boundContractId.trim() && requireSignedContract),
+        decisionArtifact:
+          preflight?.proof_bundle?.decision_artifact
+          && typeof preflight.proof_bundle.decision_artifact === "object"
+            ? (preflight.proof_bundle.decision_artifact as Record<string, unknown>)
+            : undefined,
       });
-      setRunStartupProgress(36);
+      setRunStartupProgress(stagePercent(3, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       // A double-click / retry that hit an already-running equivalent transfer.
       // Open the live job instead of starting a second writer against the same table.
@@ -3843,7 +5551,7 @@ export function TransferPage({
         const existingStatus = String(
           (data as { existing_status?: string }).existing_status || "in progress",
         );
-        setRunStartupProgress(40);
+        setRunStartupProgress(100);
         setActiveJobId(existingId);
         setTransferring(false);
         toast({
@@ -3854,7 +5562,7 @@ export function TransferPage({
         return;
       }
       if (data.job_id && (data as { async?: boolean }).async) {
-        setRunStartupProgress(40);
+        setRunStartupProgress(100);
         setActiveJobId(data.job_id);
         setTransferLaunch({
           jobId: data.job_id,
@@ -3886,12 +5594,13 @@ export function TransferPage({
           mappings: columnMappings,
           format: exportFormat,
           outputBasename: targetCollection || undefined,
+          numberLocale,
         });
         setResult(localResult);
         setRunStartupProgress(100);
         setStep(STEP_RUN);
         // Local export has no server job — skip onTransferComplete (that toast
-        // says "View progress in Job Theater" and would double with this one).
+        // says "Gate-8 proof stays on Job Theater" and would double with this one).
         toast({
           title: "Exported locally",
           message: `${localResult.records_transferred?.toLocaleString() ?? 0} rows saved — start the API for governed Job Theater proof.`,
@@ -3913,7 +5622,12 @@ export function TransferPage({
   };
 
   const handleJobComplete = (job: JobProgress) => {
-    setActiveJobId(null);
+    // Keep Theater mounted so Gate-8 stays on the operator path.
+    // Leave via leaveTheaterToValidate / leaveTheaterToMap / onNewTransfer.
+    if (!keepTheaterMountedOnStatus(job.status)) {
+      setActiveJobId(null);
+    }
+    setTransferring(false);
     const success = isJobSuccess(job.status);
     const ds = (job.destination_summary ?? {}) as NonNullable<TransferResult["destination_summary"]>;
     const rps = job.records_per_second ?? ds.records_per_second;
@@ -3938,6 +5652,7 @@ export function TransferPage({
           ?? job.load_history_report,
       },
       reconciliation: job.reconciliation,
+      row_accounting: job.row_accounting,
       explanation: job.explanation,
       mapping_proof: job.mapping_proof,
       ddl_executed: job.ddl_executed ?? job.ddl_log,
@@ -3948,6 +5663,7 @@ export function TransferPage({
       cdc_row_filter: job.cdc_row_filter,
       cdc_shared_reader: job.cdc_shared_reader,
       snapshot_mode: job.snapshot_mode,
+      snapshot_plan: job.snapshot_plan,
       watermark: job.watermark,
       cdc_lease_holder: job.cdc_lease_holder,
       cdc_lease_backend: job.cdc_lease_backend,
@@ -3975,7 +5691,25 @@ export function TransferPage({
     if (success) onTransferComplete();
   };
 
-  /** Keep Job Theater mounted on fail/cancel so recovery CTAs remain visible. */
+  /** Explicit leave only — completed Gate-8 and fail/cancel recovery stay on Theater. */
+  const continuityRecoveryAvailable = destKindMode !== "file_export";
+  // Validate must re-run on the render that sees the new sync mode, not the stale closure.
+  const [revalidateAfterSyncChange, setRevalidateAfterSyncChange] = useState(false);
+  useEffect(() => {
+    if (!revalidateAfterSyncChange) return;
+    setRevalidateAfterSyncChange(false);
+    void executePreflight();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revalidateAfterSyncChange, syncMode]);
+  const acceptContinuityBaseline = async (reason: string) => {
+    const out = await rebaselineContinuity(buildDestinationEndpoint() as Record<string, unknown>, reason);
+    toast({
+      title: out.destination_missing ? "Removal accepted" : "Destination accepted",
+      message: "Recorded in the audit log. Validate re-runs against the new baseline.",
+      tone: "success",
+    });
+  };
+
   const leaveTheaterToValidate = useCallback(() => {
     setActiveJobId(null);
     setTransferring(false);
@@ -3990,22 +5724,25 @@ export function TransferPage({
     setStep(STEP_MAP);
   }, []);
 
-  const handleScheduleRoute = async () => {
-    if (multiStreamUnsupportedMode) {
-      toast({
-        title: "Multi-stream not supported for this mode",
-        message: multiStreamScd2MirrorBlockCopy("schedule"),
-        tone: "error",
-      });
-      return;
-    }
+  const replayScheduleId = String(seedStudioIntent?.scheduleId || "").trim();
+
+  /**
+   * Persist the Validate-approved mapping contract onto a schedule.
+   *
+   * ``quiet`` is the schedule-seeded Execute path: the beat must replay the
+   * same contract the operator just ran, so it is written before the run
+   * instead of waiting for a footer click that only exists after success.
+   * Returns true when the contract was persisted.
+   */
+  const handleScheduleRoute = async (opts: { quiet?: boolean } = {}): Promise<boolean> => {
+    const quiet = Boolean(opts.quiet);
     if (destKindMode !== "database" || !connectorId) {
       toast({
         title: "Saved destination required",
         message: "Select a saved destination connector to schedule a recurring pipeline.",
         tone: "info",
       });
-      return;
+      return false;
     }
     if (!isConnectorSource || !sourceConnectorId) {
       toast({
@@ -4013,84 +5750,226 @@ export function TransferPage({
         message: "Scheduling works for database-to-database routes with saved connectors on both ends.",
         tone: "info",
       });
-      return;
+      return false;
     }
     const sourceTableName = sourceKind === "cloud" ? cloudPath.trim() : primarySourceStream;
     if (!sourceTableName || !targetCollection.trim()) {
       toast({ title: "Route incomplete", message: "Source and destination table names are required.", tone: "warning" });
-      return;
+      return false;
     }
+    const replayId = replayScheduleId;
     try {
-      await createSchedule({
-        name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
+      const mappingsForSchedule = mergeSignedRiskContracts(
+        mergeStampedTargetTypes(columnMappings, preflight?.stamped_mappings),
+        preflight?.signed_mappings,
+      );
+      const transferMappings = mappingsForSchedule.length
+        ? buildPreflightMappings(analysis?.columns ?? [], mappingsForSchedule)
+        : analysis
+          ? buildPreflightMappings(analysis.columns)
+          : columnMappings.map((m) => ({
+              source: m.source,
+              target: m.target,
+              confidence: m.confidence,
+              transform: m.transform,
+            }));
+      if (!persistedMappingRows(transferMappings).length) {
+        toast({
+          title: "Validate a mapping first",
+          message:
+            "Unattended runs replay a Validate-approved contract. Map columns and run Validate, then Schedule from this footer — that persists mappings onto this schedule instead of creating another empty draft.",
+          tone: "warning",
+        });
+        return false;
+      }
+      const payload = {
         source_connector_id: sourceConnectorId,
         source_table: sourceTableName,
         dest_connector_id: connectorId,
         dest_table: targetCollection,
-        interval: "daily",
-        enabled: true,
-      });
-      toast({
-        title: "Pipeline created",
-        message: "Daily sync enabled. Manage cadence in Schedules.",
-        tone: "success",
-      });
+        // A replayed schedule keeps the cadence the operator chose.
+        ...(replayId ? {} : { interval: "daily", enabled: true }),
+        sync_mode: syncMode,
+        cursor_column: cursorField,
+        primary_key: primaryKeyField,
+        source_read_mode: sourceReadMode,
+        procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+        source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+        procedure_params: Object.keys(procedureParams).length ? procedureParams : {},
+        mappings: transferMappings,
+        stream_contracts: streamContracts,
+        shape_recipe: recipePayload(shapeSteps),
+        approved_shape_recipe_hash: shapeIdentity?.hash || "",
+        ...(recipeBinding ? {
+          transform_recipe_id: recipeBinding.recipe_id,
+          transform_recipe_version: recipeBinding.version,
+          transform_recipe_version_mode: recipeBinding.version_mode,
+          transform_recipe_params: recipeBinding.params,
+        } : {}),
+        ...studioScheduleValidateIdentity(preflight),
+        ...studioSchedulePolicies({
+          validationMode,
+          schemaPolicy,
+          backfillNewFields,
+          writeViaStaging,
+          priorityColumn,
+          priorityDirection,
+          rowLimit,
+          dateLocale,
+          numberLocale,
+          syncMode,
+          snapshotMode,
+        }),
+        delivery_guarantee: studioDeliveryGuarantee({
+          syncMode,
+          deliveryGuarantee,
+          allowAppendOnly,
+          callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+        }),
+        ...studioScheduleCdcExtras({
+          syncMode,
+          allowAppendOnly,
+          cdcRowFilter,
+          multiSubnetFailover,
+        }),
+        contract_id: boundContractId.trim(),
+        require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),
+      };
+      if (replayId) {
+        await updateSchedule(replayId, payload);
+        if (quiet) return true;
+        toast({
+          title: "Mapping contract persisted",
+          message:
+            "This schedule can run unattended. The empty-mapping park was a plan change — no signature was required.",
+          tone: "success",
+        });
+      } else {
+        await createSchedule({
+          ...payload,
+          name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
+        });
+        toast({
+          title: "Pipeline created",
+          message: "Daily sync enabled. Manage cadence in Schedules.",
+          tone: "success",
+        });
+      }
       onOpenSchedules?.();
+      return true;
     } catch (e) {
       toast({
-        title: "Could not create pipeline",
+        title: replayId ? "Could not persist mapping contract" : "Could not create pipeline",
         message: e instanceof Error ? e.message : "Schedule API failed",
         tone: "error",
       });
+      return false;
     }
   };
 
-  const sourceInputsReady =
-    sourceKind === "file"
-      ? Boolean(parsed)
-      : Boolean(
-          sourceConnectorId
-          && (sourceKind === "cloud" ? cloudPath.trim() : (sourceTable || sourceCollection)),
-        );
+  const sourceInputsReady = sourceExtractReady({
+    sourceKind,
+    parsed: Boolean(parsed),
+    sourceConnectorId,
+    cloudPath,
+    sourceTable,
+    sourceCollection,
+    sourceReadMode,
+    procedureCall,
+  });
 
+  const anyStreamReady = streamPreviews.some(
+    (s) => s.status === "ok" && (s.columns?.length ?? 0) > 0,
+  );
+  const multiStreamUnread = isMultiStreamSource && streamPreviews.length > 0 && !anyStreamReady;
   const canConfigureDest =
     sourceKind === "file"
       ? Boolean(parsed)
       : Boolean(
           sourceInputsReady
-          && (analysis?.columns.length || currentSourceColumns.length),
+          && (analysis?.columns.length || currentSourceColumns.length)
+          && !multiStreamUnread,
         );
 
+  const destSqlReady = destWriteReady({
+    destWriteMode,
+    destProcedureCall,
+    destQuerySql,
+  });
   const canRunPreflight =
     canConfigureDest &&
     (destKindMode === "file_export" ||
-      (Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
+      (isCallableDestMode(destWriteMode)
+        ? Boolean(
+            destType
+            && destSqlReady
+            && (connectorId || targetDb.trim() || destDriverType === "iceberg")
+            && !destSchemaLoading,
+          )
+        : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
+
+  const destContinueBlocker = destinationContinueBlocker({
+    sourceReady: canConfigureDest,
+    destKindMode,
+    destType,
+    callable: isCallableDestMode(destWriteMode),
+    sqlReady: destSqlReady,
+    hasConnector: Boolean(connectorId),
+    targetDb,
+    targetCollection,
+    schemaLoading: destSchemaLoading,
+    isFileDatabase,
+    objectWord: destDriverType === "mongodb" ? "collection" : "table",
+  });
 
   const needsDbPreflight = destKindMode === "database";
-  /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
+  const studioSchedulePersistable = canPersistStudioSchedule({
+    isConnectorSource,
+    sourceConnectorId,
+    destKindMode,
+    destConnectorId: connectorId,
+  });
+  const currentDestRouteKey = destRouteKey({
+    destKindMode,
+    destType,
+    targetDb,
+    destSchema,
+    targetCollection,
+    exportFormat,
+    destOutputPath,
+  });
+  /** Map/sync/PK/dest/Advanced edits must invalidate a prior green Validate before Execute. */
   const buildValidateContractKey = useCallback(
-    (maps: EditableMapping[]) =>
-      JSON.stringify({
+    (maps: EditableMapping[], overrides?: { schemaDriftAcknowledged?: boolean }) =>
+      composeValidateContractKey({
         syncMode,
         primaryKeyField,
         cursorField,
         validationMode,
         schemaPolicy,
-        targetCollection: targetCollection.trim(),
+        targetCollection,
         destType,
         targetDb,
         destKindMode,
-        destSchema: destSchema.trim(),
-        mappings: maps.map((m) => [
-          m.source,
-          m.target,
-          m.transform,
-          m.engineTransform ?? "",
-          m.approved,
-          Boolean(m.createNew),
-          m.assignmentStrategy ?? "",
-          m.destType ?? "",
-        ]),
+        destSchema,
+        mappings: maps,
+        dateLocale,
+        numberLocale,
+        backfillNewFields,
+        writeViaStaging,
+        deliveryGuarantee,
+        allowAppendOnly,
+        snapshotMode,
+        priorityColumn,
+        priorityDirection,
+        rowLimit,
+        cursorSemantics,
+        streamFields,
+        shapeRecipeHash: shapeIdentity?.hash || "",
+        shapeSteps,
+        multiSubnetFailover,
+        cdcRowFilter,
+        schemaDriftAcknowledged: overrides?.schemaDriftAcknowledged ?? schemaDriftAcknowledged,
       }),
     [
       syncMode,
@@ -4103,6 +5982,23 @@ export function TransferPage({
       targetDb,
       destKindMode,
       destSchema,
+      dateLocale,
+      numberLocale,
+      backfillNewFields,
+      writeViaStaging,
+      deliveryGuarantee,
+      allowAppendOnly,
+      snapshotMode,
+      priorityColumn,
+      priorityDirection,
+      rowLimit,
+      cursorSemantics,
+      streamFields,
+      shapeIdentity?.hash,
+      shapeSteps,
+      multiSubnetFailover,
+      cdcRowFilter,
+      schemaDriftAcknowledged,
     ],
   );
   const validateContractKey = useMemo(
@@ -4114,16 +6010,57 @@ export function TransferPage({
     if (!preflight) return;
     if (validatedContractKey != null && validatedContractKey !== validateContractKey) {
       setPreflight(null);
+      setPreflightError("");
       setValidatedContractKey(null);
     }
   }, [validateContractKey, validatedContractKey, preflight]);
+
+  /**
+   * A finished run reports the route it wrote. Retarget the destination and that
+   * panel stops being an answer about the route on screen, so Run offers Execute
+   * again instead of claiming a landing in a table it never wrote. The result is
+   * kept rather than destroyed: point the plan back and the proof returns.
+   * Mapping edits are deliberately not part of this — repairs are applied from
+   * the result panel itself.
+   */
+  const runResultDescribesCurrentPlan = runResultDescribesRoute(
+    executedRouteKey,
+    currentDestRouteKey,
+  );
+  /**
+   * The launch pointer belongs to the route it was launched for. Kept in state
+   * so Job Theater can still open it, but withheld from Validate and Run, whose
+   * job is the route on screen — otherwise "Open live progress" takes Execute's
+   * place for a plan that was never executed.
+   */
+  const routeScopedLaunch = runResultDescribesCurrentPlan ? transferLaunch : null;
+  const studioPrimary = resolveValidateStudioPrimary({
+    preflight,
+    preflighting,
+    transferring,
+    mappingReviewCount,
+    riskAckPendingCount,
+    transferLaunch: routeScopedLaunch,
+    executeBlocked: Boolean(contractBlockReason),
+    hasPrimaryFix: Boolean(primaryFix.onPrimaryFix && primaryFix.primaryFixLabel),
+    primaryFixLabel: primaryFix.primaryFixLabel,
+    hasHoldOut: true,
+  });
+  /**
+   * Route the superseded run actually wrote, named from the route it recorded so
+   * the sentence matches the label the result dashboard uses for the same run.
+   */
+  const staleRunDestLabel = describeDestRoute(executedRouteKey)
+    || [result?.destination?.database, result?.destination?.collection]
+      .filter(Boolean)
+      .join(".");
 
   /** API-approved preflight only — local/review-grade never unlocks Execute. */
   const isGovernedExecuteReady = Boolean(
     preflight?.passed
     && validatedContractKey === validateContractKey
     && preflight.proof_bundle?.transfer_decision?.decision === "approve"
-    && !String(preflight.run_id || "").startsWith("pf_local_"),
+    && isApiPreflight(preflight),
   );
   const canExecute = Boolean(canConfigureDest && isGovernedExecuteReady);
 
@@ -4132,16 +6069,73 @@ export function TransferPage({
     : destType
       ? `${destType}${targetCollection ? ` · ${targetCollection}` : ""}`
       : "Choose destination";
-  const sourceLabel = sourceKind === "file"
-    ? (file?.name ?? "Choose source")
-    : sourceKind === "cloud"
-      ? (cloudPath.trim() || sourceConnector?.name || "Cloud source")
-      : (sourceConnector?.name ?? "Database source");
+  const sourceLabel = studioSourceLabel({
+    sourceKind,
+    fileName: file?.name,
+    cloudPath,
+    sourceConnectorName: sourceConnector?.name,
+  });
+  const theaterRoute = jobEndpointLabels(
+    isMultiStreamSource
+      ? {
+          destination_database: targetDb,
+          transfer_request: {
+            stream_contracts: multiStreamNames.map((name) => ({ name, selected: true })),
+          },
+        }
+      : null,
+    { source: sourceLabel, dest: `${targetDb}.${targetCollection}` },
+  );
   const destLabelShort = destSelected && (destKindMode === "file_export" || Boolean(destType))
     ? (selectedDestConnector
       ? `${selectedDestConnector.name}${targetCollection ? ` · ${targetCollection}` : ""}`
       : destinationLabel)
     : "Choose destination";
+  const hydratedDraft = useRef("");
+  useEffect(() => {
+    if (!studioFlags.canvas) return;
+    if (!sourceLabel || sourceLabel.startsWith("Choose")) return;
+    const key = `${sourceLabel}→${destLabelShort}`;
+    if (hydratedDraft.current === key) return;
+    let cancelled = false;
+    void fetchShapeDraft(key).then((body) => {
+      if (cancelled) return;
+      hydratedDraft.current = key;
+      const steps = body.draft?.steps;
+      if (steps?.length) setShapeSteps((prev) => (prev.length ? prev : steps));
+    }).catch(() => {
+      if (!cancelled) hydratedDraft.current = key;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [studioFlags.canvas, sourceLabel, destLabelShort]);
+  useEffect(() => {
+    if (!studioFlags.canvas) return;
+    const key = `${sourceLabel}→${destLabelShort}`;
+    if (hydratedDraft.current !== key || shapeSteps.length === 0) return;
+    const handle = window.setTimeout(() => {
+      void saveShapeDraft({
+        route_key: key,
+        recipe: { steps: shapeSteps },
+        source_columns: currentSourceColumns,
+      }).catch(() => {});
+    }, 500);
+    return () => window.clearTimeout(handle);
+  }, [studioFlags.canvas, shapeSteps, sourceLabel, destLabelShort, currentSourceColumns]);
+  const reviewSig = columnMappings.map((row) => `${row.source}:${row.target}:${row.transform ?? ""}:${row.riskAcknowledged ? 1 : 0}`).join("|");
+  const lastReviewSig = useRef("");
+  useEffect(() => {
+    if (!studioFlags.canvas) return;
+    if (step !== STEP_MAP && step !== STEP_VALIDATE) return;
+    if (!columnMappings.length || analyzing || preflighting) return;
+    if (lastReviewSig.current === reviewSig) return;
+    lastReviewSig.current = reviewSig;
+    const handle = window.setTimeout(() => {
+      void executePreflight(undefined, undefined, { stayOnReview: true });
+    }, 700);
+    return () => window.clearTimeout(handle);
+  }, [studioFlags.canvas, step, reviewSig, columnMappings.length, analyzing, preflighting]);
 
   const mapSourceType = sourceKind === "file"
     ? (parsed?.file_type ?? file?.name.split(".").pop() ?? "file")
@@ -4194,7 +6188,7 @@ export function TransferPage({
       mergeMappingProof(mappingProof, columnMappings, {
         destColumns,
         destType: destKindMode === "file_export" ? exportFormat : destType,
-        destTableExists: destKindMode === "database" ? destTableExists : false,
+        destTableExists: destCatalogExists(destKindMode, destTableExists),
       }),
     [mappingProof, columnMappings, destColumns, destKindMode, exportFormat, destType, destTableExists],
   );
@@ -4391,11 +6385,20 @@ export function TransferPage({
     setSourceCollection("");
     setCloudPath("");
     setAdvancedOpen(false);
+    setAdvancedLocaleFocus(null);
     setFile(null);
     setParsed(null);
+    setShapeSteps([]);
+    setShapeIdentity(null);
+    hydratedDraft.current = "";
+    if (sourceLabel && destLabelShort) {
+      void deleteShapeDraft(`${sourceLabel}→${destLabelShort}`).catch(() => {});
+    }
+    setConnectorSampleRows([]);
     setSourceRowEstimate(null);
     setAnalysis(null);
     setPreflight(null);
+    setPreflightError("");
     setComplianceAcknowledged(false);
     setSchemaDriftAcknowledged(false);
     setValidatedContractKey(null);
@@ -4420,7 +6423,7 @@ export function TransferPage({
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPlanLoading(false);
-    setTargetDb("dataflow_test");
+    setTargetDb("");
     setTargetCollection("");
     setDestHost("");
     setDestPort(0);
@@ -4434,8 +6437,9 @@ export function TransferPage({
     setTransferring(false);
     setActiveJobId(null);
     setResult(null);
+    setExecutedRouteKey(null);
     setSyncMode("full_refresh_append");
-    setSchemaPolicy("manual_review");
+    setSchemaPolicy(DEFAULT_SCHEMA_POLICY);
     setValidationMode("balanced");
     setBackfillNewFields(false);
     setMultiSubnetFailover(false);
@@ -4447,7 +6451,7 @@ export function TransferPage({
     setDestColumns([]);
     setDestSchemaMap({});
     setDestSchemaLoading(false);
-    setDestTableExists(null);
+    proveDestTableExists(null);
     setTransferLaunch(null);
     setLlmMappingUsed(false);
     setMappingProof(null);
@@ -4459,26 +6463,56 @@ export function TransferPage({
     setActiveData(null);
   }, [onFreshTransfer, setActiveData]);
 
+  const continueFromDestination = () => {
+    if (studioFlags.canvas) {
+      void goToMapping();
+      return;
+    }
+    setStep(STEP_SHAPE);
+  };
+
   return (
     <PageShell
       wide
       showHeader={false}
-      className="df2-page-transfer-studio"
+      className={studioFlags.canvas ? "df2-page-transfer-studio is-studio-next" : "df2-page-transfer-studio"}
       title="Transfer Studio"
       description="Governed path: source → destination → map → preflight → run → proof"
     >
-      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
+      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}${studioFlags.canvas && step < STEP_SHAPE ? " is-flow-connect" : ""}${studioFlags.canvas && transformOpen && step <= STEP_SHAPE ? " is-flow-transform" : ""}${studioFlags.canvas && (step === STEP_MAP || step === STEP_VALIDATE) ? " is-flow-review" : ""}`} showHonesty>
+      <PermissionNotice
+        allowed={jobRun.allowed}
+        reason={jobRun.reason}
+        what="You can plan a transfer but not run one."
+      />
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
           variant="studio"
+          // P1-3: canvas mode shows the same six-step flow with the same
+          // separators — the mandated Source→Destination→Transform→Map→
+          // Validate→Run sequence is the product's contract, not a mode.
           steps={STEPS}
           current={step}
-          onStepClick={setStep}
+          onStepClick={(n) => {
+            if (!studioFlags.canvas) {
+              setStep(n);
+              return;
+            }
+            if (n === STEP_MAP && columnMappings.length) {
+              setStep(STEP_MAP);
+              void executePreflight(undefined, undefined, { stayOnReview: true });
+            } else if (n === STEP_MAP) {
+              void goToMapping();
+            } else {
+              setStep(n);
+            }
+          }}
           canGoTo={(n) =>
             n < step ||
             n === STEP_SOURCE ||
-            (n === STEP_DESTINATION && (sourceKind === "file" ? !!parsed : Boolean(currentSourceColumns.length || analysis?.columns.length))) ||
+            (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
+            (n === STEP_SHAPE && canRunPreflight) ||
             (n === STEP_MAP && canRunPreflight) ||
             (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
             (n === STEP_RUN && canExecute)
@@ -4494,26 +6528,46 @@ export function TransferPage({
               : destType || ""
           }
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-          live={Boolean(activeJobId) || transferring}
+          live={routeBarLiveWhileWriting(transferring)}
         />
+        {/* D-BP-20: toasts dock into the header chrome as compact pills —
+            never over content, no permanent lane, no reflow. */}
+        <div className="df2-toast-dock" data-df2-toast-dock />
         </div>
       </header>
 
       <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
       <main className="df2-transfer-main-panel" key={step}>
-      {step === STEP_MAP && columnMappings.length > 0 && !analyzing && (
+      {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
+          hideFooter={studioFlags.canvas}
           analysis={analysis}
           destColumns={destColumns}
+          ruleReport={businessRuleReport}
+          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
           destSchemaLoading={destSchemaLoading}
-          destTableExists={destTableExists}
+          destTableExists={destCatalogExists(destKindMode, destTableExists)}
+          extraSourceColumns={shapeContract?.extra_source_columns ?? []}
+          destShapeHeadline={shapeContract?.headline ?? ""}
+          onReloadDestSchema={async () => {
+            // Re-probe the catalog, then re-map with the probe's own verdict —
+            // a proven-absent table becomes create-new, a loaded table binds
+            // real destination types. No guessing either way.
+            const res = await loadDestinationSchema({ force: true });
+            await applyPipelineMappings(
+              res.columns,
+              res.schema,
+              undefined,
+              res.tableExists,
+            );
+          }}
           destConnected={destConnected}
           destConnectionError={destConnectionError}
           targetCollection={targetCollection}
           targetDatabase={targetDb}
           destKindMode={destKindMode}
-          destType={destType}
+          destType={destKindMode === "file_export" ? exportFormat : destType}
           sourceLabel={sourceLabel}
           sourceSubtitle={mapSourceSubtitle}
           sourceType={mapSourceType}
@@ -4586,7 +6640,7 @@ export function TransferPage({
               setStreamMappings((prev) => ({ ...prev, [current]: next }));
             }
           }}
-          onBack={() => setStep(STEP_DESTINATION)}
+          onBack={() => (studioFlags.canvas ? backWizard() : setStep(STEP_DESTINATION))}
           onContinue={() => void goToPreflight()}
           initialFocusSource={mapFocusSource}
           identityFixBanner={mapIdentityBanner}
@@ -4607,12 +6661,14 @@ export function TransferPage({
         />
       )}
 
-      {step === STEP_MAP && !analyzing && columnMappings.length === 0 && (
+      {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && !analyzing && columnMappings.length === 0 && (
         <div className="df2-transfer-step-panel">
           <EmptyState
-            icon="sparkle"
-            title="Preparing column mappings"
-            description={analysis?.columns.length
+            icon={mappingError ? "warning" : "sparkle"}
+            title={mappingError ? "Couldn't load column mappings" : "Preparing column mappings"}
+            description={mappingError
+              ? mappingErrorSummary(mappingError)
+              : analysis?.columns.length
               ? "Analysis finished but mappings did not load — retry to map source columns to your destination."
               : "Configure your destination first, then we will fetch the existing schema and map source columns intelligently."}
             action={
@@ -4625,10 +6681,16 @@ export function TransferPage({
               </button>
             }
           />
+          {mappingError && (
+            <details className="df2-map-error-details">
+              <summary>Details</summary>
+              <p>{mappingError}</p>
+            </details>
+          )}
         </div>
       )}
 
-      {step === STEP_MAP && analyzing && (
+      {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && analyzing && !(studioFlags.canvas && columnMappings.length > 0) && (
         <div className="df2-transfer-step-panel df2-transfer-analyzing-panel">
           <div className="df2-card-body df2-analyzing">
             <Spinner size="lg" premium />
@@ -4646,11 +6708,12 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_SOURCE && (
+      {step === STEP_SOURCE && !(studioFlags.canvas && transformOpen) && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-source-step">
         <div className="df2-card-body">
           <div className="df2-transfer-step-split">
             <div className="df2-transfer-step-primary">
+              {studioFlags.canvas && <h2 className="df2-flow-column-title">Source</h2>}
               <div className="df2-field">
                 <label className="df2-label">Where is your data?</label>
                 <SourceKindTiles
@@ -4671,19 +6734,22 @@ export function TransferPage({
 
           {sourceKind === "file" ? (
             <>
-              <input
+              <HiddenFileInput
+                id="df2-source-file"
                 ref={fileInputRef}
-                type="file"
                 accept=".json,.csv,.jsonl,.tsv,.parquet,.pdf,.docx,.html,.htm,.xlsx,.xls,.xml"
+                disabled={uploading}
                 onChange={handleFileSelect}
-                hidden
               />
               {uploadError && (
                 <div className="df2-alert df2-alert-error" role="alert">
                   <DtIcon name="x" size={16} />
                   <div>
-                    <strong>Upload failed</strong>
+                    <strong>{readWindowRefused ? "Read window refused" : "Upload failed"}</strong>
                     <p>{uploadError}</p>
+                    {readWindowRefused && (
+                      <p>The file and its previous read window are unchanged — correct the declaration and apply again.</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -4701,47 +6767,55 @@ export function TransferPage({
               >
                 <input
                   type="checkbox"
-                  checked={enableOcr}
+                  checked={enableOcr && ocrStatus?.available !== false}
+                  disabled={ocrStatus?.available === false}
+                  aria-describedby="df2-source-ocr-status"
                   onChange={(e) => setEnableOcr(e.target.checked)}
                 />
                 <span>
                   <strong>OCR scanned PDFs</strong>
-                  <small>
+                  <small id="df2-source-ocr-status">
                     {ocrStatus?.available === false
-                      ? "Not ready on this host — hover for install steps."
+                      ? "Unavailable — the API host needs Tesseract installed."
                       : ocrStatus?.available
                         ? "Tesseract ready — used when a PDF has no text layer."
                         : "Optional · runs Tesseract when a PDF has no text layer."}
                   </small>
                 </span>
               </label>
+              {file && parsed && offersReadWindow(parsed.file_type || "") && (
+                <SourceReadWindowPanel
+                  fileType={parsed.file_type || ""}
+                  sheets={parsed.sheets ?? []}
+                  applied={readOptions}
+                  busy={uploading}
+                  onApply={applyReadWindow}
+                />
+              )}
               {file && parsed ? (
                 <div className="df2-upload-result df2-upload-result-compact">
                   <div className="df2-upload-result-main">
-                    <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
+                    <span className="df2-badge df2-badge-live df2-badge-filename" title={file.name}><DtIcon name="check" size={14} /> {file.name}</span>
                     <span className="df2-upload-result-meta">
                       {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
                     </span>
                   </div>
-                  <button
-                    type="button"
+                  <label
+                    htmlFor="df2-source-file"
                     className="df2-btn df2-btn-sm"
-                    onClick={() => fileInputRef.current?.click()}
+                    aria-disabled={uploading}
                     title="Replace source file"
                   >
                     <DtIcon name="upload" size={14} /> Replace
-                  </button>
+                  </label>
                 </div>
               ) : (
-              <div
+              <label
+                htmlFor="df2-source-file"
                 className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""}`}
-                onClick={() => !uploading && fileInputRef.current?.click()}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               >
                 <div className="df2-upload-icon">
                   {uploading || analyzing ? <Spinner /> : <DtIcon name="upload" size={22} />}
@@ -4757,7 +6831,7 @@ export function TransferPage({
                     <span key={fmt} className="df2-upload-format-chip">{fmt}</span>
                   ))}
                 </div>
-              </div>
+              </label>
               )}
               {!parsed && !uploading && (
                 <div className="df2-upload-sample-row">
@@ -4869,37 +6943,127 @@ export function TransferPage({
                   placeholder="Select connector…"
                   hint="Saved connection (host, database, credentials)."
                 />
-                <div className="df2-field">
-                  <label className="df2-label" htmlFor="source-stream-input">
-                    {sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
-                  </label>
-                  <input
+                {dialectOffersSqlExtract(sourceConnector?.type) && (
+                  <div className="df2-field df2-source-read-mode">
+                    <label className="df2-label" htmlFor="source-read-mode">
+                      Source extract
+                    </label>
+                    <FilterTabs<SourceReadMode>
+                      ariaLabel="Source extract"
+                      value={sourceReadMode}
+                      onChange={setSourceReadMode}
+                      items={[
+                        { id: "table", label: "Table" },
+                        ...(dialectOffersQuery(sourceConnector?.type)
+                          ? [{ id: "query" as const, label: "SQL query" }]
+                          : []),
+                        ...(dialectOffersProcedures(sourceConnector?.type)
+                          ? [{ id: "procedure" as const, label: "Stored procedure" }]
+                          : []),
+                      ]}
+                    />
+                    <span className="df2-label-hint">
+                      {sourceReadMode === "procedure"
+                        ? "Execute one CALL/EXEC, map the result set, remap extra columns on Map."
+                        : sourceReadMode === "query"
+                          ? "One read-only SELECT/WITH. Result columns map on the next step. Not CDC."
+                          : "Read a table or view. Query and stored procedure are result-set snapshots, not CDC."}
+                    </span>
+                  </div>
+                )}
+                {isCallableSourceMode(sourceReadMode) && dialectOffersSqlExtract(sourceConnector?.type) ? (
+                <div className="df2-field df2-source-procedure">
+                  <SqlEditor
+                    id="source-procedure-input"
+                    label={sourceReadMode === "query" ? "SQL query" : "Stored procedure"}
+                    value={procedureCall}
+                    onChange={setProcedureCall}
+                    mode={sourceReadMode === "query" ? "query" : "procedure"}
+                    dialect={sourceConnector?.type}
+                    bound={procedureParams}
+                    placeholder={
+                      sourceReadMode === "query"
+                        ? queryHint(sourceConnector?.type)
+                        : procedureHint(sourceConnector?.type)
+                    }
+                    hint="One statement. :name binds below, or quoted/numeric literals. Extra result columns stay on Map — never silent drop."
+                    rows={6}
+                    bindInsert={bindSqlInsert}
+                  />
+                  {bindNamesFromSql(procedureCall).length > 0 && (
+                    <div className="df2-source-bind-params">
+                      {bindNamesFromSql(procedureCall).map((name) => (
+                        <div className="df2-field" key={name}>
+                          <label className="df2-label" htmlFor={`bind-${name}`}>
+                            :{name}
+                          </label>
+                          <input
+                            id={`bind-${name}`}
+                            className="df2-input"
+                            value={procedureParams[name] ?? ""}
+                            onChange={(e) =>
+                              setProcedureParams((prev) => ({ ...prev, [name]: e.target.value }))
+                            }
+                            placeholder="Bound value"
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                ) : (
+                <div className="df2-field df2-source-stream-field">
+                  <ObjectNameCombobox
                     id="source-stream-input"
-                    className="df2-input"
+                    label={sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
                     value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
-                    onChange={(e) => {
-                      if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
-                      else setSourceTable(e.target.value);
+                    onChange={(next) => {
+                      if (sourceConnector?.type === "mongodb") setSourceCollection(next);
+                      else setSourceTable(next);
                     }}
+                    options={sourceObjectNames}
+                    loading={sourceIntrospecting && sourceObjectNames.length === 0}
+                    allowCreate={false}
+                    objectNoun={sourceConnector?.type === "mongodb" ? "collection" : "table"}
                     placeholder={
                       sourceConnector?.type === "mongodb"
-                        ? "orders — or orders, customers"
+                        ? "Pick a collection that exists"
                         : sourceConnector?.type === "dynamodb"
                           ? sourceConnector.database || "orders"
-                          : "public.orders — or public.orders, public.items"
+                          : "Pick a table that exists"
                     }
-                    autoComplete="off"
-                    spellCheck={false}
+                    emptyHint="Studio will not invent a table that does not exist. Type an existing name or wait for the catalog."
                   />
                   <span className="df2-label-hint">
                     {sourceConnector?.type === "mongodb"
-                      ? "One collection, or several separated by commas."
-                      : "One table, or several separated by commas."}
+                      ? "One collection, or several separated by commas. Missing names refuse Map."
+                      : "One table, or several separated by commas. A name that is not on this source refuses Map."}
                   </span>
                 </div>
+                )}
               </div>
 
-              <div className="df2-source-multistream" role="note">
+              <StudioFlagBanner
+                error={studioFlags.error}
+                optIn={studioFlags.schemaOptIn}
+                onOptIn={studioFlags.optInSchema}
+                kind="schema"
+              />
+              <TransferSourceSchemaPanel
+                schemaBrowser={studioFlags.schemaBrowser}
+                sourceKind={sourceKind}
+                connectorId={sourceConnectorId}
+                connectorType={sourceConnector?.type}
+                readMode={sourceReadMode}
+                setSourceTable={setSourceTable}
+                setSourceCollection={setSourceCollection}
+                onInsertText={insertSql}
+              />
+
+              {!isCallableSourceMode(sourceReadMode) && (
+              <div className="df2-source-multistream">
                 <div className="df2-source-multistream-head">
                   <DtIcon name="activity" size={15} />
                   <strong>
@@ -4910,8 +7074,8 @@ export function TransferPage({
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each name is a separate table/collection with its own watermark. Configure identity in Destination → Advanced."
-                    : "Use commas for multi-table sync (example: sessions, users)."}
+                    ? "Each name is its own table, with its own watermark, mapping, and transform."
+                    : "Use commas for multi-table sync (example: sessions, users). Each table is its own stream."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -4935,7 +7099,64 @@ export function TransferPage({
                     })}
                   </ul>
                 )}
+                {isMultiStreamSource && (dialectOffersProcedures(sourceConnector?.type) || dialectOffersQuery(sourceConnector?.type)) && (
+                  <div className="df2-stream-procedures">
+                    <p className="df2-label-hint">
+                      Optional extract for each table. Leave it blank to copy the table.
+                      One statement is not reused on the others.
+                    </p>
+                    <details className="df2-stream-extract-note">
+                      <summary>What you can write</summary>
+                      <p>
+                        A CALL, a function (<code>SELECT * FROM schema.fn()</code>), or one
+                        read-only SELECT. Use quoted literals. A procedure that joins
+                        these tables is one extract: switch Source extract to Stored
+                        procedure and paste that CALL. A destination CALL or
+                        INSERT/MERGE is in Destination → Advanced.
+                      </p>
+                    </details>
+                    {multiStreamNames.map((streamName) => {
+                      const fields = resolveStreamFields(
+                        streamName,
+                        streamFields,
+                        cursorField,
+                        primaryKeyField,
+                        cursorSemantics,
+                      );
+                      return (
+                        <label className="df2-label" htmlFor={`src-extract-${streamName.replace(/[^A-Za-z0-9_-]/g, "-")}`} key={`src-extract-${streamName}`}>
+                          {streamName}
+                          <textarea
+                            id={`src-extract-${streamName.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+                            className="df2-input"
+                            rows={2}
+                            spellCheck={false}
+                            value={fields.sourceProcedure || ""}
+                            placeholder={streamExtractPlaceholder(
+                              streamName,
+                              dialectOffersProcedures(sourceConnector?.type),
+                            )}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setStreamFields((prev) => ({
+                                ...prev,
+                                [streamName]: {
+                                  ...prev[streamName],
+                                  cursorField: prev[streamName]?.cursorField ?? cursorField,
+                                  primaryKeyField: prev[streamName]?.primaryKeyField ?? primaryKeyField,
+                                  cursorSemantics: prev[streamName]?.cursorSemantics ?? cursorSemantics,
+                                  sourceProcedure: value,
+                                },
+                              }));
+                            }}
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
+              )}
             </div>
           )}
 
@@ -4956,6 +7177,12 @@ export function TransferPage({
                 sourceIntrospecting={sourceIntrospecting}
                 sourceIntrospectError={sourceIntrospectError}
                 onRetrySourceIntrospect={retrySourceIntrospect}
+                sourceObjectNames={sourceObjectNames}
+                onPickSourceObject={(name) => {
+                  sourceIntrospectGateRef.current = { key: "", status: "idle" };
+                  if (sourceConnector?.type === "mongodb") setSourceCollection(name);
+                  else setSourceTable(name);
+                }}
                 sourceObjectLabel={
                   sourceKind === "cloud"
                     ? cloudPath.trim()
@@ -4985,9 +7212,19 @@ export function TransferPage({
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
-              : isMultiStreamSource
-                ? `${multiStreamNames.length} streams selected — continue to pick a destination`
-                : "Select connector and table/collection to continue";
+              : isCallableSourceMode(sourceReadMode)
+                ? (currentSourceColumns.length || analysis?.columns.length
+                    ? "Result set profiled — choose where data should land next."
+                    : sourceReadMode === "query"
+                      ? "Enter a read-only SELECT. Preview the result set, then continue."
+                      : "Enter a CALL/EXEC. Preview the result set, then continue.")
+                : isMultiStreamSource
+                  ? (multiStreamUnread
+                    ? "No stream schema was read. Fix the connector, then retry."
+                    : streamPreviews.some((s) => s.status === "error")
+                      ? `${streamPreviews.filter((s) => s.status === "ok").length} of ${multiStreamNames.length} streams ready — continue to pick a destination`
+                      : `${multiStreamNames.length} streams selected — continue to pick a destination`)
+                  : "Select connector and table/collection to continue";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
           return (
             <div className="df2-card-footer df2-wizard-footer">
@@ -5006,57 +7243,71 @@ export function TransferPage({
       </div>
       )}
 
-      {step === STEP_DESTINATION && (
+      {step === STEP_DESTINATION && !(studioFlags.canvas && transformOpen) && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-dest-step">
         <div className="df2-card-body">
           <div className="df2-dest-step-layout">
             <div className="df2-dest-step-left">
+              {studioFlags.canvas && <h2 className="df2-flow-column-title">Destination</h2>}
               <div className="df2-dest-toolbar">
                 <div className="df2-field df2-dest-mode-field">
-                  <label className="df2-label">Mode</label>
+                  <label className="df2-label">{studioFlags.canvas ? "Write as" : "Mode"}</label>
                   <div className="df2-dest-mode-row">
-                    <FilterBar ariaLabel="Destination mode">
-                      <FilterTabs
-                        ariaLabel="Destination mode"
-                        value={destKindMode}
-                        onChange={(mode) => {
-                          setDestKindMode(mode);
+                    <div className="df2-dest-mode-toggle" role="tablist" aria-label="Destination mode">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={destKindMode === "database"}
+                        className={`df2-dest-mode-btn${destKindMode === "database" ? " active" : ""}`}
+                        onClick={() => {
+                          setDestKindMode("database");
                           resetRouteForDestinationChange();
                         }}
-                        items={[
-                          { id: "database", label: "Database / Warehouse" },
-                          { id: "file_export", label: "File Export" },
-                        ]}
-                      />
-                    </FilterBar>
+                      >
+                        Database
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={destKindMode === "file_export"}
+                        className={`df2-dest-mode-btn${destKindMode === "file_export" ? " active" : ""}`}
+                        onClick={() => {
+                          setDestKindMode("file_export");
+                          resetRouteForDestinationChange();
+                        }}
+                      >
+                        File export
+                      </button>
+                    </div>
                     <Button
-                      size="sm"
-                      variant="ghost"
-                  className="df2-dest-advanced-btn"
-                  onClick={() => setAdvancedOpen(true)}
-                  leadingIcon={<DtIcon name="settings" size={14} />}
-                  title="Advanced settings — sync mode, primary key, cursor, and write policies"
-                >
-                  Advanced
-                </Button>
+                      variant="secondary"
+                      className="df2-dest-advanced-btn"
+                      onClick={() => setAdvancedOpen(true)}
+                      leadingIcon={<DtIcon name="settings" size={16} />}
+                      title="Advanced settings — sync mode, primary key, cursor, schema drift, and write policies"
+                    >
+                      Advanced
+                    </Button>
                   </div>
                 </div>
               </div>
 
               {destKindMode === "file_export" ? (
-                <div className="df2-field">
-                  <label className="df2-label">Export Format</label>
-                  <FilterBar ariaLabel="Export format">
-                    <FilterTabs
-                      ariaLabel="Export format"
-                      value={exportFormat}
-                      onChange={(format) => {
-                        setExportFormat(format);
-                        setTransferPlan(null);
-                      }}
-                      items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-                    />
-                  </FilterBar>
+                <div className="df2-field df2-dest-export-format">
+                  <label className="df2-label" htmlFor="dest-export-format">Export format</label>
+                  <select
+                    id="dest-export-format"
+                    className="df2-input df2-dest-export-select"
+                    value={exportFormat}
+                    onChange={(e) => {
+                      setExportFormat(e.target.value);
+                      setTransferPlan(null);
+                    }}
+                  >
+                    {liveExportFormats.map((f) => (
+                      <option key={f.id} value={f.id}>{f.label}</option>
+                    ))}
+                  </select>
                 </div>
               ) : (
                 <DestinationPicker
@@ -5104,12 +7355,33 @@ export function TransferPage({
             <>
           {!connectorId && destType && destType !== "bigquery" && destDriverType === "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields df2-dest-iceberg">
-            <label className="df2-label">Iceberg warehouse</label>
+            <label className="df2-label">Iceberg catalog</label>
             <p className="df2-label-hint" style={{ marginTop: 0 }}>
-              Filesystem / mounted lakehouse root. Writes Iceberg V2 metadata + Parquet/JSONL data files
-              with additive schema evolution and CoW upsert (<code>_df_lsn</code>). REST/Glue catalog
-              committers are not required for this writer — do not claim multi-engine catalog yet.
+              Overwrite leftover MERGE deletes dest keys not in a complete source snapshot
+              (file-footer COUNT). Incremental leftover MERGE is a hard no-op. REST commits
+              through RestCatalog. Glue and Nessie stay Planned.
             </p>
+            <div className="df2-form-row" role="radiogroup" aria-label="Iceberg catalog kind">
+              <label className="df2-label">
+                <input
+                  type="radio"
+                  name="dest-iceberg-catalog"
+                  checked={destIcebergCatalogMode === "filesystem"}
+                  onChange={() => setDestIcebergCatalogMode("filesystem")}
+                />
+                {" "}Warehouse path
+              </label>
+              <label className="df2-label">
+                <input
+                  type="radio"
+                  name="dest-iceberg-catalog"
+                  checked={destIcebergCatalogMode === "rest"}
+                  onChange={() => setDestIcebergCatalogMode("rest")}
+                />
+                {" "}REST catalog
+              </label>
+            </div>
+            {destIcebergCatalogMode === "filesystem" ? (
             <div className="df2-form-row">
               <div className="df2-field df2-field-flex">
                 <label className="df2-label" htmlFor="dest-iceberg-warehouse">Warehouse path</label>
@@ -5122,6 +7394,30 @@ export function TransferPage({
                 />
               </div>
             </div>
+            ) : (
+            <div className="df2-form-row">
+              <div className="df2-field df2-field-flex">
+                <label className="df2-label" htmlFor="dest-iceberg-rest-uri">REST catalog URI</label>
+                <input
+                  id="dest-iceberg-rest-uri"
+                  className="df2-input"
+                  value={destConnectionString}
+                  onChange={(e) => setDestConnectionString(e.target.value)}
+                  placeholder="http://127.0.0.1:8181"
+                />
+              </div>
+              <div className="df2-field df2-field-flex">
+                <label className="df2-label" htmlFor="dest-iceberg-rest-warehouse">Warehouse</label>
+                <input
+                  id="dest-iceberg-rest-warehouse"
+                  className="df2-input"
+                  value={destWarehouse}
+                  onChange={(e) => setDestWarehouse(e.target.value)}
+                  placeholder="file:///mnt/lake or s3://bucket/wh"
+                />
+              </div>
+            </div>
+            )}
           </div>
           )}
 
@@ -5135,11 +7431,18 @@ export function TransferPage({
                   <input
                     className="df2-input"
                     value={destConnectionString}
-                    onChange={(e) => setDestConnectionString(e.target.value)}
+                    onChange={(e) => {
+                      setDestConnectionString(e.target.value);
+                      if (isFileDatabase) {
+                        const path = fileDatabasePathFromUrl(e.target.value);
+                        if (path) setTargetDb(path);
+                      }
+                    }}
                     placeholder={destDriverType === "mongodb" ? "mongodb://localhost:27017/" : getGenericSqlPlaceholder(destType)}
                   />
                 </div>
               )}
+              {!isFileDatabase && (<>
               <div className="df2-field">
                 <label className="df2-label">
                   {destDriverType === "pinecone" ? "Index host" : "Host"}
@@ -5185,6 +7488,7 @@ export function TransferPage({
                   </div>
                 </div>
               )}
+              </>)}
             </div>
           </div>
           )}
@@ -5236,7 +7540,9 @@ export function TransferPage({
                         ? "Namespace (optional)"
                         : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
                           ? "Unused (optional)"
-                          : "Database"}
+                          : isFileDatabase
+                            ? "Database file path"
+                            : "Database"}
                 </label>
                 <input
                   id="dest-db"
@@ -5255,7 +7561,9 @@ export function TransferPage({
                           ? "analytics"
                           : destDriverType === "milvus"
                             ? "default"
-                            : "test_db"
+                            : isFileDatabase
+                              ? `/data/warehouse.${destDriverType === "duckdb" ? "duckdb" : "sqlite"}`
+                              : "test_db"
                   }
                   autoComplete="off"
                   spellCheck={false}
@@ -5269,7 +7577,7 @@ export function TransferPage({
                     className="df2-input"
                     value={destSchema}
                     onChange={(e) => setDestSchema(e.target.value)}
-                    placeholder="dataflow"
+                    placeholder="analytics"
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -5319,10 +7627,15 @@ export function TransferPage({
                 onChange={(next) => {
                   setTargetCollection(next);
                   // Do not claim existence for a name we have not probed yet.
-                  setDestTableExists(null);
+                  proveDestTableExists(null);
                   setDestColumns([]);
                   setDestSchemaMap({});
+                  // The destination side of every row described the old table.
+                  // Keeping it showed "city VARCHAR(6) [exists]" for a table that
+                  // had never been probed.
+                  setColumnMappings((prev) => prev.map(markMappingDestUnread));
                   setPreflight(null);
+                  setPreflightError("");
                   setValidatedContractKey(null);
                   setCellPreview(null);
                 }}
@@ -5344,6 +7657,24 @@ export function TransferPage({
                 </div>
               )}
             </div>
+            <DestProcedurePanel
+              destType={destDriverType || destType}
+              destWriteMode={destWriteMode}
+              onDestWriteMode={setDestWriteMode}
+              destProcedureCall={destProcedureCall}
+              onDestProcedureCall={setDestProcedureCall}
+              destQuerySql={destQuerySql}
+              onDestQuerySql={setDestQuerySql}
+              destProcedureParams={destProcedureParams}
+              onDestProcedureParams={setDestProcedureParams}
+              destProcedureBefore={destProcedureBefore}
+              onDestProcedureBefore={setDestProcedureBefore}
+              destProcedureAfter={destProcedureAfter}
+              onDestProcedureAfter={setDestProcedureAfter}
+              sourceColumns={currentSourceColumns}
+              paramMap={destProcedureParamMap}
+              onParamMap={setDestProcedureParamMap}
+            />
             {/* Status when probing / resolved — including pending unknown existence */}
             {destDriverType !== "dynamodb"
               && (destSchemaLoading
@@ -5368,20 +7699,40 @@ export function TransferPage({
                     <Spinner size="sm" label="Analyzing destination schema" />
                     <p>
                       <strong>Checking destination…</strong> Looking up{" "}
-                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>{" "}
-                      and loading column types for mapping.
+                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>
+                      {" "}(column types only — no row scan).
+                      {destDriverType === "snowflake" ? (
+                        <>
+                          {" "}If the warehouse is suspended, Snowflake is waking it
+                          (often 20–60s), then one <code>DESC TABLE</code>.
+                          {String(targetDb || "").toUpperCase() === "SNOWFLAKE_SAMPLE_DATA" ? (
+                            <>
+                              {" "}<code>SNOWFLAKE_SAMPLE_DATA</code> is a shared
+                              sample catalog (usually read-only) — destination
+                              tables normally live in your own database.
+                            </>
+                          ) : null}
+                        </>
+                      ) : null}
                     </p>
                   </>
                 ) : destTableExists === true ? (
                   <>
                     <DtIcon name="database" size={14} />
                     <p>
-                      <strong>Existing table detected.</strong> New rows will <strong>append</strong> by default.
-                      Open Advanced settings to switch to overwrite or incremental sync.
+                      <strong>Existing table detected</strong>
+                      {targetCollection.trim() ? <> — <code>{targetCollection.trim()}</code></> : null}
+                      . This is not create-new. The object already exists
+                      (even if a prior run wrote 0 rows).{" "}
+                      {syncModeHonestyLine(syncMode, destTableExists, destType)}
+                      {" "}To start a new table, type a name that does not exist.
+                      {syncMode === "full_refresh_overwrite"
+                        ? " Open Advanced to switch append or incremental."
+                        : " Open Advanced to switch overwrite or incremental."}
                       {destColumns.length > 0 ? (
-                        <> · {destColumns.length} columns loaded.</>
+                        <> · {destColumns.length} live columns loaded.</>
                       ) : (
-                        <> · Column metadata pending — retry schema load before Map invents create-new.</>
+                        <> · Column metadata pending — load the columns before Map invents create-new.</>
                       )}
                     </p>
                   </>
@@ -5399,10 +7750,51 @@ export function TransferPage({
                   <>
                     <DtIcon name="database" size={14} />
                     <p>
-                      <strong>Destination not confirmed yet.</strong> Retry schema load — Map will stay
-                      schema-pending until the table is found or confirmed missing (no invent create-new).
+                      <strong>Destination not confirmed yet.</strong> Map stays schema-pending until the
+                      table is found or confirmed missing (no invent create-new).
+                      {destConnectionError ? <> · {destConnectionError}</> : null}
                     </p>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={destSchemaLoading}
+                      onClick={() => void loadDestinationSchema({ force: true })}
+                    >
+                      Reload destination schema
+                    </Button>
                   </>
+                )}
+              </div>
+            )}
+            {/* Schema preview under status — keep visible when exists but columns pending. */}
+            {destKindMode === "database"
+              && !destSchemaLoading
+              && destTableExists === true
+              && (
+              <div className="df2-dest-schema-preview">
+                {destColumns.length > 0 ? (
+                  <StructurePreview
+                    columns={destColumns}
+                    schema={destSchemaMap}
+                    title="Existing destination schema"
+                    subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
+                  />
+                ) : (
+                  <div className="df2-dest-schema-pending" role="status">
+                    <p>
+                      <strong>Existing table — column metadata pending.</strong>{" "}
+                      Load the columns before Map invents create-new types.
+                      {destConnectionError ? <> · {destConnectionError}</> : null}
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={destSchemaLoading}
+                      onClick={() => void loadDestinationSchema({ force: true })}
+                    >
+                      Reload destination schema
+                    </Button>
+                  </div>
                 )}
               </div>
             )}
@@ -5413,6 +7805,13 @@ export function TransferPage({
               Table name is the DynamoDB table to read or write.
             </p>
           )}
+          {(destType === "openshift" || destType === "openshift_postgresql" || destType === "cnpg" || destType === "crunchy_pgo") && (
+            <p className="df2-label-hint df2-field-note">
+              OpenShift hosts PostgreSQL (CloudNativePG / Crunchy) — it is not a destination store.
+              Host is the Service DNS (<code>svc.cluster.local</code>), a Route, or a port-forward.
+              DynamoDB snapshot uses consistent Scan. Streams CDC is at-least-once upsert, not exactly-once.
+            </p>
+          )}
           {destDriverType === "bigquery" && (
             <p className="df2-label-hint df2-field-note">
               Set Database to GCP project ID. Optional: save service account JSON path as connection string in connector settings.
@@ -5421,7 +7820,7 @@ export function TransferPage({
             </>
           ) : (
             <p className="df2-label-hint df2-dest-right-empty">
-              Select a saved connector or engine on the left to configure the destination.
+              Select a saved connection, or open New connection to pick an engine.
             </p>
           )}
             </>
@@ -5438,7 +7837,13 @@ export function TransferPage({
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
               <p className="df2-label-hint">
-                Change overwrite, CDC, and identity in Advanced.
+                {syncModeHonestyLine(syncMode, destTableExists, destType)}
+              </p>
+              <p className="df2-label-hint">
+                {schemaPolicyHonestyLine(schemaPolicy)}
+              </p>
+              <p className="df2-label-hint">
+                Change overwrite, CDC, schema drift, and identity in Advanced.
               </p>
             </div>
             <div className="df2-dest-sync-summary-actions">
@@ -5463,30 +7868,15 @@ export function TransferPage({
                 (Postgres / MySQL / SQL Server / Oracle); otherwise streams run sequentially.
               </p>
             )}
-            {isMultiStreamSource && syncMode !== "cdc" && !multiStreamUnsupportedMode && (
+            {isMultiStreamSource && syncMode !== "cdc" && (
               <p className="df2-label-hint" role="status">
-                Multi-stream full/incremental runs each table/collection{" "}
-                <strong>sequentially</strong> with its own watermark and mappings
-                ({multiStreamNames.length} streams). Prefer CDC when you need one shared log consumer.
-              </p>
-            )}
-            {multiStreamUnsupportedMode && (
-              <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-                {MULTI_STREAM_SCD2_MIRROR_BLOCK}
+                Multi-stream runs each table/collection{" "}
+                <strong>sequentially</strong> with its own watermark, staging
+                merge, and mappings ({multiStreamNames.length} streams). Prefer
+                CDC when you need one shared log consumer.
               </p>
             )}
           </div>
-
-          {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
-            <div className="df2-dest-schema-preview">
-              <StructurePreview
-                columns={destColumns}
-                schema={destSchemaMap}
-                title="Existing destination schema"
-                subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
-              />
-            </div>
-          )}
 
           {transferPlan && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>
@@ -5498,8 +7888,8 @@ export function TransferPage({
               </p>
               {transferPlan.auto_create.length > 0 && (
                 <ul className="df2-plan-callout-list">
-                  {transferPlan.auto_create.slice(0, 3).map((item) => (
-                    <li key={item}>{item}</li>
+                  {transferPlan.auto_create.slice(0, 3).map((item, i) => (
+                    <li key={`${item}-${i}`}>{item}</li>
                   ))}
                   {transferPlan.auto_create.length > 3 && (
                     <li className="df2-plan-callout-more">+{transferPlan.auto_create.length - 3} more steps</li>
@@ -5517,8 +7907,13 @@ export function TransferPage({
           </div>
         </div>
         <div className="df2-card-footer df2-wizard-footer">
-          <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>← Back to source</button>
+          <button type="button" className="df2-btn" onClick={() => (studioFlags.canvas ? backWizard() : setStep(STEP_SOURCE))}>
+            <DtIcon name="arrow-left" size={14} /> Back to source
+          </button>
           <div className="df2-btn-row">
+          {!canRunPreflight && destContinueBlocker && (
+            <span className="df2-label-hint" role="status">{destContinueBlocker}</span>
+          )}
           <button
             type="button"
             className="df2-btn df2-btn-ghost"
@@ -5534,33 +7929,149 @@ export function TransferPage({
           <button
             type="button"
             className="df2-btn df2-btn-primary"
-            onClick={() => void goToMapping()}
+            onClick={continueFromDestination}
             disabled={!canRunPreflight || analyzing}
           >
-            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="sparkle" size={18} /> Continue to Map</>}
+            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : (
+              <><DtIcon name="layers" size={18} /> {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
+            )}
           </button>
           </div>
         </div>
       </div>
       )}
 
-      {step === STEP_VALIDATE && (
+      {studioFlags.canvas && step <= STEP_SHAPE && !transformOpen && (
+        <div className="df2-flow-transform">
+          <ButtonGroup label="Optional transform">
+            <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setTransformOpen(true)}>
+              Transform (optional)
+            </button>
+          </ButtonGroup>
+        </div>
+      )}
+
+      {(step === STEP_SHAPE || (studioFlags.canvas && transformOpen && step < STEP_SHAPE)) && (
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-xform-step">
+        <TransferTransformStep
+          sampleRows={shapeSampleRows}
+          sourceType={sourceKind === "file" ? "" : resolveDriverType(sourceConnector?.type || "")}
+          sourceColumns={currentSourceColumns}
+          sourceSchema={currentSourceSchema}
+          targetSchema={destSchemaMap}
+          sourceLabel={sourceLabel}
+          destRouteLabel={mapDestRouteLabel}
+          rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
+          steps={shapeSteps}
+          recipeBinding={recipeBinding}
+          onBindRecipe={setRecipeBinding}
+          onChangeSteps={(next) => {
+            if (!isMultiStreamSource) {
+              setShapeSteps(next);
+              return;
+            }
+            const active = (mapActiveStream || primarySourceStream || "").trim();
+            setShapeSteps(next.map((step) => (
+              step.source_table || !active ? step : { ...step, source_table: active }
+            )));
+          }}
+          onIdentity={setShapeIdentity}
+          onBack={() => (studioFlags.canvas ? backWizard() : setStep(STEP_DESTINATION))}
+          onCollapse={studioFlags.canvas ? () => setTransformOpen(false) : undefined}
+          onContinue={() => void goToMapping()}
+          syncMode={syncMode}
+          ruleReport={businessRuleReport}
+          sourceTable={primarySourceStream || sourceTable}
+          destTable={targetCollection}
+          sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
+          sourceCatalog={Object.keys(sourceColumnsByStream).length ? sourceColumnsByStream : undefined}
+          streamSamples={
+            multiStreamNames.length > 1
+              ? Object.fromEntries(
+                  streamPreviews
+                    .filter((preview) => preview.status === "ok" && preview.columns.length)
+                    .map((preview) => [preview.name, {
+                      columns: preview.columns,
+                      schema: preview.schema,
+                      rows: preview.rows,
+                    }]),
+                )
+              : undefined
+          }
+          onProgramHash={(hash) => {
+            setShapeIdentity((prev) => (prev ? { ...prev, hash } : prev));
+          }}
+          destTables={targetCollection ? [targetCollection] : undefined}
+          destCatalog={
+            targetCollection && destSchemaMap && Object.keys(destSchemaMap).length
+              ? { [targetCollection]: Object.keys(destSchemaMap) }
+              : undefined
+          }
+          canvasEnabled={studioFlags.canvas}
+          studioFlagsError={studioFlags.error}
+          canvasOptIn={studioFlags.canvasOptIn}
+          onOptInCanvas={studioFlags.optInCanvas}
+          onOpenSchema={() => setStep(STEP_SOURCE)}
+          onApplyRules={(report) => {
+            setBusinessRuleReport(report);
+            const primary = primarySourceStream || sourceTable || undefined;
+            if (report.shape_steps.length) {
+              // Several tables: keep every stamped step. Filtering to the
+              // primary table dropped orders' transforms before Execute.
+              setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps, {
+                sourceTable: multiStreamNames.length > 1 ? undefined : primary,
+              }));
+            }
+            setColumnMappings((prev) => mergeBusinessRules(prev, report, { sourceTable: primary }));
+            setStreamMappings((prev) => {
+              const next = { ...prev };
+              for (const name of multiStreamNames) {
+                next[name] = mergeBusinessRules(next[name] || [], report, { sourceTable: name });
+              }
+              return next;
+            });
+            toast({
+              title: "Business rules compiled",
+              message: ruleReportSummary(report),
+              tone: report.buckets.needs_confirmation || report.buckets.conflict ? "warning" : "success",
+            });
+          }}
+        />
+        </div>
+      )}
+
+      {(step === STEP_VALIDATE || (studioFlags.canvas && step === STEP_MAP && columnMappings.length > 0)) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
           <div className="df2-card-body df2-validate-body">
           <ValidateDashboard
             preflight={preflight}
+            compactVerdict={studioFlags.canvas}
+            onPrimaryFix={primaryFix.onPrimaryFix}
+            primaryFixLabel={primaryFix.primaryFixLabel}
+            preflightError={preflightError}
             running={preflighting}
+            progress={validateProgress}
             confidenceThreshold={confidenceThreshold}
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}
             syncMode={syncMode}
             writeViaStaging={writeViaStaging}
             onApplyAction={applySuggestedAction}
+            onApplyCreateNewWidens={() => applyCreateNewTypeWidens(createNewFitWidenActions(preflight))}
             onStripControlChars={stripControlCharsAndRerun}
+            formatControlCharsSeen={formatControlCharsSeen}
             stripControlsApplied={columnMappings.some(
               (m) => m.transform === "strip_controls",
             )}
             onQuarantineAndRerun={quarantineAndRerun}
+            onRebaselineContinuity={continuityRecoveryAvailable ? async (reason) => {
+              await acceptContinuityBaseline(reason);
+              void executePreflight();
+            } : undefined}
+            onRebuildFullRefresh={continuityRecoveryAvailable ? () => {
+              setSyncMode("full_refresh_overwrite");
+              setRevalidateAfterSyncChange(true);
+            } : undefined}
             badDataFixOpen={badDataFixOpen}
             onBadDataFixOpenChange={setBadDataFixOpen}
             cellPreview={cellPreview}
@@ -5573,7 +8084,9 @@ export function TransferPage({
               }
               setStep(STEP_MAP);
             }}
+            onReloadDestSchema={() => { void loadDestinationSchema({ force: true }); }}
             onOpenIdentitySettings={openIdentitySettings}
+            onOpenLocaleSettings={openLocaleSettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
             compositeKeySuggestions={compositeKeySuggestions}
             onApplyPrimaryKey={(column) => {
@@ -5584,9 +8097,8 @@ export function TransferPage({
             mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
             onAcknowledgeCompliance={() => {
-              setComplianceAcknowledged(true);
               toast({
-                title: "PII acknowledged",
+                title: "Submitting PII approval",
                 message: "Re-running Validate with governance approval for detected PII fields.",
                 tone: "info",
               });
@@ -5596,9 +8108,8 @@ export function TransferPage({
               });
             }}
             onAcknowledgeSchemaDrift={() => {
-              setSchemaDriftAcknowledged(true);
               toast({
-                title: "Schema drift acknowledged",
+                title: "Submitting schema-drift acknowledgment",
                 message: "Re-running Validate — existing mappings kept for this run (exception recorded).",
                 tone: "info",
               });
@@ -5607,10 +8118,10 @@ export function TransferPage({
                 acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
               });
             }}
+            fkRiskAcknowledged={fkRiskAcknowledged}
             onAcknowledgeFkRisk={() => {
-              setFkRiskAcknowledged(true);
               toast({
-                title: "FK risk acknowledged",
+                title: "Submitting FK-risk acknowledgment",
                 message: "Re-running Validate — FK mapping risk accepted for this run (RI not proven).",
                 tone: "info",
               });
@@ -5623,6 +8134,7 @@ export function TransferPage({
             onRunPopulationOrphanScanChange={setRunPopulationOrphanScan}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
             seedRepairProposalId={seedRepairProposalId}
+            studioPrimary={studioPrimary}
             onSeedRepairConsumed={() => setSeedRepairProposalId(null)}
             repairMappings={columnMappings.map((m) => ({
               source: m.source,
@@ -5688,19 +8200,55 @@ export function TransferPage({
           </div>
           <ValidateActionsRail
             preflight={preflight}
+            preflightError={preflightError}
             preflighting={preflighting}
             transferring={transferring}
             mappingReviewCount={mappingReviewCount}
             riskAckPendingCount={riskAckPendingCount}
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-            transferLaunch={transferLaunch}
-            savingContract={savingContract}
-            executeBlocked={multiStreamUnsupportedMode}
-            executeBlockedReason={
-              multiStreamUnsupportedMode
-                ? MULTI_STREAM_SCD2_MIRROR_BLOCK
+            transferLaunch={routeScopedLaunch}
+            supersededRunLabel={
+              result && !runResultDescribesCurrentPlan
+                ? (staleRunDestLabel || "another destination")
                 : undefined
             }
+            savingContract={savingContract}
+            executeBlocked={Boolean(contractBlockReason)}
+            executeBlockedReason={contractBlockReason || undefined}
+            contractSlot={(
+              <ContractBindField
+                idPrefix="studio"
+                contractId={boundContractId}
+                requireSigned={requireSignedContract}
+                onContractIdChange={setBoundContractId}
+                onRequireSignedChange={setRequireSignedContract}
+                onBlockReasonChange={setContractBlockReason}
+                route={(() => {
+                  const source = buildSourceEndpoint() as {
+                    format?: string;
+                    table?: string;
+                    collection?: string;
+                    filename?: string;
+                  };
+                  return {
+                    source: {
+                      format: String(source.format || ""),
+                      table: source.table,
+                      collection: source.collection,
+                      filename: source.filename,
+                    },
+                    destination: destKindMode === "file_export"
+                      ? { format: exportFormat }
+                      : {
+                        format: destType,
+                        table: destDriverType === "mongodb" ? undefined : targetCollection,
+                        collection: destDriverType === "mongodb" ? targetCollection : undefined,
+                      },
+                  };
+                })()}
+                compact
+              />
+            )}
             cdcRetentionSlot={
               syncMode === "cdc"
               && sourceConnector
@@ -5729,6 +8277,8 @@ export function TransferPage({
             onRunPreflight={() => void executePreflight()}
             onApproveMappings={() => void approveAllAndPreflight()}
             onOpenMapForRisk={() => setStep(STEP_MAP)}
+            onHoldOutRows={() => void holdOutRowsAndRevalidate()}
+            holdingOutRows={preflighting}
             onExecute={() => void executeTransfer()}
             onOpenJobTheater={openJobTheater}
             onSaveAsContract={() => void handleSaveAsContract()}
@@ -5748,7 +8298,11 @@ export function TransferPage({
         />
       )}
 
-      {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (
+      {step === STEP_RUN
+        && !activeJobId
+        && !transferring
+        && !routeScopedLaunch
+        && (!result || !runResultDescribesCurrentPlan) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
           <div className="df2-card-body df2-run-center">
             <div className="df2-run-readiness" aria-label="Run readiness summary">
@@ -5798,17 +8352,20 @@ export function TransferPage({
                   ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
                   : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
                 {writeViaStaging
-                  ? " Staging is on — rows land in {table}_df_staging first; only clean rows promote to primary."
+                  ? " Staging is on — rows land in a staging table next to the destination first; only clean rows promote to primary."
                   : ""}
               </p>
             </div>
             <EmptyState
               icon="transfer"
-              title={isGovernedExecuteReady ? "Ready to transfer" : "Confirm Validate before write"}
+              title={isGovernedExecuteReady ? "Execute-ready · not migration proven" : "Confirm Validate before write"}
               description={
-                isGovernedExecuteReady
-                  ? "API preflight approved on Validate. Re-open gate cards anytime, or execute here to start the write."
-                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock)."
+                (result && !runResultDescribesCurrentPlan
+                  ? `The plan changed since the last run${staleRunDestLabel ? ` (it wrote ${staleRunDestLabel})` : ""}; nothing has been written for the route above. `
+                  : "")
+                + (isGovernedExecuteReady
+                  ? "API preflight approved on Validate. Execute starts the write; Gate-8 post-write proof is still required for migration_proven."
+                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock).")
               }
             />
           </div>
@@ -5834,17 +8391,30 @@ export function TransferPage({
               </span>
             </div>
             <div className="df2-run-footer-actions">
+              {replayScheduleId && (
+                <button
+                  type="button"
+                  className="df2-btn"
+                  onClick={() => void handleScheduleRoute()}
+                  disabled={!isGovernedExecuteReady}
+                  title={
+                    isGovernedExecuteReady
+                      ? "Write this Validate-approved mapping contract onto the schedule so Run now / Activate can replay it"
+                      : "Requires API Validate with decision approve"
+                  }
+                >
+                  <DtIcon name="activity" size={14} /> Save mapping to schedule
+                </button>
+              )}
               <button
                 type="button"
                 className="df2-btn df2-btn-primary"
                 onClick={() => void executeTransfer()}
-                disabled={!canExecute || multiStreamUnsupportedMode}
+                disabled={!canExecute}
                 title={
-                  multiStreamUnsupportedMode
-                    ? MULTI_STREAM_SCD2_MIRROR_BLOCK
-                    : !canExecute
-                      ? "Requires API Validate with decision approve"
-                      : undefined
+                  !canExecute
+                    ? "Requires API Validate with decision approve"
+                    : undefined
                 }
               >
                 <DtIcon name="transfer" size={16} /> Execute Transfer
@@ -5872,14 +8442,14 @@ export function TransferPage({
                 <span>Initializing transfer job</span>
                 <strong>Starting…</strong>
               </div>
-              <div className="df2-run-launch-progress-track df2-run-launch-progress-track-indeterminate">
-                <span className="df2-run-launch-progress-fill" style={{ width: `${Math.min(runStartupProgress, 40)}%` }} />
+              <div className="df2-run-launch-progress-track">
+                <span className="df2-run-launch-progress-fill" style={{ width: `${runStartupProgress}%` }} />
               </div>
             </div>
 
             <div className="df2-run-launch-stages" aria-label="Launch stages">
               {RUN_LAUNCH_STAGES.map((stage, idx) => {
-                const state = runStartupProgress >= (idx + 1) * 25 ? "done" : runStartupProgress >= idx * 25 ? "active" : "pending";
+                const state = launchStageState(runStartupProgress, idx, RUN_LAUNCH_STAGES.length);
                 return (
                   <span key={stage} className={`df2-run-launch-stage ${state}`}>
                     {stage}
@@ -5901,8 +8471,8 @@ export function TransferPage({
           <div className="df2-card-body df2-run-theater-host">
             <JobTheater
               jobId={activeJobId}
-              sourceLabel={file?.name || sourceConnector?.name}
-              destLabel={`${targetDb}.${targetCollection}`}
+              sourceLabel={theaterRoute.source}
+              destLabel={theaterRoute.dest}
               sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
               destType={destKindMode === "file_export" ? exportFormat : destType}
               preflight={preflight || undefined}
@@ -5910,6 +8480,15 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
+              onRebaselineContinuity={continuityRecoveryAvailable ? async (reason) => {
+                await acceptContinuityBaseline(reason);
+                leaveTheaterToValidate();
+              } : undefined}
+              onRebuildFullRefresh={continuityRecoveryAvailable ? () => {
+                setSyncMode("full_refresh_overwrite");
+                leaveTheaterToValidate();
+              } : undefined}
+              onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onResumed={(nextId) => {
                 setActiveJobId(nextId);
                 setTransferring(true);
@@ -5920,7 +8499,10 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_RUN && result && !activeJobId && (
+      {step === STEP_RUN && result && showStudioResultDashboard({
+        hasResult: true,
+        theaterJobId: activeJobId,
+      }) && runResultDescribesCurrentPlan && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
           <div className="df2-card-body df2-result-body">
             <TransferResultDashboard
@@ -5984,7 +8566,7 @@ export function TransferPage({
                 });
               }}
               onNewTransfer={resetTransferStudio}
-              onSchedule={() => void handleScheduleRoute()}
+              onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onOpenValidate={() => setStep(STEP_VALIDATE)}
               onOpenChildJob={(childId) => {
                 setActiveJobId(childId);
@@ -6030,9 +8612,14 @@ export function TransferPage({
               <span>
                 <strong>Result</strong> {result.success ? "Completed" : "Needs attention"}
               </span>
-              <span>
-                <strong>Rows</strong> {(result.records_transferred ?? 0).toLocaleString()}
-              </span>
+              {(() => {
+                const dest = destHeadline(result);
+                return (
+                  <span title={dest.title}>
+                    <strong>{dest.label}</strong> {dest.value}
+                  </span>
+                );
+              })()}
             </div>
             <div className="df2-run-footer-actions">
               {(!result.success || Boolean(result.destination_summary?.rejected_rows)) && (
@@ -6069,9 +8656,11 @@ export function TransferPage({
                   Resume
                 </button>
               )}
-              <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
-                <DtIcon name="activity" size={14} /> Schedule
-              </button>
+              {studioSchedulePersistable && (
+                <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
+                  <DtIcon name="activity" size={14} /> Schedule
+                </button>
+              )}
               <button type="button" className="df2-btn df2-btn-primary" onClick={resetTransferStudio}>
                 New transfer
               </button>
@@ -6085,20 +8674,29 @@ export function TransferPage({
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
       <DestinationAdvancedDrawer
         open={advancedOpen}
-        onClose={() => setAdvancedOpen(false)}
+        onClose={() => {
+          setAdvancedOpen(false);
+          setAdvancedLocaleFocus(null);
+        }}
+        localeFocus={advancedLocaleFocus}
         syncModes={routeSyncModes}
         schemaPolicies={SCHEMA_POLICIES}
         validationModes={VALIDATION_MODES}
         dateLocales={DATE_LOCALES}
+        numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
+        syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists, destType)}
+        schemaHonestyLine={schemaPolicyHonestyLine(schemaPolicy)}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}
         dateLocale={dateLocale}
+        numberLocale={numberLocale}
         backfillNewFields={backfillNewFields}
         streamNames={advancedStreamNames}
         streamFields={streamFields}
         defaultCursor={cursorField}
         defaultPrimaryKey={primaryKeyField}
+        defaultCursorSemantics={cursorSemantics}
         sourceColumns={currentSourceColumns}
         sourceSchema={currentSourceSchema}
         sourceColumnsByStream={sourceColumnsByStream}
@@ -6114,6 +8712,13 @@ export function TransferPage({
         compositeKeySuggestions={compositeKeySuggestions}
         snapshotMode={snapshotMode}
         onSnapshotModeChange={setSnapshotMode}
+        mirrorDeleteMode={mirrorDeleteMode}
+        onMirrorDeleteModeChange={setMirrorDeleteMode}
+        foreignKeysMode={foreignKeysMode}
+        onForeignKeysModeChange={setForeignKeysMode}
+        deliveryGuarantee={deliveryGuarantee}
+        onDeliveryGuaranteeChange={setDeliveryGuarantee}
+        exactlyOnceWired={exactlyOnceWiredDest(destDriverType || destType)}
         allowAppendOnly={allowAppendOnly}
         onAllowAppendOnlyChange={setAllowAppendOnly}
         multiSubnetFailover={multiSubnetFailover}
@@ -6135,6 +8740,9 @@ export function TransferPage({
         writeViaStaging={writeViaStaging}
         onWriteViaStagingChange={setWriteViaStaging}
         writeViaStagingSupported={writeViaStagingSupported}
+        captureJournal={captureJournal}
+        onCaptureJournalChange={setCaptureJournal}
+        captureJournalBlockedReason={captureJournalBlockedReason}
         showVectorOptions={
           destDriverType === "pgvector" ||
           destDriverType === "qdrant" ||
@@ -6142,18 +8750,37 @@ export function TransferPage({
           destDriverType === "pinecone" ||
           destDriverType === "milvus"
         }
+        showPgvectorOptions={destDriverType === "pgvector"}
         vectorContentColumn={vectorContentColumn}
         vectorEmbeddingColumn={vectorEmbeddingColumn}
         vectorMetadataColumns={vectorMetadataColumns}
         vectorEmbeddingModel={vectorEmbeddingModel}
         vectorChunkSize={vectorChunkSize}
         vectorChunkOverlap={vectorChunkOverlap}
+        vectorChunkStrategy={vectorChunkStrategy}
+        vectorChunkUnit={vectorChunkUnit}
+        vectorTextTemplate={vectorTextTemplate}
+        vectorSkipUnchanged={vectorSkipUnchanged}
+        vectorIndex={vectorIndex}
+        vectorStorage={vectorStorage}
+        vectorEmbeddingApiKey={vectorEmbeddingApiKey}
+        vectorEmbeddingBaseUrl={vectorEmbeddingBaseUrl}
+        vectorEmbeddingEndpoint={vectorEmbeddingEndpoint}
         onVectorContentColumnChange={setVectorContentColumn}
         onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
         onVectorMetadataColumnsChange={setVectorMetadataColumns}
         onVectorEmbeddingModelChange={setVectorEmbeddingModel}
         onVectorChunkSizeChange={setVectorChunkSize}
         onVectorChunkOverlapChange={setVectorChunkOverlap}
+        onVectorChunkStrategyChange={setVectorChunkStrategy}
+        onVectorChunkUnitChange={setVectorChunkUnit}
+        onVectorTextTemplateChange={setVectorTextTemplate}
+        onVectorSkipUnchangedChange={setVectorSkipUnchanged}
+        onVectorIndexChange={setVectorIndex}
+        onVectorStorageChange={setVectorStorage}
+        onVectorEmbeddingApiKeyChange={setVectorEmbeddingApiKey}
+        onVectorEmbeddingBaseUrlChange={setVectorEmbeddingBaseUrl}
+        onVectorEmbeddingEndpointChange={setVectorEmbeddingEndpoint}
         vectorRoutingFields={vectorRoutingFields}
         vectorRoutingLoading={vectorRoutingLoading}
         vectorExcludePiiColumns={vectorExcludePiiColumns}
@@ -6181,31 +8808,69 @@ export function TransferPage({
         }}
         onValidationModeChange={setValidationMode}
         onDateLocaleChange={setDateLocale}
+        onNumberLocaleChange={setNumberLocale}
         onBackfillChange={setBackfillNewFields}
         onStreamCursorChange={(stream, value) => {
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: value,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+              // A new column is a new question: the previous column's declared
+              // meaning says nothing about this one.
+              cursorSemantics: "",
             },
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setCursorField(value);
+            setCursorSemantics("");
+          }
+        }}
+        onStreamCursorSemanticsChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              ...prev[stream],
+              cursorField: prev[stream]?.cursorField ?? cursorField,
+              primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+              cursorSemantics: value,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setCursorSemantics(value);
           }
         }}
         onStreamPrimaryKeyChange={(stream, value) => {
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: value,
+              cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
             },
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setPrimaryKeyField(value);
           }
         }}
+        onStreamDestProcedureChange={
+          isMultiStreamSource && (dialectOffersProcedures(destDriverType || destType) || dialectOffersQuery(destDriverType || destType))
+            ? (stream, value) => {
+                setStreamFields((prev) => ({
+                  ...prev,
+                  [stream]: {
+                    ...prev[stream],
+                    cursorField: prev[stream]?.cursorField ?? cursorField,
+                    primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+                    cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
+                    destProcedure: value,
+                  },
+                }));
+              }
+            : undefined
+        }
       />
       </PageFrame>
     </PageShell>

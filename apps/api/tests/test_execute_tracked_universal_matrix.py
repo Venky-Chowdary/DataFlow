@@ -6,6 +6,7 @@ machine are skipped gracefully, so the same file can run in CI with many
 emulators or locally with only Postgres/Mongo/Redis/Minio/DuckDB/SQLite.
 """
 from __future__ import annotations
+import os
 
 import json
 import socket
@@ -15,6 +16,7 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -22,10 +24,16 @@ _API_ROOT = Path(__file__).resolve().parents[2]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from src.transfer.adapters import write_destination_database  # noqa: E402
+from connectors.snowflake_conn import get_connection, normalize_account  # noqa: E402
+from connectors.writer_common import quote_sql_identifier  # noqa: E402
+from src.transfer.adapters import (  # noqa: E402
+    resolve_connector_config,
+    write_destination_database,
+)
 from src.transfer.connector_capabilities import (  # noqa: E402
     default_port,
     driver_available,
+    get_capabilities,
     resolve_driver_type,
 )
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
@@ -42,10 +50,55 @@ except Exception:  # pragma: no cover - fallback if import path differs
     from test_live_emulator_matrix import CASES as EMULATOR_CASES  # type: ignore
 
 
+_SAAS_STUB_URL: str | None = None
+
+
+def _saas_stub_url() -> str:
+    """Local HTTP stub for Salesforce / HubSpot / Stripe / REST — not a customer org."""
+    global _SAAS_STUB_URL
+    if _SAAS_STUB_URL is None:
+        from tests.saas_desktop_stub import seed_tabular_fixture, start_saas_stub
+
+        _server, url = start_saas_stub()
+        seed_tabular_fixture(_server)
+        _SAAS_STUB_URL = url
+    return _SAAS_STUB_URL
+
+
+def _oracle_sku_password() -> str:
+    from services.desktop_lab_cross import _oracle_password
+
+    return _oracle_password()
+
+
 RECORDS = [{"id": "1", "amount": "1000.00"}, {"id": "2", "amount": "2000.50"}]
 COLUMNS = ["id", "amount"]
 SCHEMA = {"id": "INTEGER", "amount": "DECIMAL"}
 MAPPINGS = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]
+DESTINATION_NUMERIC_SOURCE_OVERRIDES = {
+    "salesforce": {
+        # Salesforce Number fields allow 18 total digits, including decimal places:
+        # https://help.salesforce.com/s/articleView?id=000386249&language=en_US&type=1
+        # Snowflake integer synonyms become NUMBER(38,0); explicit NUMBER(p,s)
+        # retains its precision and scale:
+        # https://docs.snowflake.com/en/sql-reference/data-types-numeric
+        "records": RECORDS,
+        "schema": {"id": "DECIMAL(18,0)", "amount": "DECIMAL(18,2)"},
+        "snowflake_column_types": {
+            "id": "NUMBER(18,0)",
+            "amount": "NUMBER(18,2)",
+        },
+    },
+    "hubspot": {
+        # HubSpot documents numeric properties but no total precision cap; the
+        # route's currency target carrier is DataFlow's DECIMAL(38,2) map.
+        # BigQuery INT64 is emulator-supported and fits its 36 integer digits.
+        # https://developers.hubspot.com/docs/api-reference/latest/crm/properties/guide
+        # apps/api/connectors/hubspot_writer.py:203
+        "records": [{"id": "1", "amount": "1000"}, {"id": "2", "amount": "2000"}],
+        "schema": {"id": "INT64", "amount": "INT64"},
+    },
+}
 
 
 def _is_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -66,6 +119,25 @@ def _is_file_based_sql(endpoint: EndpointConfig) -> bool:
     return False
 
 
+def _tcp_target(endpoint: EndpointConfig) -> tuple[str, int]:
+    """Host/port for a reachability probe, including ``http://host:port`` hosts."""
+    host = (endpoint.host or "").strip()
+    port = int(endpoint.port or 0)
+    if "://" in host:
+        parsed = urlparse(host)
+        host = parsed.hostname or "127.0.0.1"
+        port = port or int(parsed.port or 0)
+    cs = (endpoint.connection_string or "").strip()
+    if cs.startswith("http://") or cs.startswith("https://"):
+        parsed = urlparse(cs)
+        if not host or host in {"localhost", "127.0.0.1"}:
+            host = parsed.hostname or host or "127.0.0.1"
+        port = port or int(parsed.port or 0)
+    driver = resolve_driver_type(endpoint.format)
+    port = port or int(default_port(driver) or 0)
+    return host or "localhost", int(port or 0)
+
+
 def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
     if endpoint.kind != "database":
         return True
@@ -76,24 +148,56 @@ def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
         return True
     if driver == "snowflake":
         return True  # exercised through fakesnow
-    host = endpoint.host or "localhost"
-    port = endpoint.port or default_port(driver)
+    if driver == "iceberg":
+        host, port = _tcp_target(endpoint)
+        if port and host:
+            return _is_reachable(host, port)
+        # Filesystem CoW warehouse (SKU tmp_path) has no REST broker port.
+        return True
+    host, port = _tcp_target(endpoint)
+    if not port:
+        return True
     if not _is_reachable(host, port):
         return False
     # Port open ≠ authenticated. Half-dead QEMU mssql on ARM listens then
     # rejects login — fail-skip instead of failing the matrix.
     if driver in {"sqlserver", "mssql", "azure_sql"}:
+        # Same handshake as Validate/Execute (pyodbc + operator TLS extra).
+        # Bare pymssql ignored ``trust_server_certificate`` and skipped dest
+        # SQL Server while source seed failed Driver 18 cert verify.
         try:
-            import pymssql
+            from connectors.generic_sql import connection_options
+            from connectors.sqlserver import test_sqlserver
 
-            conn = pymssql.connect(
-                server=host,
+            extra = dict(endpoint.extra or {})
+            ok, _msg = test_sqlserver(
+                host=host,
                 port=int(port),
-                user=endpoint.username or "sa",
-                password=endpoint.password or "",
                 database=endpoint.database or "master",
-                login_timeout=3,
-                timeout=3,
+                username=endpoint.username or "sa",
+                password=endpoint.password or "",
+                schema=endpoint.schema or "dbo",
+                connection_string=endpoint.connection_string or "",
+                ssl=bool(endpoint.ssl),
+                type="sqlserver",
+                connect_timeout=3,
+                **connection_options(extra),
+            )
+            return bool(ok)
+        except Exception:
+            return False
+    if driver in {"postgresql", "postgres", "timescaledb", "citus"}:
+        # Port open ≠ role/password valid (common on shared localhost:5432).
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host=host,
+                port=int(port),
+                dbname=endpoint.database or "postgres",
+                user=endpoint.username or "postgres",
+                password=endpoint.password or "",
+                connect_timeout=3,
             )
             conn.close()
             return True
@@ -116,35 +220,131 @@ for _param in EMULATOR_CASES:
         _DB_TEMPLATES[_fmt] = _ep
 
 
-def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> EndpointConfig:
+def _build_db_endpoint(
+    driver: str,
+    tmp_path: Path,
+    role: str,
+    suffix: str,
+    *,
+    object_store: str = "",
+    sftp_server: Any = None,
+) -> EndpointConfig:
     """Return a database EndpointConfig for a live driver with a unique table/key."""
+    if driver == "sftp":
+        # ``local_sftp`` runs paramiko's server half in-process. The generated
+        # host key is pinned so the matrix exercises real verification rather
+        # than the insecure_ignore escape.
+        if sftp_server is None:
+            pytest.skip("no local SFTP server (paramiko unavailable)")
+        remote = f"/matrix_payments_{role}_{suffix}.json"
+        cfg = sftp_server.endpoint_config(remote)
+        return EndpointConfig(
+            kind="database",
+            format="sftp",
+            host=cfg["host"],
+            port=cfg["port"],
+            username=cfg["username"],
+            password=cfg["password"],
+            database=cfg["database"],
+            table=cfg["table"],
+            extra={"host_key": cfg["host_key"]},
+        )
+    if driver == "s3":
+        # ``local_object_store`` supplies moto (or a MinIO / real endpoint the
+        # operator points at). Without one there is nothing to talk to, and a
+        # skip is the honest answer.
+        if not object_store:
+            pytest.skip("no local object store endpoint (install moto or set DATAFLOW_TEST_S3_ENDPOINT)")
+        from tests.conftest import LOCAL_OBJECT_STORE_BUCKET
+
+        parsed = urlparse(object_store)
+        return EndpointConfig(
+            kind="database",
+            format="s3",
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 443,
+            database=LOCAL_OBJECT_STORE_BUCKET,
+            username="test",
+            password="test",
+            connection_string=object_store,
+            table=f"matrix/payments_s3_{role}_{suffix}.json",
+        )
+    if driver == "dynamodb":
+        # The same endpoint answers DynamoDB. Unlike a bucket, a table cannot be
+        # written into existence: it needs a declared key schema first, and the
+        # writer refuses identity it cannot see. The matrix keys on ``id``.
+        if not object_store:
+            pytest.skip("no local AWS endpoint (install moto or set DATAFLOW_TEST_S3_ENDPOINT)")
+        import boto3
+
+        table = f"payments_dynamodb_{role}_{suffix}"
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url=object_store,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        )
+        try:
+            client.create_table(
+                TableName=table,
+                KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
+                # The matrix keys on an INTEGER id, so the table declares N —
+                # a string key would read as a numeric-to-text collapse.
+                AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "N"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+        except client.exceptions.ResourceInUseException:
+            pass
+        parsed = urlparse(object_store)
+        return EndpointConfig(
+            kind="database",
+            format="dynamodb",
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 443,
+            # The connection probe reads the table name from ``database`` while
+            # the reader accepts ``table``; set both so neither has to guess.
+            database=table,
+            username="test",
+            password="test",
+            connection_string=object_store,
+            table=table,
+        )
     # SFTP, email, and Qdrant require external network services; the universal
     # matrix test cannot stand up a real server here, so these routes are skipped.
-    if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka"}:
+    if driver == "email":
         pytest.skip(f"No local emulator for {driver}")
-    if driver == "oracle":
-        pytest.skip("No local Oracle emulator on this runner")
+    if driver in {"salesforce", "hubspot", "stripe", "rest_api"}:
+        url = _saas_stub_url()
+        parsed = urlparse(url)
+        table = {
+            "salesforce": "Account",
+            "hubspot": "contacts",
+            "stripe": "customers",
+            "rest_api": "records",
+        }[driver]
+        extra = {"local_stub_not_customer_org": True}
+        if driver == "rest_api":
+            # Stub answers the whole collection in one GET. Default offset paging
+            # still works; ``none`` makes uniqueness publish an authoritative
+            # total instead of "unbounded REST".
+            extra["pagination_type"] = "none"
+        return EndpointConfig(
+            kind="database",
+            format=driver,
+            host=url,
+            port=int(parsed.port or 0),
+            password="stub-token",
+            api_key="stub-token",
+            table=table,
+            ssl=False,
+            extra=extra,
+        )
     if driver == "pgvector":
         # Require the Postgres vector extension; homebrew PG without pgvector must skip.
-        try:
-            import psycopg2
+        from tests.host_facts import require_pgvector
 
-            conn = psycopg2.connect(
-                host="127.0.0.1",
-                port=5432,
-                dbname="dataflow",
-                user="dataflow",
-                password="dataflow",
-                connect_timeout=2,
-            )
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            finally:
-                conn.close()
-        except Exception as exc:
-            pytest.skip(f"pgvector extension unavailable: {exc}")
+        require_pgvector()
     if driver == "generic_sql":
         # Exercise the generic_sql catalog id with a local SQLite file — DuckDB
         # remains certified when its DBAPI is installed; matrix routes must not
@@ -174,6 +374,7 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
             database=str(warehouse),
             table=f"t_{role}_{suffix}",
             schema="default",
+            extra={"catalog_type": "filesystem"},
         )
     if driver == "redshift":
         return EndpointConfig(
@@ -237,9 +438,68 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
             port=1433,
             database="dataflow",
             username="sa",
-            password="Datawrap_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             schema="dbo",
             table="payments_sqlserver",
+            extra={"trust_server_certificate": True, "encrypt": "yes"},
+        ),
+        "oracle": EndpointConfig(
+            kind="database",
+            format="oracle",
+            host="127.0.0.1",
+            port=1521,
+            database="XEPDB1",
+            username="dataflow",
+            password=_oracle_sku_password(),
+            schema="DATAFLOW",
+            table="payments_oracle",
+        ),
+        "kafka": EndpointConfig(
+            kind="database",
+            format="kafka",
+            host="127.0.0.1",
+            port=9092,
+            table="payments_kafka",
+        ),
+        "qdrant": EndpointConfig(
+            kind="database",
+            format="qdrant",
+            host="127.0.0.1",
+            port=6333,
+            table="payments_qdrant",
+        ),
+        "weaviate": EndpointConfig(
+            kind="database",
+            format="weaviate",
+            host="127.0.0.1",
+            port=8080,
+            table="PaymentsWeaviate",
+        ),
+        # Pinecone Local index emulator (desktop-extended). Dim 32 matches
+        # pytest ``DATAFLOW_EMBEDDING_MODEL=hash/32``. Not a customer tenant.
+        "pinecone": EndpointConfig(
+            kind="database",
+            format="pinecone",
+            host="http://127.0.0.1:5081",
+            port=5081,
+            password="pclocal",
+            api_key="pclocal",
+            connection_string="http://127.0.0.1:5081",
+            table="sku_ns",
+            extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
+        ),
+        # Milvus standalone REST (desktop-extended). Port 19530 is the
+        # documented REST v2 + gRPC mux. Not a Zilliz Cloud cluster.
+        "milvus": EndpointConfig(
+            kind="database",
+            format="milvus",
+            host="127.0.0.1",
+            port=19530,
+            username="root",
+            password="Milvus",
+            connection_string="http://127.0.0.1:19530",
+            table="payments_milvus",
+            extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
         ),
     }
     template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)
@@ -270,9 +530,19 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
         lines = [json.dumps(r, ensure_ascii=False) for r in RECORDS]
         return ("\n".join(lines).encode(), f"data.{fmt}")
     if fmt == "parquet":
-        pd = pytest.importorskip("pandas")
+        from decimal import Decimal
+
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
         buf = BytesIO()
-        pd.DataFrame(df_data).to_parquet(buf, engine="pyarrow", index=False)
+        table = pa.table({
+            "id": pa.array([1, 2], type=pa.int64()),
+            "amount": pa.array(
+                [Decimal("1000.00"), Decimal("2000.50")],
+                type=pa.decimal128(12, 2),
+            ),
+        })
+        pq.write_table(table, buf)
         return (buf.getvalue(), "data.parquet")
     if fmt == "excel":
         pd = pytest.importorskip("pandas")
@@ -307,6 +577,20 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
             b'<record><id>2</id><amount>2000.50</amount></record></records>',
             "data.xml",
         )
+    if fmt == "yaml":
+        return (
+            b'- id: "1"\n  amount: "1000.00"\n- id: "2"\n  amount: "2000.50"\n',
+            "data.yaml",
+        )
+    if fmt == "fixed_width":
+        # Self-describing layout header — guessing widths is forbidden.
+        id_w, amt_w = 8, 16
+        lines = ["#layout: id:8,amount:16"]
+        for rec in RECORDS:
+            lines.append(
+                str(rec["id"]).ljust(id_w) + str(rec["amount"]).ljust(amt_w)
+            )
+        return ("\n".join(lines) + "\n").encode(), "data.fwf"
     raise ValueError(f"Unsupported file format: {fmt}")
 
 
@@ -316,35 +600,167 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
 _NO_INDEPENDENT_VERIFIER = frozenset({
     "pgvector", "redis", "redshift", "pinecone", "milvus", "weaviate", "qdrant",
     "kafka", "elasticsearch", "neo4j", "influxdb", "couchbase", "email",
+    "salesforce", "hubspot", "rest_api",
 })
 
 
-def _build_source(kind: str, fmt: str, tmp_path: Path, suffix: str) -> tuple[EndpointConfig, bytes, str]:
+def _build_source(
+    kind: str,
+    fmt: str,
+    tmp_path: Path,
+    suffix: str,
+    *,
+    object_store: str = "",
+    sftp_server: Any = None,
+) -> tuple[EndpointConfig, bytes, str]:
     if kind == "file":
         content, filename = _file_content(fmt)
         return EndpointConfig(kind="file", format=fmt), content, filename
-    return _build_db_endpoint(fmt, tmp_path, "src", suffix), b"", ""
+    return (
+        _build_db_endpoint(
+            fmt,
+            tmp_path,
+            "src",
+            suffix,
+            object_store=object_store,
+            sftp_server=sftp_server,
+        ),
+        b"",
+        "",
+    )
 
 
-def _build_destination(kind: str, fmt: str, tmp_path: Path, suffix: str) -> EndpointConfig:
+def _build_destination(
+    kind: str,
+    fmt: str,
+    tmp_path: Path,
+    suffix: str,
+    *,
+    object_store: str = "",
+    sftp_server: Any = None,
+) -> EndpointConfig:
     if kind == "file_export":
+        if fmt == "fixed_width":
+            # Widths are declared, never guessed — same contract an operator meets.
+            return EndpointConfig(
+                kind="file_export",
+                format=fmt,
+                extra={"fixed_width_layout": [
+                    {"name": "id", "width": 8},
+                    {"name": "amount", "width": 40},
+                ]},
+            )
         return EndpointConfig(kind="file_export", format=fmt)
-    return _build_db_endpoint(fmt, tmp_path, "dst", suffix)
+    return _build_db_endpoint(
+        fmt, tmp_path, "dst", suffix, object_store=object_store, sftp_server=sftp_server
+    )
 
 
 def _uses_snowflake(*endpoints: EndpointConfig) -> bool:
     return any(ep.format == "snowflake" for ep in endpoints if ep.kind == "database")
 
 
-def _seed_source(source: EndpointConfig) -> dict[str, Any]:
-    rows, _, summary = write_destination_database(
-        source, RECORDS, COLUMNS, SCHEMA, MAPPINGS
+def _stub_owns_fixture(source: EndpointConfig) -> bool:
+    """SaaS sources whose two-row fixture is served by the local stub itself.
+
+    A source-only connector has no writer to seed through, and a reverse-ETL
+    writer that is not a certified destination (Stripe: integer cents, not the
+    matrix's DECIMAL) is not the seeding path either — the stub's
+    ``seed_tabular_fixture`` already holds the rows the read must return.
+    """
+    if not (source.extra or {}).get("local_stub_not_customer_org"):
+        return False
+    caps = get_capabilities(source.format)
+    return not caps.get("write") or caps.get("certified_dest") is False
+
+
+def _snowflake_fixture_connection(source: EndpointConfig) -> Any:
+    cfg = resolve_connector_config(source)
+    return get_connection(
+        account=normalize_account(cfg.get("host", "")),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        database=cfg.get("database", ""),
+        schema=(cfg.get("schema") or "PUBLIC").upper(),
+        warehouse=cfg.get("warehouse", ""),
+        connection_string=cfg.get("connection_string", ""),
+        role=cfg.get("role", ""),
+        private_key=str(cfg.get("private_key") or ""),
+        private_key_passphrase=str(cfg.get("password") or ""),
     )
+
+
+def _seed_source(
+    source: EndpointConfig,
+    *,
+    records: list[dict[str, Any]] = RECORDS,
+    schema: dict[str, str] = SCHEMA,
+    snowflake_column_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if _stub_owns_fixture(source):
+        return {"seeded_by": "saas_desktop_stub"}
+    if snowflake_column_types is None:
+        rows, _, summary = write_destination_database(
+            source, records, COLUMNS, schema, MAPPINGS
+        )
+    else:
+        if source.kind != "database" or source.format != "snowflake":
+            raise ValueError(
+                "explicit Snowflake fixture types require a Snowflake source"
+            )
+
+        conn = _snowflake_fixture_connection(source)
+        table = quote_sql_identifier(str(source.table).upper())
+        column_defs = ", ".join(
+            f"{quote_sql_identifier(column)} {snowflake_column_types[column]}"
+            for column in COLUMNS
+        )
+        column_names = ", ".join(quote_sql_identifier(column) for column in COLUMNS)
+        placeholders = ", ".join("%s" for _ in COLUMNS)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE TABLE {table} ({column_defs})")
+                cur.executemany(
+                    f"INSERT INTO {table} ({column_names}) VALUES ({placeholders})",
+                    [tuple(record[column] for column in COLUMNS) for record in records],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        rows = len(records)
+        summary = {"type": "snowflake", "table": source.table}
     if rows != 2:
         pytest.skip(f"source seed wrote {rows} rows: {summary}")
     if summary.get("error"):
         pytest.skip(f"source seed error: {summary.get('error')}")
     return summary
+
+
+def test_salesforce_snowflake_fixture_preserves_declared_number_precision(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fakesnow")
+    source, _, _ = _build_source(
+        "database", "snowflake", tmp_path, uuid.uuid4().hex[:12]
+    )
+    _seed_source(source, **DESTINATION_NUMERIC_SOURCE_OVERRIDES["salesforce"])
+
+    conn = _snowflake_fixture_connection(source)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DESC TABLE {quote_sql_identifier(str(source.table).upper())}"
+            )
+            described_types = {
+                str(row[0]).lower(): str(row[1]).upper() for row in cur.fetchall()
+            }
+    finally:
+        conn.close()
+
+    assert described_types == {
+        "id": "NUMBER(18,0)",
+        "amount": "NUMBER(18,2)",
+    }
 
 
 ROUTES = sorted(LIVE_MATRIX)
@@ -355,12 +771,31 @@ ROUTES = sorted(LIVE_MATRIX)
     ROUTES,
     ids=lambda r: f"{r[0]}_{r[1]}_to_{r[2]}_{r[3]}",
 )
-def test_live_transfer_route(route: tuple[str, str, str, str], tmp_path: Path) -> None:
+def test_live_transfer_route(
+    route: tuple[str, str, str, str],
+    tmp_path: Path,
+    local_object_store: str,
+    local_sftp: Any,
+) -> None:
     src_kind, src_fmt, dst_kind, dst_fmt = route
     suffix = uuid.uuid4().hex[:12]
 
-    source, source_content, source_filename = _build_source(src_kind, src_fmt, tmp_path, suffix)
-    destination = _build_destination(dst_kind, dst_fmt, tmp_path, suffix)
+    source, source_content, source_filename = _build_source(
+        src_kind,
+        src_fmt,
+        tmp_path,
+        suffix,
+        object_store=local_object_store,
+        sftp_server=local_sftp,
+    )
+    destination = _build_destination(
+        dst_kind,
+        dst_fmt,
+        tmp_path,
+        suffix,
+        object_store=local_object_store,
+        sftp_server=local_sftp,
+    )
 
     if not _endpoint_reachable(source):
         pytest.skip(f"source {src_kind}/{src_fmt} not reachable")

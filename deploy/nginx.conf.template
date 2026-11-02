@@ -1,3 +1,13 @@
+# Behind the Railway edge: TLS ends there, so $scheme is http and $remote_addr
+# is the edge. Keep the scheme the edge saw, and append (never overwrite) the
+# client chain: the API reads X-Forwarded-For hops[-N] with
+# DATAWRAP_TRUSTED_PROXY_COUNT=3 (browser -> edge -> nginx -> edge -> API) or 2
+# over private networking. See docs/DEPLOYMENT.md.
+map $http_x_forwarded_proto $dw_forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
 server {
     listen ${PORT};
     server_name _;
@@ -14,15 +24,20 @@ server {
     }
 
     # Same-origin API proxy so the browser can use /api/v1 without CORS.
-    # Upstream host comes from DATAFLOW_API_BASE / VITE_API_BASE at container start.
+    # Upstream host comes from DATAWRAP_API_BASE at container start (start-nginx.sh).
     location /api/ {
         proxy_pass ${API_PROXY_PASS};
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
+        # Host is the backend so the edge can route; the public host travels in
+        # X-Forwarded-Host (honoured by the API only against its allow-list).
         proxy_set_header Host ${API_PROXY_HOST};
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $dw_forwarded_proto;
+        # X-Real-IP is not a client address here ($remote_addr is the edge);
+        # the API ignores it whenever X-Forwarded-For is present.
+        proxy_set_header X-Real-IP "";
         proxy_set_header Authorization $http_authorization;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
@@ -33,6 +48,8 @@ server {
         proxy_busy_buffers_size 512k;
         proxy_temp_file_write_size 512k;
         client_max_body_size 256m;
+        # Default 8k/16k spills POST /preflight/explain to client_temp (warn, not 413).
+        client_body_buffer_size 2m;
     }
 
     # Real API liveness (not the static web /health stub).
@@ -45,7 +62,15 @@ server {
         proxy_read_timeout 10s;
     }
 
+    # Hashed Vite assets are content-addressed. index.html must revalidate so a
+    # deploy cannot leave a cached shell requesting deleted DashboardPage-*.js.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
     location / {
+        add_header Cache-Control "no-cache";
         try_files $uri $uri/ /index.html;
     }
 }

@@ -22,7 +22,8 @@ hardcoding ``\"public\"``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import Literal
 
 FoldMode = Literal["lower", "upper", "none"]
@@ -62,14 +63,39 @@ DIALECT_PROFILES: dict[str, DialectProfile] = {
     "presto": DialectProfile("presto", "public", True, "none", "double"),
     "trino": DialectProfile("trino", "default", True, "none", "double"),
     "generic_sql": DialectProfile("generic_sql", None, True, "none", "double"),
+    "iceberg": DialectProfile("iceberg", None, True, "none", "double", "namespace"),
+    "apache_iceberg": DialectProfile("apache_iceberg", None, True, "none", "double", "namespace"),
+    "s3": DialectProfile("s3", None, False, "none", "none", "bucket"),
+    "gcs": DialectProfile("gcs", None, False, "none", "none", "bucket"),
+    "adls": DialectProfile("adls", None, False, "none", "none", "container"),
 }
 
 _ALIASES: dict[str, str] = {
     "mssql+pyodbc": "sqlserver",
+    "mssql+pymssql": "sqlserver",
+    "synapse": "sqlserver",
+    "azure_synapse": "sqlserver",
+    "synapse_analytics": "sqlserver",
+    "azure_synapse_dedicated": "sqlserver",
+    "azure_synapse_serverless": "sqlserver",
     "postgresql+psycopg2": "postgresql",
     "mysql+pymysql": "mysql",
     "oracle+oracledb": "oracle",
+    "oracle+cx_oracle": "oracle",
+    "autonomous_database": "oracle",
     "bq": "bigquery",
+    "motherduck": "duckdb",
+    "databricks_sql": "databricks",
+    "amazon_redshift": "redshift",
+    "redshift_serverless": "redshift",
+    "amazon_s3": "s3",
+    "aws_s3": "s3",
+    "minio": "s3",
+    "s3_compatible": "s3",
+    "google_cloud_storage": "gcs",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
 }
 
 
@@ -77,11 +103,20 @@ def normalize_driver(driver: str | None) -> str:
     raw = (driver or "").strip().lower()
     if not raw:
         return ""
-    return _ALIASES.get(raw, raw)
+    if raw in _ALIASES:
+        return _ALIASES[raw]
+    from src.transfer.engine_family import sql_duplex_family
+
+    return sql_duplex_family(raw) or raw
 
 
 def dialect_profile(driver: str | None) -> DialectProfile:
     key = normalize_driver(driver)
+    if key == "bigquery":
+        # The default dataset is a brand artifact (switchable, off by default).
+        from services.brand import bigquery_default_dataset
+
+        return replace(DIALECT_PROFILES[key], default_schema=bigquery_default_dataset())
     if key in DIALECT_PROFILES:
         return DIALECT_PROFILES[key]
     # Unknown SQL-ish engines: no Postgres leak — require explicit schema.
@@ -169,6 +204,242 @@ def schema_from_cfg(
     return normalize_schema(driver, raw, username=user) or ""
 
 
+def catalog_namespace(
+    driver: str | None,
+    cfg: dict | None = None,
+    *,
+    schema: str | None = None,
+) -> str:
+    """The name the engine catalog uses to find this object.
+
+    Distinct from :func:`schema_from_cfg`, which is the SQL qualifier in front
+    of a table. MySQL has no schema layer, so that helper correctly returns
+    empty — but ``information_schema.columns.table_schema`` is the *database
+    name*. Looking up ``public`` on MySQL matches nothing and silently falls
+    back to mapping hints, which is how ``timestamp`` (an instant on MySQL, a
+    wall clock on PostgreSQL) gets misclassified.
+
+    This is the single lookup rule every catalog reader should use. Extend the
+    per-dialect branch when a new engine's catalog is keyed differently; do
+    not copy a ``or "public"`` fallback into the caller.
+    """
+    cfg = cfg or {}
+    profile = dialect_profile(driver)
+    hinted = schema if schema is not None else cfg.get("schema")
+    if profile.uses_schema:
+        return schema_from_cfg(driver, cfg, schema=hinted if isinstance(hinted, str) or hinted is None else str(hinted))
+    key = normalize_driver(driver)
+    if key in {"mysql", "mariadb"}:
+        database = str(cfg.get("database") or "").strip()
+        leaked = str(hinted or "").strip()
+        # A leaked Postgres default is not a MySQL database.
+        if leaked.lower() in {"", "public"}:
+            return database
+        return leaked or database
+    return str(cfg.get("database") or hinted or "").strip()
+
+
+# Dialects that reject ``LIMIT``/``OFFSET`` and use the SQL:2008 form instead.
+# Oracle (12c+), SQL Server (2012+), DB2 and Derby all parse
+# ``OFFSET n ROWS FETCH NEXT m ROWS ONLY``; emitting ``LIMIT`` there raises
+# ORA-03047 / incorrect-syntax and makes the source unreadable.
+_FETCH_FIRST_DIALECTS: frozenset[str] = frozenset(
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "autonomous_database",
+        "sqlserver",
+        "synapse_analytics",
+        "azure_synapse_dedicated",
+        "azure_synapse_serverless",
+        "db2",
+        "ibm_db2",
+        "db2_luw",
+        "db2_iseries",
+        "derby",
+    }
+)
+
+_ORACLE_LIKE: frozenset[str] = frozenset(
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "autonomous_database",
+    }
+)
+
+
+def uses_fetch_first_pagination(driver: str | None) -> bool:
+    """True when the dialect needs ``OFFSET … FETCH NEXT`` instead of ``LIMIT``."""
+    return normalize_driver(driver) in _FETCH_FIRST_DIALECTS or (driver or "").strip().lower() in _FETCH_FIRST_DIALECTS
+
+
+def warehouse_sql_quote_dialect(driver: str | None) -> str | None:
+    """Exact dest-engine COUNT(*) family. Stats views never this path.
+
+    SQL Server / Oracle (catalog SKUs alias). Snowflake, BigQuery, DuckDB,
+    Databricks, and Redshift: ``SELECT COUNT(*)`` is exact;
+    ``INFORMATION_SCHEMA`` / ``__TABLES__.row_count`` / clustering stats /
+    ``SVV_TABLE_INFO.tbl_rows`` never close. Redshift is PG-wire, not
+    PG-catalog — ``to_regclass`` is not this family.
+    """
+    key = dialect_profile(driver).driver
+    if key == "sqlserver":
+        return "sqlserver"
+    if key == "oracle":
+        return "oracle"
+    if key in {"snowflake", "bigquery", "duckdb", "databricks", "redshift"}:
+        return key
+    return None
+
+
+def is_sqlserver_like(driver: str | None) -> bool:
+    return warehouse_sql_quote_dialect(driver) == "sqlserver"
+
+
+def is_oracle_like(driver: str | None) -> bool:
+    if dialect_profile(driver).driver == "oracle":
+        return True
+    raw = (driver or "").strip().lower()
+    return normalize_driver(driver) in _ORACLE_LIKE or raw in _ORACLE_LIKE
+
+
+_UPPER_FOLDING_DIALECTS: frozenset[str] = frozenset(
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "autonomous_database",
+        "snowflake",
+        "db2",
+        "ibm_db2",
+        "db2_luw",
+        "db2_iseries",
+        "derby",
+        "h2",
+        "hsqldb",
+        "firebird",
+        "teradata",
+    }
+)
+
+
+def folds_identifiers_upper(driver: str | None) -> bool:
+    """True when unquoted identifiers are stored folded to UPPER CASE.
+
+    The canonical profile table only carries the engines it lists; the
+    Oracle/DB2 SKU aliases and other SQL-standard folders resolve here so every
+    caller agrees on identifier case.
+    """
+    raw = (driver or "").strip().lower()
+    if raw in _UPPER_FOLDING_DIALECTS or normalize_driver(driver) in _UPPER_FOLDING_DIALECTS:
+        return True
+    return dialect_profile(driver).fold == "upper"
+
+
+def denormalize_result_key(driver: str | None, name: str) -> str:
+    """Physical spelling of a DBAPI result key, for use inside quoted SQL.
+
+    Drivers for upper-folding engines (Oracle, DB2, Snowflake) hand back
+    case-insensitive column names lowercased, so quoting the key verbatim
+    references a column that does not exist (ORA-00904). A name that is already
+    mixed case was created quoted and is returned exactly as stored.
+    """
+    if not name:
+        return name
+    if not folds_identifiers_upper(driver):
+        return name
+    return name.upper() if name.islower() else name
+
+
+_RESULT_WINDOW_RE = re.compile(
+    r"\b(?:LIMIT|TOP|FETCH\s+(?:FIRST|NEXT))\b",
+    re.IGNORECASE,
+)
+
+
+def query_already_windowed(sql: str) -> bool:
+    """True when the statement already has a row window (any dialect spelling)."""
+    return bool(_RESULT_WINDOW_RE.search(sql or ""))
+
+
+def _is_sqlserver_sample(driver: str | None) -> bool:
+    raw = (driver or "").strip().lower()
+    return is_sqlserver_like(driver) or raw in {"mssql", "sqlserver"}
+
+
+def sample_select_sql(driver: str | None, qualified: str, limit: int) -> str:
+    """``SELECT`` of at most ``limit`` rows. Never emits ``LIMIT`` on Oracle/DB2.
+
+    Oracle rejects ``LIMIT`` (ORA-03047). A table sample is not a paged scan,
+    so it does not need ``ORDER BY`` — ``FETCH FIRST n ROWS ONLY`` is legal
+    there, and SQL Server uses ``TOP``.
+    """
+    n = int(limit)
+    if _is_sqlserver_sample(driver):
+        return f"SELECT TOP {n} * FROM {qualified}"  # nosec B608
+    if uses_fetch_first_pagination(driver):
+        return f"SELECT * FROM {qualified} FETCH FIRST {n} ROWS ONLY"  # nosec B608
+    return f"SELECT * FROM {qualified} LIMIT {n}"  # nosec B608
+
+
+def append_result_limit(driver: str | None, sql: str, limit: int) -> str:
+    """Bound a read-only statement without inventing ``LIMIT`` on Oracle/DB2.
+
+    Metadata statements and queries that already name a window are unchanged.
+    SQL Server gets ``SELECT TOP n``. Fetch-first dialects get
+    ``FETCH FIRST n ROWS ONLY``. Everyone else keeps ``LIMIT``.
+    """
+    clean = (sql or "").strip().rstrip(";")
+    upper = clean.upper()
+    if not clean:
+        return clean
+    if upper.startswith(("SHOW", "DESCRIBE", "EXPLAIN", "ANALYZE", "PRAGMA")):
+        return clean
+    if query_already_windowed(clean):
+        return clean
+    n = int(limit)
+    if _is_sqlserver_sample(driver):
+        if upper.startswith("SELECT "):
+            return f"SELECT TOP {n} {clean[7:]}"
+        return clean
+    if uses_fetch_first_pagination(driver):
+        return f"{clean} FETCH FIRST {n} ROWS ONLY"
+    return f"{clean} LIMIT {n}"
+
+
+def page_clause(driver: str | None, offset: int, limit: int) -> str:
+    """Dialect-correct *window* clause. Caller supplies a unique ORDER BY.
+
+    Microsoft: each OFFSET/FETCH page is an independent query and is invalid
+    without ORDER BY. Oracle/DB2 reject ``LIMIT`` (ORA-03047). OFFSET is
+    O(n²) and can skip/duplicate rows when the order key is not unique.
+
+    Full-population reads (SCD2 current digest, mirror active digest, staging
+    drain) must not use this helper — stream one SELECT
+    (``iter_select_row_dicts`` / ``stream_select_checksum``). Dest-engine
+    ``HASH_AGG`` / ``CHECKSUM_AGG`` pushdown is a future enhancement of that
+    kernel, not a second path: CHECKSUM_AGG ignores NULL; HASH_AGG is not
+    portable.
+    """
+    if uses_fetch_first_pagination(driver):
+        return f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
+    return f"LIMIT {int(limit)} OFFSET {int(offset)}"
+
+
+def zero_row_probe_sql(driver: str | None, qualified: str) -> str:
+    """A ``SELECT`` that returns column metadata but no rows, on any dialect."""
+    raw = (driver or "").strip().lower()
+    if is_sqlserver_like(driver) or raw in {"mssql", "sqlserver"}:
+        return f"SELECT TOP 0 * FROM {qualified}"  # nosec B608
+    if uses_fetch_first_pagination(driver):
+        # ``LIMIT 0`` is a syntax error on Oracle/DB2; ``WHERE 1=0`` is universal.
+        return f"SELECT * FROM {qualified} WHERE 1=0"  # nosec B608
+    return f"SELECT * FROM {qualified} LIMIT 0"  # nosec B608
+
+
 def quote_char_for(driver: str | None) -> str:
     style = dialect_profile(driver).quote
     if style == "backtick":
@@ -178,3 +449,60 @@ def quote_char_for(driver: str | None) -> str:
     if style == "none":
         return ""
     return '"'
+
+
+def stored_identifier(driver: str | None, name: str) -> str:
+    """``name`` as a table DataFlow creates on this engine stores it.
+
+    The one identifier rule for hand-built SQL (SCD2 / mirror). Snowflake
+    stores what DataFlow creates folded — the writer folds create-new names
+    (``snowflake_conn.snowflake_column_ref``) and SQLAlchemy emits lower-case
+    names unquoted — and its quoted identifiers are case-sensitive, so quoting
+    the logical ``"id"`` never matched the stored ``ID`` (D47). It is also the
+    spelling a rerun reads back, so anything keyed by column name (the SCD2
+    row hash) stays stable across runs. It takes the same fold the writer
+    applies; every other engine keeps the verbatim name.
+    """
+    return fold_identifier(driver, name) if normalize_driver(driver) == "snowflake" else name
+
+
+def quote_stored_identifier(driver: str | None, name: str) -> str:
+    """:func:`stored_identifier`, quoted in the engine's own quote character."""
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    return quote_sql_identifier(stored_identifier(driver, name), quote_char_for(driver) or '"')
+
+
+def stores_boolean_as_numeric(driver: str | None) -> bool:
+    """True when BOOLEAN is INTEGER/BIT/NUMBER(1), not ANSI BOOLEAN.
+
+    SQLAlchemy dialect.name is ``mssql`` for SQL Server. Catalog SKUs alias
+    through ``warehouse_sql_quote_dialect``. T-SQL has no ``IS TRUE``;
+    Oracle 19c has no BOOLEAN (NUMBER(1) until 23c).
+    """
+    kind = (driver or "").strip().lower()
+    if kind in {"sqlite", "mssql"} or kind.startswith("mssql"):
+        return True
+    return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
+
+
+def sql_bool_is_true(driver: str | None, quoted_column: str) -> str:
+    """Predicate: column is the SQL TRUE / 1 value."""
+    if stores_boolean_as_numeric(driver):
+        return f"{quoted_column} = 1"
+    return f"{quoted_column} IS TRUE"
+
+
+def sql_bool_is_not_true(driver: str | None, quoted_column: str) -> str:
+    """Predicate: column is FALSE or NULL (SQL ``IS NOT TRUE``)."""
+    if stores_boolean_as_numeric(driver):
+        return f"({quoted_column} IS NULL OR {quoted_column} = 0)"
+    return f"{quoted_column} IS NOT TRUE"
+
+
+def sql_bool_true_literal(driver: str | None) -> str:
+    return "1" if stores_boolean_as_numeric(driver) else "TRUE"
+
+
+def sql_bool_false_literal(driver: str | None) -> str:
+    return "0" if stores_boolean_as_numeric(driver) else "FALSE"

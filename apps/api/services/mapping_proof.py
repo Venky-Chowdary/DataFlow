@@ -9,7 +9,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import (
+    ddl_type,
+    is_lossy_coercion,
+    materialize_dest_ddl,
+    normalize_logical_type,
+)
 
 # Transforms that mutate string content (fidelity risk even when intentional).
 _MUTATING_TRANSFORMS = frozenset({
@@ -19,6 +24,7 @@ _MUTATING_TRANSFORMS = frozenset({
     "lower",
     "hash_pii",
     "mask_pii",
+    "redact",
     "strip_controls",
     "normalize_unicode",
     "phone",
@@ -62,6 +68,17 @@ DELIVERY_SEMANTICS = (
 def transform_fidelity(transform: str | None) -> str:
     """Classify transform risk: preserve | mutate | lossy_cast."""
     t = (transform or "none").strip().lower()
+    # Aliases grade as their engine id — ``cast_integer``/``to_int`` land in
+    # _LOSSY_CAST_TRANSFORMS via ``integer`` instead of silently grading
+    # "mutate"/"preserve" next to an identical column (D40).
+    try:
+        from services.transform_engine import normalize_engine_transform
+
+        resolved = normalize_engine_transform(t)
+        if resolved:
+            t = str(resolved).lower()
+    except Exception:
+        pass
     if t in _PRESERVE_TRANSFORMS:
         return "preserve"
     if t in _LOSSY_CAST_TRANSFORMS:
@@ -71,12 +88,25 @@ def transform_fidelity(transform: str | None) -> str:
     return "mutate"
 
 
+def _mapping_population(mapping: dict, population: list | None) -> list | None:
+    """Measured cells for this column, or None when nobody sampled it."""
+    if population is not None:
+        return list(population)
+    for key in ("samples", "sample_values", "preview_values"):
+        raw = mapping.get(key)
+        if isinstance(raw, (list, tuple)) and raw:
+            return list(raw)[:256]
+    return None
+
+
 def mapping_fidelity(
     mapping: dict,
     *,
     declared_source_type: str = "",
     declared_target_type: str = "",
     destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
+    population: list | None = None,
 ) -> dict[str, object]:
     """Canonical per-column fidelity verdict for one mapping.
 
@@ -101,17 +131,134 @@ def mapping_fidelity(
         or mapping.get("inferred_type")
         or "VARCHAR"
     )
-    tgt_type = str(
+    stamp = str(
         declared_target_type
         or mapping.get("target_type")
         or mapping.get("dest_type")
-        or src_type
-    )
+        or ""
+    ).strip()
+    create_new = bool(mapping.get("create_new")) or str(
+        mapping.get("assignment_strategy") or ""
+    ) in {"identity_passthrough", "create_compatible_new"}
     transform = str(mapping.get("transform") or "none")
     t_fidelity = transform_fidelity(transform)
-
     dest = (destination_db_type or "").strip().lower()
-    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
+    # Existing match without Map/Studio stamp: refuse source_type invent for a
+    # false-green preserve verdict (partial Studio honesty).
+    # A confirmed-missing target is create, not an unread collapse.
+    if dest_table_exists is False and not stamp:
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "will_create",
+            "reason": (
+                "Destination object does not exist yet — the column will be "
+                "created from the source type. This is not a fidelity collapse."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.LOSSLESS.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
+        }
+    if not stamp and not create_new:
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "cast",
+            "reason": (
+                "Destination type pending Studio/Map stamp — refuse source_type "
+                "invent for fidelity (confirm live schema or stamp Map)."
+            ),
+            "type_narrowing": True,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+            "invents_capacity": False,
+            "requires_risk_contract": True,
+        }
+    # Create-new: prefer Map stamp, else dialect create-new physical — never
+    # green UUID→UUID when writers emit STRING(36) (BQ invent cliff).
+    if create_new and not stamp:
+        from services.conversion_contract import ConversionClass
+
+        if not dest:
+            return {
+                "verdict": "cast",
+                "reason": (
+                    "Create-new destination type pending Map stamp / dest_db — "
+                    "refuse source_type identity invent for fidelity."
+                ),
+                "type_narrowing": True,
+                "transform_fidelity": t_fidelity,
+                "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+                "invents_capacity": False,
+                "requires_risk_contract": True,
+            }
+        try:
+            from services.decision_kernel import create_new_mapping_target_type
+
+            proof_samples = None
+            for key in ("samples", "sample_values", "preview_values"):
+                raw = mapping.get(key)
+                if raw:
+                    proof_samples = [str(x) for x in list(raw)[:32]]
+                    break
+            tgt_type = str(
+                create_new_mapping_target_type(
+                    src_type, dest, samples=proof_samples
+                )
+                or ""
+            ).strip()
+        except Exception:
+            tgt_type = ""
+        if not tgt_type:
+            # Never fall back to source identity (UUID→UUID false-green).
+            return {
+                "verdict": "cast",
+                "reason": (
+                    f"Create-new physical stamp unavailable for {src_type} on "
+                    f"{dest} — refuse source_type identity invent for fidelity."
+                ),
+                "type_narrowing": True,
+                "transform_fidelity": t_fidelity,
+                "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+                "invents_capacity": False,
+                "requires_risk_contract": True,
+            }
+    else:
+        tgt_type = stamp or src_type
+
+    from services.timezone_policy import effective_source_type as _tz_effective
+
+    from services.document_instant import document_instant_utc_invent
+
+    if document_instant_utc_invent(
+        _tz_effective(src_type, transform), tgt_type, dest_db=dest
+    ):
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "lossy_cast",
+            "reason": (
+                f"{src_type} → {tgt_type} stamps a zone the source never proved: "
+                "this store holds instants only, so every row is written as if "
+                "its wall clock were UTC. Declare the source zone, or accept the "
+                "UTC-normalize risk."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_TRANSFORM.value,
+            "invents_capacity": False,
+            "requires_risk_contract": True,
+        }
+
+    if is_lossy_coercion(
+        _tz_effective(src_type, transform),
+        tgt_type,
+        dest_db=dest,
+        dest_table_exists=dest_table_exists,
+        population=_mapping_population(mapping, population),
+    ):
         from services.conversion_contract import classify_conversion
 
         conv = classify_conversion(
@@ -147,18 +294,46 @@ def mapping_fidelity(
     if t_fidelity == "lossy_cast":
         from services.conversion_contract import ConversionClass
 
+        # Type path already proven non-lossy above. Typed parse (decimal/integer/…)
+        # is a quarantine guard for dirty cells — not precision invent. Create-new
+        # and same-family carriers are equivalent (preserve), so Map does not spam
+        # Review/Risk Contract on Excel DECIMAL → Postgres NUMERIC.
         return {
-            "verdict": "cast",
+            "verdict": "preserve",
             "reason": (
-                f"Parsed via '{transform}'; the type path holds, but unparseable "
-                "values are quarantined rather than written."
+                f"{src_type} → {tgt_type} is equivalent"
+                f"{' (create-new)' if create_new else ''}; "
+                f"'{transform}' parse guards quarantine unparseable cells only."
             ),
             "type_narrowing": False,
             "transform_fidelity": t_fidelity,
-            "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+            "conversion_class": ConversionClass.LOSSLESS.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
+            "parse_guard": transform,
+        }
+    src_tok = src_type.strip().lower().split("(")[0].strip()
+    tgt_tok = (stamp or tgt_type or "").strip().lower().split("(")[0].strip()
+    if src_tok != tgt_tok and {src_tok, tgt_tok} == {"json", "jsonb"}:
+        # jsonb stores the parsed document: whitespace, key order and duplicate
+        # keys normalize on write. The JSON *value* is equal; the bytes are not —
+        # "preserve" overclaims a verbatim round-trip (C07 minor).
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "normalizing",
+            "reason": (
+                f"{src_type} → {tgt_type}: jsonb re-serializes the document — "
+                "whitespace, key order and duplicate keys normalize on write; "
+                "the JSON value stays equal but the bytes do not round-trip."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.LOSSLESS.value,
             "invents_capacity": False,
             "requires_risk_contract": False,
         }
+
     from services.conversion_contract import ConversionClass
 
     return {
@@ -178,6 +353,8 @@ def stamp_mapping_fidelity(
     source_types: dict[str, str] | None = None,
     target_types: dict[str, str] | None = None,
     destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
+    samples_by_source: dict[str, list] | None = None,
 ) -> list[dict]:
     """Attach the canonical verdict to every mapping, in place of guessing.
 
@@ -189,11 +366,17 @@ def stamp_mapping_fidelity(
     tgt_declared = target_types or {}
     out: list[dict] = []
     for m in mappings:
+        source_name = str(m.get("source") or "")
+        sampled = None
+        if samples_by_source is not None and source_name in samples_by_source:
+            sampled = list(samples_by_source[source_name])
         verdict = mapping_fidelity(
             m,
-            declared_source_type=str(src_declared.get(str(m.get("source") or "")) or ""),
+            declared_source_type=str(src_declared.get(source_name) or ""),
             declared_target_type=str(tgt_declared.get(str(m.get("target") or "")) or ""),
             destination_db_type=destination_db_type,
+            dest_table_exists=dest_table_exists,
+            population=sampled,
         )
         out.append({
             **m,
@@ -267,6 +450,7 @@ def _mapping_risks(
     dest_mode: str,
     destination_db_type: str,
     sync_mode: str = "",
+    dest_table_exists: bool | None = None,
 ) -> list[dict[str, str]]:
     risks: list[dict[str, str]] = []
     transform = (mapping.get("transform") or "none").lower()
@@ -283,7 +467,7 @@ def _mapping_risks(
                 "severity": "info",
                 "message": "Trim strips leading/trailing whitespace — values change vs source.",
             })
-        elif transform in {"hash_pii", "mask_pii"}:
+        elif transform in {"hash_pii", "mask_pii", "redact"}:
             risks.append({
                 "code": "pii_transform",
                 "severity": "info",
@@ -320,7 +504,12 @@ def _mapping_risks(
             dest = "databricks"
         if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
             dest = "iceberg"
-    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
+    if is_lossy_coercion(
+        src_type,
+        tgt_type,
+        dest_db=dest,
+        dest_table_exists=dest_table_exists,
+    ):
         risks.append({
             "code": "type_narrowing",
             "severity": "warn",
@@ -334,10 +523,10 @@ def _mapping_risks(
 
     # Align Map proof severity with G3 fidelity helpers (never bury as info).
     try:
+        from services.decision_kernel import is_precision_collapse_coercion
         from services.type_system import (
             is_nested_document_collapse,
             is_nested_shape_collapse,
-            is_precision_collapse_coercion,
             is_timezone_polarity_loss,
         )
     except ImportError:  # pragma: no cover
@@ -345,6 +534,17 @@ def _mapping_risks(
         is_nested_shape_collapse = None  # type: ignore
         is_precision_collapse_coercion = None  # type: ignore
         is_timezone_polarity_loss = None  # type: ignore
+
+    # One named policy per temporal pair — the same resolution Validate and
+    # Execute read, so a route cannot green under one policy and write another.
+    from services.timezone_policy import resolve_timezone_policy
+
+    # A declared zone is the operator supplying what the source never recorded,
+    # so the type path is judged on what the column carries after it.
+    from services.timezone_policy import effective_source_type
+
+    tz_src_type = effective_source_type(src_type, transform)
+    tz_policy = resolve_timezone_policy(tz_src_type, tgt_type, dest_db=dest)
 
     if is_timezone_polarity_loss and is_timezone_polarity_loss(
         src_type, tgt_type, dest_db=dest
@@ -354,26 +554,35 @@ def _mapping_risks(
             "severity": "warn",
             "message": (
                 f"Timezone polarity drop: {src_type} → {tgt_type} discards offset "
-                "(Airbyte timestamp_with_timezone → without_timezone class). "
-                "Prefer TIMESTAMPTZ/TIMESTAMP_TZ/DATETIMEOFFSET on the destination."
+                "(timestamp_with_timezone → without_timezone). "
+                + (
+                    tz_policy.remediation
+                    if tz_policy and tz_policy.remediation
+                    else "Prefer TIMESTAMPTZ/TIMESTAMP_TZ/DATETIMEOFFSET on the destination."
+                )
             ),
+            **({"timezone_policy": tz_policy.as_dict()} if tz_policy else {}),
         })
-    elif src_logical in {"datetime", "timestamp"} and tgt_logical in {"datetime", "timestamp", "date"}:
-        if dest in {
-            "snowflake", "bigquery", "redshift", "postgresql", "postgres", "mysql",
-            "databricks", "iceberg",
-        } or "timestamp" in tgt_type.lower():
-            risks.append({
-                "code": "timezone_policy",
-                "severity": "info",
-                "message": (
-                    "Temporal write follows destination timezone/bind policy "
-                    f"({destination_db_type or 'dest'}); MySQL TIMESTAMP vs DATETIME "
-                    "and Iceberg timestamptz vs timestamp without TZ differ — confirm expectations."
-                ),
-            })
+    elif tz_policy is not None:
+        risks.append({
+            "code": "timezone_policy",
+            "severity": "warn" if tz_policy.requires_contract else "info",
+            "message": (
+                f"Timezone policy {tz_policy.policy}: destination reads as "
+                f"{tz_policy.destination_reads_as} "
+                f"(instant {'preserved' if tz_policy.instant_preserved else 'NOT preserved'}, "
+                f"offset label {'preserved' if tz_policy.offset_label_preserved else 'not stored'}"
+                f", range {tz_policy.range_limit}). {tz_policy.note}"
+            ),
+            "timezone_policy": tz_policy.as_dict(),
+        })
 
-    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest):
+    if is_precision_collapse_coercion and is_precision_collapse_coercion(
+        src_type,
+        tgt_type,
+        dest_db=dest,
+        dest_table_exists=dest_table_exists,
+    ):
         if not any(r.get("code") == "timezone_polarity_loss" for r in risks):
             risks.append({
                 "code": "precision_collapse",
@@ -385,7 +594,9 @@ def _mapping_risks(
                 ),
             })
 
-    if is_nested_document_collapse and is_nested_document_collapse(src_type, tgt_type):
+    if is_nested_document_collapse and is_nested_document_collapse(
+        src_type, tgt_type, dest_db=dest
+    ):
         risks.append({
             "code": "nested_document_collapse",
             "severity": "warn",
@@ -595,28 +806,50 @@ def _mapping_risks(
 def _schema_decision(mapping: dict, *, dest_mode: str, destination_db_type: str) -> str:
     tgt = mapping.get("target") or ""
     src_type = mapping.get("source_type") or "VARCHAR"
-    tgt_type = mapping.get("target_type") or mapping.get("dest_type") or src_type
-    # Prefer operator/pipeline target type for DDL display — preserve DECIMAL(p,s).
-    try:
-        from services.type_system import ddl_carrier_type
-
-        carrier = ddl_carrier_type(str(tgt_type or src_type))
-    except Exception:
-        carrier = str(tgt_type or src_type)
-    dest = (destination_db_type or "").strip().lower()
+    stamp = str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
     create_row = bool(mapping.get("create_new")) or str(
         mapping.get("assignment_strategy") or ""
     ) in {"identity_passthrough", "create_compatible_new", "pending_dest_schema"}
+    # Create-new / ADD may preview from source; MATCH existing must not invent
+    # a destination carrier from source_type when Map/Studio left a gap.
+    type_for_ddl = stamp or (src_type if (create_row or dest_mode == "create_new") else "")
+    try:
+        from services.type_system import ddl_carrier_type
+
+        carrier = ddl_carrier_type(str(type_for_ddl)) if type_for_ddl else ""
+    except Exception:
+        carrier = str(type_for_ddl or "")
+    dest = (destination_db_type or "").strip().lower()
     if dest_mode == "schema_pending" or str(mapping.get("assignment_strategy") or "") == "pending_dest_schema":
-        return f"PENDING destination schema for `{tgt}` ({carrier}) — confirm table before create-new"
+        if carrier:
+            return (
+                f"PENDING destination schema for `{tgt}` ({carrier}) — "
+                "confirm table before create-new"
+            )
+        return (
+            f"PENDING destination schema for `{tgt}` — "
+            "confirm table/types before create-new"
+        )
     if dest_mode == "create_new" or (create_row and mapping.get("exists_in_destination") is False):
-        native = ddl_type(dest, carrier) if dest else carrier
+        native = ddl_type(dest, carrier or src_type) if dest else (carrier or src_type)
         return f"CREATE column `{tgt}` as {native}"
     exists = mapping.get("exists_in_destination")
     if exists is False or create_row:
+        # Additive ADD on an existing table must carry Map stamp — never invent
+        # VARCHAR from source under partial Studio (write path refuse parity).
+        if not carrier:
+            return (
+                f"ADD new column `{tgt}` — Map target_type required "
+                "(refuse source_type invent under partial Studio)"
+            )
         native = ddl_type(dest, carrier) if dest else carrier
         return f"ADD new column `{tgt}` as {native} (not in introspected schema)"
-    return f"MATCH existing `{tgt}` ({carrier})"
+    if carrier:
+        return f"MATCH existing `{tgt}` ({carrier})"
+    return (
+        f"MATCH existing `{tgt}` — destination type pending Studio/Map stamp "
+        "(refuse source_type invent)"
+    )
 
 
 def _sample_preview_pair(mapping: dict) -> tuple[list[str], list[str]]:
@@ -684,7 +917,12 @@ def _sample_preview(mapping: dict) -> list[str]:
     return masked
 
 
-def _evidence(mapping: dict, *, destination_db_type: str = "") -> dict[str, Any]:
+def _evidence(
+    mapping: dict,
+    *,
+    destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
+) -> dict[str, Any]:
     profile = mapping.get("column_profile") or {}
     sample_n = mapping.get("sample_count")
     if sample_n is None:
@@ -708,6 +946,7 @@ def _evidence(mapping: dict, *, destination_db_type: str = "") -> dict[str, Any]
         str(mapping.get("source_type") or ""),
         str(mapping.get("target_type") or mapping.get("source_type") or ""),
         dest_db=evidence_dest,
+        dest_table_exists=dest_table_exists,
     )
     preview, preview_clear = _sample_preview_pair(mapping)
     classification = None
@@ -798,6 +1037,7 @@ def mapping_proof_or_build(
     dest_kind: str = "",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> dict[str, Any]:
     """Prefer a persisted proof; otherwise build from the mappings that ran."""
     if isinstance(existing, dict) and existing.get("mappings"):
@@ -813,7 +1053,40 @@ def mapping_proof_or_build(
         dest_kind=dest_kind,
         sync_mode=sync_mode,
         destination_table_exists=destination_table_exists,
+        source_db_type=source_db_type,
     )
+
+
+def mappings_from_request(request: Any) -> list[dict[str, Any]]:
+    """Mappings this run applies.
+
+    A single-table request stores them on the request. A multi-table request
+    stores them on each selected stream contract and leaves the top-level list
+    empty. The top-level list wins when it is non-empty so a contract draft
+    cannot hide an explicit map. Each contract row keeps its stream name.
+    """
+    if isinstance(request, dict):
+        top = request.get("mappings")
+        contracts = request.get("stream_contracts")
+    else:
+        top = getattr(request, "mappings", None)
+        contracts = getattr(request, "stream_contracts", None)
+    rows = [dict(item) for item in (top or []) if isinstance(item, dict)]
+    if rows:
+        return rows
+    out: list[dict[str, Any]] = []
+    for contract in contracts or []:
+        if not isinstance(contract, dict) or contract.get("selected") is False:
+            continue
+        stream = str(contract.get("name") or contract.get("stream") or "").strip()
+        for raw in contract.get("mappings") or []:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            if stream and not str(row.get("stream") or "").strip():
+                row["stream"] = stream
+            out.append(row)
+    return out
 
 
 def build_mapping_proof(
@@ -825,6 +1098,7 @@ def build_mapping_proof(
     dest_kind: str = "",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> dict[str, Any]:
     """Build universal mapping proof for Map/Validate UI — any connector pair.
 
@@ -832,7 +1106,26 @@ def build_mapping_proof(
     - ``create_new`` — confirmed missing table (or every mapping is create-new with no targets)
     - ``schema_pending`` — destination existence/schema unknown; refuse invent create-new
     - ``match_existing`` — destination columns present (adds are per-row, not whole-plan create)
+
+    ``source_db_type`` is bound for the fidelity verdicts: the plan, run
+    payload and job-detail routes build this proof outside any transfer, and
+    an unbound PostgreSQL VARCHAR → SQL Server NVARCHAR read as lossy (D158).
     """
+    from services.source_engine_scope import active_source_engine, bind_source_engine
+
+    scoped_engine = (source_db_type or "").strip().lower()
+    if scoped_engine and not active_source_engine():
+        with bind_source_engine(scoped_engine):
+            return build_mapping_proof(
+                mappings,
+                target_columns=target_columns,
+                destination_db_type=destination_db_type,
+                source_kind=source_kind,
+                dest_kind=dest_kind,
+                sync_mode=sync_mode,
+                destination_table_exists=destination_table_exists,
+                source_db_type=source_db_type,
+            )
     has_targets = bool(target_columns)
     pending = any(
         str(m.get("assignment_strategy") or "") == "pending_dest_schema"
@@ -869,15 +1162,30 @@ def build_mapping_proof(
         confidences.append(conf)
         transform = m.get("transform") or "none"
         fidelity = transform_fidelity(str(transform))
-        verdict = mapping_fidelity(m, destination_db_type=destination_db_type)
+        # match_existing (or confirmed exists) clears existing-table document loads.
+        exists_for_fidelity = (
+            True
+            if dest_mode == "match_existing"
+            else (False if dest_mode == "create_new" else destination_table_exists)
+        )
+        verdict = mapping_fidelity(
+            m,
+            destination_db_type=destination_db_type,
+            dest_table_exists=exists_for_fidelity,
+        )
         risks = _mapping_risks(
             m,
             dest_mode=dest_mode,
             destination_db_type=destination_db_type,
             sync_mode=effective_sync,
+            dest_table_exists=exists_for_fidelity,
         )
         all_risks.extend(risks)
-        evidence = _evidence(m, destination_db_type=destination_db_type)
+        evidence = _evidence(
+            m,
+            destination_db_type=destination_db_type,
+            dest_table_exists=exists_for_fidelity,
+        )
         # Cap display confidence honesty for create-new identity
         display_conf = conf
         if evidence.get("create_new"):
@@ -885,22 +1193,24 @@ def build_mapping_proof(
         breakdown = confidence_breakdown(m, evidence, display_conf)
         evidence = {**evidence, "confidence_breakdown": breakdown}
 
+        # Honest dest type: Map stamp / create-new may use source; match_existing
+        # / schema_pending without a stamp must not invent VARCHAR from source.
+        _stamp = str(m.get("target_type") or m.get("dest_type") or "").strip()
+        _create_new = bool(evidence.get("create_new")) or dest_mode == "create_new"
+        if _stamp:
+            display_tgt = _stamp
+        elif _create_new:
+            display_tgt = str(m.get("source_type") or "VARCHAR")
+        else:
+            display_tgt = ""
         rows.append({
             "source": m.get("source"),
             "target": m.get("target"),
             "source_type": m.get("source_type") or "VARCHAR",
-            "target_type": m.get("target_type") or m.get("dest_type") or m.get("source_type") or "VARCHAR",
+            "target_type": display_tgt,
             "dest_native_type": (
-                ddl_type(
-                    destination_db_type,
-                    str(
-                        m.get("target_type")
-                        or m.get("dest_type")
-                        or m.get("source_type")
-                        or "VARCHAR"
-                    ),
-                )
-                if destination_db_type
+                materialize_dest_ddl(destination_db_type, display_tgt)
+                if destination_db_type and display_tgt
                 else None
             ),
             "transform": transform,
@@ -927,6 +1237,9 @@ def build_mapping_proof(
             "sample_preview": evidence.get("sample_preview") or [],
             "sample_preview_clear": evidence.get("sample_preview_clear") or [],
         })
+        stream_name = str(m.get("stream") or "").strip()
+        if stream_name:
+            rows[-1]["stream"] = stream_name
 
     # Unique global risks by code+message
     seen_g: set[str] = set()
@@ -953,6 +1266,7 @@ def build_mapping_proof(
         try:
             from services.cdc_effectively_once import (
                 SINK_APPEND_ONLY,
+                SINK_PK_UPSERT_AT_LEAST_ONCE,
                 classify_sink_delivery,
             )
 
@@ -971,6 +1285,17 @@ def build_mapping_proof(
                         f"Destination '{destination_db_type}' does not support upsert — "
                         "CDC redelivery will duplicate rows (not LSN-guarded idempotent upsert). "
                         "Use a PK upsert sink or set allow_append_only=true."
+                    ),
+                })
+            if sink.get("class") == SINK_PK_UPSERT_AT_LEAST_ONCE and not any(
+                r["code"] == "cdc_pk_upsert_at_least_once" for r in global_risks
+            ):
+                global_risks.insert(0, {
+                    "code": "cdc_pk_upsert_at_least_once",
+                    "severity": "info",
+                    "message": (
+                        f"Destination '{destination_db_type}' is PK upsert without "
+                        "_df_lsn — at-least-once last-write-wins, not exactly-once."
                     ),
                 })
         except Exception as exc:

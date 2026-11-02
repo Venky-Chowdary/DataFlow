@@ -112,7 +112,10 @@ def test_edge_types_csv_to_postgresql():
     assert rows[0][3] == Decimal("1500")
     assert rows[0][4] == Decimal("12.5")
     assert bytes(rows[0][5]) == b"hello"
-    assert rows[0][6] == "Café Münich"
+    # The source cell carries a trailing space; TEXT keeps it. Trimming would be
+    # an unrequested edit to the customer's data, and it previously made the
+    # write-pass digest disagree with the read-back on every padded string.
+    assert rows[0][6] == "Café Münich "
     assert rows[0][7] is True
 
     assert rows[1][0] == 2
@@ -120,5 +123,7 @@ def test_edge_types_csv_to_postgresql():
     assert rows[1][3] == Decimal("0.025")
     assert rows[1][4] == Decimal("0")
     assert bytes(rows[1][5]) == b"world"
+    # An unquoted empty CSV cell decodes as NULL (C04 codec — a literal
+    # empty string requires a quoted `""` cell). Numeric/temporal stay NULL.
     assert rows[1][6] is None
     assert rows[1][7] is False

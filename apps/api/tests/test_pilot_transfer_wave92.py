@@ -42,8 +42,9 @@ def _pg_reachable() -> bool:
          "orders", "Local Postgres", "Warehouse", "", False),
         ("move the customers table from Local Postgres into Mongo Prod",
          "customers", "Local Postgres", "Mongo Prod", "", False),
+        # D208: a bare "upsert" is a full-source upsert, never incremental.
         ("copy orders from pg to wh as upsert",
-         "orders", "pg", "wh", "incremental_upsert", False),
+         "orders", "pg", "wh", "upsert", False),
         ("sync payments from mysql prod to snowflake with overwrite",
          "payments", "mysql prod", "snowflake", "full_refresh_overwrite", False),
         ("plan a transfer of orders from Local Postgres to Warehouse",
@@ -121,8 +122,9 @@ def test_transfer_request_outranks_generic_advice_tools():
         ("overwrite", "full_refresh_overwrite"),
         ("replace the table", "full_refresh_overwrite"),
         ("truncate and load", "full_refresh_overwrite"),
-        ("upsert", "incremental_upsert"),
-        ("merge on id", "incremental_upsert"),
+        ("upsert", "upsert"),  # D208: full-source upsert
+        ("merge on id", "upsert"),
+        ("incremental upsert", "incremental_upsert"),
         ("cdc", "cdc_incremental"),
         ("append", "full_refresh_append"),
         ("incremental_upsert", "incremental_upsert"),
@@ -414,10 +416,8 @@ def test_live_start_transfer_stages_but_does_not_move_data(pg_route):
 @pytest.mark.skipif(not _pg_reachable(), reason="Postgres not reachable")
 def test_live_confirm_actually_moves_the_rows(pg_route):
     """The whole point: Confirm runs a real job and the rows land."""
-    import asyncio
-
+    from conftest import spend_pilot_ack
     from src.ai.copilot.tools import DataPilotTools
-    from src.routers.copilot_router import ConfirmActionRequest, copilot_confirm
 
     staged = DataPilotTools().execute("start_transfer", {
         "source_connector_name": pg_route["connector_name"],
@@ -428,9 +428,7 @@ def test_live_confirm_actually_moves_the_rows(pg_route):
     assert staged.success, staged.error
     ack_id = staged.output["ack_id"]
 
-    confirmed = asyncio.get_event_loop().run_until_complete(
-        copilot_confirm(ConfirmActionRequest(ack_id=ack_id, actor="wave92-test"))
-    )
+    confirmed = spend_pilot_ack(ack_id, "wave92-test")
     assert confirmed["ok"] is True
     assert confirmed["kind"] == "start_transfer"
     job_id = confirmed["job_id"]
@@ -455,9 +453,7 @@ def test_live_confirm_actually_moves_the_rows(pg_route):
     assert rows == expected
 
     # Replaying the same approval must not run a second job.
-    replay = asyncio.get_event_loop().run_until_complete(
-        copilot_confirm(ConfirmActionRequest(ack_id=ack_id, actor="wave92-test"))
-    )
+    replay = spend_pilot_ack(ack_id, "wave92-test")
     assert replay["idempotent"] is True
     assert replay["job_id"] == job_id
     assert _count(pg_route["conn"], pg_route["dst"]) == 5

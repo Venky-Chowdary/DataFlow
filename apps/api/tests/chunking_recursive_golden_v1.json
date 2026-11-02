@@ -1,0 +1,22 @@
+[
+  {"name":"empty","text":"","size":12,"overlap":3,"chunks":[]},
+  {"name":"spaces","text":" \t\n  ","size":12,"overlap":3,"chunks":[]},
+  {"name":"short-paragraph","text":"short paragraph","size":32,"overlap":4,"chunks":["short paragraph"]},
+  {"name":"exact-size","text":"12345678","size":8,"overlap":2,"chunks":["12345678"]},
+  {"name":"single-long-word","text":"abcdefghijklmnopqrstuvwxyz","size":9,"overlap":2,"chunks":["abcdefghi","hijklmnop","opqrstuvw","vwxyz"]},
+  {"name":"sentence-boundaries","text":"One short. Two short! Three?","size":18,"overlap":4,"chunks":["One short.","Two short!\n\nThree?"]},
+  {"name":"sentence-spacing","text":"Alpha.   Beta?\tGamma!","size":11,"overlap":2,"chunks":["Alpha.","Beta?","Gamma!"]},
+  {"name":"paragraph-merge","text":"alpha\n\nbeta","size":16,"overlap":3,"chunks":["alpha\n\nbeta"]},
+  {"name":"paragraph-split","text":"alpha beta\n\ngamma delta\n\nepsilon zeta","size":14,"overlap":3,"chunks":["alpha beta","gamma delta","epsilon zeta"]},
+  {"name":"paragraph-excess-newline","text":"first\n\n\nsecond","size":32,"overlap":5,"chunks":["first\n\nsecond"]},
+  {"name":"single-newline","text":"first line\nsecond line","size":12,"overlap":3,"chunks":["first line\ns","e\nsecond lin","line"]},
+  {"name":"unicode-accent","text":"café déjà vu — naïve façade","size":10,"overlap":2,"chunks":["café déjà","à vu — naï","aïve façad","ade"]},
+  {"name":"emoji","text":"🙂🙂🙂🙂🙂🙂","size":5,"overlap":2,"chunks":["🙂🙂🙂🙂🙂","🙂🙂🙂"]},
+  {"name":"cjk","text":"東京大阪京都札幌福岡","size":6,"overlap":2,"chunks":["東京大阪京都","京都札幌福岡","福岡"]},
+  {"name":"mixed-unicode","text":"Hello 世界 👋 café","size":9,"overlap":3,"chunks":["Hello 世界","世界 👋 café","afé"]},
+  {"name":"tab-whitespace","text":"a\tb  c\n\td","size":5,"overlap":1,"chunks":["a\tb","c\n\td","d"]},
+  {"name":"zero-overlap","text":"abcdefghijklmno","size":6,"overlap":0,"chunks":["abcdef","ghijkl","mno"]},
+  {"name":"one-step-overlap","text":"abcdefghij","size":5,"overlap":4,"chunks":["abcde","bcdef","cdefg","defgh","efghi","fghij","ghij","hij","ij\n\nj"]},
+  {"name":"punctuation-only","text":"...?! ...?!","size":6,"overlap":2,"chunks":["...?!","...?!"]},
+  {"name":"paragraph-and-sentence","text":"First sentence. Second sentence.\n\nThird paragraph has enough length to split.","size":22,"overlap":5,"chunks":["First sentence.","Second sentence.","Third paragraph has en","as enough length to sp","to split."]}
+]

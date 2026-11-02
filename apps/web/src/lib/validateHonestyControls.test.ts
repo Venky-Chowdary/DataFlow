@@ -8,6 +8,12 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  advancedLocaleFieldId,
+  dateLocaleValidateAction,
+  numberLocaleValidateAction,
+  schemaDriftAckRecorded,
+  schemaDriftAllowsAcknowledge,
+  schemaDriftRequiresRemap,
 } from "./validateHonestyControls.ts";
 import type { PreflightResult } from "./types.ts";
 
@@ -93,6 +99,8 @@ describe("validateHonestyControls", () => {
     assert.equal(honesty.ddlIdentityHash, "abc123");
     assert.equal(honesty.historicalSuccess.measured, false);
     assert.match(honesty.historicalSuccess.headline, /unmeasured/i);
+    assert.equal(honesty.historicalSuccess.headline.includes("%"), false);
+    assert.equal(honesty.historicalSuccess.hasPercent, false);
   });
 
   it("surfaces measured historical success without inventing when absent", () => {
@@ -102,6 +110,8 @@ describe("validateHonestyControls", () => {
           measured: true,
           success_rate: 0.97,
           runs_observed: 4,
+          rows_written_total: 200,
+          rows_rejected_total: 6,
           never_invented: true,
         },
       },
@@ -109,6 +119,171 @@ describe("validateHonestyControls", () => {
     const honesty = buildValidateHonestyControls(preflight);
     assert.equal(honesty.historicalSuccess.measured, true);
     assert.equal(honesty.historicalSuccess.successRate, 0.97);
+    assert.equal(honesty.historicalSuccess.rowsKept, 194);
+    assert.equal(honesty.historicalSuccess.rowsRejected, 6);
     assert.match(honesty.historicalSuccess.headline, /97\.0%/);
+    assert.equal(honesty.historicalSuccess.hasPercent, true);
+  });
+
+  it("never prints a percent when measured is false even if success_rate is 0.99", () => {
+    const honesty = buildValidateHonestyControls({
+      proof_bundle: {
+        historical_success: {
+          measured: false,
+          success_rate: 0.99,
+          runs_observed: 0,
+        },
+      },
+    } as unknown as PreflightResult);
+    assert.equal(honesty.historicalSuccess.measured, false);
+    assert.equal(honesty.historicalSuccess.successRate, null);
+    assert.equal(honesty.historicalSuccess.headline.includes("%"), false);
+  });
+
+  it("Phase C12 — Decision Artifact honesty from Validate proof_bundle", () => {
+    const hash = "a".repeat(64);
+    const preflight = {
+      proof_bundle: {
+        decision_artifact_hash: hash,
+        decision_artifact: {
+          schema_version: "decision_artifact_v1",
+          content_hash: hash,
+        },
+      },
+    } as unknown as PreflightResult;
+    const honesty = buildValidateHonestyControls(preflight);
+    assert.equal(honesty.decisionArtifact.present, true);
+    assert.equal(honesty.decisionArtifact.contentHash, hash);
+    assert.match(honesty.decisionArtifact.headline, /Decision Artifact stamped/i);
+
+    const missing = buildValidateHonestyControls({
+      proof_bundle: {},
+    } as unknown as PreflightResult);
+    assert.equal(missing.decisionArtifact.present, false);
+    assert.match(missing.decisionArtifact.headline, /missing/i);
+  });
+
+  it("never lets Acknowledge green a hard-breaking schema change", () => {
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "acknowledge_schema_drift",
+        ack_required: true,
+        schema_evolution: {
+          action: "pause",
+          should_pause: true,
+          compatibility: "none",
+          hard_breaking: [{ kind: "narrow_type", column: "amount" }],
+        },
+      }),
+      false,
+    );
+    assert.equal(
+      schemaDriftRequiresRemap({
+        schema_evolution: {
+          action: "pause",
+          should_pause: true,
+          compatibility: "none",
+          hard_breaking: [{ kind: "type_change" }],
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "acknowledge_schema_drift",
+        ack_required: true,
+        schema_evolution: {
+          action: "review",
+          should_pause: false,
+          compatibility: "forward",
+          hard_breaking: [],
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "review_mappings",
+        schema_evolution: { should_pause: true, compatibility: "none" },
+      }),
+      false,
+    );
+  });
+
+  it("records schema drift only when the preflight says the ack landed", () => {
+    assert.equal(schemaDriftAckRecorded(null), false);
+    assert.equal(schemaDriftAckRecorded({ gates: [{ id: "schema_drift", details: {} }] }), false);
+    assert.equal(
+      schemaDriftAckRecorded({
+        gates: [{ id: "schema_drift", details: { acknowledged: true } }],
+      }),
+      true,
+    );
+    assert.equal(schemaDriftAckRecorded({ schema_drift: { acknowledged: true } }), true);
+  });
+
+  it("number locale set_locale names columns and does not invent ok", () => {
+    assert.equal(numberLocaleValidateAction(null), null);
+    assert.equal(
+      numberLocaleValidateAction({
+        number_locale_report: { decision: "ok", ambiguous_columns: [] },
+      } as unknown as PreflightResult),
+      null,
+    );
+    const action = numberLocaleValidateAction({
+      number_locale_report: {
+        decision: "set_locale",
+        ambiguous_columns: [{ column: "amount" }, { column: "fee" }],
+      },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.deepEqual(action.columns, ["amount", "fee"]);
+    assert.match(action.message, /amount, fee/);
+    assert.match(action.message, /Destination → Advanced/);
+    assert.match(action.message, /Auto will not guess/);
+  });
+
+  it("date locale set_locale names columns and does not invent ok", () => {
+    assert.equal(dateLocaleValidateAction(null), null);
+    assert.equal(
+      dateLocaleValidateAction({
+        date_locale_report: { decision: "ok", ambiguous_columns: [] },
+      } as unknown as PreflightResult),
+      null,
+    );
+    const action = dateLocaleValidateAction({
+      date_locale_report: {
+        decision: "set_locale",
+        ambiguous_columns: [{ column: "event_date" }, { column: "due_on" }],
+      },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.deepEqual(action.columns, ["event_date", "due_on"]);
+    assert.match(action.message, /event_date, due_on/);
+    assert.match(action.message, /Jan 2 or Feb 1/);
+    assert.match(action.message, /DMY or MDY/);
+    assert.match(action.message, /Auto will not guess/);
+  });
+
+  it("shows a settled date order without asking the operator to guess", () => {
+    const action = dateLocaleValidateAction({
+      date_locale: "MDY",
+      date_locale_report: { decision: "ok", date_locale: "MDY", ambiguous_columns: [] },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.equal(action.decision, "settled");
+    assert.equal(action.locale, "MDY");
+    assert.match(action.message, /Reading dates as MDY \(month\/day\/year\)/);
+    const dmy = dateLocaleValidateAction({
+      date_locale_report: { decision: "ok", date_locale: "DMY", ambiguous_columns: [] },
+    } as unknown as PreflightResult);
+    assert.ok(dmy);
+    assert.equal(dmy.locale, "DMY");
+    assert.match(dmy.message, /day\/month\/year/);
+  });
+
+  it("Advanced locale field ids stay one owner", () => {
+    assert.equal(advancedLocaleFieldId("date"), "df2-adv-date-locale");
+    assert.equal(advancedLocaleFieldId("number"), "df2-adv-number-locale");
   });
 });

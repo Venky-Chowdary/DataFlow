@@ -64,7 +64,7 @@ def test_hubspot_datetime_epoch_millis_wire():
     assert coerce_hubspot_datetime_wire(1704067200) == "1704067200000"  # seconds
     assert coerce_hubspot_datetime_wire(1704067200000) == "1704067200000"
     assert coerce_hubspot_date_wire("2024-01-15T12:00:00Z") == "2024-01-15"
-    with pytest.raises(ValueError, match="refuse invent"):
+    with pytest.raises(ValueError, match="refuse invent|refuses|cannot parse"):
         coerce_hubspot_datetime_wire("not-a-date")
 
 

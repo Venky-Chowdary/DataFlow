@@ -184,9 +184,16 @@ def test_elasticsearch_requires_host_or_url():
 
 
 def test_catalog_includes_new_beta_connectors():
-    for cid in ("redis", "elasticsearch", "s3"):
-        data = catalog.search_catalog(cid, "all", "", "", 10)
-        assert any(c["id"] == cid for c in data["connectors"]), f"{cid} missing from catalog"
+    # Honesty: catalog may expose amazon_s3 (not bare `s3` tile) while driver_type=s3.
+    for query, accept in (
+        ("redis", {"redis"}),
+        ("elasticsearch", {"elasticsearch"}),
+        ("s3", {"s3", "amazon_s3"}),
+    ):
+        data = catalog.search_catalog(query, "all", "", "", 10)
+        ids = {c["id"] for c in data["connectors"]}
+        drivers = {c.get("driver_type") for c in data["connectors"]}
+        assert ids & accept or query in drivers, f"{query} missing from catalog (ids={ids})"
 
 
 def test_saved_connector_crud_file_store(tmp_path, monkeypatch):

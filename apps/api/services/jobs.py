@@ -11,7 +11,15 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
+
+
+def load_job_json(text: str) -> Any:
+    """Job snapshot or reconciliation JSON. Numbers match ``json_loads_exact``.
+
+    Callers still decide whether a non-object / non-list payload is usable.
+    """
+    return json_loads_exact(text)
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +222,7 @@ class JsonFileJobStore(MemoryJobStore):
         if not self._path.exists():
             return
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            raw = load_job_json(self._path.read_text(encoding="utf-8"))
             if not isinstance(raw, list):
                 return
             with self._lock:
@@ -316,7 +324,7 @@ class PostgresJobStore:
         ) = row
         recon = reconciliation
         if isinstance(recon, str):
-            recon = json.loads(recon)
+            recon = load_job_json(recon)
         return JobRecord(
             job_id=job_id,
             status=status,

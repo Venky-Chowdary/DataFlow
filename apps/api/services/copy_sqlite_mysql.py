@@ -1,0 +1,350 @@
+"""SQLite SELECT → MySQL STRICT LOAD DATA (cross-engine bulk).
+
+One ``BEGIN`` on the source file streams ``SELECT``; each cell is encoded
+as LOAD DATA TSV into a tempfile, then STRICT ``LOAD DATA LOCAL INFILE``.
+Dest ``COUNT(*)`` must equal the source COUNT **before commit**. Empty
+dest is LOAD DATA, **not** upsert / ``.dump`` / sqlldr. Occupied dest
+whose COUNT already equals the source COUNT is skip-complete. Occupied
+dest with a different COUNT declines. ``:memory:`` / BLOB decline.
+DATE ISO text or a calendar day loads as MySQL DATE. Naive ISO DATETIME
+loads as MySQL ``DATETIME(6)`` (not session-TZ ``TIMESTAMP``). INTEGER
+unix, REAL julian, tz-aware, and date-only DATETIME decline. BOOLEAN
+0/1 loads as MySQL BOOLEAN (TINYINT). ``true``/``yes`` synonyms
+decline. JSON declines.
+
+Declines (row path keeps quarantine): transforms that change values,
+BLOB/unix DATETIME/boolean synonyms/JSON, public proxy, occupied dest with dest COUNT ≠
+source, ``:memory:``, LOAD DATA ineligible sessions.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+from typing import Any
+
+from services.brand_env import getenv_brand
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
+from services.copy_mysql_mysql import fast_load_data_text_value
+from services.copy_mysql_pg import _mysql_connect, _mysql_ident
+from services.copy_pg_mysql import _mysql_create_sql, mapping_is_plain_carry
+from services.copy_sqlite_common import (
+    sqlite_connect,
+    sqlite_copy_bool_value,
+    sqlite_copy_date_value,
+    sqlite_copy_naive_datetime_value,
+    sqlite_ddl_base,
+    sqlite_ident,
+    sqlite_pragma_types,
+    sqlite_source_carrier_census,
+    sqlite_resolved_path,
+    sqlite_type_is_copy_safe,
+)
+
+logger = logging.getLogger(__name__)
+
+_FETCH_BATCH = 8192
+_UNSAFE_SQLITE_MYSQL_BASES = frozenset({
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "JSON",
+    "JSONB",
+})
+
+
+def sqlite_mysql_copy_enabled() -> bool:
+    raw = (getenv_brand("SQLITE_MYSQL_COPY", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def sqlite_mysql_type_is_copy_safe(declared: str) -> bool:
+    if not sqlite_type_is_copy_safe(declared):
+        return False
+    base = sqlite_ddl_base(declared)
+    return base not in _UNSAFE_SQLITE_MYSQL_BASES
+
+
+def sqlite_value_to_load_data(value: Any, ddl: str) -> str:
+    """SQLite cell → LOAD DATA TSV. DATE/naive DATETIME/BOOLEAN 0/1 are proven."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise FastPathUnavailable("BLOB values are not MySQL COPY-safe")
+    base = sqlite_ddl_base(ddl)
+    if base in _UNSAFE_SQLITE_MYSQL_BASES:
+        raise FastPathUnavailable(
+            f"{base} SQLite value is not MySQL COPY-safe"
+        )
+    if base == "DATE":
+        parsed = sqlite_copy_date_value(value)
+        return "\\N" if parsed is None else parsed.isoformat()
+    if base == "DATETIME":
+        parsed = sqlite_copy_naive_datetime_value(value)
+        return "\\N" if parsed is None else str(parsed)
+    if base in {"BOOLEAN", "BOOL"}:
+        parsed = sqlite_copy_bool_value(value)
+        return "\\N" if parsed is None else ("1" if parsed else "0")
+    return fast_load_data_text_value(value)
+
+
+def _mysql_table_exists(cur: Any, table: str) -> bool:
+    cur.execute(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name = %s",
+        (table,),
+    )
+    return int(cur.fetchone()[0]) > 0
+
+
+def _load_tsv_into_mysql(
+    dest_conn: Any,
+    dst_cur: Any,
+    *,
+    path: str,
+    table_q: str,
+    columns: list[str],
+) -> None:
+    from connectors.mysql_load_data import (
+        blocking_load_data_warnings,
+        execute_load_data_local,
+        mysql_load_data_session_ready,
+    )
+
+    ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
+    if not ready:
+        raise FastPathUnavailable(why)
+    # D102: refuse to start the one-statement LOAD after a cancel.
+    from services.cancel_check import cancel_checkpoint
+
+    cancel_checkpoint()
+    execute_load_data_local(
+        dst_cur,
+        path=path,
+        table_q=table_q,
+        columns=columns,
+    )
+    dst_cur.execute("SHOW WARNINGS")
+    blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
+    if blocked:
+        raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
+
+
+def copy_sqlite_to_mysql(
+    *,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    mysql_ddls: list[str],
+    replace_destination: bool,
+    source_schema: str | None = None,
+    source_where: str = "",
+) -> FastPathResult:
+    """SELECT SQLite into MySQL LOAD DATA. Dest COUNT(*) before commit is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and SELECT use that filter and dest-occupied skip is disabled.
+    """
+    del source_schema
+    if not pairs or len(pairs) != len(mysql_ddls):
+        raise FastPathUnavailable("column list / DDL mismatch")
+    if not sqlite_mysql_copy_enabled():
+        raise FastPathUnavailable("SQLite→MySQL COPY disabled")
+    ok, reason = mapping_is_plain_carry(
+        [{"source": s, "target": t, "transform": "none"} for s, t in pairs]
+    )
+    if not ok:
+        raise FastPathUnavailable(reason)
+
+    from connectors.write_resilience import is_public_proxy_host
+
+    if is_public_proxy_host(dest_cfg.get("host") or dest_cfg.get("connection_string") or ""):
+        raise FastPathUnavailable("public proxy: LOAD DATA not assumed")
+
+    sqlite_resolved_path(source_cfg)
+    source_cols = [p[0] for p in pairs]
+    target_cols = [p[1] for p in pairs]
+    src_ref = sqlite_ident(source_table)
+    dest_q = _mysql_ident(dest_table)
+    src_col_sql = ", ".join(sqlite_ident(c) for c in source_cols)
+    cursor_where = (source_where or "").strip()
+    where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+    select_sql = f"SELECT {src_col_sql} FROM {src_ref}{where_sql}"  # nosec B608
+
+    source_conn = sqlite_connect(source_cfg)
+    dest_conn = _mysql_connect(dest_cfg)
+    created_here = False
+    tmp_path = ""
+    dst_cur = dest_conn.cursor()
+    try:
+        source_conn.execute("BEGIN")
+        live = sqlite_pragma_types(source_conn, source_table)
+        live_l = {k.lower(): v for k, v in live.items()}
+        for col, ddl in zip(source_cols, mysql_ddls, strict=True):
+            declared = live_l.get(col.lower())
+            if declared is None:
+                raise FastPathUnavailable(f"source column {col!r} absent")
+            if not sqlite_mysql_type_is_copy_safe(declared) or (
+                ddl and not sqlite_mysql_type_is_copy_safe(ddl)
+            ):
+                raise FastPathUnavailable(
+                    f"source column {col!r} type {declared} is not MySQL COPY-safe"
+                )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, mysql_ddls, where_sql)
+        source_count = int(
+            source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
+        )
+
+        exists = _mysql_table_exists(dst_cur, dest_table)
+        dest_count_before = 0
+        if exists:
+            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
+            dest_count_before = int(dst_cur.fetchone()[0])
+        dest_occupied = dest_count_before > 0
+        if dest_occupied and not replace_destination:
+            if cursor_where:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
+            raise FastPathUnavailable(
+                "append into occupied MySQL dest stays on the row path "
+                "(identity COPY would duplicate)"
+            )
+        swap_at_end = False
+        swap_dest_q = dest_q
+        if replace_destination and exists:
+            # C03/X-OW2 — stage the overwrite and swap atomically at the
+            # commit boundary; MySQL auto-commits DDL, so a DROP-first left
+            # the destination absent for the whole run and unrecoverable.
+            from services.dest_overwrite_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+            stage_table = mysql_staged_overwrite_name(dest_table)
+            swap_trash_table = mysql_overwrite_trash_name(dest_table)
+            dest_q = _mysql_ident(stage_table)
+            dest_table = stage_table
+            swap_at_end = True
+            exists = False
+        if not exists:
+            dst_cur.execute(_mysql_create_sql(dest_table, pairs, mysql_ddls, []))
+            settle_fast_path_create_on(dst_cur, dest_dialect="mysql", dest_table=dest_table)
+            dest_conn.commit()
+            created_here = True
+
+        handle, tmp_path = tempfile.mkstemp(prefix="df_sqlite_mysql_", suffix=".tsv")
+        os.close(handle)
+        written = 0
+        src_cur = source_conn.cursor()
+        src_cur.execute(select_sql)
+        join = "\t".join
+        with open(tmp_path, "wb", buffering=1 << 20) as writer:
+            while True:
+                # D102: stop mid-extract when the job was cancelled.
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint(written)
+                rows = src_cur.fetchmany(_FETCH_BATCH)
+                if not rows:
+                    break
+                lines = [
+                    join(
+                        sqlite_value_to_load_data(val, ddl)
+                        for val, ddl in zip(row, mysql_ddls, strict=True)
+                    )
+                    for row in rows
+                ]
+                written += len(lines)
+                if lines:
+                    writer.write(("\n".join(lines) + "\n").encode("utf-8"))
+        if written != source_count:
+            raise ValueError(
+                "SQLite→MySQL COPY refused: TSV rows "
+                f"{written} != source COUNT {source_count}"
+            )
+        _load_tsv_into_mysql(
+            dest_conn,
+            dst_cur,
+            path=tmp_path,
+            table_q=dest_q,
+            columns=target_cols,
+        )
+        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
+        dest_count = int(dst_cur.fetchone()[0])
+        if dest_count != source_count:
+            dest_conn.rollback()
+            raise ValueError(
+                "SQLite→MySQL COPY refused: dest COUNT(*) "
+                f"{dest_count} != source COUNT {source_count}"
+            )
+        if swap_at_end:
+            from services.dest_overwrite_swap import mysql_swap_staged_dest
+
+            mysql_swap_staged_dest(
+                dst_cur,
+                dest_q=swap_dest_q,
+                staging_q=dest_q,
+                trash_q=_mysql_ident(swap_trash_table),
+            )
+        dest_conn.commit()
+        try:
+            source_conn.commit()
+        except Exception:
+            logger.debug("SQLite source commit skipped", exc_info=True)
+        proof = f"dest_count:{dest_count}"
+        mysql_write = "overwrite" if replace_destination and dest_occupied else "insert"
+        return FastPathResult(
+            rows_copied=dest_count,
+            source_rows=source_count,
+            source_checksum=proof,
+            target_rows=dest_count,
+            target_checksum=proof,
+            source_snapshot={
+                "copy_workers": 1,
+                "copy_split": "cursor" if cursor_where else "serial",
+                "copy_partitions": 1,
+                "partitions_skipped": 0,
+                "partitions_loaded": 1,
+                "shard_mode": "cursor" if cursor_where else "table",
+                "source_where": bool(cursor_where),
+                "sqlite_read": "select",
+                "load_data": "tempfile",
+                "mysql_write": mysql_write,
+            },
+            proof_scope="dest_count_equals_source_snapshot_count",
+        )
+    except Exception:
+        try:
+            dest_conn.rollback()
+        except Exception:
+            logger.debug("MySQL dest rollback skipped", exc_info=True)
+        if created_here:
+            try:
+                dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
+                dest_conn.commit()
+            except Exception:
+                logger.debug("MySQL dest drop after copy failure skipped", exc_info=True)
+        raise
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                logger.debug("SQLite→MySQL TSV unlink skipped", exc_info=True)
+        try:
+            dst_cur.close()
+        except Exception:
+            logger.debug("MySQL dest cursor close skipped", exc_info=True)
+        try:
+            dest_conn.close()
+        except Exception:
+            logger.debug("MySQL dest close skipped", exc_info=True)
+        try:
+            source_conn.close()
+        except Exception:
+            logger.debug("SQLite source close skipped", exc_info=True)

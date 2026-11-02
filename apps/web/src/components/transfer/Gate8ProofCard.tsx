@@ -1,18 +1,42 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
-import { useEffect, useRef, useState } from "react";
-import type { Gate8ReconciliationPayload } from "../../lib/types";
+import { useEffect, useState } from "react";
+import { useToast } from "../Toast";
+import { HiddenFileInput } from "../ui/HiddenFileInput";
+import {
+  controlTotalEvidenceLabel,
+  controlTotalEvidenceTitle,
+  readControlTotals,
+} from "../../lib/gate8Population";
+import {
+  classifyGate8Status,
+  gate8AppendIdentity,
+  gate8SampleDeclinedReason,
+  isGate8AppendDelta,
+  isGate8IdentityUnproven,
+  isGate8KeyedBatch,
+  isGate8LastStream,
+  isGate8PreWriteSimulation,
+  isGate8SampleVerified,
+  isGate8WriterAckOnly,
+  isGate8WritePassDestReadback,
+} from "./gate8Status";
+import type {
+  Gate8Reconciliation,
+  Gate8SampleMismatch,
+} from "./gate8Status";
 
 /**
  * The card renders the engine payload verbatim — one shape, defined in
  * `lib/types.ts`. A second local copy is how honesty fields (identity,
  * alignment, read-back error) silently fell off the card before.
  */
-export type Gate8Reconciliation = Gate8ReconciliationPayload;
-export type Gate8Identity = NonNullable<Gate8ReconciliationPayload["identity"]>;
-export type Gate8SampleMismatch = NonNullable<
-  NonNullable<Gate8ReconciliationPayload["sample_compare"]>["mismatches"]
->[number];
+export type {
+  Gate8Identity,
+  Gate8Reconciliation,
+  Gate8SampleMismatch,
+  Gate8StatusView,
+} from "./gate8Status";
 
 interface Gate8ProofCardProps {
   report: Gate8Reconciliation;
@@ -46,8 +70,7 @@ function mismatchLabel(m: Gate8SampleMismatch): string {
   return `${row} · ${col}: ${String(m.source_value ?? "—")} → ${String(m.target_value ?? "—")}`;
 }
 
-function downloadJson(filename: string, payload: unknown) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -59,7 +82,42 @@ function downloadJson(filename: string, payload: unknown) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
-async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
+function downloadJson(filename: string, payload: unknown) {
+  downloadBlob(filename, new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+}
+
+/** Client-facing run report: rows read/written/quarantined, verdict, signature. */
+async function exportMigrationCertificate(jobId: string, onError: (message: string) => void) {
+  try {
+    const { fetchMigrationCertificatePdf, fetchMigrationCertificateMarkdown } = await import(
+      "../../lib/api"
+    );
+    try {
+      downloadBlob(
+        `datawrap-migration-certificate-${jobId}.pdf`,
+        await fetchMigrationCertificatePdf(jobId),
+      );
+      return;
+    } catch {
+      // A deployment without the PDF renderer still owes the operator the
+      // evidence, so fall back to the same content as markdown.
+      const markdown = await fetchMigrationCertificateMarkdown(jobId);
+      downloadBlob(
+        `datawrap-migration-certificate-${jobId}.md`,
+        new Blob([markdown], { type: "text/markdown" }),
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Certificate export failed";
+    onError(message);
+  }
+}
+
+async function exportGate8Proof(
+  report: Gate8Reconciliation,
+  jobId: string | undefined,
+  onError: (message: string) => void,
+) {
   if (jobId) {
     try {
       const { fetchSignedProofPack } = await import("../../lib/api");
@@ -69,11 +127,11 @@ async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Signed proof pack export failed";
       // Do not silently substitute an unsigned snapshot when the CTA promised HMAC.
-      window.alert(`Could not export signed proof pack.\n${message}`);
+      onError(message);
       return;
     }
   }
-  downloadJson(`dataflow-gate8-proof-${Date.now()}.json`, {
+  downloadJson(`datawrap-gate8-proof-${Date.now()}.json`, {
     honesty: "Unsigned local Gate-8 snapshot — open Jobs with a job id to export HMAC-signed pack.",
     gate8: report,
   });
@@ -86,130 +144,6 @@ async function verifyProofFile(
   const pack = JSON.parse(text) as Record<string, unknown>;
   const { verifySignedProofPack } = await import("../../lib/api");
   return verifySignedProofPack(pack);
-}
-
-/** True when evidence is writer-ack only — not independent source/target Verified. */
-export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
-  const phase = String(report.phase || "").toLowerCase();
-  if (phase.includes("sample_verified")) return false;
-  if (phase.includes("writer_ack")) return true;
-  const msg = String(report.message || "").toLowerCase();
-  if (/sample-verified|sample verified|key-aligned field/i.test(msg)) return false;
-  if (/verified by writer|read-back verifier not available/i.test(msg)) return true;
-  if (report.passed && report.source_checksum && !report.target_checksum) {
-    // Keyed sample proof upgrades writer-ack when present.
-    const compared = Number(report.sample_compare?.compared ?? 0);
-    if (compared > 0 && report.sample_compare?.passed !== false) return false;
-    return true;
-  }
-  return false;
-}
-
-/** True when evidence is keyed sample read-back (SaaS / Kafka reverse-ETL class). */
-export function isGate8SampleVerified(report: Gate8Reconciliation): boolean {
-  const phase = String(report.phase || "").toLowerCase();
-  if (phase.includes("sample_verified")) return true;
-  if (String(report.coverage || "").toLowerCase() === "sample") return true;
-  const msg = String(report.message || "").toLowerCase();
-  if (/sample-verified|sample verified/i.test(msg)) return true;
-  const compared = Number(report.sample_compare?.compared ?? 0);
-  const sampleOk = Boolean(
-    report.passed
-    && compared > 0
-    && report.sample_compare?.passed !== false,
-  );
-  if (!sampleOk) return false;
-  // No independent dest digest — sample is the only proof.
-  if (!String(report.target_checksum || "").trim()) return true;
-  // Whole-table digests diverge — sample authority, not population proof.
-  const src = String(report.source_checksum || "").trim();
-  const tgt = String(report.target_checksum || "").trim();
-  if (src && tgt && src !== tgt) return true;
-  return false;
-}
-
-/** True when evidence is pre-write only — never show Verified / match claims. */
-export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean {
-  // Writer-ack is post-write limited proof — not a pre-write simulation.
-  if (isGate8WriterAckOnly(report)) return false;
-  if (report.preview === true || report.post_write_pending === true) return true;
-  if (String(report.phase || "").toLowerCase().includes("pre_write")) return true;
-  if (String(report.phase || "").toLowerCase().includes("post_write_pending")) return true;
-  const hasChecksums = Boolean(report.source_checksum && report.target_checksum);
-  const destRows = Number(report.target_rows ?? 0);
-  const msg = String(report.message || "").toLowerCase();
-  // Writer digest alone (or duplicated into both sides) is not independent proof.
-  if (/writer checksum|still pending|may still be loading|compare still pending/i.test(msg)) {
-    return true;
-  }
-  if (
-    hasChecksums
-    && report.source_checksum === report.target_checksum
-    && !report.sample_compare
-    && /writer|pending|loading/i.test(msg)
-  ) {
-    return true;
-  }
-  if (!hasChecksums && (destRows === 0 || /after (transfer )?execution|pre-write|pending/i.test(msg))) {
-    return true;
-  }
-  return false;
-}
-
-export type Gate8StatusView = {
-  label: string;
-  tone: "ok" | "warn" | "danger" | "muted";
-  /**
-   * Independent full-checksum post-write proof (source↔dest digests match).
-   * Sample-verified / writer-ack / pre-write must keep this false — never invent
-   * population proof from a keyed sample.
-   */
-  fullPass: boolean;
-};
-
-/** Shared operator label for Gate-8 — never call writer-ack / pre-write “Passed”. */
-/**
- * True when the engine compared values but could not prove row identity
- * (no primary key, or null/duplicate keys). Positional matches are not
- * keyed fidelity proof and must never render as a clean pass.
- */
-export function isGate8IdentityUnproven(report: Gate8Reconciliation): boolean {
-  const mode = String(report.verification_mode || "").toLowerCase();
-  if (mode === "unproven_identity" || mode === "positional_only") return true;
-  if (report.identity && report.identity.proven === false) return true;
-  const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
-  if (alignment === "unproven_identity" || alignment === "positional_only") return true;
-  return Boolean(report.sample_compare?.identity_warning);
-}
-
-export function classifyGate8Status(
-  report: Gate8Reconciliation | null | undefined,
-): Gate8StatusView {
-  if (!report) {
-    return { label: "Pending", tone: "muted", fullPass: false };
-  }
-  if (report.passed === false) {
-    return { label: "Failed", tone: "danger", fullPass: false };
-  }
-  if (isGate8WriterAckOnly(report)) {
-    return { label: "Writer ack", tone: "warn", fullPass: false };
-  }
-  // A positional / unproven-identity compare is not keyed fidelity proof —
-  // labelling it "Passed" is the false-proof the engine explicitly refuses.
-  if (isGate8IdentityUnproven(report)) {
-    return { label: "Unproven identity", tone: "warn", fullPass: false };
-  }
-  if (isGate8SampleVerified(report)) {
-    // Sample ≠ population — never green "ok" (Enterprise GA honesty).
-    return { label: "Sample verified", tone: "warn", fullPass: false };
-  }
-  if (isGate8PreWriteSimulation(report)) {
-    return { label: "Pre-write only", tone: "warn", fullPass: false };
-  }
-  if (report.passed === true) {
-    return { label: "Passed", tone: "ok", fullPass: true };
-  }
-  return { label: "Pending", tone: "muted", fullPass: false };
 }
 
 /**
@@ -228,7 +162,7 @@ export function Gate8ProofCard({
   onRerun,
   onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
-  const verifyInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
   const [verifyState, setVerifyState] = useState<
     | { status: "idle" }
     | { status: "working" }
@@ -245,6 +179,7 @@ export function Gate8ProofCard({
     mapping_hash?: string | null;
     rollback?: string;
   } | null>(null);
+  const controlTotals = readControlTotals(report);
   useEffect(() => {
     setVerifyState({ status: "idle" });
   }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
@@ -286,7 +221,10 @@ export function Gate8ProofCard({
   }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
   const preWrite = isGate8PreWriteSimulation(report);
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
-  const writerAck = !preWrite && !sampleVerified && isGate8WriterAckOnly(report);
+  const keyedBatch = !preWrite && !sampleVerified && isGate8KeyedBatch(report);
+  const lastStream = !preWrite && !sampleVerified && !keyedBatch && isGate8LastStream(report);
+  const appendDelta = !preWrite && !sampleVerified && !keyedBatch && !lastStream && isGate8AppendDelta(report);
+  const writerAck = !preWrite && !sampleVerified && !appendDelta && !keyedBatch && isGate8WriterAckOnly(report);
   const passed = Boolean(report.passed) && !preWrite && !writerAck;
   const simulationOk = Boolean(report.passed) && preWrite;
   const writerAckOk = Boolean(report.passed) && writerAck;
@@ -300,8 +238,30 @@ export function Gate8ProofCard({
   const heldOut = Math.max(rejectedRows - coercedNullRows, 0);
   const expectedRows = Math.max(sourceRows - heldOut - rowsSkipped, 0);
   const delta = targetRows - expectedRows;
+  const jobDestRaw = report.job_dest_count;
+  const jobDestCount = typeof jobDestRaw === "number" && Number.isInteger(jobDestRaw) && jobDestRaw >= 0
+    ? jobDestRaw
+    : null;
+  const checksumsMatch = Boolean(
+    report.source_checksum
+    && report.target_checksum
+    && report.source_checksum === report.target_checksum,
+  );
+  const appendId = gate8AppendIdentity(report);
+  const showAppendIdentity = Boolean((appendDelta || keyedBatch) && appendId.destBefore != null);
   const mismatches = report.sample_compare?.mismatches ?? [];
+  const ruleFindings: string[] = [
+    ...(report.rule_checks ?? [])
+      .filter((c) => c.status === "failed")
+      .map((c) =>
+        `Business rule ${c.rule_id || "unknown"}: ${Number(c.duplicates ?? 0)} duplicate value(s) in ${c.column || "?"} after load`,
+      ),
+    ...(report.unverified_rules ?? []).map((u) =>
+      `Business rule ${u.rule_id || "unknown"} not verified: ${u.reason || "unverified"}`,
+    ),
+  ];
   const sampleSkipped = Boolean(report.sample_compare?.skipped);
+  const declinedReason = gate8SampleDeclinedReason(report);
   const sampleError = String(report.sample_compare?.error || "").trim();
   const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
   const identityWarning = String(
@@ -322,12 +282,12 @@ export function Gate8ProofCard({
     || Boolean(sampleError)
     || sampleSkipped;
 
-  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven;
+  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta && !keyedBatch && !lastStream;
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-fail")
-      : sampleVerified || identityUnproven
+      : sampleVerified || identityUnproven || appendDelta || keyedBatch || lastStream
         ? "is-pending"
         : (fullChecksumPass ? "is-pass" : (passed ? "is-pending" : "is-fail"));
   const title = preWrite
@@ -342,7 +302,13 @@ export function Gate8ProofCard({
         ? "Sample compared — identity not proven"
         : sampleVerified
           ? "Keyed sample matched — not population / migration_proven"
-          : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
+          : keyedBatch && passed
+            ? "This run’s rows verified — extra destination rows are outside this proof"
+            : appendDelta && passed
+              ? "Append delta verified — whole-table checksums not comparable"
+              : lastStream && passed
+                ? "Last stream checksum matches — not the whole job"
+              : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
     : writerAck
@@ -351,12 +317,18 @@ export function Gate8ProofCard({
         ? "Unproven identity"
         : sampleVerified
           ? "Sample only"
-          : (fullChecksumPass ? "Verified" : "Failed");
+          : keyedBatch && passed
+            ? "Batch"
+            : appendDelta && passed
+              ? "Row count"
+              : lastStream && passed
+                ? "Last stream"
+              : (fullChecksumPass ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
-      : identityUnproven || sampleVerified
+      : identityUnproven || sampleVerified || ((appendDelta || keyedBatch || lastStream) && passed)
         ? "is-pending"
         : (fullChecksumPass ? "is-ok" : "is-bad");
 
@@ -382,6 +354,21 @@ export function Gate8ProofCard({
             {" "}Post-write <strong>row-count</strong> and <strong>checksum</strong> proof
             is produced only after Execute finishes — never claim “source and destination match”
             before the write.
+          </>
+        ) : lastStream && passed ? (
+          <>
+            This digest is the <strong>last stream</strong> in a multi-table run.
+            Each stream has its own destination COUNT(*). Those counts are the
+            job population. This checksum is <strong>not</strong> the whole job
+            and is not migration_proven.
+          </>
+        ) : appendDelta || keyedBatch ? (
+          <>
+            Full Append into a table that already held rows cannot compare whole-table
+            checksums. The identity is <strong>dest after − dest before</strong>
+            {keyedBatch ? " plus a digest of the keys this run wrote" : ""}.
+            Per-cell / population fidelity is <strong>not</strong> proven — use overwrite
+            or upsert with a primary key for <strong>full_checksum</strong>.
           </>
         ) : (
           <>
@@ -413,7 +400,15 @@ export function Gate8ProofCard({
         </p>
       )}
 
-      {sampleSkipped && !sampleError && (
+      {declinedReason && !sampleError && (
+        <p className="df2-gate8-proof-message is-warn" role="status">
+          <strong>Per-row sample not compared.</strong> {declinedReason} Row
+          counts and checksums still apply; per-cell fidelity is unproven for
+          this run.
+        </p>
+      )}
+
+      {sampleSkipped && !sampleError && !declinedReason && (
         <p className="df2-gate8-proof-message is-warn" role="status">
           Value read-back was not performed — row counts/checksums alone do not prove
           per-cell fidelity.
@@ -439,26 +434,81 @@ export function Gate8ProofCard({
 
       {!preWrite && (
       <dl className="df2-gate8-proof-grid">
-        <div>
-          <dt>Source rows</dt>
-          <dd>{sourceRows.toLocaleString()}</dd>
-        </div>
-        <div>
-          <dt>Destination rows</dt>
-          <dd>{targetRows.toLocaleString()}</dd>
-        </div>
-        <div>
-          <dt>Expected dest</dt>
-          <dd title="source − quarantine hold-outs">
-            {expectedRows.toLocaleString()}
-          </dd>
-        </div>
-        <div>
-          <dt>Delta vs expected</dt>
-          <dd className={delta === 0 ? "is-ok" : "is-warn"}>
-            {delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
-          </dd>
-        </div>
+        {showAppendIdentity ? (
+          <>
+            <div>
+              <dt>Dest before</dt>
+              <dd>{appendId.destBefore!.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>This run wrote</dt>
+              <dd className={appendId.deltaOk ? "is-ok" : "is-warn"}>
+                {appendId.written!.toLocaleString()}
+                {appendId.expected !== appendId.written
+                  ? ` · expected ${appendId.expected.toLocaleString()}`
+                  : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Dest after</dt>
+              <dd>{appendId.destAfter.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Dest Δ</dt>
+              <dd className={appendId.deltaOk ? "is-ok" : "is-warn"}>
+                {appendId.written != null
+                  ? `${appendId.written > 0 ? "+" : ""}${appendId.written.toLocaleString()}`
+                  : "—"}
+              </dd>
+            </div>
+          </>
+        ) : lastStream ? (
+          <>
+            <div>
+              <dt>Last stream source</dt>
+              <dd>{sourceRows.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Last stream dest</dt>
+              <dd>{targetRows.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Job dest COUNT(*)</dt>
+              <dd className="is-warn" title="Sum of each stream’s destination COUNT(*), not this digest">
+                {jobDestCount == null ? "—" : jobDestCount.toLocaleString()}
+              </dd>
+            </div>
+            <div>
+              <dt>Last stream delta</dt>
+              <dd className={delta === 0 ? "is-ok" : "is-warn"}>
+                {delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
+              </dd>
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <dt>Source rows</dt>
+              <dd>{sourceRows.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Destination rows</dt>
+              <dd>{targetRows.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Expected dest</dt>
+              <dd title="source − quarantine hold-outs">
+                {expectedRows.toLocaleString()}
+              </dd>
+            </div>
+            <div>
+              <dt>Delta vs expected</dt>
+              <dd className={delta === 0 ? "is-ok" : "is-warn"}>
+                {delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
+              </dd>
+            </div>
+          </>
+        )}
         {(heldOut > 0 || coercedNullRows > 0) && (
           <div>
             <dt>Quarantine</dt>
@@ -499,15 +549,29 @@ export function Gate8ProofCard({
         <div>
           <dt>Checksums</dt>
           <dd className={
-            report.source_checksum
-            && report.target_checksum
-            && report.source_checksum === report.target_checksum
-              ? "is-ok"
-              : "is-warn"
+            appendDelta || lastStream || !checksumsMatch
+              ? "is-warn"
+              : "is-ok"
           }>
-            {report.source_checksum && report.target_checksum
-              ? (report.source_checksum === report.target_checksum ? "Match" : "Mismatch")
-              : "—"}
+            {appendDelta
+              ? "Not comparable"
+              : keyedBatch && checksumsMatch
+                ? "Match (written keys)"
+                : lastStream && checksumsMatch
+                  ? "Match (last stream)"
+                  : report.source_checksum && report.target_checksum
+                    ? (checksumsMatch ? "Match" : "Mismatch")
+                    : "—"}
+          </dd>
+        </div>
+        <div>
+          <dt>Proof scope</dt>
+          <dd
+            className="df2-gate8-proof-scope"
+            title="Coverage and source-digest provenance — never claimed as population_proof"
+          >
+            <span>{report.coverage || report.dest_readback?.coverage || "unmeasured"}</span>
+            <span>{report.source_checksum_provenance || "—"}</span>
           </dd>
         </div>
         {report.sample_compare?.sample_seed?.method === "stratified" && (
@@ -558,6 +622,116 @@ export function Gate8ProofCard({
         </div>
       )}
 
+      {ruleFindings.length > 0 && (
+        <div className="df2-gate8-proof-mismatches" aria-label="Business rule checks">
+          <strong>Business rule checks</strong>
+          <ul>
+            {ruleFindings.map((f, i) => (
+              <li key={i}>{f}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {controlTotals.declared && (
+        <div
+          className={`df2-gate8-control-totals${controlTotals.proven ? " is-proven" : " is-unproven"}`}
+          aria-label="Control totals"
+        >
+          <div className="df2-gate8-control-totals-head">
+            <strong>Control totals</strong>
+            <span
+              className={`df2-gate8-proof-badge ${
+                controlTotals.proven ? "is-ok" : controlTotals.mismatch ? "is-fail" : "is-warn"
+              }`}
+            >
+              {controlTotals.proven ? "Proven" : controlTotals.mismatch ? "Mismatch" : "Unproven"}
+            </span>
+            <span
+              className="df2-gate8-control-totals-evidence"
+              title={controlTotalEvidenceTitle(controlTotals)}
+            >
+              {controlTotalEvidenceLabel(controlTotals)}
+            </span>
+          </div>
+          <table className="df2-gate8-control-totals-table">
+            <thead>
+              <tr>
+                <th scope="col">Column</th>
+                <th scope="col">Source SUM</th>
+                <th scope="col">Dest SUM</th>
+              </tr>
+            </thead>
+            <tbody>
+              {controlTotals.rows.map((row) => (
+                <tr key={row.column}>
+                  <th scope="row">{row.column}</th>
+                  <td>
+                    <code>{row.sourceSum || "—"}</code>
+                  </td>
+                  <td>
+                    <code>{row.destSum || "—"}</code>
+                    {row.proven ? null : (
+                      <span className="df2-gate8-control-totals-why">{row.reason}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {report.match_summary && (
+        <div className="df2-gate8-match" aria-label="What was compared">
+          <strong>What was compared</strong>
+          <dl>
+            <div>
+              <dt>Populations</dt>
+              <dd>
+                {lastStream ? "last stream " : ""}
+                source {(report.match_summary.source_rows ?? 0).toLocaleString()} ·
+                {" "}destination {(report.match_summary.dest_rows ?? 0).toLocaleString()}
+                {lastStream && jobDestCount != null
+                  ? ` · job dest ${jobDestCount.toLocaleString()}`
+                  : ""}
+                {report.match_summary.dest_rows_before != null
+                  && !(lastStream && Number(report.match_summary.dest_rows_before) === 0)
+                  ? ` (held ${report.match_summary.dest_rows_before.toLocaleString()} before this run)`
+                  : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Cells agreeing</dt>
+              {/* Null percent is "not measured", never 0% — an unmeasured
+                  comparison must not read as total disagreement. A last-stream
+                  sample at 100% is still not the multi-table job. */}
+              <dd className={report.match_summary.sample_match_percent == null || lastStream
+                ? "is-warn"
+                : report.match_summary.sample_match_percent === 100 ? "is-ok" : "is-warn"}>
+                {report.match_summary.sample_match_percent == null
+                  ? "not measured"
+                  : `${report.match_summary.sample_match_percent}%`}
+              </dd>
+            </div>
+            <div>
+              <dt>Of</dt>
+              <dd>{report.match_summary.denominator}</dd>
+            </div>
+          </dl>
+          {(report.remediation?.length ?? 0) > 0 && (
+            <ol className="df2-gate8-match-fix">
+              {report.remediation!.slice(0, 4).map((r, i) => (
+                <li key={`${r.action}-${i}`}>
+                  <strong>{r.label}</strong>
+                  <span>{r.why}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+
       {packSummary && (
         <dl className="df2-gate8-proof-honesty" aria-label="Signed proof pack honesty">
           <div>
@@ -600,7 +774,7 @@ export function Gate8ProofCard({
 
       <div className="df2-gate8-proof-next" role="region" aria-label="Proof export and next steps">
         <div className="df2-gate8-proof-next-copy">
-          <strong>{hasFindings || preWrite ? "Next step" : "Audit export"}</strong>
+          <strong>{hasFindings || preWrite || (lastStream && passed) ? "Next step" : "Audit export"}</strong>
           <p>
             {preWrite
               ? "Run Execute to produce post-write row-count and checksum proof in Job Theater."
@@ -608,7 +782,11 @@ export function Gate8ProofCard({
                 ? "Fix mapping or transforms, inspect quarantine if rows were isolated, then re-run. Export the proof for audit."
                 : sampleVerified
                   ? "Sample matched — export the signed pack; migration_proven stays false until full_checksum."
-                  : "Export the signed proof pack for diligence (accepted risks, policies, hashes)."}
+                  : appendDelta || keyedBatch
+                    ? "Rows landed. For full_checksum cell proof, re-run with overwrite/truncate or upsert on a primary key."
+                    : lastStream
+                      ? "This checksum is the last table. The job total is each stream’s destination COUNT(*) added together. Export the pack; migration_proven stays false."
+                      : "Export the signed proof pack for diligence (accepted risks, policies, hashes)."}
           </p>
         </div>
         <div className="df2-gate8-proof-next-actions">
@@ -630,15 +808,28 @@ export function Gate8ProofCard({
           <button
             type="button"
             className="df2-btn df2-btn-sm df2-btn-secondary"
-            onClick={() => void exportGate8Proof(report, jobId)}
+            onClick={() => void exportGate8Proof(report, jobId, (message) => {
+              toast({ title: "Could not export signed proof pack", message, tone: "error" });
+            })}
           >
             {jobId ? "Export signed proof pack" : "Export proof JSON"}
           </button>
-          <input
-            ref={verifyInputRef}
-            type="file"
+          {jobId && !preWrite && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              onClick={() => void exportMigrationCertificate(jobId, (message) => {
+                toast({ title: "Could not export the Migration Certificate", message, tone: "error" });
+              })}
+              title="Signed audit PDF: rows read/written/quarantined by reason, reconciliation verdict, destination physical state"
+            >
+              Download Migration Certificate (PDF)
+            </button>
+          )}
+          <HiddenFileInput
+            id="df2-gate8-verify-proof"
             accept="application/json,.json"
-            hidden
+            disabled={verifyState.status === "working"}
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
@@ -663,15 +854,14 @@ export function Gate8ProofCard({
                 });
             }}
           />
-          <button
-            type="button"
+          <label
+            htmlFor="df2-gate8-verify-proof"
             className="df2-btn df2-btn-sm"
-            disabled={verifyState.status === "working"}
-            onClick={() => verifyInputRef.current?.click()}
+            aria-disabled={verifyState.status === "working"}
             title="Re-check an exported HMAC proof pack (buyer diligence)"
           >
             {verifyState.status === "working" ? "Verifying…" : "Verify proof pack"}
-          </button>
+          </label>
         </div>
         {verifyState.status === "ok" && (
           <p className="df2-gate8-proof-verify is-ok" role="status">

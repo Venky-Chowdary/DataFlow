@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib
 from typing import Any, Callable
 
+from connectors.sdk import get_descriptor
+
 from .connector_registry import CONNECTOR_MODULES, ConnectorModules
 
 
@@ -55,6 +57,98 @@ def default_port_for(driver: str) -> int:
     return int(default_port(driver) or 0)
 
 
+def writer_extra_kwargs(
+    driver: str,
+    *,
+    cfg: dict[str, Any],
+    dest: Any = None,
+    common: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Driver-specific writer kwargs that the common batch payload does not carry.
+
+    One owner for "what else does *this* writer need", so a connection setting
+    cannot reach the adapter path and be dropped by the streaming one — which is
+    how SFTP host-key trust came to be verified at Validate and absent at write.
+    """
+    return {
+        **_route_wide_writer_kwargs(cfg, dest),
+        **_driver_writer_kwargs(driver, cfg=cfg, dest=dest, common=common),
+    }
+
+
+def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
+    """Writer kwargs every driver needs, on every path.
+
+    ``dest_table_prior_spelling`` is the spelling a destination had before an
+    overwrite dropped it: without it a case-folding engine recreates the table
+    under the folded name and the object the operator pointed at is gone.
+
+    TLS / SID / driver keywords must ride the same path: readers already
+    merge ``connection_options``, but the writer ``common`` dict used to drop
+    them, so SQL Server Driver 18 verified a compose self-signed cert on
+    seed/write after Validate had already declared trust.
+    """
+    from connectors.generic_sql import connection_options
+
+    dest_extra = getattr(dest, "extra", None) or {}
+    if not isinstance(dest_extra, dict):
+        dest_extra = {}
+    nested = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    out = dict(connection_options({**dest_extra, **nested, **cfg}))
+    prior = str(
+        cfg.get("dest_table_prior_spelling")
+        or nested.get("dest_table_prior_spelling")
+        or dest_extra.get("dest_table_prior_spelling")
+        or ""
+    )
+    if prior:
+        out["dest_table_prior_spelling"] = prior
+    return out
+
+
+def _driver_writer_kwargs(
+    driver: str,
+    *,
+    cfg: dict[str, Any],
+    dest: Any = None,
+    common: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Kwargs only this driver needs."""
+    common = common or {}
+    if driver == "snowflake":
+        from services.connector_auth import snowflake_session_kwargs
+
+        return snowflake_session_kwargs(cfg)
+    if driver == "sftp":
+        from connectors.sftp_common import host_key_settings
+
+        # Host-key trust must ride every path that opens an SFTP connection.
+        # Dropping it downgraded the write to "no pinned key" while Validate had
+        # just verified against the pinned one.
+        extra = dict(host_key_settings(cfg))
+        extra["private_key"] = str(cfg.get("private_key") or "")
+        return extra
+    if driver == "kafka":
+        from services.copy_kafka_common import kafka_security_options
+
+        return {
+            "schema_registry_url": str(
+                (getattr(dest, "extra", None) or {}).get("schema_registry_url")
+                or cfg.get("schema_registry_url")
+                or ""
+            ),
+            # The producer must dial the SASL listener Test verified (D83).
+            **kafka_security_options(cfg),
+        }
+    if driver == "iceberg":
+        # Forward catalog properties (warehouse, region, catalog_type, token,
+        # rest.*, glue.*, …) that are not already part of the common kwargs.
+        return {
+            k: v for k, v in cfg.items() if k not in common and v not in (None, "")
+        }
+    return {}
+
+
 def write_via_registry(
     driver: str,
     *,
@@ -71,14 +165,28 @@ def write_via_registry(
     # Dialect wrappers expect type=; harmless for others via **_kwargs.
     kwargs.setdefault("type", driver)
     # Pass write_mode / conflict_columns when the writer accepts them.
-    try:
-        return fn(
-            **kwargs,
-            write_mode=write_mode,
-            conflict_columns=conflict_columns or [],
-        )
-    except TypeError:
-        return fn(**kwargs)
+    with _dial_scope(driver, kwargs):
+        try:
+            return fn(
+                **kwargs,
+                write_mode=write_mode,
+                conflict_columns=conflict_columns or [],
+            )
+        except TypeError:
+            return fn(**kwargs)
+
+
+def _dial_scope(driver: str, cfg: dict[str, Any]):
+    """Egress policy around a connector call: pre-dial check + DNS pinning."""
+    from services.egress_guard import connector_dial_scope
+
+    extra = [
+        str(cfg.get(key) or "")
+        for key in ("schema_registry_url", "registry_url", "api_url", "base_url")
+    ]
+    return connector_dial_scope(
+        cfg, *extra, db_type=str(cfg.get("type") or driver or ""), point="transfer"
+    )
 
 
 def read_via_registry(
@@ -89,13 +197,60 @@ def read_via_registry(
     limit: int = 100_000,
     offset: int = 0,
     columns: list[str] | None = None,
+    cursor_column: str = "",
+    cursor_after: Any = None,
+    sdk_state: str | None = None,
+) -> Any:
+    """Invoke the registered batch reader (SQL-style signature or SaaS object)."""
+    with _dial_scope(driver, cfg):
+        return _read_via_registry_unscoped(
+            driver,
+            cfg=cfg,
+            table=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+            cursor_column=cursor_column,
+            cursor_after=cursor_after,
+            sdk_state=sdk_state,
+        )
+
+
+def _read_via_registry_unscoped(
+    driver: str,
+    *,
+    cfg: dict[str, Any],
+    table: str,
+    limit: int = 100_000,
+    offset: int = 0,
+    columns: list[str] | None = None,
+    cursor_column: str = "",
+    cursor_after: Any = None,
+    sdk_state: str | None = None,
 ) -> Any:
     """Invoke the registered batch reader (SQL-style signature or SaaS object)."""
     fn = load_reader(driver)
+    descriptor = get_descriptor(driver)
+    if descriptor and "source" in descriptor.roles and descriptor.catalog_ids:
+        return fn(
+            cfg=cfg,
+            object=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+            sdk_state=sdk_state,
+        )
     # SaaS readers use read_object(cfg=, object=, limit=). Iceberg needs the full
     # resolved config (warehouse, region, extra catalog properties) too.
     if driver in {"salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "iceberg"}:
-        return fn(cfg=cfg, object=table, limit=limit, offset=offset, columns=columns)
+        saas_kwargs: dict[str, Any] = {}
+        if cursor_column:
+            # Keyset seek for SaaS APIs whose OFFSET paging is capped.
+            saas_kwargs["cursor_column"] = cursor_column
+            saas_kwargs["cursor_after"] = cursor_after
+        return fn(
+            cfg=cfg, object=table, limit=limit, offset=offset, columns=columns, **saas_kwargs
+        )
 
     kwargs: dict[str, Any] = {
         "host": cfg.get("host", ""),
@@ -111,6 +266,12 @@ def read_via_registry(
         "offset": offset,
         "limit": limit,
     }
+    # TLS trust/pin, Oracle service_name/sid, MSSQL driver & failover: these
+    # decide which server answers and whether the handshake succeeds, so the
+    # reader has to dial the same connection the writer does.
+    from connectors.generic_sql import connection_options
+
+    kwargs.update(connection_options(cfg))
     if columns is not None:
         kwargs["columns"] = columns
     try:

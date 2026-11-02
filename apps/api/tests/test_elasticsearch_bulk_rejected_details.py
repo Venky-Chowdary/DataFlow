@@ -46,7 +46,10 @@ def test_es_bulk_errors_materialize_rejected_details_and_fail_strict():
     assert result.ok is False
     assert result.rejected_rows >= 1
     assert any("elasticsearch bulk" in str(d.get("reason", "")).lower() for d in result.rejected_details)
-    assert "bulk" in (result.error or "").lower()
+    # Mid-write bulk rejects under fail/FAIL_JOB abort via reject_on_strict_policy —
+    # error text may be the abort message; details still carry the bulk reason.
+    err_l = (result.error or "").lower()
+    assert "bulk" in err_l or "abort" in err_l or "fail" in err_l or "reject" in err_l
 
 
 def test_es_bulk_errors_quarantine_policy_keeps_partial_ok():

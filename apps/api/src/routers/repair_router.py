@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter(tags=["repair"])
@@ -23,15 +23,19 @@ class ProposeQuarantineBody(BaseModel):
 
 class DecideBody(BaseModel):
     approve: bool = True
-    actor: str = "user"
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
 
 
 class SnapshotBody(BaseModel):
     source_key: str
     table: str
-    primary_key: str = "id"
+    primary_key: str  # required — refuse inventing default "id"
     chunk_size: int = 1000
+    row_filter: dict | list | None = None
 
 
 @router.post("/repair/propose/preflight")
@@ -72,7 +76,7 @@ async def get_repair_proposal(proposal_id: str) -> dict[str, Any]:
 
 
 @router.post("/repair/proposals/{proposal_id}/decide")
-async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
+async def decide_repair(proposal_id: str, body: DecideBody, request: Request) -> dict[str, Any]:
     from services.agentic_repair import apply_actions_with_report, decide_proposal
 
     def _apply(actions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -85,7 +89,7 @@ async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
         p = decide_proposal(
             proposal_id,
             approve=body.approve,
-            actor=body.actor,
+            actor=_actor_email(request),
             apply_fn=apply_fn,
         )
     except KeyError:
@@ -95,40 +99,77 @@ async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
     return p.to_dict()
 
 
-@router.post("/cdc/snapshots")
-async def request_snapshot(body: SnapshotBody) -> dict[str, Any]:
-    from services.cdc_incremental_snapshot import request_incremental_snapshot
+def _signal_workspace_stamp(request: Request) -> str:
+    """The workspace a new standalone signal belongs to.
 
-    sig = request_incremental_snapshot(
-        body.source_key,
-        body.table,
-        primary_key=body.primary_key,
-        chunk_size=body.chunk_size,
-    )
-    return sig.to_dict()
+    The caller's write workspace; a platform admin acting with no workspace
+    named keeps the legacy unscoped stamp rather than a new 400.
+    """
+    from services.workspace_access import tenant_scope
 
-
-@router.get("/cdc/snapshots")
-async def list_snapshots(source_key: str = "", status: str = "") -> dict[str, Any]:
-    from services.cdc_incremental_snapshot import list_signals
-
-    return {"signals": [s.to_dict() for s in list_signals(source_key, status=status)]}
+    scope = tenant_scope(request)
+    try:
+        return scope.target_workspace_id(write=True)
+    except HTTPException:
+        if scope.unrestricted:
+            return ""
+        raise
 
 
-@router.get("/cdc/snapshots/{signal_id}")
-async def get_snapshot(signal_id: str) -> dict[str, Any]:
+def _visible_signal(request: Request, signal_id: str):
+    """The signal, or the same 404 for a missing id and another workspace's (D222)."""
     from services.cdc_incremental_snapshot import get_signal
+    from services.workspace_access import assert_resource_workspace
 
     sig = get_signal(signal_id)
     if sig is None:
         raise HTTPException(404, "Snapshot signal not found")
+    assert_resource_workspace(request, sig.workspace_id, not_found_detail="Snapshot signal not found")
+    return sig
+
+
+@router.post("/cdc/snapshots")
+async def request_snapshot(body: SnapshotBody, request: Request) -> dict[str, Any]:
+    from services.cdc_incremental_snapshot import request_incremental_snapshot
+
+    workspace_id = _signal_workspace_stamp(request)
+    try:
+        sig = request_incremental_snapshot(
+            body.source_key,
+            body.table,
+            primary_key=body.primary_key,
+            chunk_size=body.chunk_size,
+            row_filter=body.row_filter,
+            workspace_id=workspace_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return sig.to_dict()
 
 
+@router.get("/cdc/snapshots")
+async def list_snapshots(request: Request, source_key: str = "", status: str = "") -> dict[str, Any]:
+    from services.cdc_incremental_snapshot import list_signals
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request)
+    return {
+        "signals": [
+            s.to_dict() for s in list_signals(source_key, status=status) if scope.allows(s.workspace_id)
+        ]
+    }
+
+
+@router.get("/cdc/snapshots/{signal_id}")
+async def get_snapshot(signal_id: str, request: Request) -> dict[str, Any]:
+    return _visible_signal(request, signal_id).to_dict()
+
+
 @router.post("/cdc/snapshots/{signal_id}/cancel")
-async def cancel_snapshot(signal_id: str) -> dict[str, Any]:
+async def cancel_snapshot(signal_id: str, request: Request) -> dict[str, Any]:
     from services.cdc_incremental_snapshot import cancel_signal
 
+    _visible_signal(request, signal_id)
     sig = cancel_signal(signal_id)
     if sig is None:
         raise HTTPException(404, "Snapshot signal not found")
@@ -136,9 +177,9 @@ async def cancel_snapshot(signal_id: str) -> dict[str, Any]:
 
 
 @router.post("/cdc/signals/execute-snapshot")
-async def execute_snapshot_signal(body: SnapshotBody) -> dict[str, Any]:
+async def execute_snapshot_signal(body: SnapshotBody, request: Request) -> dict[str, Any]:
     """Debezium-compatible alias: enqueue incremental snapshot via signal API."""
-    return await request_snapshot(body)
+    return await request_snapshot(body, request)
 
 
 class EnsureSignalTableBody(BaseModel):

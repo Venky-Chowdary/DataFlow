@@ -4,6 +4,7 @@
  * Surfaces what Validate actually proved (sample vs population RI, ConversionClass)
  * so operators never confuse sample gates with migration_proven / RI proven.
  */
+import { buildHistoricalSuccessMetric, type HistoricalSuccessMetric } from "./historicalSuccessMetric.js";
 import type { PreflightResult } from "./types.js";
 
 export interface ReferentialIntegrityHonesty {
@@ -33,20 +34,25 @@ export interface ConversionClassHonesty {
   note: string;
 }
 
+export interface DecisionArtifactHonesty {
+  present: boolean;
+  contentHash: string | null;
+  schemaVersion: string | null;
+  headline: string;
+  note: string;
+}
+
 export interface ValidateHonestyControls {
   referentialIntegrity: ReferentialIntegrityHonesty;
   conversionClasses: ConversionClassHonesty;
+  /** Phase C11/C12 — Decision Artifact authority from Validate. */
+  decisionArtifact: DecisionArtifactHonesty;
   /** Opt-in population orphan scan — expensive; default false. */
   populationScanRequested: boolean;
   migrationProven: boolean;
   ddlIdentityHash: string | null;
   /** Module 17 — measured route success or explicitly unmeasured. */
-  historicalSuccess: {
-    measured: boolean;
-    successRate: number | null;
-    runsObserved: number;
-    headline: string;
-  };
+  historicalSuccess: HistoricalSuccessMetric;
   note: string;
 }
 
@@ -108,7 +114,13 @@ export function buildConversionClassHonesty(
 
   const needsApproval = counts["needs_user_approval"] || 0;
   const unsupported = counts["unsupported"] || 0;
-  const lossless = counts["lossless"] || 0;
+  const lossless =
+    (counts["lossless"] || 0)
+    + (counts["identity"] || 0)
+    + (counts["equivalent"] || 0)
+    + (counts["widening"] || 0)
+    + (counts["representation"] || 0)
+    + (counts["normalization"] || 0);
 
   let headline: string;
   if (columns.length === 0) {
@@ -118,7 +130,7 @@ export function buildConversionClassHonesty(
   } else if (unsupported > 0) {
     headline = `${unsupported} unsupported conversion(s) — remap required`;
   } else {
-    headline = `${lossless} lossless · ${columns.length} column(s) classified`;
+    headline = `${lossless} safe-path · ${columns.length} column(s) classified`;
   }
 
   return {
@@ -143,31 +155,41 @@ export function buildValidateHonestyControls(
   const migrationProven = Boolean(preflight?.proof_bundle?.migration_proven);
   const ddlIdentityHash =
     preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || null;
+  const art = preflight?.proof_bundle?.decision_artifact;
+  const artHash =
+    preflight?.proof_bundle?.decision_artifact_hash
+    || art?.content_hash
+    || null;
+  const artPresent = Boolean(artHash && String(artHash).length === 64);
+  const decisionArtifact: DecisionArtifactHonesty = {
+    present: artPresent,
+    contentHash: artHash ? String(artHash) : null,
+    schemaVersion: art?.schema_version ? String(art.schema_version) : null,
+    headline: artPresent
+      ? `Decision Artifact stamped (${String(artHash).slice(0, 12)}…)`
+      : "Decision Artifact missing — re-run Validate before Execute",
+    note:
+      "Execute consumes this immutable artifact hash — UI never re-derives invent/risk.",
+  };
   const hsRaw =
     (preflight?.proof_bundle as Record<string, unknown> | undefined)?.historical_success
     ?? (preflight as Record<string, unknown> | null | undefined)?.historical_success;
-  const hs = (hsRaw && typeof hsRaw === "object")
-    ? (hsRaw as {
-      measured?: boolean;
-      success_rate?: number | null;
-      runs_observed?: number;
-    })
-    : undefined;
-  const hsMeasured = Boolean(hs?.measured);
-  const hsRate = typeof hs?.success_rate === "number" ? hs.success_rate : null;
-  const hsRuns = typeof hs?.runs_observed === "number" ? hs.runs_observed : 0;
-  const historicalSuccess = {
-    measured: hsMeasured,
-    successRate: hsMeasured ? hsRate : null,
-    runsObserved: hsRuns,
-    headline: hsMeasured && hsRate != null
-      ? `Historical success measured: ${(hsRate * 100).toFixed(1)}% over ${hsRuns} load(s)`
-      : "Historical success unmeasured — no invented rate",
-  };
+  const historicalSuccess = buildHistoricalSuccessMetric(
+    hsRaw && typeof hsRaw === "object"
+      ? (hsRaw as {
+        measured?: boolean;
+        success_rate?: number | null;
+        runs_observed?: number;
+        rows_written_total?: number;
+        rows_rejected_total?: number;
+      })
+      : undefined,
+  );
 
   return {
     referentialIntegrity: ri,
     conversionClasses,
+    decisionArtifact,
     populationScanRequested: Boolean(opts?.populationScanRequested),
     migrationProven,
     ddlIdentityHash,
@@ -179,4 +201,184 @@ export function buildValidateHonestyControls(
       "Historical success is measured or unmeasured — never invented.",
     ].join(" "),
   };
+}
+
+export type SchemaEvolutionStamp = {
+  action?: string;
+  should_pause?: boolean;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: unknown[];
+  soft_net_additive?: unknown[];
+};
+
+/**
+ * Acknowledge-this-run is only valid for manual_review additive/soft drift.
+ * Hard-breaking (Confluent NONE) must remap or re-sign — Airbyte "approve myself"
+ * silently continued on column drop; we refuse that here.
+ */
+/** True only when this preflight recorded the schema-drift attestation. */
+export function schemaDriftAckRecorded(preflight: {
+  gates?: Array<{ id?: string; details?: Record<string, unknown> | null }>;
+  schema_drift?: { acknowledged?: boolean } | null;
+} | null | undefined): boolean {
+  if (!preflight) return false;
+  const gate = (preflight.gates || []).find((item) => item?.id === "schema_drift");
+  if (gate?.details?.acknowledged === true) return true;
+  return preflight.schema_drift?.acknowledged === true;
+}
+
+export function schemaDriftAllowsAcknowledge(
+  details?: Record<string, unknown> | null,
+): boolean {
+  if (!details) return false;
+  if (details.remediation_kind !== "acknowledge_schema_drift") return false;
+  if (details.ack_required === false) return false;
+  const evolution = schemaEvolutionFromDetails(details);
+  if (evolution.should_pause) return false;
+  if ((evolution.hard_breaking?.length ?? 0) > 0) return false;
+  if (evolution.compatibility === "none") return false;
+  return true;
+}
+
+export function schemaEvolutionFromDetails(
+  details?: Record<string, unknown> | null,
+): SchemaEvolutionStamp {
+  const raw = details?.schema_evolution;
+  if (!raw || typeof raw !== "object") return {};
+  const evo = raw as SchemaEvolutionStamp;
+  return {
+    action: typeof evo.action === "string" ? evo.action : undefined,
+    should_pause: Boolean(evo.should_pause),
+    compatibility: typeof evo.compatibility === "string" ? evo.compatibility : undefined,
+    compatibility_note:
+      typeof evo.compatibility_note === "string" ? evo.compatibility_note : undefined,
+    hard_breaking: Array.isArray(evo.hard_breaking) ? evo.hard_breaking : undefined,
+    soft_net_additive: Array.isArray(evo.soft_net_additive) ? evo.soft_net_additive : undefined,
+  };
+}
+
+export function schemaDriftCompatibilityHeadline(
+  details?: Record<string, unknown> | null,
+): string {
+  const evo = schemaEvolutionFromDetails(details);
+  const compat = evo.compatibility;
+  if (!compat) return "";
+  if (evo.compatibility_note) return `Compatibility ${compat} — ${evo.compatibility_note}`;
+  return `Compatibility ${compat}`;
+}
+
+export interface NumberLocaleValidateAction {
+  decision: "set_locale" | "assumed_us";
+  columns: string[];
+  message: string;
+}
+
+export interface DateLocaleValidateAction {
+  decision: "set_locale" | "settled";
+  columns: string[];
+  message: string;
+  locale?: "MDY" | "DMY";
+}
+
+/** Validate next action when grouping is ambiguous — refused, or read as US. */
+export function numberLocaleValidateAction(
+  preflight: PreflightResult | null | undefined,
+): NumberLocaleValidateAction | null {
+  const report = preflight?.number_locale_report;
+  if (!report || typeof report !== "object") return null;
+  const decision = String(report.decision || "");
+  if (decision !== "set_locale" && decision !== "assumed_us") return null;
+  const columns = (report.ambiguous_columns || [])
+    .map((row) => String(row?.column || "").trim())
+    .filter(Boolean);
+  const named = columns.slice(0, 6).join(", ") || "amount";
+  if (decision === "assumed_us") {
+    return {
+      decision: "assumed_us",
+      columns,
+      // The run will read these as US. Say so before Execute, not after.
+      message:
+        `${named}: no locale declared and the sample shows no grouping ` +
+        "evidence — reading as US (1,234.56). If this export is European, " +
+        "set number locale EU in Destination → Advanced before you run.",
+    };
+  }
+  return {
+    decision: "set_locale",
+    columns,
+    message:
+      `${named}: grouping is ambiguous (1,234 vs 1.234). ` +
+      "Set number locale US or EU in Destination → Advanced — Auto will not guess.",
+  };
+}
+
+export type AdvancedLocaleKind = "date" | "number";
+
+/** Stable ids for Destination → Advanced locale selects. One owner. */
+export const ADVANCED_LOCALE_FIELD_ID: Record<AdvancedLocaleKind, string> = {
+  date: "df2-adv-date-locale",
+  number: "df2-adv-number-locale",
+};
+
+export function advancedLocaleFieldId(kind: AdvancedLocaleKind): string {
+  return ADVANCED_LOCALE_FIELD_ID[kind];
+}
+
+/** Scroll + focus the locale control after Advanced mounts. Returns whether it was found. */
+export function scrollAdvancedLocaleIntoView(kind: AdvancedLocaleKind): boolean {
+  const el = document.getElementById(advancedLocaleFieldId(kind));
+  if (!el) return false;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if ("focus" in el && typeof el.focus === "function") {
+    el.focus();
+  }
+  return true;
+}
+
+/** Validate next action when Auto cannot tell Jan 2 from Feb 1. */
+export function dateLocaleValidateAction(
+  preflight: PreflightResult | null | undefined,
+): DateLocaleValidateAction | null {
+  const report = preflight?.date_locale_report;
+  if (!report || typeof report !== "object") return null;
+  const decision = String(report.decision || "");
+  if (decision === "ok") {
+    const locale = String(report.date_locale || preflight?.date_locale || "").trim().toUpperCase();
+    if (locale === "MDY" || locale === "DMY") {
+      return {
+        decision: "settled",
+        locale,
+        columns: [],
+        message:
+          locale === "DMY"
+            ? "Reading dates as DMY (day/month/year). A value in each date column fixed the order."
+            : "Reading dates as MDY (month/day/year). A value in each date column fixed the order.",
+      };
+    }
+    return null;
+  }
+  if (decision !== "set_locale") return null;
+  const columns = (report.ambiguous_columns || [])
+    .map((row) => String(row?.column || "").trim())
+    .filter(Boolean);
+  const named = columns.slice(0, 6).join(", ") || "event_date";
+  return {
+    decision: "set_locale",
+    columns,
+    message:
+      `${named}: day/month order is ambiguous (01/02/2024 is Jan 2 or Feb 1). ` +
+      "Set date locale DMY or MDY in Destination → Advanced — Auto will not guess.",
+  };
+}
+
+/** Hard-breaking drift (Confluent NONE) — remap / re-sign, never acknowledge. */
+export function schemaDriftRequiresRemap(
+  details?: Record<string, unknown> | null,
+): boolean {
+  if (!details) return false;
+  const evo = schemaEvolutionFromDetails(details);
+  if (evo.should_pause) return true;
+  if ((evo.hard_breaking?.length ?? 0) > 0) return true;
+  return evo.compatibility === "none";
 }

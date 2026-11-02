@@ -46,6 +46,6 @@ def test_pg_specialty_introspect_carriers():
         assert _pg_to_logical(raw) == want, raw
         assert ddl_type("postgresql", want) == want, want
 
-    # Integers still integers — specialty split must not invent OID for bigint.
-    assert _pg_to_logical("bigint") == "INTEGER"
-    assert _pg_to_logical("integer") == "INTEGER"
+    # Integers keep width — specialty split must not invent OID for bigint.
+    assert _pg_to_logical("bigint") == "BIGINT"
+    assert _pg_to_logical("integer") == "INT4"

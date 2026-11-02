@@ -1,5 +1,8 @@
 /**
- * Datawrap mark — wrap lattice (original geometry).
+ * Datawrap mark — wrap lattice.
+ *
+ * Geometry and colours come from `lib/brandMark`, the one definition the
+ * favicon, manifest icons and social exports are also generated from.
  *
  * Uniqueness notes (research pass):
  * - NOT headphones (no twin uprights + headband)
@@ -8,6 +11,7 @@
  * Concept: three cargo-style wrap straps sealing a center void, diagonal
  * strap ends as directional arrow (secured anywhere→anywhere).
  */
+import { BRAND_COLORS, BRAND_MARK_GEOMETRY, BRAND_MARK_VIEWBOX } from "../lib/brandMark";
 
 interface DtLogoProps {
   size?: number;
@@ -39,13 +43,14 @@ export function DtLogo({
   }
 
   const isApp = variant === "app";
+  const g = BRAND_MARK_GEOMETRY;
 
   return (
     <svg
       className="dt-brand-mark"
       width={size}
       height={size}
-      viewBox="0 0 64 64"
+      viewBox={`0 0 ${BRAND_MARK_VIEWBOX} ${BRAND_MARK_VIEWBOX}`}
       fill="none"
       role={decorative ? undefined : "img"}
       aria-hidden={decorative ? true : undefined}
@@ -53,30 +58,26 @@ export function DtLogo({
       shapeRendering="geometricPrecision"
     >
       {!decorative && <title>{title}</title>}
-      {isApp && <rect width="64" height="64" rx="14" fill="#0A3D3A" />}
+      {isApp && <rect {...g.tile} fill={BRAND_COLORS.tile} />}
 
-      {/* Horizontal wrap strap */}
-      <rect x="10" y="28" width="44" height="8" rx="2.5" fill="#F59E0B" />
-      {/* Vertical wrap strap */}
-      <rect x="28" y="10" width="8" height="44" rx="2.5" fill={isApp ? "#F8FAFC" : "#0F766E"} />
-      {/* Diagonal wrap strap → arrow (unique third axis) */}
+      <rect {...g.horizontalStrap} fill={BRAND_COLORS.strap} />
+      <rect
+        {...g.verticalStrap}
+        fill={isApp ? BRAND_COLORS.strapOnTile : BRAND_COLORS.strapPlain}
+      />
       <path
-        d="M16 48 L40 24"
-        stroke="#2DD4BF"
-        strokeWidth="8"
+        d={g.diagonal.d}
+        stroke={BRAND_COLORS.arrow}
+        strokeWidth={g.diagonal.strokeWidth}
         strokeLinecap="round"
       />
-      <path d="M36 18 L52 14 L44 30 Z" fill="#2DD4BF" />
+      <path d={g.arrowHead.d} fill={BRAND_COLORS.arrow} />
 
       {/* Center seal void — reads as secured packet, not ear cup */}
       <rect
-        x="27"
-        y="27"
-        width="10"
-        height="10"
-        rx="2"
-        fill={isApp ? "#0A3D3A" : "#FFFFFF"}
-        stroke={isApp ? "#0A3D3A" : "#FFFFFF"}
+        {...g.seal}
+        fill={isApp ? BRAND_COLORS.tile : BRAND_COLORS.sealPlain}
+        stroke={isApp ? BRAND_COLORS.tile : BRAND_COLORS.sealPlain}
         strokeWidth="1"
       />
     </svg>

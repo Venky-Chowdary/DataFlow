@@ -11,13 +11,149 @@ import re
 _IDENT_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
+_PLAIN_SQL_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def unsafe_sql_identifier_reason(name: str) -> str | None:
+    """Refuse a destination name the writer would silently rename.
+
+    A quote or comment in the table name does not inject (the writer
+    replaces illegal characters), but the plan, preview, and job kept the
+    raw string while the table was created under a different spelling
+    (R4-D10). Case-only differences are legal unquoted SQL and are allowed.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    parts = [part for part in raw.split(".") if part]
+    if parts and all(_PLAIN_SQL_IDENT.fullmatch(part) for part in parts):
+        return None
+    shown = sanitize_identifier(raw.replace(".", "_"))
+    return (
+        f"Destination name {raw!r} is not a plain SQL identifier. "
+        f"The writer would store it as {shown!r}. "
+        "Use that spelling, or a name of letters, digits, and underscores."
+    )
+
+
+def unsafe_destination_identifier_reason(dest_type: str, name: str) -> str | None:
+    """SQL catalogs only. Object keys and document names keep their own rules."""
+    from services.db_type_utils import NO_RELATIONAL_DDL_DESTS, normalize_dest_kind
+    from services.type_system import destination_is_file_export
+
+    kind = normalize_dest_kind(dest_type)
+    if not kind:
+        return None
+    if destination_is_file_export(kind) or kind in NO_RELATIONAL_DDL_DESTS:
+        return None
+    if kind in {"mongodb", "dynamodb", "redis", "elasticsearch", "opensearch", "kafka"}:
+        return None
+    return unsafe_sql_identifier_reason(name)
+
+
 def sanitize_identifier(name: str, preserve_case: bool = False, *, max_len: int = 63) -> str:
+    """Make an identifier legal without making two distinct names one.
+
+    Only characters that are actually illegal are replaced. Runs of underscores
+    and trailing underscores are legal in every dialect we write to, and
+    normalizing them away was not cosmetic: it merged distinct columns.
+    ``first__name`` and ``first_name`` both became ``first_name``, so one source
+    column silently overwrote the other in the destination, and ``value_`` and
+    ``value`` collided the same way.
+
+    It also renamed data that needed no renaming. Every Salesforce custom field
+    ends in ``__c``, so ``ExternalKey__c`` landed as ``ExternalKey_c`` — the
+    values transferred, but under a column name the source never had, which is
+    enough for a checksum to disagree with a transfer that in fact moved every
+    row correctly.
+    """
     cleaned = (name or "").strip() if preserve_case else (name or "").strip().lower()
-    s = _IDENT_RE.sub("_", cleaned)
-    s = re.sub(r"_+", "_", s).rstrip("_")
+    # D55: a letter with an accent is that letter, not an illegal character.
+    # ``Café`` became ``Caf_`` (and ``Straße`` ``Stra_e``); transliterating
+    # keeps the name readable. Characters with no Latin spelling still become
+    # ``_`` as before.
+    s = _IDENT_RE.sub("_", transliterate_identifier(cleaned))
     if not s or s[0].isdigit():
         s = f"col_{s or 'field'}"
     return s[:max_len]
+
+
+#: Latin letters NFKD does not decompose into an ASCII base.
+_LATIN_EXTRA = {
+    "ß": "ss", "ẞ": "SS", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+    "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D",
+    "ð": "d", "Ð": "D", "þ": "th", "Þ": "TH", "ı": "i", "ħ": "h", "Ħ": "H",
+}
+
+
+def transliterate_identifier(name: str) -> str:
+    """Accented Latin letters to their ASCII spelling; everything else untouched."""
+    import unicodedata
+
+    out: list[str] = []
+    for ch in name or "":
+        if ch.isascii():
+            out.append(ch)
+            continue
+        if ch in _LATIN_EXTRA:
+            out.append(_LATIN_EXTRA[ch])
+            continue
+        base = "".join(
+            c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c)
+        )
+        out.append(base if base and base.isascii() and base.isalnum() else ch)
+    return "".join(out)
+
+
+def legacy_sanitized_identifier(name: str, preserve_case: bool = False, *, max_len: int = 63) -> str:
+    """The spelling writers used before transliteration (``Café`` -> ``Caf_``).
+
+    Tables DataFlow created then still hold it, so a rerun must recognise it
+    as the same column (D55).
+    """
+    cleaned = (name or "").strip() if preserve_case else (name or "").strip().lower()
+    s = _IDENT_RE.sub("_", cleaned)
+    if not s or s[0].isdigit():
+        s = f"col_{s or 'field'}"
+    return s[:max_len]
+
+
+def sanitized_spellings(name: str) -> set[str]:
+    """Lower-cased destination spellings a source name may already have."""
+    return {
+        sanitize_identifier(name).lower(),
+        legacy_sanitized_identifier(name).lower(),
+    }
+
+
+#: Engines whose column names compare case-insensitively, so ``ID`` and ``id``
+#: are one column even when both are quoted.
+_CASE_INSENSITIVE_COLUMN_ENGINES = frozenset(
+    {"mysql", "mariadb", "sqlite", "sqlserver", "mssql"}
+)
+
+
+def sanitized_name_collisions(
+    names: list[str], dest_kind: str = ""
+) -> list[tuple[str, list[str]]]:
+    """Distinct names that sanitise to one destination identifier (D54).
+
+    ``First Name`` and ``First-Name`` both become ``First_Name``; the writer
+    then emits the column twice and the driver reports "specified more than
+    once" after DDL has run. Returns ``[(identifier, [originals...])]``.
+    """
+    fold = (dest_kind or "").strip().lower() in _CASE_INSENSITIVE_COLUMN_ENGINES
+    groups: dict[str, list[str]] = {}
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        ident = sanitize_identifier(name, preserve_case=True)
+        key = ident.casefold() if fold else ident
+        bucket = groups.setdefault(key, [])
+        if name not in bucket:
+            bucket.append(name)
+    return [(key, originals) for key, originals in groups.items() if len(originals) > 1]
 
 
 def snowflake_fold_identifier(name: str) -> str:
@@ -67,6 +203,45 @@ def require_safe_identifier(
     return s
 
 
+def _verbatim_quoted_identifier(name: str) -> bool:
+    """True when quoting this spelling is safe and must not rename it.
+
+    A space is legal inside every quoted identifier we emit. Replacing it
+    with an underscore addresses a different table, so a source named
+    ``Order Details`` could not be sampled or transferred (DEF-C-047).
+    A quote, semicolon or other mark still goes through the injection
+    sanitizer: those are not part of a name we will paste verbatim.
+    """
+    if not name or name[0].isdigit() or name != name.strip():
+        return False
+    return all(ch.isalnum() or ch in {"_", " "} for ch in name)
+
+
+def catalog_identifier(
+    name: str,
+    *,
+    preserve_case: bool = False,
+    max_len: int = 63,
+    sanitize: bool = True,
+) -> str:
+    """The identifier to place inside quotes.
+
+    ``sanitize`` still strips injection payloads. A name whose only unusual
+    character is a space is kept, because the quotes make the space legal.
+    """
+    if not sanitize:
+        return require_safe_identifier(name, allow_raw=True, max_len=max_len)
+    raw = (name or "").strip()
+    if _verbatim_quoted_identifier(raw):
+        # A space is only legal when the object was created quoted, so the
+        # stored case is the name. Lowercasing it looks up a different table.
+        kept = raw if preserve_case or " " in raw else raw.lower()
+        return kept[:max_len]
+    return require_safe_identifier(
+        name, preserve_case=preserve_case, max_len=max_len
+    )
+
+
 def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
     """Quote a SQL identifier and escape embedded quote characters.
 
@@ -88,6 +263,112 @@ def quote_column_list(columns: list[str] | None, *, quote_char: str = '"') -> st
     return ", ".join(quote_sql_identifier(c, quote_char) for c in columns)
 
 
+def _unquote_sql_ident(part: str) -> str:
+    """Strip one layer of SQL identifier quotes, including doubled escapes."""
+    raw = (part or "").strip()
+    if len(raw) >= 2:
+        if raw[0] == '"' and raw[-1] == '"':
+            return raw[1:-1].replace('""', '"')
+        if raw[0] == "`" and raw[-1] == "`":
+            return raw[1:-1].replace("``", "`")
+        if raw[0] == "[" and raw[-1] == "]":
+            return raw[1:-1].replace("]]", "]")
+    return raw
+
+
+def _ident_parts(name: str) -> list[str]:
+    """Split ``schema.table`` on dots that are not inside quotes."""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(name)
+    while i < n:
+        ch = name[i]
+        if quote is None:
+            if ch in {'"', "`"}:
+                quote = ch
+                buf.append(ch)
+            elif ch == "[":
+                quote = "]"
+                buf.append(ch)
+            elif ch == ".":
+                part = "".join(buf).strip()
+                if part:
+                    parts.append(part)
+                buf = []
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+        buf.append(ch)
+        closer = quote
+        if ch == closer:
+            nxt = name[i + 1] if i + 1 < n else ""
+            if closer == "]" and nxt == "]":
+                buf.append(nxt)
+                i += 2
+                continue
+            if closer in {'"', "`"} and nxt == closer:
+                buf.append(nxt)
+                i += 2
+                continue
+            quote = None
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def split_qualified_table(
+    table: str,
+    schema: str | None = None,
+) -> tuple[str | None, str]:
+    """Return ``(schema, table)`` without double-prefixing a qualified name.
+
+    Studio and schedules often store ``public.case_a_src`` while the connector
+    already has ``schema=public``. Callers that then do
+    ``sa.table(table, schema=schema)`` or ``quote_table_ref(table, schema)``
+    addressed ``public."public.case_a_src"`` — a relation that does not exist —
+    so uniqueness and collision probes failed closed on a table the operator
+    had already chosen.
+
+    A quoted identifier that contains a dot (``"foo.bar"``) is one name and is
+    not split. Unquoted ``schema.table`` (and ``catalog.schema.table``) yields
+    the last segment as the table and the preceding segment as the schema.
+    The table's own qualifier wins over ``schema`` when both are set.
+    """
+    fallback = (schema or "").strip() or None
+    raw = (table or "").strip()
+    if not raw:
+        return fallback, raw
+    parts = _ident_parts(raw)
+    if len(parts) <= 1:
+        return fallback, _unquote_sql_ident(parts[0] if parts else raw)
+    tbl = _unquote_sql_ident(parts[-1])
+    sch = _unquote_sql_ident(parts[-2])
+    return sch or fallback, tbl
+
+
+def pg_regclass_literal(schema: str | None, table: str) -> str:
+    """Literal passed to ``to_regclass`` for an existence probe.
+
+    ``to_regclass('public.Mixed_Case')`` folds the unquoted identifier to
+    lowercase and returns NULL for a table stored as ``"Mixed_Case"`` — the
+    caller then concludes the destination is absent, issues CREATE TABLE, and
+    fails ``relation already exists`` (QA MX3-06). Both segments must be
+    double-quoted with embedded quotes escaped.
+    """
+    def _seg(name: str) -> str:
+        return '"' + str(name or "").replace('"', '""') + '"'
+
+    sch, tbl = split_qualified_table(table, schema)
+    if sch:
+        return f"{_seg(sch)}.{_seg(tbl)}"
+    return _seg(tbl)
+
+
 def quote_table_ref(
     table: str,
     schema: str | None = None,
@@ -102,25 +383,26 @@ def quote_table_ref(
 
     ``dialect``: ansi | postgresql | snowflake | sqlite | duckdb | mysql | bigquery
     """
+    schema, table = split_qualified_table(table, schema)
     dialect = (dialect or "ansi").lower()
-    if dialect in ("mysql", "mariadb", "clickhouse"):
+    try:
+        from services.dialect_profiles import normalize_driver
+
+        dialect = normalize_driver(dialect) or dialect
+    except Exception:
+        pass
+    if dialect in ("mysql", "mariadb", "clickhouse", "databricks"):
         q = "`"
-        tbl = require_safe_identifier(table, preserve_case=True) if sanitize else require_safe_identifier(
-            table, allow_raw=True, max_len=64
-        )
+        tbl = catalog_identifier(table, preserve_case=True, max_len=64, sanitize=sanitize)
         if schema:
-            sch = require_safe_identifier(schema, preserve_case=True) if sanitize else require_safe_identifier(
-                schema, allow_raw=True, max_len=64
-            )
+            sch = catalog_identifier(schema, preserve_case=True, max_len=64, sanitize=sanitize)
             return f"{quote_sql_identifier(sch, q)}.{quote_sql_identifier(tbl, q)}"
         return quote_sql_identifier(tbl, q)
 
     if dialect in ("sqlserver", "mssql"):
         # SQL Server: [schema].[table]
         def _bracket(ident: str) -> str:
-            safe = require_safe_identifier(ident, preserve_case=True) if sanitize else require_safe_identifier(
-                ident, allow_raw=True, max_len=128
-            )
+            safe = catalog_identifier(ident, preserve_case=True, max_len=128, sanitize=sanitize)
             return f"[{safe.replace(']', ']]')}]"
 
         if schema:
@@ -133,10 +415,9 @@ def quote_table_ref(
         for part in (project, dataset or schema, table):
             if not part:
                 continue
-            if sanitize:
-                parts.append(require_safe_identifier(part, preserve_case=True, max_len=1024))
-            else:
-                parts.append(require_safe_identifier(part, allow_raw=True, max_len=1024))
+            parts.append(
+                catalog_identifier(part, preserve_case=True, max_len=1024, sanitize=sanitize)
+            )
         if not parts:
             raise ValueError("BigQuery table reference is empty")
         joined = ".".join(parts)
@@ -145,14 +426,22 @@ def quote_table_ref(
     # ANSI / Postgres / Snowflake / SQLite / DuckDB / Oracle
     q = '"'
     preserve = preserve_case or dialect in ("snowflake", "postgresql", "postgres", "redshift", "oracle")
-    if sanitize:
-        tbl = require_safe_identifier(table, preserve_case=preserve)
-        sch = require_safe_identifier(schema, preserve_case=preserve) if schema else None
-    else:
-        tbl = require_safe_identifier(table, allow_raw=True)
-        sch = require_safe_identifier(schema, allow_raw=True) if schema else None
-    # Dialect fold (Snowflake UPPER, etc.) — never leak Postgres lowercase into warehouses.
-    if dialect in ("snowflake", "oracle", "postgresql", "postgres", "redshift"):
+    tbl = catalog_identifier(table, preserve_case=preserve, sanitize=sanitize)
+    sch = (
+        catalog_identifier(schema, preserve_case=preserve, sanitize=sanitize)
+        if schema
+        else None
+    )
+    # Dialect fold (Snowflake UPPER, etc.) — never leak Postgres lowercase into
+    # warehouses. ``preserve_case`` means the caller resolved the stored spelling
+    # from the catalog: folding it again would address a different object.
+    if not preserve_case and dialect in (
+        "snowflake",
+        "oracle",
+        "postgresql",
+        "postgres",
+        "redshift",
+    ):
         try:
             from services.dialect_profiles import fold_identifier
 

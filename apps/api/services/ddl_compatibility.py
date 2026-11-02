@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -11,15 +12,17 @@ from services.db_type_utils import (
     ci_get,
     normalize_dest_kind,
 )
-from services.type_system import (
+from services.decision_kernel import (
     ddl_type,
-    decimal_precision_would_truncate,
-    decimal_scale_would_truncate,
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+)
+from services.type_system import (
+    blocking_string_width_narrowing,
+    decimal_precision_would_truncate,
+    decimal_scale_would_truncate,
     specialty_carrier_would_collapse,
-    string_width_would_narrow,
     vector_dim_mismatch,
     vector_dim_unknown_for_native,
 )
@@ -38,6 +41,8 @@ _UNBOUNDED_TEXT_TYPES = re.compile(
     r"string|bytes|json|jsonb|xml|super|variant)\b",
     re.I,
 )
+_logger = logging.getLogger(__name__)
+
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric|number)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", re.I)
 _NUMBERISH = re.compile(r"^(?:decimal|numeric|number|float|double|real|int|bigint|smallint)", re.I)
 
@@ -85,33 +90,46 @@ def _parse_decimal_capacity(ddl: str) -> tuple[int, int] | None:
     return None
 
 
+def _digits_needed(value: Any) -> tuple[int, int]:
+    """(integer digits, fractional digits) this decimal occupies as written."""
+    _sign, digits, exp = value.as_tuple()
+    if not isinstance(exp, int):  # NaN / Infinity carry a string exponent
+        return 0, 0
+    scale_digits = -exp if exp < 0 else 0
+    int_digits = len(digits) - scale_digits if exp < 0 else len(digits) + exp
+    return int_digits, scale_digits
+
+
 def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str | None:
     capacity = _parse_decimal_capacity(tgt_type)
     if not capacity or not samples:
         return None
     precision, scale = capacity
     max_int_digits = max(0, precision - scale)
-    try:
-        from decimal import Decimal, InvalidOperation
-    except ImportError:
-        return None
     for raw in samples[:50]:
-        text = (raw or "").strip().replace(",", "")
+        from services.transform_engine import decimal_wire_value
+
+        from services.value_serializer import unescape_wire_text
+
+        text = str(unescape_wire_text(raw) or "").strip()
         if not text or text.lower() in {"null", "none", "nan"}:
             continue
-        try:
-            value = Decimal(text)
-        except (InvalidOperation, ValueError):
-            # Non-numeric into DECIMAL is a type/coercion problem handled elsewhere.
+        value = decimal_wire_value(text)
+        if value is None:
+            # Auto refused grouping, or non-numeric — type/coercion handled elsewhere.
             continue
-        sign, digits, exp = value.as_tuple()
-        del sign
-        scale_digits = -exp if exp < 0 else 0
-        int_digits = len(digits) - scale_digits if exp < 0 else len(digits) + max(exp, 0)
+        int_digits, scale_digits = _digits_needed(value)
+        if scale_digits > scale:
+            # Trailing zeros carry no value: '1.50000000' lands in DECIMAL(9,2) as
+            # 1.50, exactly, and the writer's own fit predicate says so. Measuring
+            # the padded scale here blocks a row Execute would have accepted —
+            # Validate must not be stricter than the write it is forecasting.
+            int_digits, scale_digits = _digits_needed(value.normalize())
         if int_digits > max_int_digits or scale_digits > scale:
             return (
                 f"Decimal capacity overflow: {tgt} ({tgt_type}) cannot hold sample value "
-                f"'{raw[:40]}' (needs ~{int_digits},{scale_digits} vs {precision},{scale})"
+                f"'{raw[:40]}' (needs ~{int_digits + scale_digits},{scale_digits} "
+                f"vs {precision},{scale})"
             )
     return None
 
@@ -120,11 +138,13 @@ def _sample_values(sample_rows: list[dict] | None, column: str) -> list[str]:
     if not sample_rows:
         return []
     out: list[str] = []
+    from services.value_serializer import is_reader_null_cell, unescape_wire_text
+
     for row in sample_rows:
         val = row.get(column)
-        if val is None:
+        if val is None or is_reader_null_cell(val):
             continue
-        out.append(str(val).strip())
+        out.append(str(unescape_wire_text(val)).strip())
     return out
 
 
@@ -151,6 +171,8 @@ def evaluate_ddl_compatibility(
     destination_table: str | None = None,
     destination_pk_columns: list[str] | None = None,
     contract_primary_key: str | None = None,
+    proven_width_narrowings: Any = None,
+    population_fit_report: Any = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -169,6 +191,21 @@ def evaluate_ddl_compatibility(
 
     if not mappings:
         return False, ["No column mappings defined"]
+
+    if relational_ddl:
+        # D54: names the writer sanitises to the same identifier. Found here
+        # they are a rename; found at write they are a driver error after DDL.
+        from connectors.sql_identifiers import sanitized_name_collisions
+        from services.mapping_constraints import write_mappings
+
+        for ident, originals in sanitized_name_collisions(
+            [str(m.get("target") or "") for m in write_mappings(mappings)], dest_kind
+        ):
+            issues.append(
+                "Column names collide once made legal for the destination: "
+                + " and ".join(repr(o) for o in originals)
+                + f" both become {ident!r}. Rename one of them in Map."
+            )
 
     from services.batch_progress import effective_backfill_new_fields
 
@@ -293,7 +330,21 @@ def evaluate_ddl_compatibility(
         from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
         risk_cleared = mapping_has_clearing_risk_contract(m)
-        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type, dest_db=dest_kind):
+        from services.column_case import column_population
+
+        # Measured ASCII is not a code-page collapse. No rows stays unread,
+        # so that pair stays a collapse until a contract clears it.
+        population = column_population(sample_rows, src)
+        if not schemaless and tgt_type and is_lossy_coercion(
+            src_type,
+            tgt_type,
+            dest_db=dest_kind,
+            dest_table_exists=table_exists,
+            population=population,
+            source=src,
+            target=tgt,
+            proven=proven_width_narrowings,
+        ):
             # Align with G3: declared lossy never soft-passes on head samples
             # without a clearing Risk Contract.
             src_logical = normalize_logical_type(src_type)
@@ -310,7 +361,13 @@ def evaluate_ddl_compatibility(
                 elif (
                     src_logical == "decimal"
                     and tgt_logical == "decimal"
-                    and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
+                    and is_precision_collapse_coercion(
+                        src_type,
+                        tgt_type,
+                        dest_db=dest_kind,
+                        dest_table_exists=table_exists,
+                        population=population,
+                    )
                 ):
                     note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; accept risk or remap)"
                 elif src_logical == "datetime" and tgt_logical == "date":
@@ -322,14 +379,24 @@ def evaluate_ddl_compatibility(
                 elif specialty_carrier_would_collapse(src_type, tgt_type):
                     note = (
                         " — specialty polarity collapse "
-                        "(prefer VARCHAR(24)/BINARY(12) for ObjectId; bare TEXT/VARCHAR drops carrier domain)"
+                        "(prefer VARCHAR(24)/BINARY(12) for ObjectId; "
+                        "narrow VARCHAR(n<24) or non-text sinks drop the hex/binary wire)"
                     )
                 elif (
                     src_logical in {"string", "text"}
                     and tgt_logical in {"string", "text"}
-                    and string_width_would_narrow(src_type, tgt_type)
+                    and blocking_string_width_narrowing(
+                        src,
+                        tgt,
+                        src_type,
+                        tgt_type,
+                        dest_db=dest_kind,
+                        proven=proven_width_narrowings,
+                    )
                 ):
-                    note = " — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
+                    from services.population_fit_narrowing import unproven_width_message
+
+                    note = " — " + unproven_width_message(tgt, population_fit_report)
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
@@ -338,7 +405,16 @@ def evaluate_ddl_compatibility(
         if (
             not schemaless
             and tgt_type
-            and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
+            and is_precision_collapse_coercion(
+                src_type,
+                tgt_type,
+                dest_db=dest_kind,
+                dest_table_exists=table_exists,
+                population=population,
+                source=src,
+                target=tgt,
+                proven=proven_width_narrowings,
+            )
             and not risk_cleared
         ):
             if specialty_carrier_would_collapse(src_type, tgt_type):
@@ -350,11 +426,20 @@ def evaluate_ddl_compatibility(
             elif (
                 normalize_logical_type(src_type) in {"string", "text"}
                 and normalize_logical_type(tgt_type) in {"string", "text"}
-                and string_width_would_narrow(src_type, tgt_type)
+                and blocking_string_width_narrowing(
+                    src,
+                    tgt,
+                    src_type,
+                    tgt_type,
+                    dest_db=dest_kind,
+                    proven=proven_width_narrowings,
+                )
             ):
+                from services.population_fit_narrowing import unproven_width_message
+
                 msg = (
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
-                    "— VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
+                    f"— {unproven_width_message(tgt, population_fit_report)}"
                 )
             else:
                 msg = ""
@@ -365,27 +450,44 @@ def evaluate_ddl_compatibility(
             samples = _sample_values(sample_rows, src)
             if samples:
                 width = _parse_varchar_width(tgt_type)
+                value_overflows: list[str] = []
                 if width is not None:
                     max_len = _max_string_len(samples)
                     if max_len > width:
-                        issues.append(
+                        value_overflows.append(
                             f"Value width overflow: {src} sample max {max_len} chars "
                             f"exceeds {tgt} ({tgt_type})"
                         )
 
                 overflow = _decimal_overflow_issue(samples, tgt, tgt_type)
                 if overflow:
-                    issues.append(overflow)
+                    value_overflows.append(overflow)
+                if value_overflows and risk_cleared:
+                    # A verified continue-policy Risk Contract is the operator's
+                    # signed instruction for exactly these rows: the writer holds
+                    # each non-fitting value out per its execution_policy
+                    # (quarantine / skip / cast). Blocking here made every
+                    # continue policy unreachable for capacity overflow.
+                    _logger.info(
+                        "G6 value overflow on %s→%s (%s) cleared by Risk Contract; "
+                        "writer enforces per row: %s",
+                        src,
+                        tgt,
+                        tgt_type,
+                        "; ".join(value_overflows),
+                    )
+                else:
+                    issues.extend(value_overflows)
 
                 src_logical = normalize_logical_type(src_type)
                 tgt_logical = normalize_logical_type(tgt_type)
                 if src_logical in {"integer", "decimal"} and tgt_logical == "integer":
-                    for s in samples[:20]:
-                        if "." in s and s.replace(".", "", 1).replace("-", "", 1).isdigit():
-                            issues.append(
-                                f"Fractional source values for {src} cannot fit integer target {tgt}"
-                            )
-                            break
+                    from services.transform_engine import is_fractional_wire_value
+
+                    if any(is_fractional_wire_value(s) for s in samples[:20]):
+                        issues.append(
+                            f"Fractional source values for {src} cannot fit integer target {tgt}"
+                        )
 
         if not schemaless and table_exists is False and allow_create:
             inferred_ddl = ddl_type(dest_db_type, src_type)

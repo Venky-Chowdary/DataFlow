@@ -14,6 +14,15 @@ by fetching them defeats the purpose of having pushed the compute down. The
 results are still emitted in the expectations engine's shape so the job
 plumbing and UI consume them unchanged.
 
+**Hold-out is physical, not an accounting fiction.** A failing error-severity
+test used to stamp ``rows_quarantined`` from ``COUNT(*)`` while the violating
+rows stayed in the mart — silent pollution. After the count fails, this runner
+SELECTs the violators, writes the same dest DLQ table as transfer
+(``{model}_df_quarantine``), and DELETEs them from the mart **only if** that
+dest write succeeded. ``rows_quarantined`` is the dest COUNT decrease.
+Warn-severity tests never delete. No project_id / dest write failure is
+fail-closed: mart unchanged, no hold-out claim.
+
 **Identifiers are never interpolated raw.** Model names, columns and unique
 keys all reach SQL text. Every one of them goes through
 ``require_safe_identifier`` at definition time and ``quote_table_ref`` /
@@ -33,7 +42,6 @@ from services.engine_pool import release_engine
 from services.dialect_profiles import dialect_profile, normalize_driver
 from services.transform_models import (
     TransformModel,
-    TransformPlan,
     build_plan,
     describe_plan,
     extract_refs,
@@ -41,6 +49,10 @@ from services.transform_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Fail-closed cap. COUNT stays O(1); hold-out SELECTs only after a test fails.
+#: Crossing this cap refuses DELETE rather than pulling a warehouse into RAM.
+TRANSFORM_HOLDOUT_ROW_CAP = 100_000
 
 @dataclass(frozen=True)
 class MaterializationDialect:
@@ -108,6 +120,36 @@ class UnsupportedMaterializationError(ValueError):
     """
 
 
+class TransformAlignmentError(ValueError):
+    """The model's output cannot be matched by name to the existing target.
+
+    Raised before the load writes anything, naming the columns involved. The
+    alternative is what this module used to do — bind positionally, and let the
+    engine put ``region`` into ``city`` while the run reported success.
+    """
+
+
+@dataclass(frozen=True)
+class ColumnAlignment:
+    """Target column ↔ model column pairs for one incremental load.
+
+    Order follows the model's output so the INSERT column list and the SELECT
+    projection stay index-for-index identical whatever order the target has.
+    """
+
+    #: (target column name, model output column name)
+    pairs: tuple[tuple[str, str], ...]
+
+    def insert_clause(self, runner: "TransformRunner") -> str:
+        return "(" + ", ".join(runner.quote_column(t) for t, _ in self.pairs) + ")"
+
+    def select_list(self, runner: "TransformRunner") -> str:
+        return ", ".join(runner.quote_column(m) for _, m in self.pairs)
+
+    def to_dict(self) -> dict[str, str]:
+        return {target: model for target, model in self.pairs}
+
+
 @dataclass
 class ModelRunResult:
     """Outcome of materializing one model."""
@@ -123,6 +165,13 @@ class ModelRunResult:
     sql: str = ""
     error: str = ""
     tests: list[dict[str, Any]] = field(default_factory=list)
+    #: target column → model column, for incremental loads that ran.
+    column_alignment: dict[str, str] = field(default_factory=dict)
+    #: Rows physically removed from the mart after dest DLQ write succeeded.
+    rows_held_out: int = 0
+    hold_out_persisted: bool = False
+    hold_out_warning: str = ""
+    quarantine_details: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,10 +181,13 @@ class ModelRunResult:
             "relation": self.relation,
             "strategy": self.strategy,
             "rows_affected": self.rows_affected,
+            "rows_held_out": self.rows_held_out,
             "seconds": round(self.seconds, 3),
             "sql": self.sql,
             "error": self.error,
             "tests": list(self.tests),
+            "column_alignment": dict(self.column_alignment),
+            "hold_out_warning": self.hold_out_warning,
         }
 
 
@@ -163,6 +215,23 @@ class TransformRunResult:
             if not t.get("passed") and t.get("severity") == "error"
         ]
 
+    def row_accounting(self) -> dict[str, int]:
+        """Dest-COUNT ledger — ``rows_quarantined`` is hold-out, not COUNT(*).
+
+        Failing tests that could not be held out (no project_id, dest DLQ write
+        failed, cap exceeded) keep ``rows_quarantined=0`` even when
+        ``tests_failed>0``. Claiming COUNT(*) as quarantined while the mart
+        still holds the rows is silent pollution.
+        """
+        written = sum(m.rows_affected for m in self.models if m.rows_affected >= 0)
+        quarantined = sum(max(int(m.rows_held_out or 0), 0) for m in self.models)
+        return {
+            "models_run": len(self.models),
+            "rows_written": written,
+            "rows_quarantined": quarantined,
+            "tests_failed": len(self.failed_tests),
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
@@ -174,6 +243,7 @@ class TransformRunResult:
             "model_count": len(self.models),
             "failed_model_count": len(self.failed_models),
             "failed_test_count": len(self.failed_tests),
+            "row_accounting": self.row_accounting(),
         }
 
 
@@ -188,6 +258,8 @@ class TransformRunner:
         schema: str = "",
         source_table: str = "",
         dry_run: bool = False,
+        project_id: str = "",
+        workspace_id: str = "",
     ) -> None:
         self.cfg = dest_cfg or {}
         self.dialect = normalize_driver(dialect or self.cfg.get("type") or "")
@@ -199,6 +271,12 @@ class TransformRunner:
         self.schema = resolved_schema if self.profile.uses_schema else ""
         self.source_table = source_table
         self.dry_run = dry_run
+        self.project_id = str(project_id or "").strip()
+        self.workspace_id = str(workspace_id or "").strip()
+
+    def transform_job_id(self) -> str:
+        """Stable DLQ / Inspect id — empty when this run has no project."""
+        return f"xform-{self.project_id}" if self.project_id else ""
 
     # ---------------------------------------------------------------- naming
 
@@ -294,18 +372,31 @@ class TransformRunner:
             )
 
         if model.materialization == "incremental":
-            return self._incremental_statements(model, relation, body)
+            # Preview form. Execution replaces it with a name-aligned load once
+            # the destination catalog can be read — see resolve_alignment.
+            return self._incremental_statements(model, relation, body, None)
 
         raise UnsupportedMaterializationError(
             f"Unsupported materialization {model.materialization!r}"
         )
 
     def _create_if_absent(self, relation: str, body: str, model_name: str) -> str:
-        """Seed statement so first run and steady state share one code path."""
+        """Seed statement so first run and steady state share one code path.
+
+        The seed creates the *shape* only. A `CREATE TABLE ... AS <body>` that
+        also materialized the rows made the first run load everything twice for
+        the append strategy — the CTAS wrote the batch and the INSERT that
+        follows wrote it again — while every later run was correct, so the
+        duplication only ever appeared in the very first load of a new model.
+        `WHERE 1 = 0` keeps one loading statement per run on every dialect.
+        """
         caps = self.caps
         term = caps.terminator
         if caps.create_table_if_not_exists and caps.ctas:
-            return f"CREATE TABLE IF NOT EXISTS {relation} AS {body}{term}"  # nosec B608
+            return (
+                f"CREATE TABLE IF NOT EXISTS {relation} AS "  # nosec B608
+                f"SELECT * FROM {self._aliased(body, '_df_seed')} WHERE 1 = 0{term}"
+            )
         if caps.select_into:
             # Empty seed: WHERE 1=0 gives the shape without the rows, then the
             # incremental step below loads them.
@@ -327,40 +418,180 @@ class TransformRunner:
         )
 
     def _incremental_statements(
-        self, model: TransformModel, relation: str, body: str
+        self,
+        model: TransformModel,
+        relation: str,
+        body: str,
+        alignment: "ColumnAlignment | None",
     ) -> list[str]:
         """Incremental load. First run creates; later runs merge or append.
 
         ``merge`` is implemented as delete-then-insert on every dialect, and
-        that is deliberate. A native ``MERGE`` needs an explicit column list,
-        which the runner cannot know without introspecting the model's output
-        first; the ``UPDATE SET *`` shorthand that would avoid it is Databricks
-        and Spark syntax only — Snowflake, BigQuery, Oracle and SQL Server all
-        reject it. Delete-then-insert is dbt's own ``delete+insert`` strategy,
-        is idempotent on the unique key, and works everywhere. The physical
-        strategy is reported back so nobody has to guess which ran.
+        that is deliberate. The ``UPDATE SET *`` shorthand a native ``MERGE``
+        would need is Databricks and Spark syntax only — Snowflake, BigQuery,
+        Oracle and SQL Server all reject it. Delete-then-insert is dbt's own
+        ``delete+insert`` strategy, is idempotent on the unique key, and works
+        everywhere. The physical strategy is reported back so nobody has to
+        guess which ran.
+
+        ``alignment`` names the columns on both sides. Without it the INSERT
+        would bind positionally, which is only correct while the model's output
+        order happens to equal the target's — not after someone pre-created the
+        mart, added a column, or reordered the SELECT. ``None`` is the preview
+        case; execution always passes a resolved alignment.
 
         The statements are executed inside one transaction by the caller. Split
         across two, a crash between them would delete rows and never reinsert.
         """
         term = self.caps.terminator
         create_if_absent = self._create_if_absent(relation, body, model.name)
+        columns = alignment.insert_clause(self) if alignment else ""
+        projection = alignment.select_list(self) if alignment else "*"
 
         if model.incremental_strategy == "append":
+            if alignment is None:
+                return [
+                    create_if_absent,
+                    f"INSERT INTO {relation} {body}{term}",  # nosec B608
+                ]
             return [
                 create_if_absent,
-                f"INSERT INTO {relation} {body}{term}",  # nosec B608
+                (
+                    f"INSERT INTO {relation} {columns} "  # nosec B608
+                    f"SELECT {projection} FROM {self._aliased(body, '_df_new')}{term}"
+                ),
             ]
 
         key = self.quote_column(model.unique_key)
+        delete = (
+            f"DELETE FROM {relation} WHERE {key} IN "  # nosec B608
+            f"(SELECT {key} FROM {self._aliased(body, '_df_new')}){term}"
+        )
+        if alignment is None:
+            return [
+                create_if_absent,
+                delete,
+                (
+                    f"INSERT INTO {relation} "  # nosec B608
+                    f"SELECT * FROM {self._aliased(body, '_df_new')}{term}"
+                ),
+            ]
         return [
             create_if_absent,
+            delete,
             (
-                f"DELETE FROM {relation} WHERE {key} IN "  # nosec B608
-                f"(SELECT {key} FROM ({body}) AS _df_new){term}"
+                f"INSERT INTO {relation} {columns} "  # nosec B608
+                f"SELECT {projection} FROM {self._aliased(body, '_df_new')}{term}"
             ),
-            f"INSERT INTO {relation} SELECT * FROM ({body}) AS _df_new{term}",  # nosec B608
         ]
+
+    def _aliased(self, body: str, alias: str) -> str:
+        """``(body) AS alias``, minus the ``AS`` on dialects that reject it.
+
+        Oracle raises ORA-00933 on a table alias introduced with ``AS``.
+        """
+        keyword = "" if self.dialect == "oracle" else "AS "
+        return f"({body}) {keyword}{alias}"
+
+    # ------------------------------------------------------------- alignment
+
+    def resolve_alignment(
+        self, conn: Any, model: TransformModel, body: str
+    ) -> "ColumnAlignment":
+        """Match the model's output columns to the target's, by name.
+
+        Both sides are read for real: the model's columns from a zero-row
+        execution of its own body, the target's from the destination catalog.
+        Anything that cannot be matched is refused here, before the load, with
+        the column named — a column the target does not have, a required column
+        nothing fills, or a unique key missing from either side.
+        """
+        model_columns = self._model_output_columns(conn, body, model.name)
+        target = self._target_columns(conn, model)
+
+        by_name = {name.lower(): meta for name, meta in target.items()}
+        unknown = [c for c in model_columns if c.lower() not in by_name]
+        if unknown:
+            raise TransformAlignmentError(
+                f"Model '{model.name}' produces column(s) "
+                f"{', '.join(unknown)} that its target table does not have. "
+                "Add them to the target, or drop them from the model — an "
+                "incremental load must not guess where a new column belongs."
+            )
+
+        produced = {c.lower() for c in model_columns}
+        unfilled_required = [
+            name
+            for name, meta in target.items()
+            if name.lower() not in produced and _is_required(meta)
+        ]
+        if unfilled_required:
+            raise TransformAlignmentError(
+                f"Target of model '{model.name}' requires column(s) "
+                f"{', '.join(unfilled_required)} that the model does not "
+                "produce, and they have no default. Select them in the model, "
+                "or give the column a default at the destination."
+            )
+
+        if model.incremental_strategy != "append":
+            key = model.unique_key.lower()
+            if key not in produced:
+                raise TransformAlignmentError(
+                    f"Model '{model.name}' declares unique_key "
+                    f"'{model.unique_key}' but does not select it, so the "
+                    "delete+insert step would not be idempotent."
+                )
+            if key not in by_name:
+                raise TransformAlignmentError(
+                    f"Target of model '{model.name}' has no column "
+                    f"'{model.unique_key}' to match the declared unique_key."
+                )
+
+        pairs = [(by_name[c.lower()]["name"], c) for c in model_columns]
+        return ColumnAlignment(pairs=tuple(pairs))
+
+    def _model_output_columns(self, conn: Any, body: str, model_name: str) -> list[str]:
+        """Column names the model body actually produces, in its own order."""
+        import sqlalchemy as sa
+
+        probe = f"SELECT * FROM {self._aliased(body, '_df_probe')} WHERE 1 = 0"  # nosec B608
+        try:
+            result = conn.execute(sa.text(probe))
+            columns = [str(k) for k in result.keys()]
+        except Exception as exc:
+            raise TransformAlignmentError(
+                f"Model '{model_name}' output columns could not be read "
+                f"({exc}), so its load cannot be aligned to the target by name."
+            ) from exc
+        if not columns:
+            raise TransformAlignmentError(
+                f"Model '{model_name}' reported no output columns."
+            )
+        return columns
+
+    def _target_columns(
+        self, conn: Any, model: TransformModel
+    ) -> dict[str, dict[str, Any]]:
+        """Destination catalog columns of the model's target, keyed by name."""
+        import sqlalchemy as sa
+
+        from services.dialect_profiles import fold_identifier
+
+        physical = fold_identifier(self.dialect, model.name) or model.name
+        try:
+            inspector = sa.inspect(conn)
+            columns = inspector.get_columns(physical, schema=self.schema or None)
+        except Exception as exc:
+            raise TransformAlignmentError(
+                f"Target table of model '{model.name}' could not be read from "
+                f"the destination catalog ({exc}). An incremental load is "
+                "refused rather than written positionally."
+            ) from exc
+        if not columns:
+            raise TransformAlignmentError(
+                f"Target table of model '{model.name}' reported no columns."
+            )
+        return {str(c["name"]): c for c in columns}
 
     def physical_strategy(self, model: TransformModel) -> str:
         """The strategy actually used, which may differ from the declared one."""
@@ -414,6 +645,69 @@ class TransformRunner:
 
         raise ValueError(f"Unsupported test type {test.test_type!r}")
 
+    def build_violation_predicate(self, model: TransformModel, test: Any) -> str:
+        """WHERE predicate matching rows that fail ``test`` (no WHERE keyword).
+
+        Shared by the violator SELECT and the hold-out DELETE so COUNT, payload
+        and dest COUNT decrease describe the same population. Unique tests
+        match every row in a duplicate group, not the group count.
+        """
+        relation = self.relation_for(model.name)
+        col = self.quote_column(test.column) if test.column else ""
+
+        if test.test_type == "not_null":
+            return f"{col} IS NULL"
+
+        if test.test_type == "unique":
+            # Nested subquery so SQLite will DELETE from the same table.
+            return (
+                f"{col} IN (SELECT {col} FROM ("
+                f"SELECT {col} FROM {relation} "
+                f"WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
+                ") AS _df_dupes)"
+            )
+
+        if test.test_type == "accepted_values":
+            literals = ", ".join(_sql_literal(v) for v in test.values)
+            return f"{col} IS NOT NULL AND {col} NOT IN ({literals})"
+
+        if test.test_type == "positive":
+            return f"{col} <= 0"
+
+        if test.test_type == "relationships":
+            parent = self.relation_for(test.to_model)
+            parent_col = self.quote_column(test.to_column)
+            child_col = self.quote_column(test.column) if test.column else parent_col
+            return (
+                f"{child_col} IS NOT NULL AND NOT EXISTS "
+                f"(SELECT 1 FROM {parent} AS _df_p "
+                f"WHERE _df_p.{parent_col} = {relation}.{child_col})"
+            )
+
+        raise ValueError(f"Unsupported test type {test.test_type!r}")
+
+    def build_violation_select_sql(self, model: TransformModel, test: Any) -> str:
+        relation = self.relation_for(model.name)
+        predicate = self.build_violation_predicate(model, test)
+        return f"SELECT * FROM {relation} WHERE {predicate}"  # nosec B608
+
+    def build_holdout_delete_sql(self, model: TransformModel, test: Any) -> str:
+        relation = self.relation_for(model.name)
+        predicate = self.build_violation_predicate(model, test)
+        return f"DELETE FROM {relation} WHERE {predicate}"  # nosec B608
+
+    def _dest_endpoint_for_model(self, model_name: str) -> Any:
+        from src.transfer.models import EndpointConfig
+
+        data = dict(self.cfg)
+        data.setdefault("format", self.dialect)
+        data.setdefault("type", self.dialect)
+        data["table"] = model_name
+        data["table_name"] = model_name
+        if self.schema:
+            data.setdefault("schema", self.schema)
+        return EndpointConfig.from_dict("database", data)
+
     # ------------------------------------------------------------- execution
 
     def run(
@@ -429,13 +723,8 @@ class TransformRunner:
         plan = build_plan(models, select=select)
         result.plan = plan.to_dict()
 
-        for name, missing in plan.unresolved_refs.items():
-            result.warnings.append(
-                f"Model '{name}' references undefined model(s) "
-                f"{', '.join(missing)} — those refs will not resolve at the "
-                "destination."
-            )
-
+        # An undefined ref is a plan-time failure raised by build_plan, not a
+        # warning: it never reaches here.
         if not plan.layers:
             result.status = "skipped"
             result.seconds = time.perf_counter() - started
@@ -487,6 +776,8 @@ class TransformRunner:
                         continue
                     run = self._run_one(engine, model, plan.models)
                     result.models.append(run)
+                    if run.hold_out_warning:
+                        result.warnings.append(run.hold_out_warning)
                     if run.status == "failed":
                         failed.add(name)
         finally:
@@ -513,7 +804,123 @@ class TransformRunner:
                 f"{first.get('model')}.{first.get('column')} "
                 f"{first.get('test_type')}"
             )
+        self._persist_transform_quarantine(result)
         return result
+
+    def _persist_transform_quarantine(self, result: TransformRunResult) -> None:
+        """Mint Inspect job. Row payloads are persisted during hold-out.
+
+        Count-only findings are a leftover path for error tests that never
+        selected rows (test could not run). Held-out models already wrote
+        real payloads + dest DLQ; do not double-persist COUNT(*) as if it
+        were a row body.
+        """
+        job_id = self.transform_job_id()
+        if not job_id or self.dry_run:
+            return
+        details: list[dict[str, Any]] = []
+        already_held = False
+        for model in result.models:
+            if model.hold_out_persisted and model.quarantine_details:
+                already_held = True
+                details.extend(model.quarantine_details)
+                continue
+            for test in model.tests:
+                if test.get("passed") or str(test.get("severity") or "error") != "error":
+                    continue
+                if model.hold_out_persisted:
+                    continue
+                message = str(test.get("message") or "") or (
+                    f"{test.get('test_type')} failed on {model.name}"
+                )
+                details.append(
+                    {
+                        "reason": message,
+                        "message": message,
+                        "column": test.get("column") or "",
+                        "failure_reason": message,
+                        "original_value": test.get("failing_rows") or 0,
+                        "expected_type": str(test.get("test_type") or "test"),
+                        "actual_type": "violating_row",
+                        "job_id": job_id,
+                        "connector": self.dialect,
+                        "source": "transform",
+                        "model": model.name,
+                    }
+                )
+        if not details and not already_held:
+            return
+        self._ensure_transform_inspect_job(job_id, result, details)
+        if already_held:
+            return
+        if not details:
+            return
+        try:
+            from services.quarantine_dlq import persist_rejected_rows
+
+            persist_rejected_rows(
+                job_id=job_id,
+                rejected_details=details,
+                workspace_id=self.workspace_id,
+                source="transform",
+                connector=self.dialect,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Transform quarantine persist failed for %s: %s", job_id, exc
+            )
+            result.warnings.append(
+                "Transform test findings could not be written to the quarantine "
+                f"DLQ: {exc}"
+            )
+
+    def _ensure_transform_inspect_job(
+        self,
+        job_id: str,
+        result: TransformRunResult,
+        details: list[dict[str, Any]],
+    ) -> None:
+        """Mint a lightweight job so Inspect Quarantine can open the same DLQ."""
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            svc = get_mongodb_service()
+            ledger = result.row_accounting()
+            quarantined = int(ledger.get("rows_quarantined") or 0)
+            status = (
+                "completed_with_quarantine"
+                if quarantined > 0
+                else "failed"
+                if result.status == "failed"
+                else "completed"
+            )
+            existing = svc.get_job(job_id)
+            if not existing:
+                svc.create_transfer_job(
+                    {
+                        "_id": job_id,
+                        "name": f"Transform · {self.project_id}",
+                        "source_type": "transform",
+                        "source_name": self.project_id,
+                        "destination_type": self.dialect or "sql",
+                        "destination_database": str(self.cfg.get("database") or ""),
+                        "destination_collection": "",
+                        "workspace_id": self.workspace_id,
+                        "operation": "transform",
+                        "triggered_by": "transform_run",
+                    }
+                )
+            svc.update_job_status(
+                job_id,
+                status,
+                rejected_rows=quarantined,
+                rejected_details=details[:200],
+                rejected_details_total=len(details),
+                row_accounting=ledger,
+                records_processed=int(ledger.get("rows_written") or 0),
+            )
+        except Exception as exc:
+            logger.debug("Transform inspect job not persisted: %s", exc, exc_info=exc)
 
     def _engine(self) -> Any:
         from connectors.generic_sql import get_sqlalchemy_engine
@@ -536,6 +943,7 @@ class TransformRunner:
             strategy=self.physical_strategy(model),
         )
         try:
+            incremental = model.materialization == "incremental"
             statements = self.build_statements(model, models)
             run.sql = ";\n".join(statements)
             if not statements:
@@ -550,6 +958,12 @@ class TransformRunner:
                 # DELETE then INSERT; committing between them would leave the
                 # deleted rows gone and the replacements never written.
                 with conn.begin():
+                    if incremental:
+                        # Runs the seed itself and records the executed SQL,
+                        # returning only the statements still to run.
+                        statements = self._aligned_incremental_statements(
+                            conn, model, models, run
+                        )
                     for stmt in statements:
                         cursor = conn.execute(sa.text(stmt))
                         count = getattr(cursor, "rowcount", None)
@@ -559,6 +973,10 @@ class TransformRunner:
                 # Tests run after the commit so they observe what an operator
                 # would see, not uncommitted state inside our own transaction.
                 run.tests = self._run_tests(conn, model)
+                violators = self._collect_violators(conn, model, run)
+            # Dest DLQ write uses its own connection (sqlite NullPool). Hold
+            # the sqlalchemy handle closed first so the file lock is released.
+            self._apply_transform_holdout(engine, model, run, violators)
         except Exception as exc:
             run.status = "failed"
             run.error = str(exc)
@@ -567,6 +985,224 @@ class TransformRunner:
             )
         run.seconds = time.perf_counter() - started
         return run
+
+    def _collect_violators(
+        self,
+        conn: Any,
+        model: TransformModel,
+        run: ModelRunResult,
+    ) -> list[dict[str, Any]]:
+        """SELECT row bodies for error-severity test failures.
+
+        Empty when there is nothing to hold out (pass, warn, view, no rows).
+        Crossing TRANSFORM_HOLDOUT_ROW_CAP sets a warning and returns [].
+        """
+        import sqlalchemy as sa
+
+        if self.dry_run or not model.is_materialized:
+            return []
+        if model.materialization not in {"table", "incremental"}:
+            return []
+
+        batches: list[dict[str, Any]] = []
+        for test, entry in zip(model.tests, run.tests):
+            if entry.get("passed") or str(entry.get("severity") or "error") != "error":
+                continue
+            try:
+                failing = max(int(entry.get("failing_rows") or 0), 0)
+            except (TypeError, ValueError):
+                failing = 0
+            if failing <= 0:
+                continue
+            try:
+                sql = self.build_violation_select_sql(model, test)
+                result = conn.execute(sa.text(sql))
+                fetched: list[dict[str, Any]] = []
+                for raw in result:
+                    fetched.append(_sqlalchemy_row_dict(raw))
+                    if len(fetched) > TRANSFORM_HOLDOUT_ROW_CAP:
+                        run.hold_out_warning = (
+                            f"Transform hold-out refused on {model.name}: "
+                            f"{test.test_type} selected more than "
+                            f"{TRANSFORM_HOLDOUT_ROW_CAP:,} violating rows. "
+                            "Mart left intact (fail-closed)."
+                        )
+                        return []
+            except Exception as exc:
+                run.hold_out_warning = (
+                    f"Transform hold-out SELECT failed on {model.name} "
+                    f"({test.test_type}): {exc}. Mart left intact."
+                )
+                logger.warning(
+                    "Transform hold-out SELECT failed for %s: %s",
+                    model.name,
+                    exc,
+                    exc_info=exc,
+                )
+                return []
+            if not fetched:
+                continue
+            batches.append({"test": test, "entry": entry, "rows": fetched})
+        return batches
+
+    def _apply_transform_holdout(
+        self,
+        engine: Any,
+        model: TransformModel,
+        run: ModelRunResult,
+        violators: list[dict[str, Any]],
+    ) -> None:
+        """Persist payloads + dest DLQ, then DELETE only if dest write succeeded."""
+        import sqlalchemy as sa
+
+        if not violators:
+            return
+        if run.hold_out_warning:
+            return
+
+        job_id = self.transform_job_id()
+        if not job_id:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: no project_id, "
+                "so violating rows were left in the mart rather than deleted "
+                "without durable evidence."
+            )
+            return
+
+        details = _violator_details(
+            violators,
+            job_id=job_id,
+            connector=self.dialect,
+            model_name=model.name,
+        )
+        if not details:
+            return
+
+        try:
+            from services.quarantine_dlq import persist_rejected_rows
+
+            persist_rejected_rows(
+                job_id=job_id,
+                rejected_details=details,
+                workspace_id=self.workspace_id,
+                source="transform",
+                connector=self.dialect,
+            )
+            run.hold_out_persisted = True
+            run.quarantine_details = details
+        except Exception as exc:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: control-plane "
+                f"DLQ persist failed ({exc}). Mart left intact."
+            )
+            logger.warning(
+                "Transform hold-out DLQ persist failed for %s: %s", job_id, exc
+            )
+            return
+
+        try:
+            from services.dest_quarantine import dest_supports_dlq_table, write_dest_quarantine
+
+            if not dest_supports_dlq_table(self.dialect):
+                run.hold_out_warning = (
+                    f"Transform hold-out refused on {model.name}: dialect "
+                    f"{self.dialect!r} cannot host a dest DLQ table. Mart left intact."
+                )
+                return
+            dest_result = write_dest_quarantine(
+                self._dest_endpoint_for_model(model.name),
+                details,
+                job_id=job_id,
+            )
+        except Exception as exc:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: dest DLQ write "
+                f"failed ({exc}). Mart left intact."
+            )
+            logger.warning(
+                "Transform dest DLQ write failed for %s: %s", model.name, exc
+            )
+            return
+
+        if not dest_result.get("ok"):
+            reason = dest_result.get("error") or dest_result.get("reason") or "not ok"
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: dest DLQ write "
+                f"{reason}. Mart left intact."
+            )
+            return
+
+        deleted = 0
+        try:
+            with engine.connect() as conn:
+                with conn.begin():
+                    before_row = conn.execute(
+                        sa.text(f"SELECT COUNT(*) FROM {self.relation_for(model.name)}")  # nosec B608
+                    ).fetchone()
+                    before = (
+                        int(before_row[0])
+                        if before_row and before_row[0] is not None
+                        else 0
+                    )
+                    for batch in violators:
+                        stmt = self.build_holdout_delete_sql(model, batch["test"])
+                        conn.execute(sa.text(stmt))
+                    after_row = conn.execute(
+                        sa.text(f"SELECT COUNT(*) FROM {self.relation_for(model.name)}")  # nosec B608
+                    ).fetchone()
+                    dest_count = (
+                        int(after_row[0])
+                        if after_row and after_row[0] is not None
+                        else 0
+                    )
+                deleted = max(before - dest_count, 0)
+        except Exception as exc:
+            run.hold_out_warning = (
+                f"Transform dest DLQ wrote but mart DELETE failed on "
+                f"{model.name} ({exc}). Rows may remain in the mart; "
+                "rows_quarantined stays 0."
+            )
+            logger.warning(
+                "Transform hold-out DELETE failed for %s: %s", model.name, exc
+            )
+            return
+
+        run.rows_held_out = deleted
+        run.rows_affected = dest_count
+        run.hold_out_persisted = True
+        if deleted <= 0:
+            run.rows_held_out = 0
+            run.hold_out_warning = (
+                f"Transform dest DLQ wrote but mart COUNT did not decrease on "
+                f"{model.name}. rows_quarantined stays 0."
+            )
+
+    def _aligned_incremental_statements(
+        self,
+        conn: Any,
+        model: TransformModel,
+        models: dict[str, TransformModel],
+        run: ModelRunResult,
+    ) -> list[str]:
+        """Seed the target, then build the load with an explicit column list.
+
+        The seed has to run before the alignment can be read, because on the
+        first run the target does not exist yet. Everything after it names its
+        columns, so a reordered target, an added column or a pre-created mart
+        can no longer shift values into neighbouring columns.
+        """
+        import sqlalchemy as sa
+
+        body = self.compile_sql(model, models)
+        relation = self.relation_for(model.name)
+        seed = self._create_if_absent(relation, body, model.name)
+        conn.execute(sa.text(seed))
+
+        alignment = self.resolve_alignment(conn, model, body)
+        run.column_alignment = alignment.to_dict()
+        load = self._incremental_statements(model, relation, body, alignment)[1:]
+        run.sql = ";\n".join([seed, *load])
+        return load
 
     def _relation_columns(self, conn: Any, model: TransformModel) -> set[str] | None:
         """Lower-cased column names of a model's relation, or None if unknown.
@@ -647,8 +1283,85 @@ class TransformRunner:
         return results
 
 
+def _sqlalchemy_row_dict(row: Any) -> dict[str, Any]:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        return {str(k): v for k, v in dict(mapping).items()}
+    if hasattr(row, "_asdict"):
+        return {str(k): v for k, v in row._asdict().items()}
+    keys = getattr(row, "keys", None)
+    if callable(keys):
+        return {str(k): row[i] for i, k in enumerate(list(keys()))}
+    return {}
+
+
+def _violator_details(
+    batches: list[dict[str, Any]],
+    *,
+    job_id: str,
+    connector: str,
+    model_name: str,
+) -> list[dict[str, Any]]:
+    from connectors.writer_common import quarantine_cell_wire
+
+    details: list[dict[str, Any]] = []
+    idx = 0
+    for batch in batches:
+        test = batch["test"]
+        entry = batch["entry"]
+        col = str(getattr(test, "column", "") or "")
+        message = str(entry.get("message") or "") or (
+            f"{getattr(test, 'test_type', 'test')} failed on {model_name}"
+        )
+        for row in batch.get("rows") or []:
+            idx += 1
+            values = {str(k): quarantine_cell_wire(v) for k, v in row.items()}
+            cell = row.get(col) if col else None
+            details.append(
+                {
+                    "reason": message,
+                    "message": message,
+                    "column": col,
+                    "target": col,
+                    "failure_reason": message,
+                    "original_value": cell,
+                    "value": cell,
+                    "expected_type": str(getattr(test, "test_type", "") or "test"),
+                    "actual_type": "violating_row",
+                    "job_id": job_id,
+                    "connector": connector,
+                    "source": "transform",
+                    "model": model_name,
+                    "policy": "quarantine",
+                    "values": values,
+                    "row": idx,
+                    "retry_status": "open",
+                    "transform_attempted": "none",
+                }
+            )
+    return details
+
+
 def _quote_char(style: str) -> str:
     return {"double": '"', "backtick": "`", "bracket": "[", "none": '"'}.get(style, '"')
+
+
+def _is_required(column: dict[str, Any]) -> bool:
+    """True when the destination will reject a row that omits this column.
+
+    A NOT NULL column is only required when nothing else fills it: a default, a
+    server-side computed value, or an identity/auto-increment sequence all make
+    omission legal.
+    """
+    if column.get("nullable", True):
+        return False
+    if column.get("default") is not None:
+        return False
+    if column.get("server_default") is not None:
+        return False
+    if column.get("computed") or column.get("identity"):
+        return False
+    return not bool(column.get("autoincrement"))
 
 
 def _missing_column(test: Any, known: set[str] | None) -> str:

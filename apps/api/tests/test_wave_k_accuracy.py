@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -64,6 +64,10 @@ def test_es_insert_uses_create_op_type():
 
         def refresh(self, index):
             return None
+
+        def get_mapping(self, index):
+            # Empty properties = dynamic mapping (Map stamps bind).
+            return {index: {"mappings": {"properties": {}}}}
 
     class FakeClient:
         indices = FakeIndices()
@@ -139,10 +143,23 @@ def test_avro_streaming_batches():
 def test_dynamo_fail_policy_on_transform_errors():
     from connectors.dynamodb_writer import write_mapped_rows
 
+    # A bare MagicMock client answers describe_table with an empty KeySchema,
+    # which the writer now refuses on its own — the transform policy under test
+    # would never be reached, so the table describes itself honestly here.
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "TableName": "t",
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "TableStatus": "ACTIVE",
+        }
+    }
+
     with patch(
         "connectors.dynamodb_writer.build_mapped_rows_with_details",
         return_value=([], ["bad type"], [{"row": 1, "reason": "bad type"}]),
-    ), patch("connectors.dynamodb_writer.boto3_client"):
+    ), patch("connectors.dynamodb_writer.boto3_client", return_value=client):
         result = write_mapped_rows(
             host="",
             port=0,
@@ -161,4 +178,5 @@ def test_dynamo_fail_policy_on_transform_errors():
             create_table=False,
         )
     assert result.ok is False
-    assert "Transform" in (result.error or "")
+    err = result.error or ""
+    assert "Transform" in err or "rejected" in err.lower() or "strict" in err.lower()

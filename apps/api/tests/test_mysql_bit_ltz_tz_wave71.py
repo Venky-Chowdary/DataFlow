@@ -47,7 +47,10 @@ def test_timestamp_with_local_time_zone_not_string():
     )
 
     assert is_timezone_polarity_loss("TIMESTAMP_LTZ", "TIMESTAMP_NTZ") is True
-    assert is_timezone_polarity_loss("TIMESTAMP_LTZ", "TIMESTAMP_TZ") is True
+    # LTZ→TZ preserves the instant: the source stores no offset to lose and the
+    # writer binds aware UTC, so DATETIMEOFFSET receives the same point in time
+    # at +00:00. The reverse drops an offset the source held as data.
+    assert is_timezone_polarity_loss("TIMESTAMP_LTZ", "TIMESTAMP_TZ") is False
     assert is_timezone_polarity_loss("TIMESTAMP_TZ", "TIMESTAMP_LTZ") is True
     assert is_timezone_polarity_loss("TIMESTAMP_LTZ", "TIMESTAMPTZ") is False
 

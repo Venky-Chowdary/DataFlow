@@ -2,7 +2,7 @@
  * AlgorithmCinema — product-feeling animated stages that carry the
  * Datawrap story on marketing pages. These are NOT decorative dots;
  * each stage renders a concrete slice of the real engine: semantic
- * mapping, G1–G8 preflight, checksum proof, and CDC handoff.
+ * mapping, G1–G9 preflight, checksum proof, and CDC handoff.
  *
  * Guardrails:
  *  - All motion honors prefers-reduced-motion (final state is rendered).
@@ -60,10 +60,10 @@ interface MappingEdge {
 }
 
 const MAPPING_EDGES: MappingEdge[] = [
-  { source: "order_amt", target: "payment_amount", confidence: 0.96, role: "amount" },
-  { source: "cust_email", target: "email", confidence: 0.94, role: "email" },
-  { source: "order_id", target: "order_key", confidence: 0.91, role: "identifier" },
-  { source: "created_at", target: "created_at", confidence: 0.99, role: "timestamp" },
+  { source: "order_amt", target: "total_amount", confidence: 0.92, role: "order total" },
+  { source: "pay_amt", target: "payment_amount", confidence: 0.99, role: "payment" },
+  { source: "tax_amt", target: "tax_amount", confidence: 0.99, role: "tax" },
+  { source: "cust_id", target: "customer_key", confidence: 0.78, role: "identity" },
 ];
 
 export function MappingCinema() {
@@ -71,9 +71,9 @@ export function MappingCinema() {
   const tick = useVisibleCycle(7, 900, inView);
 
   const drawn = Math.min(MAPPING_EDGES.length, tick + 1);
-  const reviewIndex = 2;
-  const reviewActive = tick === 3;
-  const pinned = tick >= 4;
+  const reviewIndex = 3;
+  const reviewActive = tick === 4;
+  const pinned = tick >= 5;
 
   return (
     <figure ref={ref} className="lp-cinema-stage lp-cinema-mapping" aria-label="Semantic mapping animation">
@@ -151,14 +151,16 @@ export function MappingCinema() {
           <>
             <span className="lp-cinema-chip is-warn">review</span>
             <span>
-              <code>order_id → order_key</code> · role match, name divergent — human confirms.
+              <code>cust_id → customer_key</code> · same customer entity, different identity
+              kind (CRM id ≠ warehouse surrogate) — Map asks you to confirm before it
+              pins.
             </span>
           </>
         ) : pinned ? (
           <>
             <span className="lp-cinema-chip is-ok">pinned</span>
             <span>
-              <code>order_id → order_key</code> added to workspace synonyms.
+              <code>cust_id → customer_key</code> stays in review until an operator pins it.
             </span>
           </>
         ) : (
@@ -170,7 +172,7 @@ export function MappingCinema() {
       </div>
 
       <figcaption>
-        Semantic mapping — roles, synonyms, type fit — not string equality.
+        Semantic mapping — qualifiers + review keep every amount on its own column.
       </figcaption>
     </figure>
   );
@@ -179,7 +181,7 @@ export function MappingCinema() {
 /* ─── 2) GateCinema ──────────────────────────────────────────────── */
 
 /**
- * Local copy of the 8 preflight gate titles. We intentionally do NOT
+ * Local copy of the 9 preflight gate titles. We intentionally do NOT
  * import from `pages/marketing/productPageShared` to avoid pulling a
  * page-tree module into the landing component tree (circular risk).
  * The engine truth still lives in `packages/preflight` — this list is
@@ -194,11 +196,12 @@ const GATE_TITLES: { id: string; title: string; algorithm: string }[] = [
   { id: "G6", title: "Target DDL", algorithm: "Write plan valid against target object" },
   { id: "G7", title: "Capacity", algorithm: "Estimate vs destination limits" },
   { id: "G8", title: "Reconciliation plan", algorithm: "Row count + checksum strategy ready" },
+  { id: "G9", title: "Data integrity", algorithm: "Encoding · identity keys · precision" },
 ];
 
 export function GateCinema() {
   const { ref, inView } = useInView<HTMLElement>("80px 0px");
-  const tick = useVisibleCycle(10, 1100, inView);
+  const tick = useVisibleCycle(11, 1100, inView);
 
   const active = Math.min(tick, GATE_TITLES.length - 1);
   const g5Active = active === 4;
@@ -209,7 +212,7 @@ export function GateCinema() {
   return (
     <figure ref={ref} className="lp-cinema-stage lp-cinema-gate" aria-label="Preflight gates animation">
       <div className="lp-cinema-gate-grid">
-        <ol className="lp-cinema-gate-list" aria-label="Preflight G1–G8">
+        <ol className="lp-cinema-gate-list" aria-label="Preflight G1–G9">
           {GATE_TITLES.map((g, i) => {
             const state =
               i < active ? "pass" : i === active ? (g5Active ? "block" : "active") : "pending";
@@ -250,7 +253,7 @@ export function GateCinema() {
           </div>
           <p className="lp-cinema-quarantine-reason">
             <strong>Reason:</strong> currency symbol prevents lossless NUMERIC coerce.
-            Row isolates to quarantine with column + value + reason — never silently dropped.
+            Row isolates to quarantine with column + value + reason, ready to replay.
           </p>
           <div className={`lp-cinema-quarantine-final${active >= 7 ? " is-visible" : ""}`}>
             <span className="lp-cinema-chip is-ok">G8</span>
@@ -355,7 +358,7 @@ export function ProofCinema() {
       <div className="lp-cinema-proof-quarantine">
         <div className="lp-cinema-proof-quarantine-head">
           <span className="lp-cinema-chip is-warn">quarantine</span>
-          <span>Isolated with column + value + reason — never silently dropped.</span>
+          <span>Isolated with column + value + reason, ready to replay.</span>
         </div>
         <ul>
           {PROOF_QUARANTINE.map((row) => (
@@ -369,7 +372,7 @@ export function ProofCinema() {
       </div>
 
       <figcaption>
-        Checksum + row-count reconcile after every write — matched or failed, never assumed.
+        Read-back after every write — row counts, checksums, and a value and key census.
       </figcaption>
     </figure>
   );
@@ -406,7 +409,7 @@ export function CdcCinema() {
         <div className="lp-cinema-cdc-phase lp-cinema-cdc-phase--stream">
           <div className="lp-cinema-cdc-phase-head">
             <strong>Streaming upserts</strong>
-            <em>{handoff ? "at-least-once" : "idle"}</em>
+            <em>{handoff ? "idempotent" : "idle"}</em>
           </div>
           <ol className="lp-cinema-cdc-ticks">
             {Array.from({ length: 6 }, (_, i) => (
@@ -423,13 +426,13 @@ export function CdcCinema() {
       <div className="lp-cinema-cdc-legend" role="list">
         <span role="listitem" className="lp-cinema-chip">snapshot + LSN handoff</span>
         <span role="listitem" className="lp-cinema-chip is-ok">idempotent upsert on PK</span>
-        <span role="listitem" className="lp-cinema-chip is-warn">
-          at-least-once until exactly-once is proven
+        <span role="listitem" className="lp-cinema-chip is-ok">
+          redelivery-safe upserts
         </span>
       </div>
 
       <figcaption>
-        Snapshot + LSN handoff — honest CDC default. Streaming upserts idempotent on primary key.
+        Snapshot, then stream — upserts stay idempotent on the primary key so a retry is safe.
       </figcaption>
     </figure>
   );
@@ -495,8 +498,8 @@ const DEFAULT_SURFACES = [
   { label: "Job Theater", route: "product-jobs", sub: "Live phases · quarantine · proof" },
   { label: "Pipelines", route: "product-pipelines", sub: "Schedules on the governed engine" },
   { label: "Query", route: "product-query", sub: "Safe preview · Studio handoff" },
-  { label: "Pilot", route: "product-pilot", sub: "NL triage on real evidence" },
-  { label: "MCP", route: "product-mcp", sub: "Agent tools · never raw passwords" },
+  { label: "Pilot", route: "product-pilot", sub: "Local-engine copilot on real evidence" },
+  { label: "MCP", route: "product-mcp", sub: "Agent tools · secret references only" },
 ] as const;
 
 export function ProductSurfaceStrip<Route extends string>({

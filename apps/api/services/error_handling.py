@@ -9,17 +9,46 @@ quarantine for malformed records, and resume/replay support.
 from __future__ import annotations
 
 import logging
-import os
-from services.brand_env import getenv_brand
 import random
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from services.brand_env import getenv_brand
+
 
 class TransferCancelled(Exception):
-    """Raised when a user cancels a running transfer job."""
+    """Raised when a user cancels a running transfer job.
+
+    ``rows_written`` is the count already committed when the writer noticed
+    the cancel. Leaving it off made the job report 0 while the destination
+    held the table.
+    """
+
+    def __init__(
+        self,
+        message: str = "Transfer cancelled by user",
+        *,
+        rows_written: int | None = None,
+        superseded: bool = False,
+    ) -> None:
+        #: True when a newer run attempt of the same job took over (resume /
+        #: rerun-in-place): this attempt must stop without touching the job.
+        self.superseded = superseded
+        text = message
+        if rows_written is not None:
+            try:
+                count = max(0, int(rows_written))
+            except (TypeError, ValueError):
+                count = 0
+            self.rows_written = count
+            if count:
+                text = (
+                    f"{message}. {count} row(s) were already written "
+                    "and were not removed."
+                )
+        super().__init__(text)
 
 
 class FullRefreshDropFailed(Exception):
@@ -94,6 +123,8 @@ RETRIABLE_EXCEPTIONS: set[str] = {
     "lost connection",
     "server has gone away",
     "terminating connection",
+    # pymssql/FreeTDS: the TDS session dropped (tunnel rotation, failover).
+    "dbprocess is dead",
 }
 
 # Non-retriable errors indicate a data or contract problem that will not fix itself.
@@ -131,6 +162,9 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "serialization",
     "schema",
     "partial write",
+    "blocks partial write",
+    "migration risk contract",
+    "writebatchblocked",
     "refuse concurrent consumer",
     "cdc lease",
     "cdc_lease_conflict",
@@ -160,11 +194,62 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 # `fix` must list *likely checks* — never a single guaranteed remedy.
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
+        # First, because a transform refusal names a column and would otherwise be
+        # read as a destination-column error by the driver-text rules below —
+        # sending the operator to Map for a decision that belongs to Transform,
+        # and inviting a Resume that cannot help.
+        ("transform step", "shaping step"),
+        {
+            "code": "shape_refused_row",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "A transform step refused a row rather than guess at its value",
+            "fix": (
+                "The recipe's error policy for that step is Refuse, so the run stopped at the "
+                "named source row instead of writing a value it could not compute. Open Transform "
+                "and either fix the step for that shape of value, or change the step's policy "
+                "to Divert (quarantine the row, keep the load) or Null (write null, counted as "
+                "information loss). Re-run Validate afterwards: a changed recipe is a different "
+                "approved recipe."
+            ),
+            "primary_action": "open_shape",
+        },
+    ),
+    (
+        # A recipe-validation refusal raised before any write — a tracked /
+        # key / option column the recipe names but the recipe cannot see.
+        # It is not a missing destination column and not a capacity problem;
+        # without this rule the `column '` needle below sends the operator to
+        # Map and invents written rows that never happened.
+        (
+            "point in the recipe",
+            "is not a transform operation",
+            "shape recipe",
+            "transform recipe",
+        ),
+        {
+            "code": "shape_recipe_refusal",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "The transform recipe was refused before any write",
+            "fix": (
+                "The recipe named a column or option it cannot use (for example an "
+                "scd2 tracked column that is not in the source). Open Transform, fix "
+                "the named step, and re-run Validate: a changed recipe is a different "
+                "approved recipe. Nothing was written to the destination."
+            ),
+            "primary_action": "open_shape",
+        },
+    ),
+    (
         (
             "lock wait timeout",
             "lock wait timeout exceeded",
             "1205",
             "metadata lock",
+            # SQL Server 1222 and PostgreSQL 55P03: the same bounded wait.
+            "lock request time out period exceeded",
+            "due to lock timeout",
         ),
         {
             "code": "destination_lock_timeout",
@@ -172,9 +257,10 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "Destination table is locked",
             "fix": (
-                "Close other sessions on this MySQL table (Workbench, Validate probes, "
-                "stuck prior jobs), then re-run. Datawrap fails closed instead of waiting "
-                "minutes behind a metadata lock."
+                "Another session holds a lock on this destination table (a SQL client, "
+                "a Validate probe, or a stuck earlier attempt). Close it, then re-run. "
+                "Datawrap fails closed after the bounded lock wait instead of waiting "
+                "forever behind it."
             ),
         },
     ),
@@ -196,11 +282,25 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         (
             "cdc_lsn_gap",
             "cdc_scn_gap",
+            "cdc_binlog_gap",
+            "cdc_slot_gap",
+            "cdc_ct_gap",
+            "cdc_oplog_gap",
             "cdc_cursor_gap",
             "before capture retention",
             "before available redo",
             "min_lsn",
+            "min_valid_version",
+            "last_sync_version",
+            "change tracking",
             "oldest_available",
+            "gtid_purged",
+            "binary log",
+            "binlog",
+            "wal_status",
+            "replication slot",
+            "changestreamhistorylost",
+            "resume point may no longer be in the oplog",
             "ora-01291",
             "ora-01292",
         ),
@@ -210,8 +310,10 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "CDC cursor gap (retention / failover)",
             "fix": (
-                "Reset the CDC watermark, set snapshot to when_needed or initial, then re-run. "
-                "Continuous CDC across the gap is not possible."
+                "If snapshot_mode=when_needed, Resume — the engine snapshots current "
+                "source keys then streams from the new tip. initial/never stay fail-closed "
+                "until you change mode or reset the watermark. Purged-window events are gone. "
+                "Not continuous CDC, not migration_proven."
             ),
         },
     ),
@@ -264,6 +366,41 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
                 "Map target for that column is DATETIME (not TEXT), then Resume. If this "
                 "persists after upgrade, open Validate → review that column's wire form."
             ),
+        },
+    ),
+    (
+        (
+            "nosuchkey",
+            "no such key",
+            "object store has no object",
+        ),
+        {
+            "code": "object_missing",
+            "category": "source",
+            "confidence": "high",
+            "title": "The file is not in the object store",
+            "fix": (
+                "The named object is not in the bucket. Check the path and that "
+                "the file has finished uploading, then run the load again."
+            ),
+            "primary_action": "open_source",
+        },
+    ),
+    (
+        (
+            "keyerror: 'primary_key'",
+            'keyerror: "primary_key"',
+        ),
+        {
+            "code": "missing_primary_key",
+            "category": "mapping",
+            "confidence": "high",
+            "title": "This run needs an identity column",
+            "fix": (
+                "Open Map and set the stream contract primary_key to the column "
+                "that identifies a row. The load did not guess one."
+            ),
+            "primary_action": "open_map",
         },
     ),
     (
@@ -428,6 +565,30 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            # PostgreSQL says 'new row for relation "t" violates check
+            # constraint', which the table_not_found tokens below matched
+            # (D112: a CHECK refusal read "Table was not found").
+            "violates check constraint",
+            "check constraint '",
+            "(3819,",
+            "conflicted with the check constraint",
+            "ora-02290",
+        ),
+        {
+            "code": "destination_check_violation",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "A row broke a destination CHECK constraint",
+            "fix": (
+                "The destination refused a row its CHECK constraint forbids, so the "
+                "write rolled back. Run Validate: it names the offending rows and the "
+                "constraint. Fix those source rows or map them out, then run again."
+            ),
+            "primary_action": "open_map",
+        },
+    ),
+    (
+        (
             "relation does not exist",
             'relation "',
             "table doesn't exist",
@@ -441,18 +602,55 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "invalid object name",
         ),
         {
-            "code": "destination_table_missing",
+            "code": "table_not_found",
             "category": "schema_mismatch",
             "confidence": "high",
-            "title": "Destination table/relation was not found at write time",
+            "title": "Table was not found",
             "fix": (
-                "Confirm Database + Table on Destination (same namespace Validate probed). "
-                "If the table should be created, Destination must show create-on-write and "
-                "the connector role needs CREATE. If it should already exist, pick it from "
-                "the table list — do not rely on a name that only exists in another database "
-                "on the same host."
+                "The driver names a table and does not say whether it is the source "
+                "or the destination. Confirm the source object exists and is the one "
+                "selected, and confirm Database + Table on the destination. "
+                "This is not a capacity problem."
             ),
             "primary_action": "open_destination",
+        },
+    ),
+    (
+        (
+            "replication client",
+            "replication slave",
+            "(1227,",
+            "error 1227",
+        ),
+        {
+            "code": "cdc_log_privilege",
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "MySQL CDC cannot read the binary log",
+            "fix": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO the source "
+                "user. Privileges on one schema do not include them, and that user "
+                "cannot grant them to itself. gtid_mode and enforce_gtid_consistency "
+                "are separate server settings; file and position CDC does not invent "
+                "a GTID. After the grant, re-run."
+            ),
+        },
+    ),
+    (
+        (
+            "wal_level",
+        ),
+        {
+            "code": "cdc_wal_level",
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "Postgres CDC needs wal_level=logical",
+            "fix": (
+                "Set wal_level=logical (max_replication_slots and max_wal_senders "
+                "above 0) and restart PostgreSQL. A reload does not apply wal_level. "
+                "Until that restart, logical decoding cannot write a resume LSN, so "
+                "dest-owned watermarks stay empty and delivery stays at-least-once upsert."
+            ),
         },
     ),
     (
@@ -530,6 +728,37 @@ def format_exception_message(error: Exception | str) -> str:
     return msg
 
 
+def _cursor_gap_fix(error: Any) -> str:
+    """Operator next step from the snapshot plan, not a generic reset slogan."""
+    plan = getattr(error, "snapshot_plan", None) or {}
+    action = str(plan.get("next_action") or "")
+    mode = str(plan.get("snapshot_mode") or "")
+    if action == "set_when_needed" or mode == "never":
+        return (
+            "Set snapshot_mode=when_needed, then Resume. The engine will snapshot "
+            "current source keys and stream from the new tip. snapshot_mode=never "
+            "forbids a recovery snapshot. Purged-window events are gone — not "
+            "continuous CDC, not migration_proven."
+        )
+    if mode in {"when_needed", "always", "initial_only"}:
+        return (
+            "Resume — engine will snapshot current source keys, then stream from "
+            "the new tip. Purged-window events are gone. At-least-once upsert, not "
+            "continuous CDC, not migration_proven."
+        )
+    if mode == "initial" or action == "set_when_needed":
+        return (
+            "snapshot_mode=initial will not snapshot again. Reset the CDC watermark "
+            "or set when_needed, then Resume. Purged-window events are gone."
+        )
+    return (
+        "If snapshot_mode=when_needed, Resume — the engine snapshots current source "
+        "keys then streams from the new tip. Otherwise reset the watermark or set "
+        "when_needed. Purged-window events are gone. Not continuous CDC, not "
+        "migration_proven."
+    )
+
+
 def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """Turn a raw driver exception into an operator-facing failure summary.
 
@@ -543,6 +772,53 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """
     raw = format_exception_message(error)
     text = raw.lower()
+    # X-49: a SQL Server self-signed cert failure can arrive wrapped in any
+    # error type (e.g. FullRefreshDropFailed) — classify it before the
+    # generic branches so the user gets the cert fix, not a lock/grant guess
+    # or raw ODBC text.
+    if re.search(r"certificate verify failed|self.signed certificate", text) and re.search(
+        r"ssl provider|08001|sql server|sqlserver|mssql", text
+    ):
+        return {
+            "code": "tls_certificate_untrusted",
+            "category": "destination",
+            "title": "SQL Server's certificate isn't trusted",
+            "message": (
+                "SQL Server's certificate isn't trusted (self-signed). "
+                "Turn on 'Trust server certificate' for this connector or "
+                "install a trusted certificate on the server."
+            ),
+            "fix": (
+                "Open the connector settings and enable 'Trust server "
+                "certificate' (extra option trust_server_certificate), or "
+                "install a CA-signed certificate on the SQL Server host, "
+                "then re-run."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+    if "expected file not arrived" in text or type(error).__name__ == "FileNotArrived":
+        return {
+            "code": "expected_file_not_arrived",
+            "category": "source",
+            "title": "Expected file not arrived",
+            "message": raw,
+            "fix": (
+                "Put the file where this schedule reads it, or widen "
+                "file_wait_seconds, then run the schedule again."
+            ),
+            "raw": raw,
+            "retriable": bool(getattr(error, "retryable", False)),
+            "confidence": "high",
+        }
+    # KeyError('primary_key') renders as the quoted token alone. Matching that
+    # token as a substring rewrote unrelated errors. Only the KeyError itself
+    # is an identity-column failure.
+    if isinstance(error, KeyError) and "primary_key" in text:
+        text = "keyerror: 'primary_key'"
+    elif text.strip() in {"'primary_key'", '"primary_key"'}:
+        text = "keyerror: 'primary_key'"
     # Type-aware match when str(exc) is empty (decimal.Overflow).
     if isinstance(error, Exception) and type(error).__name__ == "Overflow":
         text = f"decimal.overflow {text}"
@@ -603,6 +879,49 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             ),
         }
 
+    if (
+        "no durable checkpoint to resume" in text
+        or "restart-from-zero would duplicate" in text
+    ):
+        return {
+            "code": "resume_without_checkpoint",
+            "category": "execution",
+            "title": "Resume needs a committed checkpoint",
+            "message": raw,
+            "fix": (
+                "This job has no durable progress (typically 0 rows written). "
+                "Re-run from Validate or start a new transfer — do not Resume. "
+                "After a deploy/restart, workers restart zero-progress jobs from "
+                "the beginning instead of false-failing Resume on append/Excel."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
+    try:
+        from services.cdc_catchup import CdcStreamBehind
+
+        if isinstance(error, CdcStreamBehind):
+            return {
+                "code": "cdc_stream_behind",
+                "category": "cdc_ops",
+                "title": "CDC catch-up still has an unread change",
+                "message": raw,
+                "fix": (
+                    "Resume this job. The replication slot was kept so the "
+                    "unread change can be applied. A row-count check cannot "
+                    "see an UPDATE that is still in the log. Delivery stays "
+                    "at-least-once."
+                ),
+                "raw": raw,
+                "retriable": True,
+                "confidence": "high",
+                "slot_name": error.slot_name,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
     try:
         from services.cdc_lease import CdcLeaseConflict
 
@@ -645,11 +964,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                     f"(resume={error.resume or '?'}, retained={error.retained or '?'}). "
                     "Continuous CDC across the gap is not possible."
                 ),
-                "fix": (
-                    "Reset the CDC watermark in Job Theater, set snapshot mode to "
-                    "when_needed or initial, then re-run. Do not claim continuous CDC "
-                    "across an AG / Data Guard / archive-purge gap."
-                ),
+                "fix": _cursor_gap_fix(error),
                 "raw": raw,
                 "retriable": False,
                 "confidence": "high",
@@ -711,6 +1026,25 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "Open Map and set Primary key to a column that is unique in the source "
                 "(or use append without that PK / dedupe upstream) before Resume."
             )
+        elif matched.get("code") in {"cdc_log_privilege", "cdc_wal_level"}:
+            message = f"{title}. Driver reported: {raw}."
+        elif matched.get("code") == "table_not_found":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "This does not say the destination was missing, and it is not a capacity problem."
+            )
+        elif matched.get("code") == "shape_refused_row":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Open Transform and fix that step, or change its error policy, "
+                "then re-run Validate."
+            )
+        elif matched.get("code") == "shape_recipe_refusal":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Open Transform and fix the recipe, then re-run Validate — "
+                "nothing was written to the destination."
+            )
         else:
             message = (
                 f"{title}. Driver reported: {raw}. "
@@ -726,6 +1060,24 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "retriable": False,
             "confidence": confidence,
         }
+    if "circuit_breaker_open" in text or (
+        "circuit breaker" in text and "is open" in text
+    ):
+        return {
+            "code": "circuit_breaker_open",
+            "category": "contract",
+            "title": "Contract circuit breaker is OPEN",
+            "message": raw,
+            "fix": (
+                "Reset the breaker after you fix the contract violation "
+                "(Contracts or Validate bind), then re-run. "
+                "Do not enqueue while the breaker is OPEN."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
     # Unknown — never invent a specific root cause or fake remediation path.
     return {
         "code": "transfer_failed",
@@ -765,6 +1117,78 @@ class RetryBudget:
 
     def has_budget(self) -> bool:
         return self.attempts_made < self.max_attempts
+
+
+# Server-directed backoff cap. Salesforce/HubSpot/Graph can ask for minutes;
+# honour that, but never let one header park a worker indefinitely.
+_RETRY_AFTER_CAP_SECONDS = float(getenv_brand("RETRY_AFTER_MAX_SECONDS", "300.0"))
+
+
+def retry_after_seconds(error: Exception) -> float | None:
+    """Server-directed wait from a throttled HTTP response, in seconds.
+
+    Salesforce (REQUEST_LIMIT_EXCEEDED), HubSpot, and Microsoft Graph all answer
+    429/503 with ``Retry-After``. Ignoring it and using our own exponential
+    backoff re-sends inside the penalty window, which is what turns a throttle
+    into a multi-hour stall on large SaaS migrations. Supports both the
+    delta-seconds and HTTP-date forms of RFC 9110 ``Retry-After``.
+    """
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    try:
+        items = list(headers.items())
+    except (AttributeError, TypeError, ValueError):
+        return None
+    retry_after = next(
+        (value for key, value in items if str(key).lower() == "retry-after"),
+        None,
+    )
+    has_retry_after = any(str(key).lower() == "retry-after" for key, _ in items)
+    if has_retry_after:
+        text = str(retry_after or "").strip()
+        if not text:
+            return None
+        try:
+            return max(0.0, min(float(text), _RETRY_AFTER_CAP_SECONDS))
+        except ValueError:
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
+
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if when is None:
+            return None
+        from datetime import datetime, timezone
+
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        delta = (when - datetime.now(timezone.utc)).total_seconds()
+        if delta <= 0:
+            return 0.0
+        return min(delta, _RETRY_AFTER_CAP_SECONDS)
+
+    status = getattr(response, "status_code", None)
+    if status not in {429, 403}:
+        return None
+    remaining = next(
+        (value for key, value in items if str(key).lower() == "x-ratelimit-remaining"),
+        None,
+    )
+    if status == 403 and str(remaining).strip() != "0":
+        return None
+    reset = next(
+        (value for key, value in items if str(key).lower() == "x-ratelimit-reset"),
+        None,
+    )
+    try:
+        delta = float(reset) - time.time()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0.0, min(delta, _RETRY_AFTER_CAP_SECONDS))
 
 
 @dataclass
@@ -809,6 +1233,22 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
             "class": exc_name,
         }
 
+    # The slot still has the change. Resume is safe; the slot was kept.
+    try:
+        from services.cdc_catchup import CdcStreamBehind
+
+        if isinstance(error, CdcStreamBehind):
+            return {
+                "retriable": True,
+                "evidence": ["cdc_stream_behind"],
+                "message": text,
+                "class": exc_name,
+                "code": "cdc_stream_behind",
+                "slot_name": error.slot_name,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
     # Structured CDC lease conflict — never auto-retry into a live holder.
     try:
         from services.cdc_lease import CdcLeaseConflict
@@ -838,7 +1278,24 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
     status_match = re.search(r"\b(4\d\d|5\d\d)\b", text)
     if status_match:
         code = int(status_match.group(1))
-        if code in {408, 429, 500, 502, 503, 504}:
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        try:
+            remaining = next(
+                (
+                    value
+                    for key, value in headers.items()
+                    if str(key).lower() == "x-ratelimit-remaining"
+                ),
+                None,
+            )
+        except (AttributeError, TypeError, ValueError):
+            remaining = None
+        github_rate_limit = code == 403 and str(remaining).strip() == "0"
+        if github_rate_limit:
+            retriable = True
+            evidence.append("HTTP 403 GitHub rate limit has zero remaining requests")
+        elif code in {408, 429} or 500 <= code <= 599:
             # 500 is retriable only if no contract violation evidence is present
             if code == 500 and any(p in text for p in NON_RETRIABLE_PATTERNS):
                 retriable = False
@@ -878,6 +1335,9 @@ class AmbiguousWriteOutcome(Exception):
         )
 
 
+_DEFAULT_RETRY_SLEEP = time.sleep
+
+
 def with_retry(
     fn: Callable[[], Any],
     *,
@@ -885,6 +1345,7 @@ def with_retry(
     on_transient: Callable[[Exception, float], None] | None = None,
     replay_safety: Any | None = None,
     on_replay_blocked: Callable[[Exception, Any], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Any:
     """Run a function with bounded retry and backoff.
 
@@ -897,6 +1358,8 @@ def with_retry(
     Reads and other side-effect-free work pass no verdict and retry as before.
     """
     budget = budget or RetryBudget()
+    if sleep is _DEFAULT_RETRY_SLEEP and time.sleep is not _DEFAULT_RETRY_SLEEP:
+        sleep = time.sleep
     last_error: Exception | None = None
     while budget.has_budget():
         try:
@@ -916,9 +1379,12 @@ def with_retry(
                         )
                 raise AmbiguousWriteOutcome(exc, replay_safety) from exc
             delay = budget.next_delay()
+            server_hint = retry_after_seconds(exc)
+            if server_hint is not None:
+                delay = max(delay, server_hint)
             if on_transient:
                 on_transient(exc, delay)
-            time.sleep(delay)
+            sleep(delay)
     raise last_error or RuntimeError("Retry budget exhausted")
 
 

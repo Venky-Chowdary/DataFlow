@@ -7,7 +7,16 @@ Do not invent parallel SQL. Every probe goes through:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from .example_phrases import (
+    example_connector_name,
+    example_dest_connector_name,
+    example_table_name,
+)
+
+if TYPE_CHECKING:
+    from .tools import ToolResult
 
 
 class AmbiguousConnectorError(Exception):
@@ -19,7 +28,7 @@ class AmbiguousConnectorError(Exception):
         self.candidates = candidates or []
 
 
-def _tool_result(name: str, *, success: bool, output: Any = None, error: str = ""):
+def _tool_result(name: str, *, success: bool, output: Any = None, error: str = "") -> ToolResult:
     from .tools import ToolResult
 
     return ToolResult(name=name, success=success, output=output, error=error)
@@ -34,11 +43,138 @@ _TYPE_ALIASES = {
     "snowflake": "snowflake",
     "mysql": "mysql",
     "sqlite": "sqlite",
+    "sql server": "sqlserver",
+    "sqlserver": "sqlserver",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "ms sql server": "sqlserver",
+    "azure sql": "sqlserver",
+    "maria": "mariadb",
+    "mariadb": "mariadb",
+    "oracle": "oracle",
+    "redshift": "redshift",
+    "databricks": "databricks",
+    "duckdb": "duckdb",
 }
 
+# A dialect name is not a connector: "Postgres" says *what kind*, never *which
+# instance*. Guessing an instance is how data lands in the wrong database, so
+# these resolve only when exactly one saved connector is of that type.
+_DIALECT_WORDS = frozenset({*_TYPE_ALIASES, *_TYPE_ALIASES.values()})
+# Words that name a *family* of databases and no dialect at all. "transfer to sql"
+# says even less than "to postgres", so it can never resolve to an instance.
+_FAMILY_WORDS = frozenset({"sql", "database", "db", "warehouse", "lake", "lakehouse"})
+_ENGINE_WORDS = _DIALECT_WORDS | _FAMILY_WORDS
+# Environment / role qualifiers carry no instance identity: "local", "prod" and
+# "primary" appear in most connector labels, so token overlap on them alone is
+# not evidence. Requiring one distinctive token keeps "local postgres" from
+# resolving to "Local Snowflake".
+_QUALIFIER_TOKENS = frozenset(
+    {
+        "local",
+        "localhost",
+        "prod",
+        "production",
+        "dev",
+        "development",
+        "test",
+        "testing",
+        "stage",
+        "staging",
+        "qa",
+        "uat",
+        "sandbox",
+        "demo",
+        "main",
+        "primary",
+        "replica",
+        "standby",
+        "secondary",
+        "new",
+        "old",
+        "temp",
+        "my",
+        "the",
+        "connector",
+        "connection",
+        "instance",
+        "server",
+        "cluster",
+        "source",
+        "target",
+        "destination",
+        *_FAMILY_WORDS,
+    }
+)
 
-def _match_score(needle: str, label: str, ctype: str = "") -> float:
-    """Rank how well a saved connector matches a user phrase. Higher is better."""
+
+def _normalize_needle(needle: str) -> str:
+    return (needle or "").strip().lower().removesuffix(" connector").strip()
+
+
+def _engine_word(needle: str) -> str:
+    """Return the canonical engine type a phrase names, or "" if it names none."""
+    n = _normalize_needle(needle)
+    if n not in _DIALECT_WORDS:
+        return ""
+    return _TYPE_ALIASES.get(n, n)
+
+
+def _is_family_word(needle: str) -> bool:
+    """True for "sql" / "database" / "warehouse" — a family, not even a dialect."""
+    return _normalize_needle(needle) in _FAMILY_WORDS
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in (text or "").replace("-", " ").replace("_", " ").split() if t}
+
+
+def _named_engines(tokens: set[str]) -> set[str]:
+    """Canonical engine types a phrase's tokens name, e.g. {"postgresql"}."""
+    return {_TYPE_ALIASES.get(t, t) for t in tokens if t in _DIALECT_WORDS}
+
+
+def _engine_conflict(tokens: set[str], type_l: str) -> bool:
+    """True when the phrase names a dialect that the connector's type is not.
+
+    "orders on Local Postgres" must never resolve to a saved Snowflake
+    connector because both labels contain "Local": the phrase states the
+    engine, and a wrong engine means the answer describes another database.
+    """
+    named = _named_engines(tokens)
+    if not named or not type_l:
+        return False
+    return not any(e == type_l or e in type_l or type_l in e for e in named)
+
+
+def _identifier_needle(needle: str) -> bool:
+    """True when the phrase is one saved-connector name, not a dialect or a sentence.
+
+    ``QA_RT5_sqlit`` and ``QA_RT5_delme`` are identifiers. Prefix and token
+    overlap used to bind them to a different live connector — including staging
+    deletion of that connector. A dialect word (``postgres``) or a multi-word
+    phrase (``local postgres``) is still resolved by the copilot rules below.
+    """
+    n = _normalize_needle(needle)
+    if not n or any(ch.isspace() for ch in n):
+        return False
+    if n in _DIALECT_WORDS or n in _FAMILY_WORDS:
+        return False
+    return True
+
+
+def _match_score(
+    needle: str,
+    label: str,
+    ctype: str = "",
+    *,
+    exact_name: bool = False,
+) -> float:
+    """Rank how well a saved connector matches a user phrase. Higher is better.
+
+    ``exact_name`` is the destructive-tool contract: only a full name match
+    counts. A dialect word must not select an instance for delete or update.
+    """
     n = (needle or "").strip().lower()
     label_l = (label or "").strip().lower()
     type_l = (ctype or "").strip().lower()
@@ -46,6 +182,17 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
         return 0.0
     if label_l == n:
         return 100.0
+    if exact_name or _identifier_needle(n):
+        return 0.0
+    if _engine_conflict(_tokens(n), type_l):
+        # Only the exact-name match above may resolve a phrase whose dialect
+        # contradicts the saved connector's engine; anything weaker is a guess.
+        return 0.0
+    if _is_family_word(n):
+        # "sql" / "database" / "warehouse" name a family, not an instance. Matching
+        # one to a saved connector is a guess, and a guess writes to the wrong
+        # database — so only an exact name match (above) may resolve it.
+        return 0.0
     if label_l.startswith(n) or n.startswith(label_l):
         return 85.0 - abs(len(label_l) - len(n)) * 0.2
     if n in label_l:
@@ -54,36 +201,71 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
     if alias and (alias == type_l or alias in type_l or n == type_l or n in type_l):
         return 35.0
     # Token overlap: "local postgres" vs "Local Postgres Prod"
-    n_toks = {t for t in n.replace("-", " ").split() if t}
-    l_toks = {t for t in label_l.replace("-", " ").split() if t}
+    n_toks = _tokens(n)
+    l_toks = _tokens(label_l)
     if n_toks and n_toks <= l_toks:
         return 70.0 + len(n_toks) * 2.0
-    if n_toks and l_toks:
-        overlap = len(n_toks & l_toks) / len(n_toks)
+    shared = n_toks & l_toks
+    if shared and (shared - _QUALIFIER_TOKENS):
+        overlap = len(shared) / len(n_toks)
         if overlap >= 0.5:
             return 45.0 + overlap * 20.0
     return 0.0
 
 
-def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pick a clear winner or raise AmbiguousConnectorError — never silent first-match."""
+def _pick_connector(
+    needle: str,
+    candidates: list[dict[str, Any]],
+    *,
+    exact_name: bool = False,
+) -> dict[str, Any]:
+    """Pick a clear winner or raise AmbiguousConnectorError — never silent first-match.
+
+    Identifier needles and destructive tools (``exact_name``) accept only a
+    case-insensitive full name. Two connectors with that same name are an
+    error, not a silent first hit.
+    """
+    # Id, name and display name — case, spacing and punctuation folded — are
+    # one resolver shared with free-text mentions (connector_resolver).
+    from .connector_resolver import ambiguity_message, describe, reference_matches
+
+    named = reference_matches(needle, candidates)
+    if len(named) == 1:
+        return named[0]
+    if len(named) > 1:
+        raise AmbiguousConnectorError(
+            ambiguity_message(needle, named), candidates=[describe(d) for d in named[:6]]
+        )
     scored: list[tuple[float, dict[str, Any]]] = []
     for d in candidates:
         score = _match_score(
             needle,
             str(d.get("name") or ""),
             str(d.get("type") or d.get("format") or ""),
+            exact_name=exact_name,
         )
         if score > 0:
             scored.append((score, d))
     if not scored:
-        raise AmbiguousConnectorError(
-            f'No connector matched “{needle}”. Name a saved connector from Connectors.'
-        )
+        raise AmbiguousConnectorError(_no_match_message(needle, candidates))
     scored.sort(key=lambda x: (-x[0], str(x[1].get("name") or "").lower()))
     best_score, best = scored[0]
-    # Exact / near-exact name wins alone
+    # Exact name: more than one saved connector with that label is ambiguous.
     if best_score >= 95.0:
+        ties = [d for score, d in scored if score >= 95.0]
+        if len(ties) > 1:
+            names = []
+            for d in ties[:5]:
+                label = str(d.get("name") or "").strip()
+                cid = str(d.get("id") or d.get("_id") or "").strip()
+                shown = f"{label} ({cid})" if cid else label
+                if shown and shown not in names:
+                    names.append(shown)
+            listed = ", ".join(f"**{n}**" for n in names)
+            raise AmbiguousConnectorError(
+                f"“{needle}” matches {len(ties)} connectors. Pass the connector id. {listed}",
+                candidates=names,
+            )
         return best
     # Clear margin over runner-up
     if len(scored) == 1 or best_score >= scored[1][0] + 12.0:
@@ -95,33 +277,102 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if name and name not in names:
             names.append(name)
     listed = ", ".join(f"**{n}**" for n in names)
-    raise AmbiguousConnectorError(
-        f"Which connector did you mean? {listed}",
-        candidates=names,
+    engine = _engine_word(needle)
+    question = (
+        f"“{needle}” is a database type, so it names more than one saved {engine} "
+        f"connector. Which connector did you mean? {listed}"
+        if engine
+        else f"Which connector did you mean? {listed}"
     )
+    raise AmbiguousConnectorError(question, candidates=names)
 
 
-def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | None:
-    """Resolve a saved connector by id or fuzzy name.
+def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
+    """Say precisely what is missing — a type with no instance, or an unknown name."""
+    engine = _engine_word(needle)
+    saved = [str(d.get("name") or "").strip() for d in candidates]
+    saved = [n for n in saved if n]
+    listed = ", ".join(f"**{n}**" for n in saved[:6]) or "none yet"
+    # Keep "no connector matched" in every branch: the agent's recovery step and
+    # the client both read it to offer the saved list instead of a dead end.
+    head = f"No connector matched “{needle}”"
+    tail = f"Name a saved connector from Connectors. Saved connectors: {listed}."
+    if engine:
+        return (
+            f"{head} — that is a database type, not a saved connector, and no "
+            f"{engine} connector is saved, so there is no instance to point this at. "
+            f"{tail}"
+        )
+    if _is_family_word(needle):
+        return (
+            f"{head} — that names a family of databases, not one instance, so there "
+            f"is nothing to point this at. {tail}"
+        )
+    named = _named_engines(_tokens(_normalize_needle(needle)))
+    saved_types = {str(d.get("type") or d.get("format") or "").strip().lower() for d in candidates}
+    absent = sorted(
+        e
+        for e in named
+        if not any(t and (e == t or e in t or t in e) for t in saved_types)
+    )
+    if absent:
+        engines = ", ".join(absent)
+        return (
+            f"{head} — no {engines} connector is saved, so there is no instance to "
+            f"point this at, and a connector of another engine is not the same "
+            f"database. {tail}"
+        )
+    return f"{head}, and I will not guess which database you meant. {tail}"
+
+
+def _connector_dict(
+    connector_id: str = "",
+    name: str = "",
+    *,
+    exact_name: bool = False,
+) -> dict[str, Any] | None:
+    """Resolve a saved connector by id or name.
+
+    Identifier names match in full (case-insensitive). Phrases and dialect
+    words still use the copilot ranker. ``exact_name`` is required for
+    delete / update / CDC prepare: a dialect word is not an instance.
 
     Raises AmbiguousConnectorError when multiple connectors match equally.
     """
     cid = (connector_id or "").strip()
     needle = (name or "").strip().lower()
 
+    from services.connector_access import caller_workspace_id, visible, visible_items
+
+    scope = caller_workspace_id() or None
     try:
         from services.connector_store import get_connector, list_connectors
 
         if cid:
-            c = get_connector(cid)
+            c = get_connector(cid, workspace_id=scope)
             if c:
                 return c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
+            if not needle:
+                # An agent passing a name (or an id in other case) as the id.
+                from .connector_resolver import ambiguity_message, describe, reference_matches
+
+                pool_by_id = [
+                    x.to_dict() if hasattr(x, "to_dict") else dict(x.__dict__)
+                    for x in list_connectors()
+                ]
+                named = reference_matches(cid, pool_by_id)
+                if len(named) == 1:
+                    return named[0]
+                if len(named) > 1:
+                    raise AmbiguousConnectorError(
+                        ambiguity_message(cid, named), candidates=[describe(d) for d in named[:6]]
+                    )
         if needle:
             pool: list[dict[str, Any]] = []
-            for c in list_connectors():
+            for c in list_connectors(workspace_id=scope):
                 d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
                 pool.append(d)
-            return _pick_connector(needle, pool)
+            return _pick_connector(needle, pool, exact_name=exact_name)
     except AmbiguousConnectorError:
         raise
     except Exception as exc:
@@ -132,12 +383,16 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
 
         mongo = get_mongodb_service()
         if cid:
-            found = mongo.get_connector(cid)
+            found = visible(_in_scope(mongo.get_connector(cid), scope))
             if found:
                 return found
         if needle:
-            pool = list(mongo.list_connectors() or [])
-            return _pick_connector(needle, [c for c in pool if isinstance(c, dict)])
+            pool = visible_items(
+                c for c in (mongo.list_connectors() or []) if _in_scope(c, scope)
+            )
+            return _pick_connector(
+                needle, [c for c in pool if isinstance(c, dict)], exact_name=exact_name
+            )
     except AmbiguousConnectorError:
         raise
     except Exception as exc:
@@ -145,31 +400,70 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
     return None
 
 
-def _safe_connector(connector_id: str = "", name: str = "", tool: str = "schema"):
+def _safe_connector(
+    connector_id: str = "",
+    name: str = "",
+    tool: str = "schema",
+    *,
+    exact_name: bool = False,
+):
     """Resolve connector or return a failed ToolResult (plain-language errors)."""
     try:
-        conn = _connector_dict(connector_id, name)
+        conn = _connector_dict(connector_id, name, exact_name=exact_name)
     except AmbiguousConnectorError as exc:
         return None, _tool_result(tool, success=False, error=exc.message)
+    if not conn and not (connector_id or "").strip() and not (name or "").strip():
+        # Nothing was named and there is nothing to choose between: asking
+        # "which connector?" when the workspace holds exactly one is a
+        # dead-end, not a safeguard. A wrong *name* still errors below.
+        conn = _only_saved_connector()
     if not conn:
-        from .example_phrases import example_connector_name
-
         ex = example_connector_name()
         return None, _tool_result(
             tool,
             success=False,
             error=(
                 "Connector not found. Name a saved connector, e.g. "
-                f'"columns on airports in {ex}".'
+                f'"columns on {example_table_name()} in {ex}".'
             ),
         )
+    # Until a later step says otherwise, the call is waiting on this system:
+    # a deadline names its host instead of "a system it reads from" (D169).
+    from .tool_deadline import note_step
+
+    note_step(f"{tool}: reading connector {conn.get('name') or ''}".strip(), conn, role="connector", if_unset=True)
     return conn, None
+
+
+def _in_scope(doc: Any, scope: str | None) -> Any:
+    """``doc`` when it is unscoped or in ``scope`` (``None`` = no narrowing)."""
+    if not isinstance(doc, dict) or not scope:
+        return doc
+    ws = str(doc.get("workspace_id") or "").strip()
+    return doc if ws in ("", scope) else None
+
+
+def _only_saved_connector() -> dict[str, Any] | None:
+    """The single saved connector, or None when there are zero or several."""
+    try:
+        from services.connector_access import caller_workspace_id
+        from services.connector_store import list_connectors
+
+        saved = list(list_connectors(workspace_id=caller_workspace_id() or None) or [])
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return None
+    if len(saved) != 1:
+        return None
+    only = saved[0]
+    return only.to_dict() if hasattr(only, "to_dict") else dict(only)
 
 
 def _endpoint_from_connector(conn: dict[str, Any], table: str = "") -> Any:
     from src.transfer.models import EndpointConfig
 
     fmt = str(conn.get("type") or conn.get("format") or "").lower()
+    extra = conn.get("extra") if isinstance(conn.get("extra"), dict) else {}
     return EndpointConfig(
         kind="database",
         format=fmt,
@@ -188,6 +482,7 @@ def _endpoint_from_connector(conn: dict[str, Any], table: str = "") -> Any:
         auth_mode=str(conn.get("auth_mode") or ""),
         auth_role=str(conn.get("auth_role") or ""),
         auth_source=str(conn.get("auth_source") or ""),
+        extra=dict(extra),
     )
 
 
@@ -196,6 +491,7 @@ def introspect_connector_table(
     table: str = "",
     *,
     purpose: str = "",
+    execute_shape: bool = False,
 ) -> dict[str, Any]:
     """Canonical live schema read for a saved connector.
 
@@ -209,9 +505,14 @@ def introspect_connector_table(
     ``purpose`` is passed to the introspector as ``introspect_purpose`` so
     destination reads can distinguish "table absent" from "cannot connect" —
     the difference between create-new and a hard failure.
+
+    ``execute_shape=True`` (transfer planning) returns the columns the Execute
+    reader will emit — for MongoDB that includes nested ``parent_child``
+    leaves, so the plan maps or omits every column G13 will count at runtime.
+    Query/aggregation callers keep the raw document keys their pipelines use.
     """
     from services.dialect_profiles import normalize_schema
-    from services.schema_introspect import introspect_schema
+    from services.schema_introspect import introspect_schema, is_object_store_type
 
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -221,8 +522,16 @@ def introspect_connector_table(
         endpoint.extra = {**(getattr(endpoint, "extra", None) or {}), "introspect_purpose": purpose}
     cfg = resolve_connector_config(endpoint)
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    # The handshake keywords the connector saved (SQL Server trust flag, TLS
+    # mode, Oracle SID...) reach this read exactly as they reach Test and the
+    # engine's reads. Without them a certificate the operator trusted failed
+    # here, the destination read as "cannot introspect", and every mapping sat
+    # at "pending Studio/Map stamp" (D147).
+    from connectors.generic_sql import connection_options
+
     info = introspect_schema(
         db_type,
+        **connection_options({**(cfg.get("extra") or {}), **cfg}),
         host=str(cfg.get("host") or ""),
         port=int(cfg.get("port") or 0) or 5432,
         database=str(cfg.get("database") or ""),
@@ -235,18 +544,51 @@ def introspect_connector_table(
         table=table,
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
+        # Object stores dial the connector's endpoint/port from it (D142).
+        reader_cfg=cfg if execute_shape or is_object_store_type(db_type) else None,
+        introspect_purpose=purpose,
     )
     ok = bool(info.get("ok"))
+    columns = _normalize_columns(info) if ok else []
     return {
         "ok": ok,
         "error": str(info.get("error") or ""),
         "db_type": db_type,
-        "columns": _normalize_columns(info) if ok else [],
+        "columns": columns,
         "tables": info.get("tables") or [],
         "config": cfg,
         "endpoint": endpoint,
         "raw": info,
+        "table_exists": _measured_table_exists(endpoint, ok=ok, has_columns=bool(columns)),
     }
+
+
+def _measured_table_exists(endpoint: Any, *, ok: bool, has_columns: bool) -> bool | None:
+    """Ask the catalog whether the table is there, rather than read an error string.
+
+    ``introspect_schema`` answers "what are this table's columns", so an absent
+    table and a table whose metadata could not be loaded both come back as a
+    successful call with none. Callers were left inferring the difference from
+    error text, which no engine promises to phrase any particular way, and a
+    destination that was simply missing came back as ``None`` — neither
+    create-new nor a failure, so Validate had nothing to approve.
+
+    Only the ambiguous case pays for the extra look: columns already prove the
+    table exists.
+    """
+    if has_columns:
+        return True
+    if not ok:
+        return None
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+
+        probed = introspect_endpoint(endpoint)
+    except Exception as exc:
+        logging.getLogger(__name__).info("table existence probe unavailable: %s", exc)
+        return None
+    exists = probed.get("table_exists")
+    return exists if isinstance(exists, bool) else None
 
 
 def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -258,6 +600,16 @@ def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
     refuses SUM/AVG on NUMERIC and "by month" on DATE.
     """
     schema_map = info.get("schema") if isinstance(info.get("schema"), dict) else {}
+    # Object stores and keyspaces return the profile under ``column_types``.
+    # ``schema`` is the namespace string on those engines, so ignoring
+    # ``column_types`` stamped every column TEXT while integrity re-inferred
+    # DECIMAL from the same rows and blocked the route.
+    column_types = (
+        info.get("column_types") if isinstance(info.get("column_types"), dict) else {}
+    )
+    if column_types:
+        typed_map = {str(k): str(v) for k, v in column_types.items() if k}
+        schema_map = {**typed_map, **{str(k): str(v) for k, v in schema_map.items()}}
     nullability = (
         info.get("schema_nullability")
         if isinstance(info.get("schema_nullability"), dict)
@@ -290,7 +642,15 @@ def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
                     c["nullable"] if "nullable" in c else nullability.get(name, True)
                 ),
                 "data_type": str(
-                    c.get("data_type") or c.get("column_type") or schema_map.get(name) or ""
+                    c.get("data_type")
+                    or c.get("column_type")
+                    # Engine-declared type (PRAGMA/information_schema) is the
+                    # honest `data_type`; inference is not the declared type.
+                    or c.get("declared_type")
+                    or c.get("native_type")
+                    or c.get("type")
+                    or schema_map.get(name)
+                    or ""
                 ),
             })
             seen.add(name)
@@ -341,14 +701,19 @@ def list_connector_objects(
         info = introspect_endpoint(endpoint)
         raw_objects = list(info.get("objects") or [])
         objects: list[str] = []
+        kinds: dict[str, str] = {}
         for obj in raw_objects:
             if isinstance(obj, dict):
                 name = str(obj.get("name") or obj.get("table") or obj.get("id") or "").strip()
+                kind = str(obj.get("type") or "").strip()
             else:
-                name = str(obj).strip()
+                name, kind = str(obj).strip(), ""
             if name:
                 objects.append(name)
-        objects = objects[: max(1, min(int(limit or 100), 500))]
+                if kind:
+                    kinds[name] = kind
+        total = len(objects)
+        objects = objects[: max(1, int(limit or 100))]
         return _tool_result(
             "list_connector_objects",
             success=True,
@@ -358,7 +723,17 @@ def list_connector_objects(
                 "type": conn.get("type") or conn.get("format"),
                 "connected": bool(info.get("connected")),
                 "objects": objects,
+                # name -> kind (table / view / collection / …) for the objects above,
+                # so a view is not mistaken for a table (M18).
+                "object_kinds": {n: kinds[n] for n in objects if n in kinds},
                 "count": len(objects),
+                # Callers that resolve a name against this list need to know the
+                # difference between "not on this connector" and "not in the page
+                # I was shown" — a schema with more objects than the display limit
+                # is ordinary, and treating the window as the whole inventory
+                # reports existing tables as missing.
+                "total": total,
+                "truncated": total > len(objects) or bool(info.get("objects_truncated")),
                 "message": info.get("message") or "",
                 "database": conn.get("database"),
                 "schema": conn.get("schema"),
@@ -382,13 +757,17 @@ def introspect_connector_schema(
         return _tool_result(
             "introspect_connector_schema",
             success=False,
-            error='Which table or collection? Example: "schema of airports on Local Postgres".',
+            error=(
+                "Which table or collection? Example: "
+                f'"schema of {example_table_name()} on {example_connector_name()}".'
+            ),
         )
     conn, err = _safe_connector(connector_id, connector_name, "introspect_connector_schema")
     if err:
         return err
     try:
-        from services.schema_introspect import introspect_schema
+        from connectors.generic_sql import connection_options
+        from services.schema_introspect import introspect_schema, is_object_store_type
 
         from src.transfer.adapters import resolve_connector_config
         from src.transfer.connector_capabilities import resolve_driver_type
@@ -412,6 +791,9 @@ def introspect_connector_schema(
             table=table,
             catalog_type=str(cfg.get("type") or ""),
             auth_source=str(cfg.get("auth_source") or ""),
+            reader_cfg=cfg if is_object_store_type(db_type) else None,
+            # TLS trust / service name / driver keywords the writer dials with.
+            **connection_options(cfg),
         )
         if not info.get("ok"):
             return _tool_result(
@@ -491,7 +873,8 @@ def diff_schemas(
             success=False,
             error=(
                 "Need a source table. Example: "
-                '"diff airports on Local Postgres vs data on LocalMongoDB".'
+                f'"diff {example_table_name()} on {example_connector_name()} '
+                f'vs {example_table_name()} on {example_dest_connector_name()}".'
             ),
         )
     src = introspect_connector_schema(source_connector_id, source_connector_name, src_table)
@@ -513,9 +896,11 @@ def diff_schemas(
         c["name"]: bool(c.get("nullable", True))
         for c in (dst.output or {}).get("columns") or []
     }
+    # The destination is what exists; the source is what a load brings. A
+    # source-only column is an add, a destination-only column a drop (QA MX3-08).
     classification = classify_schema_change(
-        {"columns": src_map, "nullable": src_null},
         {"columns": dst_map, "nullable": dst_null},
+        {"columns": src_map, "nullable": src_null},
     )
     only_src = sorted(set(src_map) - set(dst_map))
     only_dst = sorted(set(dst_map) - set(src_map))
@@ -525,6 +910,52 @@ def diff_schemas(
         for col in shared
         if str(src_map[col]).upper() != str(dst_map[col]).upper()
     ]
+    # Type differences are judged in the direction of the load (D43): writing
+    # source into destination loses only when the DESTINATION is the narrower
+    # carrier. The schema-evolution classifier compares dest→src, so every
+    # type-mismatched column is re-evaluated source→destination here —
+    # DataFlow's own widening (dest INT4→BIGINT for a safe source) and
+    # documented carriers (SQLite DECIMAL-as-TEXT) stay compatible.
+    from services.schema_drift import _is_type_narrow
+
+    dest_db = str((dst.output or {}).get("type") or "")
+    breaking: list[dict] = [
+        item for item in (classification.get("breaking") or [])
+        if item.get("kind") not in {"narrow_type", "type_change", "widen_type"}
+    ]
+    load_widening: list[dict] = []
+    for m in type_mismatches:
+        col = m["column"]
+        src_t, dst_t = m["source_type"], m["dest_type"]
+        if _is_type_narrow(src_t, dst_t, dest_db=dest_db):
+            breaking.append({
+                "kind": "dest_narrower_than_source",
+                "column": col,
+                "source_type": src_t,
+                "dest_type": dst_t,
+            })
+        else:
+            load_widening.append({
+                "kind": "dest_carries_source",
+                "column": col,
+                "source_type": src_t,
+                "dest_type": dst_t,
+            })
+    additive = [
+        item for item in (classification.get("additive") or [])
+        if item.get("kind") != "widen_type"
+    ]
+    # Severity is read off the lists it summarises. A destination that already
+    # carries every source type needs nothing added: calling that "additive"
+    # beside ``additive=[]`` contradicted itself (D43).
+    if breaking:
+        severity = "breaking"
+    elif additive:
+        severity = "additive"
+    elif load_widening:
+        severity = "compatible"
+    else:
+        severity = "none"
     return _tool_result(
         "diff_schemas",
         success=True,
@@ -543,9 +974,10 @@ def diff_schemas(
             "only_in_source": only_src,
             "only_in_destination": only_dst,
             "type_mismatches": type_mismatches,
-            "severity": classification.get("severity"),
-            "additive": classification.get("additive") or [],
-            "breaking": classification.get("breaking") or [],
+            "severity": severity,
+            "additive": additive,
+            "dest_carries_source": load_widening,
+            "breaking": breaking,
         },
     )
 
@@ -579,9 +1011,11 @@ def map_connector_schemas(
     dst_cols: list[str] = []
     dst_schemas: list[dict] = []
     dst_name = dest_connector_name
+    dst_db = ""
     if dest_connector_id or dest_connector_name:
         dst = introspect_connector_schema(dest_connector_id, dest_connector_name, dst_table)
         if dst.success:
+            dst_db = str((dst.output or {}).get("type") or "")
             dst_cols = [c["name"] for c in (dst.output or {}).get("columns") or []]
             dst_schemas = [
                 {
@@ -619,6 +1053,10 @@ def map_connector_schemas(
         source_schemas=src_schemas,
         target_schemas=dst_schemas or None,
         threshold=float(threshold or 0.85),
+        # Both engines decide the type pair: PostgreSQL VARCHAR onto SQL Server
+        # NVARCHAR is a preserve only once the mapper knows the two sides (D158).
+        destination_db_type=dst_db,
+        source_db_type=str((src.output or {}).get("type") or ""),
     )
     mapped_src = {m.get("source") for m in mappings if m.get("source")}
     mapped_tgt = {m.get("target") for m in mappings if m.get("target")}
@@ -677,5 +1115,154 @@ def map_connector_schemas(
             "low_confidence": low_confidence,
             "type_risks": type_risks,
             "threshold": float(threshold or 0.85),
+        },
+    )
+
+
+def saved_connector_name(needle: str) -> str:
+    """The saved connector this phrase names, exactly as the store spells it.
+
+    A planner needs to know whether a phrase is one of the operator's own
+    connectors *before* it commits to a tool: "what is the difference between
+    append and overwrite" and "compare Demo Orders and Quarantine SQLite" have
+    the same shape and completely different answers. Returns "" for anything
+    that is not one saved connector, so the caller fails closed.
+    """
+    want = (needle or "").strip()
+    if not want:
+        return ""
+    try:
+        conn = _connector_dict("", want)
+    except AmbiguousConnectorError:
+        return ""
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return ""
+    if not conn:
+        return ""
+    return str(conn.get("name") or "").strip()
+
+
+def _connector_health(conn: dict[str, Any]) -> str:
+    from services.connector_store import connector_health
+
+    return connector_health(conn)
+
+
+def _connector_facts(conn: dict[str, Any]) -> dict[str, Any]:
+    """One saved connector as the facts an operator compares them on.
+
+    Everything here is read from the store or measured live. Nothing is inferred
+    from the engine name: transfer-readiness comes from the capability registry
+    the transfer engine itself consults, and the object count comes from a real
+    introspection, so "connected" reports what the probe actually did.
+    """
+    engine = str(conn.get("type") or conn.get("format") or "").strip()
+    facts: dict[str, Any] = {
+        "id": str(conn.get("id") or conn.get("_id") or ""),
+        "name": str(conn.get("name") or ""),
+        "engine": engine,
+        "database": str(conn.get("database") or ""),
+        "host": str(conn.get("host") or ""),
+        "schema": str(conn.get("schema") or ""),
+        "health": _connector_health(conn),
+        "last_tested_at": conn.get("last_tested_at") or "",
+        "capability": "",
+        "transfer_ready": None,
+        "objects": None,
+        "connected": None,
+        "message": "",
+    }
+    try:
+        from src.transfer.connector_capabilities import (
+            capability_label,
+            get_capabilities,
+            transfer_ready,
+        )
+
+        caps = get_capabilities(engine, engine)
+        facts["capability"] = capability_label(caps)
+        facts["transfer_ready"] = bool(transfer_ready(caps))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    listed = list_connector_objects(connector_id=facts["id"], connector_name=facts["name"])
+    if getattr(listed, "success", False):
+        out = getattr(listed, "output", None) or {}
+        facts["objects"] = out.get("total")
+        facts["connected"] = bool(out.get("connected"))
+        facts["message"] = str(out.get("message") or "")
+    else:
+        facts["connected"] = False
+        facts["message"] = str(getattr(listed, "error", "") or "")
+    return facts
+
+
+#: Comparisons an operator asks for that this workspace does not measure. Saying
+#: "Demo Orders is faster" from an engine name would be an invented benchmark;
+#: the connectors page records no throughput, latency or price per connector.
+UNMEASURED_CRITERIA: dict[str, str] = {
+    "faster": "per-connector throughput",
+    "fastest": "per-connector throughput",
+    "slower": "per-connector throughput",
+    "quicker": "per-connector throughput",
+    "cheaper": "per-connector cost",
+    "better": "an overall quality score",
+    "best": "an overall quality score",
+    "worse": "an overall quality score",
+    "reliable": "a reliability score",
+}
+
+
+def compare_connectors(
+    left: str = "",
+    right: str = "",
+    criterion: str = "",
+):
+    """Two saved connectors side by side, on the facts the workspace actually holds.
+
+    "compare Demo Orders and Quarantine SQLite" used to reach no tool. Retrieval
+    won the turn instead and, because the documentation uses both names in its
+    examples, answered with the destination type table for six logical types —
+    a real passage about something the operator had not asked.
+    """
+    left_conn, err = _safe_connector("", left, "compare_connectors")
+    if err:
+        return err
+    right_conn, err = _safe_connector("", right, "compare_connectors")
+    if err:
+        return err
+    if str(left_conn.get("id") or "") == str(right_conn.get("id") or ""):
+        return _tool_result(
+            "compare_connectors",
+            success=False,
+            error=(
+                f"“{left}” and “{right}” resolve to the same saved connector "
+                f"({left_conn.get('name')}). Name two different ones to compare."
+            ),
+        )
+
+    a = _connector_facts(left_conn)
+    b = _connector_facts(right_conn)
+    differs = [
+        field
+        for field in ("engine", "database", "host", "health", "capability")
+        if str(a.get(field) or "") != str(b.get(field) or "")
+    ]
+    if a.get("objects") != b.get("objects"):
+        differs.append("objects")
+    want = (criterion or "").strip().lower()
+    return _tool_result(
+        "compare_connectors",
+        success=True,
+        output={
+            "left": a,
+            "right": b,
+            "differs": differs,
+            "same_engine": a["engine"].lower() == b["engine"].lower(),
+            # Named so the renderer can say what it cannot compare instead of
+            # answering a throughput question with an engine name.
+            "criterion": want,
+            "unmeasured": UNMEASURED_CRITERIA.get(want, ""),
         },
     )

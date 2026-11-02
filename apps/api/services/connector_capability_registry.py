@@ -55,7 +55,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "tier": TIER_HIGHEST,
         "pattern": "batch",
         "supports_cdc": True,
-        "supports_streaming": False,
+        # F4: START_REPLICATION is the default (auto) with peek fallback; proven by
+        # tests/test_cdc_postgres_streaming_transport_live.py. DATAFLOW_CDC_PG_TRANSPORT=peek opts out.
+        "supports_streaming": True,
+        "cdc_transport_default": "auto",
+        "cdc_streaming_status": "default_with_peek_fallback",
+        "bulk_export_status": "implemented_pg_copy",
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
@@ -63,7 +68,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Query-based CDC requires a monotonic cursor column. Log-based CDC uses logical decoding with the test_decoding output plugin; requires wal_level=logical and REPLICATION privileges.",
+        "cdc_prerequisites": (
+            "Query-based CDC requires a monotonic cursor column. Log-based CDC uses "
+            "logical decoding (default peek→apply→ack; streaming START_REPLICATION is "
+            "opt-in via CDC_PG_TRANSPORT=streaming — Planned until lag curves proven). "
+            "Requires wal_level=logical and REPLICATION privileges."
+        ),
         "auth_notes": "Standard host/port/user/password. Use SSL in production.",
         "common_issues": ["The destination table must exist or 'create table' must be enabled.", "Integer overflow when target column is smaller than source values."],
         "recommended_batch_size": 1000,
@@ -120,12 +130,31 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Prefer LogMiner CDC when privileges allow; Flashback Query is the fallback. Query-based CDC requires a monotonic cursor column.",
+        "cdc_prerequisites": (
+            "Oracle LogMiner transaction buffering is enabled by default. Setting "
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION "
+            "and SELECT ON GV_$INSTANCE, and refuses on RAC because V$TRANSACTION "
+            "is instance-local. Any open transaction on any table or schema holds "
+            "the buffer-off SCN window at the oldest transaction until it ends; "
+            "the throttled hold WARNING is the only signal. CURRENT_SCN and "
+            "V$TRANSACTION are sampled in one statement, but the views are not "
+            "guaranteed to be read atomically, leaving a narrow residual; buffering "
+            "is the safe default. RAC behavior is not live-verified. Prefer LogMiner "
+            "CDC when privileges allow; Flashback Query is the fallback. Query-based "
+            "CDC requires a monotonic cursor column. Oracle LOB values are read by "
+            "primary key at capture time; final state converges, though between two "
+            "changes a row may briefly carry a LOB value newer than its other "
+            "columns. LOB CDC requires a primary key."
+        ),
         "common_issues": [
             "Table names may be case-sensitive. Use uppercase unless quoted.",
             "NUMBER with no precision maps to a wide decimal.",
             "Upsert prefers native MERGE with NULL-safe PK match (PTT/GTT stage); falls back to delete+insert. Still at-least-once.",
             "LogMiner needs supplemental logging.",
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION and SELECT ON GV_$INSTANCE; it refuses on RAC.",
+            "Any open transaction on any table or schema holds the buffer-off window until it ends; the throttled hold WARNING is the only signal.",
+            "The head and oldest transaction are sampled in one statement, but V$DATABASE and V$TRANSACTION are not guaranteed to be read atomically; a narrow residual remains. Buffering stays on by default.",
+            "RAC behavior is not live-verified.",
         ],
         "recommended_batch_size": 2000,
     },
@@ -180,6 +209,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": True,
         "supports_binary": True,
         "supports_unstructured": True,
+        # F3: source unload/COPY INTO stage is Planned — writer COPY INTO is separate.
+        "bulk_export_status": "planned",
         "cdc_prerequisites": "Query-based CDC only: the source table must have a monotonic cursor column. Snowpipe Streaming/log-based CDC is not implemented.",
         "common_issues": ["Large TIMESTAMP values can exceed Snowflake range.", "VARIANT is preferred for semi-structured JSON."],
         "recommended_batch_size": 10000,
@@ -198,6 +229,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": True,
         "supports_binary": True,
         "supports_unstructured": True,
+        # F3: Storage Read API bulk source export is Planned (fail-closed stub).
+        "bulk_export_status": "planned",
         "cdc_prerequisites": "Query-based CDC only: the source table must have a monotonic cursor column. BigQuery Storage Write CDC is not implemented.",
         "common_issues": ["Object tables are required for unstructured binary payloads.", "Partitioning can only be set at table creation."],
         "recommended_batch_size": 10000,
@@ -222,6 +255,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "JSON/ARRAY land as SUPER; binary as VARBYTE.",
             "Upsert prefers native MERGE with NULL-safe PK match; falls back to delete+insert. Still at-least-once (not exactly-once).",
             "DISTKEY/SORTKEY are operator-owned — Datawrap does not invent them.",
+            "Bulk loads use COPY FROM S3 when staging_bucket and iam_role are set "
+            "(TSV, gzip when the stage file is large; Parquet when "
+            "redshift_stage_format=parquet). Inserts below REDSHIFT_COPY_THRESHOLD "
+            "keep the PostgreSQL-wire path. Still at-least-once.",
         ],
         "recommended_batch_size": 5000,
     },
@@ -264,16 +301,24 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
-        "supports_merge": True,
+        # Document $set upsert / bulk_write — not SQL MERGE / Iceberg CoW MERGE.
+        "supports_merge": False,
+        # Application-level `_df_lsn` compare when the column is present — not a
+        # MongoDB server LSN API. CDC delivery remains at-least-once.
         "supports_lsn_guard": True,
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "cdc_prerequisites": "Query-based CDC requires a monotonic cursor field. Log-based CDC uses MongoDB Change Streams; requires a replica set or MongoDB Atlas cluster.",
+        "cdc_prerequisites": (
+            "Query-based CDC requires a monotonic cursor field. Log-based CDC "
+            "uses MongoDB Change Streams (at-least-once); requires a replica set "
+            "or MongoDB Atlas cluster. Exactly-once is not claimed."
+        ),
         "common_issues": [
             "Only the '_id' field is a hard primary key; other identifier fields may repeat.",
             "Decimal128 should be preserved for money; do not cast to float.",
             "ObjectId strings may be mapped as plain strings unless explicitly cast.",
+            "Insert without conflict columns is at-least-once and may duplicate on retry.",
         ],
         "recommended_batch_size": 2000,
     },
@@ -290,7 +335,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "common_issues": [
-            "The partition key must have a consistent type (S/N/B). Datawrap infers the key type from the source sample.",
+            "DynamoDB AttributeDefinitions cover table and index keys only; ordinary item attributes are schemaless and may be absent.",
+            "Every HASH/RANGE key and mapped GSI/LSI key must use its declared S/N/B scalar type and exact attribute name.",
             "DynamoDB items cannot exceed 400 KB including attribute names.",
         ],
         "recommended_batch_size": 25,
@@ -342,8 +388,17 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_unstructured": True,
         "common_issues": [
             "Use the region-specific endpoint and verify bucket permissions.",
-            "Large objects should be split into parts. S3 has no native UPDATE — "
-            "upsert sync modes are not supported (overwrite object key only).",
+            "Bodies at or above DATAFLOW_OBJECT_STORE_MULTIPART_THRESHOLD use "
+            "S3 multipart (abort on failure). Map+quarantine+serialize runs in "
+            "bounded bundles (DATAFLOW_OBJECT_STORE_MATERIALIZE_BATCH, default "
+            "1024); accepted mapped_rows are not retained. Source matrix / "
+            "STRUCT explode spills to disk above DATAFLOW_SOURCE_ROW_SPILL_MAX. "
+            "Engine records stay in RAM until the write returns. The export "
+            "spool rolls to disk above DATAFLOW_OBJECT_STORE_SPILL_MAX. "
+            "Parquet writes one RecordBatch per bundle. S3 has no native UPDATE "
+            "— upsert sync modes are not supported (overwrite object key only). "
+            "Still at-least-once.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -363,7 +418,13 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Use HMAC keys or service-account JSON for authentication.",
             "Bucket names are global and unique.",
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects compose from component uploads; small objects stay "
+            "on upload_from_string. Map+quarantine+serialize uses the same "
+            "bounded-bundle + source-row spool algorithm as S3 (accepted "
+            "mapped_rows not retained; STRUCT explode does not build a list). "
+            "Object overwrite only — no row-level "
+            "upsert/MERGE. Still at-least-once.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -381,8 +442,14 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "supports_unstructured": True,
         "common_issues": [
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects use stage_block + commit_block_list; small objects "
+            "stay on upload_blob. Map+quarantine+serialize uses the same "
+            "bounded-bundle + source-row spool algorithm as S3 (accepted "
+            "mapped_rows not retained; STRUCT explode does not build a list). "
+            "Object overwrite only — no row-level "
+            "upsert/MERGE. Still at-least-once.",
             "Use Azure Storage Account key or service principal.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -402,7 +469,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "MinIO is S3-compatible; use the MinIO endpoint and region.",
             "Bucket policies may differ from AWS S3.",
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects use the same S3 multipart path as AWS. "
+            "Object overwrite only — no row-level upsert/MERGE. Still at-least-once.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -423,6 +491,29 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "CSV has no type metadata; Datawrap infers types from sample values.",
             "Malformed quoting or embedded newlines can break parsing.",
+            "Different locale decimal separators may misclassify numbers.",
+        ],
+        "recommended_batch_size": 10000,
+    },
+    # TSV is tab-delimited CSV — identical capability profile, distinct driver
+    # key. Missing this row made F7 flag 'tsv' as a transfer-ready driver with
+    # no static capability entry (catalog count ≠ proven live).
+    "tsv": {
+        "transfer_ready": True,
+        "tier": TIER_HIGHEST,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "supports_unstructured": False,
+        "common_issues": [
+            "TSV has no type metadata; Datawrap infers types from sample values.",
+            "Embedded tabs or newlines inside unquoted fields can break parsing.",
             "Different locale decimal separators may misclassify numbers.",
         ],
         "recommended_batch_size": 10000,
@@ -488,6 +579,42 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": ["XML attributes and namespaces are flattened to a path notation."],
         "recommended_batch_size": 1000,
     },
+    "yaml": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "common_issues": [
+            "A YAML document must be a sequence of mappings; anchors and tags are resolved before typing.",
+            "Unquoted scalars (yes/no, 1_000, 1e3) follow YAML typing, not the source column type.",
+        ],
+        "recommended_batch_size": 1000,
+    },
+    "fixed_width": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": True,
+        "supports_binary": False,
+        "common_issues": [
+            "Column widths are never guessed: ingest needs a #layout: header, a .layout.json sidecar, or extra.fixed_width_layout.",
+            "Export needs a declared layout or CHAR(n)/VARCHAR(n) on every column; a value wider than its column is refused, not truncated.",
+        ],
+        "recommended_batch_size": 10000,
+    },
     "excel": {
         "transfer_ready": True,
         "tier": TIER_HIGH,
@@ -502,7 +629,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "common_issues": [
             "Upload .xlsx (Office Open XML). Datawrap streams sheets via openpyxl and writes typed rows to Postgres/Snowflake — Excel is not a warehouse native; conversion is automatic.",
-            "Legacy .xls (BIFF) is weakly supported — save as .xlsx for production loads.",
+            "BIFF .xls is read. A sheet holds at most 65,536 rows, and a formula cell is the cached value Excel stored; larger workbooks must be .xlsx.",
             "Excel stores dates as serial numbers; Datawrap normalizes them to ISO dates.",
         ],
         "recommended_batch_size": 5000,
@@ -651,6 +778,48 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": ["Custom object properties may vary by account."],
         "recommended_batch_size": 100,
     },
+    # Stripe resolves from TRANSFER_READY_CATALOG_IDS, so F7 requires a row here.
+    # Reader is cursor-paged (starting_after, max 100/page) and has no introspect;
+    # writer creates/updates with per-request Idempotency-Key, so upsert needs a
+    # conflict column 'id' and there is no destination-wide overwrite.
+    "stripe": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": False,
+        "supports_overwrite": False,
+        "supports_merge": False,
+        "requires_schema": False,
+        "pagination": "cursor",
+        "dest_certification_note": (
+            "The reverse-ETL writer exists in connectors/stripe.py, but the "
+            "destination role is not certified until a production SKU execute "
+            "plus destination COUNT on a named Stripe object."
+        ),
+        "capability_downgrades": [
+            {
+                "fields": ["supports_upsert", "supports_append"],
+                "reason": (
+                    "The reverse-ETL writer exists in connectors/stripe.py, but "
+                    "the destination role is not certified until a production SKU "
+                    "execute plus destination COUNT on a named Stripe object."
+                ),
+            }
+        ],
+        "rate_limit_notes": (
+            "Stripe list APIs cap at 100 objects per page and rate-limit per account; "
+            "starting_after is page walking, not an incremental cursor."
+        ),
+        "auth_notes": "Secret API key (sk_...). Restricted keys need write scope to load.",
+        "common_issues": [
+            "Upsert refuses rows without an 'id' conflict value — quarantined, not guessed.",
+            "No local emulator: live proof needs a hosted Stripe test-mode account.",
+        ],
+        "recommended_batch_size": 100,
+    },
     "zendesk": {
         "transfer_ready": False,
         "tier": TIER_HIGH,
@@ -695,7 +864,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "common_issues": ["Files are immutable; use a unique filename or append-only mode."],
+        "common_issues": [
+            "Files are immutable; use a unique filename or append-only mode.",
+            "JSON/CSV/TSV/JSONL/Parquet map+quarantine+serialize in bounded "
+            "bundles onto the same object-store spool (rolls to disk above "
+            "DATAFLOW_OBJECT_STORE_SPILL_MAX) and PUT in chunks. Accepted "
+            "mapped_rows are not retained; source rows spill above "
+            "DATAFLOW_SOURCE_ROW_SPILL_MAX. Temp file + "
+            "posix_rename when the server supports it — still at-least-once, "
+            "not exactly-once.",
+        ],
         "recommended_batch_size": 1000,
     },
     # ERP / strategic
@@ -781,21 +959,21 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
-        # Filesystem + catalog path today is Copy-on-Write rewrite (not MoR /
-        # deletion-vector). MoR is Planned — do not claim Iceberg V3 DV yet.
-        "write_strategy": "copy-on-write",
-        "supports_merge_on_read": False,
+        # Filesystem writes use v2 equality deletes; catalog writes use
+        # copy-on-write. Overwrite/replace remain copy-on-write.
+        "write_strategy": "filesystem-equality-delete, catalog-copy-on-write",
+        "supports_merge_on_read": True,
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [
             "Schema evolution is supported but should be declared explicitly.",
-            "Upserts/deletes rewrite data files (copy-on-write); merge-on-read / deletion vectors are Planned.",
+            "Filesystem upserts and deletes use Iceberg v2 equality-delete files; catalog writes use copy-on-write. Overwrite/replace stay copy-on-write.",
         ],
         "recommended_batch_size": 10000,
     },
     "delta": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_STRATEGIC,
         "pattern": "batch",
         "supports_cdc": False,
@@ -806,11 +984,14 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Delta schema enforcement can reject type changes; enable schema evolution if needed."],
+        "common_issues": [
+            "Delta Lake writer is Planned — no transfer driver in this build.",
+            "Delta schema enforcement can reject type changes; enable schema evolution if needed.",
+        ],
         "recommended_batch_size": 10000,
     },
     "hudi": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_STRATEGIC,
         "pattern": "batch",
         "supports_cdc": False,
@@ -821,7 +1002,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Hudi requires a record key and pre-combine field for upserts."],
+        "common_issues": [
+            "Apache Hudi writer is Planned — no transfer driver in this build.",
+            "Hudi requires a record key and pre-combine field for upserts.",
+        ],
         "recommended_batch_size": 10000,
     },
     "generic_sql": {
@@ -861,19 +1045,140 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": ["Custom connectors need a spec or SDK. Document pagination, auth, and rate limits."],
         "recommended_batch_size": 100,
     },
+    # Phase F7 — file line formats (TRANSFER_READY unique drivers)
+    "jsonl": {
+        "transfer_ready": True,
+        "tier": TIER_HIGHEST,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "supports_unstructured": True,
+        "common_issues": ["One JSON object per line; schema inferred from samples."],
+        "recommended_batch_size": 10000,
+    },
+    "ndjson": {
+        "transfer_ready": True,
+        "tier": TIER_HIGHEST,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "supports_unstructured": True,
+        "common_issues": ["Alias of JSON Lines; prefer jsonl catalog id when possible."],
+        "recommended_batch_size": 10000,
+    },
+    # Phase F7 — vector engines (TRANSFER_READY unique drivers)
+    "pgvector": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": True,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": True,
+        "requires_schema": True,
+        "supports_binary": True,
+        "common_issues": [
+            "Vector dimension must be declared — refuse inventing 1536.",
+            "Rides PostgreSQL driver; extension must be installed on the target.",
+            "CDC: at-least-once; deletes by document key; no LSN guard.",
+        ],
+        "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
+        "cdc_prerequisites": (
+            "At-least-once; deletes by document key; no LSN guard."
+        ),
+    },
+    "qdrant": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": True,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": True,
+        "common_issues": [
+            "Point id + vector required; payload schema is soft.",
+            "CDC: at-least-once; deletes by document key; no LSN guard.",
+        ],
+        "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
+        "cdc_prerequisites": (
+            "At-least-once; deletes by document key; no LSN guard."
+        ),
+    },
+    "weaviate": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": True,
+        "supports_binary": True,
+        "common_issues": ["Class schema must exist or be auto-created with explicit vectorizer config."],
+        "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
+    },
+    "pinecone": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": True,
+        "common_issues": ["Index dimension is fixed at create time — mismatch fails closed."],
+        "recommended_batch_size": 100,
+        "rate_limit_notes": "Respect Pinecone upsert QPS; batch under recommended_batch_size.",
+        "supports_lsn_guard": False,
+    },
+    "milvus": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": True,
+        "supports_binary": True,
+        "common_issues": ["Collection schema + index required before search-quality loads."],
+        "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
+    },
 }
 
 
 # Aliases used by the UI, connectors, and driver layer.
 CONNECTOR_ALIASES: dict[str, str] = {
-    "postgres": "postgresql",
-    "pg": "postgresql",
-    "mysql2": "mysql",
-    "mariadb": "mysql",
-    "mssql": "sqlserver",
-    "sql_server": "sqlserver",
     "ms_sql": "sqlserver",
-    "oracle_db": "oracle",
     "mongo": "mongodb",
     "documentdb": "mongodb",
     "document_db": "mongodb",
@@ -909,8 +1214,12 @@ CONNECTOR_ALIASES: dict[str, str] = {
 
 
 def _normalize_connector_id(key: str) -> str:
+    from src.transfer.engine_family import sql_duplex_family
+
     k = (key or "").lower().strip()
-    return CONNECTOR_ALIASES.get(k, k)
+    if k in CONNECTOR_ALIASES or k in CAPABILITY_REGISTRY:
+        return CONNECTOR_ALIASES.get(k, k)
+    return sql_duplex_family(k) or k
 
 
 def _align_registry_honesty() -> None:
@@ -987,12 +1296,42 @@ def get_connector_capability(key: str) -> dict[str, Any]:
             cap["supports_append"] = False
             cap["supports_overwrite"] = False
             cap["supports_merge"] = False
+        from services.connector_truth_audit import write_mode_downgrade_reason
+
+        write_flags = (
+            "supports_upsert",
+            "supports_append",
+            "supports_overwrite",
+            "supports_merge",
+        )
+        originally_true = [flag for flag in write_flags if cap.get(flag)]
+        if originally_true:
+            reason = write_mode_downgrade_reason(normalized, driver, caps)
+            if reason:
+                cap["capability_downgrades"] = [
+                    {"fields": originally_true, "reason": reason}
+                ]
+                for flag in write_flags:
+                    cap[flag] = False
         cap["driver_type"] = driver
         cap["driver_capabilities"] = caps
     except Exception:
         if normalized in _FICTION:
             cap["transfer_ready"] = False
     return cap
+
+
+def is_append_only_destination(key: str) -> bool:
+    """True when the destination can only add rows: no upsert, merge or overwrite.
+
+    Read from the same record the writers' honesty downgrades land on, so a
+    destination whose writer is absent (every write flag demoted to False) is
+    not mistaken for an append-only one.
+    """
+    cap = get_connector_capability(key)
+    return bool(cap.get("supports_append")) and not any(
+        cap.get(flag) for flag in ("supports_upsert", "supports_merge", "supports_overwrite")
+    )
 
 
 def list_connectors_by_tier() -> dict[str, list[str]]:
@@ -1016,6 +1355,107 @@ def is_schemaless(key: str) -> bool:
 
 def recommended_batch_size(key: str) -> int:
     return int(get_connector_capability(key).get("recommended_batch_size", 1000))
+
+
+# Fields that affect Migration Decision Kernel / Execution Plan choices.
+# Hash is stable across process restarts; marketing prose is excluded.
+_KERNEL_CAPABILITY_HASH_FIELDS: tuple[str, ...] = (
+    "normalized_key",
+    "driver_type",
+    "transfer_ready",
+    "tier",
+    "pattern",
+    "supports_cdc",
+    "supports_streaming",
+    "supports_upsert",
+    "supports_append",
+    "supports_overwrite",
+    "supports_merge",
+    "supports_lsn_guard",
+    "requires_schema",
+    "supports_binary",
+    "supports_unstructured",
+    "pagination",
+    "recommended_batch_size",
+    "write_strategy",
+)
+
+
+def capability_profile_hash(key: str) -> str:
+    """Deterministic SHA-256 of kernel-relevant capability fields (Phase F7)."""
+    import hashlib
+    import json
+
+    cap = get_connector_capability(key)
+    body = {f: cap.get(f) for f in _KERNEL_CAPABILITY_HASH_FIELDS}
+    # Include a compact, sorted view of driver_capabilities write/source flags.
+    caps = cap.get("driver_capabilities") or {}
+    if isinstance(caps, dict):
+        body["driver_flags"] = {
+            k: caps.get(k)
+            for k in sorted(
+                (
+                    "read",
+                    "write",
+                    "source_only",
+                    "dest_only",
+                    "preflight",
+                    "cdc",
+                    "certified",
+                )
+            )
+            if k in caps
+        }
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(raw).hexdigest()
+
+
+def export_live_capability_matrix() -> dict[str, Any]:
+    """Machine-readable capability matrix for all TRANSFER_READY unique drivers."""
+    from datetime import datetime, timezone
+
+    from src.transfer.connector_capabilities import (
+        TRANSFER_READY_CATALOG_IDS,
+        resolve_driver_type,
+    )
+
+    drivers = sorted({resolve_driver_type(cid) for cid in TRANSFER_READY_CATALOG_IDS})
+    engines: list[dict[str, Any]] = []
+    for driver in drivers:
+        cap = get_connector_capability(driver)
+        engines.append(
+            {
+                "engine_id": driver,
+                "in_static_registry": driver in CAPABILITY_REGISTRY
+                or _normalize_connector_id(driver) in CAPABILITY_REGISTRY,
+                "capability_profile_hash": capability_profile_hash(driver),
+                "transfer_ready": bool(cap.get("transfer_ready")),
+                "supports_cdc": bool(cap.get("supports_cdc")),
+                "supports_upsert": bool(cap.get("supports_upsert")),
+                "supports_merge": bool(cap.get("supports_merge")),
+                "requires_schema": bool(cap.get("requires_schema")),
+                "pagination": cap.get("pagination") or "none",
+                "recommended_batch_size": int(cap.get("recommended_batch_size") or 1000),
+                "tier": cap.get("tier"),
+            }
+        )
+    missing_static = [
+        e["engine_id"] for e in engines if not e["in_static_registry"]
+    ]
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "unique_driver_count": len(engines),
+        "catalog_transfer_ready_tile_count": len(TRANSFER_READY_CATALOG_IDS),
+        "missing_static_registry": missing_static,
+        "engines": engines,
+        "honesty_note": (
+            "unique_driver_count is the public live count — not catalog tile count. "
+            "transfer_ready is forced from connector_capabilities SSOT."
+        ),
+    }
 
 
 STRUCTURED_FILE_FORMATS: set[str] = {

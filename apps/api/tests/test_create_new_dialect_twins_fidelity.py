@@ -33,6 +33,9 @@ def test_mysql_ci_text_to_bare_pg_text_is_normalize():
     assert case_fold_polarity_invent(src, "TEXT") is False
     assert case_fold_polarity_invent(src, "VARCHAR") is False
     assert is_precision_collapse_coercion(src, "TEXT") is False
+    # Uncollated → MySQL platform CI is the twin normalize (Mongo → MySQL TEXT).
+    assert case_fold_polarity_invent("VARCHAR", src) is False
+    assert is_precision_collapse_coercion("VARCHAR", src, dest_db="mysql") is False
     # CITEXT polarity drop / invent still blocks.
     assert case_fold_polarity_invent("CITEXT", "TEXT") is True
     assert case_fold_polarity_invent("TEXT", "CITEXT") is True

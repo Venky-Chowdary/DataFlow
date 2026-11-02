@@ -48,11 +48,13 @@ def test_transfer_job_created_with_workspace_id(client, tmp_path):
 
     # Job list scoped to workspace includes the job.
     response = client.get("/api/v1/connectors/jobs", headers={"X-Workspace-Id": ws.id})
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert job_id in {j["_id"] for j in response.json()["jobs"]}
 
-    # Job list without workspace does not include the job.
-    response = client.get("/api/v1/connectors/jobs")
+    # Another workspace's scope does not include the job. (No header is the
+    # caller's whole scope — every job for the auth-off single operator, D154.)
+    other = create_workspace(name="Other", created_by="anonymous")
+    response = client.get("/api/v1/connectors/jobs", headers={"X-Workspace-Id": other.id})
     assert response.status_code == 200
     assert job_id not in {j["_id"] for j in response.json()["jobs"]}
 

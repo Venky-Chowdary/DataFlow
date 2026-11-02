@@ -74,7 +74,8 @@ def test_upsert_with_pk_recommends_upsert():
     )
     assert tr.success
     mode = (tr.output or {}).get("recommended_mode") or ""
-    assert "upsert" in mode.lower()
+    assert mode == "incremental_deduped"
+    assert "upsert" in str((tr.output or {}).get("label") or "").lower()
 
 
 def test_quarantine_uses_distinct_label():

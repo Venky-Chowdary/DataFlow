@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Callable, Iterable
 
 
 # Phase floors/caps — writing uses row ratio inside the write band only.
@@ -58,6 +58,127 @@ def compute_transfer_progress_pct(
     return None
 
 
+def reconcile_display_pct(rows_hashed: int, total: int) -> float:
+    """Paint 98.00–98.99 while Gate-8 checksums. Never 99 or 100.
+
+    ``compute_transfer_progress_pct(phase="reconcile")`` stays 99 for callers
+    that only know the phase. This value moves with hashed rows so a minute-long
+    scan is not a frozen 99.
+    """
+    try:
+        hashed = int(rows_hashed or 0)
+        denom = int(total or 0)
+    except (TypeError, ValueError):
+        return 98.0
+    if hashed <= 0 or denom <= 0:
+        return 98.0
+    ratio = min(1.0, hashed / denom)
+    return round(min(98.99, 98.0 + ratio * 0.99), 2)
+
+
+def reconcile_scan_pct(rows_hashed: int, total: int) -> int:
+    """0–99 checksum completion. 0 until a row has been hashed. Never 100."""
+    try:
+        hashed = int(rows_hashed or 0)
+        denom = int(total or 0)
+    except (TypeError, ValueError):
+        return 0
+    if hashed <= 0 or denom <= 0:
+        return 0
+    return min(99, int(hashed * 100 / denom))
+
+
+def row_count_label(total_rows: int | None) -> str:
+    """Operator-facing row count, or ``"an unknown number of"`` when unmeasured.
+
+    Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a search
+    index — report ``None`` rather than inventing a total. Progress messages
+    formatted that with ``{total_rows:,}``, which raises on ``None``, so an
+    honest "we do not know yet" killed the transfer before its first batch.
+    """
+    if total_rows is None:
+        return "an unknown number of"
+    return f"{int(total_rows):,}"
+
+
+def selected_contract_names(stream_contracts: list | None) -> list[str]:
+    """Selected stream names, in contract order, with blanks dropped."""
+    names: list[str] = []
+    for raw in stream_contracts or []:
+        if not isinstance(raw, dict) or raw.get("selected", True) is False:
+            continue
+        name = str(raw.get("name") or raw.get("stream") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def opening_analysis_message(stream_contracts: list | None = None) -> str:
+    """The pre-write peek is the restored endpoint when several tables are selected."""
+    if len(selected_contract_names(stream_contracts)) >= 2:
+        return "Analyzing the restored endpoint…"
+    return "Analyzing source table…"
+
+
+def opening_batch_message(
+    total_rows: int | None,
+    stream_contracts: list | None = None,
+    *,
+    delta: bool = False,
+) -> str:
+    """Row count on the opening write line.
+
+    For one table that count is the transfer. For several tables the peek is
+    the restored endpoint, and each table is written on its own afterwards.
+    A bounded incremental run does not stream the whole table — quoting the
+    full-table count on a 6-row delta was a lie (M4); the delta size is only
+    known after the bound read, so the opening line says what it is without
+    a number.
+    """
+    if delta:
+        return "Streaming new or updated rows in batches…"
+    label = row_count_label(total_rows)
+    count = len(selected_contract_names(stream_contracts))
+    if count >= 2:
+        return (
+            f"Streaming {label} rows on the restored endpoint, "
+            f"then each of {count} tables…"
+        )
+    return f"Streaming {label} rows in batches…"
+
+
+def batch_write_message(
+    chunk: int,
+    chunks: int,
+    rows: int,
+    *,
+    is_cdc: bool = False,
+    checkpoint: dict | None = None,
+    stream_contracts: list | None = None,
+) -> str:
+    """Name the table on a multi-table batch so identical counts stay distinct.
+
+    Two tables of 2 rows otherwise emit the same sentence. The event log keeps
+    a line only when the message changes, so the second table disappeared.
+    """
+    stream = ""
+    if isinstance(checkpoint, dict):
+        stream = str(checkpoint.get("cdc_stream") or "").strip()
+    multi = len(selected_contract_names(stream_contracts)) >= 2 and bool(stream)
+    if is_cdc:
+        base = f"CDC applied {int(rows):,} change(s)"
+    elif int(chunk) > int(chunks):
+        # D102: the pre-loop chunk estimate bottoms out at 1 when the source
+        # cannot report a row count — printing "batch 7/1" claims a total we
+        # never knew. Name the batch without inventing a denominator.
+        base = f"Writing batch {int(chunk)} ({int(rows):,} rows)"
+    else:
+        base = f"Writing batch {int(chunk)}/{int(chunks)} ({int(rows):,} rows)"
+    if multi:
+        return f"{base} on {stream}…"
+    return f"{base}…"
+
+
 def schema_policy_implies_backfill(schema_policy: str | None) -> bool:
     """propagate_* schema policies require additive destination columns."""
     return (schema_policy or "").strip().lower() in {
@@ -66,10 +187,38 @@ def schema_policy_implies_backfill(schema_policy: str | None) -> bool:
     }
 
 
-def mappings_require_new_columns(mappings: list | None) -> bool:
-    """True when any mapping intentionally proposes ADD COLUMN / create-new DDL."""
+def mappings_require_dest_widen(mappings: list | None) -> bool:
+    """True when any mapping carries an approved destination widen (D107).
+
+    A ``dest_widen`` stamp is placed by schema-drift approval (propagate
+    policy or an acknowledged review). The writer's widen path must run so
+    the ALTER lands before binding — it is not an ADD COLUMN signal.
+    """
+    for m in mappings or []:
+        if isinstance(m, dict) and m.get("dest_widen"):
+            return True
+    return False
+
+
+def mappings_require_new_columns(
+    mappings: list | None, *, dest_columns: Iterable[str] | None = None
+) -> bool:
+    """True when any mapping intentionally proposes ADD COLUMN / create-new DDL.
+
+    ``dest_columns`` are the live columns of a destination that exists. A
+    ``create_new`` stamp is a statement about the run that wrote it: run 1
+    stamped every column because the table did not exist. Replayed by a
+    schedule against the table run 1 created, those stamps name columns that
+    are already there and must not arm ADD COLUMN for the run — otherwise a
+    later run silently adds columns under manual review. Only a mapping whose
+    target the live table lacks still proposes one. Without ``dest_columns``
+    (existence unknown) every stamp counts, as before.
+    """
+    live = None if dest_columns is None else {str(c).lower() for c in dest_columns}
     for m in mappings or []:
         if not isinstance(m, dict):
+            continue
+        if live is not None and str(m.get("target") or "").lower() in live:
             continue
         if m.get("create_new"):
             return True
@@ -87,17 +236,33 @@ def effective_backfill_new_fields(
     backfill_new_fields: bool = False,
     schema_policy: str | None = None,
     mappings: list | None = None,
+    dest_columns: Iterable[str] | None = None,
 ) -> bool:
     """Honor explicit backfill toggle, propagate schema policies, or create_new maps.
 
     create_compatible_new mappings (e.g. Mongo ObjectId → new VARCHAR beside DECIMAL id)
     must ADD COLUMN on an existing destination — otherwise Snowflake fails with
     invalid identifier on names like id_text.
+
+    ``dest_columns`` is the live column list of an existing destination; see
+    :func:`mappings_require_new_columns`. An acknowledged drift review does not
+    appear here: it approves the evolution it disclosed by stamping those
+    mappings (``plan_destination_evolution``), not by switching on the writer's
+    whole backfill lane.
     """
+    policy = (schema_policy or "").strip().lower()
+    # pause_on_change and type_locked forbid silent ADD COLUMN. Implying
+    # backfill from a create-new mapping made every run fail g10 with
+    # "Schema change policy incomplete" before any drift was looked at
+    # (QA R2-080). An explicit toggle still flows through so the gate can
+    # name that conflict.
+    if policy in {"pause_on_change", "type_locked"}:
+        return bool(backfill_new_fields)
     return (
         bool(backfill_new_fields)
         or schema_policy_implies_backfill(schema_policy)
-        or mappings_require_new_columns(mappings)
+        or mappings_require_new_columns(mappings, dest_columns=dest_columns)
+        or mappings_require_dest_widen(mappings)
     )
 
 

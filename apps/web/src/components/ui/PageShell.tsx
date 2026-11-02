@@ -2,7 +2,7 @@
  * Page chrome — the visible page name lives in the topbar breadcrumb
  * (`Workspace > {page}`), so this shell intentionally does NOT render a
  * duplicated in-content title. The reclaimed vertical space is handed back
- * to each page for high-signal content (KPIs, status, context, actions).
+ * to each page for the primary work surface (toolbar, list, actions).
  *
  * An `sr-only` <h1> is always emitted so the document keeps one accessible,
  * SEO-friendly page heading. When a page supplies `actions`, they render in a
@@ -21,7 +21,7 @@ interface PageShellProps {
   className?: string;
   /** @deprecated All pages are full-width; kept for API compatibility */
   wide?: boolean;
-  /** Fit content in one viewport — scroll only inside .df2-scroll-pane regions */
+  /** Fit content in one viewport — scroll only inside the page body, not the app chrome */
   fit?: boolean;
   /**
    * When false, no chrome at all (Transfer Studio / Pilot immersive) — only the

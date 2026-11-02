@@ -370,12 +370,12 @@ export function ConnectionHub({
         >
           <defs>
             <linearGradient id="hub-line-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#0f766e" />
-              <stop offset="100%" stopColor="#6366f1" />
+              <stop offset="0%" stopColor="var(--df-logo-tile)" />
+              <stop offset="100%" stopColor="var(--df-logo-arrow)" />
             </linearGradient>
             <linearGradient id="hub-line-grad-live" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#14b8a6" />
-              <stop offset="100%" stopColor="#818cf8" />
+              <stop offset="0%" stopColor="var(--df-logo-ink)" />
+              <stop offset="100%" stopColor="var(--df-logo-arrow)" />
             </linearGradient>
           </defs>
 

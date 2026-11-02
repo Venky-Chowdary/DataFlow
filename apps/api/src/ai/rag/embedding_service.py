@@ -15,10 +15,14 @@ from services.brand_env import getenv_brand
 import re
 from typing import Optional
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # slim API hosts — hashed TF-IDF still boots
+    np = None  # type: ignore[assignment]
 
 _logger = logging.getLogger(__name__)
 _embedding_service: Optional["DataTransferEmbeddingService"] = None
+Vec = list[float]
 
 
 class DataTransferEmbeddingService:
@@ -71,25 +75,30 @@ class DataTransferEmbeddingService:
             return self._model.get_sentence_embedding_dimension()
         return self.EMBEDDING_DIM
 
-    def embed(self, texts: list[str]) -> np.ndarray:
+    def embed(self, texts: list[str]):
         """Embed a list of texts into vectors."""
         if not texts:
-            return np.array([])
+            return [] if np is None else np.array([])
 
         if self._backend == "sentence_transformers":
             return self._model.encode(texts, normalize_embeddings=True)
 
-        return np.array([self._tfidf_embed(t) for t in texts])
+        rows = [self._tfidf_embed(t) for t in texts]
+        return rows if np is None else np.array(rows)
 
-    def embed_single(self, text: str) -> np.ndarray:
+    def embed_single(self, text: str):
         """Embed a single text."""
         return self.embed([text])[0]
 
-    def similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+    def similarity(self, vec1, vec2) -> float:
         """Cosine similarity between two vectors."""
-        dot = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
+        a = list(vec1)
+        b = list(vec2)
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm1 = math.sqrt(sum(x * x for x in a))
+        norm2 = math.sqrt(sum(y * y for y in b))
         if norm1 == 0 or norm2 == 0:
             return 0.0
         return float(dot / (norm1 * norm2))
@@ -99,10 +108,10 @@ class DataTransferEmbeddingService:
         tokens = re.findall(r"[a-z0-9]+", text)
         return tokens
 
-    def _tfidf_embed(self, text: str) -> np.ndarray:
-        """Fallback TF-IDF + hash embedding."""
+    def _tfidf_embed(self, text: str) -> Vec:
+        """Fallback TF-IDF + hash embedding (no numpy required)."""
         tokens = self._tokenize(text)
-        vec = np.zeros(self.EMBEDDING_DIM)
+        vec = [0.0] * self.EMBEDDING_DIM
 
         for token in tokens:
             h = int(hashlib.md5(token.encode(), usedforsecurity=False).hexdigest(), 16)
@@ -119,9 +128,9 @@ class DataTransferEmbeddingService:
                 idx = h % self.EMBEDDING_DIM
                 vec[idx] += 0.5
 
-        norm = np.linalg.norm(vec)
+        norm = math.sqrt(sum(x * x for x in vec))
         if norm > 0:
-            vec = vec / norm
+            vec = [x / norm for x in vec]
         return vec
 
 

@@ -31,8 +31,8 @@ def test_missing_sql_table_sets_table_exists_false_and_auto_create():
         "src.transfer.endpoint_intelligence.resolve_connector_config",
         return_value={"type": "snowflake", "database": "DATAFLOW", "schema": "PUBLIC"},
     ), patch(
-        "src.transfer.endpoint_intelligence._introspect_table_schema",
-        return_value={},
+        "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+        return_value=({}, {}, {}),
     ):
         _attach_db_sample(out, endpoint)
 
@@ -67,8 +67,8 @@ def test_listed_mysql_table_not_marked_missing_when_columns_empty():
         "src.transfer.endpoint_intelligence.resolve_connector_config",
         return_value={"type": "mysql", "database": "railway", "host": "h", "port": 3306},
     ), patch(
-        "src.transfer.endpoint_intelligence._introspect_table_schema",
-        return_value={},
+        "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+        return_value=({}, {}, {}),
     ):
         _attach_db_sample(out, endpoint)
 
@@ -283,8 +283,8 @@ def test_missing_sql_table_source_purpose_does_not_promise_create():
         "src.transfer.endpoint_intelligence.resolve_connector_config",
         return_value={"type": "snowflake", "database": "DATAFLOW", "schema": "PUBLIC"},
     ), patch(
-        "src.transfer.endpoint_intelligence._introspect_table_schema",
-        return_value={},
+        "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+        return_value=({}, {}, {}),
     ):
         _attach_db_sample(out, endpoint)
 

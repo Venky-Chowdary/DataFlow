@@ -5,13 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.transform_engine import CANONICAL_BOOLEAN_TOKENS, apply_transform, decimal_wire_value
+from services.value_serializer import is_null_evidence
+
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
-DATE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}/\d{2}/\d{2})(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
-BOOL_VALUES = {"true", "false", "yes", "no", "y", "n", "1", "0", "t", "f"}
+# Write-path tokens only — informal yes/on must not score as boolean dest.
+BOOL_VALUES = set(CANONICAL_BOOLEAN_TOKENS)
 
 # Create-new identity is "ready to CREATE", not proven against an existing dest.
 IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
@@ -38,22 +41,35 @@ CONFIDENCE_CLASS_LABELS: dict[str, str] = {
     "weak_or_conflicted": "Weak or conflicted evidence",
 }
 
+# Pairs are in the *logical* vocabulary ``_logical_type`` returns
+# (``normalize_logical_type``): BIGINT/SMALLINT collapse to ``integer``,
+# DOUBLE/REAL to ``float``, NUMBER to ``decimal``, and TIMESTAMP/DATETIME to
+# ``datetime``. Physical spellings here are unreachable — ``("date",
+# "timestamp")`` never matched, so every DATE → TIMESTAMP widening (the shape
+# of a re-run against a destination DataFlow itself created) was classed
+# "weak or conflicted" and held for review.
 _SAFE_PROMOTIONS = frozenset({
-    ("integer", "bigint"),
     ("integer", "decimal"),
     ("integer", "float"),
-    ("integer", "double"),
-    ("integer", "number"),
-    ("float", "double"),
-    ("float", "decimal"),
-    ("float", "number"),
-    ("date", "timestamp"),
+    # float→decimal is IEEE→fixed-point invent — not a safe promotion (lossy).
+    ("date", "datetime"),
     ("boolean", "integer"),
     ("string", "text"),
     ("text", "string"),
 })
 
+_TEXT_TARGET_LOGICALS = frozenset({"string", "text", "varchar"})
+
 _IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "cast", "auto", "passthrough"})
+
+# Typed parse guards quarantine unparseable cells; within one family they do not
+# change a parseable value.
+_PARSE_GUARD_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"decimal", "numeric", "number", "integer", "int", "bigint", "float", "double"}),
+    frozenset({"date", "datetime", "timestamp", "time"}),
+    frozenset({"json", "array", "struct", "map"}),
+    frozenset({"string", "text", "varchar"}),
+)
 
 
 def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str) -> bool:
@@ -71,7 +87,19 @@ def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str
     xf = (transform or "").strip().lower()
     if xf in _IDENTITY_TRANSFORMS:
         return True
-    return bool(src_logical) and xf == src_logical == tgt_logical
+    if bool(src_logical) and xf == src_logical == tgt_logical:
+        return True
+    # The guard is also a passthrough when it names the *family* both sides
+    # share: DOUBLE→DOUBLE arrives labelled ``decimal`` because the numeric
+    # parse guard is family-wide, and reading that as a custom transform
+    # demoted identical-schema columns to semantic_inference (0.78) — below the
+    # G4 floor, on a column whose fidelity verdict is ``preserve``.
+    for family in _PARSE_GUARD_FAMILIES:
+        if xf in family and src_logical in family and tgt_logical in family:
+            return True
+    return False
+
+
 _STRUCTURAL_LOGICALS = frozenset({"json", "array", "struct", "map"})
 
 _TEMPORAL_NAME_TERMS = frozenset({"date", "time", "dt", "timestamp", "created", "updated"})
@@ -96,14 +124,22 @@ _STRING_TYPE_TOKENS = (
 )
 
 
-def _non_empty(samples: list[str]) -> list[str]:
-    return [s.strip() for s in samples if s is not None and str(s).strip()]
+def _non_empty(samples: list[Any]) -> list[str]:
+    """Present samples only. Reader-wired SQL NULL is not a VARCHAR token."""
+    out: list[str] = []
+    for raw in samples:
+        if is_null_evidence(raw):
+            continue
+        text = raw.strip() if isinstance(raw, str) else str(raw).strip()
+        if text and not is_null_evidence(text):
+            out.append(text)
+    return out
 
 
-def _null_rate(samples: list[str]) -> float:
+def _null_rate(samples: list[Any]) -> float:
     if not samples:
         return 0.0
-    empty = sum(1 for s in samples if s is None or str(s).strip() == "")
+    empty = sum(1 for raw in samples if is_null_evidence(raw))
     return empty / len(samples)
 
 
@@ -143,9 +179,21 @@ def _target_is_temporal(target_name: str, target_type: str) -> bool:
     return _contains_term(target_name, _TEMPORAL_NAME_TERMS)
 
 
+def _sample_binds_temporal(value: str) -> bool:
+    """True when the write path can bind this cell as date or datetime."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    parsed, err = apply_transform(text, "date")
+    if parsed is not None and not err:
+        return True
+    parsed, err = apply_transform(text, "datetime")
+    return parsed is not None and not err
+
+
 def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
     """Infer column profile from sample values for mapping quality scoring."""
-    vals = _non_empty([str(x) for x in samples[:24]])
+    vals = _non_empty(samples[:24])
     profile: dict[str, Any] = {
         "name": name,
         "sample_count": len(samples),
@@ -166,15 +214,14 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         email_ratio = _pattern_rate(vals, EMAIL_RE)
         phone_ratio = _pattern_rate(vals, PHONE_RE)
         uuid_ratio = _pattern_rate(vals, UUID_RE)
-        date_ratio = _pattern_rate(vals, DATE_RE)
+        date_hits = sum(1 for v in vals if _sample_binds_temporal(v))
+        date_ratio = date_hits / len(vals)
         bool_hits = sum(1 for v in vals if v.lower() in BOOL_VALUES)
+
         numeric = 0
         for v in vals:
-            try:
-                float(v.replace(",", ""))
+            if decimal_wire_value(v) is not None:
                 numeric += 1
-            except ValueError:
-                pass
 
         numeric_ratio = numeric / len(vals)
         bool_ratio = bool_hits / len(vals)
@@ -182,17 +229,121 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         profile["semantic_pattern_score"] = round(best_ratio, 3)
 
         profile["likely_identifier"] = profile["unique_ratio"] >= 0.95 or uuid_ratio >= 0.5
-        profile["likely_email"] = email_ratio >= 0.5 or _contains_term(name, {"email", "mail"})
-        profile["likely_phone"] = phone_ratio >= 0.5 or _contains_term(name, {"phone", "mobile", "tel"})
-        profile["likely_uuid"] = uuid_ratio >= 0.5 or _contains_term(name, {"uuid", "guid", "identifier"})
-        profile["likely_numeric"] = numeric_ratio >= 0.75 or _contains_term(name, {"amount", "qty", "total", "balance", "price"})
-        profile["likely_date"] = date_ratio >= 0.5 or _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
+        # Name may disambiguate only when samples already match. A column named
+        # email/phone/uuid whose values are plain text must not invent a type.
+        profile["likely_email"] = email_ratio >= 0.75 or (
+            email_ratio >= 0.5 and _contains_term(name, {"email", "mail"})
+        )
+        profile["likely_phone"] = phone_ratio >= 0.75 or (
+            phone_ratio >= 0.5 and _contains_term(name, {"phone", "mobile", "tel"})
+        )
+        profile["likely_uuid"] = uuid_ratio >= 0.75 or (
+            uuid_ratio >= 0.5 and _contains_term(name, {"uuid", "guid"})
+        )
+        # Name may disambiguate only when samples already bind. Auto-ambiguous
+        # 1,234 must not score as numeric — the write path refuses them.
+        profile["likely_numeric"] = numeric_ratio >= 0.75 or (
+            numeric_ratio >= 0.5
+            and _contains_term(name, {"amount", "qty", "total", "balance", "price"})
+        )
+        # Name may disambiguate only when samples already bind. Auto-ambiguous
+        # 01/02/2024 must not score as date-like — the write path refuses them.
+        profile["likely_date"] = date_ratio >= 0.7 or (
+            date_ratio >= 0.5
+            and _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
+        )
         # Name alone is not enough for "status" — that is usually a string enum.
         profile["likely_boolean"] = bool_ratio >= 0.7 or (
             bool_ratio >= 0.5 and _contains_term(name, {"flag", "is_", "has_", "active", "enabled", "verified"})
         )
 
+        # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
+        if numeric_ratio >= 0.5 or profile["likely_numeric"]:
+            try:
+                from services.decimal_observe import observe_source_numeric_samples
+
+                obs = observe_source_numeric_samples(vals)
+                if obs.get("kind") not in {None, "empty"}:
+                    profile["observed_precision"] = obs.get("precision")
+                    profile["observed_scale"] = obs.get("scale")
+                    profile["numeric_kind"] = obs.get("kind")
+                    profile["suggested_carrier"] = obs.get("carrier")
+                    profile["ieee_signals"] = obs.get("ieee_signals") or []
+            except Exception:
+                pass
+            nums = []
+            for v in vals:
+                parsed = decimal_wire_value(v)
+                if parsed is not None:
+                    nums.append(parsed)
+            if nums:
+                profile["min"] = min(nums)
+                profile["max"] = max(nums)
+
     return profile
+
+
+def merge_column_profile(
+    base: dict[str, Any],
+    *,
+    schema_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge analyzer profile with data_profiler statistics for Map strip SSOT."""
+    out = dict(base or {})
+    src = schema_row or {}
+    schema_rate = src.get("null_rate")
+    if schema_rate is not None:
+        # A stripped sample list analyzes as 0.0 and must not erase a rate
+        # counted while the SQL NULLs were still in the sample.
+        try:
+            analyzed = float(out.get("null_rate") or 0)
+            declared = float(schema_rate)
+        except (TypeError, ValueError):
+            out["null_rate"] = schema_rate
+        else:
+            if declared == 0.0 and analyzed > 0:
+                out["null_rate"] = round(analyzed, 3)
+            else:
+                out["null_rate"] = schema_rate
+    if src.get("distinct_ratio") is not None:
+        out["unique_ratio"] = src.get("distinct_ratio")
+    stats = src.get("statistics") if isinstance(src.get("statistics"), dict) else {}
+    for key in (
+        "min",
+        "max",
+        "mean",
+        "observed_precision",
+        "observed_scale",
+        "numeric_kind",
+        "suggested_carrier",
+        "ieee_signals",
+    ):
+        if stats.get(key) is not None and out.get(key) is None:
+            out[key] = stats.get(key)
+    return out
+
+
+def column_profile_for_map(profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Compact column_profile stamped onto mappings for Map / Validate."""
+    p = profile or {}
+    keys = (
+        "null_rate",
+        "unique_ratio",
+        "min",
+        "max",
+        "observed_precision",
+        "observed_scale",
+        "numeric_kind",
+        "suggested_carrier",
+        "ieee_signals",
+        "likely_identifier",
+        "likely_email",
+        "likely_uuid",
+        "likely_date",
+        "likely_boolean",
+        "semantic_pattern_score",
+    )
+    return {k: p[k] for k in keys if k in p and p[k] is not None}
 
 
 def _logical_type(type_str: str) -> str:
@@ -207,16 +358,111 @@ def _logical_type(type_str: str) -> str:
         if any(x in t for x in ("JSON", "JSONB", "VARIANT", "ARRAY")):
             return "json"
         if any(x in t for x in ("DATE", "TIME", "TIMESTAMP")):
-            return "timestamp" if "TIME" in t else "date"
+            # Same vocabulary as ``normalize_logical_type`` above.
+            return "datetime" if "TIME" in t else "date"
         if "BOOL" in t:
             return "boolean"
         return "string"
+
+
+def _is_dialect_sanctioned_carrier(
+    source_type: str, target_type: str, dest_db: str
+) -> bool:
+    """True when the destination column is exactly the carrier our DDL would create.
+
+    A cross-family pair is normally weak evidence, but ``DECIMAL(12,2) → TEXT``
+    on SQLite is the exact-digit carrier :func:`materialize_dest_ddl` itself
+    picks — re-running a migration into a table DataFlow created must not score
+    its own DDL as an incompatible-type conflict. A carrier never excuses a
+    lossy source-to-target conversion.
+    """
+    if not dest_db or not source_type or not target_type:
+        return False
+    from services.dest_schema_authority import destination_schema_is_sampled
+    from services.type_system import is_lossy_coercion, materialize_dest_ddl
+
+    try:
+        if is_lossy_coercion(source_type, target_type, dest_db=dest_db):
+            return False
+        if destination_schema_is_sampled(dest_db):
+            # No DDL here: the write's carrier is the destination type map's
+            # (Redis stores DECIMAL as exact JSON text); the SQL materializer
+            # only echoes the source type back.
+            from services.decision_kernel import InventContext, invent_dest_type
+
+            expected = str(
+                invent_dest_type(source_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
+                or ""
+            ).strip()
+        else:
+            expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
+    except Exception:
+        return False
+    if not expected:
+        return False
+    return _logical_type(expected) == _logical_type(target_type)
+
+
+#: Engines whose existing-table column types are catalog DDL, not a profile.
+_DECLARED_COLUMN_ENGINES = frozenset({
+    "postgresql", "mysql", "mariadb", "sqlserver", "oracle", "sqlite",
+    "snowflake", "bigquery", "redshift", "duckdb",
+})
+
+
+def _is_lossless_text_or_numeric_widening(
+    source_type: str, target_type: str, dest_db: str
+) -> bool:
+    """True for a file/typed value landing on a text or wider numeric column.
+
+    A CSV digit column profiled INTEGER onto an existing TEXT column (zip,
+    code, sku), or BOOLEAN onto a numeric one, is the type pair the fidelity
+    SSOT already grades ``preserve``. Scoring it "weak or conflicted" (0.55)
+    held every exact-name column of such a table for review, so a fresh load
+    into an existing table was refused while a rerun of the stored mapping
+    passed (D159). The lossy checks still decide: nothing lossy is promoted.
+    """
+    if not source_type or not target_type:
+        return False
+    from services.type_system import _normalize_dest_db, is_lossy_coercion
+
+    if _logical_type(target_type) not in {"string", "text", "decimal", "float"}:
+        return False
+    if _normalize_dest_db(dest_db or "") not in _DECLARED_COLUMN_ENGINES:
+        # A document / keyspace sink reports a placeholder ``string`` per
+        # column; that is no declared carrier to be confident about.
+        return False
+    try:
+        return not is_lossy_coercion(
+            source_type, target_type, dest_db=dest_db, dest_table_exists=True
+        )
+    except Exception:
+        return False
+
+
+def _json_text_into_json_column(src_logical: str, tgt_logical: str, samples: list[str]) -> bool:
+    """Text whose every sampled value parses as JSON, onto a JSON/JSONB column.
+
+    That is the document load itself (``payload`` text onto an existing
+    JSONB), not a cross-family guess; text that does not parse stays weak.
+    """
+    if src_logical not in {"string", "text"} or tgt_logical != "json" or not samples:
+        return False
+    import json
+
+    try:
+        for raw in samples:
+            json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def classify_mapping_confidence(
     mapping: dict,
     *,
     source_profile: dict[str, Any] | None = None,
+    destination_db_type: str = "",
 ) -> dict[str, Any]:
     """Return evidence class + calibrated axes (not a single opaque %).
 
@@ -238,14 +484,50 @@ def classify_mapping_confidence(
         str(mapping.get("target_type") or mapping.get("dest_type") or mapping.get("source_type") or "")
     )
     transform = str(mapping.get("transform") or "").strip().lower()
-    has_custom_xf = not _is_passthrough_transform(transform, src_logical, tgt_logical)
+    sanctioned_carrier = _is_dialect_sanctioned_carrier(
+        str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+        str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+        destination_db_type,
+    )
+    # The cast onto the carrier DataFlow's own DDL creates (SQLite BOOLEAN →
+    # INTEGER) is the create-new write path, not an operator's custom
+    # transform. Grading it "custom · sparse" (0.70) blocked run 2 into the
+    # table run 1 created at 0.95 (D78).
+    has_custom_xf = not sanctioned_carrier and not _is_passthrough_transform(
+        transform, src_logical, tgt_logical
+    )
     samples = [str(x) for x in (profile.get("samples") or []) if str(x).strip()]
     if not samples and mapping.get("samples"):
         samples = [str(x) for x in mapping["samples"] if str(x).strip()]
     sparse = len(samples) < 3
-    name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
-    type_same = src_logical == tgt_logical
-    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS
+    # A table DataFlow created holds the *sanitised* names (``First Name`` ->
+    # ``First_Name``, ``Café`` -> ``Caf_``). Judging those against the original
+    # spelling by underscores alone demoted every such rerun below the
+    # confidence floor (D55); the sanitiser's own mapping is the identity.
+    from connectors.sql_identifiers import sanitized_spellings
+
+    name_exact = (
+        src_l == tgt_l
+        or src_l.replace("_", "") == tgt_l.replace("_", "")
+        or tgt_l in sanitized_spellings(src)
+    )
+    # VARCHAR onto an unbounded TEXT column is the same text carrier, not a
+    # promotion: exact name + compatible type is the exact band (D159).
+    type_same = src_logical == tgt_logical or (src_logical, tgt_logical) == ("string", "text")
+    safe_promo = (
+        (src_logical, tgt_logical) in _SAFE_PROMOTIONS
+        or sanctioned_carrier
+        or _json_text_into_json_column(src_logical, tgt_logical, samples)
+        or (
+            not is_identity
+            and not type_same
+            and _is_lossless_text_or_numeric_widening(
+                str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+                str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+                destination_db_type,
+            )
+        )
+    )
     structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
     pattern = float(profile.get("semantic_pattern_score") or 0.0)
     null_rate = float(profile.get("null_rate") or 0.0)
@@ -271,7 +553,12 @@ def classify_mapping_confidence(
         cls = "safe_type_promotion" if safe_promo else "semantic_inference"
 
     # Wrong-role demotion: numeric-looking name on text-heavy country/currency fields, etc.
-    if profile.get("likely_numeric") and any(
+    # Not for an exact-name pair onto a text carrier: whatever the sampled values
+    # look like, they land byte for byte in the column of the same name (D159).
+    exact_text_pair = name_exact and tgt_logical in _TEXT_TARGET_LOGICALS and (
+        type_same or safe_promo
+    )
+    if not exact_text_pair and profile.get("likely_numeric") and any(
         t in tgt_l for t in ("country", "currency", "status", "state", "city", "email")
     ):
         if cls in {"exact_name_type", "safe_type_promotion"}:
@@ -293,6 +580,18 @@ def classify_mapping_confidence(
     return {
         "confidence_class": cls,
         "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
+        "type_path_class": str(mapping.get("conversion_class") or ""),
+        "type_same_declared": bool(
+            str(mapping.get("source_type") or mapping.get("inferred_type") or "").strip()
+            and str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
+            and type_same
+        ),
+        "source_expr": src,
+        "semantic_role": str(
+            mapping.get("semantic_role")
+            or profile.get("semantic_role")
+            or ""
+        ),
         "anchor": anchor,
         "axes": {
             "mapping": round(mapping_axis, 3),
@@ -312,6 +611,26 @@ def apply_confidence_class(
     cls = str(classification.get("confidence_class") or "")
     conf = float(confidence)
     if cls == "create_new_projected":
+        conv = str(classification.get("type_path_class") or "").lower()
+        expression = "(" in str(classification.get("source_expr") or "")
+        same_declared = bool(classification.get("type_same_declared"))
+        hard_loss = conv in {"narrowing", "lossy", "incompatible"}
+        # Widening is a real capacity change. same_declared must not lift it
+        # into the identity band or every create-new score collapses to 0.93.
+        if conv in {"widening", "lossless"} and not hard_loss:
+            return round(min(0.90, max(conf, 0.86)), 3)
+        # round(x*1.18, 2) is a SQL expression classified as a cast and sat
+        # under the 0.85 floor (R3-M3). A declared same-type projection is
+        # the same case. A real text→numeric cast is not lifted.
+        if not hard_loss and (
+            conv in {"equivalent", "identity"} or expression or same_declared
+        ):
+            role = str(classification.get("semantic_role") or "").lower()
+            if role in {"categorical", "market_segment"}:
+                return round(min(0.88, max(conf, 0.82)), 3)
+            return round(min(IDENTITY_PASSTHROUGH_CONF_CAP, max(conf, 0.91)), 3)
+        if conv in {"representation", "normalization"}:
+            return round(min(0.89, max(conf, 0.82)), 3)
         return round(min(conf, IDENTITY_PASSTHROUGH_CONF_CAP), 3)
     if cls == "exact_name_type":
         # Exact proven pairs should read near-certain, not 0.93.
@@ -422,8 +741,7 @@ def score_mapping_pair(
         samples = [str(x).strip() for x in profile["sample_values"] if str(x).strip()]
     distinct = {s.lower() for s in samples}
     looks_enum = len(distinct) > 2 or any(
-        s not in {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
-        for s in distinct
+        s not in CANONICAL_BOOLEAN_TOKENS for s in distinct
     )
     if looks_enum and ("BOOL" in tgt_type or tgt_type == "BOOLEAN" or "bool" in tgt):
         delta -= 0.85
@@ -442,6 +760,7 @@ def refine_mappings_with_quality(
     mappings: list[dict],
     *,
     source_schemas: list[dict] | None = None,
+    destination_db_type: str = "",
 ) -> list[dict]:
     """Apply cross-field quality scoring to each mapping."""
     src_by_name = {s["name"]: s for s in (source_schemas or [])}
@@ -452,13 +771,41 @@ def refine_mappings_with_quality(
         if src_name not in profile_cache:
             src = src_by_name.get(src_name, {})
             samples = [str(x) for x in (src.get("samples") or [])]
-            profile_cache[src_name] = analyze_column_profile(src_name, samples)
+            profile_cache[src_name] = merge_column_profile(
+                analyze_column_profile(src_name, samples),
+                schema_row=src,
+            )
         profile = profile_cache[src_name]
 
         delta, notes = score_mapping_pair(m, source_profile=profile)
         out = dict(m)
+        if not out.get("semantic_role"):
+            from services.semantic_analyzer import analyze_column
+
+            schema_row = src_by_name.get(src_name, {})
+            analyzed = analyze_column(
+                src_name,
+                str(out.get("source_type") or schema_row.get("inferred_type") or "VARCHAR"),
+                [str(x) for x in (schema_row.get("samples") or [])],
+            )
+            out["semantic_role"] = analyzed.get("semantic_role")
+        if not out.get("conversion_class") and out.get("source_type") and (
+            out.get("target_type") or out.get("dest_type")
+        ):
+            from services.conversion_contract import classify_conversion
+
+            out["conversion_class"] = classify_conversion(
+                str(out.get("source_type") or out.get("inferred_type") or ""),
+                str(out.get("target_type") or out.get("dest_type") or ""),
+                dest_db=destination_db_type,
+                transform=str(out.get("transform") or "none"),
+            ).get("conversion_class")
         conf = min(0.99, max(0.0, float(m.get("confidence", 0.0)) + delta))
-        classification = classify_mapping_confidence(out, source_profile=profile)
+        classification = classify_mapping_confidence(
+            out,
+            source_profile=profile,
+            destination_db_type=destination_db_type,
+        )
         conf = apply_confidence_class(conf, classification)
         out["confidence"] = round(conf, 3)
         out["confidence_class"] = classification["confidence_class"]
@@ -478,19 +825,7 @@ def refine_mappings_with_quality(
                 out["requires_review"] = True
         if classification["confidence_class"] in {"weak_or_conflicted", "custom_transform_sparse"}:
             out["requires_review"] = True
-        out["column_profile"] = {
-            k: profile[k]
-            for k in (
-                "null_rate",
-                "unique_ratio",
-                "likely_identifier",
-                "likely_email",
-                "likely_uuid",
-                "likely_date",
-                "likely_boolean",
-                "semantic_pattern_score",
-            )
-        }
+        out["column_profile"] = column_profile_for_map(profile)
         refined.append(out)
     return refined
 
@@ -544,8 +879,7 @@ def detect_cross_field_issues(
         tgt_type = str(m.get("target_type") or "").upper()
         if not samples:
             continue
-        strict_bool = {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
-        if any(s not in strict_bool for s in samples) and (
+        if any(s not in CANONICAL_BOOLEAN_TOKENS for s in samples) and (
             "BOOL" in tgt_type or "bool" in (m.get("target") or "").lower()
         ):
             issues.append(

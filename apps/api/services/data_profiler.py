@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-import base64
-import json
-import math
 import re
 from collections import Counter
-from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
-from services.value_serializer import json_default
 from services.transform_engine import (
     _parse_boolean,
     _parse_date,
     _parse_datetime,
+    _parse_decimal,
     _parse_integer,
     _parse_uuid,
+    decimal_wire_value,
+    pin_settled_number_locale,
+    reset_active_number_locale,
 )
+from services.value_serializer import wire_cell_text
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -28,59 +28,96 @@ PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,20}$")
 DATE_PATTERN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{8}$")
 
 
-def _as_str(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (bytes, bytearray)):
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(value, default=json_default)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, time):
-        return value.isoformat()
-    return str(value).strip()
+def _as_str(value: Any) -> str | None:
+    """One profiler sample. Same spelling as the transfer wire.
+
+    ``None`` means absence (SQL NULL / Missing / reader-wired sentinel).
+    An empty string ``""`` is a *stored value*: VARCHAR `''` written to the
+    source is not NULL, and counting it as absent misreported null-rate and
+    hid a real column population (QA T19). Empty cells carry no type
+    evidence but still count as present.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    if value is None or is_reader_null_cell(value):
+        return None
+    text = wire_cell_text(value)
+    if is_reader_null_cell(text):
+        return None
+    return text.strip()
 
 
-def _percentile(sorted_vals: list[float], p: float) -> float | None:
+def _percentile(sorted_vals: list[Decimal], p: float) -> Decimal | None:
     if not sorted_vals:
         return None
-    k = (len(sorted_vals) - 1) * p
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return sorted_vals[int(k)]
-    return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    k = Decimal(n - 1) * Decimal(str(p))
+    floor = int(k)
+    ceil = floor if k == floor else min(floor + 1, n - 1)
+    if floor == ceil:
+        return sorted_vals[floor]
+    frac = k - Decimal(floor)
+    return sorted_vals[floor] * (Decimal(1) - frac) + sorted_vals[ceil] * frac
+
+
+def _numeric_values(values: list[str]) -> list[Decimal]:
+    out: list[Decimal] = []
+    for raw in values:
+        parsed = decimal_wire_value(raw)
+        if parsed is None:
+            continue
+        out.append(parsed)
+    return out
+
+
+def _decimal_work_prec(nums: list[Decimal]) -> int:
+    """Precision wide enough for NUMERIC(38,10) under the default context of 28.
+
+    ``quantize`` of a 38-digit coefficient raises ``InvalidOperation`` at
+    precision 28 and the planner used to surface that as a raw exception.
+    """
+    prec = 28
+    for number in nums:
+        digits = number.as_tuple().digits
+        prec = max(prec, len(digits) + 8)
+    return prec
 
 
 def _numeric_stats(values: list[str]) -> dict[str, Any]:
-    nums: list[float] = []
-    for raw in values:
-        try:
-            nums.append(float(Decimal(raw.replace(",", "").replace("$", ""))))
-        except (InvalidOperation, ValueError):
-            continue
+    nums = _numeric_values(values)
     if not nums:
         return {}
     sorted_nums = sorted(nums)
     n = len(nums)
-    mean = sum(nums) / n
-    variance = sum((x - mean) ** 2 for x in nums) / n
-    return {
-        "min": sorted_nums[0],
-        "max": sorted_nums[-1],
-        "mean": round(mean, 6),
-        "stddev": round(math.sqrt(variance), 6),
-        "p25": _percentile(sorted_nums, 0.25),
-        "p50": _percentile(sorted_nums, 0.50),
-        "p75": _percentile(sorted_nums, 0.75),
-        "p95": _percentile(sorted_nums, 0.95),
-        "numeric_parse_rate": round(n / max(len(values), 1), 4),
-    }
+    rate = round(n / max(len(values), 1), 4)
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _decimal_work_prec(nums)
+            mean = sum(nums, Decimal(0)) / Decimal(n)
+            variance = sum((x - mean) ** 2 for x in nums) / Decimal(n)
+            stddev = variance.sqrt() if variance >= 0 else Decimal(0)
+            quantum = Decimal("0.000001")
+            return {
+                "min": sorted_nums[0],
+                "max": sorted_nums[-1],
+                "mean": mean.quantize(quantum) if mean.is_finite() else mean,
+                "stddev": stddev.quantize(quantum) if stddev.is_finite() else stddev,
+                "p25": _percentile(sorted_nums, 0.25),
+                "p50": _percentile(sorted_nums, 0.50),
+                "p75": _percentile(sorted_nums, 0.75),
+                "p95": _percentile(sorted_nums, 0.95),
+                "numeric_parse_rate": rate,
+            }
+    except InvalidOperation:
+        # Stats are not the column type. Omit them rather than crash the plan
+        # or shrink a declared NUMERIC(38,10).
+        return {
+            "min": sorted_nums[0],
+            "max": sorted_nums[-1],
+            "numeric_parse_rate": rate,
+        }
 
 
 def _infer_pattern(values: list[str]) -> str | None:
@@ -102,21 +139,32 @@ def _infer_pattern(values: list[str]) -> str | None:
     return None
 
 
-def _histogram(values: list[float], buckets: int = 10) -> list[dict[str, Any]]:
+def _histogram(values: list[Decimal], buckets: int = 10) -> list[dict[str, Any]]:
     if not values:
         return []
-    lo, hi = min(values), max(values)
-    if lo == hi:
-        return [{"bucket": 0, "low": lo, "high": hi, "count": len(values)}]
-    width = (hi - lo) / buckets
-    counts = [0] * buckets
-    for v in values:
-        idx = min(buckets - 1, int((v - lo) / width))
-        counts[idx] += 1
-    return [
-        {"bucket": i, "low": round(lo + i * width, 4), "high": round(lo + (i + 1) * width, 4), "count": c}
-        for i, c in enumerate(counts)
-    ]
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _decimal_work_prec(values)
+            lo, hi = min(values), max(values)
+            if lo == hi:
+                return [{"bucket": 0, "low": lo, "high": hi, "count": len(values)}]
+            width = (hi - lo) / buckets
+            counts = [0] * buckets
+            for v in values:
+                idx = min(buckets - 1, int((v - lo) / width))
+                counts[idx] += 1
+            quantum = Decimal("0.0001")
+            return [
+                {
+                    "bucket": i,
+                    "low": (lo + i * width).quantize(quantum),
+                    "high": (lo + (i + 1) * width).quantize(quantum),
+                    "count": c,
+                }
+                for i, c in enumerate(counts)
+            ]
+    except InvalidOperation:
+        return []
 
 
 def _type_scores(values: list[str]) -> dict[str, float]:
@@ -139,11 +187,8 @@ def _type_scores(values: list[str]) -> dict[str, float]:
             scores["BOOLEAN"] += 1
         if _parse_integer(raw) is not None:
             scores["INTEGER"] += 1
-        try:
-            Decimal(raw.replace(",", ""))
+        if _parse_decimal(raw) is not None:
             scores["DECIMAL"] += 1
-        except InvalidOperation:
-            pass
         if _parse_date(raw):
             scores["DATE"] += 1
         if _parse_datetime(raw):
@@ -158,11 +203,22 @@ def _type_scores(values: list[str]) -> dict[str, float]:
     return {k: round(v / non_empty, 3) for k, v in scores.items()}
 
 
+# Identity-shaped names by token, not substring: "paid", "valid", "provider" are not ids.
+_KEY_NAME_RE = re.compile(r"(^|_)(id|uuid|guid|key|code|pk)$")
+
+
+def _snake_name(name: str) -> str:
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name)).lower()
+
+
 def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> dict[str, Any]:
     """Profile one column: type inference, statistics, patterns, quality signals."""
     strings = [_as_str(v) for v in values[:sample_limit]]
-    non_empty = [s for s in strings if s]
-    null_rate = 1.0 - (len(non_empty) / max(len(strings), 1))
+    # Absence (None) vs presence-without-evidence (""): only the former is a
+    # null. Empty strings contribute to distinct/top-values as real data.
+    present = [s for s in strings if s is not None]
+    non_empty = [s for s in present if s]
+    null_rate = 1.0 - (len(present) / max(len(strings), 1))
     distinct = len(set(non_empty))
     distinct_ratio = distinct / max(len(non_empty), 1)
 
@@ -182,16 +238,26 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
 
     stats: dict[str, Any] = {}
     histogram: list[dict[str, Any]] = []
-    if best_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT"}:
+    from services.type_system import normalize_logical_type as _nlt_prof
+
+    numeric_logical = _nlt_prof(best_type) in {"integer", "decimal", "float"}
+    if numeric_logical or best_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT"}:
         stats = _numeric_stats(non_empty)
         if stats:
-            nums = []
-            for raw in non_empty:
-                try:
-                    nums.append(float(Decimal(raw.replace(",", "").replace("$", ""))))
-                except (InvalidOperation, ValueError):
-                    pass
-            histogram = _histogram(nums)
+            histogram = _histogram(_numeric_values(non_empty))
+        # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
+        from services.decimal_observe import observe_source_numeric_samples
+
+        obs = observe_source_numeric_samples(non_empty)
+        if obs.get("kind") not in {None, "empty"}:
+            stats = {
+                **stats,
+                "observed_precision": obs.get("precision"),
+                "observed_scale": obs.get("scale"),
+                "numeric_kind": obs.get("kind"),
+                "ieee_signals": obs.get("ieee_signals") or [],
+                "suggested_carrier": obs.get("carrier"),
+            }
 
     pattern = _infer_pattern(non_empty)
     pii = bool(re.search(r"email|phone|ssn|password|secret|name|address", name, re.I))
@@ -199,7 +265,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         pii = True
 
     # Uniqueness estimate — high distinct ratio on id-like columns
-    is_likely_key = bool(distinct_ratio > 0.95 and distinct >= 5 and re.search(r"id|key|uuid|code", name, re.I))
+    is_likely_key = bool(distinct_ratio > 0.95 and distinct >= 5 and _KEY_NAME_RE.search(_snake_name(name)))
 
     return {
         "name": name,
@@ -212,6 +278,9 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         "likely_primary_key": is_likely_key,
         "sample_count": len(strings),
         "non_empty_count": len(non_empty),
+        # Present = not SQL NULL. A stored '' is present but empty (QA T19).
+        "present_count": len(present),
+        "empty_string_count": len(present) - len(non_empty),
         "likely_pii": pii,
         "detected_pattern": pattern,
         "type_scores": scores,
@@ -220,6 +289,19 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         "top_values": top_values,
         "notes": intel.get("notes") or [],
     }
+
+
+def _settled_number_locale(columns: list[str], sample: list[dict[str, Any]]):
+    """Read the profile under the contract the transfer will read under.
+
+    A column of ``10.129`` is Auto-ambiguous, so profiling it under Auto types
+    it VARCHAR — and Map then bills a VARCHAR→DECIMAL fidelity collapse for a
+    column preflight and the writer read as US. The profile has to settle the
+    same way they do: evidence first, the reported US assumption last.
+    """
+    if not columns or not sample:
+        return None
+    return pin_settled_number_locale(sample, columns)
 
 
 def profile_dataset(
@@ -234,13 +316,18 @@ def profile_dataset(
     schema: dict[str, str] = {}
     primary_key_candidates: list[str] = []
 
-    for col in columns:
-        col_values = [row.get(col) for row in sample]
-        prof = profile_column(col, col_values)
-        profiles[col] = prof
-        schema[col] = prof["inferred_type"]
-        if prof.get("likely_primary_key"):
-            primary_key_candidates.append(col)
+    token = _settled_number_locale(columns, sample)
+    try:
+        for col in columns:
+            col_values = [row.get(col) for row in sample]
+            prof = profile_column(col, col_values)
+            profiles[col] = prof
+            schema[col] = prof["inferred_type"]
+            if prof.get("likely_primary_key"):
+                primary_key_candidates.append(col)
+    finally:
+        if token is not None:
+            reset_active_number_locale(token)
 
     quality_score = 0.0
     if profiles:
@@ -301,11 +388,141 @@ def source_types_are_authoritative(source_kind: str, source_format: str = "") ->
         return False
 
 
+def source_numbers_are_typed(source_db_type: str) -> bool:
+    """True when the source hands over numbers already typed, not as text.
+
+    The question the IEEE/Excel-float chip asks ("was this FLOAT invented
+    from text like ``111.89999999999999``?") has the answer No for a source
+    that declares DDL, and also for one whose wire format tags every value
+    with its type: a BSON double, or a Kafka message's JSON/Avro number. Those
+    are IEEE doubles already. The long fraction is the value itself. The rule
+    used to live inline at the risk stamp as "relational, or MongoDB", so
+    every Kafka DOUBLE was blocked at G4 (D161).
+    """
+    fmt = (source_db_type or "").strip().lower()
+    if not fmt:
+        return False
+    if source_types_are_authoritative("database", fmt):
+        return True
+    from services.copy_kafka_common import kafka_family_name
+
+    return fmt == "mongodb" or kafka_family_name(fmt) == "kafka"
+
+
+# Carriers a schemaless/text source declares for *every* column (CSV header,
+# Parquet string, thin SaaS describe). Profiling off one of these is evidence;
+# profiling *onto* one is a loss of evidence.
+UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
+
+# Families whose *declared* form carries a domain even with no parameters:
+# ``NUMERIC`` / Dynamo ``N`` / BSON ``Decimal128`` accept values no sample bounds.
+_NUMERIC_DOMAIN_LOGICALS = frozenset({"decimal", "integer", "float"})
+
+
+def _inference_would_invent_boolean(declared: str, inferred: str) -> bool:
+    """True when samples would relabel a declared number as BOOLEAN.
+
+    ``is_active`` holding ``0``/``1`` is a boolean on a file. Oracle
+    ``NUMBER(1,0)`` and ``DECIMAL(5,0)`` declared that domain; copying the
+    sample guess onto the destination then blocked ``DECIMAL → BOOLEAN``.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        return (
+            normalize_logical_type(declared) in {"integer", "decimal", "float"}
+            and normalize_logical_type(inferred) == "boolean"
+        )
+    except Exception:  # noqa: BLE001 — an unreadable type token is not a boolean invent
+        return False
+
+
+def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
+    """True when profiling stringified samples would erase a typed declaration.
+
+    Profiling reads ``cell_to_string`` output, so a Mongo ``ObjectId`` arrives as
+    ``"6991173f8d64fcf16f3a0805"`` and a ``Decimal128`` as ``"12.34"``. Those look
+    like text, but the declaration came from the BSON type itself — strictly
+    stronger evidence than the string that was rendered from it. Letting the
+    profile win typed ``OBJECTID`` down to ``VARCHAR`` made the engine invent a
+    ``TEXT`` destination column and then report its own invent as an
+    ``OBJECTID → TEXT`` fidelity collapse, blocking every Mongo→SQL create-new
+    route. Upgrades off an untyped carrier (``VARCHAR`` → ``DECIMAL``) and
+    same-family widening (``INTEGER`` → ``BIGINT``) are unaffected.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        declared_logical = normalize_logical_type(declared)
+        inferred_logical = normalize_logical_type(inferred)
+    except Exception:
+        return False
+    if declared_logical == inferred_logical:
+        return False
+    return (
+        declared_logical not in UNTYPED_TEXT_LOGICALS
+        and inferred_logical in UNTYPED_TEXT_LOGICALS
+    )
+
+
+def _inference_would_narrow_numeric_domain(declared: str, inferred: str) -> bool:
+    """True when profiling would collapse an unbounded Number to a sample integer.
+
+    DynamoDB ``N`` / BSON ``Decimal128`` / bare ``DECIMAL`` accept values no
+    Validate page bounds. Integer-looking samples (``1``, ``2``) profile as
+    ``INTEGER``, Map invents ``BIGINT``, and Execute rematerializes the
+    catalog ``DECIMAL`` → dest ``NUMERIC``/``DECIMAL`` — a Map→DDL identity
+    mismatch on every DynamoDB ``N`` HASH key. The declaration owns the
+    family; samples do not invent a 64-bit cliff.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        declared_logical = normalize_logical_type(declared)
+        inferred_logical = normalize_logical_type(inferred)
+    except Exception:
+        return False
+    if declared_logical not in {"decimal", "float"}:
+        return False
+    return inferred_logical == "integer"
+
+
+def _inference_would_invent_fixed_point(declared: str, inferred: str) -> bool:
+    """True when profiling would turn a declared float into a sized decimal.
+
+    Profiling reads ``cell_to_string`` output, so an IEEE double arrives as
+    ``"0.025"`` and is indistinguishable from a fixed-point cell. Sizing it that
+    way invents a domain the source never declared *and* bounds it to the sample:
+    a Mongo collection whose ``amount`` starts near zero profiled as
+    ``DECIMAL(3,2)``, create-new built that PostgreSQL column, and a 100k CDC
+    snapshot landed 999 rows with the rest quarantined at ``10.00``. A declared
+    float keeps its inexact carrier; the destination can still hold every value.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        return (
+            normalize_logical_type(declared) == "float"
+            and normalize_logical_type(inferred) == "decimal"
+        )
+    except Exception:
+        return False
+
+
 def merge_profiler_schema(
     existing: dict[str, str],
     profiled: dict[str, str],
     *,
     authoritative_existing: bool = False,
+    source_carriers_sampled: bool = False,
 ) -> dict[str, str]:
     """Combine declared column types with statistical inference from samples.
 
@@ -322,15 +539,31 @@ def merge_profiler_schema(
       always wins; inference only fills columns that declared nothing.
     * Otherwise (files): inference wins, except that a parameterised declared
       type keeps its precision when inference agrees on the same logical family
-      but drops the parameters.
+      but drops the parameters, and except that inference may never demote a
+      typed declaration to text (see :func:`_inference_would_demote_to_text`)
+      nor invent fixed point off a declared float (see
+      :func:`_inference_would_invent_fixed_point`).
+
+    ``source_carriers_sampled`` marks a source that declares no width at all —
+    a document or keyspace store, where every page is a new sample of an
+    unbounded family. A file's measured ``DECIMAL(8,6)`` is a fact about a
+    finite object; the same number read from Redis is a fact about the 200 keys
+    the probe happened to scan, and stamping it created a destination column the
+    *next* value could not enter. Such a numeric profile keeps its family and
+    loses its bound, so create-new invents the platform floor instead.
     """
-    from services.type_system import normalize_logical_type
+    from services.type_system import (
+        normalize_logical_type,
+        unbound_sampled_numeric_carrier,
+    )
 
     merged = dict(existing)
     for col, inferred in profiled.items():
         declared = str(existing.get(col) or "").strip()
         if not inferred:
             continue
+        if source_carriers_sampled:
+            inferred = unbound_sampled_numeric_carrier(str(inferred))
         if authoritative_existing:
             # The source declared this column. Even a bare TEXT is a fact here
             # (Postgres TEXT is unbounded), not the placeholder a header scan
@@ -339,6 +572,32 @@ def merge_profiler_schema(
                 continue
             merged[col] = inferred
             continue
+        if _inference_would_invent_boolean(declared, str(inferred)):
+            # Flag-shaped 0/1 samples promote to BOOLEAN. A declared
+            # NUMBER/DECIMAL is still a number (DEF-B-011).
+            continue
+        if _inference_would_demote_to_text(declared, str(inferred)):
+            continue
+        if _inference_would_invent_fixed_point(declared, str(inferred)):
+            continue
+        if _inference_would_narrow_numeric_domain(declared, str(inferred)):
+            continue
+        if "(" not in declared and "(" in str(inferred):
+            try:
+                declared_logical = normalize_logical_type(declared)
+                same_family = declared_logical == normalize_logical_type(inferred)
+            except Exception:
+                declared_logical, same_family = "", False
+            if same_family and declared_logical in _NUMERIC_DOMAIN_LOGICALS:
+                # The source declared the family and declared no bound: a Dynamo
+                # ``N`` or a Mongo ``Decimal128`` accepts values the sample never
+                # showed. Sizing that declaration down to the sample's
+                # ``DECIMAL(9,6)`` invents a domain the source does not have, and
+                # the create-new carrier (``DECIMAL(38,15)``) then reads as a
+                # narrowing of the profile rather than a widening of the
+                # declaration. Inference types the untyped; it does not bound the
+                # unbounded.
+                continue
         if "(" in declared and "(" not in str(inferred):
             try:
                 same_family = normalize_logical_type(declared) == normalize_logical_type(inferred)

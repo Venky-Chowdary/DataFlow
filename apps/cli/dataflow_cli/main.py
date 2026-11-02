@@ -70,7 +70,7 @@ def _load_file(path: Path) -> dict[str, Any]:
     if isinstance(data, list):
         manifest_kinds, _ = _manifest_kinds()
         return {
-            "apiVersion": "dataflow.space/v1",
+            "apiVersion": "datawrap.io/v1",
             "kind": manifest_kinds[0],
             "resources": data,
         }

@@ -36,15 +36,19 @@ def test_unlisted_but_introspectable_table_is_not_create_new():
         "src.transfer.endpoint_intelligence.resolve_connector_config",
         return_value={"type": "postgresql", "database": "railway", "schema": "public", "ssl": False},
     ), patch(
-        "src.transfer.endpoint_intelligence._introspect_table_schema",
-        return_value={
-            "city": "TEXT",
-            "code": "TEXT",
-            "country": "TEXT",
-            "lat": "NUMERIC",
-            "lon": "NUMERIC",
-            "name": "TEXT",
-        },
+        "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+        return_value=(
+            {
+                "city": "TEXT",
+                "code": "TEXT",
+                "country": "TEXT",
+                "lat": "NUMERIC",
+                "lon": "NUMERIC",
+                "name": "TEXT",
+            },
+            {},
+            {},
+        ),
     ), patch(
         "src.transfer.endpoint_intelligence._attach_sql_sample_rows",
     ):
@@ -107,8 +111,10 @@ def test_streaming_append_passes_with_reconcile_sample():
             validation_mode="strict",
         )
 
-    assert report["passed"] is True, report
-    assert "sample" in report["message"].lower()
+    # Audit §1.2 / proof contract: sample success must NEVER override a
+    # whole-table checksum mismatch. Gate-8 stays fail-closed here.
+    assert report["passed"] is False, report
+    assert report.get("checksum_match") is False
     assert read_sample.called
     kwargs = read_sample.call_args.kwargs
     assert kwargs.get("sort_key") == "code"
@@ -143,4 +149,53 @@ def test_streaming_append_still_fails_without_sample_proof():
             validation_mode="strict",
         )
     assert report["passed"] is False
-    assert "sample" in report["message"].lower()
+    # Dest-before is unknown, so extra dest rows are an unverified append
+    # delta — not a whole-table checksum mismatch and not a sample pass.
+    assert "unverified" in report["message"].lower()
+    assert "checksum mismatch" not in report["message"].lower()
+
+
+def test_streaming_append_engine_digest_pair_needs_no_sample():
+    """A whole-population engine digest pair already compared every mapped
+    cell (server-to-server COPY); a stashed sample is a subset of that proof
+    and must not be demanded on top of it."""
+    endpoint = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        database="railway",
+        schema="public",
+        table="airports",
+    )
+    mappings = [{"source": "code", "target": "code"}, {"source": "city", "target": "city"}]
+    with patch(
+        "src.transfer.reconcile_step.resolve_connector_config",
+        return_value={"type": "postgresql", "database": "railway", "schema": "public", "ssl": False},
+    ), patch(
+        "src.transfer.reconcile_step.verify_target",
+        return_value=(30, "engine-digest"),
+    ), patch(
+        "src.transfer.reconcile_step.read_target_sample",
+        return_value=[],
+    ):
+        report = run_reconciliation(
+            endpoint=endpoint,
+            records=[],
+            columns=["code", "city"],
+            rows_written=30,
+            writer_checksum="x",
+            dest_summary={
+                "schema": "public",
+                "table": "airports",
+                "streaming": True,
+                "load_method": "copy_binary_server_to_server",
+                "source_row_count": 30,
+                "rows_written": 30,
+                "engine_source_checksum": "d1",
+                "engine_target_checksum": "d1",
+                "reconcile_sample": None,
+            },
+            mappings=mappings,
+            validation_mode="strict",
+        )
+    assert "no reconcile_sample" not in (report.get("message") or "")
+    assert report["passed"] is True, report

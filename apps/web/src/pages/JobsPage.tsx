@@ -1,3 +1,4 @@
+import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
@@ -13,19 +14,46 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 import { useActiveData } from "../lib/DataContext";
-import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob } from "../lib/api";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { confirmCopilotAction, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, stageJobSync, RetryRefusedError, SyncAlreadyRunningError } from "../lib/api";
+import {
+  jobFilterCounts,
+  jobHistoryFromResponse,
+  jobWindowNote,
+  type JobHistory,
+} from "../lib/jobHistory";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "../lib/uiUtils";
+import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
-import { Gate8ProofCard, classifyGate8Status } from "../components/transfer/Gate8ProofCard";
+import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
+import { classifyGate8Status, presentMultiStreamGate8 } from "../components/transfer/gate8Status";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
+import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
+import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
+import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
+import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "../components/jobs/SchemaFidelityNotes";
+import {
+  formatSchemaPolicyLabel,
+  formatSyncModeLabel,
+  formatValidationModeLabel,
+} from "../lib/transferConstants";
+import { jobStudioDataRules } from "../lib/studioDataRules";
+import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
+import { blockerTitle } from "../lib/preflightGates";
+import { reconcileBarPercent } from "../lib/progressRing";
+import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
+import { EmbeddingUsageSummary } from "../components/transfer/EmbeddingUsageSummary";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
 import { ReplaySafetyCard } from "../components/transfer/ReplaySafetyCard";
 import { TransformationsCard } from "../components/transfer/TransformationsCard";
@@ -57,6 +85,15 @@ export type JobsStudioIntent = {
   /** Job-captured preflight so Studio Validate shows real gates, not Pending. */
   preflight?: import("../lib/types").PreflightResult;
   validationMode?: string;
+  schemaPolicy?: string;
+  deliveryGuarantee?: string;
+  /** Schedules → Studio: preload the parked route so Map can persist a contract. */
+  sourceConnectorId?: string;
+  destConnectorId?: string;
+  sourceTable?: string;
+  destTable?: string;
+  /** Persist mappings onto this draft — do not POST a second empty schedule. */
+  scheduleId?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -94,8 +131,10 @@ interface JobDetailRecord extends JobProgress {
     }[];
     column_types?: Record<string, string>;
     sync_mode?: string;
+    contract_id?: string;
     validation_mode?: string;
     schema_policy?: string;
+    delivery_guarantee?: string;
   };
   phases?: { name: string; status: "pending" | "active" | "done" | "failed" | "skipped"; message?: string }[];
   ddl_log?: string[];
@@ -109,10 +148,11 @@ interface JobDetailRecord extends JobProgress {
 
 function formatJobDuration(startedAt?: string, completedAt?: string): string | null {
   if (!startedAt) return null;
-  const start = Date.parse(startedAt);
-  if (!Number.isFinite(start)) return null;
-  const end = completedAt ? Date.parse(completedAt) : Date.now();
-  if (!Number.isFinite(end) || end < start) return null;
+  // Job-store timestamps are UTC without an offset; Date.parse reads them as local.
+  const start = parseServerTimestampMs(startedAt);
+  if (start == null) return null;
+  const end = completedAt ? parseServerTimestampMs(completedAt) : Date.now();
+  if (end == null || end < start) return null;
   const s = Math.floor((end - start) / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -121,13 +161,10 @@ function formatJobDuration(startedAt?: string, completedAt?: string): string | n
   return `${h}h ${m % 60}m`;
 }
 
-function formatSyncModeLabel(mode?: string): string {
-  if (!mode) return "—";
-  return mode.replace(/_/g, " ");
-}
-
 interface JobsPageProps {
   jobs: TransferJob[];
+  /** Whole-history counts; the table still shows the recent page in `jobs`. */
+  history?: JobHistory;
   onRefresh?: () => void;
   /** Open Transfer Studio — optional intent lands on Validate / Map with repair context. */
   onStartTransfer?: (intent?: JobsStudioIntent) => void;
@@ -153,20 +190,43 @@ function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   return "detail";
 }
 
-function jobRouteLabel(job: Pick<TransferJob, "source_name" | "destination_database" | "destination_collection" | "destination_type">) {
-  const dest =
-    [job.destination_database, job.destination_collection].filter(Boolean).join(".")
-    || job.destination_type
-    || "destination";
-  return `${job.source_name} → ${dest}`;
+/** Source side of a route label. Never renders a missing name as "undefined". */
+function jobSourceLabel(job: Pick<TransferJob, "source_name" | "source_type">) {
+  return (job.source_name || "").trim() || (job.source_type || "").trim() || "source";
+}
+
+function jobRouteLabel(
+  job: Pick<
+    TransferJob,
+    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type" | "stream_names"
+  >,
+) {
+  return formatJobRoute(job);
 }
 
 function jobDisplayName(
-  job: Pick<TransferJob, "name" | "source_name" | "destination_database" | "destination_collection" | "destination_type">,
+  job: Pick<
+    TransferJob,
+    | "name"
+    | "source_name"
+    | "source_type"
+    | "destination_database"
+    | "destination_collection"
+    | "destination_type"
+    | "stream_names"
+  >,
   override?: string | null,
 ) {
   const named = (override ?? job.name)?.trim();
-  return named || jobRouteLabel(job);
+  if (named && !isRestoredEndpointTitle(named, job)) return named;
+  return formatJobRoute(job);
+}
+
+function checkpointCommittedPhrase(checkpoint: TransferJob["checkpoint"] | null | undefined): string {
+  if (checkpoint?.rows_processed == null) return "";
+  const rows = `${checkpoint.rows_processed.toLocaleString()} rows committed`;
+  const stream = (checkpoint.cdc_stream || "").trim();
+  return stream ? `${rows} on ${stream}` : rows;
 }
 
 function normalizeJobName(value: string) {
@@ -192,15 +252,50 @@ function duplicateJobNameError(
   return null;
 }
 
-export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
+const LIVE_JOB_STATUSES = new Set(["running", "pending", "queued", "retrying"]);
+
+function shortJobId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+function JobLineageLinks({
+  parentId,
+  childId,
+  onOpen,
+}: {
+  parentId?: string;
+  childId?: string;
+  onOpen: (id: string) => void;
+}) {
+  const parent = (parentId || "").trim();
+  const child = (childId || "").trim();
+  if (!parent && !child) return null;
+  return (
+    <p className="df2-job-lineage">
+      {parent ? (
+        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => onOpen(parent)}>
+          Triggered from {shortJobId(parent)}
+        </button>
+      ) : null}
+      {child ? (
+        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => onOpen(child)}>
+          Sync started {shortJobId(child)} (View)
+        </button>
+      ) : null}
+    </p>
+  );
+}
+
+export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [blockingJob, setBlockingJob] = useState<{ id: string; status: string; createdAt: string } | null>(null);
   const [resuming, setResuming] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
   const [detailTab, setDetailTab] = useState<JobDetailTab>("detail");
@@ -212,33 +307,34 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
+  const appliedFocusRef = useRef<string | null>(null);
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
 
   const openStudio = useCallback((intent?: JobsStudioIntent) => {
     onStartTransfer?.(intent);
   }, [onStartTransfer]);
 
   const jobRepairMappings = useMemo((): RepairMapping[] => {
-    const maps = liveJob?.transfer_request?.mappings;
-    if (!Array.isArray(maps)) return [];
-    return maps.map((m) => ({
-      source: m.source || m.source_column || "",
-      destination: m.target || m.target_column || "",
-      destination_type: m.target_type || m.source_type,
-      target_type: m.target_type || m.source_type,
+    return readJobMappings(liveJob).map((m) => ({
+      source: m.source,
+      destination: m.target,
+      destination_type: m.targetType || m.sourceType,
+      target_type: m.targetType || m.sourceType,
+      stream: m.stream || undefined,
     })).filter((m) => m.source);
-  }, [liveJob?.transfer_request?.mappings]);
+  }, [liveJob]);
 
-  const counts = useMemo(() => ({
-    all: jobs.length,
-    running: jobs.filter((j) => j.status === "running" || j.status === "pending").length,
-    completed: jobs.filter((j) => isJobSuccess(j.status)).length,
-    quarantine: jobs.filter((j) => j.status === "completed_with_quarantine").length,
-    failed: jobs.filter((j) => j.status === "failed").length,
-  }), [jobs]);
+  // Counted over the whole history, not the page of rows below: counting the rows
+  // showed "All (50)" for a 90-job history and disagreed with Pilot.
+  const counts = useMemo(
+    () => jobFilterCounts(history || jobHistoryFromResponse({ jobs })),
+    [history, jobs],
+  );
 
   const filtered = useMemo(() => {
     let list = jobs;
-    if (filter === "running") list = jobs.filter((j) => j.status === "running" || j.status === "pending");
+    if (filter === "running") list = jobs.filter((j) => LIVE_JOB_STATUSES.has(j.status));
     else if (filter === "completed") list = jobs.filter((j) => isJobSuccess(j.status));
     else if (filter !== "all") list = jobs.filter((j) => j.status === filter);
 
@@ -262,16 +358,27 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     );
   }, [jobs, filter, jobSearch, nameOverrides]);
 
+  const windowNote = jobWindowNote({
+    counts,
+    filter,
+    loaded: jobs.length,
+    shown: jobSearch.trim() ? undefined : filtered.length,
+  });
+
   useEffect(() => {
-    if (!initialJobId) return;
-    if (!jobs.some((j) => j._id === initialJobId)) return;
+    const ids = jobs.map((j) => j._id);
+    if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
+    appliedFocusRef.current = initialJobId!;
     setFilter("all");
     setJobSearch("");
-    setSelectedId(initialJobId);
+    setSelectedId(initialJobId!);
     if (initialPanel === "mapping-proof") {
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
       setMappingProofOpen(true);
+    } else if (initialPanel === "quarantine") {
+      setDetailTab("quarantine");
+      setEvidenceDrawer("quarantine");
     }
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${initialJobId}`)?.scrollIntoView({
@@ -305,14 +412,24 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     };
   }, [selectedId, liveJob]);
 
+  const pinnedJobRef = useRef<string | null>(null);
   useEffect(() => {
-    if (filter === "failed" && counts.failed > 0 && !selectedId) {
-      const first = jobs.find((j) => j.status === "failed");
-      if (first) setSelectedId(first._id);
-    } else if (filtered.length > 0 && !filtered.some((j) => j._id === selectedId)) {
-      setSelectedId(filtered[0]._id);
+    const pin = pinnedJobRef.current;
+    if (pin && selectedId === pin) {
+      if (filtered.some((j) => j._id === pin)) {
+        pinnedJobRef.current = null;
+        window.requestAnimationFrame(() => {
+          document.getElementById(`job-item-${pin}`)?.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+          });
+        });
+      }
+      return;
     }
-  }, [filter, filtered, jobs, counts.failed, selectedId]);
+    const next = nextListSelection(selectedId, filtered.map((j) => j._id));
+    if (next && next !== selectedId) setSelectedId(next);
+  }, [filter, filtered, selectedId]);
 
   // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
@@ -320,7 +437,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     if (!job) return;
     const dest = job.destination_collection || job.destination_database || job.destination_type || "destination";
     setActiveData((prev) => ({
-      name: prev?.name || job.source_name || "job",
+      name: prev?.name || (job.source_name || "").trim() || "job",
       filename: prev?.filename,
       columns: prev?.columns || [],
       row_count: job.records_processed ?? prev?.row_count ?? 0,
@@ -329,7 +446,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       preflight_run_id: prev?.preflight_run_id,
       job_id: job._id,
       validation_status: job.status,
-      route: `${job.source_name} → ${dest}`,
+      route: `${jobSourceLabel(job)} → ${dest}`,
       blockers: job.error ? [job.error] : prev?.blockers,
     }));
   }, [jobs, selectedId, setActiveData]);
@@ -342,18 +459,20 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       return;
     }
     let cancelled = false;
-    setDetailLoading(true);
-    const listed = jobs.find((j) => j._id === selectedId);
+    const listed = jobsRef.current.find((j) => j._id === selectedId);
     // Optimistic hydrate from list so the detail pane never goes blank on slow/404 get.
     if (listed) {
-      setLiveJob({
+      setLiveJob((prev) => ({
+        ...(prev && prev._id === selectedId ? prev : {}),
         ...(listed as unknown as JobDetailRecord),
         _id: listed._id,
         status: listed.status,
         progress_pct: listed.progress_pct ?? 0,
         records_processed: listed.records_processed ?? 0,
         message: listed.message || listed.error || "",
-      });
+      }));
+    } else {
+      setDetailLoading(true);
     }
     fetchJob(selectedId)
       .then((job) => {
@@ -372,10 +491,26 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     return () => {
       cancelled = true;
     };
-  }, [selectedId, jobs]);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const listed = jobs.find((j) => j._id === selectedId);
+    if (!listed) return;
+    setLiveJob((prev) => {
+      if (!prev || prev._id !== selectedId) return prev;
+      return {
+        ...prev,
+        status: listed.status,
+        progress_pct: listed.progress_pct ?? prev.progress_pct,
+        records_processed: listed.records_processed ?? prev.records_processed,
+        message: listed.message || listed.error || prev.message,
+      };
+    });
+  }, [jobs, selectedId]);
 
   const selected = jobs.find((j) => j._id === selectedId);
-  const isLive = selected?.status === "running" || selected?.status === "pending";
+  const isLive = Boolean(selected && LIVE_JOB_STATUSES.has(selected.status));
 
   useEffect(() => {
     if (!counts.running || !onRefresh) return;
@@ -396,6 +531,17 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       setSelectedId(result.job_id);
       onRefresh?.();
     } catch (e) {
+      if (e instanceof RetryRefusedError) {
+        // Retry re-reads the source from zero; the rows this attempt already
+        // committed would land a second time. Resume is the safe action.
+        toast({
+          title: "Retry refused \u2014 it would duplicate committed rows",
+          message: `${e.message} Use Resume from checkpoint instead.`,
+          tone: "warning",
+        });
+        setRetrying(false);
+        return;
+      }
       const msg = e instanceof Error ? e.message : "Retry failed";
       if (msg.includes("File uploads") || msg.includes("Transfer Studio")) {
         toast({ title: "Re-upload required", message: msg, tone: "warning" });
@@ -408,12 +554,107 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
 
+  const focusJob = useCallback((jobId: string) => {
+    const id = jobId.trim();
+    if (!id) return;
+    pinnedJobRef.current = id;
+    setFilter("all");
+    setJobSearch("");
+    setSelectedId(id);
+    onRefresh?.();
+    window.requestAnimationFrame(() => {
+      document.getElementById(`job-item-${id}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    });
+  }, [onRefresh]);
+
+  const handleSync = useCallback(async (mode: "sync" | "full") => {
+    if (!selectedId) return;
+    setRetrying(true);
+    try {
+      const staged = await stageJobSync(selectedId, mode);
+      const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
+      const contractId = String(liveJob?.transfer_request?.contract_id || "").trim();
+      const labels = jobEndpointLabels(liveJob, {
+        source: liveJob?.source_name || "",
+        dest: liveJob
+          ? `${liveJob.destination_database || ""}.${liveJob.destination_collection || ""}`
+          : "",
+      });
+      const accepted = await confirm({
+        title: mode === "full" ? "Re-sync from the start" : "Sync now",
+        message: [
+          staged.preview?.note || "This starts one child job from the signed contract.",
+          staged.preview?.destructive ? "This replaces the destination." : "",
+        ].filter(Boolean).join(" "),
+        confirmLabel: mode === "full" ? "Re-sync" : "Sync now",
+        cancelLabel: "Cancel",
+        tone: staged.preview?.destructive ? "danger" : "default",
+        facts: [
+          { label: "Contract", value: contractId || "Signed contract on this job" },
+          { label: "Source", value: labels.source || "Source on this job" },
+          { label: "Destination", value: labels.dest || "Destination on this job" },
+          {
+            label: "Mode",
+            value: formatSyncModeLabel(staged.preview?.sync_mode || liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode),
+          },
+        ],
+      });
+      if (!accepted) return;
+      const confirmed = await confirmCopilotAction({ ack_id: staged.ack_id, reason });
+      setBlockingJob(null);
+      if (confirmed.job_id) focusJob(confirmed.job_id);
+      toast({
+        title: confirmed.idempotent ? "Sync already started" : (mode === "full" ? "Full re-sync started" : "Sync started"),
+        message: confirmed.job_id
+          ? `Triggered from ${shortJobId(selectedId)}. Open the new job to follow it.`
+          : "One child job. A second click does not start another run.",
+        tone: "success",
+      });
+    } catch (e) {
+      if (e instanceof SyncAlreadyRunningError && e.existingJobId) {
+        setBlockingJob({
+          id: e.existingJobId,
+          status: e.existingStatus,
+          createdAt: e.existingCreatedAt,
+        });
+        focusJob(e.existingJobId);
+        toast({
+          title: "Already running",
+          message: `Already running: ${shortJobId(e.existingJobId)} (View)`,
+          tone: "warning",
+        });
+        return;
+      }
+      const msg = e instanceof Error ? e.message : "Sync failed";
+      toast({ title: "Sync failed", message: msg, tone: "error" });
+    } finally {
+      setRetrying(false);
+    }
+  }, [selectedId, toast, confirm, liveJob, focusJob]);
+
   const handleResume = useCallback(async () => {
-    if (!selectedId || !liveJob?.checkpoint) return;
+    if (!selectedId) return;
+    const gapRecovery = Boolean(liveJob?.cdc_cursor_gap);
+    if (!liveJob?.checkpoint && !gapRecovery) return;
     setResuming(true);
     try {
-      await resumeJob(selectedId);
-      toast({ title: "Resume started", message: `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`, tone: "success" });
+      const res = await resumeJob(selectedId);
+      // Full refresh restarts rather than continuing; promising a batch offset
+      // it will not use is the kind of detail that erodes trust in the report.
+      toast({
+        title: res.restarted ? "Transfer restarted" : "Resume started",
+        message:
+          res.message
+          || (res.restarted
+            ? (gapRecovery
+              ? "CDC cursor-gap recovery restarted — not a checkpoint continuation. Purged-window events are gone."
+              : "Full refresh re-run from the beginning — it replaces the destination.")
+            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${checkpointCommittedPhrase(liveJob?.checkpoint) || "no rows committed yet"}).`),
+        tone: "success",
+      });
       onRefresh?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Resume failed";
@@ -426,21 +667,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     } finally {
       setResuming(false);
     }
-  }, [selectedId, liveJob?.checkpoint, onRefresh, onStartTransfer, toast]);
-
-  const handleCancel = useCallback(async () => {
-    if (!selectedId) return;
-    setCancelling(true);
-    try {
-      await cancelJob(selectedId);
-      toast({ title: "Cancellation requested", message: "The job will stop at the next checkpoint.", tone: "info" });
-      onRefresh?.();
-    } catch (e) {
-      toast({ title: "Could not cancel job", message: e instanceof Error ? e.message : "Cancel failed", tone: "error" });
-    } finally {
-      setCancelling(false);
-    }
-  }, [selectedId, onRefresh, toast]);
+  }, [selectedId, liveJob?.checkpoint, liveJob?.cdc_cursor_gap, onRefresh, onStartTransfer, toast]);
 
   const beginRename = useCallback((job: TransferJob) => {
     setRenamingId(job._id);
@@ -517,16 +744,37 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     setRenameError(null);
   }, [selectedId]);
 
-  const jobMappings = liveJob?.transfer_request?.mappings ?? [];
+  const jobMappings = readJobMappings(liveJob);
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const ddlLog = liveJob?.ddl_executed ?? liveJob?.ddl_log ?? [];
   const sessionEvents = selectedId ? readJobEventLog(selectedId) : [];
-  const eventLog = (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [];
+  const eventLog = presentStoredEventLog(
+    (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [],
+    liveJob,
+  );
   const logLineCount = eventLog.length + ddlLog.length;
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
-  const rejectedCount = liveJob?.rejected_rows ?? 0;
-  const recon = liveJob?.reconciliation;
+  const streamHealth = readJobStreams(liveJob);
+  const streamNames = readJobStreamNames(liveJob);
+  const multiStream = streamNames.length >= 2;
+  const routeLabels = jobEndpointLabels(liveJob ?? selected, {
+    source: liveJob?.source_name || selected?.source_name || "",
+    dest: liveJob
+      ? `${liveJob.destination_database}.${liveJob.destination_collection}`
+      : selected
+        ? `${selected.destination_database}.${selected.destination_collection}`
+        : "",
+  });
+  const explanationText = presentStoredExplanation(liveJob?.explanation, liveJob);
+  const rejectedCount = readRejectedRows(liveJob);
+  const coercedCount = readCoercedNullRows(liveJob);
+  const rejectedDetails = readRejectedDetails(liveJob);
+  const recon = presentMultiStreamGate8(
+    liveJob?.reconciliation,
+    liveJob?.destination_summary,
+  );
   const gate8 = classifyGate8Status(recon);
+  const destMetric = destHeadline(liveJob);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
   const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
   const syncModeLabel = formatSyncModeLabel(
@@ -534,26 +782,33 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   );
   const jobPreflight = liveJob?.preflight;
   const openValidateInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    const rules = jobStudioDataRules(liveJob);
     openStudio({
       step: "validate",
       jobId: selectedId || liveJob?._id || undefined,
       mappings: jobRepairMappings,
       preflight: liveJob?.preflight,
-      validationMode: liveJob?.transfer_request?.validation_mode,
+      validationMode: rules.validationMode || undefined,
+      schemaPolicy: rules.schemaPolicy || undefined,
+      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const openMapInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    const rules = jobStudioDataRules(liveJob);
     openStudio({
       step: "map",
       jobId: selectedId || liveJob?._id || undefined,
       mappings: jobRepairMappings,
       preflight: liveJob?.preflight,
-      validationMode: liveJob?.transfer_request?.validation_mode,
+      validationMode: rules.validationMode || undefined,
+      schemaPolicy: rules.schemaPolicy || undefined,
+      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
+  const checksumNote = presentChecksumNote(destSummary.checksum_note, liveJob);
   const loadHistory =
     liveJob?.load_history_report
     || (destSummary.load_history_report && typeof destSummary.load_history_report === "object"
@@ -622,10 +877,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             completedAt: liveJob.completed_at,
             status: selected.status,
             retryOf: selected.retry_of,
-            phases: liveJob.phases,
+            phases: presentJobPhases(liveJob.phases, liveJob),
             notifications: liveJob.notifications,
             rejectedRows: liveJob.rejected_rows,
-            coercedNullRows: liveJob.coerced_null_rows,
+            coercedNullRows: coercedCount,
           })
         : [],
     [liveJob, selected],
@@ -648,9 +903,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             description="Run a transfer from Transfer Studio — live batch progress, phases, and proof reports appear here."
             action={
               onStartTransfer ? (
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => openStudio()}>
-                  <DtIcon name="transfer" size={14} /> Open Transfer Studio
-                </button>
+                <Button
+                  variant="primary"
+                  onClick={() => openStudio()}
+                  leadingIcon={<DtIcon name="transfer" size={14} />}
+                >
+                  Open Transfer Studio
+                </Button>
               ) : undefined
             }
           />
@@ -698,13 +957,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                     }
                   />
                 ) : (
-                  filtered.map((job) => {
-                    const route = jobRouteLabel(job);
+                  filtered.map((job, index) => {
+                    const fullRoute = jobRouteLabel(job);
                     const displayName = jobDisplayName(job, nameOverrides[job._id]);
-                    const isLiveRow = job.status === "running" || job.status === "pending";
+                    const route = displayName === fullRoute
+                      ? `${job.source_type || "source"} → ${job.destination_type || "destination"}`
+                      : fullRoute;
+                    const isLiveRow = LIVE_JOB_STATUSES.has(job.status);
                     return (
                       <button
-                        key={job._id}
+                        key={uniqueListKey(job._id, index, "job")}
                         id={`job-item-${job._id}`}
                         type="button"
                         role="listitem"
@@ -714,6 +976,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           job.status === "failed" ? "is-failed" : "",
                           isLiveRow ? "is-live" : "",
                         ].filter(Boolean).join(" ")}
+                        aria-current={selectedId === job._id ? "true" : undefined}
                         onClick={() => setSelectedId(job._id)}
                       >
                         <span className={`df2-job-row-status is-${job.status}`} aria-hidden>
@@ -727,8 +990,18 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                             </span>
                           </div>
                           <div className="df2-job-row-meta">
-                            <span className="df2-job-row-route-meta" title={route}>{route}</span>
-                            <span>{(job.records_processed ?? 0).toLocaleString()} rows</span>
+                            <span className="df2-job-row-route-meta" title={fullRoute}>{route}</span>
+                            {(() => {
+                              const rows = formatJobRowMetric(job);
+                              return (
+                                <span
+                                  className={`df2-job-row-rows ${destMetricToneClass(rows)}`}
+                                  title={rows.title}
+                                >
+                                  {destMetricCompact(rows)}
+                                </span>
+                              );
+                            })()}
                             <span>
                               {new Date(job.created_at).toLocaleString(undefined, {
                                 month: "short",
@@ -741,18 +1014,33 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           </div>
                           {isLiveRow && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
-                              <i style={{ width: `${job.progress_pct}%` }} />
+                              <i style={{ width: `${reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase)}%` }} />
                             </div>
+                          )}
+                          {isLiveRow && String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null && (
+                            <span className="df2-job-row-rows">Checksum {Math.min(99, Number(job.reconcile_pct))}%</span>
                           )}
                         </div>
                       </button>
                     );
                   })
                 )}
+                {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
-                {detailLoading ? (
+                {blockingJob && (
+                  <p className="df2-job-sync-block" role="status">
+                    Already running: <span title={blockingJob.id}>{shortJobId(blockingJob.id)}</span>
+                    {blockingJob.status ? ` (${jobStatusLabel(blockingJob.status)})` : ""}
+                    {blockingJob.createdAt ? ` · ${blockingJob.createdAt}` : ""}
+                    {" "}
+                    <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => focusJob(blockingJob.id)}>
+                      View
+                    </button>
+                  </p>
+                )}
+                {detailLoading && !selected && !liveJob ? (
                   <LoadingBlock title="Loading job details" size="md" variant="glass" />
                 ) : isLive && selected ? (
                   <div className="df2-jobs-v3-live">
@@ -771,24 +1059,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                         onSave={() => void commitRename(selected._id)}
                         onCancel={cancelRename}
                       />
-                      <div className="df2-jobs-v3-live-actions">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => void handleCancel()}
-                          disabled={cancelling}
-                          loading={cancelling}
-                          loadingLabel="Cancelling…"
-                          leadingIcon={<DtIcon name="x" size={14} />}
-                        >
-                          Cancel job
-                        </Button>
-                      </div>
+                      <JobLineageLinks
+                        parentId={liveJob?.parent_job_id || selected.parent_job_id}
+                        childId={liveJob?.last_sync_job_id || selected.last_sync_job_id}
+                        onOpen={focusJob}
+                      />
                     </div>
                     <JobTheater
                       jobId={selectedId!}
-                      sourceLabel={selected.source_name}
-                      destLabel={`${selected.destination_database}.${selected.destination_collection}`}
+                      sourceLabel={routeLabels.source}
+                      destLabel={routeLabels.dest}
                       sourceType={selected.source_type}
                       destType={selected.destination_type}
                       onComplete={handleComplete}
@@ -819,122 +1099,36 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           <ConnectorIcon id={selected.source_type} size={22} />
                           <div>
                             <span>Source</span>
-                            <strong>{liveJob.source_name || selected.source_name}</strong>
+                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                              {routeLabels.source}
+                            </strong>
                           </div>
                           <DtIcon name="transfer" size={14} />
                           <ConnectorIcon id={selected.destination_type} size={22} />
                           <div>
                             <span>Destination</span>
-                            <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
+                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                              {routeLabels.dest}
+                            </strong>
                           </div>
                         </div>
+                        <JobLineageLinks
+                          parentId={liveJob.parent_job_id || selected.parent_job_id}
+                          childId={liveJob.last_sync_job_id || selected.last_sync_job_id}
+                          onOpen={focusJob}
+                        />
                       </div>
                       <div className="df2-jobs-v3-summary-ids">
                         <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                        <span
+                          className={`df2-jobs-v3-summary-dest ${destMetricToneClass(destMetric)}`}
+                          title={destMetric.title}
+                        >
+                          {destMetricCompact(destMetric)}
+                        </span>
                         <CopyIdChip id={selected._id} label="Job" />
                       </div>
                     </header>
-
-                    <div className="df2-jobs-v3-summary-metrics" role="group" aria-label="Job metrics">
-                      <article className="is-metric-rows">
-                        <strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong>
-                        <span>Rows</span>
-                      </article>
-                      <article className="is-metric-progress">
-                        <strong>{liveJob.progress_pct ?? 100}%</strong>
-                        <span>Progress</span>
-                      </article>
-                      <article className="is-metric-columns">
-                        <strong>{mappingCount || "—"}</strong>
-                        <span>Columns</span>
-                      </article>
-                      <article
-                        className="is-metric-mode"
-                        title={liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}
-                      >
-                        <strong>
-                          {(() => {
-                            const mode = String(liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer");
-                            const short: Record<string, string> = {
-                              full_refresh_overwrite: "overwrite",
-                              full_refresh_append: "append",
-                              incremental_append: "incr append",
-                              incremental_upsert: "upsert",
-                              cdc: "CDC",
-                              migration: "migration",
-                            };
-                            return short[mode.toLowerCase()] || (mode.length > 12 ? `${mode.slice(0, 10)}…` : mode);
-                          })()}
-                        </strong>
-                        <span>Mode</span>
-                      </article>
-                      <article className={`is-metric-quarantine${rejectedCount > 0 ? " is-warn" : ""}`}>
-                        <strong>{rejectedCount.toLocaleString()}</strong>
-                        <span>Quarantined</span>
-                      </article>
-                      <article className={`is-metric-coerced${Number(liveJob.coerced_null_rows ?? 0) > 0 ? " is-warn" : ""}`}>
-                        <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
-                        <span>Coerced</span>
-                      </article>
-                      <article
-                        className={`is-metric-reconcile${
-                          gate8.tone === "ok"
-                            ? " is-ok"
-                            : gate8.tone === "danger" || selected.status === "failed"
-                              ? " is-bad"
-                              : gate8.tone === "warn"
-                                ? " is-warn"
-                                : ""
-                        }`}
-                      >
-                        <strong>
-                          {gate8.label !== "Pending"
-                            ? gate8.label
-                            : isJobSuccess(liveJob.status)
-                              ? "Pending"
-                              : selected.status === "failed"
-                                ? "Failed"
-                                : "—"}
-                        </strong>
-                        <span>Reconcile</span>
-                      </article>
-                      {jobDuration && (
-                        <article className="is-metric-duration">
-                          <strong>{jobDuration}</strong>
-                          <span>Duration</span>
-                        </article>
-                      )}
-                      {triggeredBy && (
-                        <article className="is-metric-actor">
-                          <strong title={triggeredBy}>
-                            {triggeredBy.includes("@") ? triggeredBy.split("@")[0] : triggeredBy}
-                          </strong>
-                          <span>Run by</span>
-                        </article>
-                      )}
-                      {syncModeLabel !== "—" && (
-                        <article className="is-metric-mode">
-                          <strong title={syncModeLabel}>{syncModeLabel}</strong>
-                          <span>Sync mode</span>
-                        </article>
-                      )}
-                      {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
-                        <article className="is-metric-cdc">
-                          <strong>{`${Number(liveJob.cdc_lag_seconds).toFixed(1)}s`}</strong>
-                          <span>CDC lag</span>
-                        </article>
-                      )}
-                      {liveJob.replication_lag_bytes != null && Number.isFinite(Number(liveJob.replication_lag_bytes)) && (
-                        <article className="is-metric-wal">
-                          <strong>
-                            {Number(liveJob.replication_lag_bytes) >= 1_048_576
-                              ? `${(Number(liveJob.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
-                              : `${Number(liveJob.replication_lag_bytes).toLocaleString()} B`}
-                          </strong>
-                          <span>WAL</span>
-                        </article>
-                      )}
-                    </div>
 
                     <div className="df2-jobs-detail-card">
                       <div className="df2-jobs-detail-tabs" role="tablist" aria-label="Job detail sections">
@@ -977,8 +1171,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                               Overview of this run. Open evidence panels from the right for Gate-8,
                               run metadata, timeline, and logs — keep this pane scannable.
                             </JobOverviewNote>
+                            <ConservationLedgerCard
+                              job={liveJob}
+                              onOpenValidate={() => openValidateInStudio()}
+                            />
+                            <RunCarryNotes job={liveJob} />
+                            <SchemaFidelityNotes job={liveJob} />
+                            <IdentityAlignmentNote job={liveJob} />
                             <JobTrustScoreCard
                               job={liveJob}
+                              onOpenGate8={recon ? () => setEvidenceDrawer("gate8") : undefined}
                               onOpenQuarantine={
                                 showQuarantineTab ? () => setDetailTab("quarantine") : undefined
                               }
@@ -996,7 +1198,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 {
                                   id: "gate8",
                                   title: "Gate-8 reconcile",
-                                  description: "Source vs destination row counts and checksums",
+                                  description: "Dest-before delta, row counts, and checksums",
                                   icon: "shield",
                                   meta: recon
                                     ? gate8.label
@@ -1196,11 +1398,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
 
                             <CdcCursorGapPanel
                               job={liveJob}
-                              onResume={
-                                liveJob.checkpoint || liveJob.chunk_current != null
-                                  ? () => void handleResume()
-                                  : undefined
-                              }
+                              onResume={() => void handleResume()}
                             />
                             <CdcRetentionPanel
                               status={liveJob.cdc_retention_status}
@@ -1214,12 +1412,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   ? () => void handleResume()
                                   : undefined
                               }
+                              hideGap={Boolean(liveJob.cdc_cursor_gap)}
                             />
                             {(liveJob.cdc_plugin || liveJob.watermark || liveJob.cdc_delivery || liveJob.sync_mode === "cdc") && (
                               <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
                             )}
 
-                            {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
+                            {isJobSuccess(selected.status) && ((rejectedCount - coercedCount) > 0 || coercedCount > 0) && (
                               <div className="df2-data-integrity" role="note">
                                 <header className="df2-data-integrity-head">
                                   <DtIcon name="alert" size={16} />
@@ -1230,12 +1429,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 </header>
                                 <div className="df2-data-integrity-metrics">
                                   <article className="df2-data-integrity-metric is-dropped">
-                                    <strong>{Math.max(rejectedCount - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
+                                    <strong>{Math.max(rejectedCount - coercedCount, 0).toLocaleString()}</strong>
                                     <span>Rows held out (quarantine)</span>
                                     <small>Not written to the primary table — not silently dropped or NULL-invented.</small>
                                   </article>
                                   <article className="df2-data-integrity-metric is-coerced">
-                                    <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                    <strong>{coercedCount.toLocaleString()}</strong>
                                     <span>Values coerced to NULL</span>
                                     <small>coerce_null policy only — row kept with a NULL cell; original value not in primary.</small>
                                   </article>
@@ -1339,7 +1538,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 </article>
                                 <article className="df2-jobs-quarantine-metric">
                                   <span>Coerced to NULL</span>
-                                  <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                  <strong>{coercedCount.toLocaleString()}</strong>
                                 </article>
                               </div>
                             </section>
@@ -1383,18 +1582,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 },
                                 {
                                   id: "streams",
-                                  title: "CDC streams",
-                                  description: "Per-stream lag and watermark",
+                                  title: "Streams",
+                                  description: "Per-stream dest COUNT(*) and watermarks",
                                   icon: "zap",
-                                  meta: Array.isArray(liveJob.streams) && liveJob.streams.length
-                                    ? `${liveJob.streams.length}`
-                                    : undefined,
-                                  disabled: !(Array.isArray(liveJob.streams) && liveJob.streams.length > 0),
+                                  meta: streamHealth.length ? `${streamHealth.length}` : undefined,
+                                  disabled: streamHealth.length === 0,
                                   onOpen: () => setEvidenceDrawer("streams"),
                                 },
                               ]}
                             />
-                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && (
+                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && streamHealth.length === 0 && (
                               <EmptyState
                                 compact
                                 icon="jobs"
@@ -1407,6 +1604,28 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                       </div>
 
                       <div className="df2-jobs-detail-footer" role="navigation" aria-label="Job actions">
+                        {detailTab === "detail" && isJobSuccess(selected.status) && (
+                          <div className="df2-jobs-v3-actions">
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-primary"
+                              onClick={() => void handleSync("sync")}
+                              disabled={retrying}
+                              title="Reuses the signed contract. One confirm. A second click does not start another run."
+                            >
+                              <DtIcon name="activity" size={16} /> Sync now
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("full")}
+                              disabled={retrying}
+                              title="Re-reads from the start on the signed contract. Upserts when a key exists."
+                            >
+                              Re-sync (full)
+                            </button>
+                          </div>
+                        )}
                         {detailTab === "detail" && selected.status === "failed" && (
                           <div className="df2-jobs-v3-actions">
                             {duplicateKeyFailure && onStartTransfer && (
@@ -1445,6 +1664,24 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 : (
                                   <><DtIcon name="transfer" size={16} /> Retry from start</>
                                 )}
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("sync")}
+                              disabled={retrying}
+                              title="Reuses the signed contract. One confirm. A second click does not start another run."
+                            >
+                              Sync now
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("full")}
+                              disabled={retrying}
+                              title="Re-reads from the start on the signed contract. Upserts when a key exists."
+                            >
+                              Re-sync (full)
                             </button>
                             {onStartTransfer && (
                               <button
@@ -1532,7 +1769,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
         >
           <Gate8ProofCard
             report={recon}
-            explanation={liveJob.explanation}
+            explanation={explanationText}
             jobId={selectedId || liveJob._id}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
@@ -1605,7 +1842,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             <ul className="df2-jobs-preflight-blockers">
               {jobPreflight.blockers.slice(0, 8).map((b) => (
                 <li key={b.id}>
-                  <strong>{b.id}</strong> — {b.message}
+                  <strong title={b.id}>{blockerTitle(b.id, b.message)}</strong> — {b.message}
                   {b.guidance?.fix ? <span className="df2-muted"> Fix: {b.guidance.fix}</span> : null}
                 </li>
               ))}
@@ -1646,7 +1883,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                 <dd>
                   batch {liveJob.checkpoint.chunk_index ?? 0}
                   {liveJob.checkpoint.rows_processed != null
-                    ? ` · ${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows committed`
+                    ? ` · ${checkpointCommittedPhrase(liveJob.checkpoint)}`
                     : ""}
                   {liveJob.checkpoint.updated_at
                     ? ` · updated ${String(liveJob.checkpoint.updated_at)}`
@@ -1656,7 +1893,20 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               </div>
             )}
             {typeof destSummary.load_method === "string" && destSummary.load_method && (
-              <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
+              <div>
+                <dt>Load method</dt>
+                <dd title={loadMethodDescription(String(destSummary.load_method))}>
+                  {loadMethodLabel(String(destSummary.load_method))}
+                </dd>
+              </div>
+            )}
+            {typeof destSummary.copy_decline_reason === "string" && destSummary.copy_decline_reason && (
+              <div>
+                <dt>COPY declined</dt>
+                <dd title={destSummary.copy_decline_reason}>
+                  {destSummary.copy_decline_reason}
+                </dd>
+              </div>
             )}
             {typeof destSummary.chunk_policy === "object" && destSummary.chunk_policy !== null ? (
               <div>
@@ -1678,22 +1928,50 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             )}
             {(typeof destSummary.table === "string" || typeof destSummary.collection === "string") && (
               <div>
-                <dt>Table / collection</dt>
-                <dd>{String(destSummary.table || destSummary.collection)}</dd>
+                <dt>{multiStream ? "Last stream table" : "Table / collection"}</dt>
+                <dd>
+                  {String(destSummary.table || destSummary.collection)}
+                  {multiStream ? ` · job is ${formatStreamNames(streamNames)}` : ""}
+                </dd>
               </div>
             )}
             {typeof destSummary.checksum === "string" && destSummary.checksum && (
-              <div><dt>Writer checksum</dt><dd className="df2-mono">{String(destSummary.checksum)}</dd></div>
+              <div>
+                <dt>{multiStream ? "Last stream writer checksum" : "Writer checksum"}</dt>
+                <dd className="df2-mono">{String(destSummary.checksum)}</dd>
+              </div>
+            )}
+            {checksumNote && (
+              <div>
+                <dt>{multiStream ? "Last stream checksum note" : "Checksum note"}</dt>
+                <dd>{checksumNote}</dd>
+              </div>
             )}
           </dl>
+          <EmbeddingUsageSummary destinationSummary={destSummary} />
           <PhaseProfileCard
+            scopeNote={
+              multiStream
+                ? `Timing is the last stream (${typeof destSummary.table === "string" && destSummary.table ? destSummary.table : streamNames[streamNames.length - 1]}). A re-read is counted again. These phase rows are not the job total.`
+                : null
+            }
             profile={
               destSummary.phase_profile && typeof destSummary.phase_profile === "object"
                 ? (destSummary.phase_profile as PhaseProfileReport)
                 : null
             }
+            engineSeconds={
+              typeof destSummary.elapsed_seconds === "number" && Number.isFinite(destSummary.elapsed_seconds)
+                ? destSummary.elapsed_seconds
+                : null
+            }
           />
           <ReplaySafetyCard
+            scopeNote={
+              multiStream
+                ? `This verdict is the last stream (${typeof destSummary.table === "string" && destSummary.table ? destSummary.table : streamNames[streamNames.length - 1]}). It is not a retry guarantee for every table.`
+                : null
+            }
             report={
               destSummary.replay_safety && typeof destSummary.replay_safety === "object"
                 ? (destSummary.replay_safety as ReplaySafetyReport)
@@ -1760,13 +2038,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             {(liveJob.schema_policy || liveJob.transfer_request?.schema_policy) && (
               <div>
                 <dt>Schema policy</dt>
-                <dd>{formatSyncModeLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
+                <dd>{formatSchemaPolicyLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
               </div>
             )}
             {(liveJob.validation_mode || liveJob.transfer_request?.validation_mode) && (
               <div>
                 <dt>Validation</dt>
-                <dd>{formatSyncModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
+                <dd>{formatValidationModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
               </div>
             )}
             {liveJob.watermark && (
@@ -1802,7 +2080,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <div><dt>CDC topology</dt><dd>Shared log reader (one slot / server_id)</dd></div>
             )}
             {liveJob.snapshot_mode && (
-              <div><dt>Snapshot mode</dt><dd>{liveJob.snapshot_mode}</dd></div>
+              <div>
+                <dt>Snapshot mode</dt>
+                <dd>
+                  {liveJob.snapshot_mode}
+                  {liveJob.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+                </dd>
+              </div>
             )}
             {(liveJob.cdc_lease_holder || liveJob.cdc_lease_conflict) && (
               <div>
@@ -1857,6 +2141,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <table className="df2-table">
                 <thead>
                   <tr>
+                    {jobMappings.some((m) => m.stream) ? <th>Stream</th> : null}
                     <th>Source</th>
                     <th>Target</th>
                     <th>Type</th>
@@ -1866,21 +2151,22 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                 <tbody>
                   {jobMappings.length > 0
                     ? jobMappings.map((m, i) => {
-                        const src = String(m.source ?? m.source_column ?? "").trim() || "—";
-                        const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
+                        const src = m.source || "—";
+                        const tgt = m.target || "—";
                         const typ =
                           columnTypes[src]
-                          ?? m.source_type
-                          ?? m.target_type
-                          ?? columnTypes[tgt]
-                          ?? columnTypes[src.toLowerCase()]
-                          ?? columnTypes[tgt.toLowerCase()]
-                          ?? "—";
-                        const conf = typeof m.confidence === "number"
+                          || m.sourceType
+                          || m.targetType
+                          || columnTypes[tgt]
+                          || columnTypes[src.toLowerCase()]
+                          || columnTypes[tgt.toLowerCase()]
+                          || "—";
+                        const conf = m.confidence != null
                           ? `${Math.round(m.confidence * 100)}%`
                           : "—";
                         return (
-                          <tr key={`${src}-${tgt}-${i}`}>
+                          <tr key={`${m.stream}-${src}-${tgt}-${i}`}>
+                            {jobMappings.some((row) => row.stream) ? <td>{m.stream || "—"}</td> : null}
                             <td title={src}>{src}</td>
                             <td title={tgt}>{tgt}</td>
                             <td className="df2-cell-mono" title={typ}>{typ}</td>
@@ -1913,11 +2199,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             setMappingProofOpen(false);
           }}
           proof={mappingProof}
-          sourceLabel={liveJob.source_name}
+          sourceLabel={routeLabels.multi ? routeLabels.source : liveJob.source_name}
           destLabel={
-            liveJob.destination_collection
-            || liveJob.destination_database
-            || liveJob.destination_type
+            routeLabels.multi
+              ? routeLabels.dest
+              : (
+                liveJob.destination_collection
+                || liveJob.destination_database
+                || liveJob.destination_type
+              )
           }
         />
       )}
@@ -1957,49 +2247,20 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           icon={<DtIcon name="book" size={18} />}
           size="lg"
         >
-          <JobExplanationView text={liveJob.explanation} />
+          <JobExplanationView text={explanationText} />
         </Drawer>
       )}
 
-      {liveJob && evidenceDrawer === "streams" && Array.isArray(liveJob.streams) && (
+      {liveJob && evidenceDrawer === "streams" && streamHealth.length > 0 && (
         <Drawer
           open
           onClose={() => setEvidenceDrawer(null)}
-          title="CDC stream health"
-          subtitle={`${liveJob.streams.length} stream(s)`}
+          title="Stream conservation"
+          subtitle={`${streamHealth.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
           size="lg"
         >
-          <table className="df2-table df2-jobs-cdc-table">
-            <thead>
-              <tr>
-                <th>Stream</th>
-                <th>Status</th>
-                <th>Records</th>
-                <th>Lag</th>
-                <th>Watermark</th>
-              </tr>
-            </thead>
-            <tbody>
-              {liveJob.streams.map((s) => (
-                <tr key={s.name}>
-                  <td>{s.name}</td>
-                  <td>{s.status || "—"}</td>
-                  <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
-                  <td>
-                    {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))
-                      ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
-                      : "—"}
-                  </td>
-                  <td className="df2-cell-mono" title={s.watermark || ""}>
-                    {s.watermark
-                      ? `${String(s.watermark).slice(0, 40)}${String(s.watermark).length > 40 ? "…" : ""}`
-                      : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <StreamHealthTable streams={streamHealth} />
         </Drawer>
       )}
 
@@ -2018,14 +2279,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
         >
           <QuarantinePanel
             jobId={selectedId}
-            rejectedRows={liveJob.rejected_rows}
-            coercedNullRows={liveJob.coerced_null_rows}
-            initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
-            truncatedDetails={
-              liveJob.rejected_details_truncated
-              ?? (liveJob.destination_summary as { rejected_details_truncated?: number } | undefined)
-                ?.rejected_details_truncated
-            }
+            rejectedRows={rejectedCount}
+            coercedNullRows={coercedCount}
+            initialDetails={rejectedDetails}
+            truncatedDetails={Math.max(0, readRejectedDetailsTotal(liveJob) - (rejectedDetails?.length ?? 0))}
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}

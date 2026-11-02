@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -59,8 +56,10 @@ class TestTombstoneDetectionIsConservative:
 
         assert _is_tombstone_set({"is_deleted": True}, "is_deleted") is True
         assert _is_tombstone_set({"is_deleted": False}, "is_deleted") is False
-        assert _is_tombstone_set({"is_deleted": "yes"}, "is_deleted") is True
+        assert _is_tombstone_set({"is_deleted": "true"}, "is_deleted") is True
         assert _is_tombstone_set({"is_deleted": "0"}, "is_deleted") is False
+        # Informal yes is not a write-path boolean — fail closed to present.
+        assert _is_tombstone_set({"is_deleted": "yes"}, "is_deleted") is False
 
     def test_deleted_at_null_means_alive(self) -> None:
         from src.transfer.cdc_transfer import _is_tombstone_set
@@ -509,6 +508,46 @@ class TestCancelRaceIsClosed:
             )
         assert ok is True
         fake_coll.update_one.assert_called_once()
+
+    def test_cancelled_blocks_completed_update(self) -> None:
+        """A late COPY success must not rewrite Cancel to completed."""
+        from services.mongodb_service import MongoDBService
+
+        svc = MongoDBService.__new__(MongoDBService)
+        fake_coll = MagicMock()
+        fake_coll.find_one.return_value = {"status": "cancelled", "event_log": []}
+        fake_db = MagicMock()
+        fake_db.__getitem__.return_value = fake_coll
+        with patch.object(svc, "get_database", return_value=fake_db), patch(
+            "services.mongodb_service._as_object_id", return_value="oid"
+        ):
+            ok = svc.update_job_status(
+                "job-1", "completed", records_processed=800, message="Done"
+            )
+        assert ok is False
+        fake_coll.update_one.assert_not_called()
+
+    def test_cancel_requested_blocks_completed_while_still_running(self) -> None:
+        """Flag-first cancel: worker completed write lands after request_job_cancel."""
+        from services.mongodb_service import MongoDBService
+
+        svc = MongoDBService.__new__(MongoDBService)
+        fake_coll = MagicMock()
+        fake_coll.find_one.return_value = {
+            "status": "running",
+            "cancel_requested": True,
+            "event_log": [],
+        }
+        fake_db = MagicMock()
+        fake_db.__getitem__.return_value = fake_coll
+        with patch.object(svc, "get_database", return_value=fake_db), patch(
+            "services.mongodb_service._as_object_id", return_value="oid"
+        ):
+            ok = svc.update_job_status(
+                "job-1", "completed", records_processed=800, message="Done"
+            )
+        assert ok is False
+        fake_coll.update_one.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

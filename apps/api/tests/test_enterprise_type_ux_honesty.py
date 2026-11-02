@@ -78,12 +78,13 @@ def test_uuid_create_new_string_sink_stamps_domain_risk():
     from services.type_system import assess_create_new_type_risk, create_new_mapping_target_type
 
     stamp = create_new_mapping_target_type("UUID", "bigquery")
-    assert stamp == "STRING"
+    # Width-preserving STRING(36) or bare STRING — both are string sinks.
+    assert stamp.upper().startswith("STRING")
     kinds = {r["kind"] for r in assess_create_new_type_risk("UUID", stamp, destination_db_type="bigquery")}
     assert "uuid_domain" in kinds or "precision_collapse" in kinds or "lossy_coercion" in kinds
 
 
-def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
+def _mysql_create_new_row(inferred_type: str, sample: str = "2024-01-01T00:00:00Z") -> dict:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
@@ -91,8 +92,8 @@ def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
         target_columns=[],
         source_schemas=[{
             "name": "created_at",
-            "inferred_type": "TIMESTAMPTZ",
-            "samples": ["2024-01-01T00:00:00Z"],
+            "inferred_type": inferred_type,
+            "samples": [sample],
         }],
         destination_db_type="mysql",
         destination_table_exists=False,
@@ -100,6 +101,35 @@ def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
     )
     row = result["mappings"][0]
     assert row.get("create_new") is True
+    return row
+
+
+def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
+    """Nanoseconds in the data into MySQL's microsecond carrier drop three digits.
+
+    DATETIME(6) is still the right carrier (no 2038 cap), but a source whose
+    cells hold nine fractional digits loses real digits, so the drop needs the
+    Risk Contract. A declared ``(9)`` whose sampled cells all fit loses nothing
+    and needs none (D49).
+    """
+    row = _mysql_create_new_row("TIMESTAMPTZ(9)", sample="2024-01-01T00:00:00.123456789Z")
+    assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
+    assert row.get("requires_risk_contract") is True
+    kinds = {r.get("kind") for r in row.get("create_new_risks") or []}
+    assert "precision_collapse" in kinds
+    assert "instant_range_cap" not in kinds
+
+
+def test_create_new_mysql_timestamptz_keeps_the_instant_and_names_its_ceiling():
+    """Cross-engine TIMESTAMPTZ create-new on MySQL is DATETIME(6).
+
+    TIMESTAMP(6) would refuse instants outside 1970..2038. DATETIME(6) stores
+    the UTC clock, so Map does not warn about that ceiling and does not
+    demand a Risk Contract.
+    """
+    row = _mysql_create_new_row("TIMESTAMPTZ")
+    assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
     risks = row.get("create_new_risks") or []
-    assert risks, row
-    assert row.get("requires_review") is True
+    assert "instant_range_cap" not in {r.get("kind") for r in risks}
+    assert row.get("requires_risk_contract") is False
+    assert str(row.get("fidelity") or "").lower() in {"", "preserve", "lossless"}

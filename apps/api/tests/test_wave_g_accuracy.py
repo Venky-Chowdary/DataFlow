@@ -48,7 +48,8 @@ def test_bq_field_preserves_struct_and_array():
         precision=None,
         scale=None,
     )
-    assert _bq_field_to_logical(loc) == "STRUCT<lat:FLOAT, lon:FLOAT>"
+    # BigQuery FLOAT64 is a 64-bit carrier — never collapse to bare FLOAT/FLOAT32.
+    assert _bq_field_to_logical(loc) == "STRUCT<lat:FLOAT64, lon:FLOAT64>"
     assert _bq_field_to_logical(tags) == "ARRAY<TEXT>"
 
 

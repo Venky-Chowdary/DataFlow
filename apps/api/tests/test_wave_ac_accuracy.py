@@ -36,9 +36,10 @@ def test_upsert_without_primary_key_refuses_insert_fallback():
 
 
 def test_scd2_refuses_invented_conflict_key():
-    stream_src = Path(_API_ROOT / "src/transfer/stream.py").read_text()
-    assert "refuse inventing a conflict key" in stream_src
-    assert "conflict_columns = [target_cols[0]]" not in stream_src
+    # The SCD2/mirror path owns this guard (extracted from stream.py).
+    scd2_src = Path(_API_ROOT / "src/transfer/stream_scd2.py").read_text()
+    assert "refuse inventing a conflict key" in scd2_src
+    assert "conflict_columns = [target_cols[0]]" not in scd2_src
 
 
 def test_get_file_chunks_json_unions_sparse_late_keys(tmp_path, monkeypatch):

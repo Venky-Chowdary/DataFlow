@@ -1,18 +1,40 @@
 """Transform engine unit tests."""
 
+from decimal import Decimal
+
 import pytest
 
-from services.transform_engine import apply_transform, dry_run_sample, infer_transform, preview_quarantine_cells
+from services.transform_engine import apply_transform, dry_run_sample, preview_quarantine_cells
 
 
 def test_infer_decimal_for_amount():
-    assert infer_transform("AMT", "payment_amount", "VARCHAR") == "decimal"
+    from services.transform_engine import infer_transform_for_mapping
+
+    # Numeric destination: amount heuristic may select decimal.
+    assert (
+        infer_transform_for_mapping("AMT", "payment_amount", "VARCHAR", "DECIMAL")
+        == "decimal"
+    )
+    # TEXT sink: never invent a decimal cast that strips currency markers.
+    assert (
+        infer_transform_for_mapping("AMT", "payment_amount", "VARCHAR", "VARCHAR")
+        == "none"
+    )
+
+
+def test_infer_no_url_invent_on_text_image_column():
+    """MySQL image VARCHAR → Postgres TEXT must not invent url (empty→quarantine tax)."""
+    from services.transform_engine import infer_transform_for_mapping
+
+    assert infer_transform_for_mapping("image", "image", "VARCHAR", "TEXT") == "none"
+    assert infer_transform_for_mapping("image", "image", "VARCHAR", "VARCHAR") == "none"
+    assert infer_transform_for_mapping("email", "email", "VARCHAR", "TEXT") == "none"
 
 
 def test_apply_decimal():
     val, err = apply_transform("1,234.50", "decimal")
     assert err is None
-    assert val == "1234.50"
+    assert Decimal(str(val)) == Decimal("1234.50")
 
 
 def test_apply_date():
@@ -102,6 +124,22 @@ def test_dry_run_reports_multiple_errors_per_mapping():
     assert sum(1 for e in errors if "Invalid decimal" in e) >= 3
 
 
+def test_file_dry_run_holds_out_a_mixed_column():
+    """A file load quarantines the bad rows instead of failing the sample."""
+    rows = [["1.00"], ["2.00"], ["bad-a"], ["3.00"], ["bad-b"], ["bad-c"], ["4.00"]]
+    ok, errors = dry_run_sample(
+        headers=["AMT"],
+        sample_rows=rows,
+        mappings=[{"source": "AMT", "target": "payment_amount", "transform": "decimal"}],
+        column_types={"AMT": "DECIMAL"},
+        file_row_quarantine=True,
+    )
+    assert not ok
+    assert len(errors) == 1
+    assert errors[0].startswith("holdout AMT→payment_amount:")
+    assert "3 sample row(s)" in errors[0]
+
+
 def test_apply_hash_pii_is_deterministic(monkeypatch):
     monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "unit-test-pii-key")
     val, err = apply_transform("secret@email.com", "hash_pii")
@@ -115,9 +153,25 @@ def test_apply_hash_pii_is_deterministic(monkeypatch):
 def test_hash_pii_fails_closed_without_secret(monkeypatch):
     monkeypatch.delenv("DATAFLOW_PII_HASH_KEY", raising=False)
     monkeypatch.delenv("DATAFLOW_SECRET", raising=False)
+    # Round 8: keys are per-workspace and auto-provisioned; "no key" now means
+    # the key store cannot answer, and the message names no infrastructure.
+    from services import pii_hash_keys
+
+    def _unavailable(_workspace_id):
+        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
+
+    monkeypatch.setattr(pii_hash_keys, "workspace_key", _unavailable)
     val, err = apply_transform("secret@email.com", "hash_pii")
     assert val is None
-    assert err and "DATAFLOW_PII_HASH_KEY" in err
+    assert err and "hashing key" in err and "PII_HASH_KEY" not in err
+
+
+def test_apply_redact_replaces_the_cell():
+    from services.transform_engine import REDACTED_PLACEHOLDER
+
+    val, err = apply_transform("Alice Patient", "redact")
+    assert err is None
+    assert val == REDACTED_PLACEHOLDER
 
 
 def test_apply_uuid_validates():
@@ -131,17 +185,23 @@ def test_apply_uuid_validates():
 
 
 def test_apply_decimal_accounting_and_scientific():
+    # An explicit decimal cast parses accounting parentheses and currency
+    # markers. Inference still does not treat a marked token as an integer
+    # (R4-D07). Scientific notation is still a number.
     val, err = apply_transform("(1,234.56)", "decimal")
     assert err is None
-    assert val == "-1234.56"
+    assert Decimal(val) == Decimal("-1234.56")
 
     val2, err2 = apply_transform("1.5e3", "decimal")
     assert err2 is None
-    assert val2 == "1500"
+    assert Decimal(str(val2)) == Decimal("1500")
 
     val3, err3 = apply_transform("$10,000.00", "decimal")
     assert err3 is None
-    assert val3 == "10000.00"
+    assert Decimal(val3) == Decimal("10000.00")
+    parsed, perr = apply_transform("$10,000.00", "currency")
+    assert perr is None
+    assert Decimal(parsed) == Decimal("10000.00")
 
 
 def test_unknown_transform_fails_closed():

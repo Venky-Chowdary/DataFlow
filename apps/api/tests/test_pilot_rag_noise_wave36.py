@@ -67,3 +67,14 @@ def test_followups_do_not_suggest_fake_logistics():
     agent = DataPilotAgent()
     prompts = agent._follow_ups("hello", PilotTurn())
     assert not any("logistics" in p.lower() for p in prompts)
+
+
+def test_followups_after_product_answer_skip_retail_chip():
+    from src.ai.copilot.pilot_agent import DataPilotAgent, PilotTurn
+    from src.ai.copilot.tools import ToolResult
+
+    turn = PilotTurn()
+    turn.tool_results.append(ToolResult(name="explain_product", success=True, output={}))
+    prompts = DataPilotAgent()._follow_ups("tell me about cdc exactly once matrix", turn)
+    assert not any("retail" in p.lower() for p in prompts)
+    assert "Give me a workspace briefing" in prompts

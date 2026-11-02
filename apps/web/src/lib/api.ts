@@ -1,8 +1,25 @@
-import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
-import { clearSession, getAuthToken } from "./session";
+import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
+import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
+import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
+import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
+import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionActor, readSession } from "./session";
+import { getActiveWorkspaceId } from "./workspace";
+import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
+import { readOptionsPayload } from "./readOptions";
+import type { RuleCompileReport } from "./businessRules";
+import type {
+  ShapeCatalog,
+  ShapePreviewResponse,
+  ShapeProfileResponse,
+  ShapeRecipeWire,
+  ShapeStepWire,
+} from "./shape";
+import { slimPreflightForExplain } from "./slimPreflightForExplain";
+
+export { refusalSentence };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
-const LONG_REQUEST_TIMEOUT_MS = 120000;
+const LONG_REQUEST_TIMEOUT_MS = 180000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
 let _healthFailStreak = 0;
@@ -83,27 +100,126 @@ function notifyAuthRequired(requestUrl: string) {
   }
 }
 
-async function parseApiError(res: Response, fallback: string): Promise<string> {
-  try {
-    const data = await res.json();
-    const detail = data.detail ?? data.error ?? data.message;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") {
-      if (typeof detail.error === "string") return detail.error;
-      if (typeof detail.message === "string") return detail.message;
-    }
-    return fallback;
-  } catch {
-    return fallback;
+/**
+ * A refusal that keeps the status that caused it.
+ *
+ * A 403 is not a transport failure and must not be rendered as one, nor —
+ * as this client used to — replaced with plausible-looking defaults. Callers
+ * check {@link ApiError.forbidden} to say "you do not have permission" and name
+ * the permission the API asked for.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly requiredPermission: string;
+  readonly effectiveRole: string;
+  /** Machine code + pending-challenge handle from the {error:{code}} envelope,
+   * when the route emits one (e.g. 403 email_unverified carries challenge_id). */
+  readonly code: string;
+  readonly challengeId: string;
+
+  constructor(message: string, status: number, requiredPermission = "", effectiveRole = "", code = "", challengeId = "") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.requiredPermission = requiredPermission;
+    this.effectiveRole = effectiveRole;
+    this.code = code;
+    this.challengeId = challengeId;
+  }
+
+  get forbidden(): boolean {
+    return this.status === 403;
   }
 }
 
-async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
+export function isForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.forbidden;
+}
+
+/** The API's own reason for a non-OK response, plus the 403 metadata it carries. */
+async function readApiRefusal(
+  res: Response,
+  fallback: string,
+): Promise<{ detail: string; permission: string; role: string }> {
+  let detail = fallback;
+  let permission = "";
+  let role = "";
+  try {
+    const data = await res.clone().json();
+    permission = typeof data?.required_permission === "string" ? data.required_permission : "";
+    role = typeof data?.effective_role === "string" ? data.effective_role : "";
+    const raw = data?.detail ?? data?.error ?? data?.message;
+    if (typeof raw === "string" && raw.trim()) detail = raw;
+    else if (raw && typeof raw === "object") {
+      if (typeof raw.error === "string") detail = raw.error;
+      else if (typeof raw.message === "string") detail = raw.message;
+    }
+  } catch {
+    /* keep the fallback */
+  }
+  if (res.status === 502 || res.status === 504) {
+    if (detail === fallback || /<html/i.test(detail)) {
+      detail = (
+        `Control plane timed out (HTTP ${res.status}) while Validate was running. `
+        + `Re-run Validate. Execute stays locked.`
+      );
+    }
+  }
+  if (res.status === 403) {
+    // A denial the gate phrased for itself is rewritten for the person reading
+    // it — but only when a permission is actually identified. Not every 403 is a
+    // role problem: rewriting an unnamed one invented "ask a workspace admin for
+    // the editor role" for a mistyped current password, hiding the real reason.
+    const named = permissionFromRefusal(detail, permission);
+    if (named) {
+      detail = refusalSentence(named, role);
+      permission = named;
+    }
+  }
+  return { detail, permission, role };
+}
+
+/** Build the typed refusal for a non-OK response, preserving the API's reason. */
+export async function apiErrorFrom(res: Response, fallback: string): Promise<ApiError> {
+  const { detail, permission, role } = await readApiRefusal(res, fallback);
+  return new ApiError(detail, res.status, permission, role);
+}
+
+async function parseApiError(res: Response, fallback: string): Promise<string> {
+  return (await readApiRefusal(res, fallback)).detail;
+}
+
+/** Authenticated fetch (Bearer + X-Workspace-Id + CSRF); shared by the lib/*Api modules. */
+export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
-  const token = getAuthToken();
+  const session = readSession();
+  const token = apiBearerToken(session);
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
+  }
+  // Name the workspace being viewed, so the API gates on the role held *there*
+  // rather than on the platform label alone.
+  const workspaceId = getActiveWorkspaceId();
+  if (workspaceId && !headers.has("X-Workspace-Id")) {
+    headers.set("X-Workspace-Id", workspaceId);
+  }
+  // Cookie session (P3): mutating requests echo the readable dw_csrf cookie so
+  // the middleware's double-submit check can bind the call to this browser.
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  if (
+    method !== "GET" && method !== "HEAD" && !headers.has("x-csrf-token")
+    && typeof document !== "undefined"
+  ) {
+    const csrf = (document.cookie.match(/(?:^|;\s*)dw_csrf=([^;]+)/) ?? [])[1];
+    if (csrf) headers.set("x-csrf-token", decodeURIComponent(csrf));
+  }
+  // A JSON body the caller forgot to label is still a JSON body. Without this
+  // the request reaches FastAPI as an unparsed string and every field of the
+  // model comes back as missing — a 422 that reads like the payload was wrong.
+  // FormData and Blob bodies are left alone so the browser sets their boundary.
+  if (typeof requestInit.body === "string" && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
   const mergedInit = { ...requestInit, headers };
   if (timeoutMs <= 0) return fetch(input, { ...mergedInit, signal });
@@ -118,7 +234,7 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
 
   try {
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
-    if (res.status === 401) {
+    if (res.status === 401 && apiUnauthorizedEndsSession(session)) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
     } else if (res.ok) {
       noteApiSuccess();
@@ -275,6 +391,8 @@ export async function runPreflight(payload: {
     requires_review?: boolean;
     score_gap?: number;
     user_override?: boolean;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
     create_new?: boolean;
     assignment_strategy?: string;
     semantic_role?: string;
@@ -283,13 +401,34 @@ export async function runPreflight(payload: {
     type_narrowing?: boolean;
     risk_acknowledged?: boolean;
     intentional_omit?: boolean;
+    /** Field Reduction Ledger (G16) evidence for an omitted column. */
+    omit_reason?: string;
+    omit_reason_text?: string;
+    archive_reference?: string;
+    retention_until?: string;
+    omit_approved_by?: string;
+    /** G20 operator-declared source→target code map. */
+    code_crosswalk?: Record<string, string>;
+    code_crosswalk_system?: string;
     risk_contract?: Record<string, unknown>;
+    /** G21 — independent SUM of this monetary column after write. */
+    control_total?: boolean;
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;
+    structural_class?: string;
+    child_table_spec?: {
+      child_table: string;
+      parent_key_columns: string[];
+      ordinal_column?: string;
+      columns: Array<{ name: string; type: string }>;
+      keep_parent_json?: boolean;
+    };
   }[];
   connector_id?: string;
   source_connector_id?: string;
+  /** Ad-hoc / inline source endpoint when no saved connector — uniqueness + orphan probes. */
+  source_config?: Record<string, unknown>;
   source_table?: string;
   source_collection?: string;
   dest_type?: string;
@@ -311,11 +450,14 @@ export async function runPreflight(payload: {
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
+  /** CDC delivery — default at_least_once; exactly_once is opt-in. */
+  delivery_guarantee?: "at_least_once" | "exactly_once";
   schema_policy?: string;
   validation_mode?: string;
   backfill_new_fields?: boolean;
   stream_contracts?: Record<string, unknown>[];
   date_locale?: string;
+  number_locale?: string;
   /** Operator attested governance policy allows moving detected PII. */
   compliance_acknowledged?: boolean;
   /** Operator acknowledged schema drift under manual_review for this run. */
@@ -330,8 +472,22 @@ export async function runPreflight(payload: {
   acknowledgment_reason?: string;
   /** Pre-ingestion staging (SQL destinations only). */
   write_via_staging?: boolean;
+  /** Execute-applied priority sort + optional row cap. Named on G17. */
+  priority_column?: string;
+  priority_direction?: "asc" | "desc";
+  row_limit?: number;
+  /** Connector-specific dest settings (Redshift staging_bucket / iam_role). */
+  dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
+  /** Persisted /connectors/upload id — Validate scans the stored file, not the preview. */
+  source_file_id?: string;
+  /**
+   * Approved pre-load transform recipe. Execute shapes rows on the read, so the
+   * gates have to judge the transformed rows or they refuse values the write
+   * never carries.
+   */
+  shape_recipe?: ShapeRecipeWire;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",
@@ -354,10 +510,17 @@ export async function explainPreflight(payload: {
   validation_mode?: string;
   use_llm?: boolean;
 }): Promise<import("./types").ValidationExplanation> {
+  const slimed = slimPreflightForExplain(payload.preflight);
   const res = await apiFetch(`${API_BASE}/preflight/explain`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ use_llm: true, ...payload }),
+    body: JSON.stringify({
+      use_llm: true,
+      dest_type: payload.dest_type,
+      validation_mode: payload.validation_mode,
+      run_id: slimed.run_id,
+      preflight: slimed,
+    }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Explain failed"));
@@ -379,6 +542,13 @@ export type CellPreviewResult = {
     message?: string;
     transform?: string;
   }>;
+  transform_image?: {
+    recipe_hash?: string;
+    sample_rows_in?: number;
+    sample_rows_out?: number;
+    sample_rows_removed?: number;
+    retyped_columns?: Record<string, string>;
+  };
 };
 
 /** Cell-level will-quarantine / will-coerce preview before run. */
@@ -388,6 +558,16 @@ export async function previewQuarantineCells(payload: {
   mappings: Array<{ source: string; target: string; transform?: string | null; target_type?: string | null }>;
   column_types?: Record<string, string>;
   sample_size?: number;
+  /**
+   * The approved pre-load recipe. Execute transforms on the read, so a cell
+   * preview scanned on raw values reports findings the writer never sees.
+   */
+  shape_recipe?: ShapeRecipeWire | null;
+  date_locale?: string;
+  number_locale?: string;
+  /** Typed sources read their own numbers canonically — same owner as Validate/Execute. */
+  source_kind?: string;
+  source_type?: string;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",
@@ -395,6 +575,342 @@ export async function previewQuarantineCells(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Cell preview failed"));
+  return res.json();
+}
+
+/**
+ * Shape (pre-write shaping) design-time calls.
+ *
+ * All four are pure design aids: they take the sampled rows the studio already
+ * holds and never touch a source or a destination, so the editor stays
+ * responsive and the answers are reproducible — the property Validate≡Execute
+ * later depends on.
+ */
+export async function fetchShapeCatalog(): Promise<ShapeCatalog> {
+  const res = await apiFetch(`${API_BASE}/shape/catalog`);
+  if (!res.ok) throw await apiErrorFrom(res, "Shape catalog unavailable");
+  return res.json();
+}
+
+export async function checkShapeExpression(payload: {
+  expression: string;
+  source_columns?: string[];
+}): Promise<{ valid: boolean; columns?: string[]; error?: string }> {
+  const res = await apiFetch(`${API_BASE}/shape/expression`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Expression check failed");
+  return res.json();
+}
+
+export async function profileShapeSource(payload: {
+  sample_rows: Record<string, unknown>[];
+  source_columns?: string[];
+  target_schema?: Record<string, string>;
+}): Promise<ShapeProfileResponse> {
+  const res = await apiFetch(`${API_BASE}/shape/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Profile failed");
+  return res.json();
+}
+
+export async function fetchShapeDraft(routeKey: string): Promise<{
+  draft: { steps?: ShapeStepWire[]; recipe_hash?: string; canvas_layout?: Record<string, unknown> } | null;
+}> {
+  const res = await apiFetch(`${API_BASE}/shape/drafts?route_key=${encodeURIComponent(routeKey)}`);
+  if (!res.ok) throw await apiErrorFrom(res, "Could not load the transform draft");
+  return res.json();
+}
+
+export async function saveShapeDraft(body: {
+  route_key: string;
+  recipe: ShapeRecipeWire;
+  source_columns?: string[];
+  canvas_layout?: Record<string, unknown>;
+}): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/shape/drafts`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not save the transform draft");
+}
+
+export async function deleteShapeDraft(routeKey: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/shape/drafts?route_key=${encodeURIComponent(routeKey)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not delete the transform draft");
+}
+
+// ── Transform Library — named, versioned, reusable recipes ──────────────────
+
+export interface TransformLibraryRecipe {
+  id: string;
+  name: string;
+  description: string;
+  version: number;
+  status: "draft" | "active";
+  enabled: boolean;
+  issues: string[];
+  parameters: Record<string, { default?: unknown; description?: string }>;
+  input_columns: string[];
+  output_columns: string[];
+  steps: {
+    column: string;
+    op: string;
+    on_error: string;
+    enabled: boolean;
+    options?: Record<string, unknown>;
+    output_column?: string;
+  }[];
+  updated_at: string;
+}
+
+export interface TransformRecipeCompileResult {
+  recipe_id: string;
+  recipe_name: string;
+  bound_version: number;
+  shape_recipe: ShapeRecipeWire;
+  recipe_hash: string;
+  parameters: TransformLibraryRecipe["parameters"];
+  input_columns: string[];
+  output_columns: string[];
+}
+
+export async function listTransformLibrary(): Promise<TransformLibraryRecipe[]> {
+  const res = await apiFetch(`${API_BASE}/transform-library/`);
+  if (!res.ok) throw await apiErrorFrom(res, "Transform library unavailable");
+  return res.json();
+}
+
+export async function compileTransformRecipe(
+  recipeId: string,
+  body: { params?: Record<string, unknown>; source_columns?: string[] },
+  version?: number,
+): Promise<TransformRecipeCompileResult> {
+  const qs = version != null ? `?version=${version}` : "";
+  const res = await apiFetch(
+    `${API_BASE}/transform-library/${encodeURIComponent(recipeId)}/compile${qs}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be prepared");
+  return res.json();
+}
+
+export interface TransformOpDetail {
+  op: string;
+  summary?: string;
+  family?: string;
+  active?: boolean;
+  expands?: boolean;
+  needs_column?: boolean;
+  produces_column?: boolean;
+  buffered?: boolean;
+  expression_option?: string | null;
+  options?: string[];
+  required?: string[];
+}
+
+export interface TransformLibraryOps {
+  ops: string[];
+  ops_detail: TransformOpDetail[];
+  engine_aliases: string[];
+  on_error_modes: string[];
+  functions?: { name: string; min_args: number; max_args: number | null; summary?: string }[];
+}
+
+export interface TransformRecipeStepWire {
+  column: string;
+  op: string;
+  on_error: "fail" | "keep_original";
+  enabled: boolean;
+  options?: Record<string, unknown>;
+  output_column?: string;
+}
+
+export async function fetchTransformLibraryOps(): Promise<TransformLibraryOps> {
+  const res = await apiFetch(`${API_BASE}/transform-library/ops`);
+  if (!res.ok) throw await apiErrorFrom(res, "Transform ops unavailable");
+  return res.json();
+}
+
+export interface TransformTemplate {
+  key: string;
+  name: string;
+  description: string;
+}
+
+export async function listTransformTemplates(): Promise<TransformTemplate[]> {
+  const res = await apiFetch(`${API_BASE}/transform-library/templates`);
+  if (!res.ok) throw await apiErrorFrom(res, "Transform templates unavailable");
+  return res.json();
+}
+
+export async function cloneTransformTemplate(key: string): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(
+    `${API_BASE}/transform-library/templates/${encodeURIComponent(key)}/clone`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw await apiErrorFrom(res, "Template could not be added");
+  return res.json();
+}
+
+export async function getTransformRecipe(id: string): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}`);
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe not found");
+  return res.json();
+}
+
+export interface TransformRecipeDraft {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  steps?: TransformRecipeStepWire[];
+  parameters?: Record<string, { default?: unknown; description?: string }>;
+  input_columns?: string[];
+  output_columns?: string[];
+  expected_version?: number;
+}
+
+export async function createTransformRecipe(body: TransformRecipeDraft): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(`${API_BASE}/transform-library/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be saved");
+  return res.json();
+}
+
+export async function updateTransformRecipe(id: string, body: TransformRecipeDraft): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be saved");
+  return res.json();
+}
+
+export async function deleteTransformRecipe(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be deleted");
+}
+
+export interface TransformPreviewResult {
+  compiled: boolean;
+  rows_removed?: number;
+  rows: Record<string, unknown>[];
+  steps?: { step: string; after?: Record<string, unknown> }[];
+  error?: string;
+}
+
+export async function previewTransformRecipe(
+  id: string,
+  body: { rows: Record<string, unknown>[]; steps?: TransformRecipeStepWire[]; params?: Record<string, unknown>; per_step?: boolean },
+): Promise<TransformPreviewResult> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Preview failed");
+  return res.json();
+}
+
+export async function transformRecipeWhereUsed(id: string): Promise<{
+  recipe_id: string;
+  used_by: { schedule_id: string; schedule_name: string; bound_version: number; version_mode: string; latest_version: number }[];
+}> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}/where-used`);
+  if (!res.ok) throw await apiErrorFrom(res, "Where-used unavailable");
+  return res.json();
+}
+
+export async function syncScheduleNow(
+  id: string,
+  mode: "delta" | "full" = "delta",
+): Promise<{ job_id?: string }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Sync now is not available on this API yet");
+  return res.json();
+}
+
+export async function previewShapeRecipe(payload: {
+  recipe: ShapeRecipeWire;
+  sample_rows: Record<string, unknown>[];
+  source_columns?: string[];
+  /** Declared source carriers — untouched columns keep them, touched ones are re-read. */
+  column_types?: Record<string, string>;
+  target_schema?: Record<string, string>;
+  include_profile?: boolean;
+  /** Sample's table when several streams share one recipe. */
+  focus_table?: string;
+  source_tables?: string[];
+  source_catalog?: Record<string, string[]>;
+  /** Source format (postgresql, csv…): a database's '' is a value, a file's is NULL — same rule as Execute. */
+  source_type?: string;
+}): Promise<ShapePreviewResponse> {
+  const res = await apiFetch(`${API_BASE}/shape/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Shape preview failed");
+  return res.json();
+}
+
+export async function importBusinessRules(payload: {
+  file: File;
+  sourceColumns?: string[];
+  destColumns?: string[];
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
+  sourceTypes?: Record<string, string>;
+  destTypes?: Record<string, string>;
+  syncMode?: string;
+}): Promise<RuleCompileReport> {
+  const form = new FormData();
+  form.append("file", payload.file);
+  form.append("source_columns", JSON.stringify(payload.sourceColumns ?? []));
+  form.append("dest_columns", JSON.stringify(payload.destColumns ?? []));
+  form.append("source_table", payload.sourceTable ?? "");
+  form.append("dest_table", payload.destTable ?? "");
+  form.append("source_tables", JSON.stringify(payload.sourceTables ?? []));
+  form.append("source_catalog", JSON.stringify(payload.sourceCatalog ?? {}));
+  form.append("dest_tables", JSON.stringify(payload.destTables ?? []));
+  form.append("dest_catalog", JSON.stringify(payload.destCatalog ?? {}));
+  form.append("source_types", JSON.stringify(payload.sourceTypes ?? {}));
+  form.append("dest_types", JSON.stringify(payload.destTypes ?? {}));
+  form.append("sync_mode", payload.syncMode ?? "");
+  const res = await apiFetch(`${API_BASE}/transfer/rules/import`, {
+    method: "POST",
+    body: form,
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not read the rule file");
   return res.json();
 }
 
@@ -580,6 +1096,25 @@ export interface PilotTransferPreview {
   destination_table_exists?: boolean;
   preflight_run_id?: string;
   readiness_score?: number;
+  validation_mode?: string;
+  schema_policy?: string;
+  contract_id?: string;
+  require_signed_contract?: boolean;
+  enforce_contract?: boolean;
+  breaker_state?: string;
+}
+
+/** One retrieved citation behind a grounded answer. */
+export interface CopilotSource {
+  title?: string;
+  doc?: string;
+  section?: string;
+  href?: string;
+  text?: string;
+  source?: string;
+  url?: string;
+  snippet?: string;
+  type?: string;
 }
 
 export interface CopilotChatResponse {
@@ -602,7 +1137,9 @@ export interface CopilotChatResponse {
   };
   tools_used?: { name: string; success: boolean; summary: string }[];
   /** RAG citations for knowledge answers. */
-  sources?: { title?: string; source?: string; url?: string; snippet?: string }[];
+  sources?: CopilotSource[];
+  /** True only when the answer rests on a citation or a live read, not authored prose. */
+  grounded?: boolean;
 }
 
 export interface PilotToolRegistry {
@@ -628,6 +1165,9 @@ export interface ModelCapabilities {
   active_model: string;
   agent_mode: string;
   pilot_engine?: string;
+  pilot_engine_source?: string;
+  pilot_engine_reason?: string;
+  configured_providers?: string[];
   fallback_order: string[];
   providers: {
     provider: string;
@@ -640,7 +1180,10 @@ export interface ModelCapabilities {
     package_installed: boolean;
     available: boolean;
     status: string;
+    blocked_reason?: string;
+    key_state?: "ready" | "none" | "disabled" | "undecryptable" | "unreachable";
   }[];
+  settings_storage?: { path?: string; persistent: boolean; reason: string };
   guarantees: string[];
 }
 
@@ -686,6 +1229,7 @@ export async function copilotChat(
       blockers: dataContext.blockers,
       pilot_session_id: dataContext.pilot_session_id,
       last_result_id: dataContext.last_result_id,
+      workspace_id: dataContext.workspace_id,
     };
   }
   let res: Response;
@@ -733,6 +1277,11 @@ export async function confirmCopilotAction(payload: {
   preflight_run_id?: string;
   /** run_schedule */
   schedule_id?: string;
+  /** studio_remediation */
+  remediation_kind?: "open_bad_data_fix" | "quarantine_and_rerun";
+  run_id?: string;
+  label?: string;
+  destructive?: boolean;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -740,7 +1289,18 @@ export async function confirmCopilotAction(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Failed to confirm Pilot action"));
+    const data = await res.json().catch(() => ({} as Record<string, unknown>));
+    const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+    const detail = record.detail && typeof record.detail === "object"
+      ? record.detail as Record<string, unknown>
+      : record;
+    if (res.status === 409 && (detail.error === "duplicate_transfer" || record.error === "duplicate_transfer")) {
+      throw new SyncAlreadyRunningError(parseDuplicateTransfer(record));
+    }
+    const message = typeof record.detail === "string"
+      ? record.detail
+      : String(detail.error || detail.message || "Failed to confirm Pilot action");
+    throw new Error(message);
   }
   return res.json();
 }
@@ -791,10 +1351,21 @@ export interface CatalogConnector {
   driver_type?: string;
   effective_status?: string;
   transfer_ready?: boolean;
+  /** Can take the source side (source-only, file source, or duplex). */
+  source_ready?: boolean;
+  /** Can take the destination side (dest-only or duplex). */
+  dest_ready?: boolean;
   connect_only?: boolean;
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
   certification_tier?: string;
+  /** False when the Certified driver package is not loadable on this host. */
+  driver_available?: boolean;
+  /** Certified product, missing package here — not Planned. */
+  environment_gap?: boolean;
+  environment_gap_reason?: string;
+  is_hosted_alias?: boolean;
+  alias_of?: string | null;
   capabilities?: {
     test?: boolean;
     read?: boolean;
@@ -845,6 +1416,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
   const normalize = (c: Record<string, unknown>): Connector | null => {
     const id = String(c.id ?? c._id ?? "");
     if (!id) return null;
+    // Probe result is authoritative — never keep a sticky status=error after a pass.
+    const lastTestOk = coerceLastTestOk(c.last_test_ok);
     return {
       id,
       name: String(c.name ?? ""),
@@ -852,7 +1425,7 @@ export async function fetchConnectors(): Promise<Connector[]> {
       host: String(c.host ?? ""),
       port: Number(c.port ?? 0),
       database: String(c.database ?? ""),
-      status: c.last_test_ok === false ? "error" : String(c.status ?? "configured"),
+      status: statusFromLastTest(lastTestOk),
       role: c.role ? String(c.role) : undefined,
       username: c.username ? String(c.username) : undefined,
       password: c.password ? String(c.password) : undefined,
@@ -866,9 +1439,10 @@ export async function fetchConnectors(): Promise<Connector[]> {
       service_account: c.service_account ? String(c.service_account) : undefined,
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
-      // Coercing null→false made brand-new saves look like "Test failed".
-      last_test_ok:
-        c.last_test_ok === true ? true : c.last_test_ok === false ? false : undefined,
+      last_test_ok: lastTestOk,
+      last_tested_at: c.last_tested_at ? String(c.last_tested_at) : null,
+      last_used_at: c.last_used_at ? String(c.last_used_at) : null,
+      last_transfer_ok_at: c.last_transfer_ok_at ? String(c.last_transfer_ok_at) : null,
     };
   };
 
@@ -898,20 +1472,25 @@ export async function fetchConnectors(): Promise<Connector[]> {
   return [];
 }
 
-export async function fetchJobs(): Promise<TransferJob[]> {
-  const data = await requestJson<{ jobs?: TransferJob[] }>(
-    [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
+/** Recent jobs plus the whole-history counts the operator-visible totals read. */
+export async function fetchJobs(): Promise<JobHistory> {
+  const data = await requestJson<{
+    jobs?: TransferJob[];
+    total?: number;
+    status_counts?: Record<string, number>;
+  }>(
+    [`${API_BASE}/connectors/jobs`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );
-  return data.jobs || [];
+  return jobHistoryFromResponse(data);
 }
 
 export type JobProgress = import("./types").JobProgress;
 
 export async function fetchJob(jobId: string): Promise<JobProgress> {
   return requestJson<JobProgress>(
-    [`${API_BASE}/connectors/jobs/${jobId}`, `${API_BASE}/jobs/${jobId}`],
+    [`${API_BASE}/connectors/jobs/${jobId}`],
     "Job not found"
   );
 }
@@ -951,6 +1530,34 @@ export async function verifySignedProofPack(
   return res.json();
 }
 
+/** Client-facing Migration Certificate (Markdown) for a completed run. */
+export async function fetchMigrationCertificateMarkdown(jobId: string): Promise<string> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=markdown`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.text();
+}
+
+/** Audit deliverable: the same signed certificate, paginated and hash-stamped. */
+export async function fetchMigrationCertificatePdf(jobId: string): Promise<Blob> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=pdf`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.blob();
+}
+
+/** Signed JSON form of the certificate — the artifact /certificate/verify checks. */
+export async function fetchMigrationCertificate(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate`],
+    "Migration certificate not available",
+  );
+}
+
 /** Execute signed rollback plan — DISCARD_STAGING only (never population undo). */
 export async function executeJobRollback(
   jobId: string,
@@ -969,10 +1576,7 @@ export async function executeJobRollback(
 }
 
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}`,
-    `${API_BASE}/jobs/${jobId}`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1000,32 +1604,109 @@ export async function renameJob(jobId: string, name: string): Promise<JobProgres
   throw lastError instanceof Error ? lastError : new Error("Rename failed");
 }
 
-export async function retryJob(jobId: string): Promise<{ job_id: string; retry_of: string }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/retry`,
-    `${API_BASE}/jobs/${jobId}/retry`,
-  ];
+/** Retry from start was refused because it would duplicate committed rows. */
+export class RetryRefusedError extends Error {
+  readonly rowsCommitted: number | null;
+  readonly rowsCommittedKnown: boolean;
+
+  constructor(reason: string, rowsCommitted: number | null, rowsCommittedKnown: boolean) {
+    super(reason);
+    this.name = "RetryRefusedError";
+    this.rowsCommitted = rowsCommitted;
+    this.rowsCommittedKnown = rowsCommittedKnown;
+  }
+}
+
+export async function retryJob(
+  jobId: string,
+  options: { force?: boolean } = {},
+): Promise<{ job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean }> {
+  const query = options.force ? "?force=true" : "";
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/retry${query}`];
   let lastError: unknown;
   for (const url of urls) {
     try {
       const res = await apiFetch(url, { method: "POST" });
       const data = await res.json();
+      if (res.status === 409 && data?.detail && typeof data.detail === "object") {
+        // A refusal is the server's answer, not a route miss: surface it rather
+        // than falling through to the legacy URL and reporting its 404 instead.
+        const detail = data.detail as {
+          reason?: string;
+          rows_committed?: number | null;
+          rows_committed_known?: boolean;
+        };
+        throw new RetryRefusedError(
+          detail.reason || "Retry from start would duplicate committed rows.",
+          detail.rows_committed ?? null,
+          detail.rows_committed_known !== false,
+        );
+      }
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Retry failed");
       }
-      return data as { job_id: string; retry_of: string };
+      return data as { job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean };
     } catch (error) {
+      if (error instanceof RetryRefusedError) throw error;
       lastError = error;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Retry failed");
 }
 
-export async function resumeJob(jobId: string): Promise<{ job_id: string; status: string }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/resume`,
-    `${API_BASE}/jobs/${jobId}/resume`,
-  ];
+export async function stageJobSync(
+  jobId: string,
+  mode: "sync" | "full",
+): Promise<{ ack_id: string; idempotent?: boolean; preview?: { confirm_reason?: string; note?: string; destructive?: boolean; sync_mode?: string; mode?: string } }> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data?.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : (detail?.error || "Sync could not be staged");
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function stageScheduleSync(
+  scheduleId: string,
+  mode: "sync" | "full",
+): Promise<{ ack_id: string; idempotent?: boolean; preview?: { confirm_reason?: string; note?: string; destructive?: boolean } }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${scheduleId}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data?.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : (detail?.error || "Sync could not be staged");
+    throw new Error(message);
+  }
+  return data;
+}
+
+/**
+ * Resume a job. A full refresh has nothing to resume *into* — it replaces the
+ * destination — so the server re-runs it from the beginning and says so with
+ * `restarted`. Dropping that made the UI promise a checkpoint continuation it
+ * had not performed.
+ */
+export async function resumeJob(jobId: string): Promise<{
+  job_id: string;
+  status: string;
+  restarted?: boolean;
+  message?: string;
+}> {
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/resume`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1034,7 +1715,12 @@ export async function resumeJob(jobId: string): Promise<{ job_id: string; status
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Resume failed");
       }
-      return data as { job_id: string; status: string };
+      return data as {
+        job_id: string;
+        status: string;
+        restarted?: boolean;
+        message?: string;
+      };
     } catch (error) {
       lastError = error;
     }
@@ -1043,10 +1729,7 @@ export async function resumeJob(jobId: string): Promise<{ job_id: string; status
 }
 
 export async function cancelJob(jobId: string): Promise<{ success: boolean; job_id: string; status: string; message?: string }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/cancel`,
-    `${API_BASE}/jobs/${jobId}/cancel`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/cancel`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1076,6 +1759,14 @@ export function streamJobProgress(
     const ds = raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined;
+    const evidence = {
+      streams: raw.streams,
+      rejected_rows: raw.rejected_rows,
+      coerced_null_rows: raw.coerced_null_rows,
+      rejected_details: raw.rejected_details,
+      destination_summary: ds,
+    };
+    const streamHealth = readJobStreams(evidence);
     const rpsFromRoot = raw.records_per_second != null ? Number(raw.records_per_second) : undefined;
     const rpsFromDs = ds?.records_per_second != null ? Number(ds.records_per_second) : undefined;
     return {
@@ -1109,9 +1800,9 @@ export function streamJobProgress(
         : ds?.chunk_size != null
           ? Number(ds.chunk_size)
           : undefined,
-      rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
-      coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
-      rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
+      rejected_rows: readRejectedRows(evidence),
+      coerced_null_rows: readCoercedNullRows(evidence),
+      rejected_details: readRejectedDetails(evidence),
       destination_summary: ds,
       load_history_report: raw.load_history_report && typeof raw.load_history_report === "object"
         ? raw.load_history_report as JobProgress["load_history_report"]
@@ -1159,7 +1850,39 @@ export function streamJobProgress(
           ? rpsFromDs
           : undefined,
       cdc_lag_seconds: raw.cdc_lag_seconds != null ? Number(raw.cdc_lag_seconds) : null,
+      cdc_lag_basis: raw.cdc_lag_basis != null ? String(raw.cdc_lag_basis) : null,
+      cdc_heartbeat_age_sec:
+        raw.cdc_heartbeat_age_sec != null ? Number(raw.cdc_heartbeat_age_sec) : null,
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
+      cdc_confirmed_flush_lsn: raw.cdc_confirmed_flush_lsn
+        ? String(raw.cdc_confirmed_flush_lsn)
+        : null,
+      cdc_restart_lsn: raw.cdc_restart_lsn ? String(raw.cdc_restart_lsn) : null,
+      cdc_min_lsn: raw.cdc_min_lsn ? String(raw.cdc_min_lsn) : null,
+      cdc_max_lsn: raw.cdc_max_lsn ? String(raw.cdc_max_lsn) : null,
+      cdc_max_lsn_time: raw.cdc_max_lsn_time ? String(raw.cdc_max_lsn_time) : null,
+      cdc_capture_instance: raw.cdc_capture_instance
+        ? String(raw.cdc_capture_instance)
+        : null,
+      cdc_capture_stall: raw.cdc_capture_stall == null ? null : Boolean(raw.cdc_capture_stall),
+      cdc_capture_stall_reason: raw.cdc_capture_stall_reason
+        ? String(raw.cdc_capture_stall_reason)
+        : null,
+      cdc_capture_stall_unknown:
+        raw.cdc_capture_stall_unknown == null ? null : Boolean(raw.cdc_capture_stall_unknown),
+      cdc_capture_latency_seconds:
+        raw.cdc_capture_latency_seconds != null
+          ? Number(raw.cdc_capture_latency_seconds)
+          : null,
+      cdc_slot_active: raw.cdc_slot_active == null ? null : Boolean(raw.cdc_slot_active),
+      cdc_slot_exists: raw.cdc_slot_exists == null ? null : Boolean(raw.cdc_slot_exists),
+      cdc_wal_status: raw.cdc_wal_status ? String(raw.cdc_wal_status) : null,
+      cdc_freshness_severity: raw.cdc_freshness_severity
+        ? String(raw.cdc_freshness_severity)
+        : null,
+      cdc_lag_unknown_reason: raw.cdc_lag_unknown_reason
+        ? String(raw.cdc_lag_unknown_reason)
+        : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
       mapping_review_required: raw.mapping_review_required == null ? null : Boolean(raw.mapping_review_required),
@@ -1173,6 +1896,10 @@ export function streamJobProgress(
       watermark: raw.watermark != null ? String(raw.watermark) : null,
       cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
       snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
+      snapshot_plan:
+        raw.snapshot_plan && typeof raw.snapshot_plan === "object"
+          ? (raw.snapshot_plan as import("./types").TransferJob["snapshot_plan"])
+          : null,
       cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
       cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
       cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),
@@ -1202,7 +1929,10 @@ export function streamJobProgress(
       cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
       trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
       trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
-      streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
+      row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
+        ? raw.row_accounting as JobProgress["row_accounting"]
+        : undefined,
+      streams: streamHealth.length ? streamHealth : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
@@ -1229,7 +1959,7 @@ export function streamJobProgress(
             })
             .filter((p): p is NonNullable<typeof p> => Boolean(p))
         : undefined,
-      created_at: String(raw.created_at ?? new Date().toISOString()),
+      created_at: raw.created_at ? String(raw.created_at) : "",
       updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
       started_at: raw.started_at ? String(raw.started_at) : undefined,
       completed_at: raw.completed_at ? String(raw.completed_at) : undefined,
@@ -1260,11 +1990,12 @@ export function streamJobProgress(
   };
 
   try {
-    const token = getAuthToken();
+    const token = apiBearerToken();
     const streamUrl = token
       ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
       : `${API_BASE}/connectors/jobs/${jobId}/stream`;
     const es = new EventSource(streamUrl);
+    let closedTerminal = false;
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
@@ -1276,6 +2007,7 @@ export function streamJobProgress(
           || job.status === "failed"
           || job.status === "cancelled"
         ) {
+          closedTerminal = true;
           es.close();
         }
       } catch {
@@ -1284,6 +2016,9 @@ export function streamJobProgress(
     };
     es.onerror = () => {
       es.close();
+      // Closing a completed stream fires onerror in some browsers. Do not
+      // reconnect — that re-appends the last log line and makes it jump.
+      if (stopped || closedTerminal) return;
       startPolling();
     };
     return () => {
@@ -1306,15 +2041,24 @@ export async function deleteConnector(id: string): Promise<void> {
   throw new Error(await parseApiError(res, "Failed to delete connector"));
 }
 
-export async function testSavedConnector(id: string): Promise<{ success: boolean; message: string }> {
+export async function testSavedConnector(id: string): Promise<{
+  success: boolean;
+  message: string;
+  last_test_ok: boolean;
+}> {
   const res = await apiFetch(`${API_BASE}/connectors/saved/${id}/test`, { method: "POST" });
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Connection test failed"));
   }
   const data = await res.json();
+  const success = Boolean(data?.success);
+  // Prefer explicit last_test_ok from API; fall back to success so UI never
+  // sticks on a stale failed badge after a green probe.
+  const lastTestOk = coerceLastTestOk(data?.last_test_ok);
   return {
-    success: Boolean(data?.success),
-    message: String(data?.message || (data?.success ? "Connected" : "Connection failed")),
+    success,
+    message: String(data?.message || (success ? "Connected" : "Connection failed")),
+    last_test_ok: lastTestOk === undefined ? success : lastTestOk,
   };
 }
 
@@ -1344,6 +2088,162 @@ export async function fetchScheduleHistory(
 ): Promise<import("./types").ScheduleHistory> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}/history?limit=${limit}`);
   if (!res.ok) throw new Error("Failed to fetch schedule history");
+  return res.json();
+}
+
+/**
+ * Record the source's current shape as this schedule's baseline.
+ *
+ * The operator asserting that a drift finding has been reviewed and the mapping
+ * still holds. Deliberately a separate action rather than something a retry
+ * does implicitly.
+ */
+export async function acceptScheduleSourceSchema(
+  id: string,
+): Promise<{
+  success: boolean;
+  message?: string;
+  columns?: number;
+  recorded_from?: string;
+  approval_closed?: boolean;
+}> {
+  const res = await apiFetch(`${API_BASE}/schedules/${id}/accept-source-schema`, {
+    method: "POST",
+    // Live probe is capped server-side; 20s leaves room for the 12s ceiling
+    // plus JSON. The old default 15s abort looked like Accept "kept loading".
+    timeoutMs: 20_000,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data?.detail === "string" ? data.detail : "Could not update the baseline",
+    );
+  }
+  return data as {
+    success: boolean;
+    message?: string;
+    columns?: number;
+    recorded_from?: string;
+    approval_closed?: boolean;
+  };
+}
+
+/**
+ * Every schedule currently parked on a decision.
+ *
+ * Autopilot's inbox: a deterministic refusal is a finding a human owes an answer
+ * to, not something the next beat should replay.
+ */
+export async function fetchOpenScheduleApprovals(): Promise<
+  import("./types").ScheduleApprovalInboxItem[]
+> {
+  const res = await apiFetch(`${API_BASE}/schedules/approvals/open`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load approvals"));
+  const data = (await res.json()) as {
+    approvals?: import("./types").ScheduleApprovalInboxItem[];
+  };
+  return data.approvals ?? [];
+}
+
+/** The finding and the standing authority currently recorded on one schedule. */
+export async function fetchScheduleApprovalDetail(scheduleId: string): Promise<{
+  schedule_id: string;
+  approval: import("./types").ScheduleApproval | Record<string, never>;
+  authorization: import("./types").StandingAuthorization | Record<string, never>;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approval`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load the approval"));
+  return res.json();
+}
+
+/**
+ * Headers for a call that records a human decision.
+ *
+ * The API names the decider from the identity it verified; `X-Actor` only carries
+ * the operator's name for a deployment that does not enforce authentication, so a
+ * decision is never anonymous there.
+ */
+function decisionHeaders(json: boolean): Record<string, string> {
+  const headers: Record<string, string> = json ? { "Content-Type": "application/json" } : {};
+  const actor = getSessionActor();
+  if (actor) headers["X-Actor"] = actor;
+  return headers;
+}
+
+/**
+ * Approve one finding.
+ *
+ * `grantStanding` is the powerful half: it delegates the same signature to every
+ * later run of the *identical* plan, so it needs `schedule.authorize` and it stops
+ * applying the moment the mapping, source shape or policy moves.
+ */
+export async function approveScheduleFinding(
+  scheduleId: string,
+  approvalId: string,
+  payload: {
+    reason: string;
+    compliance?: boolean;
+    schema_drift?: boolean;
+    fk_risk?: boolean;
+    grant_standing?: boolean;
+    expires_in_days?: number;
+  },
+): Promise<{
+  approval: import("./types").ScheduleApproval;
+  authorization: import("./types").StandingAuthorization;
+  schedule: PipelineSchedule;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approvals/${encodeURIComponent(
+      approvalId,
+    )}/approve`,
+    {
+      method: "POST",
+      headers: decisionHeaders(true),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not approve this finding"));
+  return res.json();
+}
+
+/** Reject a finding; the schedule is paused rather than left to re-refuse. */
+export async function rejectScheduleFinding(
+  scheduleId: string,
+  approvalId: string,
+  payload: { reason: string; disable?: boolean },
+): Promise<{
+  approval: import("./types").ScheduleApproval;
+  schedule: PipelineSchedule;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approvals/${encodeURIComponent(
+      approvalId,
+    )}/reject`,
+    {
+      method: "POST",
+      headers: decisionHeaders(true),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not reject this finding"));
+  return res.json();
+}
+
+/** Revoke standing authority. The record is kept, permanently unusable. */
+export async function revokeScheduleAuthorization(
+  scheduleId: string,
+  reason = "",
+): Promise<{ authorization: import("./types").StandingAuthorization }> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/authorization?reason=${encodeURIComponent(
+      reason,
+    )}`,
+    { method: "DELETE", headers: decisionHeaders(false) },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not revoke the authorization"));
   return res.json();
 }
 
@@ -1390,8 +2290,8 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
 }
 
 export async function exportDatawrapManifest(): Promise<Blob> {
-  const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
-  if (!res.ok) throw new Error(await parseApiError(res, "Could not export dataflow.yaml"));
+  const res = await apiFetch(`${API_BASE}/schedules/export/manifest?format=yaml`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export datawrap.yaml"));
   return res.blob();
 }
 
@@ -1465,6 +2365,11 @@ export async function testConnection(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
+  host_key?: string;
+  host_key_policy?: string;
+  trust_server_certificate?: boolean;
+  /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+  extra?: Record<string, unknown>;
 }): Promise<{ success: boolean; message: string; source_ha?: Record<string, unknown> }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
@@ -1508,8 +2413,14 @@ export async function saveConnector(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
+  /** SFTP host-key pin — stored under extra; the probe refuses untrusted keys. */
+  host_key?: string;
+  /** SQL Server only: operator opt-in for self-signed / private-CA TLS. */
+  trust_server_certificate?: boolean;
   /** Persist form Test result so the list matches (true/false). */
   last_test_ok?: boolean;
+  /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+  extra?: Record<string, unknown>;
 }): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
   const res = await apiFetch(`${API_BASE}/connectors/saved`, {
@@ -1557,6 +2468,8 @@ export async function updateConnector(
     endpoint_url?: string;
     path_style?: boolean;
     last_test_ok?: boolean;
+    /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+    extra?: Record<string, unknown>;
   },
 ): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
@@ -1571,11 +2484,13 @@ export async function updateConnector(
 
 export async function uploadFile(
   file: File,
-  options?: { enableOcr?: boolean },
+  options?: { enableOcr?: boolean; readOptions?: SourceReadOptions },
 ): Promise<ParsedUpload> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("enable_ocr", options?.enableOcr === true ? "true" : "false");
+  const readOptions = readOptionsPayload(options?.readOptions);
+  if (readOptions) formData.append("read_options_json", readOptions);
   const res = await apiFetch(`${API_BASE}/connectors/upload`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   if (!res.ok) throw new Error(await parseApiError(res, "Upload failed"));
   return res.json();
@@ -1597,6 +2512,8 @@ export interface EndpointIntrospection {
   >;
   objects?: { name: string; type: string }[];
   row_estimate?: number;
+  row_estimate_uncertain?: boolean;
+  sample_row_count?: number;
   table_exists?: boolean;
   data?: Record<string, unknown>[];
   sample_data?: Record<string, unknown>[];
@@ -1676,13 +2593,18 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
     schedule_id?: string | null;
     job_id?: string | null;
     stream?: string | null;
-    lag_seconds?: number;
+    lag_seconds?: number | null;
+    lag_bytes?: number | null;
   }>;
+  workspace_id?: string | null;
   pipelines: Array<{
     schedule_id: string;
     stream: string;
     job_id: string;
-    lag_seconds: number;
+    workspace_id?: string | null;
+    lag_seconds: number | null;
+    lag_bytes?: number | null;
+    lag_basis?: string | null;
     polls_total: number;
     heartbeat_at?: number;
     heartbeat_age_seconds?: number | null;
@@ -1699,7 +2621,11 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
 
 export async function fetchOpsDlq(limit = 50): Promise<{
   events: Array<Record<string, unknown>>;
+  /** This workspace's queue size — never the page length, never the platform. */
   count: number;
+  total?: number;
+  returned?: number;
+  limit?: number;
   by_action: Record<string, number>;
   open_rows: number;
 }> {
@@ -1922,11 +2848,141 @@ export async function mapTransferPlan(
   return res.json();
 }
 
-export async function preflightTransferPlan(planId: string) {
+export type PreflightAcknowledgments = {
+  compliance_acknowledged?: boolean;
+  schema_drift_acknowledged?: boolean;
+  fk_risk_acknowledged?: boolean;
+  acknowledgment_actor?: string;
+  acknowledgment_reason?: string;
+};
+
+const PREFLIGHT_POLL_MS = 1500;
+const PREFLIGHT_POLL_DEADLINE_MS = 10 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Transport / proxy failures are not recipe refusals. A 504 HTML body used to
+ * become the fallback "Plan preflight failed" and Validate stayed Not run.
+ */
+export function isTransportFailure(message: string, status?: number): boolean {
+  if (status === 502 || status === 504 || status === 0) return true;
+  return /timed out|abort|504|502|network|failed to fetch|econnreset/i.test(message);
+}
+
+export function validateTransportMessage(
+  message: string,
+  rowCount?: number | null,
+): string {
+  // Studio estimates are `number | null`. Optional params are `undefined`.
+  // Do not invent a row count from 0 / null / NaN.
+  const n = typeof rowCount === "number" && Number.isFinite(rowCount) && rowCount > 0
+    ? rowCount
+    : 0;
+  const rows = n > 0 ? ` while checking ${n.toLocaleString()} row(s)` : "";
+  if (!isTransportFailure(message)) return message;
+  return (
+    `Validate did not finish${rows}. The control plane timed out or hung — `
+    + `Re-run Validate. Execute stays locked until the API returns a verdict.`
+  );
+}
+
+async function pollPlanPreflight(
+  planId: string,
+  runId: string,
+  onProgress?: (progress: {
+    status?: string;
+    elapsed_ms?: number;
+    rows_scanned?: number;
+    rows_estimate?: number;
+    phase?: string;
+  }) => void,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + PREFLIGHT_POLL_DEADLINE_MS;
+  let lastError = "Validate is still running.";
+  while (Date.now() < deadline) {
+    await sleep(PREFLIGHT_POLL_MS);
+    const res = await apiFetch(
+      `${API_BASE}/transfer/plans/${planId}/preflight${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
+      { timeoutMs: 20_000 },
+    );
+    if (res.status === 404) {
+      lastError = "Validate run was not found — Re-run Validate.";
+      continue;
+    }
+    if (res.status === 502 || res.status === 504) {
+      lastError = await parseApiError(res, `Control plane timed out (HTTP ${res.status})`);
+      continue;
+    }
+    if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
+    const data = await res.json() as {
+      status?: string;
+      error?: string;
+      passed?: boolean;
+      run_id?: string;
+      elapsed_ms?: number;
+      rows_scanned?: number;
+      rows_estimate?: number;
+      phase?: string;
+    };
+    if (data.status === "running" || data.status === "queued") {
+      onProgress?.({
+        status: data.status,
+        elapsed_ms: data.elapsed_ms,
+        rows_scanned: data.rows_scanned,
+        rows_estimate: data.rows_estimate,
+        phase: data.phase,
+      });
+      lastError = "Validate is still scanning the population.";
+      continue;
+    }
+    if (data.status === "failed") {
+      throw new Error(data.error || "Plan preflight failed");
+    }
+    return data;
+  }
+  throw new Error(
+    `${lastError} Re-run Validate — Execute stays locked until a verdict lands.`,
+  );
+}
+
+export async function preflightTransferPlan(
+  planId: string,
+  acknowledgments: PreflightAcknowledgments = {},
+  // The run shapes rows on the read, so the plan-scoped Validate — the call the
+  // wizard actually makes — has to carry the approved recipe too, or the gates
+  // score a source image the writer never sees.
+  shapeRecipe?: ShapeRecipeWire,
+  onProgress?: (progress: {
+    status?: string;
+    elapsed_ms?: number;
+    rows_scanned?: number;
+    rows_estimate?: number;
+    phase?: string;
+  }) => void,
+) {
   const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
     method: "POST",
-    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      compliance_acknowledged: acknowledgments.compliance_acknowledged ?? false,
+      schema_drift_acknowledged: acknowledgments.schema_drift_acknowledged ?? false,
+      fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
+      acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
+      acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
+      shape_recipe: shapeRecipe ?? null,
+      async_run: true,
+    }),
+    timeoutMs: 45_000,
   });
+  if (res.status === 202) {
+    const started = await res.json() as { plan_id?: string; run_id?: string };
+    return pollPlanPreflight(started.plan_id || planId, started.run_id || "", onProgress);
+  }
   if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
   return res.json();
 }
@@ -2023,6 +3079,8 @@ export async function runUniversalTransfer(options: {
   syncMode?: string;
   schemaPolicy?: string;
   validationMode?: string;
+  /** CDC dest-owned watermark EOS. Default at_least_once. */
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
   backfillNewFields?: boolean;
   writeViaStaging?: boolean;
   /** Opt-in Tesseract OCR for scanned/image-only PDF sources. */
@@ -2037,8 +3095,35 @@ export async function runUniversalTransfer(options: {
   priorityDirection?: "asc" | "desc";
   limit?: number;
   dateLocale?: string;
+  numberLocale?: string;
   /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
   idempotencyKey?: string;
+  /** Validate→Execute ack trail — must match Studio Validate acknowledgments. */
+  complianceAcknowledged?: boolean;
+  schemaDriftAcknowledged?: boolean;
+  fkRiskAcknowledged?: boolean;
+  acknowledgmentActor?: string;
+  acknowledgmentReason?: string;
+  /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
+  approvedDecisionArtifactHash?: string;
+  /** Map→DDL fingerprint stamped by the same Validate run. */
+  approvedDdlIdentityHash?: string;
+  /** Optional full artifact payload (content_hash must match approved hash). */
+  decisionArtifact?: Record<string, unknown>;
+  /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
+  contractId?: string;
+  requireSignedContract?: boolean;
+  /** Declared source read window (sheet, header row, skips, encoding, delimiter). */
+  readOptions?: SourceReadOptions;
+  /** Ordered row-local shaping applied on the read, before mapping. */
+  shapeRecipe?: ShapeRecipeWire;
+  /** Recipe identity Validate approved — a changed recipe is refused, not run. */
+  approvedShapeRecipeHash?: string;
+  /** Which Transform Library recipe produced the steps (provenance). */
+  transformRecipeId?: string;
+  transformRecipeVersion?: number;
+  transformRecipeVersionMode?: "pin" | "follow";
+  transformRecipeParams?: Record<string, unknown>;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2052,16 +3137,43 @@ export async function runUniversalTransfer(options: {
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
-  // Runtime SSOT: only at_least_once is selectable — never invent exactly-once.
-  formData.append("delivery_guarantee", "at_least_once");
+  formData.append(
+    "delivery_guarantee",
+    options.deliveryGuarantee === "exactly_once" ? "exactly_once" : "at_least_once",
+  );
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
+  // The same window the preview was profiled through — a run that omits it
+  // would read the active sheet and reconcile against rows nobody approved.
+  const runReadOptions = readOptionsPayload(options.readOptions);
+  if (runReadOptions) formData.append("read_options_json", runReadOptions);
+  // The recipe the operator approved, and its identity. Execute re-applies this
+  // recipe and refuses if the hash no longer matches what Validate scanned.
+  // An approval names a recipe, so it travels only with the recipe it names: a
+  // hash sent beside no recipe reads as "the approved recipe went missing" and
+  // is refused — which would block the pass-through run this is.
+  if (options.shapeRecipe?.steps?.length) {
+    formData.append("shape_recipe_json", JSON.stringify(options.shapeRecipe));
+    if (options.approvedShapeRecipeHash) {
+      formData.append("approved_shape_recipe_hash", options.approvedShapeRecipeHash);
+    }
+    if (options.transformRecipeId) {
+      formData.append("transform_recipe_id", options.transformRecipeId);
+      formData.append("transform_recipe_version", String(options.transformRecipeVersion || 0));
+      formData.append("transform_recipe_version_mode", options.transformRecipeVersionMode || "pin");
+      if (options.transformRecipeParams && Object.keys(options.transformRecipeParams).length) {
+        formData.append("transform_recipe_params_json", JSON.stringify(options.transformRecipeParams));
+      }
+    }
+  }
   if (options.destExtra && Object.keys(options.destExtra).length) {
     formData.append("dest_extra_json", JSON.stringify(options.destExtra));
   }
   if (options.sourceExtra && Object.keys(options.sourceExtra).length) {
     formData.append("source_extra_json", JSON.stringify(options.sourceExtra));
+    const storedId = String(options.sourceExtra.file_id || "").trim();
+    if (storedId) formData.append("source_file_id", storedId);
   }
   if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
   if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);
@@ -2096,7 +3208,42 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  if (options.contractId) formData.append("contract_id", options.contractId);
+  formData.append(
+    "require_signed_contract",
+    options.requireSignedContract === true ? "true" : "false",
+  );
   formData.append("date_locale", options.dateLocale || "");
+  formData.append("number_locale", options.numberLocale || "");
+  formData.append(
+    "compliance_acknowledged",
+    options.complianceAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "schema_drift_acknowledged",
+    options.schemaDriftAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "fk_risk_acknowledged",
+    options.fkRiskAcknowledged === true ? "true" : "false",
+  );
+  if (options.acknowledgmentActor) {
+    formData.append("acknowledgment_actor", options.acknowledgmentActor);
+  }
+  if (options.acknowledgmentReason) {
+    formData.append("acknowledgment_reason", options.acknowledgmentReason);
+  }
+  const approvedHash = (options.approvedDecisionArtifactHash || "").trim();
+  if (approvedHash) {
+    formData.append("approved_decision_artifact_hash", approvedHash);
+  }
+  const approvedDdlHash = (options.approvedDdlIdentityHash || "").trim();
+  if (approvedDdlHash) {
+    formData.append("approved_ddl_identity_hash", approvedDdlHash);
+  }
+  if (options.decisionArtifact && Object.keys(options.decisionArtifact).length) {
+    formData.append("decision_artifact_json", JSON.stringify(options.decisionArtifact));
+  }
   // A fresh key per click still lets the server fingerprint catch a double-submit
   // of the same intent; the header itself makes HTTP-level retries of this call
   // converge on one job instead of starting a second writer.
@@ -2132,8 +3279,25 @@ export type DuplicateTransferResponse = {
   duplicate: true;
   existing_job_id: string;
   existing_status: string;
+  existing_created_at?: string;
   message: string;
 };
+
+/** Sync now / transfer confirm found a live equivalent writer. */
+export class SyncAlreadyRunningError extends Error {
+  readonly existingJobId: string;
+  readonly existingStatus: string;
+  readonly existingCreatedAt: string;
+
+  constructor(parsed: DuplicateTransferResponse) {
+    const id = parsed.existing_job_id || "unknown job";
+    super(`Already running: ${id}`);
+    this.name = "SyncAlreadyRunningError";
+    this.existingJobId = parsed.existing_job_id;
+    this.existingStatus = parsed.existing_status;
+    this.existingCreatedAt = parsed.existing_created_at || "";
+  }
+}
 
 function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransferResponse {
   const detail = (data.detail && typeof data.detail === "object"
@@ -2142,6 +3306,9 @@ function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransfe
   const existing =
     String(detail.existing_job_id || data.existing_job_id || data.job_id || "").trim();
   const status = String(detail.existing_status || data.existing_status || "in progress").trim();
+  const createdAt = String(
+    detail.existing_created_at || data.existing_created_at || "",
+  ).trim();
   const message = String(
     detail.message ||
       (typeof data.detail === "string" ? data.detail : "") ||
@@ -2154,6 +3321,7 @@ function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransfe
     duplicate: true,
     existing_job_id: existing,
     existing_status: status,
+    existing_created_at: createdAt,
     message,
   };
 }
@@ -2166,10 +3334,19 @@ export async function executeTransferJson(payload: {
   syncMode?: string;
   validationMode?: string;
   schemaPolicy?: string;
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
   idempotencyKey?: string;
+  complianceAcknowledged?: boolean;
+  schemaDriftAcknowledged?: boolean;
+  fkRiskAcknowledged?: boolean;
+  acknowledgmentActor?: string;
+  acknowledgmentReason?: string;
+  approvedDecisionArtifactHash?: string;
+  approvedDdlIdentityHash?: string;
+  decisionArtifact?: Record<string, unknown>;
 }) {
   const idempotencyKey =
     payload.idempotencyKey?.trim() ||
@@ -2189,10 +3366,21 @@ export async function executeTransferJson(payload: {
       sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
-      delivery_guarantee: "at_least_once",
+      delivery_guarantee:
+        payload.deliveryGuarantee === "exactly_once" ? "exactly_once" : "at_least_once",
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
+      compliance_acknowledged: payload.complianceAcknowledged === true,
+      schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
+      fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
+      acknowledgment_actor: payload.acknowledgmentActor || undefined,
+      acknowledgment_reason: payload.acknowledgmentReason || undefined,
+      approved_decision_artifact_hash:
+        (payload.approvedDecisionArtifactHash || "").trim() || undefined,
+      approved_ddl_identity_hash:
+        (payload.approvedDdlIdentityHash || "").trim() || undefined,
+      decision_artifact: payload.decisionArtifact || undefined,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
@@ -2275,9 +3463,11 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   time: string;
   tool: string;
   client: string;
+  actor?: string | null;
   status: string;
   ms: number;
-  error?: string | null;
+  error_type?: string | null;
+  error_kind?: string | null;
 }>> {
   const res = await apiFetch(`${API_BASE}/mcp/logs?limit=${limit}`);
   if (!res.ok) return [];
@@ -2285,16 +3475,42 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   return data.logs ?? [];
 }
 
-export async function fetchWorkspaceSettings(): Promise<{
+export async function purgeJobRetention(body: { dry_run: boolean; confirm_token?: string }): Promise<{
+  would_remove?: number;
+  removed?: number;
+  cutoff: string;
+  retention_days: number;
+  confirm_token: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/jobs/retention/purge`, { method: "POST", body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not purge old jobs"));
+  return res.json();
+}
+
+/**
+ * Deployment-wide settings (General, SSO, AI providers) are one document for
+ * every workspace; only a platform admin changes them. Reads say so.
+ */
+export type PlatformEditability = {
+  editable?: boolean;
+  editable_reason?: string | null;
+};
+
+export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   org_name: string;
   timezone: string;
   retention_days: number;
+  studio_schema_browser?: boolean;
+  studio_canvas?: boolean;
   updated_at?: string | null;
   updated_by?: string | null;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`);
   if (!res.ok) {
-    return { org_name: "Datawrap", timezone: "UTC", retention_days: 90 };
+    // Never invent settings. A refusal or an outage has to reach the page as
+    // itself: returning a plausible organisation name here showed a viewer a
+    // Settings screen that was pure fiction.
+    throw await apiErrorFrom(res, "Failed to load workspace settings");
   }
   return res.json();
 }
@@ -2303,10 +3519,14 @@ export async function updateWorkspaceSettings(body: {
   org_name?: string;
   timezone?: string;
   retention_days?: number;
+  studio_schema_browser?: boolean;
+  studio_canvas?: boolean;
 }): Promise<{
   org_name: string;
   timezone: string;
   retention_days: number;
+  studio_schema_browser?: boolean;
+  studio_canvas?: boolean;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`, {
     method: "PATCH",
@@ -2314,15 +3534,61 @@ export async function updateWorkspaceSettings(body: {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Failed to save workspace settings"));
+    throw await apiErrorFrom(res, "Failed to save workspace settings");
   }
   return res.json();
+}
+
+export type EffectiveIdentity = {
+  email: string;
+  name: string;
+  platform_role: string;
+  workspace_id: string;
+  /** The API's landing workspace for this account: last used, else its own (D218). */
+  default_workspace_id?: string;
+  workspace_role: string;
+  effective_role: string;
+  permissions: string[];
+  can_write_connectors: boolean;
+  can_run_jobs: boolean;
+  can_manage_schedules: boolean;
+  can_manage_workspace: boolean;
+  workspace_choice_ambiguous: boolean;
+  must_change_password: boolean;
+  auth_required: boolean;
+  /** Two-factor standing; ``hold`` set = this session only reaches two-factor setup. */
+  mfa?: {
+    enrolled: boolean;
+    required: boolean;
+    hold: "mfa_enrollment_required" | "mfa_verification_required" | null;
+    session_verified: boolean;
+    via_sso: boolean;
+    sso_exempt: boolean;
+  };
+};
+
+/** Who the API says you are, and what it will let you do in this workspace. */
+export async function fetchEffectiveIdentity(): Promise<EffectiveIdentity> {
+  const res = await apiFetch(`${API_BASE}/auth/me`);
+  if (!res.ok) throw await apiErrorFrom(res, "Failed to load your identity");
+  return res.json();
+}
+
+export async function changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Failed to change your password");
 }
 
 export async function fetchAuditEvents(limit = 50, level?: string): Promise<Array<{
   id: string;
   time: string;
   actor: string;
+  /** Name + masked id for an API key / service account (R7). */
+  actor_display?: string;
   action: string;
   resource: string;
   level: string;
@@ -2334,6 +3600,51 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   if (!res.ok) return [];
   const data = await res.json();
   return data.events ?? [];
+}
+
+export type AuditExportFormat = "csv" | "json" | "ndjson" | "cef";
+
+/** Server-side tenant-scoped audit download (not the last 100 table rows). */
+export async function exportAuditLog(format: AuditExportFormat = "csv"): Promise<Blob> {
+  const params = new URLSearchParams({ format, limit: "5000" });
+  const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
+  return res.blob();
+}
+
+export type AuditChainFinding = {
+  kind: string;
+  index: number;
+  event_id: string;
+  detail: string;
+  cause?: string;
+  workspace_id?: string | null;
+};
+
+export type AuditChainVerification = {
+  /** null when nothing was walked (`status` says why). */
+  verified: boolean | null;
+  status?: "verified" | "findings" | "nothing_checked" | "store_unavailable";
+  store?: "mongo" | "file";
+  records_in_scope?: number;
+  truncated_by_limit?: boolean;
+  checked: number;
+  chain_head: string | null;
+  findings: AuditChainFinding[];
+  retention_checkpoints: Array<{ removed_count: number; at: string }>;
+  honesty: string;
+  withheld_findings?: number;
+  reanchored?: Array<{ event_id: string; kind: string; cause?: string; reanchored_at?: string; reanchored_by?: string }>;
+  workspace_id?: string | null;
+  scope?: "workspace" | "platform";
+};
+
+/** Re-walk the hash chain server-side and report any record that fails. */
+export async function verifyAuditChain(limit = 5000): Promise<AuditChainVerification> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const res = await apiFetch(`${API_BASE}/audit/verify?${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not verify the audit chain"));
+  return res.json();
 }
 
 export type SsoType = "saml" | "oidc" | "azure_ad";
@@ -2350,6 +3661,10 @@ export type SsoConfig = {
   redirect_uri?: string;
   scopes?: string;
   tenant_id?: string;
+  /** Sign-ins from these domains route to this IdP (`/auth/sso/route`). */
+  email_domains?: string[];
+  /** Write-only: remove the stored client secret (blank keeps it). */
+  clear_client_secret?: boolean;
 };
 
 export function resolveApiBase(): string {
@@ -2361,11 +3676,14 @@ export function ssoStartUrl(type: SsoType): string {
   return `${resolveApiBase()}/auth/sso/${type}/start`;
 }
 
-export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+export async function fetchSsoSettings(): Promise<PlatformEditability & { providers: Record<SsoType, SsoConfig> }> {
   const res = await apiFetch(`${API_BASE}/workspace/sso`);
   if (!res.ok) throw new Error("Failed to load SSO settings");
-  const data = await res.json();
-  return data.providers;
+  return res.json();
+}
+
+export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+  return (await fetchSsoSettings()).providers;
 }
 
 export async function updateSsoConfig(type: SsoType, body: Partial<SsoConfig>): Promise<{ config: SsoConfig; validation: { ok: boolean; message: string; missing_fields: string[] } }> {
@@ -2419,27 +3737,97 @@ export async function updateAiProviderSettings(provider: string, body: {
   return res.json();
 }
 
+export type PilotEngineChoice = "auto" | "local" | "hybrid" | "cloud";
+
+export type PilotEngineStatus = PlatformEditability & {
+  preference: PilotEngineChoice;
+  engine: string;
+  source: string;
+  reason: string;
+  configured_providers: string[];
+};
+
+export async function removeAiProviderKey(provider: string): Promise<Record<string, unknown>> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/key`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove the saved key"));
+  return res.json();
+}
+
+export async function testAiProviderKey(provider: string): Promise<{
+  ok: boolean;
+  provider: string;
+  error: string;
+  base_url?: string;
+  models?: string[];
+  capabilities: ModelCapabilities;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/test`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Provider key test failed"));
+  return res.json();
+}
+
+export async function fetchPilotEngineStatus(): Promise<PilotEngineStatus> {
+  const res = await apiFetch(`${API_BASE}/workspace/pilot-engine`);
+  if (!res.ok) throw new Error("Failed to load Pilot engine setting");
+  return res.json();
+}
+
+export async function updatePilotEngine(engine: PilotEngineChoice): Promise<PilotEngineStatus> {
+  const res = await apiFetch(`${API_BASE}/workspace/pilot-engine`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ engine }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save Pilot engine setting"));
+  return res.json();
+}
+
+export type WorkspaceApiKeyRole = "viewer" | "operator" | "editor" | "admin";
+
+export type WorkspaceApiKeyLifetime = "7d" | "30d" | "60d" | "90d" | "365d" | "never";
+
+export type AuditRetentionPurgeResult = {
+  removed: number;
+  would_remove?: number;
+  oldest_kept_time: string | null;
+  legal_hold: boolean;
+  retention_days: number | null;
+  dry_run: boolean;
+};
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
   prefix: string;
+  kind?: string;
+  role?: WorkspaceApiKeyRole | string;
   created_at?: string;
   created_by?: string;
   last_used_at?: string | null;
+  expires_at?: string | null;
+  lifetime?: WorkspaceApiKeyLifetime | string;
+  expired?: boolean;
+  /** What the key can reach, computed by the API (D219). */
+  access?: "platform" | "workspace" | string;
+  access_label?: string;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`);
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list API keys"));
   const data = await res.json();
   return data.keys ?? [];
 }
 
-export async function createWorkspaceApiKey(name: string): Promise<WorkspaceApiKey & { key: string }> {
+export async function createWorkspaceApiKey(
+  name: string,
+  role: WorkspaceApiKeyRole = "editor",
+  expiresIn: WorkspaceApiKeyLifetime = "90d",
+): Promise<WorkspaceApiKey & { key: string }> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, role, expires_in: expiresIn }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create API key"));
   return res.json();
@@ -2450,72 +3838,325 @@ export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
 }
 
+export type ServiceAccount = WorkspaceApiKey & {
+  scopes?: string[];
+  kind: "service_account" | "scim" | string;
+};
+
+export type ServiceAccountWithSecret = ServiceAccount & { key: string };
+
+export async function fetchServiceAccounts(): Promise<ServiceAccount[]> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list service accounts"));
+  return res.json();
+}
+
+export async function createServiceAccount(input: {
+  name: string;
+  role: WorkspaceApiKeyRole;
+  scopes: string[];
+  expires_in: WorkspaceApiKeyLifetime;
+}): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create service account"));
+  return res.json();
+}
+
+export async function revokeServiceAccount(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke service account"));
+}
+
+export async function rotateApiKey(
+  id: string,
+  overlapSeconds: number,
+): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/api-keys/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overlap_seconds: overlapSeconds }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to rotate API key"));
+  return res.json();
+}
+
+export async function createScimToken(input: {
+  name: string;
+  expires_in: WorkspaceApiKeyLifetime;
+}): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/scim-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create SCIM token"));
+  return res.json();
+}
+
+export type ScimGroupMapping = { workspace_id: string; role: string };
+export type ScimGroupMappings = Record<string, ScimGroupMapping>;
+
+export async function fetchScimGroupMappings(): Promise<{ mappings: ScimGroupMappings }> {
+  const res = await apiFetch(`${API_BASE}/iam/scim/group-mappings`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load SCIM group mappings"));
+  return res.json();
+}
+
+export async function saveScimGroupMappings(
+  mappings: ScimGroupMappings,
+): Promise<{ mappings: ScimGroupMappings }> {
+  const res = await apiFetch(`${API_BASE}/iam/scim/group-mappings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mappings }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save SCIM group mappings"));
+  return res.json();
+}
+
+export async function purgeAuditRetention(dryRun: boolean): Promise<AuditRetentionPurgeResult> {
+  const params = new URLSearchParams({ dry_run: String(dryRun) });
+  const res = await apiFetch(`${API_BASE}/audit/retention/purge?${params}`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to purge audit retention"));
+  return res.json();
+}
+
+export type WorkspaceRole = "admin" | "editor" | "viewer";
+
 export type Workspace = {
   id: string;
   name: string;
   created_at: string;
   created_by: string;
+  member_count?: number;
 };
 
 export type WorkspaceMember = {
   workspace_id: string;
   email: string;
-  role: "owner" | "editor" | "viewer";
+  role: WorkspaceRole;
   added_at: string;
   added_by: string;
+  /** Whether this email can actually sign in, and how the account was provisioned. */
+  has_account?: boolean;
+  account_status?: "active" | "disabled" | "provisioned" | "no_account";
+  name?: string;
 };
 
-export async function fetchWorkspaces(): Promise<Workspace[]> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces`);
+export type PlatformUser = {
+  email: string;
+  name: string;
+  role: "admin" | "member";
+  status: "active" | "disabled";
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  last_login_at: string | null;
+  must_change_password: boolean;
+  workspaces?: { workspace_id: string; role: WorkspaceRole }[];
+};
+
+export async function fetchWorkspaces(): Promise<{
+  workspaces: Workspace[];
+  platformAdmin: boolean;
+  actor: string;
+  /** Where this account lands when the browser names no workspace (D218). */
+  defaultWorkspaceId: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
   const data = await res.json();
-  return data.workspaces ?? [];
+  return {
+    workspaces: data.workspaces ?? [],
+    platformAdmin: !!data.platform_admin,
+    actor: data.actor ?? "",
+    defaultWorkspaceId: typeof data.default_workspace_id === "string" ? data.default_workspace_id : "",
+  };
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces`, {
+  const res = await apiFetch(`${API_BASE}/team/workspaces`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create workspace"));
-  return res.json();
+  return (await res.json()).workspace;
+}
+
+export async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to rename workspace"));
+  return (await res.json()).workspace;
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete workspace"));
 }
 
 export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`);
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load members"));
   const data = await res.json();
   return data.members ?? [];
 }
 
-export async function addWorkspaceMember(workspaceId: string, email: string, role: string): Promise<WorkspaceMember> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`, {
+export async function addWorkspaceMember(
+  workspaceId: string,
+  email: string,
+  role: string,
+  options: { createAccount?: boolean; name?: string } = {},
+): Promise<{ membership: WorkspaceMember; hasAccount: boolean; temporaryPassword: string | null }> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, role }),
+    body: JSON.stringify({ email, role, create_account: !!options.createAccount, name: options.name ?? "" }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to add member"));
-  return res.json();
+  const data = await res.json();
+  return { membership: data.membership, hasAccount: !!data.has_account, temporaryPassword: data.temporary_password ?? null };
+}
+
+export async function updateWorkspaceMemberRole(
+  workspaceId: string,
+  email: string,
+  role: string,
+): Promise<WorkspaceMember> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to change role"));
+  const data = await res.json();
+  return data.membership as WorkspaceMember;
 }
 
 export async function removeWorkspaceMember(workspaceId: string, email: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove member"));
 }
 
-export async function loginWorkspace(email: string, password: string): Promise<{
+export async function fetchPlatformUsers(): Promise<PlatformUser[]> {
+  const res = await apiFetch(`${API_BASE}/team/users`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load accounts"));
+  return (await res.json()).users ?? [];
+}
+
+export async function createPlatformUser(input: {
+  email: string;
+  name?: string;
+  platformRole?: "admin" | "member";
+  password?: string;
+  workspaceId?: string;
+  workspaceRole?: WorkspaceRole;
+}): Promise<{ user: PlatformUser; temporaryPassword: string | null }> {
+  const res = await apiFetch(`${API_BASE}/team/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: input.email,
+      name: input.name ?? "",
+      platform_role: input.platformRole ?? "member",
+      password: input.password ? input.password : null,
+      workspace_id: input.workspaceId ?? "",
+      workspace_role: input.workspaceRole ?? "viewer",
+    }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create account"));
+  const data = await res.json();
+  return { user: data.user, temporaryPassword: data.temporary_password ?? null };
+}
+
+export async function updatePlatformUser(
+  email: string,
+  patch: { name?: string; platformRole?: "admin" | "member"; status?: "active" | "disabled" },
+): Promise<PlatformUser> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: patch.name, platform_role: patch.platformRole, status: patch.status }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to update account"));
+  return (await res.json()).user;
+}
+
+export async function resetPlatformUserPassword(email: string): Promise<string | null> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}/reset-password`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to reset password"));
+  return (await res.json()).temporary_password ?? null;
+}
+
+export async function deletePlatformUser(email: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete account"));
+}
+
+export interface SignupMetrics {
+  pending_signups: number;
+  active_challenges: number;
+  email_quota: { backend: string; day_used: number; day_limit: number; month_used?: number; month_limit?: number };
+}
+
+/** Admin-only signup-surface metrics; absent entirely when the flag is off. */
+export async function fetchSignupMetrics(): Promise<SignupMetrics | null> {
+  const res = await apiFetch(`${API_BASE}/auth/admin/signup-metrics`, { timeoutMs: 8000 });
+  if (!res.ok) return null;
+  return (await res.json()) as SignupMetrics;
+}
+
+export interface LoginSession {
   token: string;
   expires_at: number;
   user: { email: string; name: string; role: string };
-}> {
+  must_change_password?: boolean;
+}
+
+/** 202 from /auth/login: the password matched an account with two-factor on. */
+export interface LoginMfaChallenge {
+  mfa_required: true;
+  challenge: string;
+  challenge_expires_at: number;
+  methods: string[];
+}
+
+export async function loginWorkspace(email: string, password: string): Promise<LoginSession | LoginMfaChallenge> {
   const res = await apiFetch(`${API_BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Sign-in failed"));
+    // Carry the status: a refused password (401) and an unreachable control
+    // plane are different facts, and the sign-in screen cannot tell them apart
+    // from message text alone. When the route uses the {error:{code}} envelope
+    // (flag-on signup surface), surface the code + challenge_id so the UI can
+    // route a 403 email_unverified straight into code entry.
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const env = (body?.error ?? {}) as Record<string, unknown>;
+    const message =
+      (typeof env.message === "string" && env.message) ||
+      (typeof body?.detail === "string" && body.detail) ||
+      "Sign-in failed";
+    throw new ApiError(
+      message,
+      res.status,
+      "",
+      "",
+      typeof env.code === "string" ? env.code : "",
+      typeof body?.challenge_id === "string" ? body.challenge_id : "",
+    );
   }
   return res.json();
 }
@@ -2526,6 +4167,57 @@ export interface QueryResult {
   column_schema: Record<string, string>;
   row_count: number;
   truncated: boolean;
+  /** Server-measured execution time. Absent on older API builds. */
+  duration_ms?: number;
+  /**
+   * Provenance of `column_schema`. Result-set types are inferred from the
+   * returned values, never read from source DDL — the console must not
+   * present the first as the second.
+   */
+  column_type_source?: string;
+}
+
+export interface QuerySchemaColumnInfo {
+  name: string;
+  type: string;
+  /** null/undefined = the catalog did not say; never assume nullable. */
+  nullable?: boolean | null;
+  primary_key?: boolean;
+}
+
+export interface QuerySchemaObjectInfo {
+  name: string;
+  type: string;
+  schema_name?: string;
+  columns: QuerySchemaColumnInfo[];
+  row_estimate?: number;
+}
+
+export interface QuerySchemaResult {
+  connected: boolean;
+  connector_type?: string;
+  database?: string;
+  objects: QuerySchemaObjectInfo[];
+  message?: string;
+  warnings?: string[];
+  type_source?: string;
+  objects_truncated?: boolean;
+}
+
+export interface QueryCatalogNodeInfo {
+  kind: "database" | "schema" | string;
+  name: string;
+  children?: QueryCatalogNodeInfo[];
+}
+
+export interface QuerySchemasResult {
+  connected: boolean;
+  connector_type?: string;
+  database?: string;
+  schema_name?: string;
+  nodes: QueryCatalogNodeInfo[];
+  listed_live: boolean;
+  message?: string;
 }
 
 export interface QueryExportResult {
@@ -2538,13 +4230,21 @@ export interface QueryExportResult {
   error?: string;
 }
 
-export async function executeQuery(payload: {
+/** Shared Run + Export fields. Bind params must travel on both. */
+export type QueryPlaygroundRequest = {
   connector_id: string;
   query: string;
   database?: string;
   collection?: string;
   limit?: number;
-}): Promise<QueryResult> {
+  /**
+   * Named bind parameters for `:name` placeholders. These stay bound values
+   * on the server — they are never interpolated into the SQL text.
+   */
+  params?: Record<string, unknown>;
+};
+
+export async function executeQuery(payload: QueryPlaygroundRequest): Promise<QueryResult> {
   const res = await apiFetch(`${API_BASE}/query/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2561,19 +4261,16 @@ export async function executeQuery(payload: {
   return res.json();
 }
 
-export async function exportQuery(payload: {
-  connector_id: string;
-  query: string;
-  database?: string;
-  collection?: string;
-  limit?: number;
-  format: string;
-  output_path?: string;
-  destination_connector_id?: string;
-  destination?: string;
-  sync_mode?: string;
-  conflict_columns?: string[];
-}): Promise<QueryExportResult> {
+export async function exportQuery(
+  payload: QueryPlaygroundRequest & {
+    format: string;
+    output_path?: string;
+    destination_connector_id?: string;
+    destination?: string;
+    sync_mode?: string;
+    conflict_columns?: string[];
+  },
+): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2583,23 +4280,76 @@ export async function exportQuery(payload: {
   return res.json();
 }
 
+/**
+ * List queryable objects for a connector, and columns for one named object.
+ *
+ * Two-phase by design: omit `object_name` to list objects, then pass it to
+ * expand that object's columns. Fetching every table's columns up front is
+ * what makes schema browsers unusable on large estates.
+ */
+export async function fetchQuerySchema(payload: {
+  connector_id: string;
+  database?: string;
+  schema_name?: string;
+  object_name?: string;
+}): Promise<QuerySchemaResult> {
+  const res = await apiFetch(`${API_BASE}/query/schema`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
+  return res.json();
+}
+
+/** Databases and schemas the connector can name. Objects stay on `/query/schema`. */
+export async function fetchQuerySchemas(payload: {
+  connector_id: string;
+  database?: string;
+  schema_name?: string;
+}): Promise<QuerySchemasResult> {
+  const res = await apiFetch(`${API_BASE}/query/schemas`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Schema catalog failed"));
+  return res.json();
+}
+
 export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
   issue_count?: number;
+  /** Distinct source rows carrying a finding of their own. */
+  finding_rows?: number;
+  /** Rows the refused (atomic) write unit rolled back without a finding. */
+  rows_rolled_back?: number;
+  /** Rows the refused write unit counted, findings plus rollbacks. */
+  rows_refused_unit?: number;
+  /** Reject total that no retrievable finding or named rollback explains. */
+  rows_unaccounted?: number;
+  /** Destination DLQ table durability — independent of the control plane. */
+  dest_dlq_durable?: boolean | null;
+  open_count?: number;
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
   quarantine: {
     row?: number;
     column?: string;
     target?: string;
-    value?: string;
+    value?: string | null;
     reason?: string;
     policy?: string;
-    values?: Record<string, string>;
+    values?: Record<string, string | null>;
     chars?: string[];
     suggested_transform?: string;
+    suggested_fix?: string;
+    suggested_target_type?: string;
     _df_qid?: string;
+    retry_status?: string;
   }[];
   /** Destination-side DLQ table (`{table}_df_quarantine`) when written. */
   dest_dlq?: {
@@ -2619,6 +4369,17 @@ export interface QuarantineInfo {
    */
   quarantine_durable?: boolean | null;
   quarantine_dlq_error?: string | null;
+  /** Dual Run sibling: remediations until open_count hits zero. closed ≠ migration_proven. */
+  quarantine_closure?: {
+    verdict?: string;
+    open_count?: number;
+    promoted_count?: number;
+    failed_count?: number;
+    durable_count?: number;
+    next_action?: string;
+    note?: string;
+    migration_proven?: boolean;
+  };
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -2659,7 +4420,7 @@ export async function downloadJobQuarantineCsv(
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
-    const lines = ["row,column,target,value,reason,policy,suggested_transform"];
+    const lines = ["row,column,target,value,reason,policy,suggested_transform,suggested_fix,suggested_target_type"];
     const mark = (v: unknown) => {
       let text = String(v ?? "");
       text = text
@@ -2673,7 +4434,7 @@ export async function downloadJobQuarantineCsv(
     };
     for (const r of rows) {
       lines.push(
-        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform]
+        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform, r.suggested_fix, r.suggested_target_type]
           .map(escape)
           .join(","),
       );
@@ -2741,6 +4502,7 @@ export interface QuarantineReplayResult {
     source_rows?: number;
     target_rows?: number;
   };
+  quarantine_closure?: QuarantineInfo["quarantine_closure"];
 }
 
 export async function replayJobQuarantine(
@@ -2767,6 +4529,16 @@ export interface NotificationChannel {
   created_at: string;
   updated_at: string;
   created_by: string;
+  /** Webhook channels: a signing secret exists (never returned on reads). */
+  signing_secret_set?: boolean;
+  /** Present only in the create / rotate response — shown once. */
+  signing_secret?: string;
+}
+
+export async function rotateNotificationSigningSecret(id: string): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}/signing-secret/rotate`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate the signing secret"));
+  return res.json();
 }
 
 export async function fetchNotificationChannels(workspaceId?: string): Promise<{ channels: NotificationChannel[] }> {
@@ -2809,9 +4581,33 @@ export type Tenant = {
   security_contact_email: string;
   mfa_required: boolean;
   session_timeout_hours: number;
+  enforce_session_timeout?: boolean;
   ip_allowlist: string[];
+  egress_allowlist: string[];
   created_at: string;
   updated_at: string;
+  /** What is enforced now (read and save responses; same source as the posture). */
+  enforcement?: TenantEnforcement;
+};
+
+export type ControlStatus = "enforced" | "audit_only" | "untrusted_client_ip" | "recorded_only" | "not_configured";
+
+/** `enforcement` block of the tenant save response and the security posture (QA round 11). */
+export type TenantEnforcement = {
+  ip_allowlist?: { enforced?: boolean; status?: ControlStatus; missing?: string[]; scope?: string; client_ip_source?: string };
+  session_timeout?: { enforced?: boolean; status?: ControlStatus; hours?: number | null; kind?: string };
+  mfa?: {
+    enforced?: boolean;
+    status?: string;
+    sso_exempt?: boolean;
+    missing?: string[];
+    members_total?: number;
+    members_enrolled?: number;
+  };
+  /** The address the server sees for this caller. */
+  caller_ip?: string;
+  /** Admin-facing: what is saved but not enforced, and who can change it. */
+  warnings?: string[];
 };
 
 export type ByokKey = {
@@ -2836,6 +4632,8 @@ export type BenchmarkReport = {
   destination_summary: Record<string, unknown>;
   error: string;
   timestamp: string;
+  peak_memory_basis?: string;
+  startup_seconds?: number;
   competitors: {
     product: string;
     typical_rps: number;
@@ -2843,7 +4641,20 @@ export type BenchmarkReport = {
     resume_from_checkpoint: boolean;
     observed_max_rows: number;
     notes: string;
+    comparison?: { verdict: "faster" | "slower" | "similar" | "unknown"; ratio: number | null; label: string };
   }[];
+};
+
+export type BenchmarkRun = {
+  id: string;
+  rows: number;
+  status: "queued" | "running" | "succeeded" | "failed";
+  phase: string;
+  progress_pct: number;
+  rows_done: number;
+  elapsed_seconds: number;
+  error: string;
+  report: BenchmarkReport | null;
 };
 
 export type SecurityPosture = {
@@ -2863,15 +4674,33 @@ export type SecurityPosture = {
   audit_logging: boolean;
   pii_detection: boolean;
   ip_allowlist_enabled: boolean;
+  ip_allowlist_enforced?: boolean;
+  egress_allowlist_enabled?: boolean;
+  /** Workspace this posture was resolved for. Empty when the read was unscoped. */
+  scope_workspace_id?: string | null;
   mfa_required: boolean;
+  mfa_enforced?: boolean;
   session_timeout_hours: number;
+  session_timeout_enforced?: boolean;
+  /** Exactly what each control enforces (round 8; round 11 adds status, warnings and real MFA). */
+  enforcement?: TenantEnforcement;
+  byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;
   attestations: Array<{ name: string; last_completed?: string | null; next_due?: string | null; status?: string }>;
 };
 
-export async function fetchTenant(): Promise<Tenant | null> {
-  const res = await apiFetch(`${API_BASE}/workspace/tenant`);
+/** The tenant of a named workspace, or of the workspace being viewed.
+ *
+ * The named form exists because the Enterprise tab lets an admin point at a
+ * workspace other than the active one: resolving that read against the session's
+ * workspace reported a saved tenant as "No tenant configured".
+ */
+export async function fetchTenant(workspaceId?: string): Promise<Tenant | null> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/tenant`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
   if (!res.ok) return null;
   return res.json();
 }
@@ -2879,7 +4708,10 @@ export async function fetchTenant(): Promise<Tenant | null> {
 export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "updated_at">): Promise<Tenant> {
   const res = await apiFetch(`${API_BASE}/workspace/tenant`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // The scope in the body is the scope of the request: without this the
+    // session's workspace header disagrees with the workspace named on the
+    // form, and the API refuses the write as a cross-workspace borrow.
+    headers: { "Content-Type": "application/json", ...(body.workspace_id ? { "X-Workspace-Id": body.workspace_id } : {}) },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));
@@ -2905,14 +4737,24 @@ export async function downloadSecurityReport(): Promise<Blob> {
   return res.blob();
 }
 
-export async function fetchSecurityPosture(): Promise<SecurityPosture> {
-  const res = await apiFetch(`${API_BASE}/workspace/security/posture`);
+export async function fetchSecurityPosture(workspaceId?: string): Promise<SecurityPosture> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/security/posture`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load security posture"));
   return res.json();
 }
 
-export async function fetchByokKeys(): Promise<{ keys: ByokKey[] }> {
-  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`);
+export async function fetchByokKeys(workspaceId?: string): Promise<{ keys: ByokKey[] }> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/tenant/byok-keys`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
+  // Keys hang off a tenant, so a workspace with no tenant has none — that is an
+  // empty list, not a failed read. Reporting it as an error printed "No tenant
+  // configured" as a red banner over a working page.
+  if (res.status === 404) return { keys: [] };
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load BYOK keys"));
   return res.json();
 }
@@ -2927,15 +4769,32 @@ export async function createByokKey(body: { label: string; provider: ByokKey["pr
   return res.json();
 }
 
+export async function rotateByokKey(keyId: string): Promise<ByokKey> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate BYOK key"));
+  return res.json();
+}
+
 export type ProofLedger = {
   generated_at: string;
   headline: string;
   metrics: {
     unique_transfer_drivers: number;
+    desktop_lab_catalog_slots?: number;
+    desktop_lab_duplex_passed?: number;
+    desktop_lab_unique_engines?: number;
     transfer_live_drivers: string[];
     catalog_transfer_ready_aliases?: number;
     live_route_combinations?: number;
     production_sku_routes: number;
+    production_sku_sold?: number;
+    production_sku_driver_missing?: number;
+    production_sku_refused?: number;
+    production_sku_note?: string;
+    customer_handover_sold?: number;
+    customer_handover_eligible?: number;
     fidelity_proofs_on_disk: number;
     fidelity_proofs_passed: number;
     planned_catalog_entries?: number;
@@ -2947,6 +4806,11 @@ export type ProofLedger = {
     dest_format: string;
     route: string;
     status: string;
+    sold?: boolean;
+    customer_handover?: boolean;
+    customer_handover_eligible?: boolean;
+    validate_ok?: boolean;
+    driver_gap?: string | null;
   }[];
   recent_proofs: {
     id: string;
@@ -2959,10 +4823,10 @@ export type ProofLedger = {
     checks?: string[];
     elapsed_ms?: number;
   }[];
-  vs_airbyte: {
+  integrity_comparison: {
     dimension: string;
-    dataflow: string;
-    airbyte: string;
+    datawrap: string;
+    industry_elt: string;
     proof: string;
   }[];
   how_to_verify: string[];
@@ -2981,7 +4845,7 @@ export type FidelityProofResult = {
   spot?: Record<string, unknown>;
   proof_id?: string;
   proof_file?: string;
-  vs_airbyte?: string;
+  integrity_note?: string;
 };
 
 export async function fetchProofLedger(): Promise<ProofLedger> {
@@ -2999,6 +4863,101 @@ export async function runFidelityProof(): Promise<FidelityProofResult> {
   return res.json();
 }
 
+export type DesktopLabConnector = {
+  catalog_id: string;
+  driver: string;
+  role: string;
+  family: string;
+  dest_status: string;
+  source_status: string;
+  dest_error?: string;
+  source_error?: string;
+  dest_rows?: number | null;
+  source_rows?: number | null;
+  duplex: boolean;
+};
+
+export type DesktopLabReport = {
+  success?: boolean;
+  available?: boolean;
+  catalog_slots: number;
+  catalog_slots_duplex_passed: number;
+  unique_engines_duplex_passed: number;
+  dest_passed?: number;
+  source_passed?: number;
+  failed?: number;
+  skipped?: number;
+  honesty?: Record<string, unknown>;
+  connectors?: DesktopLabConnector[];
+  error?: string;
+};
+
+export async function runDesktopLab(): Promise<DesktopLabReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`, {
+    method: "POST",
+    timeoutMs: 900_000,
+  });
+  const body = (await res.json().catch(() => null)) as DesktopLabReport | null;
+  if (body && typeof body.catalog_slots === "number") return body;
+  throw new Error(body?.error || (res.ok ? "Desktop lab returned no report" : "Desktop lab failed"));
+}
+
+export async function fetchDesktopLab(): Promise<DesktopLabReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load desktop lab"));
+  return res.json();
+}
+
+export type DesktopLabCrossReport = {
+  success?: boolean;
+  available?: boolean;
+  unique_engines?: string[];
+  unique_engines_seeded?: string[];
+  pairs: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  routes?: Array<{
+    source: string;
+    destination: string;
+    status: string;
+    error?: string;
+    dest_count?: number | null;
+    integrity?: string;
+  }>;
+  honesty?: Record<string, unknown>;
+  error?: string;
+};
+
+export async function runDesktopLabCross(): Promise<DesktopLabCrossReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab-cross`, {
+    method: "POST",
+    timeoutMs: 900_000,
+  });
+  const body = (await res.json().catch(() => null)) as DesktopLabCrossReport | null;
+  if (body && typeof body.pairs === "number") return body;
+  throw new Error(body?.error || (res.ok ? "Unique-engine matrix returned no report" : "Unique-engine matrix failed"));
+}
+
+export async function fetchDesktopLabCross(): Promise<DesktopLabCrossReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab-cross`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load unique-engine matrix"));
+  return res.json();
+}
+
+export async function runScheduleParallelCheck(
+  scheduleId: string,
+): Promise<{ passed?: boolean; message?: string; campaign?: PipelineSchedule["fidelity_campaign"] }> {
+  const res = await apiFetch(`${API_BASE}/fidelity/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_id: scheduleId }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Parallel-run check failed"));
+  return res.json();
+}
+
 export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
   const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
     method: "POST",
@@ -3008,6 +4967,29 @@ export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed"));
   return res.json();
+}
+
+/** Start the Scale benchmark as a background run (returns at once). */
+export async function startBenchmarkRun(rows = 100_000): Promise<BenchmarkRun> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed to start"));
+  return (await res.json()).run;
+}
+
+export async function fetchBenchmarkRun(id: string): Promise<BenchmarkRun> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not read the benchmark run"));
+  return (await res.json()).run;
+}
+
+export async function downloadBenchmarkRunReport(id: string): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs/${encodeURIComponent(id)}?format=md`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not download benchmark report"));
+  return res.blob();
 }
 
 export async function downloadBenchmarkReport(rows = 100_000): Promise<Blob> {
@@ -3038,6 +5020,10 @@ export interface DataContractSummary {
   updated_at: string;
   metadata: Record<string, unknown>;
   preflight_gates?: Record<string, unknown>[];
+  /** Server read model: "Signed v3" — the list, drawer and Pilot all show it. */
+  status_label?: string;
+  signed_version?: number | null;
+  signed_at?: string;
 }
 
 export interface ContractBreaker {
@@ -3140,6 +5126,28 @@ export async function resetContractBreaker(id: string): Promise<ContractBreaker>
   return res.json();
 }
 
+export interface ContinuityRebaselineResult {
+  rebaseline_id: string;
+  table: string;
+  previous: { rows?: number; checksum?: string; job_id?: string } | null;
+  current: { rows?: number; checksum?: string } | null;
+  destination_missing?: boolean;
+}
+
+/** Accept the current destination (or its removal) as the append-continuity baseline. Audited; reason required. */
+export async function rebaselineContinuity(
+  destination: Record<string, unknown>,
+  reason: string,
+): Promise<ContinuityRebaselineResult> {
+  const res = await apiFetch(`${API_BASE}/transfer/continuity/rebaseline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ destination, reason }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not accept the destination"));
+  return res.json();
+}
+
 export async function exportContract(id: string): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/export`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export contract"));
@@ -3161,9 +5169,21 @@ export async function fetchUsageSummary(days = 30): Promise<{
 
 export interface SchemaDriftReport {
   severity: string;
-  additive: { kind: string; column?: string; to_type?: string }[];
-  breaking: { kind: string; column?: string; to?: string; to_type?: string }[];
+  additive: { kind: string; column?: string; to_type?: string; new_type?: string }[];
+  breaking: { kind: string; column?: string; to?: string; to_type?: string; new_type?: string }[];
   summary?: string;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: { kind: string; column?: string; to?: string }[];
+  soft_net_additive?: { kind: string; column?: string; to?: string }[];
+  schema_evolution?: {
+    action?: string;
+    should_pause?: boolean;
+    compatibility?: string;
+    compatibility_note?: string;
+    hard_breaking?: { kind: string; column?: string }[];
+    soft_net_additive?: { kind: string; column?: string }[];
+  };
 }
 
 export async function classifySchemaDrift(
@@ -3266,7 +5286,7 @@ export async function fetchRepairProposal(proposalId: string): Promise<RepairPro
 
 export async function decideRepairProposal(
   proposalId: string,
-  body: { approve: boolean; actor?: string; mappings?: RepairMapping[] },
+  body: { approve: boolean; mappings?: RepairMapping[] },
 ): Promise<RepairProposal> {
   const res = await apiFetch(
     `${API_BASE}/repair/proposals/${encodeURIComponent(proposalId)}/decide`,
@@ -3275,7 +5295,6 @@ export async function decideRepairProposal(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         approve: body.approve,
-        actor: body.actor || "operator",
         mappings: body.mappings || [],
       }),
     },
@@ -3294,6 +5313,7 @@ export interface CdcSnapshotSignal {
   chunk_size?: number;
   last_pk?: string;
   rows_snapshotted?: number;
+  row_filter?: Record<string, unknown> | null;
   created_at?: number;
   updated_at?: number;
   error?: string;
@@ -3326,7 +5346,12 @@ export async function listJobCdcSnapshots(
 
 export async function requestJobCdcSnapshot(
   jobId: string,
-  body?: { table?: string; primary_key?: string; chunk_size?: number },
+  body?: {
+    table?: string;
+    primary_key?: string;
+    chunk_size?: number;
+    row_filter?: Record<string, unknown> | unknown[] | null;
+  },
 ): Promise<CdcSnapshotSignal> {
   const res = await apiFetch(
     `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots`,
@@ -3420,6 +5445,8 @@ export interface TransformCompiledModel {
   sources: string[];
   statements: string[];
   error?: string;
+  /** How the executed SQL differs from this preview, when it does. */
+  note?: string;
   tests: { test_type: string; column: string; severity: string; sql: string }[];
 }
 
@@ -3504,6 +5531,13 @@ export interface TransformRunResult {
   model_count: number;
   failed_model_count: number;
   failed_test_count: number;
+  /** Count-proven ledger — failing error tests only; not a live-matrix claim. */
+  row_accounting?: {
+    models_run: number;
+    rows_written: number;
+    rows_quarantined: number;
+    tests_failed: number;
+  };
 }
 
 export async function runTransformProject(
@@ -3532,4 +5566,3 @@ export async function exportTransformProjectDbt(projectId: string): Promise<{
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
   return res.json();
 }
-

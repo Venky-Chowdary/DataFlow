@@ -115,12 +115,21 @@ def test_saas_catalog_stays_planned_not_sku():
     """Typed read must not silently flip Planned SaaS to TRANSFER_READY."""
     from transfer.connector_capabilities import enrich_catalog_entry
 
-    for brand in ("airtable", "notion", "stripe"):
+    for brand in ("airtable", "notion"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
         assert row["transfer_ready"] is False, brand
         assert row["certification_tier"] == "planned", brand
+
+    # Stripe earned an incremental ``created`` cursor SKU as a *source* only
+    # (see test_catalog_honesty.test_dedicated_saas_drivers_activation_and_
+    # source_only). A typed read still may not certify it as a destination.
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live"}
+    )
+    assert stripe["source_ready"] is True
+    assert stripe["dest_ready"] is False
 
 
 def test_rest_api_meta_exposes_native_types_for_airtable():
@@ -202,10 +211,15 @@ def test_canonical_checksum_bind_parity_bool_wire():
 def test_snowflake_bind_rows_covers_boolean_before_copy():
     from connectors.snowflake_writer import _bind_rows_for_snowflake
 
+    rejected: list[dict] = []
     bound = _bind_rows_for_snowflake(
         [("1", "true"), ("2", "false")],
+        ["id", "active"],
         ["VARCHAR", "BOOLEAN"],
+        rejected,
+        "quarantine",
     )
+    assert not rejected, rejected
     assert bound[0][1] is True or bound[0][1] == 1 or bound[0][1] == "true"
     # After bind, false-ish wire must not remain the string "false" if coerce works.
     assert bound[1][1] is False or bound[1][1] == 0 or bound[1][1] == "false"
@@ -232,8 +246,8 @@ def test_rejected_detail_stamps_primary_key():
 
 def test_cdc_classify_requires_lsn_guard_engine():
     from services.cdc_effectively_once import (
-        SINK_APPEND_ONLY,
         SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+        SINK_PK_UPSERT_AT_LEAST_ONCE,
         classify_sink_delivery,
     )
 
@@ -243,11 +257,13 @@ def test_cdc_classify_requires_lsn_guard_engine():
     assert pg["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
     assert pg.get("has_lsn_guard") is True
 
-    # Explicit missing LSN column → not eligible.
+    # Explicit missing LSN column → PK upsert last-write-wins, not append-only.
     no_lsn = classify_sink_delivery(
         dest_type="postgresql",
         has_primary_key=True,
         write_mode="upsert",
         has_lsn_column=False,
     )
-    assert no_lsn["class"] == SINK_APPEND_ONLY
+    assert no_lsn["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE
+    assert no_lsn["exactly_once"] is False
+    assert no_lsn["duplicates_on_redelivery"] is False

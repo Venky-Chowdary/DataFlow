@@ -7,6 +7,12 @@ description: How to bring up the DataFlow stack locally, log into the workspace 
 
 ## Bring up the stack
 
+- If the browser tool cannot initialize after a restored snapshot, verify that
+  `$DISPLAY` has a live X server (`ls /tmp/.X11-unix`, inspect Xvfb/Xorg processes).
+  `DISPLAY=:0` alone does not mean the display exists. If :0 is unused, start
+  `Xvfb :0 -screen 0 1600x1200x24 -ac`, then retry browser restart; the saved
+  browser profile may retain a valid login. Do this before starting a recording.
+
 - Mongo: `docker start df-mongo` (Jobs / Schedules / Contracts do not persist without it).
 - API: run from the repo virtualenv, **not** system python (system python has no FastAPI):
   ```bash
@@ -237,60 +243,6 @@ made with the panel closed passes vacuously. Assert with
 
 Restarting the API **wipes in-process transfer plans**, so every post-restart Validate test has to be
 rebuilt from Source.
-
-### G16 "Field reduction governance" / reduction-reason controls in Map
-
-- **The reduction-reason controls only exist inside an *omitted* row's destination cell.** Set
-  `select[aria-label="Transform for <col>"]` to `omit` first; only then do these appear:
-  `select[aria-label="Reduction reason for <col>"]` (placeholder `— why is it dropped? —`),
-  `input[aria-label="Reduction note for <col>"]`, and — only for reason `archive_only` —
-  `input[aria-label="Archive reference for <col>"]` + `input[aria-label="Retention horizon for <col>"]`,
-  plus `input[aria-label="Who accepted dropping <col>"]`. The outstanding-evidence line is
-  `.df2-column-omit-gap`. Assert on these aria-labels, not coordinates — the omitted row renders a
-  multi-input stack that shifts every row below it.
-- **Omitted rows are hidden inside collapsed bands.** After entering Map the table shows bands like
-  `3 safe mappings (preserve / normalize) · Expand` and `5 ready (approved) · Expand`; a row you are
-  looking for may simply be collapsed. Click every `· Expand` band before concluding a control or a
-  Transform value is missing. `document.querySelector('select[aria-label="Transform for x"]')`
-  returning `null` usually means "collapsed", not "reset".
-- **Returning to Map regenerates mappings — historically this wiped omissions AND all recorded
-  reduction evidence** (PR #125 up to `6cd51d8d`). The `useEffect` in `TransferPage.tsx` that calls
-  `applyPipelineMappings` on `step === STEP_MAP` rebuilds mappings from `analysis`, so both the footer
-  gate CTA `Open Map to record reduction reasons` **and** the top breadcrumb `4. Map` used to reset
-  `Transform` to `none` and drop reason/note/archive/retention/approver with no toast. Since
-  `c2efd8ad`, `carryOperatorDecisions` in `apps/web/src/lib/mappingDecisions.ts` replays a declared
-  omission by **source name** (outside `mappingDecisionFingerprint`) together with the five evidence
-  fields, and both navigations preserve it. This is regression-prone in both directions — always
-  verify by re-reading `<select>.value` / `input.value` after every Map navigation rather than
-  trusting chips, and check both directions: (a) evidence survives, and (b) a row switched **off**
-  Omit is not resurrected as omitted on the next regeneration (`applyTransformChange` clears the five
-  fields, so a stale prior list would show up as a re-omitted row).
-- **A replayed omitted row comes back already approved**, because the `"omit"` branch of
-  `applyTransformChange` sets `approved: true` / `requiresReview: false` / `target: ""`. Seeing no
-  `Approve` control on an omitted row after a Map round trip is correct, not a missed review.
-- **After a Map round trip, also assert the untouched rows**: every non-omitted column must keep a
-  transform other than `omit`, a non-empty target, an editable target input, and its prior
-  approved/risk-ack state. The source-name replay path is exactly where an over-broad match would
-  silently omit columns the operator never dropped.
-- **Reason semantics you need fixture control for.** Factual codes are checked against the Validate
-  *sample*: `dropped_empty` on a column whose sample has values and `dropped_constant` on a column with
-  >1 distinct value **block** (`claim_contradicted_by_sample`); judgement codes without a note and
-  `archive_only` without an archive reference also block; an omission with **no** reason only **warns**
-  (`dropped_unclassified` / `reason_code_missing`) and leaves Execute unlocked. A good 8-column fixture
-  has one populated column (false `dropped_empty` → block), one constant column (truthful
-  `dropped_constant`), and one all-empty column (truthful `dropped_empty`) so you can prove truthful
-  reasons are *not* listed as blockers in the same run.
-- **Verify the evidence end-to-end, not just in the UI.** `MappingItem` in
-  `apps/api/src/routers/preflight_router.py` must accept `omit_reason` / `omit_reason_text` /
-  `archive_reference` / `retention_until` / `omit_approved_by` — a previous revision let pydantic
-  silently drop them, so the UI looked correct while the engine saw an unexplained drop. The
-  authoritative check is the downloaded signed proof pack on disk:
-  `preflight_summary.field_reduction_ledger.entries[]` must carry `reason_code`, `archive_reference`,
-  `retention_until`, `approved_by` for the reduced field, plus `counts_by_disposition`. Note carried
-  rows split into `carried` vs `carried_transformed`, so `carried_count` includes both.
-- Execute is refused with a `disabled` footer button labelled `Execute (blocked)` whose `title` repeats
-  the blocker text; assert `disabled === true` **and** that the sidebar `Jobs` badge count does not
-  increase, since a disabled-looking button is not proof no job started.
 
 Confirm no rows landed with a destination count, e.g.
 `docker exec df-pg psql -U postgres -d dataflow -tAc "SELECT count(*) FROM <table>;"`.
@@ -824,11 +776,11 @@ Four traps that each invalidated a run:
   design (gated by non-rendering), not a missing-control defect. For an admin it starts `disabled` purely
   because of the `!newWorkspaceName.trim()` guard - type a name and re-read `disabled` before calling it
   over-gated. This distinction is easy to misreport in both directions.
-- **TenantSettings placeholders look exactly like real data.** `Wells Fargo`,
-  `dataflow.wellsfargo.com`, `security@example.com` and `10.0.0.0/8 / 192.168.1.50` are `placeholder=`
-  attributes, and `us-east-1` / `8` are client-side `useState` defaults for an unfilled create-tenant
-  form. A screenshot of Enterprise after a 403 therefore *looks* like invented server data but is not.
-  Always compare the DOM `value` against the `placeholder` attribute before reporting fabricated data.
+- **TenantSettings placeholders must stay instructional, not a bank.** Fields use
+  `Legal entity name`, `transfers.example.com`, `security@example.com`, and
+  `one CIDR or IPv4 per line` / `203.0.113.0/24`. `us-east-1` / `8` are client-side
+  `useState` defaults for an unfilled create-tenant form. Always compare the DOM
+  `value` against the `placeholder` attribute before reporting fabricated data.
 
 **Admin membership regression (the risk when write controls get gated):** driving Team through the real UI
 should yield `POST .../members 200`, `PATCH .../members/{email} 200` on the row `<select>`, and
@@ -1219,179 +1171,3 @@ Team/tenant actions land as `team.workspace.create`, `team.member.add`,
 `workspace.tenant.*`, with actor email, the workspace id inside Resource, and a timestamp.
 Level chips (All/Info/Success/Warnings/Errors) really re-filter rows; most membership events
 are level `warn`, so "no rows" under **Success** is expected, not a defect.
-
-### G20 code crosswalk + G21 control totals (PR #168 gate fixes) � how to drive them
-- **Crosswalk declaration**: a plain `varchar(n)` column now shows a `Declare code crosswalk` button
-  (`.df2-column-crosswalk-declare`) in the Map row. Clicking it opens a blank `OLD=NEW` textarea
-  (`textarea[aria-label="Code crosswalk for <col>"]`). Merely opening it does NOT declare anything �
-  Validate still reports G20 `Skipped � population code coverage was not asked.`
-- **Identity is never implied**: `Z=Z` must be typed. A crosswalk covering only some codes blocks
-  Validate and names the missing ones (`status=B, status=Z`), with a
-  `Open Map to complete the crosswalk` remediation CTA in the footer.
-- **Target width**: the destination carrier width is enforced, so on a `VARCHAR(4)` status column use
-  4-char targets (`ACTV/BILL/ZOMB`); 6-char targets like `active` overflow.
-- **Browser harness trap**: `browser.type`/`press_key` duplicate the `=` character in this textarea
-  (you get `A==ACTV`). Set the value with the native setter and dispatch a bubbling `input` event:
-  `const s=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;`
-  `s.call(ta,"A=ACTV\nB=BILL\nZ=ZOMB"); ta.dispatchEvent(new Event('input',{bubbles:true}));`
-  Always read `ta.value` back before validating. Clipboard paste does not work here.
-- **G21 is post-write only**: pre-write Validate always reports `Skipped` with
-  "a Validate sample SUM is not that proof". The proof appears in the exported pack at
-  `.control_totals` / `.gate8.control_totals` (`evidence: "exact"`, `proven: true`, string sums).
-  Compare the sums as STRINGS � never through JS numbers.
-- **Where the "Control totals" panel renders**: it was observed on the *failed / mismatch* run view in
-  Transfer Studio, but NOT on a successful run's `TransferResultDashboard` nor in the Jobs-page
-  detail/Gate-8 evidence drawer. If you need to verify the proven case, check both routes and fall
-  back to the exported pack; a missing panel on a green run may be a real gap rather than your
-  navigation.
-- **One-cent mismatch fixture**: pre-seed the MySQL destination with a single row (`amount=0.01`) and
-  append the 6-row source; whole-table SUM then differs by exactly one cent and the job must end
-  `Failed` with `src 618.75 ? dest 618.76`.
-
-### Windows has no `os.mkfifo` � expect a COPY fast-path decline, not a failure
-On Windows the PG?MySQL COPY route declines up front and the row writer takes over. The healthy log
-line is INFO `src.transfer.copy_route`:
-`PG?MySQL COPY declined: PG?MySQL COPY streams through a named pipe (os.mkfifo), which win32 does not provide`.
-A WARNING `COPY failed after starting: module 'os' has no attribute 'mkfifo'` means the guard did not
-run before connect/DDL and is a defect. Grep the *live* log for both.
-
-### Find the log file the running API is actually writing
-Log files here are rotated by hand (`api.log`, `api2.err.log`, `api3.err.log`, `api4.err.log`), and a
-restarted API writes to a NEW file. Match `Get-Process python* | Select Id,StartTime` against
-`Get-ChildItem C:\Users\Administrator\*.log | Sort LastWriteTime -Desc` before concluding "no log line
-for my job" � an empty grep is usually the wrong file, not missing behaviour.
-Expected benign noise: `SECRETS_KEY unset � deriving Fernet key from AUTH_SECRET` on nearly every line.
-
-### PowerShell here strips `$` from inline -Command strings
-`powershell -NoProfile -Command "...$var..."` arrives with the variables removed and fails to parse.
-Put any non-trivial PowerShell in a `.ps1` file and run
-`powershell -NoProfile -ExecutionPolicy Bypass -File <path>`.
-
-## Driving the UI when the native browser tool fails (CDP + Playwright)
-
-If the native browser tool will not initialise, launch Chrome yourself and attach Playwright over CDP.
-The devin CDP port may accept TCP but never answer CDP, so prefer your own instance:
-
-```
-C:\devin\chrome\chrome-win64\chrome.exe --remote-debugging-port=9333 --user-data-dir=C:\Users\Administrator\.qa_chrome
-```
-
-Attach with `chromium.connectOverCDP("http://127.0.0.1:9333")`, pick the page whose URL matches the
-Vite origin, and take evidence with `page.screenshot({ fullPage: true })`. Real clicks through this
-channel are legitimate governed UI actions.
-
-### Selectors that are stable, and the text-matching traps
-
-- **Workspace switcher is a `<select>`**, not a menu:
-  `page.selectOption("#df2-topbar-workspace", {label:"QA Handover \u00b7 3"})`.
-  Clicking the visible workspace text does nothing. After switching, the app re-renders â€” **reload
-  before asserting**, because panels such as Schedules keep the previous workspace's rows until a refetch.
-- **Sidebar nav items are `button.df2-nav-item`** whose `innerText` includes a count on a second line
-  (`"Jobs\n25"`). Exact-text matchers fail. Match on the first line only:
-  `[...document.querySelectorAll("button.df2-nav-item")].find(b => b.innerText.trim().split("\n")[0] === label).click()`.
-- Hash routes exist (`#/transfer`, `#/schedules`) and are handy for setup, but use real clicks for the
-  action under test.
-- Map destination type: `select[aria-label="Destination type for <col>"]`; transform:
-  `select[aria-label="Transform for <col>"]`. Rows collapse into bands â€” click
-  `/\d+ (safe mappings|ready \(approved\))/` to **Expand** before the selects exist in the DOM.
-- Team roles: `select[aria-label="Role for <email>"]` (`viewer|editor|admin`), PATCHes immediately.
-  **Remove is two-step**: the row `Remove` button opens a confirm whose button is labelled
-  `Remove member`. Removal drops the workspace membership but deliberately keeps the row under
-  **Platform logins** â€” assert on the `N member(s)` count and the Members section, not on whether the
-  e-mail appears anywhere on the page.
-
-### Reaching the quarantine panel and the replay gate
-
-Job detail -> `Open Quarantine tab` -> **`Inspect quarantine details`** (the replay controls do not exist
-until this second click). Actions are `Replay quarantined rows` / `Export CSV`.
-Note the button is enabled purely on open-count, so it can be offered for findings that carry no
-reconstructable payload: a `preflight_quarantine` finding shows `SOURCE ROW -`, `COLUMN -`,
-`VALUE __DF_SQL_NULL__`, and replay then returns
-`400 {"detail":"Could not reconstruct rows from quarantine details"}` with **no visible UI error** â€”
-capture `page.on("response")` bodies, or you will record a silent no-op as a pass.
-
-### Schedules: making a due tick actually fire
-
-A schedule created in the Schedules UI stays paused (HTTP 400 on activate) until a mapping contract
-exists â€” create it **from Transfer Studio after Validate** instead. Then Edit the schedule, choose the
-**Cron** tab and set `* * * * *` for a one-minute cadence; ticks then appear as new jobs in Jobs within
-~2 min. The schedule detail panel does **not** poll â€” reload and re-open it, or you will watch a stale
-`NEXT RUN` forever.
-Beware: editing the destination table in the schedule editor invalidates the Validate-time decision
-artifact, and every later tick (and `Run now`) refuses with
-`Decision Artifact content_hash mismatch â€” Map/DDL drifted since Validate`. Re-run Validate in Studio
-to get a runnable schedule rather than assuming the scheduler is broken.
-
-### Getting a genuine write-time quarantine is harder than it looks
-
-Validate is fail-closed on unfit cells: a CSV with `notanumber` mapped to `DECIMAL(38,15)` blocks
-Execute with `CANNOT EXECUTE UNTIL Lossy / fidelity risk acknowledged or remapped on Map`, and the Map
-row can end up status `Ready` with **no** risk-acknowledge control (no execution-policy select, no
-`Sign Risk Contract`) â€” an unreleasable dead end. Some narrowings (e.g. `DECIMAL(6,2) -> DECIMAL`) DO
-expose `Execution policy for <col>` + `Sign Risk Contract`, where choosing a policy alone is not enough
-and the contract must be signed. Check which variant you are in before concluding replay/quarantine is
-untestable.
-
-### Audit chain / "Evidence Chain"
-
-There is no Evidence Chain nav item â€” it is **Settings -> Audit Logs**, with `Verify chain`,
-`Export CSV`, `Export JSON`. `Verify chain` calls `GET /api/v1/audit/verify?limit=5000` and renders
-per-record `broken_link` / `fork` diagnostics; a long-lived dev database can legitimately accumulate
-these, so report the exact record indices rather than just "chain failed".
-`Operations` in the sidebar is only a **group label** (Jobs/Schedules/Transforms/Query/Pilot sit under
-it) â€” it is not clickable and is not a page.
-
-## Verify the running server actually contains the code under test (highest-value check)
-
-A whole QA round was invalidated once because the API process had been started *before* the fix
-commits landed, so every "governed action" exercised stale code. Symptoms that should immediately
-make you suspect a stale process:
-
-- A fix verifies when you call the service function **in-process** (a local python script) but fails
-  through the running HTTP API. That divergence almost always means the API is old, not that the fix
-  is wrong.
-- New records that a fix is supposed to stamp (e.g. an audit `chain_seq`) only appear for rows your
-  own scripts wrote, never for rows the API wrote.
-- A store-mutating fix (e.g. clearing a stale approval stamp on edit) returns HTTP 200 but the
-  document is unchanged, even though the code plainly does it.
-
-Always gate testing on this comparison **before** filing any defect (PowerShell):
-
-```powershell
-Get-CimInstance Win32_Process -Filter "name like '%python%'" |
-  Select-Object ProcessId, CreationDate, CommandLine
-Get-ChildItem apps\api\services\<changed_file>.py | Select-Object Name, LastWriteTime
-```
-
-If `CreationDate` is older than any changed file's `LastWriteTime`, kill and restart before testing:
-
-```powershell
-Stop-Process -Id <pid> -Force
-cd apps\api
-Start-Process -FilePath C:\devin\python\python.exe `
-  -ArgumentList "-m","uvicorn","src.main:app","--host","127.0.0.1","--port","8001" `
-  -RedirectStandardOutput C:\Users\Administrator\api.out.log `
-  -RedirectStandardError  C:\Users\Administrator\api.err.log -WindowStyle Hidden
-```
-
-`--reload` is not in use here, so editing a file never takes effect on its own. Re-confirm the new
-`CreationDate` postdates every changed file, then re-run any assertion measured against the old
-process. Uvicorn also keeps serving happily after the restart of a *different* process, so
-"health=200" is NOT evidence the fix is live.
-
-## Reaching a payload-bearing write-time quarantine finding (harder than it looks)
-
-To get a quarantine finding that names a column and carries values (needed to test Replay), you need
-a cell that fails at **write** time, not at Validate. Note that Map's destination-type dropdown only
-offers a fixed carrier list (e.g. for a `DECIMAL(12,2)` source: `TEXT, LONGTEXT, VARCHAR(255),
-BIGINT, INT, DECIMAL(38,15), FLOAT, DOUBLE, BOOLEAN, DATE, DATETIME(6), TIMESTAMP, JSON, LONGBLOB`) —
-there is **no narrow `DECIMAL(4,2)`**, so you cannot provoke a numeric overflow that way.
-
-Choosing an impossible carrier (`amount DECIMAL(12,2) → DATE`) fails closed at Validate with
-`Lossy / fidelity collapse across type path` and `Execute (blocked)`. Validate offers
-`Open Map · remap / Accept risk` and advises signing a "continue-policy Migration Risk Contract so
-the offending rows are held out in quarantine", but on Map that control may not exist: expanding the
-`Review` band showed no execution-policy select and no `Sign Risk Contract`. This is the same
-dead-end shape as the known `TEXT → DECIMAL(38,15)` block. So a payload-bearing replay may be
-unreachable through the UI on these type paths; budget for it and be ready to report
-could-not-test rather than assuming a route exists.

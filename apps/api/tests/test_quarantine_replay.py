@@ -109,7 +109,20 @@ def test_quarantine_replay_sqlite_edits_and_rewrites(tmp_path: Path):
 
     q2 = client.get(f"/api/v1/connectors/jobs/{job_id}/quarantine")
     assert q2.status_code == 200
-    assert int((q2.json().get("dest_dlq") or {}).get("open_rows") or 0) == 0
+    q2body = q2.json()
+    assert int((q2body.get("dest_dlq") or {}).get("open_rows") or 0) == 0
+    closure = q2body.get("quarantine_closure") or {}
+    assert closure.get("verdict") == "closed"
+    assert closure.get("open_count") == 0
+    assert closure.get("migration_proven") is False
+    assert q2body.get("open_count") == 0
+
+    again = client.post(
+        f"/api/v1/connectors/jobs/{job_id}/quarantine/replay",
+        json={"rows": edited},
+    )
+    assert again.status_code == 400
+    assert "closed" in again.json()["detail"].lower()
 
 
 def test_quarantine_replay_empty_uses_stored_details(tmp_path: Path):
@@ -151,9 +164,13 @@ def test_quarantine_replay_empty_uses_stored_details(tmp_path: Path):
     )
     assert replay.status_code == 200, replay.text
     body = replay.json()
-    assert body["success"] is True
+    # Empty body replays the stored quarantine row. The value is still not an
+    # integer, so nothing lands. A replay that writes 0 rows is not a success
+    # (QA R2-061) — the attempt is still recorded.
     assert body["rows_attempted"] >= 1
     assert body["job_id"] != job_id
+    assert body["success"] is False
+    assert int(body.get("rows_written") or 0) == 0
 
 
 def test_quarantine_replay_no_details_400(tmp_path: Path):

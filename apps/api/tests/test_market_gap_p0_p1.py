@@ -153,28 +153,47 @@ def test_salesforce_writer_upsert_quarantines_failures(mock_req: MagicMock) -> N
         {"success": False, "errors": [{"message": "DUPLICATE_VALUE"}]},
     ]
     mock_req.return_value = mock_resp
+    describe = [
+        {
+            "name": "External_Id__c",
+            "type": "string",
+            "createable": True,
+            "updateable": True,
+            "calculated": False,
+            "externalId": True,
+            "idLookup": True,
+        },
+        {
+            "name": "Name",
+            "type": "string",
+            "createable": True,
+            "updateable": True,
+            "calculated": False,
+        },
+    ]
 
-    result = write_mapped_rows(
-        host="example.my.salesforce.com",
-        api_key="token",
-        table_name="Account",
-        headers=["External_Id__c", "Name"],
-        data_rows=[["ext-1", "Acme"], ["ext-2", "Beta"]],
-        mappings=[
-            {"source": "External_Id__c", "target": "External_Id__c"},
-            {"source": "Name", "target": "Name"},
-        ],
-        column_types={},
-        write_mode="upsert",
-        conflict_columns=["External_Id__c"],
-        connection_string="",
-        username="",
-        password="",
-        schema="",
-        ssl=True,
-        port=443,
-        database="",
-    )
+    with patch("connectors.salesforce.describe_sobject", return_value=describe):
+        result = write_mapped_rows(
+            host="example.my.salesforce.com",
+            api_key="token",
+            table_name="Account",
+            headers=["External_Id__c", "Name"],
+            data_rows=[["ext-1", "Acme"], ["ext-2", "Beta"]],
+            mappings=[
+                {"source": "External_Id__c", "target": "External_Id__c"},
+                {"source": "Name", "target": "Name"},
+            ],
+            column_types={},
+            write_mode="upsert",
+            conflict_columns=["External_Id__c"],
+            connection_string="",
+            username="",
+            password="",
+            schema="",
+            ssl=True,
+            port=443,
+            database="",
+        )
     assert result.ok
     assert result.rows_written == 1
     assert len(result.rejected_details) >= 1
@@ -191,28 +210,33 @@ def test_hubspot_writer_upsert(mock_req: MagicMock) -> None:
         "errors": [],
     }
     mock_req.return_value = mock_resp
+    describe = [
+        {"name": "email", "type": "string", "fieldType": "text"},
+        {"name": "firstname", "type": "string", "fieldType": "text"},
+    ]
 
-    result = write_mapped_rows(
-        host="",
-        api_key="pat-xxx",
-        table_name="contacts",
-        headers=["email", "firstname"],
-        data_rows=[["a@x.com", "Ada"], ["b@x.com", "Bob"]],
-        mappings=[
-            {"source": "email", "target": "email"},
-            {"source": "firstname", "target": "firstname"},
-        ],
-        column_types={},
-        write_mode="upsert",
-        conflict_columns=["email"],
-        connection_string="",
-        username="",
-        password="",
-        schema="",
-        ssl=True,
-        port=443,
-        database="",
-    )
+    with patch("connectors.hubspot.describe_properties", return_value=describe):
+        result = write_mapped_rows(
+            host="",
+            api_key="pat-xxx",
+            table_name="contacts",
+            headers=["email", "firstname"],
+            data_rows=[["a@x.com", "Ada"], ["b@x.com", "Bob"]],
+            mappings=[
+                {"source": "email", "target": "email"},
+                {"source": "firstname", "target": "firstname"},
+            ],
+            column_types={},
+            write_mode="upsert",
+            conflict_columns=["email"],
+            connection_string="",
+            username="",
+            password="",
+            schema="",
+            ssl=True,
+            port=443,
+            database="",
+        )
     assert result.ok
     assert result.rows_written == 2
 

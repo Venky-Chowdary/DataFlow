@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, base_url, token
 
@@ -94,6 +94,12 @@ def _request_with_retry(
     429 and transient 5xx.  We honor ``Retry-After`` when present and fall back
     to exponential backoff.  Non-transient 4xx errors fail fast.
     """
+    from services.egress_guard import assert_connector_dial_allowed, redirect_guard_hook
+
+    assert_connector_dial_allowed(url, point="http_client")
+    hooks = dict(kwargs.pop("hooks", None) or {})
+    hooks["response"] = [*list(hooks.get("response") or []), redirect_guard_hook(url)]
+    kwargs["hooks"] = hooks
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
@@ -337,9 +343,18 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_url(cfg: dict[str, Any], pagination: dict[str, Any], next_url: str | None = None) -> str:
-    if next_url:
-        return next_url
     host = cfg["host"].rstrip("/")
+    if next_url:
+        from urllib.parse import urljoin
+
+        from services.egress_guard import EgressRefused, follow_url_allowed
+
+        target = urljoin(f"{host}/", next_url)
+        if not follow_url_allowed(target, host):
+            raise EgressRefused(
+                "REST API pagination URL leaves the configured host for a refused address"
+            )
+        return target
     obj = cfg["object_path"].strip("/")
     suffix = (cfg.get("path_suffix") or "").strip()
     if obj and suffix and not obj.endswith(suffix):
@@ -379,7 +394,7 @@ def _read_page(cfg: dict[str, Any], pagination: dict[str, Any], next_url: str | 
     params = _build_params(cfg, pagination)
     resp = _request_with_retry("GET", url, headers=headers, params=params, timeout=60)
     resp.raise_for_status()
-    body = resp.json()
+    body = load_http_json(resp)
     records = _extract_records(body, cfg.get("data_path", ""))
     next_cursor = _extract_next_cursor(body, cfg, dict(resp.headers))
     has_more = bool(next_cursor)
@@ -430,6 +445,46 @@ def test_connection(
         return False, f"REST API probe failed: {exc}"
 
 
+def _served_whole_array(records: list[dict[str, Any]], page_limit: int) -> bool:
+    """The server ignored our pagination params and returned the full array.
+
+    A paginated endpoint honours ``limit`` and answers <= page_limit rows.
+    Returning MORE than we asked proves the params were ignored — a
+    "repeated" page is then the same complete array again (D16), not a
+    broken pager hiding the tail, so stopping holds every row.
+    """
+    return len(records) > page_limit
+
+
+def _infer_rest_types(flattened: list[dict[str, Any]]) -> dict[str, str]:
+    """Per-column types from JSON values for a generic REST read.
+
+    live_source_schema said TEXT for every column while the plan had
+    typed the endpoint (D16). Introspect reads ``meta["native_types"]``;
+    infer from the wire values instead of stringifying blind.
+    """
+    order = {"BOOLEAN": 0, "INTEGER": 1, "FLOAT": 2, "JSON": 3, "TEXT": 4}
+    out: dict[str, str] = {}
+    for row in flattened:
+        for key, value in row.items():
+            if value is None or value == "":
+                continue
+            if isinstance(value, bool):
+                kind = "BOOLEAN"
+            elif isinstance(value, int):
+                kind = "INTEGER"
+            elif isinstance(value, float):
+                kind = "FLOAT"
+            elif isinstance(value, (dict, list)):
+                kind = "JSON"
+            else:
+                kind = "TEXT"
+            prev = out.get(key)
+            if prev is None or order[kind] > order[prev]:
+                out[key] = kind
+    return out
+
+
 def read_object(
     *,
     cfg: dict[str, Any],
@@ -448,6 +503,7 @@ def read_object(
     page_index = 0
     prev_fingerprint: tuple[str, ...] | None = None
     seen_cursors: set[str] = set()
+    whole_array = pagination_type == "none"
     offset_param = cfg["offset_param"]
     limit_param = cfg["limit_param"]
     page_param = cfg["page_param"]
@@ -471,6 +527,9 @@ def read_object(
                 json.dumps(r, sort_keys=True, default=str) for r in records[:3]
             )
             if page_index > 0 and fingerprint == prev_fingerprint:
+                if _served_whole_array(records, page_limit):
+                    whole_array = True
+                    break
                 raise RuntimeError(
                     "REST pagination returned a repeated page — refuse silent partial ingest "
                     "(check offset/page parameters)"
@@ -492,6 +551,9 @@ def read_object(
                 json.dumps(r, sort_keys=True, default=str) for r in records[:3]
             )
             if page_index > 0 and fingerprint == prev_fingerprint:
+                if _served_whole_array(records, page_limit):
+                    whole_array = True
+                    break
                 raise RuntimeError(
                     "REST pagination returned a repeated page — refuse silent partial ingest "
                     "(check page parameters)"
@@ -550,7 +612,7 @@ def read_object(
 
     typed_keys, typed_rows, typed_schema = rows_and_schema_from_saas(catalog_id, all_rows)
     if typed_keys and typed_rows:
-        total_rows = len(typed_rows) if pagination_type == "none" else None
+        total_rows = len(typed_rows) if whole_array else None
         return ReadBatch(
             headers=typed_keys,
             rows=typed_rows,
@@ -571,19 +633,28 @@ def read_object(
     keys: list[str] = []
     seen = set()
     flattened: list[dict[str, str]] = []
+    flattened_raw: list[dict[str, Any]] = []
     for rec in all_rows:
         flat = _flatten(rec)
         for k in flat:
             if k not in seen:
                 seen.add(k)
                 keys.append(k)
+        flattened_raw.append(flat)
         flattened.append({k: cell_to_string(v) for k, v in flat.items()})
 
     rows = [[r.get(k, "") for k in keys] for r in flattened]
     # Paginated REST never publishes authoritative object cardinality — page
-    # length ≠ source size (same stream early-stop trap HubSpot hit).
-    total_rows = len(rows) if pagination_type == "none" else None
-    return ReadBatch(headers=keys, rows=rows, offset=0, total_rows=total_rows)
+    # length ≠ source size (same stream early-stop trap HubSpot hit). A
+    # detected whole-array response is authoritative for its cardinality.
+    total_rows = len(rows) if whole_array else None
+    return ReadBatch(
+        headers=keys,
+        rows=rows,
+        offset=0,
+        total_rows=total_rows,
+        meta={"native_types": _infer_rest_types(flattened_raw)},
+    )
 
 
 # Source-only connector: writes are not supported.

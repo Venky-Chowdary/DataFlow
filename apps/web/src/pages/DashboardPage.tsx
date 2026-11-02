@@ -1,18 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { fetchCatalogStats, fetchOpsDlq, fetchOpsFreshness } from "../lib/api";
+import { fetchOpsDlq, fetchOpsFreshness, fetchOpenScheduleApprovals } from "../lib/api";
+import { WORKSPACE_CHANGED_EVENT } from "../lib/workspace";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
+import type { JobHistory } from "../lib/jobHistory";
+import { jobHistoryFromResponse } from "../lib/jobHistory";
 import {
-  buildStatusDistribution,
+  buildOverviewJobStats,
+  buildStatusDistributionFromHistory,
   buildThroughputSeries,
-  sparklineFromThroughput,
+  overviewRecentMigrationsState,
 } from "../lib/overviewAnalytics";
+import { destProvenCount, formatJobRowMetric } from "../lib/conservationLedger";
+import { formatJobRoute, formatStreamNames, readJobStreamNames } from "../lib/jobEvidence";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { DtIcon } from "../components/DtIcon";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
 import {
-  MetricGlassTile,
   StatusDonut,
   ThroughputChart,
   ThroughputChartPlaceholder,
@@ -21,17 +26,33 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { ProgressCell } from "../components/ui/ProgressCell";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
-import { FreshnessSloPanel } from "../components/overview/FreshnessSloPanel";
-import { buildDataPlaneTopology } from "../lib/topologyUtils";
+import { Button } from "../components/ui/Button";
+import {
+  FreshnessSloPanel,
+  type FreshnessAlert,
+} from "../components/overview/FreshnessSloPanel";
+import { dismissBanner, isBannerDismissed } from "../lib/dismissibleBanner";
+import { buildDataPlaneTopology, countSavedConnectionRoutes } from "../lib/topologyUtils";
+import {
+  connectorPassedProbe,
+  connectorTestHealth,
+} from "../lib/connectorHealth";
+import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
 interface DashboardPageProps {
   connectors: Connector[];
   jobs: TransferJob[];
+  /** Whole-history counts. Overview must not count the recent page of rows. */
+  history?: JobHistory;
+  /** True while the first scoped workspace lists are still in flight. */
+  listsLoading?: boolean;
   schedules?: PipelineSchedule[];
   onOpenConnectors?: () => void;
   onOpenJobs?: () => void;
   onOpenJob?: (jobId: string) => void;
   onOpenPipeline?: (scheduleId: string) => void;
+  onOpenSchedules?: () => void;
+  onStartTransfer?: () => void;
 }
 
 const JOB_LIMIT = 10;
@@ -64,21 +85,20 @@ function HealthRing({ score }: { score: number }) {
 export function DashboardPage({
   connectors,
   jobs,
+  history,
+  listsLoading = false,
   schedules = [],
   onOpenConnectors,
   onOpenJobs,
   onOpenJob,
   onOpenPipeline,
+  onOpenSchedules,
+  onStartTransfer,
 }: DashboardPageProps) {
-  const [catalogStats, setCatalogStats] = useState<{
-    live: number;
-    total: number;
-    transfer_live?: number;
-    unique_drivers?: number;
-    catalog_tiles?: number;
-  } | null>(null);
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
+  /** Inbox SSOT. null = unknown (failed fetch) — never invent 0 parked. */
+  const [parkedCount, setParkedCount] = useState<number | null>(null);
   const [freshness, setFreshness] = useState<{
     slo_status?: string;
     warn_threshold_seconds?: number;
@@ -86,56 +106,57 @@ export function DashboardPage({
     stale_count?: number;
     critical_count?: number;
     worst_lag_seconds?: number | null;
-    alerts?: Array<{
-      severity: string;
-      code: string;
-      title: string;
-      detail: string;
-      schedule_id?: string | null;
-      job_id?: string | null;
-      stream?: string | null;
-      lag_seconds?: number;
-    }>;
+    alerts?: FreshnessAlert[];
   } | null>(null);
 
   useEffect(() => {
-    fetchCatalogStats()
-      .then((s) => setCatalogStats({
-        live: s.live,
-        total: s.total,
-        transfer_live: s.transfer_live,
-        unique_drivers: s.unique_drivers ?? s.transfer_live ?? s.live,
-        catalog_tiles: s.catalog_tiles ?? s.transfer_live_tiles,
-      }))
-      .catch(() => setCatalogStats(null));
-    fetchOpsFreshness(60)
-      .then((f) => {
-        setOpsLagSeconds(f.worst_lag_seconds);
-        setFreshness({
-          slo_status: f.slo_status,
-          warn_threshold_seconds: f.warn_threshold_seconds,
-          critical_threshold_seconds: f.critical_threshold_seconds,
-          stale_count: f.stale_count,
-          critical_count: f.critical_count,
-          worst_lag_seconds: f.worst_lag_seconds,
-          alerts: f.alerts,
+    const loadOps = () => {
+      fetchOpsFreshness(60)
+        .then((f) => {
+          setOpsLagSeconds(f.worst_lag_seconds);
+          setFreshness({
+            slo_status: f.slo_status,
+            warn_threshold_seconds: f.warn_threshold_seconds,
+            critical_threshold_seconds: f.critical_threshold_seconds,
+            stale_count: f.stale_count,
+            critical_count: f.critical_count,
+            worst_lag_seconds: f.worst_lag_seconds,
+            alerts: f.alerts,
+          });
+        })
+        .catch(() => {
+          setOpsLagSeconds(null);
+          setFreshness(null);
         });
-      })
-      .catch(() => {
-        setOpsLagSeconds(null);
-        setFreshness(null);
-      });
-    fetchOpsDlq(50)
-      .then((d) => setDlqCount(d.count))
-      .catch(() => setDlqCount(null));
+      fetchOpsDlq(50)
+        .then((d) => setDlqCount(d.total ?? d.count))
+        .catch(() => setDlqCount(null));
+      fetchOpenScheduleApprovals()
+        .then((rows) => setParkedCount(rows.length))
+        .catch(() => setParkedCount(null));
+    };
+    loadOps();
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, loadOps);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, loadOps);
   }, []);
 
+  const jobHistory = useMemo(
+    () => history ?? jobHistoryFromResponse({ jobs }),
+    [history, jobs],
+  );
+  const stats = useMemo(() => buildOverviewJobStats(jobHistory), [jobHistory]);
   const completed = jobs.filter((j) => isJobSuccess(j.status));
-  const failed = jobs.filter((j) => j.status === "failed");
   const running = jobs.filter((j) => j.status === "running" || j.status === "pending");
-  const totalRecords = completed.reduce((sum, j) => sum + (j.records_processed || 0), 0);
-  const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
-  const healthyConnectors = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
+  const destMeasured = completed
+    .map((j) => destProvenCount(j))
+    .filter((n): n is number => n != null);
+  const totalRecords = destMeasured.reduce((sum, n) => sum + n, 0);
+  const successRate = stats.successRate;
+  const failedCount = stats.failed;
+  const runningCount = stats.running;
+  const healthyConnectors = connectors.filter((c) => connectorPassedProbe(c)).length;
+  const untestedConnectors = connectors.filter((c) => connectorTestHealth(c) === "never_tested").length;
+  const failedConnectors = connectors.filter((c) => connectorTestHealth(c) === "failed").length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
   const cdcLagSeconds = useMemo(() => {
     const lags = [...running, ...completed]
@@ -147,31 +168,39 @@ export function DashboardPage({
   }, [running, completed, opsLagSeconds]);
 
   const throughputSeries = useMemo(() => buildThroughputSeries(jobs), [jobs]);
-  const statusSlices = useMemo(() => buildStatusDistribution(jobs), [jobs]);
-  const throughputSpark = useMemo(() => sparklineFromThroughput(throughputSeries), [throughputSeries]);
+  const statusSlices = useMemo(
+    () => buildStatusDistributionFromHistory(jobHistory),
+    [jobHistory],
+  );
 
   const topology = useMemo(
     () => buildDataPlaneTopology(connectors, jobs, schedules),
     [connectors, jobs, schedules],
   );
-  const routeCount = topology.edges.length;
+  const routeCount = countSavedConnectionRoutes(topology);
 
   const healthScore = useMemo(() => {
-    if (connectors.length === 0 && jobs.length === 0) return null;
+    if (connectors.length === 0 && stats.total === 0) return null;
     let score = 100;
     if (connectors.length) {
-      score -= ((connectors.length - healthyConnectors) / connectors.length) * 35;
+      score -= (failedConnectors / connectors.length) * 35;
+      score -= (untestedConnectors / connectors.length) * 12;
     }
-    if (jobs.length) {
-      score -= ((jobs.length - completed.length) / jobs.length) * 25;
+    if (stats.total) {
+      score -= ((stats.total - stats.completed) / stats.total) * 25;
     }
-    if (failed.length) score -= Math.min(15, failed.length * 4);
-    if (running.length) score = Math.min(score + 2, 100);
+    if (failedCount) score -= Math.min(15, failedCount * 4);
+    if (runningCount) score = Math.min(score + 2, 100);
     return Math.round(Math.max(0, Math.min(100, score)));
-  }, [connectors.length, healthyConnectors, jobs.length, completed.length, failed.length, running.length]);
+  }, [connectors.length, failedConnectors, untestedConnectors, stats.total, stats.completed, failedCount, runningCount]);
 
   const hasThroughput = throughputSeries.some((d) => d.rows > 0);
-  const hasJobs = jobs.length > 0;
+  const hasJobs = stats.total > 0;
+  const recentState = overviewRecentMigrationsState({
+    listsLoading,
+    total: stats.total,
+    loaded: jobs.length,
+  });
   const pausedPipelines = schedules.filter((s) => !s.enabled).length;
   const scheduleNames = useMemo(() => {
     const map: Record<string, string> = {};
@@ -182,17 +211,27 @@ export function DashboardPage({
     || freshness?.slo_status === "warn"
     || freshness?.slo_status === "critical";
   const attentionItems = [
-    failed.length > 0 ? `${failed.length} failed job${failed.length === 1 ? "" : "s"}` : null,
+    failedCount > 0 ? `${failedCount} failed job${failedCount === 1 ? "" : "s"}` : null,
     dlqCount != null && dlqCount > 0 ? `${dlqCount} DLQ event${dlqCount === 1 ? "" : "s"}` : null,
     freshnessStale
-      ? `Freshness SLO ${freshness?.slo_status || "warn"}${
+      ? `CDC lag ${freshness?.slo_status === "critical" ? "critical" : "above SLO"}${
           freshness?.stale_count ? ` · ${freshness.stale_count} pipeline${freshness.stale_count === 1 ? "" : "s"}` : ""
         }`
       : cdcLagSeconds != null && cdcLagSeconds > 60
         ? `CDC lag ${cdcLagSeconds.toFixed(0)}s`
         : null,
-    pausedPipelines > 0 ? `${pausedPipelines} paused pipeline${pausedPipelines === 1 ? "" : "s"}` : null,
+    pausedPipelines > 0 ? `${pausedPipelines} paused schedule${pausedPipelines === 1 ? "" : "s"}` : null,
+    parkedCount != null && parkedCount > 0
+      ? `${parkedCount} schedule${parkedCount === 1 ? "" : "s"} parked on a decision`
+      : null,
   ].filter(Boolean) as string[];
+  const attentionSignature = attentionItems.join(" · ");
+  const [attentionDismissed, setAttentionDismissed] = useState(false);
+  useEffect(() => {
+    setAttentionDismissed(
+      attentionSignature ? isBannerDismissed("overview.attention", attentionSignature) : false,
+    );
+  }, [attentionSignature]);
 
   return (
     <PageShell
@@ -203,19 +242,24 @@ export function DashboardPage({
       description="Live health, throughput, and recent migrations for this workspace."
     >
       <PageFrame className="df2-overview-v3">
-        {attentionItems.length > 0 && (
+        {attentionItems.length > 0 && !attentionDismissed && (
           <div className="df2-overview-attention" role="status">
             <DtIcon name="alert" size={16} />
             <div>
               <strong>Needs attention</strong>
-              <p>{attentionItems.join(" · ")}</p>
+              <p>{attentionSignature}</p>
             </div>
-            {failed.length > 0 && onOpenJobs && (
+            {failedCount > 0 && onOpenJobs && (
               <button type="button" className="df2-overview-attention-action" onClick={onOpenJobs}>
                 Open jobs
               </button>
             )}
-            {freshnessStale && !failed.length && onOpenPipeline && freshness?.alerts?.[0]?.schedule_id && (
+            {failedCount === 0 && dlqCount != null && dlqCount > 0 && onOpenJobs && (
+              <button type="button" className="df2-overview-attention-action" onClick={onOpenJobs}>
+                Open quarantine
+              </button>
+            )}
+            {freshnessStale && !failedCount && onOpenPipeline && freshness?.alerts?.[0]?.schedule_id && (
               <button
                 type="button"
                 className="df2-overview-attention-action"
@@ -224,6 +268,23 @@ export function DashboardPage({
                 Open pipeline
               </button>
             )}
+            {parkedCount != null && parkedCount > 0 && failedCount === 0 && onOpenSchedules && (
+              <button type="button" className="df2-overview-attention-action" onClick={onOpenSchedules}>
+                Open Pipelines inbox
+              </button>
+            )}
+            <button
+              type="button"
+              className="df2-banner-dismiss"
+              aria-label="Dismiss needs attention"
+              title="Dismiss until these counts change"
+              onClick={() => {
+                dismissBanner("overview.attention", attentionSignature);
+                setAttentionDismissed(true);
+              }}
+            >
+              <DtIcon name="x" size={14} />
+            </button>
           </div>
         )}
         <FreshnessSloPanel
@@ -238,56 +299,14 @@ export function DashboardPage({
           onOpenPipeline={onOpenPipeline}
           onOpenJob={onOpenJob}
         />
-        <section className="df2-overview-v3-kpis" aria-label="Key metrics">
-          <MetricGlassTile
-            label="Rows moved"
-            value={jobs.length ? totalRecords.toLocaleString() : "—"}
-            sub={jobs.length ? "Completed transfers" : "No transfers yet"}
-            icon="trend"
-            tone="teal"
-            sparkline={throughputSpark}
-          />
-          <MetricGlassTile
-            label="Success rate"
-            value={successRate != null ? `${successRate}%` : "—"}
-            sub={jobs.length ? `${completed.length} of ${jobs.length} jobs` : "No jobs yet"}
-            icon="check"
-            tone="green"
-            ring={successRate}
-          />
-          <MetricGlassTile
-            label="Connections"
-            value={connectors.length}
-            sub={`${healthyConnectors} healthy`}
-            icon="connectors"
-            tone={healthyConnectors < connectors.length ? "amber" : "default"}
-            ring={connectors.length ? Math.round((healthyConnectors / connectors.length) * 100) : null}
-          />
-          <MetricGlassTile
-            label="Unique drivers"
-            value={catalogStats?.unique_drivers ?? catalogStats?.transfer_live ?? catalogStats?.live ?? "—"}
-            sub={
-              catalogStats?.catalog_tiles
-                ? `${catalogStats.catalog_tiles} catalog tiles · ${catalogStats.total} total`
-                : catalogStats?.total
-                  ? `${catalogStats.total} catalog entries · ${enabledPipelines} pipelines`
-                  : enabledPipelines
-                    ? `${enabledPipelines} pipelines enabled`
-                    : "Loading…"
-            }
-            icon="activity"
-            tone="teal"
-          />
-        </section>
-
         <section className="df2-overview-v3-analytics" aria-label="Analytics">
           <article className="df2-overview-v3-card df2-overview-v3-card--chart">
             <header className="df2-overview-v3-card-head">
               <div>
                 <h2 className="df2-overview-v3-card-title">Throughput</h2>
-                <p className="df2-overview-v3-card-sub">Rows moved per day · last 7 days</p>
+                <p className="df2-overview-v3-card-sub">Conserved dest rows per day · append dest Δ, not dest after · unmeasured omitted</p>
               </div>
-              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} total rows</span>
+              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} conserved</span>
             </header>
             <div className="df2-overview-v3-card-body df2-overview-v3-chart-body">
               {hasThroughput ? (
@@ -302,13 +321,25 @@ export function DashboardPage({
             <header className="df2-overview-v3-card-head">
               <div>
                 <h2 className="df2-overview-v3-card-title">Migration mix</h2>
-                <p className="df2-overview-v3-card-sub">Job status breakdown</p>
+                <p className="df2-overview-v3-card-sub">
+                  {listsLoading
+                    ? "Loading workspace history…"
+                    : stats.isWindow
+                      ? `Whole history · table shows the ${stats.windowLoaded.toLocaleString()} most recent`
+                      : "Job status breakdown"}
+                </p>
               </div>
-              <span className="df2-overview-v3-card-badge">{jobs.length} jobs</span>
+              <span className="df2-overview-v3-card-badge">
+                {listsLoading ? "…" : `${stats.total.toLocaleString()} jobs`}
+              </span>
             </header>
             <div className="df2-overview-v3-card-body df2-overview-v3-chart-body">
               {hasJobs ? (
                 <StatusDonut slices={statusSlices} centerLabel="success" centerValue={`${successRate ?? 0}%`} />
+              ) : listsLoading ? (
+                <div className="df2-overview-v3-donut-empty">
+                  <p>Loading workspace history…</p>
+                </div>
               ) : (
                 <div className="df2-overview-v3-donut-empty" aria-hidden>
                   <svg viewBox="0 0 120 120" className="df2-overview-v3-donut-empty-svg">
@@ -358,16 +389,43 @@ export function DashboardPage({
                   <h2 className="df2-overview-v3-card-title">Recent migrations</h2>
                   <p className="df2-overview-v3-card-sub">Latest governed transfers</p>
                 </div>
-                {onOpenJobs && jobs.length > 0 && (
+                {onOpenJobs && stats.total > 0 && (
                   <button type="button" className="df2-overview-v3-link" onClick={onOpenJobs}>
                     Job Theater →
                   </button>
                 )}
               </header>
-              {jobs.length === 0 ? (
+              {recentState === "loading" ? (
+                <div className="df2-overview-v3-table-empty">
+                  <p>Loading workspace history…</p>
+                </div>
+              ) : recentState === "empty" ? (
                 <div className="df2-overview-v3-table-empty">
                   <DtIcon name="transfer" size={22} />
-                  <p>No migrations yet. Use <strong>Transfer Studio</strong> from the sidebar when you are ready.</p>
+                  <p>No migrations yet. Open Transfer Studio when you are ready.</p>
+                  {onStartTransfer && (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={onStartTransfer}
+                      leadingIcon={<DtIcon name="transfer" size={14} />}
+                    >
+                      Open Transfer Studio
+                    </Button>
+                  )}
+                </div>
+              ) : recentState === "window-empty" ? (
+                <div className="df2-overview-v3-table-empty">
+                  <DtIcon name="jobs" size={22} />
+                  <p>
+                    {stats.total.toLocaleString()} job{stats.total === 1 ? "" : "s"} in this workspace
+                    — the recent table has not loaded a page yet.
+                  </p>
+                  {onOpenJobs && (
+                    <Button variant="secondary" size="sm" onClick={onOpenJobs}>
+                      Open Job Theater
+                    </Button>
+                  )}
                 </div>
               ) : (
                 <div className="df2-overview-v3-card-body df2-overview-v3-card-body--flush">
@@ -384,18 +442,28 @@ export function DashboardPage({
                         </tr>
                       </thead>
                       <tbody>
-                        {jobs.slice(0, JOB_LIMIT).map((job) => (
-                          <tr key={job._id} className={job.status === "failed" ? "df2-row-error" : job.status === "completed_with_quarantine" ? "df2-row-warn" : ""}>
+                        {jobs.slice(0, JOB_LIMIT).map((job, index) => (
+                          <tr key={job._id || `job-${index}`} className={job.status === "failed" ? "df2-row-error" : job.status === "completed_with_quarantine" ? "df2-row-warn" : ""}>
                             <td>
-                              <div className="df2-cell-title" title={job.source_name}>{job.source_name}</div>
-                              <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>
-                                {job.source_type} → {job.destination_type}
-                              </div>
+                              {(() => {
+                                const names = readJobStreamNames(job);
+                                const title = names.length >= 2 ? formatStreamNames(names) : job.source_name;
+                                return (
+                                  <>
+                                    <div className="df2-cell-title" title={formatJobRoute(job)}>{title}</div>
+                                    <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>
+                                      {job.source_type} → {job.destination_type}
+                                    </div>
+                                  </>
+                                );
+                              })()}
                             </td>
                             <td><CopyIdChip id={job._id} label="Job" compact /></td>
                             <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                             <td className="df2-col-progress"><JobProgressCell job={job} /></td>
-                            <td className="df2-overview-rows">{job.records_processed?.toLocaleString() ?? "—"}</td>
+                            <td className="df2-overview-rows" title={formatJobRowMetric(job).title}>
+                              {formatJobRowMetric(job).value}
+                            </td>
                             <td className="df2-overview-rows">
                               {(job.rejected_rows ?? 0) > 0 ? (
                                 <span className="df2-badge df2-badge-warn" title="Open Jobs → Inspect quarantine for row-level findings">
@@ -428,11 +496,13 @@ export function DashboardPage({
                 <div>
                   <h2 className="df2-overview-v3-card-title">Workspace</h2>
                   <p className="df2-overview-v3-card-sub">
-                    {healthScore != null
-                      ? failed.length > 0
-                        ? `${failed.length} failed job${failed.length === 1 ? "" : "s"} affecting score`
-                        : running.length > 0
-                          ? `${running.length} job${running.length === 1 ? "" : "s"} in progress`
+                    {listsLoading
+                      ? "Loading workspace counts…"
+                      : healthScore != null
+                      ? failedCount > 0
+                        ? `${failedCount} failed job${failedCount === 1 ? "" : "s"} affecting score`
+                        : runningCount > 0
+                          ? `${runningCount} job${runningCount === 1 ? "" : "s"} in progress`
                           : "All systems nominal"
                       : "Metrics populate once you connect and transfer"}
                   </p>
@@ -446,7 +516,11 @@ export function DashboardPage({
                   <h2 className="df2-overview-v3-card-title">Connections</h2>
                   <p className="df2-overview-v3-card-sub">
                     {connectors.length
-                      ? `${healthyConnectors} healthy · ${connectors.length - healthyConnectors} need attention`
+                      ? [
+                          `${healthyConnectors} healthy`,
+                          untestedConnectors ? `${untestedConnectors} never tested` : "",
+                          failedConnectors ? `${failedConnectors} need attention` : "",
+                        ].filter(Boolean).join(" · ")
                       : "No connections yet"}
                   </p>
                 </div>
@@ -463,7 +537,7 @@ export function DashboardPage({
                   <ul className="df2-overview-conn-list">
                     {connectors.slice(0, 8).map((c) => (
                       <li key={c.id}>
-                        <span className={`df2-health-dot ${c.status === "error" || c.last_test_ok === false ? "err" : "ok"}`} />
+                        <span className={`df2-health-dot ${connectorTestHealth(c) === "failed" ? "err" : connectorTestHealth(c) === "passed" ? "ok" : "warn"}`} />
                         <ConnectorIcon id={c.type} size={18} />
                         <span className="df2-overview-conn-body">
                           <span className="df2-overview-conn-name" title={c.name}>{c.name}</span>
@@ -483,11 +557,11 @@ export function DashboardPage({
 
             <article className="df2-overview-v3-card">
               <header className="df2-overview-v3-card-head">
-                <h2 className="df2-overview-v3-card-title">Pipelines</h2>
+                <h2 className="df2-overview-v3-card-title">Schedules</h2>
               </header>
               <div className="df2-overview-v3-card-body">
                 {schedules.length === 0 ? (
-                  <p className="df2-overview-v3-inline-empty">No scheduled pipelines.</p>
+                  <p className="df2-overview-v3-inline-empty">No schedules yet.</p>
                 ) : (
                   <>
                     <ul className="df2-overview-pipeline-list">
@@ -495,14 +569,18 @@ export function DashboardPage({
                         <li key={s.id}>
                           <strong title={s.name}>{s.name}</strong>
                           <span className="df2-cell-meta">
-                            {s.interval}{!s.enabled && " · paused"}
+                            {scheduleCadenceLabel(s)}{!s.enabled && " · paused"}
                             {s.last_run_at && ` · ${formatRelativeTime(s.last_run_at)}`}
                           </span>
                         </li>
                       ))}
                     </ul>
                     <p className="df2-overview-v3-rail-meta">
-                      {enabledPipelines} enabled
+                      {/* Name the whole set the Schedules page lists, not just
+                          the enabled slice — the two screens counted different
+                          things under the same word. */}
+                      {schedules.length} total · {enabledPipelines} enabled
+                      {pausedPipelines > 0 ? ` · ${pausedPipelines} paused` : ""}
                     </p>
                   </>
                 )}

@@ -1,0 +1,257 @@
+"""Live workspace briefing — facts only, then the composer narrates them.
+
+A ChatGPT-style copilot that cannot say “here is what needs you today”
+is just a FAQ. This collector reads the same stores Jobs / Schedules /
+Connectors already use. Counts come from those lists. Nothing is guessed.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def _safe_list(fn, default: list | None = None) -> list:
+    try:
+        rows = fn()
+    except Exception:
+        return list(default or [])
+    return list(rows or [])
+
+
+def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
+    """Read connectors, jobs, schedules, contracts. Never invent a green."""
+    connectors = _load_connectors(workspace_id)
+    loaded_jobs = _load_jobs(workspace_id)
+    if isinstance(loaded_jobs, tuple):
+        jobs, job_counts = loaded_jobs
+    else:
+        jobs = list(loaded_jobs or [])
+        by_loaded: dict[str, int] = {}
+        for j in jobs:
+            key = str(j.get("status") or "unknown")
+            by_loaded[key] = by_loaded.get(key, 0) + 1
+        job_counts = {"total": len(jobs), "by_status": by_loaded}
+    schedules = _load_schedules(workspace_id)
+    contract_facts = _contract_facts(workspace_id)
+
+    from services.connector_store import connector_health
+
+    health = [(c, connector_health(c)) for c in connectors]
+    failed_connectors = [c for c, h in health if h == "failed"]
+    untested_connectors = [c for c, h in health if h == "untested"]
+    passed_connectors = [c for c, h in health if h == "passed"]
+
+    failed_jobs = [j for j in jobs if str(j.get("status") or "").lower() in {"failed", "error"}]
+    running_jobs = [
+        j for j in jobs if str(j.get("status") or "").lower() in {"running", "pending"}
+    ]
+    ok_jobs = [
+        j
+        for j in jobs
+        if str(j.get("status") or "").lower() in {"completed", "success", "succeeded"}
+    ]
+
+    enabled = [s for s in schedules if s.get("enabled")]
+    parked = [s for s in schedules if s.get("needs_approval") or s.get("approval_finding")]
+    next_runs = _future_schedules(enabled)
+
+    contract_total = int(contract_facts.get("contract_count") or 0)
+    contracts_unsigned_n = int(contract_facts.get("contracts_unsigned") or 0)
+
+    job_total = int(job_counts.get("total") or 0) or len(jobs)
+    by_status = job_counts.get("by_status") or {}
+    jobs_failed_n = int(by_status.get("failed") or 0) if int(job_counts.get("total") or 0) else len(failed_jobs)
+    jobs_running_n = (
+        int(by_status.get("running") or 0) + int(by_status.get("pending") or 0)
+        if int(job_counts.get("total") or 0)
+        else len(running_jobs)
+    )
+    jobs_ok_n = (
+        int(by_status.get("completed") or 0)
+        + int(by_status.get("completed_with_quarantine") or 0)
+    ) or len(ok_jobs)
+
+    attention: list[str] = []
+    if jobs_failed_n:
+        attention.append(f"{jobs_failed_n} failed transfer job(s)")
+    if parked:
+        attention.append(f"{len(parked)} pipeline(s) waiting on approval")
+    if failed_connectors:
+        attention.append(f"{len(failed_connectors)} connector(s) failed their last test")
+    if contracts_unsigned_n:
+        attention.append(f"{contracts_unsigned_n} contract(s) not signed")
+    if not next_runs and any(s.get("next_run_at") for s in enabled):
+        attention.append(
+            "Enabled pipelines have a next run in the past — open Schedules to refresh the cadence."
+        )
+
+    return {
+        "connector_count": len(connectors),
+        "connectors_passed": len(passed_connectors),
+        "connectors_failed": len(failed_connectors),
+        "connectors_untested": len(untested_connectors),
+        "connector_names": [str(c.get("name") or "") for c in connectors[:8] if c.get("name")],
+        "failed_connector_names": [
+            str(c.get("name") or "") for c in failed_connectors[:6] if c.get("name")
+        ],
+        "job_count": job_total,
+        "jobs_ok": jobs_ok_n,
+        "jobs_failed": jobs_failed_n,
+        "jobs_running": jobs_running_n,
+        "latest_failed_job": _job_line(failed_jobs[0]) if failed_jobs else "",
+        "schedule_count": len(schedules),
+        "schedules_enabled": len(enabled),
+        "schedules_parked": len(parked),
+        "next_schedule": _schedule_line(next_runs[0]) if next_runs else "",
+        "parked_names": [str(s.get("name") or "") for s in parked[:6] if s.get("name")],
+        "contract_count": contract_total,
+        "contracts_unsigned": contracts_unsigned_n,
+        "contracts_by_status": dict(contract_facts.get("contracts_by_status") or {}),
+        "recent_contracts": list(contract_facts.get("recent_contracts") or []),
+        "attention": attention,
+        "empty_workspace": not connectors and job_total == 0 and not schedules and not contract_total,
+    }
+
+
+def _future_schedules(enabled: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Soonest next_run_at that is still in the future. A past stamp is not next."""
+    from datetime import datetime, timezone
+
+    from services.schedule_store import has_open_approval
+
+    now = datetime.now(timezone.utc)
+    future: list[tuple[datetime, dict[str, Any]]] = []
+    for sched in enabled:
+        if has_open_approval(sched):
+            # Parked pipelines are held out of the cadence — not a next run.
+            continue
+        raw = sched.get("next_run_at")
+        if not raw:
+            continue
+        text = str(raw).strip().replace("Z", "+00:00")
+        try:
+            when = datetime.fromisoformat(text)
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when > now:
+            future.append((when, sched))
+    future.sort(key=lambda pair: pair[0])
+    return [sched for _, sched in future]
+
+
+def _job_line(job: dict[str, Any]) -> str:
+    jid = str(job.get("id") or job.get("job_id") or "")[:12]
+    src = job.get("source") or (job.get("route") or {}).get("source_table") or "?"
+    dst = job.get("destination") or (job.get("route") or {}).get("dest_table") or "?"
+    return f"`{jid}` {src} → {dst}"
+
+
+def _schedule_line(sched: dict[str, Any]) -> str:
+    name = sched.get("name") or "pipeline"
+    nxt = sched.get("next_run_at") or "—"
+    return f"**{name}** next `{nxt}`"
+
+
+def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
+    try:
+        from services import connector_store
+        from services.workspace_filter import current_workspace_filter
+
+        rows = connector_store.list_connectors(workspace_id=workspace_id)
+        visible = current_workspace_filter()
+        out = []
+        for c in rows or []:
+            if visible is not None and not visible.matches(getattr(c, "workspace_id", "")):
+                continue
+            if hasattr(c, "to_dict"):
+                d = c.to_dict()
+            elif isinstance(c, dict):
+                d = c
+            else:
+                d = {
+                    "name": getattr(c, "name", ""),
+                    "last_test_ok": getattr(c, "last_test_ok", None),
+                    "last_tested_at": getattr(c, "last_tested_at", None),
+                    "last_transfer_ok_at": getattr(c, "last_transfer_ok_at", None),
+                }
+            out.append(d)
+        return out
+    except Exception:
+        return []
+
+
+def _load_jobs(workspace_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    empty_counts: dict[str, Any] = {"total": 0, "by_status": {}}
+    try:
+        from .job_reads import list_transfer_jobs
+
+        # Keep "" as this-workspace/legacy scope — never coerce to None (all workspaces).
+        rows, counts, _source = list_transfer_jobs(
+            limit=25, workspace_id=workspace_id
+        )
+        out = []
+        for j in rows or []:
+            if not isinstance(j, dict):
+                continue
+            out.append(
+                {
+                    "id": str(j.get("id") or ""),
+                    "source": j.get("source") or "",
+                    "destination": j.get("destination") or "",
+                    "status": j.get("status"),
+                    "route": {
+                        "source_table": j.get("source_table") or j.get("source"),
+                        "dest_table": j.get("dest_table") or j.get("destination"),
+                    },
+                }
+            )
+        if not int((counts or {}).get("total") or 0):
+            by_status: dict[str, int] = {}
+            for j in out:
+                key = str(j.get("status") or "unknown")
+                by_status[key] = by_status.get(key, 0) + 1
+            counts = {"total": len(out), "by_status": by_status}
+        return out, counts
+    except Exception:
+        return [], empty_counts
+
+
+def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:
+    try:
+        from services.schedule_store import list_schedules
+
+        from services.workspace_filter import current_workspace_filter
+
+        rows = list_schedules(current_workspace_filter())
+        out = []
+        for s in rows or []:
+            d = s.to_dict() if hasattr(s, "to_dict") else dict(s)
+            if workspace_id and d.get("workspace_id") and d.get("workspace_id") != workspace_id:
+                continue
+            req = d.get("approval_request") or {}
+            d["needs_approval"] = str(req.get("status") or "").lower() == "open"
+            d["approval_finding"] = req.get("finding") or ""
+            out.append(d)
+        return out
+    except Exception:
+        return []
+
+
+def _contract_facts(workspace_id: str) -> dict[str, Any]:
+    """Contract status from the one read model the Contracts page uses.
+
+    A 50-row page used to stand in for the population inside a workspace, so
+    the newest signed rows hid an older Draft and the briefing said "all
+    signed" while the page said Draft.
+    """
+    try:
+        from services.contract_read_model import briefing_summary
+
+        return briefing_summary(workspace_id=workspace_id)
+    except Exception as exc:  # noqa: BLE001 - a briefing never invents a green
+        import logging
+
+        logging.getLogger(__name__).warning("Contract census unavailable: %s", exc, exc_info=exc)
+        return {}

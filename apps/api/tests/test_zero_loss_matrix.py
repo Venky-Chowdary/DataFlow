@@ -52,8 +52,9 @@ def test_bad_int_quarantined_good_rows_written(sqlite_db: Path):
 
 
 def test_iso_datetime_coerced_not_rejected_on_sqlite(sqlite_db: Path):
+    """Naive ISO datetime writes; timezone-aware Z into NTZ must quarantine (not strip)."""
     headers = ["id", "ts"]
-    rows = [["1", "2024-08-09T01:58:42Z"]]
+    rows = [["1", "2024-08-09T01:58:42"]]
     mappings = [
         {"source": "id", "target": "id", "confidence": 1.0},
         {"source": "ts", "target": "ts", "confidence": 1.0, "target_type": "DATETIME"},
@@ -72,9 +73,33 @@ def test_iso_datetime_coerced_not_rejected_on_sqlite(sqlite_db: Path):
         headers=headers,
         data_rows=rows,
         mappings=mappings,
-        column_types={"id": "INTEGER", "ts": "VARCHAR"},
+        column_types={"id": "INTEGER", "ts": "DATETIME"},
         error_policy="quarantine",
         create_table=True,
     )
     assert result.ok, result.error
     assert result.rows_written == 1
+
+    # Honesty: Z/offset into NTZ DATETIME must quarantine — never silent strip.
+    tz_result = sqlite_writer.write_mapped_rows(
+        host=str(sqlite_db),
+        port=0,
+        database=str(sqlite_db),
+        username="",
+        password="",
+        schema="",
+        connection_string=f"sqlite:///{sqlite_db}",
+        ssl=False,
+        warehouse="",
+        table_name="t_ts_tz",
+        headers=headers,
+        data_rows=[["1", "2024-08-09T01:58:42Z"]],
+        mappings=mappings,
+        column_types={"id": "INTEGER", "ts": "DATETIME"},
+        error_policy="quarantine",
+        create_table=True,
+    )
+    assert tz_result.ok is True
+    assert tz_result.rows_written == 0
+    assert tz_result.rejected_details
+    assert any("timezone" in str(d.get("reason") or "").lower() for d in tz_result.rejected_details)

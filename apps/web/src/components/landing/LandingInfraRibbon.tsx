@@ -4,7 +4,7 @@ import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 const NODES = [
   { id: "db", label: "OLTP", sub: "PostgreSQL", kind: "server" as const },
   { id: "map", label: "Map", sub: "Semantic", kind: "glass" as const },
-  { id: "gate", label: "Gates", sub: "8 preflight", kind: "glass" as const },
+  { id: "gate", label: "Gates", sub: "9 preflight", kind: "glass" as const },
   { id: "wh", label: "Warehouse", sub: "Snowflake", kind: "server" as const },
 ];
 

@@ -110,9 +110,9 @@ def test_append_with_empty_stream_contract_does_not_drop(monkeypatch):
         drop_calls: list[str] = []
         real_drop = engine_mod._drop_destination_table
 
-        def _tracking_drop(dest):
+        def _tracking_drop(dest, **kwargs):
             drop_calls.append(dest.table or "")
-            return real_drop(dest)
+            return real_drop(dest, **kwargs)
 
         monkeypatch.setattr(engine_mod, "_drop_destination_table", _tracking_drop)
 
@@ -146,9 +146,9 @@ def test_overwrite_calls_drop_then_replaces(monkeypatch):
         drop_calls: list[str] = []
         real_drop = engine_mod._drop_destination_table
 
-        def _tracking_drop(dest):
+        def _tracking_drop(dest, **kwargs):
             drop_calls.append(dest.table or "")
-            return real_drop(dest)
+            return real_drop(dest, **kwargs)
 
         monkeypatch.setattr(engine_mod, "_drop_destination_table", _tracking_drop)
 

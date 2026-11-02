@@ -56,6 +56,7 @@ def test_sqlserver_full_ct_page_refuses_unsafe_version_advance():
     prior = cdc.version
     conn = MagicMock()
     cur = MagicMock()
+    cur.fetchone.return_value = (1, 100)
     cur.fetchall.return_value = [(6, "U", "1"), (6, "U", "2")]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
@@ -101,8 +102,12 @@ def test_object_writers_honor_fail_error_policy(module_path, bucket_kw):
         **bucket_kw,
     )
     assert result.ok is False
-    assert "Transform errors" in (result.error or "")
     assert result.rows_written == 0
+    # The refusal must name the offending cell, not just fail: the abort policy
+    # is the operator's evidence for why nothing was written.
+    error = result.error or ""
+    assert "amount" in error and "not-a-decimal" in error
+    assert "row 1" in error.lower()
 
 
 def test_legacy_get_file_chunks_refuses_binary_formats(tmp_path):

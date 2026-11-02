@@ -42,6 +42,39 @@ def test_merge_plan_into_run_recovers_empty_draft_with_request_mappings(tmp_path
     assert len(reloaded.active_revision().mappings) == 2
 
 
+def test_build_run_payload_exposes_plan_contract_bind(tmp_path, monkeypatch):
+    import services.transfer_plan_store as store
+    from services.transfer_plan_store import add_mapping_revision
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "plans.json")
+    plan = create_plan(
+        {
+            "name": "orders",
+            "source": {"kind": "file", "format": "csv"},
+            "destination": {"kind": "database", "format": "postgres"},
+            "source_columns": ["id"],
+            "source_schema": {"id": "integer"},
+            "policies": {
+                "sync_mode": "full_refresh_append",
+                "contract_id": "dfc-plan-signed",
+                "require_signed_contract": True,
+            },
+        }
+    )
+    add_mapping_revision(
+        plan.id,
+        {
+            "mappings": [{"source": "id", "target": "id", "confidence": 0.95}],
+            "transforms": [],
+            "validation": {"passed": True},
+        },
+    )
+    payload = build_run_payload(plan.id)
+    assert payload["contract_id"] == "dfc-plan-signed"
+    assert payload["require_signed_contract"] is True
+    assert payload["policies"]["contract_id"] == "dfc-plan-signed"
+
+
 def test_merge_plan_into_run_still_fails_without_request_mappings(tmp_path, monkeypatch):
     import services.transfer_plan_store as store
 

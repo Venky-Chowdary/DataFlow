@@ -33,6 +33,16 @@ HARD_GATE_IDS = {
     "schema_drift",
     "constraint_fk",
     "proof_bundle",
+    "g13_source_coverage",
+    "g14_destination_requirements",
+    "g15_dest_exists_shape",
+    "g16_field_reduction",
+    "g18_cdc_snapshot_mode",
+    "g19_dest_schema_replacement",
+    "g20_code_crosswalk",
+    "g3f_population_fit",
+    "g21_control_totals",
+    "g22_dest_referential_integrity",
 }
 
 SOFT_GATE_IDS = {
@@ -88,6 +98,25 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             {"kind": "check_connection", "label": "Check destination privileges"},
         ],
     },
+    "g3f_population_fit": {
+        "title": "Population fit",
+        "category": "hard",
+        "why": (
+            "The Map type came from a preview peek. Values later in the source do not "
+            "fit that destination NUMBER/DECIMAL/VARCHAR/integer carrier. On a new "
+            "table that peeked type is the CREATE type — the source is not broken. "
+            "Widening Map changes CREATE. On an existing table, Map cannot ALTER live DDL."
+        ),
+        "fix": (
+            "For a new table: Approve the CREATE-type widen, then re-Validate. "
+            "Nothing is written to the destination until Execute. Do not silently truncate. "
+            "For an existing table: ALTER the column or map to a new *_wide column."
+        ),
+        "examples": [
+            "flights-1m.csv DEP_TIME 0.23333333 at row 293 does not fit peeked NUMBER(9,6).",
+        ],
+        "suggested_actions": [],
+    },
     "g3_schema_contract": {
         "title": "Schema contract / type coercion",
         "category": "hard",
@@ -100,6 +129,228 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fix type coercion"},
+        ],
+    },
+    "g13_source_coverage": {
+        "title": "Source column coverage",
+        "category": "hard",
+        "why": (
+            "A source column that is neither mapped to a destination column nor "
+            "declared an intentional omission would be dropped without anyone "
+            "deciding to drop it. That is silent data loss, and it is invisible "
+            "afterwards: the destination looks complete and the certificate "
+            "reports success."
+        ),
+        "fix": (
+            "Open Map and, for each listed column, either map it to a destination "
+            "column (create-new if the destination has no carrier for it) or mark "
+            "it as an intentional omission. Omissions are recorded in the Decision "
+            "Artifact and the proof bundle, so the drop stays auditable."
+        ),
+        "examples": [
+            "30-column source into an existing 20-column table → map 20, omit 10 explicitly.",
+            "Audit columns the destination does not carry → mark them omitted, not unmapped.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to account for every column"},
+        ],
+    },
+    "g14_destination_requirements": {
+        "title": "Destination required columns",
+        "category": "hard",
+        "why": (
+            "A destination column that is NOT NULL, has no default and is neither an "
+            "identity nor a generated column can only be filled by a mapping. With "
+            "none, the database rejects the very first row — the operator learns "
+            "from a driver error mid-write instead of from Validate."
+        ),
+        "fix": (
+            "Open Map and give each listed destination column a source mapping or a "
+            "constant/derived value. If the destination should fill it, add a DEFAULT "
+            "or make it an identity column on the destination first."
+        ),
+        "examples": [
+            "Destination `tenant_id BIGINT NOT NULL` with no default and no source column.",
+            "Audit column `created_by NOT NULL` — add a DEFAULT on the destination or map a constant.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fill required columns"},
+        ],
+    },
+    "g16_field_reduction": {
+        "title": "Field reduction governance",
+        "category": "hard",
+        "why": (
+            "A declared omission says the drop was deliberate; it does not say "
+            "why, who accepted it, or — when the reason is 'the data is kept "
+            "elsewhere' — where. An auditor reviewing a field-reducing migration "
+            "(10 legacy fields into a 7-field screen) asks for the reason per "
+            "field. This gate also refuses a reason the data disproves: a column "
+            "declared empty whose sample carries values is a false record, not a "
+            "decision."
+        ),
+        "fix": (
+            "Open Map: each omitted column carries a reduction reason, a note, and "
+            "— for archive_only — the archive that holds the field. An omission "
+            "left without a reason is recorded as unexplained and warns rather "
+            "than blocks. Use a factual code (dropped_empty / dropped_constant) "
+            "only when the data supports it; otherwise use a judgement code "
+            "(dropped_not_required, dropped_redundant, dropped_obsolete, "
+            "dropped_pii_minimization) with a note."
+        ),
+        "examples": [
+            "COBOL filler columns → dropped_obsolete with a note naming the copybook release.",
+            "Card PAN not carried into the analytics target → dropped_pii_minimization.",
+            "Legacy audit trail kept in the mainframe archive → archive_only + archive_reference.",
+            "Column declared empty but 12 of 500 sampled rows hold a value → blocked as a false claim.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to record reduction reasons"},
+        ],
+    },
+    "g15_dest_exists_shape": {
+        "title": "Dest-exists shape",
+        "category": "hard",
+        "why": (
+            "When the destination table already exists, source extras, dest-only "
+            "NOT NULL columns, and false-friend binds must be classified once. "
+            "A positional INSERT would shift values if a new column is not last."
+        ),
+        "fix": (
+            "Open Map. Remap extra source columns or mark them omitted. Fill "
+            "required dest-only columns. Writes stay name-addressed — dest-only "
+            "columns stay off SET."
+        ),
+        "examples": [
+            "Stored-procedure result grew loyalty_tier — remap or omit, never silent drop.",
+            "Dest UserID vs userid fold is dest-superset, not a false bind.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to remap extra columns"},
+        ],
+    },
+    "g19_dest_schema_replacement": {
+        "title": "Destination schema replacement",
+        "category": "hard",
+        "why": (
+            "A full refresh drops the destination table and recreates it from "
+            "the source shape. Where the existing column declares a carrier the "
+            "source overflows — an INTEGER amount fed DECIMAL(20,9) — the "
+            "recreate answers a question the operator already answered "
+            "differently, and every other sync mode refuses that same pair. "
+            "Nothing in the run report says the declared destination type is "
+            "gone."
+        ),
+        "fix": (
+            "Decide which carrier is the contract. Keep the declared one: map "
+            "through a transform that fits it (round, scale, truncate with a "
+            "rule), or target a wider column. Replace it: sign a Migration Risk "
+            "Contract on that mapping, which records the replacement in the "
+            "proof pack instead of hiding it. Changing sync mode to append or "
+            "upsert also keeps the live column, and blocks for the narrowing."
+        ),
+        "examples": [
+            "amt_dec DECIMAL(20,9) → existing INTEGER column, overwrite mode: "
+            "the table is recreated NUMERIC(20,9) and the integer contract is lost.",
+            "Second overwrite tick on a table Datawrap created: the live type "
+            "already matches what it would create, so nothing is reported.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix the carrier"},
+        ],
+    },
+    "g20_code_crosswalk": {
+        "title": "Code crosswalk coverage",
+        "category": "hard",
+        "why": (
+            "A coded field (status, ICD, GL account, country) is remapped by an "
+            "operator-declared source→target table. A sample of 25 rows can make "
+            "that table look complete while a rare code in the population has no "
+            "target. Passing it through, nulling it, or dropping the row silently "
+            "corrupts meaning. One unmapped code is a failed conversion."
+        ),
+        "fix": (
+            "Open Map and add every missing source code to the column's code "
+            "crosswalk. There is no implicit identity: a code that should keep "
+            "its spelling must be listed as A→A. Re-run Validate against the "
+            "population — a covered sample is not proof."
+        ),
+        "examples": [
+            "Legacy status 'Z' appears on 12 of 1M rows; the sample only showed "
+            "A/B/C so the crosswalk never listed Z — G20 blocks rather than "
+            "writing Z into the new status column.",
+            "No mapping declared a code_crosswalk: the gate skips. It does not "
+            "invent coded fields from column names.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to complete the crosswalk"},
+        ],
+    },
+    "g21_control_totals": {
+        "title": "Control totals",
+        "category": "hard",
+        "why": (
+            "A matching row count does not prove a ledger balance. Declared "
+            "monetary columns must have an independent source SUM equal to the "
+            "destination SUM after the write. A sample SUM, an in-memory walk of "
+            "loaded rows, and a 0.01 tolerance are not that proof."
+        ),
+        "fix": (
+            "Open Map and confirm the control-total checkbox on the monetary "
+            "column. Identity mappings only — a currency parse is not a source "
+            "SUM. Fix the write (quarantine, transform, or missing rows) until "
+            "the independent destination SUM matches. A signed risk contract "
+            "does not waive a ledger mismatch."
+        ),
+        "examples": [
+            "COUNT(*) matches and SUM(amount) is 0.01 short — Gate-8 fails.",
+            "Quarantined rows without a quarantined-amount SUM — unproven, fail closed.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to declare control totals"},
+        ],
+    },
+    "g22_dest_referential_integrity": {
+        "title": "Destination referential integrity",
+        "category": "hard",
+        "why": (
+            "A child row can land while its parent never did. Schema FK coverage "
+            "(constraint_fk) and a source sample orphan probe do not prove the "
+            "destination. After write, every source relationship must be dest "
+            "enforced or anti-join scanned with zero orphans."
+        ),
+        "fix": (
+            "Load parent rows first, or quarantine orphan children. Destination "
+            "RI cannot be fixed in Map. Re-Validate after the parent population "
+            "exists, then Execute. An unavailable dest scan is unproven — fail closed."
+        ),
+        "examples": [
+            "Dest child COUNT=3, dest anti-join finds parent_id 99 missing — Gate-8 fails.",
+            "Load-speed dest with no FK: dest scan is required; catalog coverage is not enough.",
+        ],
+        "suggested_actions": [
+            {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
+        ],
+    },
+    "g18_cdc_snapshot_mode": {
+        "title": "CDC snapshot mode",
+        "category": "hard",
+        "why": (
+            "snapshot_mode=never forbids a snapshot. Without a stored watermark "
+            "Execute cannot stream and would fail after Approve. This is Debezium "
+            "never / no_data — not dest-owned exactly-once."
+        ),
+        "fix": (
+            "Open Advanced and set snapshot_mode=when_needed (or initial), or "
+            "restore a CDC resume token. Recovery is at-least-once upsert of "
+            "current source keys — not continuous CDC across a purged window."
+        ),
+        "examples": [
+            "First CDC run with never and no watermark — set when_needed, then Validate.",
+            "Watermark cleared after dest recreate — never stays refuse-closed until mode changes.",
+        ],
+        "suggested_actions": [
+            {"kind": "open_advanced", "label": "Open Advanced — set snapshot mode"},
         ],
     },
     "g4_mapping_confidence": {
@@ -190,6 +441,25 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             {"kind": "review_mappings", "label": "Open Map to fix identity/reconcile"},
         ],
     },
+    "g_pii_hash_key": {
+        "title": "hash_pii key unavailable",
+        "category": "hard",
+        "why": (
+            "A mapping or shape step hashes a column with hash_pii, an HMAC digest "
+            "under this workspace's own secret key. The key could not be loaded, "
+            "and a built-in default is refused because the digests would be "
+            "reversible across tenants."
+        ),
+        "fix": (
+            "Re-run Validate in a moment. If the key still cannot be loaded, ask "
+            "your Datawrap administrator. If a keyed digest is not required, switch "
+            "the column to mask_pii or redact. Do not remove the transform: the "
+            "column would be written in clear."
+        ),
+        "examples": [
+            "email → hash_pii while the workspace hashing key cannot be loaded.",
+        ],
+    },
     "g9_data_integrity": {
         "title": "Data integrity audit",
         "category": "hard",
@@ -221,6 +491,22 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Review proof and mappings"},
+        ],
+    },
+    "schema_mismatch": {
+        "title": "Schema mismatch",
+        "category": "hard",
+        "why": (
+            "The source has columns the destination table does not. "
+            "There is no saved mapping contract, so this is an ADD COLUMN "
+            "review, not drift."
+        ),
+        "fix": "Review the ADD COLUMN proposals and apply them before Execute.",
+        "examples": [
+            "customer_email is in the file and not on the destination table.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Review ADD COLUMN proposals"},
         ],
     },
     "schema_drift": {
@@ -600,8 +886,10 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         ],
         "gate": "constraint_fk",
         "why": (
-            "Population orphan scan found missing parents or could not complete "
-            "(e.g. composite FK). Referential integrity is not proven."
+            "Population orphan scan found missing parents or could not complete. "
+            "Composite FKs are scanned as the catalog match type — unreported is "
+            "MATCH SIMPLE. A pairing mismatch "
+            "or failed scan still leaves referential integrity unproven."
         ),
         "fix": (
             "Fix orphan rows at source, complete a full population scan for every "
@@ -609,6 +897,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         ),
         "examples": [
             "Population orphan scan: 12 rows in orders.customer_id missing from customers.id.",
+            "Population orphan scan: 1 row(s) in child.(tenant_id+order_no) missing from orders.(tenant_id+order_no).",
         ],
         "suggested_actions": [
             {
@@ -746,6 +1035,34 @@ def explain_issue(
     }
 
 
+def _g15_suggested_actions(action: str, details: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """One primary Validate button from dest-exists ``primary_action``."""
+    details = details or {}
+    extras = [
+        str(c)
+        for c in (details.get("extra_source_columns") or details.get("unaccounted_sources") or [])
+        if str(c).strip()
+    ]
+    friends = [
+        str(c)
+        for c in (details.get("false_friend_sources") or [])
+        if str(c).strip()
+    ]
+    kind_map = {
+        "review_map": ("review_mappings", "Open Map to remap extra columns"),
+        "confirm_or_remap": ("confirm_or_remap", "Confirm this pair"),
+        "reload_dest_schema": ("reload_dest_schema", "Reload destination schema"),
+        "confirm_add": ("confirm_add", "Review ADD COLUMN proposals"),
+        "continue_validate": ("continue_validate", "Continue — dest-only columns stay off SET"),
+    }
+    kind, label = kind_map.get(action, ("review_mappings", "Open Map to remap extra columns"))
+    focus = friends[0] if kind == "confirm_or_remap" and friends else (extras[0] if extras else "")
+    row: dict[str, str] = {"kind": kind, "label": label}
+    if focus and kind in {"review_mappings", "confirm_or_remap", "confirm_add"}:
+        row["column"] = focus
+    return [row]
+
+
 def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the rule for a gate failure."""
     details = details or {}
@@ -777,6 +1094,31 @@ def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = No
                 {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
                 {"kind": "run_population_orphan_scan", "label": "Run population orphan scan"},
             ],
+        }
+    if gate_id == "g18_cdc_snapshot_mode":
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "CDC snapshot mode",
+            "category": rule.get("category", "hard"),
+            "why": rule.get("why", ""),
+            "fix": rule.get("fix", ""),
+            "examples": rule.get("examples", []),
+            "suggested_actions": rule.get("suggested_actions")
+            or [{"kind": "open_advanced", "label": "Open Advanced — set snapshot mode"}],
+        }
+    if gate_id == "g15_dest_exists_shape":
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        action = str(details.get("primary_action") or details.get("remediation_kind") or "review_map")
+        actions = _g15_suggested_actions(action, details)
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "Dest-exists shape",
+            "category": rule.get("category", "hard"),
+            "why": rule.get("why", ""),
+            "fix": str(details.get("detail") or rule.get("fix", "")),
+            "examples": rule.get("examples", []),
+            "suggested_actions": actions,
         }
     # Prefer issue-catalog match so encoding/nulls beat generic gate CTAs.
     issue_match = explain_issue(message, dest_kind="", validation_mode="balanced")
@@ -838,6 +1180,15 @@ def enrich_blockers(
                     nested_bits.append(text)
         message_blob = " ".join([str(b.get("message") or ""), *nested_bits]).strip()
         guidance = explain_gate(gate_id, message_blob or str(b.get("message") or ""), details)
+        owned_actions = b.get("suggested_actions") or details.get("suggested_actions")
+        if isinstance(owned_actions, list) and owned_actions:
+            guidance["suggested_actions"] = list(owned_actions)
+        if details.get("create_new_table") and details.get("corrective_action"):
+            guidance["fix"] = str(details.get("corrective_action"))
+            guidance["why"] = (
+                "Map peeked 25 rows and stamped a NUMBER that is too small for the file. "
+                "This is a new table — widening Map changes CREATE, not the CSV."
+            )
         nested = details.get("issues") or details.get("errors") or []
         if nested and isinstance(nested, list):
             guidance["details"] = [

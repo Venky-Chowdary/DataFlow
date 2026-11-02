@@ -19,12 +19,18 @@ from src.transfer.connector_capabilities import (  # noqa: E402
     _DRIVER_CAPS,
     _FILE_CAPS,
     default_port,
+    effective_port,
     dest_ready,
     get_capabilities,
     resolve_driver_type,
 )
 from src.transfer.connector_registry import CONNECTOR_MODULES  # noqa: E402
-from src.transfer.registry import validate_transfer  # noqa: E402
+from src.transfer.registry import (  # noqa: E402
+    LIVE_DEST_FILE_FORMATS,
+    LIVE_TABULAR_SOURCE_FORMATS,
+    _FILE_FORMATS,
+    validate_transfer,
+)
 
 # Every resolve_driver_type result must land in the registry or file caps.
 _KNOWN_DRIVERS = frozenset(CONNECTOR_MODULES) | frozenset(_DRIVER_CAPS) | frozenset(_FILE_CAPS) | {
@@ -57,9 +63,7 @@ def test_all_live_catalog_ids_have_default_port(live_catalog_ids: list[str]):
 
 
 def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: list[str]):
-    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
+    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in _FILE_FORMATS]
     source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     dest_ids = [cid for cid in db_ids if dest_ready(get_capabilities(resolve_driver_type(cid)))]
     for src in source_ids:
@@ -69,12 +73,14 @@ def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: lis
 
 
 def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[str]):
-    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
-    dest_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    ) and dest_ready(get_capabilities(resolve_driver_type(cid)))]
+    source_formats = set(LIVE_TABULAR_SOURCE_FORMATS)
+    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in source_formats]
+    dest_ids = [
+        cid
+        for cid in live_catalog_ids
+        if resolve_driver_type(cid) not in _FILE_FORMATS
+        and dest_ready(get_capabilities(resolve_driver_type(cid)))
+    ]
     for fid in file_ids:
         for did in dest_ids:
             ok, msg = validate_transfer("file", fid, "database", did)
@@ -82,12 +88,9 @@ def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[st
 
 
 def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: list[str]):
-    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
-    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
+    dest_formats = set(LIVE_DEST_FILE_FORMATS)
+    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in dest_formats]
+    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in _FILE_FORMATS]
     source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     for sid in source_ids:
         for fid in file_ids:
@@ -104,3 +107,29 @@ def test_live_catalog_count_matches_health_manifest():
     # Planned brands must never appear under status=live.
     for brand in ("db2", "teradata"):
         assert brand not in live, brand
+
+
+def test_missing_listen_port_uses_the_driver_default(monkeypatch):
+    """Port 0 is unset. Redis, Elasticsearch, and Neo4j must not fall through to 443."""
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.models import EndpointConfig
+
+    monkeypatch.setattr(
+        "src.transfer.adapters._find_implicit_connector_id",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _cfg(fmt: str, port: int) -> dict:
+        return resolve_connector_config(
+            EndpointConfig(format=fmt, host=f"{fmt}.internal", port=port)
+        )
+
+    assert effective_port("redis", 0) == 6379
+    assert effective_port("elasticsearch", None) == 9200
+    assert effective_port("neo4j", "") == 7474
+    assert effective_port("redis", 6380) == 6380
+    assert _cfg("redis", 0)["port"] == 6379
+    assert _cfg("redis", 6380)["port"] == 6380
+    assert _cfg("elasticsearch", 0)["port"] == 9200
+    assert _cfg("neo4j", 0)["port"] == 7474
+    assert _cfg("influxdb", 0)["port"] == 8086

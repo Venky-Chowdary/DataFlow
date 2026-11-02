@@ -1,15 +1,29 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { BrandWordmark } from "../components/BrandWordmark";
+import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
+import { AuthButton } from "../components/AuthButton";
+import { PasswordToggle } from "../components/AuthFlow";
 import { useToast } from "../components/Toast";
-import { fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
-import { writeSession } from "../lib/session";
+import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType, type LoginSession } from "../lib/api";
+import { isMfaChallenge } from "../lib/mfaApi";
+import { LoginMfaStep } from "../components/MfaChallenge";
+import { fetchSignupConfig } from "../lib/signupApi";
+import { classifySignInFailure, SignInFailure } from "../lib/signInFailure";
+import { UI_PREVIEW_TOKEN, writeSession } from "../lib/session";
 import { Screen } from "../lib/types";
+import type { PublicRoute } from "../lib/publicNavigation";
 
 interface LoginPageProps {
   target: Screen;
   onAuthenticated: (email: string) => void;
   onBack: () => void;
+  onLegal?: (route: Extract<PublicRoute, "privacy" | "terms">) => void;
+  /** Self-serve signup (flag-gated server-side; links render only when the
+   *  deployment answers the form-token route). */
+  onSignup?: () => void;
+  onForgotPassword?: () => void;
+  /** 403 email_unverified: the API minted a fresh code — jump into code entry. */
+  onVerifyPending?: (challengeId: string, email: string) => void;
 }
 
 function isValidEmail(value: string) {
@@ -26,12 +40,12 @@ const TARGET_LABELS: Partial<Record<Screen, string>> = {
 };
 
 const TRUST_METRICS = [
-  { value: "9", label: "Core gates (G1–G9)" },
+  { value: "9", label: "Preflight gates" },
   { value: "Map", label: "Semantic confidence" },
   { value: "Σ", label: "Checksum proof" },
 ];
 
-export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
+export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, onForgotPassword, onVerifyPending }: LoginPageProps) {
   const { toast } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -42,11 +56,22 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
   const [passwordTouched, setPasswordTouched] = useState(false);
   const [checking, setChecking] = useState(false);
   const [credentialError, setCredentialError] = useState("");
+  // Which failure happened, taken from the response — not guessed from words in
+  // the message. Sniffing for "api" reported a rejected password as an
+  // unreachable control plane, sending the operator to check the deployment.
+  const [failure, setFailure] = useState<SignInFailure>("auth");
   const [capsLock, setCapsLock] = useState(false);
   const [ssoProviders, setSsoProviders] = useState<Array<{ type: SsoType; label: string; login_path: string }>>([]);
+  const [signupEnabled, setSignupEnabled] = useState(false);
+  const [pendingVerify, setPendingVerify] = useState<{ challengeId: string; email: string } | null>(null);
+  // Password matched an account with two-factor on: the second step is pending.
+  const [mfaStep, setMfaStep] = useState<{ challenge: string; email: string } | null>(null);
 
   useEffect(() => {
     fetchSsoProviders().then(setSsoProviders).catch(() => setSsoProviders([]));
+    // Read-only capability probe on the always-mounted auth router — never
+    // mints a form token just to feature-detect the signup surface.
+    fetchSignupConfig().then((c) => setSignupEnabled(c.enabled));
   }, []);
 
   const emailTrimmed = email.trim();
@@ -90,27 +115,20 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
     setChecking(true);
     try {
       const result = await loginWorkspace(emailTrimmed, password);
-      writeSession(
-        {
-          email: result.user.email,
-          name: result.user.name,
-          role: result.user.role,
-          token: result.token,
-          expires_at: result.expires_at,
-          signed_in_at: Date.now(),
-        },
-        remember,
-      );
-      toast({ title: "Signed in", message: `Opening ${targetLabel}.`, tone: "success" });
-      onAuthenticated(result.user.email);
+      if (isMfaChallenge(result)) {
+        setPassword("");
+        setMfaStep({ challenge: result.challenge, email: emailTrimmed });
+        return;
+      }
+      finishSignIn(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
-      const apiOffline =
-        msg.includes("Failed to fetch") ||
-        msg.includes("NetworkError") ||
-        msg.includes("timed out") ||
-        (msg.includes("fetch") && !msg.includes("Sign-in"));
-      if (apiOffline) {
+      const kind = classifySignInFailure(err);
+      setFailure(kind);
+      if (err instanceof ApiError && err.code === "email_unverified" && err.challengeId) {
+        setPendingVerify({ challengeId: err.challengeId, email: emailTrimmed });
+        setCredentialError("Your email isn't verified yet — we sent a fresh code.");
+      } else if (kind === "api") {
         setCredentialError("Cannot reach the API. Confirm the control plane URL and that the API service is online.");
         toast({
           title: "API offline",
@@ -130,6 +148,30 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
     }
   };
 
+  const finishSignIn = (result: LoginSession & { recovery_codes_remaining?: number; mfa_method?: string }) => {
+    writeSession(
+      {
+        email: result.user.email,
+        name: result.user.name,
+        role: result.user.role,
+        token: result.token,
+        expires_at: result.expires_at,
+        signed_in_at: Date.now(),
+      },
+      remember,
+    );
+    if (result.mfa_method === "recovery") {
+      toast({
+        title: "Signed in with a recovery code",
+        message: `${result.recovery_codes_remaining ?? 0} recovery codes left. Create new ones in Settings → Security.`,
+        tone: "warning",
+      });
+    } else {
+      toast({ title: "Signed in", message: `Opening ${targetLabel}.`, tone: "success" });
+    }
+    onAuthenticated(result.user.email);
+  };
+
   const startSso = (type: SsoType, label: string) => {
     window.location.href = ssoStartUrl(type);
     toast({ title: `Redirecting to ${label}`, message: "Complete sign-in with your identity provider.", tone: "info" });
@@ -141,7 +183,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
         email: "test@gmail.com",
         name: "Test User",
         role: "admin",
-        token: "dev-ui-preview",
+        token: UI_PREVIEW_TOKEN,
         expires_at: Math.floor(Date.now() / 1000) + 86400,
         signed_in_at: Date.now(),
       },
@@ -155,74 +197,17 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
     onAuthenticated("test@gmail.com");
   };
 
-  const alertKind = credentialError.toLowerCase().includes("api")
-    ? "api"
-    : credentialError.toLowerCase().includes("configured")
-      ? "config"
-      : "auth";
+  const alertKind = failure;
 
   return (
     <main className="lp-login lp-login--gate">
-      <section className="lp-login-brand" aria-label="Datawrap">
-        <div className="lp-login-brand-bg" aria-hidden>
-          <span className="lp-login-brand-mesh" />
-          <span className="lp-login-brand-orb lp-login-brand-orb--a" />
-          <span className="lp-login-brand-orb lp-login-brand-orb--b" />
-          <span className="lp-login-brand-rail" />
-        </div>
-
-        <div className="lp-login-brand-inner">
-          <header className="lp-login-brand-head">
-            <button type="button" className="lp-login-back" onClick={onBack}>
-              <DtIcon name="chevron-left" size={15} />
-              <span>Back</span>
-            </button>
-            <div className="lp-login-brand-logo">
-              <BrandWordmark markSize={32} title="" />
-            </div>
-          </header>
-
-          <div className="lp-login-brand-body">
-            <p className="lp-login-brand-kicker">Enterprise data platform</p>
-            <h1 className="lp-login-brand-title">Sign in to governed transfers</h1>
-            <p className="lp-login-brand-lead">
-              Semantic mapping, nine core gates (G1–G9), and checksum proof — for humans and agents.
-            </p>
-
-            <div className="lp-login-proof" aria-hidden>
-              <div className="lp-login-proof-flow">
-                <span>Map</span>
-                <i />
-                <span>Preflight</span>
-                <i />
-                <span>Prove</span>
-              </div>
-              <p>Every session inherits workspace RBAC. Agents never skip gates.</p>
-            </div>
-
-            <div className="lp-login-metrics" role="list">
-              {TRUST_METRICS.map((m) => (
-                <div key={m.label} className="lp-login-metric" role="listitem">
-                  <strong>{m.value}</strong>
-                  <span>{m.label}</span>
-                </div>
-              ))}
-            </div>
-
-            <p className="lp-login-brand-dest">
-              Continue to <strong>{targetLabel}</strong>
-            </p>
-          </div>
-
-          <footer className="lp-login-brand-foot">
-            <span>Self-host ready</span>
-            <span aria-hidden>·</span>
-            <span>SSO / RBAC</span>
-            <span aria-hidden>·</span>
-            <span>Audit trails</span>
-          </footer>
-        </div>
-      </section>
+      <AuthBrandPanel
+        title="Sign in to governed transfers"
+        lead="Semantic mapping, named preflight gates, and checksum proof — for humans and agents."
+        onBack={onBack}
+        metrics={TRUST_METRICS}
+        dest={<>Continue to <strong>{targetLabel}</strong></>}
+      />
 
       <section className="lp-login-auth" aria-labelledby="login-form-title">
         <div className="lp-login-auth-bg" aria-hidden>
@@ -234,29 +219,20 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
 
         <div className="lp-login-auth-inner">
             <div className="lp-login-auth-card">
-            <div className="lp-login-auth-banner" aria-hidden>
-              <span className="lp-login-auth-banner-glow" />
-              <span className="lp-login-auth-banner-path" />
-            </div>
-
-            <div className="lp-login-auth-mark" aria-hidden>
-              <BrandWordmark markSize={40} word={false} title="" />
-            </div>
-
+            {mfaStep ? (
+              <LoginMfaStep
+                challenge={mfaStep.challenge}
+                email={mfaStep.email}
+                onSignedIn={finishSignIn}
+                onBack={() => setMfaStep(null)}
+              />
+            ) : (<>
             <div className="lp-login-auth-head">
               <p className="lp-login-auth-kicker">Secure workspace access</p>
               <h2 id="login-form-title">Welcome back</h2>
               <p className="lp-login-auth-sub">
-                Sign in to open <strong>{targetLabel}</strong> with the same governed path —
-                map, preflight, prove.
+                Sign in to open <strong>{targetLabel}</strong> — same map → validate → move → prove path.
               </p>
-              <div className="lp-login-auth-steps" aria-hidden>
-                <span>Map</span>
-                <i />
-                <span>Preflight</span>
-                <i />
-                <span>Prove</span>
-              </div>
             </div>
 
             {credentialError && (
@@ -276,6 +252,15 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                   <p>{credentialError}</p>
                 </div>
               </div>
+            )}
+
+            {pendingVerify && (
+              <UnverifiedAlert
+                challengeId={pendingVerify.challengeId}
+                email={pendingVerify.email}
+                error={credentialError}
+                onVerifyPending={onVerifyPending}
+              />
             )}
 
             <form className="lp-login-form" onSubmit={submit} noValidate>
@@ -330,48 +315,47 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                     placeholder="Enter your password"
                     aria-invalid={Boolean(passwordError || (credentialError && alertKind === "auth"))}
                   />
-                  <button
-                    type="button"
-                    className="lp-input-password-toggle"
-                    onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                  >
-                    <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
-                  </button>
+                  <PasswordToggle show={showPassword} onToggle={() => setShowPassword((v) => !v)} />
                 </div>
                 {passwordError && <small className="lp-field-error">{passwordError}</small>}
               </div>
 
-              <div className="lp-login-row">
-                <label className="lp-login-remember">
-                  <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-                  <span>Keep me signed in on this device</span>
-                </label>
-              </div>
+              <LoginAuxRows
+                remember={remember}
+                onRemember={setRemember}
+                showForgot={Boolean(signupEnabled && onForgotPassword)}
+                onForgot={onForgotPassword}
+              />
 
-              <button
-                type="submit"
-                className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit"
-                disabled={checking}
+              <AuthButton
+                type="submit" size="lg" block
+                className="lp-login-submit"
+                loading={checking} loadingLabel="Verifying credentials…"
+                trailingIcon={<DtIcon name="arrow-right" size={16} />}
               >
-                {checking ? "Verifying credentials…" : "Sign in to workspace"}
-                {!checking && <DtIcon name="arrow-right" size={16} />}
-              </button>
+                Sign in to workspace
+              </AuthButton>
             </form>
+
+            {signupEnabled && onSignup && (
+              <p className="lp-login-legal">
+                New to Datawrap? <AuthButton variant="link" onClick={onSignup}>Create an account</AuthButton>
+              </p>
+            )}
 
             {ssoProviders.length > 0 && (
               <>
                 <div className="lp-login-divider"><span>Or continue with SSO</span></div>
                 <div className="lp-login-sso">
                   {ssoProviders.map((provider) => (
-                    <button
+                    <AuthButton
                       key={provider.type}
-                      type="button"
-                      className="lp-btn lp-btn--outline lp-login-sso-btn"
+                      variant="secondary"
+                      className="lp-login-sso-btn"
                       onClick={() => startSso(provider.type, provider.label)}
                     >
                       {provider.label}
-                    </button>
+                    </AuthButton>
                   ))}
                 </div>
               </>
@@ -382,9 +366,9 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                 <p className="lp-login-dev-hint">
                   Dev: <code>test@gmail.com</code> / <code>password123</code> · API :8001
                 </p>
-                <button type="button" className="lp-btn lp-btn--outline lp-btn--block" onClick={enterDevPreview}>
+                <AuthButton variant="secondary" block onClick={enterDevPreview}>
                   Preview workspace (UI only)
-                </button>
+                </AuthButton>
               </div>
             )}
 
@@ -402,9 +386,91 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                 <span>Sign-in audited</span>
               </li>
             </ul>
+            </>)}
+            {onLegal ? (
+              <p className="lp-login-legal">
+                <AuthButton variant="link" onClick={() => onLegal("privacy")}>Privacy</AuthButton>
+                <span aria-hidden>·</span>
+                <AuthButton variant="link" onClick={() => onLegal("terms")}>Terms</AuthButton>
+              </p>
+            ) : null}
           </div>
         </div>
       </section>
     </main>
+  );
+}
+
+/**
+ * The 403 `email_unverified` alert — the API minted a fresh code, so the
+ * action jumps straight into code entry. The control is a styled link
+ * button (AuthButton variant="link"), never a raw unstyled <button>.
+ */
+export function UnverifiedAlert({
+  challengeId,
+  email,
+  error,
+  onVerifyPending,
+}: {
+  challengeId: string;
+  email: string;
+  error: string | null;
+  onVerifyPending?: (challengeId: string, email: string) => void;
+}) {
+  return (
+    <div className="lp-login-alert lp-login-alert--warn" role="alert">
+      <DtIcon name="alert" size={18} />
+      <div>
+        <strong>Verify your email</strong>
+        <p>
+          {error}{" "}
+          {onVerifyPending && (
+            <AuthButton
+              variant="link"
+              size="sm"
+              onClick={() => onVerifyPending(challengeId, email)}
+            >
+              Enter verification code
+            </AuthButton>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The forgot-password link and the remember-me checkbox each get their own
+ * line: the link sits right-aligned directly under the password field, the
+ * checkbox follows below — they never share a row (the checkbox copy would
+ * wrap to two lines).
+ */
+export function LoginAuxRows({
+  remember,
+  onRemember,
+  showForgot,
+  onForgot,
+}: {
+  remember: boolean;
+  onRemember: (v: boolean) => void;
+  showForgot: boolean;
+  onForgot?: () => void;
+}) {
+  return (
+    <>
+      {showForgot && onForgot && (
+        <div className="lp-login-forgot-row">
+          <AuthButton variant="link" className="lp-login-forgot" onClick={onForgot}>
+            Forgot password?
+          </AuthButton>
+        </div>
+      )}
+      <div className="lp-login-row">
+        <label className="lp-login-remember">
+          <input type="checkbox" checked={remember} onChange={(e) => onRemember(e.target.checked)} />
+          <span>Keep me signed in on this device</span>
+        </label>
+      </div>
+    </>
   );
 }

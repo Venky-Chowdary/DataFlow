@@ -23,6 +23,9 @@ def test_fakesnow_catalog_error_detection():
 
 
 def test_get_connection_recovers_corrupt_fakesnow_catalog(tmp_path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("fakesnow")
     from connectors import snowflake_conn
 
     monkeypatch.setenv("FAKESNOW_DB_PATH", str(tmp_path))

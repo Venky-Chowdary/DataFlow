@@ -9,15 +9,20 @@ import logging
 # and explicit PRODUCTION_SKU routes — they are not tabular matrix sources.
 LIVE_TABULAR_SOURCE_FORMATS = [
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+    "yaml", "fixed_width",
+    # An uploaded SQLite file is staged and read through database/sqlite
+    # (src/transfer/endpoint_kind.py) — round 11.
+    "sqlite",
 ]
 LIVE_DOCUMENT_SOURCE_FORMATS = ["pdf", "docx", "html"]
 LIVE_SOURCE_FORMATS = LIVE_TABULAR_SOURCE_FORMATS + LIVE_DOCUMENT_SOURCE_FORMATS
-LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml"]
+LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml", "yaml", "fixed_width"]
 
 # Live drivers are discovered at import time; object stores and warehouses count
 # as database destinations, while the listed file formats are file targets.
 _FILE_FORMATS = {
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+    "yaml", "fixed_width",
     "pdf", "docx", "html",
 }
 
@@ -126,6 +131,21 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
         except Exception:
             return False
 
+    # ``file`` + an export format is ``file_export``; a SQLite export is a
+    # SQLite database file (round 11: "database → file/* not yet live").
+    try:
+        from .endpoint_kind import canonical_destination
+    except ImportError:  # loaded standalone (test_registry.py)
+        canonical_destination = None  # type: ignore[assignment]
+    if canonical_destination is not None:
+        dest_kind, dest_format = canonical_destination(dest_kind, dest_format)
+    if (dest_kind or "").strip().lower() == "file":
+        return False, (
+            f"Destination kind 'file' with format '{dest_format}' is not a destination: "
+            "use kind 'file_export' with one of " + ", ".join(sorted(LIVE_DEST_FILE_FORMATS))
+            + ", format 'sqlite' for a SQLite file, or kind 'database'."
+        )
+
     src_fmt = _resolve(source_format)
     dst_fmt = _resolve(dest_format)
 
@@ -147,10 +167,12 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 
 
 # Production SKU: the source × destination combinations we explicitly commit to
-# supporting and verifying in CI. Snowflake routes use fakesnow and BigQuery
+# supporting and verifying in CI. Snowflake routes use fakesnow in CI (and are
+# live-certified on a real account: docs/SNOWFLAKE_LIVE_CERTIFICATION.md); BigQuery
 # routes use the goccy/bigquery-emulator, so the warehouse matrix is always-on
 # in CI without cloud credentials. Salesforce/HubSpot reverse-ETL destinations
-# remain credential-gated and are skipped when no real tenant token is present.
+# execute against a local HTTP stub on this desktop (not a customer org);
+# closed ports still skip.
 PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     # File sources
     ("file", "csv", "database", "sqlite"),
@@ -167,6 +189,14 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "json", "database", "bigquery"),
     ("file", "json", "file_export", "csv"),
     ("file", "json", "file_export", "json"),
+    ("file", "yaml", "database", "sqlite"),
+    ("file", "yaml", "database", "postgresql"),
+    ("file", "yaml", "file_export", "yaml"),
+    ("file", "csv", "file_export", "yaml"),
+    ("file", "csv", "file_export", "fixed_width"),
+    ("file", "fixed_width", "database", "sqlite"),
+    ("file", "fixed_width", "database", "postgresql"),
+    ("file", "fixed_width", "file_export", "fixed_width"),
     # Database sources
     ("database", "sqlite", "database", "sqlite"),
     ("database", "sqlite", "database", "postgresql"),
@@ -174,6 +204,8 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "sqlite", "database", "mysql"),
     ("database", "sqlite", "file_export", "csv"),
     ("database", "sqlite", "file_export", "json"),
+    ("database", "sqlite", "file_export", "yaml"),
+    ("database", "sqlite", "file_export", "fixed_width"),
     ("database", "postgresql", "database", "sqlite"),
     ("database", "postgresql", "database", "postgresql"),
     ("database", "postgresql", "database", "mongodb"),
@@ -223,11 +255,16 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "postgresql", "database", "redis"),
     ("database", "postgresql", "database", "gcs"),
     ("file", "json", "database", "gcs"),
-    # Unlocked enterprise / object / vector destinations
+    # SFTP: earned back after gaining introspect, a G2 privilege probe, a
+    # population uniqueness scan and a Gate-8 read-back, each proven against a
+    # real SFTP server in ``test_sftp_live_transfer.py``.
+    ("file", "csv", "database", "sftp"),
+    ("file", "excel", "database", "sftp"),
     ("database", "postgresql", "database", "sftp"),
+    ("database", "sftp", "database", "postgresql"),
+    # Unlocked enterprise / object / vector destinations.
     ("database", "mysql", "database", "adls"),
     ("file", "csv", "database", "adls"),
-    ("file", "csv", "database", "sftp"),
     ("database", "sqlserver", "database", "postgresql"),
     ("database", "oracle", "database", "postgresql"),
     ("database", "postgresql", "database", "pgvector"),
@@ -237,6 +274,9 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "csv", "database", "milvus"),
     ("database", "rest_api", "database", "postgresql"),
     ("database", "rest_api", "database", "mongodb"),
+    # Named SaaS SKU: Stripe incremental ``created`` cursor → sqlite dest COUNT.
+    # Not more catalog tiles. Shopify stays Planned.
+    ("database", "stripe", "database", "sqlite"),
 ]
 
 
@@ -248,11 +288,24 @@ def validate_sku(source_kind: str, source_format: str, dest_kind: str, dest_form
 
 
 def _live_catalog_ids() -> list[str]:
-    """Return catalog IDs that are actually live so the UI can select them."""
-    try:
-        from services.catalog_service import search_catalog
+    """Catalog IDs usable on **either** side of a transfer, for the UI pickers.
 
-        return [c["id"] for c in search_catalog(status="live", limit=1000).get("connectors", [])]
+    This used to ask for ``status="live"``, which is the catalog's duplex filter
+    — read *and* write. That is the wrong question for a picker: it dropped every
+    source-only connector, so Couchbase, Neo4j and InfluxDB appeared in neither
+    ``source_databases`` nor ``destination_databases`` and could not be chosen in
+    Transfer Studio at all, despite being read-capable sources. The caller
+    separates the two sides itself with ``source_ready`` / ``dest_ready``, so
+    what it needs here is anything ready for one of them.
+    """
+    try:
+        from services.catalog_service import _enriched_connectors
+
+        return [
+            c["id"]
+            for c in _enriched_connectors()
+            if c.get("source_ready") or c.get("dest_ready")
+        ]
     except Exception:
         return _live_db_drivers()
 
@@ -260,9 +313,11 @@ def _live_catalog_ids() -> list[str]:
 def get_capabilities() -> dict:
     from .connector_capabilities import (
         _source_only_ready,
+        dest_live_driver_types,
         dest_ready,
         manifest_summary,
         resolve_driver_type,
+        source_live_driver_types,
         source_ready,
         transfer_live_driver_types,
     )
@@ -270,42 +325,54 @@ def get_capabilities() -> dict:
         get_capabilities as _caps,
     )
 
-    combos = []
+    def _category(fmt: str) -> str:
+        """Catalog class of a route endpoint — 'database' is the engine kind,
+        not the driver's class: ADLS is cloud_storage and HubSpot is saas, and
+        capabilities must not read both as databases (QA D08)."""
+        try:
+            from services.catalog_service import get_connector_by_id
+
+            entry = get_connector_by_id(str(fmt or "").lower()) or {}
+            return str(entry.get("category") or "") or "database"
+        except Exception:
+            return "database"
+
+    def _combo(sk: str, sf: str, dk: str, df: str, op: str) -> dict:
+        return {
+            "source_kind": sk,
+            "source_format": sf,
+            "source_category": _category(sf),
+            "dest_kind": dk,
+            "dest_format": df,
+            "dest_category": _category(df),
+            "operation": op,
+            "status": "live",
+        }
+
+    combos: list[dict] = []
+    seen_combos: set[tuple[str, str, str, str]] = set()
+
+    def _add(sk: str, sf: str, dk: str, df: str, op: str) -> None:
+        key = (sk, sf.lower(), dk, df.lower())
+        if key in seen_combos:
+            return
+        seen_combos.add(key)
+        combos.append(_combo(sk, sf, dk, df, op))
+
     for sk, sf, dk, df in sorted(LIVE_MATRIX):
         op = "upload" if sk == "file" and dk == "database" else (
             "migration" if sk == "database" and dk == "database" else (
                 "convert" if sk == "file" and dk == "file_export" else "dump"
             )
         )
-        combos.append({
-            "source_kind": sk,
-            "source_format": sf,
-            "dest_kind": dk,
-            "dest_format": df,
-            "operation": op,
-            "status": "live",
-        })
+        _add(sk, sf, dk, df, op)
     # Add source-only SaaS routes (source → database / file_export) so the UI can
     # advertise and validate them without bloating the seedable route matrix.
     for src in _source_only_driver_types():
         for dst in LIVE_DEST_DATABASES:
-            combos.append({
-                "source_kind": "database",
-                "source_format": src,
-                "dest_kind": "database",
-                "dest_format": dst,
-                "operation": "migration",
-                "status": "live",
-            })
+            _add("database", src, "database", dst, "migration")
         for dst_fmt in LIVE_DEST_FILE_FORMATS:
-            combos.append({
-                "source_kind": "database",
-                "source_format": src,
-                "dest_kind": "file_export",
-                "dest_format": dst_fmt,
-                "operation": "dump",
-                "status": "live",
-            })
+            _add("database", src, "file_export", dst_fmt, "dump")
 
     summary = manifest_summary()
     live_catalog = _live_catalog_ids()
@@ -342,6 +409,22 @@ def get_capabilities() -> dict:
             "error": str(exc),
         }
 
+    try:
+        from services.sku_honesty import sku_honesty_summary
+
+        sku_counts = sku_honesty_summary()
+        sku_sold = sku_counts["production_sku_sold"]
+        sku_missing = sku_counts["production_sku_driver_missing"]
+        sku_refused = sku_counts["production_sku_refused"]
+        sku_note = sku_counts["note"]
+        sku_handover = sku_counts.get("customer_handover_sold") or 0
+    except Exception:
+        sku_sold = 0
+        sku_missing = 0
+        sku_refused = 0
+        sku_note = "SKU honesty summary unavailable"
+        sku_handover = 0
+
     return {
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
@@ -350,22 +433,48 @@ def get_capabilities() -> dict:
         "source_databases": source_dbs,
         "transfer_live_drivers": drivers,
         "transfer_live_count": summary["transfer_live_count"],
+        # Reconcile with search_connectors' source_live/dest_live — different
+        # bases (driver types vs catalog ids) read as a count bug (QA D08).
+        "source_live_count": len(source_live_driver_types()),
+        "dest_live_count": len(dest_live_driver_types()),
         "unique_transfer_drivers": len(drivers),
         "production_sku_routes": len(PRODUCTION_SKU),
+        "production_sku_sold": sku_sold,
+        "production_sku_driver_missing": sku_missing,
+        "production_sku_refused": sku_refused,
+        "customer_handover_sold": sku_handover,
         "connect_only_count": summary["connect_only_count"],
         "live_route_combinations": summary["live_route_combinations"],
-        "operations": ["upload", "migration", "convert", "dump", "transfer"],
+        # Derived, never static — a listed operation with zero combos is a
+        # phantom capability (QA D08: 'transfer' had 0 combinations).
+        "operations": sorted({c["operation"] for c in combos}),
         "auto_ddl": True,
         "ocr": ocr_status,
         "embedding_cache": embedding_cache_status,
         "description": (
             f"{len(drivers)} unique transfer-ready drivers "
             f"({summary['transfer_live_count']} catalog aliases). "
-            f"{len(PRODUCTION_SKU)} PRODUCTION_SKU routes committed in CI; "
+            f"{sku_sold} of {len(PRODUCTION_SKU)} PRODUCTION_SKU routes sold on this host "
+            f"(validate_transfer + driver present; {sku_missing} driver-missing, "
+            f"{sku_refused} refused; {sku_handover} customer-handover sqlite/PostgreSQL/MySQL/file). "
             f"{summary['live_route_combinations']} capability combinations. "
-            "Catalog roadmap entries require driver implementation before production use."
+            "Catalog tiles are not transfer-live."
+        ),
+        "production_sku_note": sku_note,
+        "cdc_capable_sources": sorted(_cdc_capable_sources()),
+        "cdc_note": (
+            "CDC preflight blocks every source not in cdc_capable_sources. "
+            "timescaledb is not CDC-capable. Delivery stays at-least-once upsert."
         ),
     }
+
+
+def _cdc_capable_sources() -> list[str]:
+    try:
+        from services.preflight_cursor_gate import CDC_CAPABLE_SOURCES
+    except Exception:  # noqa: BLE001 — capabilities still render without the gate module
+        return []
+    return list(CDC_CAPABLE_SOURCES)
 
 
 def _source_only_driver_types() -> list[str]:

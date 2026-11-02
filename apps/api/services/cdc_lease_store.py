@@ -3,6 +3,10 @@
 Multi-node workers must share one lease authority. Redis is the distributed
 backend; file remains single-host. When Redis is explicitly selected, acquire
 is **fail-closed** on connectivity errors (never silent split-brain to file).
+
+Generation counters survive releases. A live or stale legacy lease without
+counters seeds them from its generation; a lease released before counters
+existed has no recoverable generation and starts again at 1.
 """
 
 from __future__ import annotations
@@ -21,11 +25,35 @@ logger = logging.getLogger(__name__)
 
 LEASE_KEY_PREFIX = "df:cdc:lease:"
 RESOURCE_KEY_PREFIX = "df:cdc:res:"
+GENERATION_KEY_PREFIX = "df:cdc:gen:"
+
+
+def _warn_generation_seed(
+    *,
+    cursor_key: str,
+    resource: str,
+    store_generation: int,
+    min_generation: int,
+    backend: str,
+) -> None:
+    if int(min_generation) <= int(store_generation):
+        return
+    logger.warning(
+        "CDC lease generation seeded cursor_key=%s resource=%s "
+        "store_generation=%s dest_fence=%s backend=%s",
+        cursor_key,
+        resource,
+        int(store_generation),
+        int(min_generation),
+        backend,
+    )
 
 # Atomic acquire: resource cross-index + fencing generation + stale steal.
 _REDIS_ACQUIRE_SCRIPT = """
 local lease_key = KEYS[1]
 local res_key = KEYS[2]
+local cursor_generation_key = KEYS[3]
+local resource_generation_key = KEYS[4]
 local now = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
 local holder = ARGV[3]
@@ -34,6 +62,7 @@ local resource = ARGV[5]
 local meta_json = ARGV[6]
 local stale_floor = tonumber(ARGV[7])
 local gc_ttl = tonumber(ARGV[8])
+local min_generation = tonumber(ARGV[9]) or 0
 
 local function is_stale(lease)
   if not lease then return true end
@@ -44,6 +73,8 @@ local function is_stale(lease)
 end
 
 local owner_ck = redis.call("GET", res_key)
+local cursor_generation = tonumber(redis.call("GET", cursor_generation_key) or 0)
+local resource_generation = tonumber(redis.call("GET", resource_generation_key) or 0)
 local prior_generation = 0
 -- lease_key = <prefix>df:cdc:lease:<cursor_key>; derive the prefix so we can look up
 -- other cursor keys under the same resource without hard-coding the key namespace.
@@ -57,6 +88,11 @@ if owner_ck and owner_ck ~= cursor_key then
       return {"err", "conflict", "holder", other["holder_id"], "cursor", other["cursor_key"] or owner_ck, "resource", other["resource"] or resource}
     end
     prior_generation = tonumber(other["generation"] or 0)
+    local other_generation_key = string.sub(cursor_generation_key, 1, -(#cursor_key + 1)) .. owner_ck
+    local other_generation = tonumber(redis.call("GET", other_generation_key) or 0)
+    if prior_generation > other_generation then
+      redis.call("SET", other_generation_key, prior_generation)
+    end
     redis.call("DEL", other_key)
   end
   redis.call("DEL", res_key)
@@ -65,21 +101,26 @@ end
 local existing_raw = redis.call("GET", lease_key)
 local generation = 1
 local acquired_at = now
+local existing_generation = 0
 if existing_raw then
   local existing = cjson.decode(existing_raw)
   if existing["holder_id"] ~= holder and not is_stale(existing) then
     return {"err", "conflict", "holder", existing["holder_id"], "cursor", existing["cursor_key"] or cursor_key, "resource", existing["resource"] or resource}
   end
   if existing["holder_id"] == holder then
-    generation = tonumber(existing["generation"] or 1)
+    existing_generation = tonumber(existing["generation"] or 1)
+    generation = existing_generation
     acquired_at = tonumber(existing["acquired_at"] or now)
   else
-    local eg = tonumber(existing["generation"] or 0)
-    if prior_generation > eg then eg = prior_generation end
-    generation = eg + 1
+    existing_generation = tonumber(existing["generation"] or 0)
+    generation = math.max(cursor_generation, resource_generation, prior_generation, existing_generation, min_generation) + 1
   end
-elseif prior_generation > 0 then
-  generation = prior_generation + 1
+else
+  generation = math.max(cursor_generation, resource_generation, prior_generation, min_generation) + 1
+end
+local pre_seed_floor = math.max(cursor_generation, resource_generation, prior_generation, existing_generation)
+if existing_raw and existing_generation <= min_generation then
+  generation = math.max(pre_seed_floor, min_generation) + 1
 end
 
 local lease = {
@@ -93,9 +134,11 @@ local lease = {
   meta = cjson.decode(meta_json)
 }
 local payload = cjson.encode(lease)
+redis.call("SET", cursor_generation_key, math.max(cursor_generation, generation))
+redis.call("SET", resource_generation_key, math.max(resource_generation, generation))
 redis.call("SET", lease_key, payload, "EX", gc_ttl)
 redis.call("SET", res_key, cursor_key, "EX", gc_ttl)
-return {"status", "ok", "payload", payload}
+return {"status", "ok", "payload", payload, "floor", tostring(pre_seed_floor)}
 """
 
 _REDIS_RENEW_SCRIPT = """
@@ -129,6 +172,8 @@ return {"status", "ok", "payload", payload}
 _REDIS_RELEASE_SCRIPT = """
 local lease_key = KEYS[1]
 local res_key = KEYS[2]
+local cursor_generation_key = KEYS[3]
+local resource_generation_key = KEYS[4]
 local holder = ARGV[1]
 local generation = tonumber(ARGV[2])
 
@@ -143,6 +188,15 @@ end
 if tonumber(lease["generation"] or 0) ~= generation then
   return {"err", "fence"}
 end
+local lease_generation = tonumber(lease["generation"] or 0)
+local cursor_generation = tonumber(redis.call("GET", cursor_generation_key) or 0)
+local resource_generation = tonumber(redis.call("GET", resource_generation_key) or 0)
+if lease_generation > cursor_generation then
+  redis.call("SET", cursor_generation_key, lease_generation)
+end
+if lease_generation > resource_generation then
+  redis.call("SET", resource_generation_key, lease_generation)
+end
 redis.call("DEL", lease_key)
 local owner = redis.call("GET", res_key)
 if owner == lease["cursor_key"] then
@@ -150,6 +204,13 @@ if owner == lease["cursor_key"] then
 end
 return {"status", "ok"}
 """
+
+
+def _sorted_leases(raws: Any) -> list[dict[str, Any]]:
+    """Copy lease dicts, most recently heartbeated first."""
+    out = [dict(r) for r in raws or [] if isinstance(r, dict)]
+    out.sort(key=lambda r: float(r.get("heartbeat_at") or 0.0), reverse=True)
+    return out
 
 
 class LeaseStoreError(RuntimeError):
@@ -169,6 +230,7 @@ class LeaseStore(ABC):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         """Return lease dict or raise CdcLeaseConflict / LeaseStoreError."""
 
@@ -197,6 +259,15 @@ class LeaseStore(ABC):
     def get(self, cursor_key: str) -> dict[str, Any] | None:
         ...
 
+    @abstractmethod
+    def list_leases(self) -> list[dict[str, Any]]:
+        """Every lease currently held, newest heartbeat first.
+
+        A conflict names the *resource* it refused on (``mysql_server_id:90269``),
+        but breaking a lease needs its ``cursor_key``. Without enumeration an
+        operator whose worker died cannot find the key that is blocking them.
+        """
+
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         """Test helper — not for production paths."""
         raise NotImplementedError
@@ -211,11 +282,15 @@ class MemoryLeaseStore(LeaseStore):
         self._lock = threading.RLock()
         self._leases: dict[str, dict[str, Any]] = {}
         self._by_resource: dict[str, str] = {}
+        self._last_generation_by_cursor: dict[str, int] = {}
+        self._last_generation_by_resource: dict[str, int] = {}
 
     def clear(self) -> None:
         with self._lock:
             self._leases.clear()
             self._by_resource.clear()
+            self._last_generation_by_cursor.clear()
+            self._last_generation_by_resource.clear()
 
     def acquire(
         self,
@@ -226,6 +301,7 @@ class MemoryLeaseStore(LeaseStore):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         from services.cdc_lease import CdcLease, CdcLeaseConflict
 
@@ -246,11 +322,24 @@ class MemoryLeaseStore(LeaseStore):
                             cursor_key=other_lease.cursor_key,
                         )
                     prior_generation = max(prior_generation, int(other_lease.generation or 0))
+                    self._last_generation_by_cursor[owner_ck] = max(
+                        self._last_generation_by_cursor.get(owner_ck, 0),
+                        int(other_lease.generation or 0),
+                    )
+                    self._last_generation_by_resource[resource] = max(
+                        self._last_generation_by_resource.get(resource, 0),
+                        int(other_lease.generation or 0),
+                    )
                     self._leases.pop(owner_ck, None)
                 self._by_resource.pop(resource, None)
 
             existing = self._leases.get(cursor_key)
-            generation = 1
+            generation_floor = max(
+                self._last_generation_by_cursor.get(cursor_key, 0),
+                self._last_generation_by_resource.get(resource, 0),
+                prior_generation,
+                int(existing.get("generation") or 0) if existing else 0,
+            )
             acquired_at = ts
             if existing:
                 ex = CdcLease.from_dict(existing)
@@ -262,13 +351,20 @@ class MemoryLeaseStore(LeaseStore):
                         resource=ex.resource or resource,
                         cursor_key=cursor_key,
                     )
-                if ex.holder_id == holder_id:
+                if ex.holder_id == holder_id and int(ex.generation or 1) > int(min_generation):
                     generation = int(ex.generation or 1)
                     acquired_at = float(ex.acquired_at or ts)
                 else:
-                    generation = max(prior_generation, int(ex.generation or 0)) + 1
-            elif prior_generation:
-                generation = prior_generation + 1
+                    generation = max(generation_floor, int(min_generation)) + 1
+            else:
+                generation = max(generation_floor, int(min_generation)) + 1
+            _warn_generation_seed(
+                cursor_key=cursor_key,
+                resource=resource,
+                store_generation=generation_floor,
+                min_generation=int(min_generation),
+                backend=self.name,
+            )
 
             lease = {
                 "cursor_key": cursor_key,
@@ -282,6 +378,12 @@ class MemoryLeaseStore(LeaseStore):
             }
             self._leases[cursor_key] = lease
             self._by_resource[resource] = cursor_key
+            self._last_generation_by_cursor[cursor_key] = max(
+                self._last_generation_by_cursor.get(cursor_key, 0), generation
+            )
+            self._last_generation_by_resource[resource] = max(
+                self._last_generation_by_resource.get(resource, 0), generation
+            )
             # Opportunistic GC
             for k, raw in list(self._leases.items()):
                 if k == cursor_key:
@@ -289,6 +391,13 @@ class MemoryLeaseStore(LeaseStore):
                 try:
                     if CdcLease.from_dict(raw).is_stale(now=ts):
                         res = str(raw.get("resource") or "")
+                        generation = int(raw.get("generation") or 0)
+                        self._last_generation_by_cursor[k] = max(
+                            self._last_generation_by_cursor.get(k, 0), generation
+                        )
+                        self._last_generation_by_resource[res] = max(
+                            self._last_generation_by_resource.get(res, 0), generation
+                        )
                         self._leases.pop(k, None)
                         if self._by_resource.get(res) == k:
                             self._by_resource.pop(res, None)
@@ -334,6 +443,13 @@ class MemoryLeaseStore(LeaseStore):
             if int(raw.get("generation") or 0) != int(generation):
                 return False
             res = str(raw.get("resource") or "")
+            generation = int(raw.get("generation") or 0)
+            self._last_generation_by_cursor[cursor_key] = max(
+                self._last_generation_by_cursor.get(cursor_key, 0), generation
+            )
+            self._last_generation_by_resource[res] = max(
+                self._last_generation_by_resource.get(res, 0), generation
+            )
             self._leases.pop(cursor_key, None)
             if self._by_resource.get(res) == cursor_key:
                 self._by_resource.pop(res, None)
@@ -343,6 +459,10 @@ class MemoryLeaseStore(LeaseStore):
         with self._lock:
             raw = self._leases.get(cursor_key)
             return dict(raw) if raw else None
+
+    def list_leases(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return _sorted_leases(self._leases.values())
 
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         with self._lock:
@@ -358,13 +478,17 @@ class FileLeaseStore(LeaseStore):
 
     def __init__(self, path: str | None = None, data_dir: str | None = None) -> None:
         default_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        if path is None and data_dir is None:
+            from services.platform_config import data_dir as platform_data_dir
+
+            default_dir = str(platform_data_dir())
         self.data_dir = data_dir or default_dir
         self.path = path or os.path.join(self.data_dir, "cdc_leases.json")
         self._thread = threading.RLock()
 
     def _load(self) -> dict[str, Any]:
         if not os.path.isfile(self.path):
-            return {"leases": {}}
+            return {"leases": {}, "generations": {"cursor": {}, "resource": {}}}
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -373,9 +497,24 @@ class FileLeaseStore(LeaseStore):
             leases = data.get("leases")
             if not isinstance(leases, dict):
                 leases = {}
-            return {"leases": leases}
+            generations = data.get("generations")
+            if not isinstance(generations, dict):
+                generations = {}
+            cursor_generations = generations.get("cursor")
+            resource_generations = generations.get("resource")
+            return {
+                "leases": leases,
+                "generations": {
+                    "cursor": cursor_generations
+                    if isinstance(cursor_generations, dict)
+                    else {},
+                    "resource": resource_generations
+                    if isinstance(resource_generations, dict)
+                    else {},
+                },
+            }
         except Exception:
-            return {"leases": {}}
+            return {"leases": {}, "generations": {"cursor": {}, "resource": {}}}
 
     def _save(self, data: dict[str, Any]) -> None:
         from services.atomic_file import write_json_atomic
@@ -426,6 +565,7 @@ class FileLeaseStore(LeaseStore):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         from services.cdc_lease import CdcLease, CdcLeaseConflict
 
@@ -433,6 +573,9 @@ class FileLeaseStore(LeaseStore):
         with self._lock_cm():
             data = self._load()
             leases: dict[str, Any] = dict(data.get("leases") or {})
+            generations = data.get("generations") or {}
+            cursor_generations = dict(generations.get("cursor") or {})
+            resource_generations = dict(generations.get("resource") or {})
             prior_generation = 0
 
             for other_key, raw in list(leases.items()):
@@ -443,6 +586,14 @@ class FileLeaseStore(LeaseStore):
                     continue
                 if other.is_stale(now=ts):
                     prior_generation = max(prior_generation, int(other.generation or 0))
+                    cursor_generations[other_key] = max(
+                        int(cursor_generations.get(other_key) or 0),
+                        int(other.generation or 0),
+                    )
+                    resource_generations[resource] = max(
+                        int(resource_generations.get(resource) or 0),
+                        int(other.generation or 0),
+                    )
                     leases.pop(other_key, None)
                     continue
                 raise CdcLeaseConflict(
@@ -454,7 +605,14 @@ class FileLeaseStore(LeaseStore):
                 )
 
             existing_raw = leases.get(cursor_key)
-            generation = 1
+            generation_floor = max(
+                int(cursor_generations.get(cursor_key) or 0),
+                int(resource_generations.get(resource) or 0),
+                prior_generation,
+                int(existing_raw.get("generation") or 0)
+                if isinstance(existing_raw, dict)
+                else 0,
+            )
             acquired_at = ts
             if existing_raw:
                 existing = CdcLease.from_dict(
@@ -468,13 +626,20 @@ class FileLeaseStore(LeaseStore):
                         resource=existing.resource or resource,
                         cursor_key=cursor_key,
                     )
-                if existing.holder_id == holder_id:
+                if existing.holder_id == holder_id and int(existing.generation or 1) > int(min_generation):
                     generation = int(existing.generation or 1)
                     acquired_at = float(existing.acquired_at or ts)
                 else:
-                    generation = max(prior_generation, int(existing.generation or 0)) + 1
-            elif prior_generation:
-                generation = prior_generation + 1
+                    generation = max(generation_floor, int(min_generation)) + 1
+            else:
+                generation = max(generation_floor, int(min_generation)) + 1
+            _warn_generation_seed(
+                cursor_key=cursor_key,
+                resource=resource,
+                store_generation=generation_floor,
+                min_generation=int(min_generation),
+                backend=self.name,
+            )
 
             lease = {
                 "cursor_key": cursor_key,
@@ -487,15 +652,38 @@ class FileLeaseStore(LeaseStore):
                 "meta": dict(meta or {}),
             }
             leases[cursor_key] = lease
+            cursor_generations[cursor_key] = max(
+                int(cursor_generations.get(cursor_key) or 0), generation
+            )
+            resource_generations[resource] = max(
+                int(resource_generations.get(resource) or 0), generation
+            )
             for k, raw in list(leases.items()):
                 if k == cursor_key:
                     continue
                 try:
                     if CdcLease.from_dict(raw).is_stale(now=ts):
+                        stale = CdcLease.from_dict(raw)
+                        cursor_generations[k] = max(
+                            int(cursor_generations.get(k) or 0),
+                            int(stale.generation or 0),
+                        )
+                        resource_generations[stale.resource] = max(
+                            int(resource_generations.get(stale.resource) or 0),
+                            int(stale.generation or 0),
+                        )
                         leases.pop(k, None)
                 except Exception:
                     leases.pop(k, None)
-            self._save({"leases": leases})
+            self._save(
+                {
+                    "leases": leases,
+                    "generations": {
+                        "cursor": cursor_generations,
+                        "resource": resource_generations,
+                    },
+                }
+            )
             return dict(lease)
 
     def renew(
@@ -520,7 +708,8 @@ class FileLeaseStore(LeaseStore):
             raw = dict(raw)
             raw["heartbeat_at"] = ts
             leases[cursor_key] = raw
-            self._save({"leases": leases})
+            data["leases"] = leases
+            self._save(data)
             return dict(raw)
 
     def release(
@@ -541,13 +730,36 @@ class FileLeaseStore(LeaseStore):
             if int(raw.get("generation") or 0) != int(generation):
                 return False
             leases.pop(cursor_key, None)
-            self._save({"leases": leases})
+            generations = data.get("generations") or {}
+            cursor_generations = dict(generations.get("cursor") or {})
+            resource_generations = dict(generations.get("resource") or {})
+            resource = str(raw.get("resource") or "")
+            lease_generation = int(raw.get("generation") or 0)
+            cursor_generations[cursor_key] = max(
+                int(cursor_generations.get(cursor_key) or 0), lease_generation
+            )
+            resource_generations[resource] = max(
+                int(resource_generations.get(resource) or 0), lease_generation
+            )
+            self._save(
+                {
+                    "leases": leases,
+                    "generations": {
+                        "cursor": cursor_generations,
+                        "resource": resource_generations,
+                    },
+                }
+            )
             return True
 
     def get(self, cursor_key: str) -> dict[str, Any] | None:
         with self._lock_cm():
             raw = (self._load().get("leases") or {}).get(cursor_key)
             return dict(raw) if isinstance(raw, dict) else None
+
+    def list_leases(self) -> list[dict[str, Any]]:
+        with self._lock_cm():
+            return _sorted_leases((self._load().get("leases") or {}).values())
 
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         with self._lock_cm():
@@ -559,7 +771,8 @@ class FileLeaseStore(LeaseStore):
             raw = dict(raw)
             raw["heartbeat_at"] = float(heartbeat_at)
             leases[cursor_key] = raw
-            self._save({"leases": leases})
+            data["leases"] = leases
+            self._save(data)
 
 
 class RedisLeaseStore(LeaseStore):
@@ -605,6 +818,12 @@ class RedisLeaseStore(LeaseStore):
     def _res_key(self, resource: str) -> str:
         return f"{self._prefix}{RESOURCE_KEY_PREFIX}{resource}"
 
+    def _cursor_generation_key(self, cursor_key: str) -> str:
+        return f"{self._prefix}{GENERATION_KEY_PREFIX}ck:{cursor_key}"
+
+    def _resource_generation_key(self, resource: str) -> str:
+        return f"{self._prefix}{GENERATION_KEY_PREFIX}res:{resource}"
+
     def _eval(self, script: str, keys: list[str], args: list[Any]) -> Any:
         client = self._connect()
         try:
@@ -622,6 +841,7 @@ class RedisLeaseStore(LeaseStore):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         from services.cdc_lease import CdcLeaseConflict
 
@@ -629,7 +849,12 @@ class RedisLeaseStore(LeaseStore):
         gc_ttl = max(30, int(float(ttl_sec) * 3))
         result = self._eval(
             _REDIS_ACQUIRE_SCRIPT,
-            [self._lease_key(cursor_key), self._res_key(resource)],
+            [
+                self._lease_key(cursor_key),
+                self._res_key(resource),
+                self._cursor_generation_key(cursor_key),
+                self._resource_generation_key(resource),
+            ],
             [
                 ts,
                 float(ttl_sec),
@@ -639,6 +864,7 @@ class RedisLeaseStore(LeaseStore):
                 json.dumps(meta or {}),
                 1.0,
                 gc_ttl,
+                int(min_generation),
             ],
         )
         if not isinstance(result, (list, tuple)) or len(result) < 1:
@@ -659,6 +885,13 @@ class RedisLeaseStore(LeaseStore):
         # field as ResponseError (so err="ok" previously raised "ok").
         if status != "ok" and err != "ok":
             raise LeaseStoreError(f"Redis acquire failed: {parsed}")
+        _warn_generation_seed(
+            cursor_key=cursor_key,
+            resource=resource,
+            store_generation=int(parsed.get("floor") or 0),
+            min_generation=int(min_generation),
+            backend=self.name,
+        )
         payload = parsed.get("payload")
         if isinstance(payload, str):
             return json.loads(payload)
@@ -707,7 +940,12 @@ class RedisLeaseStore(LeaseStore):
         res_key = self._res_key(res) if res else self._res_key("__none__")
         result = self._eval(
             _REDIS_RELEASE_SCRIPT,
-            [self._lease_key(cursor_key), res_key],
+            [
+                self._lease_key(cursor_key),
+                res_key,
+                self._cursor_generation_key(cursor_key),
+                self._resource_generation_key(res),
+            ],
             [holder_id, int(generation)],
         )
         parsed = _lua_table_to_dict(result)
@@ -729,6 +967,29 @@ class RedisLeaseStore(LeaseStore):
             return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    def list_leases(self) -> list[dict[str, Any]]:
+        client = self._connect()
+        pattern = f"{self._prefix}{LEASE_KEY_PREFIX}*"
+        out: list[dict[str, Any]] = []
+        try:
+            # SCAN, not KEYS: enumeration must not block a shared Redis.
+            for key in client.scan_iter(match=pattern, count=200):
+                raw = client.get(key)
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    out.append(data)
+        except LeaseStoreError:
+            raise
+        except Exception as exc:
+            self._client = None
+            raise LeaseStoreError(f"CDC Redis lease scan failed: {exc}") from exc
+        return _sorted_leases(out)
 
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         client = self._connect()
@@ -765,6 +1026,7 @@ def _lua_table_to_dict(result: Any) -> dict[str, Any]:
 
 _STORE: LeaseStore | None = None
 _STORE_LOCK = threading.RLock()
+_SINGLE_HOST_WARNING_EMITTED = False
 
 
 def redis_url_from_env() -> str:
@@ -793,6 +1055,16 @@ def resolve_backend_name() -> str:
 
 def build_store(backend: str | None = None) -> LeaseStore:
     name = (backend or resolve_backend_name()).strip().lower()
+    if name in {"file", "memory"} and (
+        (getenv_brand("MULTI_REPLICA", "") or "").strip().lower()
+        in {"1", "true", "yes"}
+    ):
+        raise LeaseStoreError(
+            f"CDC lease backend={name} cannot coordinate multiple instances "
+            "(DATAFLOW_MULTI_REPLICA is set); set "
+            "DATAFLOW_CDC_LEASE_REDIS_URL (or DATAFLOW_REDIS_URL) or "
+            "DATAFLOW_CDC_LEASE_BACKEND=redis"
+        )
     if name == "memory":
         return MemoryLeaseStore()
     if name == "redis":
@@ -812,11 +1084,18 @@ def build_store(backend: str | None = None) -> LeaseStore:
 
 
 def get_store() -> LeaseStore:
-    global _STORE
+    global _STORE, _SINGLE_HOST_WARNING_EMITTED
     with _STORE_LOCK:
         if _STORE is None:
             _STORE = build_store()
             logger.info("CDC lease backend=%s", _STORE.name)
+            if _STORE.name in {"file", "memory"} and not _SINGLE_HOST_WARNING_EMITTED:
+                logger.warning(
+                    "CDC lease backend=%s is single-host; "
+                    "set DATAFLOW_CDC_LEASE_REDIS_URL for multi-instance",
+                    _STORE.name,
+                )
+                _SINGLE_HOST_WARNING_EMITTED = True
         return _STORE
 
 

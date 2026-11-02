@@ -91,12 +91,14 @@ def test_shopify_introspect_stamps_core_note_and_email():
     assert by_name["email"] == "VARCHAR(255)"
 
 
-def test_zendesk_introspect_seeds_subject_width_when_describe_empty():
+def test_zendesk_introspect_fail_closed_when_describe_empty():
     with patch("connectors.zendesk.describe_fields", return_value=[]):
         out = _introspect_zendesk(table="tickets", host="x.zendesk.com", api_key="t")
-    by_name = {c["name"]: c["inferred_type"] for c in out["columns"]}
-    assert by_name["subject"] == "VARCHAR(255)"
-    assert by_name["description"] == "VARCHAR(65535)"
+    assert out.get("ok") is False
+    assert not out.get("columns")
+    assert "refuse" in str(out.get("error") or "").lower() or "no fields" in str(
+        out.get("error") or ""
+    ).lower()
 
 
 def test_thin_saas_stripe_path_stamps_after_sample_read():

@@ -1,0 +1,2203 @@
+/* Studio schema browser and recipe canvas.
+   Colors are tokens from the existing mark. No second palette. */
+
+.df2-studio-next {
+  color: var(--df-text-primary);
+}
+
+.df2-studio-next .df2-btn-primary {
+  /* premium-theme paints .df2-btn-primary from --df-action-bg. The variable
+     keeps the tile on these surfaces; the shared fill rule does the work. */
+  --df-action-bg: var(--df-brand-tile);
+  color: var(--df-on-tile);
+}
+
+.df2-studio-next .df2-btn-primary:hover:not(:disabled) {
+  --df-action-bg: var(--df-brand-text);
+}
+
+.df2-transfer-schema {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  gap: var(--df-space-4);
+  margin-top: var(--df-space-3);
+  align-items: start;
+}
+
+.df2-transfer-schema-nodes,
+.df2-transfer-schema-nodes ul {
+  list-style: none;
+  margin: var(--df-space-2) 0 0;
+  padding: 0;
+}
+
+.df2-transfer-schema-nodes ul {
+  margin-left: var(--df-space-3);
+}
+
+.df2-transfer-schema-db {
+  display: block;
+  font-size: var(--df-fs-sm);
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+  padding: var(--df-space-1) 0;
+}
+
+.df2-transfer-schema-node {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--df-radius-md);
+  color: var(--df-text-secondary);
+  padding: var(--df-space-1) var(--df-space-2);
+  font: inherit;
+}
+
+.df2-transfer-schema-node.is-selected {
+  border-color: var(--df-brand-tile);
+  color: var(--df-brand-text);
+  background: var(--df-surface);
+}
+
+.df2-canvas {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.df2-canvas .df2-btn-sm,
+.df2-canvas .df2-input,
+.df2-canvas .df2-label,
+.df2-canvas .df2-label-hint {
+  font-size: 13px;
+}
+
+.df2-canvas .df2-btn-sm {
+  min-height: 32px;
+}
+
+.df2-canvas:focus-visible {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: 2px;
+}
+
+/* The flagged canvas fills the studio column it is already given.
+   A 100dvh height ignores the wizard chrome above this step, and the
+   classic sticky footer then covers the canvas. The classic step does
+   not carry .df2-studio-next, so these rules never match it. */
+.df2-xform-step:has(.df2-studio-next) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  height: auto;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-xform-step > .df2-xform.df2-studio-next {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+/* The flagged step sits in the shared shell. The classic card, gradient,
+   and 16px frame stay on the unflagged editor. */
+.df2-xform.df2-studio-next {
+  gap: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--df-surface);
+  box-shadow: none;
+}
+
+/* The action bar is pinned in the shared shell rule below. This cancels
+   the classic sticky offset so a narrow viewport cannot drag it back. */
+.df2-xform.df2-studio-next > .df2-xform-actions {
+  position: static;
+  bottom: auto;
+  margin: 0;
+}
+
+@media (max-width: 860px) {
+  .df2-xform.df2-studio-next > .df2-xform-actions {
+    bottom: auto;
+    margin: 0;
+  }
+}
+
+.df2-xform.df2-studio-next .df2-xform-panel:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-canvas-head,
+.df2-canvas-head-actions,
+.df2-canvas-tool-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.df2-canvas-head {
+  justify-content: flex-start;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-height: 48px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-canvas-head-title {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 1 1 auto;
+  max-width: none;
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-canvas-head-title p {
+  margin: 0;
+  min-width: 0;
+  color: var(--df-text-secondary);
+  white-space: normal;
+  overflow: visible;
+}
+
+/* The subtitle yields the row on a laptop so every tool stays in view.
+   It stays available to assistive tech. */
+@media (max-width: 1512px) {
+  .df2-canvas-head-title {
+    flex: 0 0 auto;
+    max-width: none;
+  }
+
+  .df2-canvas-head-title p {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+.df2-canvas-head-actions {
+  position: relative;
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  gap: var(--df-space-2);
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.df2-button-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--df-space-2);
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.df2-canvas-tool-group {
+  gap: 6px;
+  flex: 0 0 auto;
+  padding-left: 8px;
+  margin-left: 8px;
+  border-left: 1px solid var(--df-border);
+}
+
+.df2-canvas-tool-group:first-child {
+  padding-left: 0;
+  margin-left: 0;
+  border-left: 0;
+}
+
+/* Laptop density pins .df2-btn-sm to 28px. The canvas toolbar stays on the
+   32px rung, and this selector is specific enough to win on its own. */
+.df2-app .df2-canvas .df2-btn.df2-btn-sm,
+.df2-app .df2-xform.df2-studio-next .df2-xform-help.df2-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  line-height: 1;
+  box-sizing: border-box;
+}
+
+.df2-app .df2-canvas .df2-canvas-icon-btn.df2-btn {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+.df2-app .df2-canvas .df2-canvas-icon-btn.df2-btn[aria-pressed="true"] {
+  background: var(--df-surface-muted);
+  color: var(--df-brand-text);
+}
+
+.df2-app .df2-canvas .df2-canvas-zoom-btn.df2-btn {
+  min-width: 4.25rem;
+  padding: 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-canvas-head-title .df2-canvas-badge {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+button.df2-canvas-badge {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.df2-canvas-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-canvas-filter-advanced {
+  align-self: flex-start;
+}
+
+.df2-app .df2-canvas .df2-studio-picker-trigger {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.df2-app .df2-canvas :is(input.df2-input, select.df2-select, select.df2-input) {
+  height: 32px;
+  min-height: 32px;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+/* The step title stays, but it must not spend the column the stage needs. */
+.df2-xform.df2-studio-next > .df2-xform-head {
+  position: static;
+  top: auto;
+  margin: 0;
+  gap: 0;
+  min-height: 48px;
+  padding: 0;
+  border-bottom: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.df2-xform.df2-studio-next .df2-xform-head-row {
+  align-items: center;
+  flex-wrap: nowrap;
+  min-height: 48px;
+  gap: 12px;
+}
+
+.df2-xform.df2-studio-next .df2-xform-title {
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.df2-xform.df2-studio-next .df2-xform-identity {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.df2-xform.df2-studio-next .df2-xform-route {
+  margin-top: 2px;
+}
+
+.df2-xform.df2-studio-next > .df2-alert {
+  flex: 0 1 auto;
+  max-height: 4.5rem;
+  overflow: auto;
+}
+
+.df2-canvas-head h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.2;
+  font-weight: var(--df-fw-semibold);
+  flex: 0 0 auto;
+}
+
+.df2-canvas-rail h4,
+.df2-canvas-inspector h4,
+.df2-canvas-validation h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+}
+
+.df2-canvas-banner {
+  margin: 0;
+  padding: var(--df-space-2) var(--df-space-3);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  border: 1px solid var(--df-border);
+}
+
+.df2-canvas-refusal {
+  margin: 0;
+  color: var(--df-warning-text);
+}
+
+.df2-canvas-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+  flex: 1 1 0;
+  min-height: 0;
+  align-items: stretch;
+  overflow: visible;
+  position: relative;
+}
+
+.df2-canvas-rail {
+  width: 188px;
+  flex: 0 0 188px;
+}
+
+.df2-canvas-inspector {
+  width: 252px;
+  flex: 0 0 252px;
+}
+
+.df2-canvas-rail,
+.df2-canvas-inspector {
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  padding: var(--df-space-3);
+  overflow: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-canvas-rail ul,
+.df2-canvas-shortcuts {
+  list-style: none;
+  margin: var(--df-space-2) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+}
+
+.df2-canvas-rail ul.df2-canvas-tiles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-1);
+}
+
+.df2-canvas-op {
+  position: relative;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--df-space-1);
+  width: 100%;
+  min-height: 36px;
+  height: auto;
+  padding: var(--df-space-1);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  color: var(--df-text-primary);
+  cursor: grab;
+  text-align: left;
+}
+
+.df2-canvas-rail {
+  scrollbar-gutter: stable;
+}
+
+.df2-canvas-op-tip {
+  position: fixed;
+  left: var(--df-tip-x, 0px);
+  top: var(--df-tip-y, 0px);
+  z-index: var(--df-z-popover);
+  width: max-content;
+  max-width: 220px;
+  padding: var(--df-space-1) var(--df-space-2);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-sm);
+  box-shadow: var(--df-shadow-xs);
+  font-size: 13px;
+  line-height: 1.3;
+  text-align: left;
+  pointer-events: none;
+}
+
+.df2-canvas-op-icon,
+.df2-canvas-node-mark {
+  display: grid;
+  place-items: center;
+  border-radius: var(--df-radius-md);
+}
+
+.df2-canvas-op-icon {
+  width: 32px;
+  height: 32px;
+}
+
+.df2-canvas-node-mark {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+
+/* Band and icon tile use different logo tokens so a category reads twice.
+   Ink on each fill stays at or above 4.5:1 in light and dark. */
+.df2-canvas-op[data-stripe="values"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="values"] .df2-canvas-node-mark {
+  background: var(--df-brand-arrow);
+  color: var(--df-brand-tile);
+}
+
+.df2-canvas-op[data-stripe="columns"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="columns"] .df2-canvas-node-mark {
+  background: var(--df-on-tile);
+  color: var(--df-logo-ink);
+}
+
+.df2-canvas-op[data-stripe="rows"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="rows"] .df2-canvas-node-mark {
+  background: var(--df-brand-tile);
+  color: var(--df-on-tile);
+}
+
+.df2-canvas-op[data-stripe="shape"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="shape"] .df2-canvas-node-mark {
+  background: var(--df-logo-ink);
+  color: var(--df-on-tile);
+}
+
+.df2-canvas-op-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.df2-canvas-op-name {
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-canvas-op-family {
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--df-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-canvas-op[data-stripe="values"] {
+  box-shadow: inset 3px 0 0 var(--df-brand-tile);
+}
+
+.df2-canvas-op[data-stripe="columns"] {
+  box-shadow: inset 3px 0 0 var(--df-logo-ink);
+}
+
+.df2-canvas-op[data-stripe="rows"] {
+  box-shadow: inset 3px 0 0 var(--df-brand-arrow);
+}
+
+.df2-canvas-op[data-stripe="shape"] {
+  box-shadow: inset 3px 0 0 var(--df-attention);
+}
+
+.df2-canvas-badge {
+  justify-self: end;
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+  line-height: 16px;
+  padding: 0 var(--df-space-1);
+  border-radius: var(--df-radius-sm);
+}
+
+.df2-canvas-badge.is-valid {
+  color: var(--df-brand-text);
+  background: var(--df-surface-muted);
+}
+
+.df2-canvas-badge.is-warning {
+  color: var(--df-warning-text);
+  background: var(--df-warning-bg);
+}
+
+.df2-canvas-badge.is-error {
+  color: var(--df-danger);
+  background: var(--df-danger-bg);
+}
+
+.df2-canvas-badge.is-running {
+  color: var(--df-brand-tile);
+  background: var(--df-surface-muted);
+}
+
+.df2-canvas-node-summary {
+  margin: var(--df-space-1) 0 0;
+  font-size: 13px;
+  color: var(--df-text-secondary);
+  white-space: normal;
+  overflow: visible;
+}
+
+.df2-canvas-suggest {
+  width: 100%;
+  text-align: left;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  color: var(--df-text-primary);
+  padding: var(--df-space-1);
+  font: inherit;
+  font-size: 13px;
+}
+
+.df2-canvas-op:disabled {
+  color: var(--df-text-secondary);
+  border-style: dashed;
+}
+
+.df2-canvas-plan {
+  border: 2px solid var(--df-attention);
+  border-radius: var(--df-radius-md);
+  padding: var(--df-space-2);
+  background: var(--df-surface);
+}
+
+.df2-canvas-plan p {
+  margin: 0;
+  color: var(--df-text-secondary);
+  font-size: 13px;
+}
+
+.df2-canvas-plan p:first-child {
+  color: var(--df-on-attention);
+  background: var(--df-attention);
+  display: inline-block;
+  padding: 0 var(--df-space-1);
+  font-weight: var(--df-fw-semibold);
+}
+
+.df2-canvas-plan a {
+  color: var(--df-brand-text);
+  font-size: 13px;
+}
+
+/* The canvas is the step body. Rules and suggestions live in the toolbar drawer.
+   The old two-column grid is unchanged when this class is absent. */
+.df2-xform-grid.is-canvas {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  align-items: stretch;
+  align-self: stretch;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.df2-xform-grid.is-canvas > .df2-canvas {
+  flex: 1 1 0;
+  align-self: stretch;
+  min-height: 0;
+  height: auto;
+}
+
+.df2-canvas-stage-wrap {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+  overflow: hidden;
+}
+
+.df2-canvas-stage {
+  --df-minimap-w: 176px;
+  --df-minimap-h: 126px;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 44px 8px 8px;
+  background: var(--df-bg-canvas);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  position: relative;
+  overflow: hidden;
+}
+
+.df2-canvas-stage.is-drop-target {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: -2px;
+}
+
+.df2-canvas-link-refusal,
+.df2-canvas-link-note {
+  margin: 0;
+  font-size: 13px;
+}
+
+.df2-canvas-link-refusal {
+  color: var(--df-warning-text);
+}
+
+.df2-canvas-link-note {
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-dock {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 48px;
+  max-height: 16%;
+  overflow: hidden;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+}
+
+.df2-canvas-dock.is-collapsed {
+  flex: 0 0 48px;
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
+  overflow: hidden;
+}
+
+.df2-canvas-dock.is-collapsed .df2-canvas-dock-body {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.df2-canvas-dock.is-collapsed .df2-canvas-dock-head {
+  flex-wrap: nowrap;
+}
+
+.df2-canvas-dock.is-collapsed .df2-canvas-dock-head p {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-canvas-dock-grip {
+  height: 8px;
+  flex: 0 0 8px;
+  cursor: ns-resize;
+  background: var(--df-border);
+}
+
+.df2-canvas-dock-grip:focus-visible {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: -2px;
+}
+
+.df2-canvas-dock-body {
+  overflow: auto;
+  padding: var(--df-space-2) var(--df-space-3);
+}
+
+.df2-canvas-dock-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--df-space-2);
+}
+
+.df2-canvas-dock-head p,
+.df2-canvas-dock-body .df2-label-hint {
+  margin: 0;
+  font-size: 13px;
+}
+
+.df2-canvas-dock table {
+  width: 100%;
+  margin-top: var(--df-space-2);
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.df2-canvas-dock th,
+.df2-canvas-dock td {
+  text-align: left;
+  padding: var(--df-space-1) var(--df-space-2);
+  border-bottom: 1px solid var(--df-border);
+  color: var(--df-text-primary);
+  white-space: nowrap;
+}
+
+.df2-canvas-preview,
+.df2-canvas-sql {
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  padding: var(--df-space-2) var(--df-space-3);
+}
+
+.df2-canvas-preview summary,
+.df2-canvas-sql summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+}
+
+.df2-canvas-preview p {
+  margin: var(--df-space-2) 0;
+  font-size: 13px;
+}
+
+.df2-canvas-inspector-actions {
+  display: flex;
+  gap: var(--df-space-2);
+  margin-top: var(--df-space-2);
+}
+
+.df2-canvas-stage .react-flow {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--df-bg-canvas);
+}
+
+.df2-canvas .react-flow__node-studio {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.df2-canvas-node {
+  position: relative;
+  width: 100%;
+  min-height: 160px;
+  padding: 0;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: 10px;
+  box-shadow: var(--df-shadow-xs);
+  overflow: visible;
+}
+
+.df2-canvas-node-stripe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 10px 10px 0 0;
+  background: var(--df-brand-tile);
+  pointer-events: none;
+}
+
+.df2-canvas-node[data-stripe="columns"] .df2-canvas-node-stripe {
+  background: var(--df-logo-ink);
+}
+
+.df2-canvas-node[data-stripe="rows"] .df2-canvas-node-stripe {
+  background: var(--df-brand-arrow);
+}
+
+.df2-canvas-node[data-stripe="shape"] .df2-canvas-node-stripe {
+  background: var(--df-attention);
+}
+
+.df2-canvas-node-band {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 12px 0 14px;
+  border-radius: 9px 9px 0 0;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-canvas-node-groups {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-canvas-node-group {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0 18px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-group-in,
+.df2-canvas-group-out {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-canvas-node-id {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-canvas-node-body {
+  padding: 8px 12px 10px;
+}
+
+.df2-canvas-node-tools {
+  display: flex;
+  gap: var(--df-space-1);
+  margin-top: var(--df-space-2);
+}
+
+.df2-canvas-tool {
+  min-height: 32px;
+  padding: 0 var(--df-space-2);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-sm);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+}
+
+.df2-canvas-tool:focus-visible {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: 2px;
+}
+
+.df2-canvas-fields {
+  list-style: none;
+  margin: var(--df-space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.df2-canvas-field {
+  font-size: 13px;
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-node.is-selected {
+  border: 2px solid var(--df-brand-tile);
+}
+
+.df2-canvas-node.is-disabled,
+.df2-canvas-node.is-dimmed {
+  border-style: dashed;
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-node.is-invalid {
+  border-color: var(--df-danger);
+  border-style: solid;
+}
+
+.df2-canvas-node-invalid {
+  margin: var(--df-space-1) 0 0;
+  font-size: 13px;
+  color: var(--df-danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-canvas-node-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-canvas-node-type {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.2;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-canvas-node.is-dimmed .df2-canvas-node-title,
+.df2-canvas-node.is-disabled .df2-canvas-node-title {
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-port {
+  z-index: var(--df-z-raised);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--df-surface);
+}
+
+.df2-canvas-port.is-field {
+  width: 10px;
+  height: 10px;
+  background: var(--df-brand-arrow);
+}
+
+.df2-canvas-port.is-in,
+.df2-canvas-port.is-out {
+  background: var(--df-brand-tile);
+}
+
+.df2-canvas-port.is-out {
+  box-shadow: 0 0 0 2px var(--df-brand-arrow);
+}
+
+.df2-canvas-port.is-count {
+  background: var(--df-attention);
+}
+
+.df2-canvas .df2-canvas-minimap.react-flow__panel {
+  width: 160px;
+  height: 110px;
+  margin: 0;
+  right: 8px;
+  bottom: 8px;
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  overflow: hidden;
+  background: var(--df-surface);
+}
+
+.df2-canvas .react-flow__edge-path {
+  stroke: var(--df-text-muted);
+  stroke-width: 1.5;
+}
+
+html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
+  stroke: var(--df-text-muted);
+}
+
+.df2-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--df-brand-tile);
+}
+
+.df2-canvas-palette-list {
+  list-style: none;
+  margin: var(--df-space-3) 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.df2-canvas-palette-list button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--df-space-3);
+  background: transparent;
+  border: 0;
+  color: var(--df-text-primary);
+  text-align: left;
+  padding: var(--df-space-2);
+  font: inherit;
+}
+
+.df2-canvas-palette-list button.is-active,
+.df2-canvas-palette-list button:hover {
+  background: var(--df-surface-muted);
+}
+
+.df2-canvas-palette-list small {
+  color: var(--df-text-muted);
+}
+
+.df2-canvas-shortcuts kbd {
+  font-family: var(--df-font-mono);
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas .react-flow__controls,
+.df2-canvas .df2-canvas-controls {
+  display: none;
+}
+
+.df2-canvas-validation {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  z-index: var(--df-z-canvas-issues);
+  width: min(440px, calc(100% - 32px));
+  max-height: 42%;
+  overflow: auto;
+  transform: translateX(-50%);
+  padding: var(--df-space-3);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  box-shadow: var(--df-shadow-xs);
+}
+
+.df2-canvas-validation ul {
+  list-style: none;
+  margin: var(--df-space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+}
+
+.df2-canvas-validation button {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: var(--df-text-primary);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  padding: var(--df-space-2);
+  cursor: pointer;
+}
+
+.df2-canvas-validation button.is-error {
+  color: var(--df-danger);
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger);
+}
+
+.df2-canvas-validation button.is-current {
+  box-shadow: inset 3px 0 0 var(--df-brand-tile);
+}
+
+.df2-canvas-validation-mark {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-top: 1px;
+  color: var(--df-brand-text);
+}
+
+.df2-canvas-validation button.is-warning .df2-canvas-validation-mark {
+  color: var(--df-warning-text);
+}
+
+.df2-canvas-validation button.is-error .df2-canvas-validation-mark {
+  color: var(--df-danger);
+}
+
+.df2-canvas-validation button.is-running .df2-canvas-validation-mark {
+  color: var(--df-brand-tile);
+}
+
+.df2-canvas-validation-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.df2-canvas-validation-name {
+  font-weight: var(--df-fw-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-canvas-validation-state {
+  color: var(--df-text-secondary);
+  white-space: normal;
+}
+
+.df2-canvas-validation button.is-error .df2-canvas-validation-state {
+  color: var(--df-danger);
+}
+
+.df2-canvas-stage-wrap {
+  position: relative;
+}
+
+.df2-canvas[data-view="properties"] .df2-canvas-dock.is-max {
+  position: relative;
+  flex: 1 1 auto;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+@media (min-width: 768px) {
+  .df2-canvas-body {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    align-items: stretch;
+  }
+
+  .df2-canvas-body:has(.df2-canvas-rail.is-collapsed) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-canvas-rail {
+    position: relative;
+    top: auto;
+    left: auto;
+    bottom: auto;
+    z-index: var(--df-z-base);
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    width: 240px;
+    flex: none;
+    max-height: none;
+    height: auto;
+  }
+
+  .df2-canvas-stage-wrap {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .df2-canvas-properties {
+    grid-column: 2;
+    grid-row: 2;
+    min-width: 0;
+    position: relative;
+    z-index: var(--df-z-raised);
+  }
+
+  .df2-canvas[data-view="canvas"] .df2-canvas-rail {
+    grid-row: 1 / span 2;
+  }
+
+  .df2-canvas-rail.is-collapsed {
+    display: none;
+  }
+}
+
+html.df2-canvas-focus .df2-sidebar {
+  /* The shell pins the sidebar with a display lock this file cannot
+     override. Visibility hides it, and the app padding below gives that
+     column to the canvas. */
+  visibility: hidden;
+  pointer-events: none;
+}
+
+html.df2-canvas-focus .df2-topbar,
+html.df2-canvas-focus .df2-transfer-studio-chrome,
+html.df2-canvas-focus .df2-xform.df2-studio-next > .df2-xform-head,
+html.df2-canvas-focus .df2-flow-transform {
+  display: none;
+}
+
+html.df2-canvas-focus .df2-app {
+  padding-left: 0;
+}
+
+html.df2-canvas-focus .df2-canvas[data-view="split"] .df2-canvas-properties {
+  height: 72px;
+  max-height: 72px;
+}
+
+html.df2-canvas-focus .df2-canvas-stage {
+  min-height: 70vh;
+}
+
+@media (max-width: 767px) {
+  .df2-transfer-schema {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* The stage is the full-width first row. Palette and inspector keep a
+     short band under it so a side rail cannot shrink the flow to a sliver. */
+  .df2-xform.df2-studio-next > .df2-xform-head {
+    gap: 0;
+    padding-bottom: 0;
+  }
+
+  .df2-xform.df2-studio-next .df2-xform-route,
+  .df2-xform.df2-studio-next .df2-xform-identity {
+    display: none;
+  }
+
+  .df2-xform.df2-studio-next .df2-xform-head-row {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: var(--df-space-2);
+  }
+
+  .df2-canvas-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--df-space-1);
+  }
+
+  .df2-canvas-head p {
+    display: none;
+  }
+
+  .df2-canvas-head-actions {
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .df2-canvas-stage {
+    padding: 44px 0 0;
+    min-height: 168px;
+  }
+
+  .df2-canvas-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    /* 160px card + collapsed drawer + the 8px gap, so zoom stays at 1. */
+    grid-template-rows: minmax(232px, 1fr) 4.5rem 4.5rem;
+    align-items: stretch;
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: clip;
+  }
+
+  .df2-canvas-rail {
+    grid-column: 1;
+    grid-row: 2;
+    width: auto;
+    flex: none;
+    max-height: none;
+    min-height: 0;
+    height: 100%;
+    align-self: stretch;
+    overflow: auto;
+  }
+
+  .df2-canvas-stage-wrap {
+    grid-column: 1;
+    grid-row: 1;
+    flex: none;
+    width: auto;
+    min-width: 0;
+    min-height: 0;
+    height: auto;
+    align-self: stretch;
+    overflow: hidden;
+  }
+
+  .df2-canvas-properties {
+    grid-column: 1;
+    grid-row: 3;
+    width: auto;
+    height: 100%;
+    max-height: none;
+    min-height: 0;
+  }
+
+  .df2-canvas-properties .df2-canvas-inspector {
+    width: auto;
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+
+  .df2-canvas-dock {
+    max-height: 3.75rem;
+    min-height: 0;
+  }
+
+  .df2-canvas .react-flow__minimap {
+    display: none;
+  }
+
+  .df2-canvas-op-family {
+    display: none;
+  }
+}
+
+/* One shell for every flagged step. Absent on flags-off pages.
+   The classic content box subtracts the header a second time, which left
+   a gap under the work area. Fill the column under the topbar instead. */
+.df2-content.is-transfer-studio-view:has(.is-studio-next) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.df2-content-inner.is-transfer-studio-view:has(.is-studio-next) {
+  flex: 1 1 0;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-content-inner.is-transfer-studio-view .df2-page-transfer-studio.is-studio-next {
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  /* The page gutter is cleared for the flagged shell. This 48px is the
+     action bar, so the work area ends on the bar instead of under it. */
+  padding: 0 0 48px;
+  box-sizing: border-box;
+}
+
+/* The enter animation leaves translateX(0), which becomes the containing
+   block for a fixed bar and pins it to the step instead of the viewport. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-main-panel > .df2-transfer-step-panel {
+  animation: none;
+  transform: none;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-chrome {
+  flex: 0 0 auto;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 12px;
+  gap: 0;
+  border: 0;
+  border-bottom: 1px solid var(--df-border);
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+  background: var(--df-surface);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-body,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-main-panel,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-step-viewport {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--df-surface);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-card-body,
+.df2-page-transfer-studio.is-studio-next .df2-validate-body {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  position: fixed;
+  left: var(--df-sidebar-width, 260px);
+  right: 0;
+  bottom: 0;
+  z-index: var(--df-z-action);
+  width: auto;
+  flex: none;
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
+  margin: 0;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  background: var(--df-surface);
+  border-top: 1px solid var(--df-border);
+  border-radius: 0;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+@media (min-width: 1024px) {
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-secondary,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-dest-step-right {
+    padding-right: 64px;
+  }
+
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+    padding-right: 64px;
+  }
+}
+
+@media (max-width: 1023px) {
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+    left: 0;
+  }
+}
+
+.df2-app.df2-sidebar-nav-compact .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+.df2-app.df2-sidebar-nav-compact .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+.df2-app.df2-sidebar-nav-compact .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  left: var(--df-sidebar-compact-w, 88px);
+}
+
+html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  left: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-wizard-footer .df2-btn,
+.df2-page-transfer-studio.is-studio-next .df2-xform-actions .df2-btn {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-map-footer-status,
+.df2-page-transfer-studio.is-studio-next .df2-wizard-footer .df2-label-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-label,
+.df2-page-transfer-studio.is-studio-next .df2-card-sub,
+.df2-page-transfer-studio.is-studio-next .df2-label-hint {
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-split,
+.df2-page-transfer-studio.is-studio-next .df2-dest-step .df2-dest-step-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
+  gap: 0;
+  flex: 1 1 0;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-primary,
+.df2-page-transfer-studio.is-studio-next .df2-dest-step-left {
+  padding: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-secondary,
+.df2-page-transfer-studio.is-studio-next .df2-dest-step-right {
+  border: 0;
+  border-left: 1px solid var(--df-border);
+  border-radius: 0;
+  background: var(--df-surface);
+  padding: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-map-step-layout {
+  gap: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-vd {
+  padding: 12px 16px;
+  gap: 0;
+}
+
+/* A 320px rail cannot sit beside the form on a phone. Stack it under the
+   work column. The form stays as tall as its actions, and the step scrolls,
+   so the sample control is not trapped under the rail. */
+@media (max-width: 800px) {
+  .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-split,
+  .df2-page-transfer-studio.is-studio-next .df2-dest-step .df2-dest-step-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: start;
+    flex: 0 0 auto;
+    height: auto;
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-secondary,
+  .df2-page-transfer-studio.is-studio-next .df2-dest-step-right {
+    border-left: 0;
+    border-top: 1px solid var(--df-border);
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-primary {
+    align-self: start;
+    max-height: none;
+    height: auto;
+    overflow: visible;
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
+    overflow: auto;
+  }
+}
+
+.df2-canvas-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: var(--df-z-canvas-menu);
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: var(--df-space-1);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  box-shadow: var(--df-shadow-xs);
+}
+
+.df2-canvas-menu button {
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: var(--df-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  min-height: 32px;
+  padding: 0 var(--df-space-2);
+  cursor: pointer;
+}
+
+.df2-canvas-menu button:hover,
+.df2-canvas-menu button[aria-pressed="true"] {
+  background: var(--df-surface-muted);
+}
+
+.df2-canvas-edgebar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: var(--df-z-canvas-toolbar);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 16px);
+  padding: 4px;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+}
+
+.df2-canvas-edgebar .df2-canvas-icon-btn {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.df2-canvas-zoom-label select {
+  height: 28px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--df-text-primary);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm);
+}
+
+.df2-canvas[data-view="canvas"] .df2-canvas-properties {
+  display: none;
+}
+
+.df2-canvas[data-view="properties"] .df2-canvas-stage-wrap {
+  display: none;
+}
+
+.df2-canvas[data-view="split"] .df2-canvas-properties {
+  height: var(--df-split-h, 168px);
+  max-height: var(--df-split-h, 168px);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.df2-canvas[data-view="properties"] .df2-canvas-properties {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+.df2-canvas-properties {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  overflow: hidden;
+}
+
+.df2-canvas-split {
+  height: 8px;
+  flex: 0 0 8px;
+  cursor: ns-resize;
+  background: var(--df-border);
+}
+
+.df2-canvas-split:focus-visible {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: -2px;
+}
+
+.df2-canvas-prop-head,
+.df2-canvas-preview-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-2);
+  flex-wrap: wrap;
+  padding: 4px var(--df-space-2);
+}
+
+.df2-canvas-prop-row {
+  display: flex;
+  flex: 1 1 0;
+  height: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.df2-canvas-tab-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 148px;
+  padding: var(--df-space-2);
+  border-right: 1px solid var(--df-border);
+  overflow: auto;
+}
+
+.df2-canvas-tab-rail button,
+.df2-canvas-preview-tools .df2-canvas-tabs button {
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: var(--df-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  min-height: 28px;
+  padding: 0 var(--df-space-2);
+  cursor: pointer;
+}
+
+.df2-canvas-tab-rail button[aria-selected="true"],
+.df2-canvas-preview-tools .df2-canvas-tabs button[aria-selected="true"] {
+  background: var(--df-surface-muted);
+  box-shadow: inset 3px 0 0 var(--df-brand-tile);
+}
+
+.df2-canvas-preview-tools .df2-canvas-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df2-canvas-properties .df2-canvas-inspector {
+  width: auto;
+  flex: 1 1 auto;
+  border: 0;
+  border-radius: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.df2-canvas-properties .df2-canvas-dock {
+  max-height: none;
+  border: 0;
+  border-top: 1px solid var(--df-border);
+  border-radius: 0;
+}
+
+.df2-canvas-field-list {
+  list-style: none;
+  margin: var(--df-space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.df2-canvas-field-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--df-space-2);
+  font-size: 13px;
+  color: var(--df-text-primary);
+}
+
+.df2-canvas-compare {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--df-space-2);
+}
+
+.df2-canvas-compare caption {
+  text-align: left;
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+}
+
+.df2-canvas-status {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--df-brand-text);
+}
+
+.df2-canvas-status.is-error {
+  color: var(--df-danger);
+}
+
+.df2-canvas-status-count {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--df-danger);
+  color: var(--df-surface);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.df2-canvas-insert {
+  position: absolute;
+  right: -11px;
+  top: 50%;
+  z-index: var(--df-z-raised);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid var(--df-border-strong);
+  border-radius: 11px;
+  background: var(--df-surface);
+  color: var(--df-brand-text);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.df2-canvas-node:hover .df2-canvas-insert,
+.df2-canvas-node:focus-within .df2-canvas-insert,
+.df2-canvas-insert:focus-visible {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .df2-canvas .react-flow__edge-path,
+  .df2-canvas-node {
+    transition: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .df2-canvas-split,
+  .df2-canvas-prop-head {
+    display: none;
+  }
+
+  .df2-canvas[data-view="split"] .df2-canvas-properties,
+  .df2-canvas[data-view="properties"] .df2-canvas-properties {
+    height: 4.5rem;
+    max-height: 4.5rem;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .df2-canvas-properties .df2-canvas-dock.is-collapsed {
+    flex: 0 0 48px;
+    height: 48px;
+    max-height: 48px;
+    min-height: 0;
+  }
+}
+
+/* A closed disclosure stays closed. Author display rules on its children
+   otherwise beat the user-agent hide and paint the form over the next row. */
+.df2-page-transfer-studio.is-studio-next details:not([open]) > :not(summary) {
+  display: none;
+}
+
+/* The palette is a grid column. The toolbar stays at the stage's own
+   top-left, inside the stage wrap, so it does not cover the suggestion. */
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar {
+  flex: 0 0 auto;
+  width: max-content;
+  max-width: none;
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-endpoint {
+  flex: 0 0 auto;
+  min-width: max-content;
+  overflow: visible;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-label {
+  display: inline-block;
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
+  text-overflow: clip;
+  vertical-align: bottom;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-structure-preview,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-structure-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-structure-table th,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table td,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table th span,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table .df2-type-badge {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  overflow-wrap: normal;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-main-panel {
+  overflow: auto;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-btn-primary {
+  --df-accent: var(--df-brand-tile);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-btn-primary:hover:not(:disabled) {
+  --df-accent: var(--df-brand-text);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-flow-column-title {
+  margin: 0 0 var(--df-space-2);
+  padding-left: var(--df-space-2);
+  border-left: 3px solid var(--df-brand-arrow);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 16px;
+  color: var(--df-brand-text);
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(280px, 1fr) auto;
+  gap: var(--df-space-2);
+  align-items: stretch;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step {
+  min-width: 0;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+}
+
+/* One connect section fills the row. Source and destination are separate
+   steps, so neither sits in a half-width track beside an empty column. */
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform):not(:has(.df2-dest-step)) .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform):not(:has(.df2-source-step)) .df2-dest-step {
+  grid-column: 1 / -1;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step .df2-transfer-step-split,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step .df2-dest-step-layout {
+  gap: var(--df-space-3);
+  min-height: 0;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-flow-transform {
+  grid-column: 1 / -1;
+  align-self: start;
+  height: auto;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-main-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+}
+
+@media (max-width: 1099px) {
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step {
+  min-height: 0;
+  overflow: auto;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-step-viewport {
+  height: auto;
+  max-height: none;
+  flex: 0 0 auto;
+}
+
+/* Review stacks Map and Validate. The classic map locks are a fixed
+   viewport with hidden overflow. On this screen the shell scrolls, and
+   those locks were cutting the suggestion and the column toolbar. */
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-panel .df2-card-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-layout,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-column-review,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-column-review-editor {
+  overflow: visible;
+  flex: 0 0 auto;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-column-review-scroll,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-editor-scroll-host {
+  flex: 0 0 auto;
+  height: auto;
+  max-height: 420px;
+  min-height: 160px;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:has(.df2-dest-step) .df2-source-step > .df2-wizard-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-panel > .df2-card-footer {
+  display: none;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-dest-step {
+  display: none;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-transfer-main-panel {
+  overflow: hidden;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-flow-transform {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--df-space-3);
+  margin-top: var(--df-space-2);
+  padding: var(--df-space-3) var(--df-space-4);
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-wizard-back {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 0 var(--df-space-3);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-xform-step {
+  flex: 1 1 0;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-vd.is-compact-verdict .df2-vd-hero,
+.df2-vd.is-compact-verdict .df2-vd-exec-summary,
+.df2-vd.is-compact-verdict .df2-vd-blockers,
+.df2-vd.is-compact-verdict .df2-vd-assist,
+.df2-vd.is-compact-verdict:not(.is-gates-open) .df2-vd-rule-tabs,
+.df2-vd.is-compact-verdict:not(.is-gates-open) .df2-vd-rule,
+.df2-vd.is-compact-verdict:not(.is-proof-open) .df2-vd-proof {
+  display: none;
+}
+
+.df2-vd.is-compact-verdict.is-proof-open .df2-vd-proof {
+  margin: 8px 16px 16px;
+  border: 1px solid var(--df-border);
+}
+
+.df2-vd-verdict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-vd-verdict p {
+  margin: 0;
+}
+
+.df2-vd-proof-drawer {
+  margin: 8px 16px 16px;
+}
+
+.df2-canvas-inline-suggest,
+.df2-map-inline-suggest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--df-border);
+  background: var(--df-surface);
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-canvas-inline-suggest button,
+.df2-map-inline-suggest button {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
+}
+
+@media (min-width: 1024px) {
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-vd,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-theater-v3,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-panel {
+    padding-right: 64px;
+  }
+}
+
+@media (min-width: 1024px) and (max-width: 1366px) {
+  .df2-page-transfer-studio.is-studio-next .df2-upload-formats,
+  .df2-page-transfer-studio.is-studio-next .df2-source-aside-formats,
+  .df2-page-transfer-studio.is-studio-next .df2-source-aside-steps {
+    display: flex;
+  }
+}
+
+/* <=480 canvas: the route bar cannot keep one max-content line inside the
+   chrome band — "Choose destination" / real names clipped past the edge
+   (D-BP-27). Same wrap the classic bar gets in transfer-studio.css, set
+   here because this file owns the canvas bar rules (it loads last). */
+@media (max-width: 480px) {
+  .df2-page-transfer-studio.is-studio-next .df2-route-bar {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-route-bar-endpoint {
+    min-width: 0;
+    max-width: 100%;
+  }
+}

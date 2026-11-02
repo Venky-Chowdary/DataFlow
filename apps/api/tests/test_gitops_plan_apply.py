@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from importlib import reload
 
 
@@ -56,6 +57,113 @@ def test_gitops_plan_and_apply_schedule(tmp_path, monkeypatch):
     updated = ss.get_schedule(sid)
     assert updated is not None
     assert updated.interval == "hourly"
+
+
+def test_apply_manifest_binds_workspace_and_refuses_foreign_update(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    import services.schedule_store as ss
+    from importlib import reload
+
+    reload(pc)
+    reload(ss)
+    reload(gm)
+
+    foreign = ss.create_schedule(
+        {
+            "name": "theirs",
+            "source_connector_id": "s1",
+            "source_table": "orders",
+            "dest_connector_id": "d1",
+            "dest_table": "orders_copy",
+            "interval": "daily",
+            "workspace_id": "ws-b",
+        }
+    )
+    result = gm.apply_manifest(
+        {
+            "kind": "PipelineSchedule",
+            "spec": {
+                "id": foreign.id,
+                "name": "hijack",
+                "source_connector_id": "s1",
+                "source_table": "orders",
+                "dest_connector_id": "d1",
+                "dest_table": "orders_copy",
+                "interval": "hourly",
+                "workspace_id": "ws-a",
+            },
+        },
+        workspace_id="ws-a",
+    )
+    assert result["failed"] == 1
+    assert result["results"][0]["error_code"] == "cross_workspace"
+    still = ss.get_schedule(foreign.id)
+    assert still is not None
+    assert still.workspace_id == "ws-b"
+    assert still.name == "theirs"
+
+
+def test_apply_manifest_binds_contract_workspace_and_refuses_foreign_update(tmp_path, monkeypatch):
+    """A pasted DataContract UUID is not enough to overwrite another tenant."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json"))
+    import services.contract_store as cs
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    from importlib import reload
+    from services.data_contract import ColumnRule, ContractStatus, DataContract
+
+    reload(pc)
+    reload(cs)
+    reload(gm)
+
+    store = cs.get_contract_store()
+    foreign = DataContract(
+        name="theirs-agreement",
+        columns=[ColumnRule(source_name="id", target_name="id", source_type="INTEGER", target_type="INTEGER")],
+        metadata={"workspace_id": "ws-b"},
+    )
+    store.save_contract(foreign)
+
+    result = gm.apply_manifest(
+        {
+            "kind": "DataContract",
+            "spec": {
+                "id": foreign.id,
+                "name": "hijack",
+                "columns": [
+                    {"source_name": "id", "target_name": "id", "source_type": "INTEGER", "target_type": "INTEGER"}
+                ],
+            },
+        },
+        workspace_id="ws-a",
+    )
+    assert result["failed"] == 1
+    still = store.get_contract(foreign.id)
+    assert still is not None
+    assert still.name == "theirs-agreement"
+    assert still.status == ContractStatus.DRAFT
+    assert (still.metadata or {}).get("workspace_id") == "ws-b"
+
+    created = gm.apply_manifest(
+        {
+            "kind": "DataContract",
+            "spec": {
+                "name": "ours-agreement",
+                "columns": [
+                    {"source_name": "id", "target_name": "id", "source_type": "INTEGER", "target_type": "INTEGER"}
+                ],
+            },
+        },
+        workspace_id="ws-a",
+    )
+    assert created["applied"] == 1
+    ours_id = created["results"][0]["id"]
+    ours = store.get_contract(ours_id)
+    assert ours is not None
+    assert (ours.metadata or {}).get("workspace_id") == "ws-a"
 
 
 def test_contract_artifact_shape(tmp_path, monkeypatch):
@@ -134,9 +242,15 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
     reload(cs)
     reload(gm)
 
+    # DATAFLOW_DATA_DIR only isolates the file fallback. The contract and
+    # schedule stores prefer MongoDB when it is up, which every worker shares,
+    # so fixed names collide with a parallel run or a previous one's leftovers.
+    unique = uuid.uuid4().hex[:8]
+    schedule_name = f"staging-gated-{unique}"
+
     store = cs.get_contract_store()
     draft = DataContract(
-        name="staging-orders",
+        name=f"staging-orders-{unique}",
         source={"type": "postgresql"},
         destination={"type": "snowflake"},
     )
@@ -150,9 +264,9 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
             {
                 "apiVersion": "dataflow.space/v1",
                 "kind": "PipelineSchedule",
-                "metadata": {"name": "staging-gated"},
+                "metadata": {"name": schedule_name},
                 "spec": {
-                    "name": "staging-gated",
+                    "name": schedule_name,
                     "source_connector_id": "s1",
                     "source_table": "orders",
                     "dest_connector_id": "d1",
@@ -175,4 +289,119 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
     ok = gm.apply_manifest(manifest, require_signed_contracts=True)
     assert ok["failed"] == 0
     assert ok["applied"] == 1
-    assert any(s.name == "staging-gated" for s in ss.list_schedules())
+    assert any(s.name == schedule_name for s in ss.list_schedules())
+
+
+def test_gitops_export_round_trips_advanced_write_knobs(tmp_path, monkeypatch):
+    """Studio Advanced must survive Export YAML → apply. Observed source shape must not."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    import services.schedule_store as ss
+
+    reload(pc)
+    reload(ss)
+    reload(gm)
+
+    unique = uuid.uuid4().hex[:8]
+    name = f"adv-export-{unique}"
+    live = ss.create_schedule({
+        "name": name,
+        "source_connector_id": "s1",
+        "source_table": "orders",
+        "dest_connector_id": "d1",
+        "dest_table": "orders_copy",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+        "snapshot_mode": "when_needed",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+        "schema_policy": "propagate_columns",
+        "source_schema": {"id": "INTEGER", "joining_date": "TIMESTAMP_NTZ"},
+        "source_schema_fingerprint": "fp-prod",
+        "source_schema_observed_at": "2026-08-01T00:00:00+00:00",
+        "source_primary_key": ["id"],
+    })
+    artifact = gm.schedule_artifact(live)
+    spec = artifact["spec"]
+    assert spec["write_via_staging"] is True
+    assert spec["priority_column"] == "updated_at"
+    assert spec["priority_direction"] == "asc"
+    assert spec["row_limit"] == 2500
+    assert spec["snapshot_mode"] == "when_needed"
+    assert spec["allow_append_only"] is True
+    assert spec["cdc_row_filter"] == "net"
+    assert spec["multi_subnet_failover"] is True
+    assert "source_schema" not in spec
+    assert "source_schema_fingerprint" not in spec
+    assert "source_primary_key" not in spec
+    assert "fidelity_campaign" not in spec
+
+    ss.delete_schedule(live.id)
+    applied = gm.apply_manifest(artifact)
+    assert applied["applied"] == 1
+    cloned = next(s for s in ss.list_schedules() if s.name == name)
+    assert cloned.write_via_staging is True
+    assert cloned.priority_column == "updated_at"
+    assert cloned.priority_direction == "asc"
+    assert cloned.row_limit == 2500
+    assert cloned.snapshot_mode == "when_needed"
+    assert cloned.allow_append_only is True
+    assert cloned.cdc_row_filter == "net"
+    assert cloned.multi_subnet_failover is True
+    assert cloned.source_schema == {}
+    assert cloned.source_schema_fingerprint == ""
+
+
+def test_gitops_apply_strips_yaml_source_schema_so_drift_can_still_park(tmp_path, monkeypatch):
+    """A pasted YAML must not stamp a remembered source shape over the live baseline."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    import services.schedule_store as ss
+
+    reload(pc)
+    reload(ss)
+    reload(gm)
+
+    unique = uuid.uuid4().hex[:8]
+    existing = ss.create_schedule({
+        "name": f"drift-guard-{unique}",
+        "source_connector_id": "s1",
+        "source_table": "orders",
+        "dest_connector_id": "d1",
+        "dest_table": "orders_copy",
+        "interval": "daily",
+        "source_schema": {"id": "INTEGER", "email": "VARCHAR"},
+        "source_schema_fingerprint": "fp-live",
+    })
+    result = gm.apply_manifest({
+        "kind": "PipelineSchedule",
+        "spec": {
+            "id": existing.id,
+            "name": existing.name,
+            "source_connector_id": "s1",
+            "source_table": "orders",
+            "dest_connector_id": "d1",
+            "dest_table": "orders_copy",
+            "interval": "hourly",
+            "write_via_staging": True,
+            "row_limit": 100,
+            "source_schema": {"id": "INTEGER"},
+            "source_schema_fingerprint": "fp-stale-yaml",
+        },
+    })
+    assert result["applied"] == 1
+    reloaded = ss.get_schedule(existing.id)
+    assert reloaded is not None
+    assert reloaded.interval == "hourly"
+    assert reloaded.write_via_staging is True
+    assert reloaded.row_limit == 100
+    assert reloaded.source_schema == {"id": "INTEGER", "email": "VARCHAR"}
+    assert reloaded.source_schema_fingerprint == "fp-live"

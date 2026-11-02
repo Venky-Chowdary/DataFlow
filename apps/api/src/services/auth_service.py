@@ -6,20 +6,17 @@ import hashlib
 import hmac
 import json
 import logging
-import os
+
 from services.brand_env import getenv_brand
-import re
 import time
 from typing import Any, Optional
 
+from services.password_hash import hash_password as _hash_password
+from services.password_hash import verify_password as _verify_password
 from services.platform_config import is_production
+from services.user_store import credentials_for_auth, record_login
 
 logger = logging.getLogger("dataflow.auth")
-
-_REAUTH_SECRET = getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
-_REQUIRE_AUTH = getenv_brand("REQUIRE_AUTH", "1" if is_production() else "0").lower() in ("1", "true", "yes")
-_TOKEN_TTL_SEC = int(getenv_brand("TOKEN_TTL_SEC", "86400"))
-_ALLOW_DEV_USER = getenv_brand("ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
 
 # bcrypt hash of "password123" for test@gmail.com (dev/staging only, never production)
 _DEV_USER = {
@@ -29,23 +26,56 @@ _DEV_USER = {
     "role": "Workspace tester",
 }
 
-# Legacy unsalted SHA-256 hashes are exactly 64 hex characters.
-_LEGACY_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-
 # Cache admin bcrypt hash so we do not re-salt on every login request.
 _ADMIN_USER_CACHE: dict[str, str] | None = None
 _ADMIN_CACHE_KEY: tuple[str, str] | None = None
 
+# Import-time snapshot kept only for shim re-exports / backward-compat tests.
+# Runtime paths MUST call the lazy readers below (audit §1.3 D2 — suite order).
+_REAUTH_SECRET = getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
+_REQUIRE_AUTH = getenv_brand("REQUIRE_AUTH", "1" if is_production() else "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+_TOKEN_TTL_SEC = int(getenv_brand("TOKEN_TTL_SEC", "86400") or "86400")
+_ALLOW_DEV_USER = getenv_brand("ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
+
+
+def _read_auth_secret() -> str:
+    return getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
+
+
+def _read_require_auth() -> bool:
+    return getenv_brand("REQUIRE_AUTH", "1" if is_production() else "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _read_token_ttl_sec() -> int:
+    try:
+        return int(getenv_brand("TOKEN_TTL_SEC", "86400") or "86400")
+    except ValueError:
+        return 86400
+
+
+def _read_allow_dev_user() -> bool:
+    return getenv_brand("ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
+
 
 def _token_secret() -> str:
     """Return the signing secret after validating it is not the dev default in production."""
-    if is_production() and _REAUTH_SECRET in ("", "dev-change-me-before-production"):
+    secret = _read_auth_secret()
+    if is_production() and secret in ("", "dev-change-me-before-production"):
         raise RuntimeError("DATAFLOW_AUTH_SECRET must be set to a strong random value in production")
-    return _REAUTH_SECRET
+    return secret
 
 
 def auth_required() -> bool:
-    return _REQUIRE_AUTH
+    """Whether auth is required — read env at call time (never import-frozen)."""
+    return _read_require_auth()
 
 
 def _normalize_secret(value: str) -> str:
@@ -118,24 +148,37 @@ def _users_from_auth_users_env() -> list[dict[str, str]]:
             password_hash = hash_password(plaintext)
         if not password_hash:
             continue
-        users.append({
+        entry: dict[str, Any] = {
             "email": email,
             "password_hash": password_hash,
             "name": str(row.get("name") or email),
             "role": str(row.get("role") or "member"),
-        })
+        }
+        tenant_id = str(row.get("tenant_id") or "").strip()
+        if tenant_id:
+            entry["tenant_id"] = tenant_id
+        raw_ids = row.get("tenant_ids")
+        if isinstance(raw_ids, list):
+            entry["tenant_ids"] = [str(x).strip() for x in raw_ids if str(x).strip()]
+        elif isinstance(raw_ids, str) and raw_ids.strip():
+            entry["tenant_ids"] = [p.strip() for p in raw_ids.split(",") if p.strip()]
+        users.append(entry)
     return users
 
 
-def _load_users() -> list[dict[str, str]]:
+def _load_users() -> list[dict[str, Any]]:
     """Load workspace users.
 
     Priority:
     1. DATAFLOW_ADMIN_EMAIL + DATAFLOW_ADMIN_PASSWORD (always included when set)
     2. DATAFLOW_AUTH_USERS JSON list (merged; admin email wins on conflict)
-    3. Dev user (non-production / DATAFLOW_ALLOW_DEV_USER only)
+    3. Accounts an admin created in the user store (merged; env entries win)
+    4. Dev user — **only** when DATAFLOW_ALLOW_DEV_USER=1 and not production (audit §6.9)
+
+    The store comes last so an operator locked out of their own deployment can
+    always recover through the environment-provisioned admin.
     """
-    users: list[dict[str, str]] = []
+    users: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     admin = _admin_user_from_env()
@@ -150,6 +193,13 @@ def _load_users() -> list[dict[str, str]]:
         users.append(user)
         seen.add(key)
 
+    for user in credentials_for_auth():
+        key = user["email"].strip().lower()
+        if key in seen or not user.get("password_hash"):
+            continue
+        users.append(user)
+        seen.add(key)
+
     if users:
         return users
 
@@ -158,13 +208,22 @@ def _load_users() -> list[dict[str, str]]:
     if is_production():
         return []
 
-    if _ALLOW_DEV_USER or not is_production():
-        return [_DEV_USER]
+    # Phase D5: staging/non-prod must opt in — never auto-enable password123.
+    if _read_allow_dev_user():
+        return [dict(_DEV_USER)]
     return []
 
+def auth_bootstrap_status(*, include_sensitive: bool = False) -> dict[str, Any]:
+    """Public-safe auth diagnostics (audit ITEM 3 / §6.1).
 
-def auth_bootstrap_status() -> dict[str, Any]:
-    """Safe diagnostics for operators (no secrets)."""
+    Unauthenticated callers receive **only** ``auth_required`` and ``has_users``
+    (whether ``user_count > 0``). Never account emails, password lengths, or
+    configuration detail that aids enumeration / brute-force.
+
+    Authenticated operators may pass ``include_sensitive=True`` for deploy
+    diagnostics: boolean config flags and a count — still no emails and no
+    password length.
+    """
     admin_email = _normalize_secret(getenv_brand("ADMIN_EMAIL", ""))
     admin_password = _normalize_secret(getenv_brand("ADMIN_PASSWORD", ""))
     raw_users = getenv_brand("AUTH_USERS", "").strip()
@@ -176,24 +235,28 @@ def auth_bootstrap_status() -> dict[str, Any]:
         except json.JSONDecodeError:
             auth_users_json_valid = False
     users = _load_users()
-    return {
+    # Public payload — exact audit contract: nothing else.
+    public: dict[str, Any] = {
         "auth_required": auth_required(),
-        "user_count": len(users),
-        "admin_email_configured": bool(admin_email),
-        "admin_password_configured": bool(admin_password),
-        "admin_password_length": len(admin_password) if admin_password else 0,
-        # True only when the env var is set AND parses as a JSON array.
-        "auth_users_configured": bool(raw_users) and auth_users_json_valid is True,
-        "auth_users_json_valid": auth_users_json_valid,
-        "emails": [u.get("email") for u in users],
+        "has_users": len(users) > 0,
     }
+    if include_sensitive:
+        public.update(
+            {
+                "user_count": len(users),
+                "admin_email_configured": bool(admin_email),
+                "admin_password_configured": bool(admin_password),
+                "auth_users_configured": bool(raw_users) and auth_users_json_valid is True,
+                "auth_users_json_valid": auth_users_json_valid,
+                # Never expose emails or password length — both aid attackers.
+            }
+        )
+    return public
 
 
 def hash_password(password: str) -> str:
-    """Hash a password with bcrypt (adaptive, salted, slow)."""
-    import bcrypt
-
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    """Hash a password with bcrypt — see ``services.password_hash``."""
+    return _hash_password(password)
 
 
 def _legacy_verify(password: str, password_hash: str) -> bool:
@@ -203,23 +266,29 @@ def _legacy_verify(password: str, password_hash: str) -> bool:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify a password against a bcrypt hash.
+    """Verify a password against a stored hash — see ``services.password_hash``."""
+    return _verify_password(password, password_hash)
 
-    Legacy unsalted SHA-256 is still accepted in development for backwards
-    compatibility, but it is rejected in production because it is not suitable
-    for regulated deployments.
+
+def _maybe_rehash(email: str, password: str, password_hash: str) -> None:
+    """Transparent bcrypt→argon2id upgrade on a successful login (P0-4).
+
+    Only runs while the signup flag is on; env-provisioned users aren't in
+    the store so ``update_password_hash`` is a silent no-op for them.
     """
-    if not password_hash:
-        return False
-    if _LEGACY_SHA256_RE.match(password_hash):
-        if is_production():
-            return False
-        return _legacy_verify(password, password_hash)
     try:
-        import bcrypt
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-    except ValueError:
-        return False
+        from services.password_hash import needs_rehash
+        from services.user_store import update_password_hash
+
+        if needs_rehash(password_hash):
+            from services.password_hash import hash_password_argon2
+
+            update_password_hash(
+                email=email, password_hash=hash_password_argon2(password),
+                password_algo="argon2id",
+            )
+    except Exception:  # noqa: BLE001 — a failed upgrade must never break login
+        logger.warning("password rehash failed for a stored account")
 
 
 def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
@@ -232,53 +301,145 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
         if user.get("email", "").strip().lower() != normalized:
             continue
         if verify_password(password, user.get("password_hash", "")):
+            # Stored accounts carry a last-seen stamp so an admin can tell a
+            # dormant login from a live one; env-provisioned users are a no-op.
+            record_login(user["email"])
+            _maybe_rehash(user["email"], password, user.get("password_hash", ""))
             return {
                 "email": user["email"],
                 "name": user.get("name", user["email"]),
                 "role": user.get("role", "member"),
             }
-        logger.info("Login failed for %s — password mismatch", normalized)
+        logger.info("Login failed — password mismatch")
         return None
     # Never dump the configured user directory — aids account discovery via logs.
     logger.info("Login failed — unknown email (users_configured=%s)", len(users))
     return None
 
 
-def create_token(email: str) -> tuple[str, int]:
-    expires = int(time.time()) + _TOKEN_TTL_SEC
-    payload = f"{email.strip().lower()}:{expires}"
+def _legacy_tokens_allowed() -> bool:
+    """Allow pre-jti ``email:expires:sig`` tokens (transition). Default off in production."""
+    raw = getenv_brand("AUTH_LEGACY_TOKENS", "").strip().lower()
+    if raw in ("1", "true", "yes"):
+        return True
+    if raw in ("0", "false", "no"):
+        return False
+    return not is_production()
+
+
+def create_token(email: str, *, amr: list[str] | None = None) -> tuple[str, int]:
+    """Mint Bearer token with server-side session (``jti``) — Phase D3.
+
+    ``amr``: how the person authenticated (``pwd``/``otp``/``recovery``/``sso``),
+    read by the workspace MFA policy. Omitted means password-only.
+    """
+    from services.auth_sessions import create_session
+
+    expires = int(time.time()) + _read_token_ttl_sec()
+    email_n = email.strip().lower()
+    jti = create_session(email_n, expires_at=expires, amr=amr)
+    payload = f"{email_n}:{expires}:{jti}"
     sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}", expires
 
 
-def lookup_user(email: str) -> Optional[dict[str, str]]:
+def lookup_user(email: str) -> Optional[dict[str, Any]]:
     normalized = email.strip().lower()
     for user in _load_users():
         if user.get("email", "").strip().lower() == normalized:
-            return {
+            out: dict[str, Any] = {
                 "email": user["email"],
                 "name": user.get("name", user["email"]),
                 "role": user.get("role", "member"),
             }
+            if user.get("tenant_id"):
+                out["tenant_id"] = user["tenant_id"]
+            if user.get("tenant_ids"):
+                out["tenant_ids"] = list(user["tenant_ids"])
+            return out
     return None
 
 
 def verify_token(token: str) -> Optional[str]:
+    """Return email when HMAC + expiry + (session jti) are valid."""
     if not token or ":" not in token:
         return None
-    try:
-        email, expires_s, sig = token.rsplit(":", 2)
-        expires = int(expires_s)
-    except (ValueError, TypeError):
-        return None
-    if expires < int(time.time()):
-        return None
-    payload = f"{email}:{expires_s}"
-    expected = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, sig):
-        return None
-    return email
+    parts = token.rsplit(":", 3)
+    # New form: email:expires:jti:sig  (4 segments after rsplit limit 3 → 4 parts)
+    if len(parts) == 4:
+        email, expires_s, jti, sig = parts
+        try:
+            expires = int(expires_s)
+        except (ValueError, TypeError):
+            return None
+        if expires < int(time.time()):
+            return None
+        payload = f"{email}:{expires_s}:{jti}"
+        expected = hmac.new(
+            _token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        from services.auth_sessions import session_active
+
+        if not session_active(jti, email):
+            return None
+        return email
+
+    # Legacy form: email:expires:sig (no revocation)
+    if len(parts) == 3 and _legacy_tokens_allowed():
+        email, expires_s, sig = parts
+        try:
+            expires = int(expires_s)
+        except (ValueError, TypeError):
+            return None
+        if expires < int(time.time()):
+            return None
+        payload = f"{email}:{expires_s}"
+        expected = hmac.new(
+            _token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        return email
+    return None
 
 
-def public_user(user: dict[str, str]) -> dict[str, Any]:
-    return {"email": user["email"], "name": user["name"], "role": user["role"]}
+def token_jti(token: str) -> Optional[str]:
+    """Extract jti from a v2 token; None for legacy / invalid."""
+    if not token or token.count(":") < 3:
+        return None
+    parts = token.rsplit(":", 3)
+    if len(parts) != 4:
+        return None
+    return parts[2] or None
+
+
+def revoke_token(token: str) -> bool:
+    """Revoke the session for a Bearer token (logout)."""
+    from services.auth_sessions import revoke_session
+
+    jti = token_jti(token)
+    if not jti:
+        return False
+    return revoke_session(jti)
+
+
+def revoke_sessions_for_email(email: str) -> int:
+    """Invalidate all sessions for an email (password change / force logout)."""
+    from services.auth_sessions import revoke_all_for_email
+
+    return revoke_all_for_email(email)
+
+
+def public_user(user: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "email": user["email"],
+        "name": user["name"],
+        "role": user["role"],
+    }
+    if user.get("tenant_id"):
+        out["tenant_id"] = user["tenant_id"]
+    if user.get("tenant_ids"):
+        out["tenant_ids"] = list(user["tenant_ids"])
+    return out

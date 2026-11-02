@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.value_serializer import load_http_json
+
 from connectors.saas_common import (
     ReadBatch,
     base_url,
@@ -72,7 +74,7 @@ def list_object_types(cfg: dict[str, Any]) -> list[str]:
             timeout=30,
         )
         r.raise_for_status()
-        for item in r.json().get("results") or []:
+        for item in load_http_json(r).get("results") or []:
             oid = item.get("objectTypeId") or item.get("name") or item.get("fullyQualifiedName")
             if oid and str(oid) not in names:
                 names.append(str(oid))
@@ -110,10 +112,10 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
             timeout=45,
         )
         r.raise_for_status()
-        payload = r.json() if hasattr(r, "json") else {}
+        payload = load_http_json(r)
         for p in payload.get("results") or []:
-            # Preserve validation / length metadata when HubSpot returns it so
-            # reverse-ETL quarantine can emit VARCHAR(n) tighter than 65_536.
+            # Preserve validation / length / enumeration options so reverse-ETL
+            # quarantine emits ENUM/SET domains (not open VARCHAR invent).
             row = {
                 "name": p.get("name") or "",
                 "type": p.get("type") or "string",
@@ -122,7 +124,11 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
                 "hasUniqueValue": bool(p.get("hasUniqueValue")),
                 "numberDisplayHint": str(
                     p.get("numberDisplayHint")
-                    or (p.get("options") or {}).get("numberDisplayHint")
+                    or (
+                        (p.get("options") or {}).get("numberDisplayHint")
+                        if isinstance(p.get("options"), dict)
+                        else ""
+                    )
                     or ""
                 ),
             }
@@ -130,6 +136,18 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
                 row["maxLength"] = p.get("maxLength")
             if p.get("validationRules"):
                 row["validationRules"] = p.get("validationRules")
+            opts = p.get("options")
+            if isinstance(opts, list) and opts:
+                # Keep active option dicts (value/label/hidden) for ENUM/SET carriers.
+                row["options"] = [
+                    {
+                        "value": o.get("value"),
+                        "label": o.get("label"),
+                        "hidden": o.get("hidden"),
+                    }
+                    for o in opts
+                    if isinstance(o, dict)
+                ]
             props.append(row)
         after = ((payload.get("paging") or {}).get("next") or {}).get("after")
         if not after:
@@ -194,7 +212,7 @@ def read_object(
 
         r = request(method="GET", url=url, token=access_token, params=params, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
 
         results = data.get("results", [])
         for item in results:

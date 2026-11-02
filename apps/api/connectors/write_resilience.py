@@ -12,9 +12,10 @@ long-lived sockets mid-transfer. Writers must:
 from __future__ import annotations
 
 import logging
-import os
-from services.brand_env import getenv_brand
+import threading
 import time
+
+from services.brand_env import getenv_brand
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -98,7 +99,71 @@ def proxy_stream_batch_size(
     return write_chunk_size(host, default=default, connection_string=connection_string)
 
 
+# MySQL/MariaDB codes that mean the session is gone, so a reconnect can help:
+# client CR_CONNECTION_ERROR/CR_CONN_HOST_ERROR (2002/2003), CR_SERVER_GONE_ERROR
+# (2006), CR_SERVER_LOST (2013), CR_SERVER_LOST_EXTENDED (2055); server
+# ER_SERVER_SHUTDOWN (1053), ER_ABORTING_CONNECTION (1152), ER_NET_READ_ERROR /
+# ER_NET_READ_INTERRUPTED / ER_NET_ERROR_ON_WRITE / ER_NET_WRITE_INTERRUPTED
+# (1158-1161), ER_CONNECTION_KILLED (1927), ER_CLIENT_INTERACTION_TIMEOUT (4031).
+# Every other server code (1064 syntax, 1071/1170 key DDL, 1146 missing table,
+# 1205 lock wait, 1406 data too long…) repeats identically on a fresh session.
+MYSQL_CONNECTION_LOST_CODES: frozenset[int] = frozenset(
+    {2002, 2003, 2006, 2013, 2055, 1053, 1152, 1158, 1159, 1160, 1161, 1927, 4031}
+)
+_MYSQL_DRIVER_MODULES = ("pymysql", "MySQLdb", "mysql.connector", "mariadb")
+
+
+_WRAPPED_ERROR_DEPTH = 5
+
+
+def _mysql_driver_error(exc: BaseException) -> BaseException | None:
+    """The MySQL-family driver exception inside ``exc``, if any.
+
+    SQLAlchemy (generic_sql) wraps the driver error as ``DBAPIError.orig``;
+    other layers chain it via ``raise … from`` / implicit context. Depth is
+    bounded so a cyclic chain cannot spin.
+    """
+    seen: set[int] = set()
+    frontier: list[BaseException] = [exc]
+    for _ in range(_WRAPPED_ERROR_DEPTH):
+        nxt: list[BaseException] = []
+        for err in frontier:
+            if id(err) in seen:
+                continue
+            seen.add(id(err))
+            if type(err).__module__.startswith(_MYSQL_DRIVER_MODULES):
+                return err
+            context = None if err.__suppress_context__ else err.__context__
+            for inner in (getattr(err, "orig", None), err.__cause__, context):
+                if isinstance(inner, BaseException):
+                    nxt.append(inner)
+        if not nxt:
+            break
+        frontier = nxt
+    return None
+
+
+def _mysql_error_code(exc: BaseException | str) -> int | None:
+    """Server/client error code of a (possibly wrapped) MySQL driver error, else None."""
+    if not isinstance(exc, BaseException):
+        return None
+    err = _mysql_driver_error(exc)
+    if err is None:
+        return None
+    code = getattr(err, "errno", None)
+    if not isinstance(code, int) and err.args and isinstance(err.args[0], int):
+        code = err.args[0]
+    # pymysql raises InterfaceError(0, "") on a closed socket: no code to read.
+    return code if isinstance(code, int) and code > 0 else None
+
+
 def is_connection_lost(exc: BaseException | str) -> bool:
+    mysql_code = _mysql_error_code(exc)
+    if mysql_code is not None:
+        # Classify by code, not message: an OperationalError wrapper around a
+        # DDL refusal (1170 "BLOB/TEXT column used in key specification")
+        # was retried as a dropped socket for the whole reconnect budget.
+        return mysql_code in MYSQL_CONNECTION_LOST_CODES
     text = str(exc).lower()
     name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
     try:
@@ -123,6 +188,7 @@ def is_connection_lost(exc: BaseException | str) -> bool:
                 "out of range",
                 "lock wait",
                 "lock timeout",
+                "unknown collation",
             )
         ):
             return "server closed" in text or "connection reset" in text or "broken pipe" in text
@@ -155,6 +221,128 @@ def should_retry_connection_lost(
     return attempt < chunk_reconnect_attempts(proxy=proxy)
 
 
+class PgOverwriteTransaction:
+    """One PostgreSQL full-refresh overwrite, held until the load finishes.
+
+    TRUNCATE and the inserts that follow it commit together. Readers stay on
+    the previous table until :meth:`finish`. The state lives on this object,
+    registered by connection, and is never written onto the driver connection.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.truncated = False
+        self.truncated_tables: set[str] = set()
+        self.job_id = ""
+        # Real xid of the committing transaction, captured inside finish()
+        # just before commit — the value stamped on the rows' xmin, so a
+        # failed run can undo exactly its own rows (P2 keyed undo).
+        self.tx_id: int | None = None
+
+    def begin(self, *, job_id: str = "") -> None:
+        """Hold every commit until :meth:`finish`. Safe to call on each batch."""
+        self.active = True
+        self.tx_id = None
+        if job_id and not self.job_id:
+            self.job_id = str(job_id)
+
+    def was_truncated(self, table_name: str = "") -> bool:
+        """True once emptying is done for this table.
+
+        A routed overwrite writes several destination tables on one held
+        transaction — the flag must be per table or only the first route
+        table gets truncated and the others append (RT-2).
+        """
+        if table_name:
+            return table_name in self.truncated_tables
+        return self.truncated
+
+    def note_truncated(self, table_name: str = "") -> None:
+        """Emptying is done for this load: an existing table was truncated, or
+        this run is creating the table and must not truncate its own rows.
+        """
+        self.truncated = True
+        if table_name:
+            self.truncated_tables.add(table_name)
+        self.active = True
+
+    def finish(self, conn: Any, *, success: bool) -> None:
+        if conn is None or not self.active:
+            unbind_overwrite_transaction(conn)
+            return
+        try:
+            if success:
+                try:
+                    # Inside the write transaction: pg_current_xact_id() is
+                    # the xid that stamps xmin on every row this txn wrote.
+                    with conn.cursor() as _txc:
+                        _txc.execute("SELECT pg_current_xact_id()")
+                        self.tx_id = int(_txc.fetchone()[0])
+                except Exception:
+                    self.tx_id = None
+                conn.commit()
+                if self.job_id:
+                    try:
+                        from services.auto_create_lifecycle import (
+                            mark_auto_create_committed,
+                        )
+
+                        mark_auto_create_committed(self.job_id)
+                    except Exception:
+                        logger.debug("auto_create commit mark skipped", exc_info=True)
+            else:
+                conn.rollback()
+        except Exception as exc:
+            logger.warning(
+                "PostgreSQL overwrite transaction finish failed: %s", exc, exc_info=exc
+            )
+        finally:
+            self.active = False
+            self.truncated = False
+            self.truncated_tables.clear()
+            self.job_id = ""
+            unbind_overwrite_transaction(conn)
+
+
+_OVERWRITE_TXNS: dict[int, PgOverwriteTransaction] = {}
+_OVERWRITE_LOCK = threading.Lock()
+
+
+def bind_overwrite_transaction(conn: Any, txn: PgOverwriteTransaction) -> None:
+    if conn is None:
+        return
+    with _OVERWRITE_LOCK:
+        _OVERWRITE_TXNS[id(conn)] = txn
+
+
+def overwrite_transaction_for(conn: Any) -> PgOverwriteTransaction | None:
+    if conn is None:
+        return None
+    with _OVERWRITE_LOCK:
+        return _OVERWRITE_TXNS.get(id(conn))
+
+
+def unbind_overwrite_transaction(conn: Any) -> None:
+    if conn is None:
+        return
+    with _OVERWRITE_LOCK:
+        _OVERWRITE_TXNS.pop(id(conn), None)
+
+
+def finish_held_overwrite(conn: Any, *, success: bool) -> None:
+    """Commit or roll back a PostgreSQL overwrite that deferred its commits.
+
+    TRUNCATE and the following inserts share one transaction so a reader sees
+    the old table or the new table, not a prefix of the load (R4-D06). The
+    stream holds the connection across batches and closes it at the end; a
+    close without this commit would roll the whole overwrite back.
+    """
+    txn = overwrite_transaction_for(conn)
+    if txn is None:
+        return
+    txn.finish(conn, success=success)
+
+
 def close_quietly(conn: Any) -> None:
     if conn is None:
         return
@@ -174,13 +362,26 @@ def apply_postgres_session_guards(conn: Any) -> None:
     the operator.  DDL paths that need a shorter fail-fast window can ``SET LOCAL``
     a lower value and ``RESET`` afterwards.
     """
+    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+
+    # Inside a tool call (plan, rank, sample, query...) a statement may not
+    # outlive the call: the server cancels it at the call's deadline instead of
+    # scanning on for a caller that gave up (D181). Transfer jobs keep 0.
+    budget = statement_timeout_seconds()
+    statement_ms = int(budget * 1000) if budget is not None else 0
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = 0")
-            cur.execute("SET idle_in_transaction_session_timeout = 0")
-            cur.execute("SET lock_timeout = 120000")
-            cur.execute("SET application_name = 'dataflow'")
+            cur.execute(f"SET statement_timeout = {statement_ms}")
+            # Likewise a transaction a tool left open (a scan it stopped at
+            # its budget) is ended by the server at the call's deadline, so it
+            # cannot hold locks on the customer's table afterwards.
+            cur.execute(f"SET idle_in_transaction_session_timeout = {statement_ms}")
+            cur.execute(f"SET lock_timeout = {destination_lock_wait_seconds() * 1000}")
+            from services.brand import session_application_name
+
+            # A constant from services.brand ("dataflow" / "datawrap"), never input.
+            cur.execute(f"SET application_name = '{session_application_name()}'")
         conn.autocommit = False
     except Exception:
         try:
@@ -192,7 +393,8 @@ def apply_postgres_session_guards(conn: Any) -> None:
 def apply_mysql_session_guards(
     conn: Any,
     *,
-    lock_wait_seconds: int = 120,
+    lock_wait_seconds: int = 0,
+    require_strict_sql_mode: bool = True,
 ) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
 
@@ -204,18 +406,32 @@ def apply_mysql_session_guards(
 
     STRICT_TRANS_TABLES (+ related modes) prevent silent truncation / invalid-date
     coercion that would otherwise look like a successful write with data loss.
+    When ``require_strict_sql_mode`` is True (default), failure to enable STRICT
+    modes raises — never continue a transfer that can silently truncate.
     """
-    lock_s = max(5, min(int(lock_wait_seconds or 120), 600))
+    lock_s = max(5, min(int(lock_wait_seconds or destination_lock_wait_seconds()), 600))
     try:
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
             cur.execute("SET SESSION net_read_timeout = 600")
             cur.execute("SET SESSION net_write_timeout = 600")
+            # TIMESTAMP conversion is session-relative. The same pin is used by
+            # source readers, dest writers, and generic_sql pooled connections
+            # (services.timezone_policy.pin_mysql_session_utc).
+            from services.timezone_policy import MYSQL_UTC_PIN_SQL
+
+            cur.execute(MYSQL_UTC_PIN_SQL)
             cur.execute(f"SET SESSION lock_wait_timeout = {lock_s}")
             cur.execute(f"SET SESSION innodb_lock_wait_timeout = {lock_s}")
-            _ensure_mysql_strict_sql_mode(cur)
+            _ensure_mysql_strict_sql_mode(cur, require=require_strict_sql_mode)
+    except RuntimeError:
+        raise
     except Exception as exc:
+        if require_strict_sql_mode:
+            raise RuntimeError(
+                f"MySQL session guards failed — refuse write without STRICT sql_mode: {exc}"
+            ) from exc
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
@@ -229,13 +445,17 @@ _MYSQL_STRICT_MODES = (
 )
 
 
-def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
+def _ensure_mysql_strict_sql_mode(cur: Any, *, require: bool = True) -> None:
     """Append fail-closed sql_mode flags without wiping existing session modes."""
     try:
         cur.execute("SELECT @@SESSION.sql_mode")
         row = cur.fetchone()
         current = (row[0] if row else "") or ""
     except Exception as exc:
+        if require:
+            raise RuntimeError(
+                f"Could not read MySQL sql_mode — refuse write without STRICT proof: {exc}"
+            ) from exc
         logger.warning("Could not read MySQL sql_mode: %s", exc, exc_info=exc)
         return
     parts = [p.strip().upper() for p in str(current).split(",") if p.strip()]
@@ -251,6 +471,11 @@ def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
     try:
         cur.execute("SET SESSION sql_mode = %s", (new_mode,))
     except Exception as exc:
+        if require:
+            raise RuntimeError(
+                f"Could not enable MySQL STRICT sql_mode ({new_mode}) — "
+                f"refuse silent truncation path: {exc}"
+            ) from exc
         logger.warning(
             "Could not enable MySQL STRICT sql_mode (%s): %s",
             new_mode,
@@ -259,20 +484,49 @@ def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
         )
 
 
-def apply_mssql_session_guards(conn: Any) -> None:
+#: How long a session waits on another session's table/row lock (seconds).
+DEFAULT_LOCK_WAIT_SECONDS = 120
+
+
+def destination_lock_wait_seconds() -> int:
+    """The lock-wait bound every write session uses (``*_LOCK_WAIT_SECONDS``).
+
+    PostgreSQL and MySQL sessions already waited at most 120 s; SQL Server's
+    pooled sessions waited forever (``LOCK_TIMEOUT -1``), so a retry whose
+    DELETE/TRUNCATE queued behind a lock the failed attempt's session still
+    held froze at "Connecting to destination and creating table..." (D19).
+    """
+    try:
+        value = int(float(getenv_brand("DEST_LOCK_WAIT_SECONDS", str(DEFAULT_LOCK_WAIT_SECONDS))))
+    except ValueError:
+        value = DEFAULT_LOCK_WAIT_SECONDS
+    return max(1, min(value, 600))
+
+
+def apply_mssql_session_guards(
+    conn: Any,
+    *,
+    require_ansi_warnings: bool = False,
+) -> None:
     """Fail-closed SQL Server session: reject silent string truncation.
 
     With ``ANSI_WARNINGS OFF`` (common default on some drivers), oversized
     VARCHAR/NVARCHAR inserts truncate quietly. Force warnings ON so the
     engine errors; write-path ``quarantine_unfit_strings`` is the primary
     hold-out, this is defense-in-depth.
+    When ``require_ansi_warnings`` is True (default), failure raises.
     """
     try:
         cur = getattr(conn, "cursor", None)
         if callable(cur):
+            # DATETIME2(7): read the seventh fractional digit pyodbc drops.
+            from connectors.sqlserver_tick import install_tick_converter
+
+            install_tick_converter(conn)
             with conn.cursor() as c:
                 c.execute("SET ANSI_WARNINGS ON")
                 c.execute("SET ANSI_PADDING ON")
+                c.execute(f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}")
                 try:
                     c.execute("SET CONCAT_NULL_YIELDS_NULL ON")
                 except Exception:
@@ -285,11 +539,23 @@ def apply_mssql_session_guards(conn: Any) -> None:
 
             conn.execute(sa.text("SET ANSI_WARNINGS ON"))
             conn.execute(sa.text("SET ANSI_PADDING ON"))
+            conn.execute(sa.text(f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}"))
             try:
                 conn.execute(sa.text("SET CONCAT_NULL_YIELDS_NULL ON"))
             except Exception:
                 pass
+            return
+        if require_ansi_warnings:
+            raise RuntimeError(
+                "SQL Server session guards could not obtain a cursor/execute handle"
+            )
+    except RuntimeError:
+        raise
     except Exception as exc:
+        if require_ansi_warnings:
+            raise RuntimeError(
+                f"SQL Server ANSI_WARNINGS guards failed — refuse silent truncate: {exc}"
+            ) from exc
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
@@ -322,6 +588,9 @@ _RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
             " batch_key TEXT NOT NULL,"
             " chunk_idx INTEGER NOT NULL,"
             " rows_written INTEGER NOT NULL DEFAULT 0,"
+            " row_start INTEGER NOT NULL DEFAULT 0,"
+            " row_end INTEGER NOT NULL DEFAULT 0,"
+            " attempt INTEGER NOT NULL DEFAULT 1,"
             " written_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
         ),
         create_suffix="",
@@ -336,6 +605,9 @@ _RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
             " batch_key VARCHAR(255) NOT NULL,"
             " chunk_idx INT NOT NULL,"
             " rows_written INT NOT NULL DEFAULT 0,"
+            " row_start INT NOT NULL DEFAULT 0,"
+            " row_end INT NOT NULL DEFAULT 0,"
+            " attempt INT NOT NULL DEFAULT 1,"
             " written_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         ),
         create_suffix=" ENGINE=InnoDB",
@@ -350,6 +622,9 @@ _RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
             " batch_key TEXT NOT NULL,"
             " chunk_idx INTEGER NOT NULL,"
             " rows_written INTEGER NOT NULL DEFAULT 0,"
+            " row_start INTEGER NOT NULL DEFAULT 0,"
+            " row_end INTEGER NOT NULL DEFAULT 0,"
+            " attempt INTEGER NOT NULL DEFAULT 1,"
             " written_at TEXT NOT NULL DEFAULT (datetime('now')),"
         ),
         create_suffix="",
@@ -388,6 +663,43 @@ def ensure_raw_write_ledger(
         " PRIMARY KEY (job_id, batch_key, chunk_idx)"
         f"){spec.create_suffix}"
     )
+    # Property 4 — migrate pre-existing ledgers that lack row_range / attempt.
+    _ensure_raw_ledger_p4_columns(cur, dialect=dialect, ref=ref)
+
+
+def _ensure_raw_ledger_p4_columns(cur: Any, *, dialect: str, ref: str) -> None:
+    """Add row_start/row_end/attempt when an older ledger table already exists."""
+    dialect_n = (dialect or "").strip().lower()
+    adds = (
+        ("row_start", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
+        ("row_end", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
+        ("attempt", "INTEGER NOT NULL DEFAULT 1", "INT NOT NULL DEFAULT 1"),
+    )
+    for name, pg_sqlite_typ, mysql_typ in adds:
+        typ = mysql_typ if dialect_n == "mysql" else pg_sqlite_typ
+        try:
+            if dialect_n == "postgresql":
+                cur.execute(
+                    f"ALTER TABLE {ref} ADD COLUMN IF NOT EXISTS {name} {typ}"  # nosec B608
+                )
+            elif dialect_n == "mysql":
+                # MySQL lacks IF NOT EXISTS for ADD COLUMN on older versions.
+                cur.execute(f"ALTER TABLE {ref} ADD COLUMN {name} {typ}")  # nosec B608
+            else:
+                cur.execute(f"ALTER TABLE {ref} ADD COLUMN {name} {typ}")  # nosec B608
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(
+                tok in msg
+                for tok in (
+                    "duplicate column",
+                    "already exists",
+                    "exist",
+                )
+            ):
+                continue
+            # Non-fatal — mark path can still degrade to legacy columns.
+            logger.debug("ledger P4 column %s migrate skipped: %s", name, exc)
 
 
 def raw_chunk_rows_written(
@@ -433,17 +745,63 @@ def mark_raw_chunk_committed(
     chunk_idx: int,
     rows_written: int,
     schema: str | None = None,
+    row_start: int | None = None,
+    row_end: int | None = None,
+    attempt: int = 1,
 ) -> None:
-    """Record a committed chunk inside the same transaction as its data write."""
+    """Record a committed chunk inside the same transaction as its data write.
+
+    Property 4 — ``chunk_id`` is ``{batch_key}:{chunk_idx}``; ``row_start``/
+    ``row_end`` bound the inclusive source-row range covered by this chunk;
+    ``attempt`` records which try committed (resume skips already-committed).
+    """
     spec = _raw_ledger_spec(dialect)
     ref = _raw_ledger_ref(spec, schema)
     ph = spec.placeholder
-    cur.execute(
-        f"{spec.insert_prefix} {ref} "  # nosec: B608 — identifiers are quoted, dialect SQL is a constant
-        f"(job_id, batch_key, chunk_idx, rows_written) "
-        f"VALUES ({ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
-        (job_id, batch_key, chunk_idx, int(rows_written)),
-    )
+    n = int(rows_written)
+    start = int(row_start) if row_start is not None else 0
+    end = int(row_end) if row_end is not None else max(0, start + n - 1) if n else start
+    # SAVEPOINT so a missing-column failure on PG does not abort the data txn.
+    use_sp = (dialect or "").strip().lower() == "postgresql"
+    if use_sp:
+        cur.execute("SAVEPOINT df_ledger_mark")
+    try:
+        cur.execute(
+            f"{spec.insert_prefix} {ref} "  # nosec: B608 — identifiers are quoted
+            f"(job_id, batch_key, chunk_idx, rows_written, row_start, row_end, attempt) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
+            (job_id, batch_key, chunk_idx, n, start, end, int(attempt)),
+        )
+        if use_sp:
+            cur.execute("RELEASE SAVEPOINT df_ledger_mark")
+    except Exception as exc:
+        # Pre-Property-4 ledgers lack row_start/row_end/attempt — degrade once.
+        msg = str(exc).lower()
+        if not any(
+            tok in msg
+            for tok in (
+                "row_start",
+                "row_end",
+                "attempt",
+                "no such column",
+                "unknown column",
+                "does not exist",
+            )
+        ):
+            if use_sp:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT df_ledger_mark")
+                except Exception:
+                    pass
+            raise
+        if use_sp:
+            cur.execute("ROLLBACK TO SAVEPOINT df_ledger_mark")
+        cur.execute(
+            f"{spec.insert_prefix} {ref} "  # nosec: B608
+            f"(job_id, batch_key, chunk_idx, rows_written) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
+            (job_id, batch_key, chunk_idx, n),
+        )
 
 
 def sqlalchemy_ledger_table(metadata: Any, schema: str | None = None) -> Any:
@@ -468,6 +826,9 @@ def sqlalchemy_ledger_table(metadata: Any, schema: str | None = None) -> Any:
         sa.Column("batch_key", sa.String(255), primary_key=True, nullable=False),
         sa.Column("chunk_idx", sa.Integer, primary_key=True, nullable=False),
         sa.Column("rows_written", sa.Integer, nullable=False, default=0),
+        sa.Column("row_start", sa.Integer, nullable=False, default=0),
+        sa.Column("row_end", sa.Integer, nullable=False, default=0),
+        sa.Column("attempt", sa.Integer, nullable=False, default=1),
         sa.Column(
             "written_at",
             sa.DateTime(timezone=True),
@@ -550,6 +911,9 @@ def mark_sqlalchemy_chunk_committed(
     batch_key: str,
     chunk_idx: int,
     rows_written: int,
+    row_start: int | None = None,
+    row_end: int | None = None,
+    attempt: int = 1,
 ) -> None:
     """Record a committed chunk.
 
@@ -565,16 +929,24 @@ def mark_sqlalchemy_chunk_committed(
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
+    n = int(rows_written)
+    start = int(row_start) if row_start is not None else 0
+    end = int(row_end) if row_end is not None else max(0, start + n - 1) if n else start
+    values = {
+        "job_id": job_id,
+        "batch_key": batch_key,
+        "chunk_idx": chunk_idx,
+        "rows_written": n,
+        "written_at": _dt.now(_tz.utc),
+    }
+    # Optional Property-4 columns — omit when the live table predates them.
+    cols = getattr(table, "c", None)
+    if cols is not None and hasattr(cols, "row_start"):
+        values["row_start"] = start
+        values["row_end"] = end
+        values["attempt"] = int(attempt)
     try:
-        conn.execute(
-            table.insert().values(
-                job_id=job_id,
-                batch_key=batch_key,
-                chunk_idx=chunk_idx,
-                rows_written=int(rows_written),
-                written_at=_dt.now(_tz.utc),
-            )
-        )
+        conn.execute(table.insert().values(**values))
     except Exception as exc:
         if _is_duplicate_key_error(exc):
             return
@@ -582,8 +954,27 @@ def mark_sqlalchemy_chunk_committed(
 
 
 def _is_duplicate_key_error(exc: BaseException) -> bool:
-    """Whether an exception is a primary-key / unique violation."""
+    """Whether an exception is a primary-key / unique violation.
+
+    CHECK, FOREIGN KEY and NOT NULL violations also surface as IntegrityError
+    (SQL Server error 547, 515, ...) — they must NOT be treated as duplicates:
+    silently skipping them mislabels a contract violation as a repeat row.
+    """
     text = str(exc).lower()
+    non_duplicate_signals = (
+        "check constraint",
+        "conflicted with the check",
+        "foreign key constraint",
+        "conflicted with the foreign key",
+        "cannot insert null",
+        "cannot insert the value null",
+        "not null constraint",
+        "does not allow nulls",
+        "violates not-null constraint",
+        "violates check constraint",
+    )
+    if any(s in text for s in non_duplicate_signals):
+        return False
     signals = (
         "duplicate key",
         "unique constraint",

@@ -7,18 +7,57 @@ import gzip
 import io
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from services.csv_profiler import count_csv_rows, detect_delimiter, parse_csv_preview
+from services.csv_profiler import (
+    count_csv_rows,
+    csv_header_names,
+    detect_delimiter,
+    parse_csv_preview,
+)
 from services.platform_config import data_dir, upload_dir
+from services.read_options import ReadOptions, ReadOptionsError
 from services.schema_inference import infer_columns_from_rows
-from services.value_serializer import cell_to_string, json_default
+from services.tabular_window import header_and_rows, row_to_record
+from services.upload_limits import PayloadTooLarge, gunzip_capped, read_all_bounded
+from services.value_serializer import cell_to_string, json_default, json_loads_exact
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def display_upload_filename(name: str | None, default: str = "upload.bin") -> str:
+    """Client filename reduced to its final component; never carries a directory."""
+    raw = str(name or "").replace("\\", "/").replace("\x00", "").strip()
+    base = raw.rsplit("/", 1)[-1].strip()
+    if base in ("", ".", ".."):
+        return default
+    return base
+
+
+def safe_upload_filename(name: str | None, default: str = "upload.bin") -> str:
+    """Filesystem- and object-key-safe name for a client-supplied upload filename."""
+    base = _UNSAFE_FILENAME_CHARS.sub("_", display_upload_filename(name, default))
+    base = base.lstrip(".")[:160]
+    return base or default
+
+
+def upload_path_for(root: Path, file_id: str, filename: str | None) -> Path:
+    """``root/<file_id>_<safe name>``, refusing any result that resolves outside ``root``."""
+    safe_id = _UNSAFE_FILENAME_CHARS.sub("_", str(file_id or ""))
+    candidate = Path(root) / f"{safe_id}_{safe_upload_filename(filename)}"
+    root_resolved = Path(root).resolve()
+    resolved = candidate.resolve()
+    if resolved.parent != root_resolved:
+        raise ValueError("upload path escapes the upload directory")
+    return resolved
 
 _file_registry: dict[str, dict] = {}
 
@@ -100,6 +139,9 @@ def detect_format(filename: str, content: bytes) -> str:
         return "csv"
     if lower.endswith(".tsv"):
         return "tsv"
+    #: ``.psv`` is pipe-delimited text; the reader sniffs the delimiter itself.
+    if lower.endswith(".psv"):
+        return "csv"
     if lower.endswith((".xlsx", ".xls")):
         return "excel"
     if lower.endswith(".json"):
@@ -112,7 +154,9 @@ def detect_format(filename: str, content: bytes) -> str:
         return "avro"
     if lower.endswith(".orc"):
         return "orc"
-    if lower.endswith((".txt", ".dat")):
+    if lower.endswith((".yaml", ".yml")):
+        return "yaml"
+    if lower.endswith(".fwf"):
         return "fixed_width"
     if content[:1] == b"{" or content[:1] == b"[":
         return "json"
@@ -123,6 +167,42 @@ def detect_format(filename: str, content: bytes) -> str:
     if b"\t" in content[:512]:
         return "tsv"
     return "unknown"
+
+
+# Which readers honour a declared window. A reader that cannot honour one must
+# refuse the request: ingesting a different population than the operator
+# declared is worse than failing the upload.
+_SHEET_WINDOW_TYPES = frozenset({"excel"})
+_DELIMITED_TYPES = frozenset({"csv", "tsv", "excel"})
+
+
+def unsupported_read_options(options: ReadOptions, file_type: str) -> str:
+    """Empty when this reader honours the whole window, else the refusal."""
+    if options.fixed_width_layout and file_type != "fixed_width":
+        return (
+            "Column-width layout applies to fixed-width sources; "
+            f"this source is {file_type}"
+        )
+    if options.selects_sheet and file_type not in _SHEET_WINDOW_TYPES:
+        return (
+            f"A sheet selection applies to Excel workbooks; this source is {file_type}"
+        )
+    if not options.sheet_window.is_default and file_type not in _DELIMITED_TYPES:
+        return (
+            "Header row and row-skip options apply to Excel and delimited text "
+            f"sources; this source is {file_type}"
+        )
+    if options.delimiter and file_type not in ("csv", "tsv"):
+        return (
+            "Delimiter options apply to delimited text sources; "
+            f"this source is {file_type}"
+        )
+    if options.encoding and file_type not in ("csv", "tsv", "yaml", "fixed_width"):
+        return (
+            "Encoding options apply to delimited text and YAML / fixed-width "
+            f"sources; this source is {file_type}"
+        )
+    return ""
 
 
 def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
@@ -137,7 +217,7 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
         line = line.strip()
         if not line:
             continue
-        objects.append(json.loads(line))
+        objects.append(json_loads_exact(line))
     if not objects:
         raise ValueError("JSONL must contain at least one JSON object per line")
     if not all(isinstance(item, dict) for item in objects):
@@ -154,6 +234,95 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
 
     rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in objects]
     return headers, rows, len(objects)
+
+
+def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
+    """Line reader for dest COUNT. Path (including gzip) streams; bytes/str stay in RAM."""
+    if isinstance(content, Path):
+        from services.dest_precount import open_artifact_binary
+
+        binary, closer = open_artifact_binary(content)
+        try:
+            text = io.TextIOWrapper(
+                binary, encoding="utf-8", errors="strict", newline=""
+            )
+        except Exception:
+            if closer is not None:
+                closer()
+            raise
+        return text, text.close
+    if isinstance(content, bytes):
+        handle = io.TextIOWrapper(
+            io.BytesIO(content), encoding="utf-8", errors="strict", newline=""
+        )
+        return handle, handle.close
+    if isinstance(content, str):
+        return io.StringIO(content), None
+    if hasattr(content, "read"):
+        text = io.TextIOWrapper(
+            content, encoding="utf-8", errors="strict", newline=""
+        )
+        return text, text.close
+    raise TypeError("JSONL COUNT expects bytes, str, Path, or a readable stream")
+
+
+def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
+    """One JSON object per non-blank line. Poison / non-object is unmeasured."""
+    from services.dest_precount import UnmeasuredArtifact
+
+    for raw in reader:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json_loads_exact(line)
+        except json.JSONDecodeError as exc:
+            raise UnmeasuredArtifact("jsonl_poison_line") from exc
+        if not isinstance(obj, dict):
+            raise UnmeasuredArtifact("jsonl_non_object")
+        yield obj
+
+
+def iter_jsonl_dicts(content: bytes | str | Path) -> Any:
+    """Same JSONL population as ``count_jsonl_records``, as dicts for Gate-8.
+
+    A poison or non-object line raises ``UnmeasuredArtifact`` — never yield
+    a prefix (truncated DISTINCT lesson). COUNT is ``sum`` of this walk.
+    """
+    closer = None
+    try:
+        reader, closer = _jsonl_count_open(content)
+        yield from _iter_jsonl_dicts_from_reader(reader)
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def count_jsonl_records(content: bytes | str | Path) -> int | None:
+    """Dest-engine record COUNT of JSON Lines / NDJSON. Never ingest ``parse_jsonl``.
+
+    Population is one JSON object per non-blank line — the same grain
+    streaming ingest already writes. Empty file / only blank lines is 0.
+    A scalar, array, or malformed line makes the whole artifact
+    unmeasured — never COUNT of a prefix (truncated DISTINCT lesson).
+    ``parse_jsonl`` ingest raises and materializes; this COUNT streams
+    and returns ``None``. Writer JSONL is ``json.dumps`` + newline.
+
+    Walk is one line at a time (O(line), not ``decode`` + ``splitlines`` of
+    the document). Path inputs are counted from disk; bytes (object-store
+    GET) stream from a buffer already in RAM. Local gzip JSONL streams.
+    Object-store GET gzip streams through a caller-owned ``GzipFile``.
+    Gate-8 cell checksum walks the same records via ``iter_jsonl_dicts``.
+    """
+    try:
+        return sum(1 for _ in iter_jsonl_dicts(content))
+    except (OSError, UnicodeDecodeError, UnicodeEncodeError, TypeError):
+        return None
+    except Exception:
+        return None
 
 
 def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
@@ -186,12 +355,15 @@ def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[lis
         row = []
         for col in slice_table.column_names:
             val = slice_table.column(col)[i].as_py()
-            row.append("" if val is None else cell_to_string(val))
+            # NULL stays None: a preview that showed it as '' hid the
+            # NULL / empty-string distinction the file states (D62).
+            row.append(None if val is None else cell_to_string(val))
         rows.append(row)
     return headers, rows, row_count, table.schema
 
 
 def store_upload(filename: str, content: bytes) -> dict:
+    filename = display_upload_filename(filename, "upload.csv")
     fmt = detect_format(filename, content)
     file_id = uuid.uuid4().hex[:16]
     encoding = "utf-8"
@@ -203,7 +375,7 @@ def store_upload(filename: str, content: bytes) -> dict:
     arrow_schema: Any = None
     columns_override: list | None = None
 
-    if fmt in {"csv", "unknown", "fixed_width"}:
+    if fmt in {"csv", "unknown"}:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
         row_count = count_csv_rows(content, encoding)
         fmt = "csv" if fmt == "unknown" else fmt
@@ -214,9 +386,30 @@ def store_upload(filename: str, content: bytes) -> dict:
         headers, rows, row_count = parse_json(content)
     elif fmt == "jsonl":
         headers, rows, row_count = parse_jsonl(content)
+    elif fmt == "yaml":
+        parsed = FileParser.parse_yaml(content)
+        if not parsed.success:
+            raise ValueError(parsed.error or "YAML upload parse failed")
+        headers = list(parsed.columns or [])
+        rows = [
+            [cell_to_string(rec.get(h) if isinstance(rec, dict) else rec) for h in headers]
+            for rec in (parsed.data or [])[:100]
+        ]
+        row_count = int(parsed.row_count or 0)
+    elif fmt == "fixed_width":
+        parsed = FileParser.parse_fixed_width(content)
+        if not parsed.success:
+            raise ValueError(parsed.error or "Fixed-width upload parse failed")
+        headers = list(parsed.columns or [])
+        rows = [
+            [cell_to_string(rec.get(h) if isinstance(rec, dict) else rec) for h in headers]
+            for rec in (parsed.data or [])[:100]
+        ]
+        row_count = int(parsed.row_count or 0)
     elif fmt == "excel":
-        from services.excel_parser import parse_excel_preview
+        from services.excel_parser import parse_excel_preview, require_xlsx
 
+        require_xlsx(filename)
         headers, rows, row_count = parse_excel_preview(content)
     elif fmt == "parquet":
         headers, rows, row_count, arrow_schema = _parse_parquet_preview(content)
@@ -254,7 +447,7 @@ def store_upload(filename: str, content: bytes) -> dict:
     else:
         columns = infer_columns_from_rows(headers, rows)
     preview_rows = rows[:5]
-    path = UPLOAD_DIR / f"{file_id}_{filename}"
+    path = upload_path_for(UPLOAD_DIR, file_id, filename)
     path.write_bytes(content)
 
     validation_report: dict | None = None
@@ -266,7 +459,7 @@ def store_upload(filename: str, content: bytes) -> dict:
 
     from services.object_store import stage_bytes
 
-    object_uri = stage_bytes(f"uploads/{file_id}/{filename}", content)
+    object_uri = stage_bytes(f"uploads/{file_id}/{safe_upload_filename(filename)}", content)
 
     record = {
         "file_id": file_id,
@@ -313,9 +506,12 @@ def get_file(file_id: str) -> dict | None:
     uri = str(record.get("object_uri") or "")
     if uri.startswith("s3://"):
         from services.object_store import materialize_local
-        from services.platform_config import upload_dir
 
-        dest = upload_dir() / f"{file_id}_{record.get('filename') or 'upload.bin'}"
+        try:
+            dest = upload_path_for(upload_dir(), file_id, record.get("filename"))
+        except ValueError:
+            logging.getLogger(__name__).warning("Refused to materialize upload %s outside upload_dir", file_id)
+            return record
         if materialize_local(uri, dest):
             record = dict(record)
             record["path"] = str(dest)
@@ -325,6 +521,42 @@ def get_file(file_id: str) -> dict | None:
         return record
     # Metadata known but bytes unreachable on this replica.
     return record if record.get("object_uri") else None
+
+
+def iter_stored_upload_rows(file_id: str | None):
+    """Lazy iterator over every row of a persisted upload, or ``None``.
+
+    Studio Validate posts a 25–500 row preview. Execute already re-reads the
+    same bytes. When ``/connectors/upload`` persisted a ``file_id``, Validate
+    must scan that population too — peek-inferred NUMBER(9,6) hid
+    ``7.9166665`` at row 293 of flights-1m.csv until write quarantine.
+    Never materializes the file; the fit scan is already lazy when nothing
+    is bounded.
+    """
+    fid = str(file_id or "").strip()
+    if not fid:
+        return None
+    record = get_file(fid)
+    if not record:
+        return None
+    path = Path(record.get("path") or "")
+    if not path.exists():
+        return None
+    filename = str(record.get("filename") or path.name or "upload.csv")
+    try:
+        from transfer.file_stream import iter_source_rows
+    except ImportError:  # pragma: no cover - tests with src on PYTHONPATH
+        from src.transfer.file_stream import iter_source_rows
+    try:
+        return iter_source_rows(str(path), filename)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "stored upload %s could not be streamed for Validate: %s",
+            fid,
+            exc,
+            exc_info=exc,
+        )
+        return None
 
 
 def get_file_chunks(file_id: str, chunk_size: int = 10000):
@@ -339,12 +571,34 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
     delimiter = record["delimiter"]
 
     if fmt == "csv":
-        import csv
+        from services.csv_codec import iter_csv_records
+
+        # C04: unquoted empty is None, quoted "" is '' — the chunk path sees
+        # the same cells the stream path does; the carrier bind then lands
+        # '' as NULL on non-text columns.
+        try:
+            from transfer.file_stream import file_empty_cell_bind
+        except ImportError:  # pragma: no cover
+            from src.transfer.file_stream import file_empty_cell_bind
+
+        _carriers = {
+            str(c.get("name") or ""): str(c.get("inferred_type") or "")
+            for c in (record.get("columns") or [])
+            if isinstance(c, dict)
+        }
         with open(path, "r", encoding=encoding) as f:
-            reader = csv.reader(f, delimiter=delimiter)
+            reader = iter_csv_records(f, delimiter)
             headers = next(reader, [])
             chunk = []
             for row in reader:
+                if not row or all(c is None or str(c).strip() == "" for c in row):
+                    continue
+                row = [
+                    file_empty_cell_bind(v, _carriers.get(headers[i], ""))
+                    if i < len(headers)
+                    else v
+                    for i, v in enumerate(row)
+                ]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
                     yield headers, chunk
@@ -352,12 +606,11 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             if chunk:
                 yield headers, chunk
     elif fmt == "json":
-        import json
 
         from services.json_tabular import extract_json_records
 
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json_loads_exact(f.read())
         records = extract_json_records(data)
         if not records:
             return
@@ -374,7 +627,6 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
             yield headers, rows
     elif fmt == "jsonl":
-        import json
         # Two-pass: union sparse keys across the whole file, then project rows.
         headers: list[str] = []
         seen: set[str] = set()
@@ -383,7 +635,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 if not isinstance(obj, dict):
                     raise ValueError("JSONL must contain one JSON object per line")
                 for k in obj.keys():
@@ -398,7 +650,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 row = [cell_to_string(obj.get(h, "")) for h in headers]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
@@ -440,6 +692,7 @@ class FileParser:
 
     SUPPORTED_TYPES = [
         "json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+        "yaml", "fixed_width",
         "pdf", "docx", "html",
     ]
 
@@ -452,6 +705,10 @@ class FileParser:
         payload.  This keeps billion-row CSV/JSONL ingest path-compatible.
         """
         filename_lower = (filename or "").lower()
+        # A SQLite database is recognised by its header before any name or
+        # text heuristic (a .db upload with commas in a page is still SQLite).
+        if content and bytes(content[:16]) == b"SQLite format 3\x00":
+            return "sqlite"
 
         def _from_extension(name: str) -> str | None:
             if name.endswith(".json"):
@@ -460,6 +717,8 @@ class FileParser:
                 return "csv"
             if name.endswith(".tsv"):
                 return "tsv"
+            if name.endswith(".psv"):
+                return "csv"
             if name.endswith((".jsonl", ".ndjson")):
                 return "jsonl" if name.endswith(".jsonl") else "ndjson"
             if name.endswith((".xlsx", ".xls")):
@@ -468,6 +727,10 @@ class FileParser:
                 return "parquet"
             if name.endswith(".xml"):
                 return "xml"
+            if name.endswith((".yaml", ".yml")):
+                return "yaml"
+            if name.endswith(".fwf"):
+                return "fixed_width"
             if name.endswith(".avro"):
                 return "avro"
             if name.endswith(".orc"):
@@ -478,6 +741,8 @@ class FileParser:
                 return "docx"
             if name.endswith((".html", ".htm")):
                 return "html"
+            if name.endswith((".sqlite", ".sqlite3")):
+                return "sqlite"
             return None
 
         ext_result = _from_extension(filename_lower)
@@ -533,7 +798,7 @@ class FileParser:
         try:
             from services.json_tabular import extract_json_records
 
-            data = json.loads(content)
+            data = json_loads_exact(content)
             try:
                 records = extract_json_records(data)
             except ValueError as exc:
@@ -612,7 +877,7 @@ class FileParser:
                 if not line:
                     continue
                 try:
-                    record = json.loads(line)
+                    record = json_loads_exact(line)
                     if not isinstance(record, dict):
                         return ParseResult(
                             success=False,
@@ -656,14 +921,29 @@ class FileParser:
             )
 
     @staticmethod
-    def parse_csv(content: str | bytes, delimiter: str = ",") -> ParseResult:
-        """Parse CSV/TSV file content — auto-detects delimiter and encoding."""
+    def parse_csv(
+        content: str | bytes,
+        delimiter: str = ",",
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        """Parse CSV/TSV content through the declared read window.
+
+        Without ``options`` the encoding is UTF-8, the delimiter is sniffed and
+        row 1 is the header — the historical behaviour. A declared encoding or
+        delimiter replaces the sniff instead of competing with it, and the
+        header/skip window is the same one Excel uses, so one declaration means
+        one population everywhere.
+        """
+        opts = options or ReadOptions()
         try:
             if isinstance(content, bytes):
                 # Strict decode — errors="replace" silently corrupts bytes into
                 # U+FFFD and looks like a successful faithful ingest.
+                from services.csv_profiler import detect_encoding
+
+                encoding = opts.encoding or detect_encoding(content)
                 try:
-                    text = content.decode("utf-8").lstrip("\ufeff")
+                    text = content.decode(encoding).lstrip("\ufeff")
                 except UnicodeDecodeError as exc:
                     return ParseResult(
                         success=False,
@@ -671,7 +951,7 @@ class FileParser:
                         columns=[],
                         row_count=0,
                         error=(
-                            f"CSV is not valid UTF-8 ({exc}); refuse silent "
+                            f"CSV is not valid {encoding} ({exc}); refuse silent "
                             "byte replacement — re-encode or declare the source encoding"
                         ),
                         file_type="csv",
@@ -687,10 +967,22 @@ class FileParser:
                     error="CSV file is empty",
                     file_type="csv",
                 )
-            delim = detect_delimiter(text[:8192])
-            reader = csv.DictReader(io.StringIO(text), delimiter=delim)
-            records = list(reader)
-            columns = reader.fieldnames or []
+            delim = opts.delimiter or detect_delimiter(text[:8192])
+            # C04: preview decodes with the one codec — an unquoted empty
+            # field is None and a quoted "" is '', so the preview shows the
+            # same values the transfer will write.
+            from services.csv_codec import iter_csv_records
+
+            columns, windowed = header_and_rows(
+                iter_csv_records(
+                    io.StringIO(text),
+                    delim,
+                    empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                ),
+                opts,
+                header_names=csv_header_names,
+                source_label="CSV",
+            )
             if not columns:
                 return ParseResult(
                     success=False,
@@ -700,6 +992,12 @@ class FileParser:
                     error="CSV has no header row",
                     file_type="csv",
                 )
+            # ``restval=None`` / extra-cell semantics of the streaming reader, so
+            # the preview and the writer describe the same rows.
+            records = [
+                row_to_record(columns, row, source_label="CSV row", missing=None)
+                for row in windowed
+            ]
             file_type = "tsv" if delim == "\t" else "csv"
             return ParseResult(
                 success=True,
@@ -707,6 +1005,17 @@ class FileParser:
                 columns=list(columns),
                 row_count=len(records),
                 file_type=file_type,
+            )
+        except ReadOptionsError as exc:
+            # A refused window already names the fix; do not bury it in a
+            # generic parse error.
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type="csv",
             )
         except Exception as e:
             return ParseResult(
@@ -719,8 +1028,16 @@ class FileParser:
             )
 
     @staticmethod
-    def parse_excel(content: bytes, max_rows: int = 100_000) -> ParseResult:
-        """Parse Excel (.xlsx) workbook — first sheet, header row."""
+    def parse_excel(
+        content: bytes,
+        max_rows: int = 100_000,
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        """Parse an Excel (.xlsx) workbook through the declared read window.
+
+        Without ``options`` this is the active sheet with row 1 as the header —
+        the historical behaviour.
+        """
         try:
             import sys
             from pathlib import Path
@@ -732,7 +1049,7 @@ class FileParser:
 
             records: list[dict] = []
             columns: list[str] = []
-            for batch in iter_excel_batches(content, chunk_size=5000):
+            for batch in iter_excel_batches(content, chunk_size=5000, options=options):
                 if not columns and batch:
                     columns = list(batch[0].keys())
                 # Non-streaming Excel must not silently truncate — same honesty bar
@@ -783,7 +1100,14 @@ class FileParser:
 
             import pyarrow.parquet as pq
 
+            from services.arrow_schema import (
+                columns_from_arrow_schema,
+                schema_from_arrow,
+            )
+
             table = pq.read_table(io.BytesIO(content))
+            schema_map = schema_from_arrow(table.schema)
+            column_meta = columns_from_arrow_schema(table.schema)
             total_rows = int(table.num_rows)
             if total_rows > max_rows:
                 return ParseResult(
@@ -796,22 +1120,21 @@ class FileParser:
                         f"{max_rows:,}-row non-streaming limit; use streaming ingest."
                     ),
                     file_type="parquet",
+                    schema_map=schema_map or None,
+                    column_meta=column_meta or None,
                 )
-            df = table.to_pandas()
-            records = df.to_dict(orient="records")
-            columns = [str(c) for c in df.columns.tolist()]
-            for rec in records:
-                for k, v in list(rec.items()):
-                    if hasattr(v, "item"):
-                        rec[k] = v.item()
-                    elif v != v:  # NaN
-                        rec[k] = None
+            # to_pylist keeps DECIMAL / int64 / nested fidelity. to_pandas()
+            # invented nullable integers as float64 and collapsed long decimals.
+            records = table.to_pylist()
+            columns = list(schema_map.keys()) if schema_map else [str(c) for c in table.column_names]
             return ParseResult(
                 success=True,
                 data=records,
                 columns=columns,
                 row_count=total_rows,
                 file_type="parquet",
+                schema_map=schema_map or None,
+                column_meta=column_meta or None,
             )
         except ImportError:
             return ParseResult(
@@ -953,6 +1276,22 @@ class FileParser:
             import xmltodict
 
             text = content.decode("utf-8") if isinstance(content, bytes) else content
+            # Phase D6 — reject XXE / entity expansion before xmltodict (expat).
+            try:
+                from defusedxml import ElementTree as DET
+
+                DET.fromstring(text)  # nosec B314 — defusedxml, not stdlib
+            except ImportError:
+                pass
+            except Exception as exc:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error=f"XML rejected (unsafe or malformed): {exc}",
+                    file_type="xml",
+                )
             root = xmltodict.parse(text)
 
             records, selected_path, ambiguity = FileParser._extract_xml_records(root)
@@ -1039,12 +1378,16 @@ class FileParser:
         return found
 
     @staticmethod
-    def _extract_xml_records(node: Any, depth: int = 0) -> tuple[list[dict] | None, str | None, str | None]:
-        """Return ``(records, selected_path, ambiguity_error)``.
+    def _unique_xml_collection(
+        node: Any,
+    ) -> tuple[list[dict] | None, str | None, str | None]:
+        """Unique repeating list-of-object, or ambiguity.
 
-        Multiple sibling repeating collections → fail closed (never pick one silently).
+        ``(rows, path, None)`` when one collection wins (including
+        shallowest-path tie-break). ``(None, None, error)`` when sibling
+        collections tie — never pick one silently. ``(None, None, None)``
+        when xmltodict collapsed 0/1 record into a dict (no list yet).
         """
-        del depth  # discovery walks with its own depth
         if isinstance(node, list):
             records = [
                 FileParser._flatten_xml_item(item)
@@ -1054,13 +1397,10 @@ class FileParser:
             if any(isinstance(item, dict) for item in node):
                 return records, "root[]", None
             return None, None, None
-
         if not isinstance(node, dict):
             return None, None, None
-
         collections = FileParser._discover_xml_collections(node)
         if len(collections) > 1:
-            # Prefer the shallowest path; if multiple at same depth, refuse.
             depths = [(p.count("/"), p, rows) for p, rows in collections]
             min_depth = min(d for d, _, _ in depths)
             top = [(p, rows) for d, p, rows in depths if d == min_depth]
@@ -1077,8 +1417,24 @@ class FileParser:
         if len(collections) == 1:
             path, rows = collections[0]
             return rows, path, None
+        return None, None, None
 
-        # Single-record XMLs: a single child dict becomes one row.
+    @staticmethod
+    def _extract_xml_records(node: Any, depth: int = 0) -> tuple[list[dict] | None, str | None, str | None]:
+        """Return ``(records, selected_path, ambiguity_error)``.
+
+        Multiple sibling repeating collections → fail closed (never pick one silently).
+        """
+        del depth  # discovery walks with its own depth
+        rows, path, err = FileParser._unique_xml_collection(node)
+        if err:
+            return None, None, err
+        if rows is not None:
+            return rows, path, None
+        if not isinstance(node, dict):
+            return None, None, None
+        # Ingest fallback: a single child dict becomes one row. Dest COUNT
+        # does not use this — a document XML is not a table of one.
         if len(node) == 1:
             value = list(node.values())[0]
             if isinstance(value, dict):
@@ -1104,51 +1460,99 @@ class FileParser:
         return out
 
     @classmethod
-    def parse(cls, content: str | bytes, filename: str, *, enable_ocr: bool = False) -> ParseResult:
+    def parse(
+        cls,
+        content: str | bytes,
+        filename: str,
+        *,
+        enable_ocr: bool = False,
+        read_options: ReadOptions | None = None,
+    ) -> ParseResult:
         """Parse file based on type detection, transparently handling gzip."""
         raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
 
         # Transparent gzip decompression for in-memory payloads.
         if isinstance(content, bytes) and raw_bytes[:2] == b"\x1f\x8b":
             try:
-                raw_bytes = gzip.decompress(raw_bytes)
+                raw_bytes = gunzip_capped(raw_bytes)
+            except PayloadTooLarge:
+                raise
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         file_type = cls.detect_file_type(filename, raw_bytes)
 
+        # The declared encoding decides how these bytes become text. Decoding as
+        # UTF-8 first turned a correctly declared cp1252 export into a refusal
+        # the operator could not answer: the panel offers an Encoding control,
+        # and the profile read has to obey it exactly as the write path does.
+        declared_encoding = (
+            read_options.encoding if read_options is not None else ""
+        ) or ""
         if isinstance(content, bytes):
             decoded = raw_bytes
+            if not declared_encoding and file_type in {"csv", "tsv"}:
+                # The same sniff the streaming writer reads the file with: a
+                # BOM, UTF-16 without one, UTF-8, else Windows-1252. Refusing
+                # here dropped a cp1252 / UTF-16 upload from the dataset index
+                # ("Uploaded dataset ... was not found") (round 10).
+                from services.csv_profiler import detect_encoding
+
+                declared_encoding = detect_encoding(decoded)
             try:
-                content = decoded.decode("utf-8")
+                content = decoded.decode(declared_encoding or "utf-8")
             except UnicodeDecodeError as exc:
                 # Text tabular formats must not silently latin-1 mojibake.
-                if file_type in {"csv", "tsv", "json", "jsonl", "xml", "fixed_width"}:
+                if file_type in {"csv", "tsv", "json", "jsonl", "xml", "fixed_width", "yaml"}:
+                    stated = (
+                        f"{declared_encoding} as declared"
+                        if declared_encoding
+                        else "UTF-8"
+                    )
                     return ParseResult(
                         success=False,
                         data=[],
                         columns=[],
                         row_count=0,
                         error=(
-                            f"File is not valid UTF-8 ({exc}); refuse silent "
-                            "latin-1 fallback — re-encode or declare the source encoding"
+                            f"File is not valid {stated} ({exc}); refuse silent "
+                            "byte replacement — re-encode the file or declare the "
+                            "encoding it really uses"
                         ),
                         file_type=file_type,
                     )
                 content = decoded.decode("latin-1")
+
+        # A read window this reader cannot honour must refuse, not be dropped:
+        # ingesting a different population than the operator declared is worse
+        # than failing the upload.
+        if read_options is not None and not read_options.is_default:
+            unsupported = unsupported_read_options(read_options, file_type)
+            if unsupported:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error=unsupported,
+                    file_type=file_type,
+                )
 
         if file_type == "json":
             return cls.parse_json(content)
         elif file_type == "jsonl":
             return cls.parse_jsonl(content)
         elif file_type == "csv":
-            return cls.parse_csv(content, delimiter=",")
+            return cls.parse_csv(content, delimiter=",", options=read_options)
         elif file_type == "tsv":
-            return cls.parse_csv(content, delimiter="\t")
+            return cls.parse_csv(content, delimiter="\t", options=read_options)
         elif file_type == "ndjson":
             return cls.parse_jsonl(content)
         elif file_type == "excel":
-            return cls.parse_excel(raw_bytes)
+            from services.excel_parser import require_xlsx
+
+            require_xlsx(filename)
+            return cls.parse_excel(raw_bytes, options=read_options)
         elif file_type == "parquet":
             return cls.parse_parquet(raw_bytes)
         elif file_type == "avro":
@@ -1157,6 +1561,10 @@ class FileParser:
             return cls.parse_orc(raw_bytes)
         elif file_type == "xml":
             return cls.parse_xml(raw_bytes)
+        elif file_type == "yaml":
+            return cls.parse_yaml(raw_bytes, options=read_options)
+        elif file_type == "fixed_width":
+            return cls.parse_fixed_width(raw_bytes, options=read_options)
         elif file_type in ("pdf", "docx", "html"):
             return cls.parse_document(raw_bytes, filename, file_type, enable_ocr=enable_ocr)
         else:
@@ -1167,6 +1575,113 @@ class FileParser:
                 row_count=0,
                 error=f"Unsupported file type: {file_type}",
                 file_type=file_type
+            )
+
+    @staticmethod
+    def parse_yaml(
+        content: str | bytes,
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        from services.yaml_tabular import YAMLTabularError, iter_yaml_dicts
+
+        encoding = (options.encoding if options is not None else "") or "utf-8"
+        payload: bytes | str = content
+        try:
+            sample: list[dict] = []
+            columns: list[str] = []
+            seen: set[str] = set()
+            total = 0
+            for rec in iter_yaml_dicts(payload, encoding=encoding):
+                if not isinstance(rec, dict):
+                    continue
+                total += 1
+                if len(sample) < 100:
+                    sample.append(rec)
+                    for key in rec:
+                        name = str(key).strip()
+                        if name and name not in seen:
+                            seen.add(name)
+                            columns.append(name)
+            return ParseResult(
+                success=True,
+                data=sample,
+                columns=columns,
+                row_count=total,
+                file_type="yaml",
+            )
+        except YAMLTabularError as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type="yaml",
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=f"YAML parse error: {exc}",
+                file_type="yaml",
+            )
+
+    @staticmethod
+    def parse_fixed_width(
+        content: str | bytes,
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        from services.fixed_width_layout import (
+            FixedWidthError,
+            iter_fixed_width_dicts,
+        )
+
+        encoding = (options.encoding if options is not None else "") or "utf-8"
+        layout = options.fixed_width_layout if options is not None else ()
+        try:
+            sample: list[dict] = []
+            columns: list[str] = []
+            seen: set[str] = set()
+            total = 0
+            for rec in iter_fixed_width_dicts(
+                content, layout, encoding=encoding
+            ):
+                if not isinstance(rec, dict):
+                    continue
+                total += 1
+                if len(sample) < 100:
+                    sample.append(rec)
+                    for key in rec:
+                        name = str(key).strip()
+                        if name and name not in seen:
+                            seen.add(name)
+                            columns.append(name)
+            return ParseResult(
+                success=True,
+                data=sample,
+                columns=columns,
+                row_count=total,
+                file_type="fixed_width",
+            )
+        except FixedWidthError as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type="fixed_width",
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=f"Fixed-width parse error: {exc}",
+                file_type="fixed_width",
             )
 
     @staticmethod
@@ -1263,4 +1778,421 @@ class FileParser:
 
         schema, _intel = infer_schema_map(samples)
         return schema
+
+
+def _xml_local_name(tag: object) -> str:
+    """Clark ``{ns}local`` → local, so sibling collections still collide on name."""
+    raw = str(tag or "")
+    if raw.startswith("{") and "}" in raw:
+        return raw.rsplit("}", 1)[-1]
+    return raw
+
+
+def _xml_end_kind(elem: Any, had_element_child: bool) -> str:
+    """dict / empty / scalar — the same three xmltodict shapes COUNT already used."""
+    if had_element_child or getattr(elem, "attrib", None):
+        return "dict"
+    text = (getattr(elem, "text", None) or "").strip()
+    return "scalar" if text else "empty"
+
+
+def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
+    """Byte source for iterparse. Path (including gzip) streams; bytes/str stay in RAM."""
+    from services.dest_precount import artifact_byte_source
+
+    return artifact_byte_source(content)
+
+
+def _xml_count_as_text(content: bytes | str | Path) -> str | None:
+    """ImportError fallback only — never the GB-scale COUNT path.
+
+    Gzip paths use ``artifact_byte_source`` so ``*.xml.gz`` decodes the
+    decompressed stream. ``Path.read_text`` on compressed bytes was
+    unmeasured dest COUNT (None), not dest=0.
+    """
+    try:
+        if isinstance(content, str):
+            return content
+        from services.dest_precount import artifact_byte_source
+
+        source, closer = artifact_byte_source(content)
+        try:
+            raw = read_all_bounded(source)
+        finally:
+            if closer is not None:
+                closer()
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return raw
+        return raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
+        return None
+
+
+def _xml_unique_from_parent_stats(
+    parent_stats: dict[str, dict[str, list[int]]],
+    *,
+    root_text_nonempty: bool,
+) -> tuple[int, str | None, str | None] | None:
+    """Unique shallowest list-of-object as ``(n, parent_path, tag)``.
+
+    A collection is one child tag with ≥2 dict-like occurrences (element
+    children or attributes). Nested inner lists (``items`` under ``record``)
+    lose to the outer path. Sibling collections at the same depth stay
+    unmeasured — never guess. No collection: empty wrapper ``(0, None, None)``;
+    one empty or dict-like child tag ``(1, path, tag)`` (xmltodict's
+    one-record collapse); scalar-only or mixed sibling fields ``None``,
+    not dest=1. COUNT and Gate-8 share this identity; COUNT returns ``n``,
+    checksum emits flattened dicts at ``(path, tag)``.
+    """
+    collections: list[tuple[int, int, str, str]] = []
+    for ppath, tags in parent_stats.items():
+        depth = ppath.count("/")
+        for tag, row in tags.items():
+            n, dict_n, _empty_n, _scalar_n = row
+            if n >= 2 and dict_n >= 2:
+                collections.append((depth, n, ppath, tag))
+    if collections:
+        min_depth = min(item[0] for item in collections)
+        at_min = [item for item in collections if item[0] == min_depth]
+        if len(at_min) != 1:
+            return None
+        _depth, n, ppath, tag = at_min[0]
+        return n, ppath, tag
+    if not parent_stats:
+        return None if root_text_nonempty else (0, None, None)
+    min_depth = min(path.count("/") for path in parent_stats)
+    roots = [path for path in parent_stats if path.count("/") == min_depth]
+    if len(roots) != 1:
+        return None
+    children = parent_stats[roots[0]]
+    if len(children) != 1:
+        return None
+    tag, row = next(iter(children.items()))
+    n, _dict_n, _empty_n, scalar_n = row
+    if n == 1 and not scalar_n:
+        return 1, roots[0], tag
+    return None
+
+
+def _xml_stax_unique(
+    source: Any, xml_iterparse: Any
+) -> tuple[int, str | None, str | None] | None:
+    """One StAX walk. Unique ``(n, parent_path, tag)``, else unmeasured."""
+    parent_stats: dict[str, dict[str, list[int]]] = {}
+    stack: list[str] = []
+    saw_child: list[bool] = []
+    saw_root = False
+    root_text_nonempty = False
+    for event, elem in xml_iterparse(  # nosec B314
+        source,
+        events=("start", "end"),
+        forbid_dtd=True,
+        forbid_entities=True,
+        forbid_external=True,
+    ):
+        if event == "start":
+            saw_root = True
+            if saw_child:
+                saw_child[-1] = True
+            stack.append(_xml_local_name(elem.tag))
+            saw_child.append(False)
+            continue
+        kind = _xml_end_kind(elem, bool(saw_child and saw_child[-1]))
+        tag = stack.pop() if stack else _xml_local_name(elem.tag)
+        if saw_child:
+            saw_child.pop()
+        if stack:
+            parent_path = "/" + "/".join(stack)
+            bucket = parent_stats.setdefault(parent_path, {})
+            row = bucket.get(tag)
+            if row is None:
+                row = [0, 0, 0, 0]
+                bucket[tag] = row
+            row[0] += 1
+            if kind == "dict":
+                row[1] += 1
+            elif kind == "empty":
+                row[2] += 1
+            else:
+                row[3] += 1
+        else:
+            root_text_nonempty = bool((elem.text or "").strip())
+        elem.clear()
+    if not saw_root:
+        return None
+    return _xml_unique_from_parent_stats(
+        parent_stats, root_text_nonempty=root_text_nonempty
+    )
+
+
+def _count_xml_records_stax(source: Any, xml_iterparse: Any) -> int | None:
+    """StAX unique-path COUNT. ``elem.clear()`` drops text; empty shells stay.
+
+    defusedxml/stdlib ``iterparse`` has no lxml ``getprevious()`` sibling
+    unlink, so memory is O(n) empty Element objects under a wide parent,
+    not O(document text). O(depth) unlink is a future enhancement of this
+    kernel, not a second COUNT. Gate-8 cell dicts are a second pass of
+    this same unique path (``iter_xml_dicts``), not a DOM ingest parse.
+    """
+    found = _xml_stax_unique(source, xml_iterparse)
+    return None if found is None else found[0]
+
+
+def _count_xml_records_dom(text: str) -> int | None:
+    """xmltodict COUNT when defusedxml is absent. Same unique-path identity."""
+    try:
+        import xmltodict
+    except ImportError:
+        return None
+    try:
+        root = xmltodict.parse(text)
+    except Exception:
+        return None
+    rows, _path, err = FileParser._unique_xml_collection(root)
+    if err:
+        return None
+    if rows is not None:
+        return len(rows)
+    return _count_xml_collapsed_table(root)
+
+
+def count_xml_records(content: bytes | str | Path) -> int | None:
+    """Dest-engine record COUNT of tabular XML. Never ingest ``max_rows``.
+
+    Population is the unique repeating list-of-object the ingest parser
+    already discovers. Empty ``<records/>`` is 0. One collapsed
+    ``<record>`` is 1. Sibling collections at the same depth stay
+    unmeasured — never guess a path. A document (scalar fields under a
+    wrapper, no record element) is unmeasured, not dest=1. Malformed /
+    XXE / missing parser stay unmeasured, not dest=0. ``parse_xml`` ingest
+    fallback that treats the whole document as one row is not this COUNT.
+
+    Walk is defusedxml ``iterparse`` (XXE-safe StAX, ``forbid_dtd``).
+    ``fromstring`` + xmltodict DOM is not the COUNT — a GB export must
+    not become two in-memory trees. A stream error or a DOCTYPE is
+    unmeasured; do not then DOM-parse the same poison file. Writer XML
+    has no DTD. xmltodict remains the ImportError fallback when
+    defusedxml is absent. Path inputs are counted from disk; bytes
+    (object-store GET) stream from a buffer already in RAM. Local gzip
+    XML streams; the ImportError DOM fallback does not slurp a gzip path.
+    Object-store GET gzip streams through a caller-owned ``GzipFile``.
+    Gate-8 cell checksum reuses this uniqueness via ``iter_xml_dicts``
+    (second StAX pass at the discovered path; one-shot GET is spooled).
+    """
+    try:
+        from defusedxml.ElementTree import iterparse as xml_iterparse
+    except ImportError:
+        text = _xml_count_as_text(content)
+        if text is None:
+            return None
+        return _count_xml_records_dom(text)
+    closer = None
+    try:
+        source, closer = _xml_count_open(content)
+        return _count_xml_records_stax(source, xml_iterparse)
+    except (OSError, UnicodeEncodeError, TypeError):
+        return None
+    except Exception:
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _xml_elem_value(elem: Any) -> Any:
+    """Element → xmltodict-shaped value (text, attr dict, or nested map/list)."""
+    children = list(elem)
+    attrib = dict(getattr(elem, "attrib", None) or {})
+    text = (getattr(elem, "text", None) or "").strip()
+    if not children:
+        if attrib:
+            rec = {f"@{k}": v for k, v in attrib.items()}
+            if text:
+                rec["#text"] = text
+            return rec
+        return text
+    rec = {f"@{k}": v for k, v in attrib.items()}
+    groups: dict[str, list[Any]] = {}
+    for child in children:
+        groups.setdefault(_xml_local_name(child.tag), []).append(_xml_elem_value(child))
+    for tag, vals in groups.items():
+        rec[tag] = vals if len(vals) > 1 else vals[0]
+    return rec
+
+
+def _xml_elem_record(elem: Any) -> dict[str, Any]:
+    """Same flatten ingest uses — attributes ``@attr``, nested dicts dotted.
+
+    An empty record element (``<record/>``) is one empty object ``{}``,
+    matching xmltodict's collapse and the ImportError DOM fallback — never
+    a synthetic ``value`` cell that would split COUNT=1 from Gate-8.
+    """
+    raw = _xml_elem_value(elem)
+    if not isinstance(raw, dict):
+        if raw in ("", None):
+            return {}
+        return {"value": raw}
+    return FileParser._flatten_xml_item(raw)
+
+
+def _iter_xml_dicts_at_path(
+    source: Any, xml_iterparse: Any, parent_path: str, tag: str
+) -> Any:
+    """Second StAX pass: emit flattened dicts at the unique COUNT path.
+
+    Pass 1 (COUNT) may ``elem.clear()`` on every end — it only needs
+    dict/empty/scalar kind. Pass 2 must not: clearing a child before its
+    parent record ends would serialize empty shells (``id=""``) and still
+    COUNT as n. Clear only after the unique-path record is materialized.
+    Empty shells of already-emitted records stay under the parent — the
+    same O(n) COUNT lesson; O(depth) unlink is a future of this kernel.
+    """
+    stack: list[str] = []
+    for event, elem in xml_iterparse(  # nosec B314
+        source,
+        events=("start", "end"),
+        forbid_dtd=True,
+        forbid_entities=True,
+        forbid_external=True,
+    ):
+        if event == "start":
+            stack.append(_xml_local_name(elem.tag))
+            continue
+        local = stack.pop() if stack else _xml_local_name(elem.tag)
+        current_parent = "/" + "/".join(stack) if stack else ""
+        if current_parent == parent_path and local == tag:
+            yield _xml_elem_record(elem)
+            elem.clear()
+
+
+def _iter_xml_dicts_dom(text: str) -> Any:
+    """ImportError fallback when defusedxml is absent. Same unique-path as COUNT."""
+    from services.dest_precount import UnmeasuredArtifact
+
+    try:
+        import xmltodict
+    except ImportError as exc:
+        raise UnmeasuredArtifact("xml_checksum_needs_parser") from exc
+    try:
+        root = xmltodict.parse(text)
+    except Exception as exc:
+        raise UnmeasuredArtifact("xml_unparseable") from exc
+    rows, _path, err = FileParser._unique_xml_collection(root)
+    if err:
+        raise UnmeasuredArtifact("xml_ambiguous_path")
+    if rows is not None:
+        yield from rows
+        return
+    n = _count_xml_collapsed_table(root)
+    if n == 0:
+        return
+    if n == 1 and isinstance(root, dict) and len(root) == 1:
+        wrapper = next(iter(root.values()))
+        if wrapper is None or wrapper == "":
+            yield {}
+            return
+        if isinstance(wrapper, dict) and len(wrapper) == 1:
+            inner = next(iter(wrapper.values()))
+            if inner is None or inner == "":
+                yield {}
+                return
+            if isinstance(inner, dict):
+                yield FileParser._flatten_xml_item(inner)
+                return
+    raise UnmeasuredArtifact("xml_unmeasured")
+
+
+def iter_xml_dicts(content: bytes | str | Path) -> Any:
+    """Same unique-path population as ``count_xml_records``, as dicts for Gate-8.
+
+    Pass 1 is the COUNT StAX unique-path walk. Pass 2 emits flattened
+    records at that path. A one-shot GET is spooled once, then both
+    passes read the spool — never a prefix digest, never ingest
+    ``parse_xml`` (max_rows / document-as-one). Ambiguous siblings,
+    document XML, XXE, and malformed raise ``UnmeasuredArtifact``.
+    Empty well-formed yields nothing.
+    """
+    from services.dest_precount import UnmeasuredArtifact, rewindable_byte_source
+
+    try:
+        from defusedxml.ElementTree import iterparse as xml_iterparse
+    except ImportError:
+        text = _xml_count_as_text(content)
+        if text is None:
+            raise UnmeasuredArtifact("xml_unreadable")
+        yield from _iter_xml_dicts_dom(text)
+        return
+    closer = None
+    spool_closer = None
+    try:
+        source, closer = _xml_count_open(content)
+        rewindable, spool_closer = rewindable_byte_source(source)
+        found = _xml_stax_unique(rewindable, xml_iterparse)
+        if found is None:
+            raise UnmeasuredArtifact("xml_unmeasured")
+        n, parent_path, tag = found
+        if n == 0 or parent_path is None or tag is None:
+            return
+        rewindable.seek(0)
+        yielded = 0
+        for rec in _iter_xml_dicts_at_path(
+            rewindable, xml_iterparse, parent_path, tag
+        ):
+            yielded += 1
+            yield rec
+        if yielded != n:
+            raise UnmeasuredArtifact("xml_checksum_count_mismatch")
+    except UnmeasuredArtifact:
+        raise
+    except (OSError, UnicodeEncodeError, TypeError) as exc:
+        raise UnmeasuredArtifact("xml_unreadable") from exc
+    except Exception as exc:
+        raise UnmeasuredArtifact("xml_unparseable") from exc
+    finally:
+        if spool_closer is not None:
+            try:
+                spool_closer()
+            except Exception:
+                pass
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _count_xml_collapsed_table(root: Any) -> int | None:
+    """0/1 record after xmltodict collapsed a list. Document XML stays None."""
+    if not isinstance(root, dict) or len(root) != 1:
+        return None
+    value = next(iter(root.values()))
+    if value is None or value == "":
+        return 0
+    if isinstance(value, list):
+        if not value:
+            return 0
+        if all(isinstance(item, dict) for item in value):
+            return len(value)
+        return None
+    if not isinstance(value, dict):
+        return None
+    if len(value) != 1:
+        return None
+    inner = next(iter(value.values()))
+    if inner is None or inner == "":
+        return 1
+    if isinstance(inner, dict):
+        return 1
+    if isinstance(inner, list):
+        if not inner:
+            return 0
+        if all(isinstance(item, dict) for item in inner):
+            return len(inner)
+        return None
+    return None
 

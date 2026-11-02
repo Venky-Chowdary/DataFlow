@@ -65,12 +65,17 @@ def test_specialty_carrier_would_collapse_to_varchar():
         specialty_carrier_would_collapse,
     )
 
-    assert specialty_carrier_would_collapse("INET", "VARCHAR(45)") is True
+    assert specialty_carrier_would_collapse("INET", "VARCHAR(45)") is False
+    # Width-safe IPv6 wire (45) preserves value; bare TEXT/STRING collapses polarity.
+    assert specialty_carrier_would_collapse("INET", "TEXT") is True
+    assert specialty_carrier_would_collapse("INET", "VARCHAR(10)") is True
     assert specialty_carrier_would_collapse("PG_LSN", "TEXT") is True
     assert specialty_carrier_would_collapse("POINT", "STRING") is True
     assert specialty_carrier_would_collapse("INET", "INET") is False
     assert specialty_carrier_would_collapse("VARCHAR", "TEXT") is False
-    assert is_precision_collapse_coercion("INET", "VARCHAR(64)") is True
+    # VARCHAR(64) ≥ IPv6 wire floor — not a precision collapse; narrow width is.
+    assert is_precision_collapse_coercion("INET", "VARCHAR(64)") is False
+    assert is_precision_collapse_coercion("INET", "VARCHAR(10)") is True
     assert is_lossy_coercion("HSTORE", "VARCHAR") is True
     # Same specialty stays green.
     assert is_precision_collapse_coercion("INET", "INET") is False

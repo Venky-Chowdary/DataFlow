@@ -90,9 +90,9 @@ class TestMappingFidelityVerdict:
         assert verdict["type_narrowing"] is True
         assert "VARCHAR(255)" in verdict["reason"]
 
-    def test_safe_parse_is_cast_not_lossy(self):
-        # DECIMAL(12,2) → DECIMAL(12,2) loses nothing; only unparseable values
-        # are quarantined, so this must not be scored the same as truncation.
+    def test_safe_parse_is_preserve_not_lossy(self):
+        # DECIMAL(12,2) → DECIMAL(12,2) loses nothing; typed parse is a quarantine
+        # guard only — Map must not spam Review/Risk Contract (cast chip).
         verdict = mapping_fidelity(
             {
                 "source_type": "DECIMAL(12,2)",
@@ -100,8 +100,9 @@ class TestMappingFidelityVerdict:
                 "transform": "decimal",
             }
         )
-        assert verdict["verdict"] == "cast"
+        assert verdict["verdict"] == "preserve"
         assert verdict["type_narrowing"] is False
+        assert verdict.get("parse_guard") == "decimal"
 
     def test_decimal_scale_narrowing_is_lossy(self):
         verdict = mapping_fidelity(
@@ -184,8 +185,8 @@ class TestStampMappingFidelity:
         assert by_source["description"]["fidelity"] == "lossy_cast"
         assert by_source["description"]["type_narrowing"] is True
         # BIGINT → BIGINT gets an integer parse transform: the type path holds,
-        # so it must not be scored as data loss.
-        assert by_source["id"]["fidelity"] == "cast"
+        # so it must not be scored as data loss or Review-cast spam.
+        assert by_source["id"]["fidelity"] == "preserve"
         assert by_source["id"]["type_narrowing"] is False
 
 

@@ -1,0 +1,220 @@
+"""Physical placement (tablespace / filegroup / partitioning / clustering).
+
+The certificate used to print "No partitioning on source" from a flag nothing
+ever populated. Placement must now be *measured*; when it cannot be measured
+the aspect is ``unknown``, never a silent "absent".
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+
+import pytest
+
+os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+
+from services.physical_storage_metadata import (
+    PhysicalStorage,
+    compare_physical_storage,
+    probe_physical_storage,
+)
+from services.schema_fidelity import (
+    build_catalog_from_introspect,
+    plan_create_new_fidelity,
+)
+from tests.helpers.live_env import pg_creds, pg_up
+
+
+def _aspect(report: dict, aspect: str) -> dict:
+    items = [i for i in report["items"] if i["aspect"] == aspect]
+    assert items, f"certificate is silent about {aspect}"
+    return items[0]
+
+
+def _plan_report(storage: dict | None) -> dict:
+    catalog = build_catalog_from_introspect(
+        dialect="postgresql",
+        columns=["id", "created"],
+        column_types={"id": "INTEGER", "created": "DATE"},
+        nullable={"id": False, "created": True},
+        keys={"primary_key_columns": ["id"], "physical_storage": storage},
+    )
+    plan = plan_create_new_fidelity(
+        catalog,
+        dest_dialect="postgresql",
+        target_columns=["id", "created"],
+        target_types=["BIGINT", "DATE"],
+    )
+    return plan.report.to_dict()
+
+
+def test_unmeasured_placement_is_unknown_not_absent():
+    report = _plan_report(None)
+    for aspect in ("partitioning", "tablespace", "clustering"):
+        item = _aspect(report, aspect)
+        assert item["status"] == "unknown", item
+        assert "not absent" in item["reason"] or "not proven absent" in item["reason"]
+    assert report["unknown_count"] >= 3
+
+
+def test_probe_unavailable_keeps_placement_unknown():
+    unavailable = PhysicalStorage(
+        dialect="postgresql",
+        status="unavailable",
+        detail="relation not visible for this role",
+    )
+    report = _plan_report(unavailable.to_dict())
+    assert _aspect(report, "partitioning")["status"] == "unknown"
+    assert "not visible" in _aspect(report, "partitioning")["reason"]
+
+
+def test_partition_key_outside_pk_is_refused_with_reason():
+    """PostgreSQL rejects a unique constraint that misses the partition key.
+
+    Carrying the scheme anyway would cost the PRIMARY KEY, so the certificate
+    must refuse the placement and say which constraint blocks it.
+    """
+    measured = PhysicalStorage(
+        dialect="postgresql",
+        status="measured",
+        tablespace="fast_ssd",
+        is_default_tablespace=False,
+        partitioned=True,
+        partition_strategy="range",
+        partition_keys=["created"],
+        partition_count=4,
+        clustering=["id"],
+    )
+    report = _plan_report(measured.to_dict())
+    part = _aspect(report, "partitioning")
+    assert part["status"] == "unsupported"
+    assert "range on created" in part["source_detail"]
+    assert "PRIMARY KEY" in part["reason"]
+    # The destination tablespace catalog was never read here, so "fast_ssd is
+    # missing" is not a claim this run may make.
+    tablespace = _aspect(report, "tablespace")
+    assert tablespace["status"] == "unknown"
+    assert tablespace["source_detail"] == "fast_ssd"
+    assert _aspect(report, "clustering")["status"] == "unsupported"
+
+
+def test_measured_plain_table_is_skipped_not_unknown():
+    measured = PhysicalStorage(
+        dialect="postgresql",
+        status="measured",
+        tablespace="pg_default",
+        is_default_tablespace=True,
+        partitioned=False,
+        partition_keys=[],
+        partition_count=0,
+        clustering=[],
+    )
+    report = _plan_report(measured.to_dict())
+    for aspect in ("partitioning", "tablespace", "clustering"):
+        item = _aspect(report, aspect)
+        assert item["status"] == "skipped", item
+        assert "measured" in item["reason"]
+
+
+def test_compare_refuses_carry_claim_when_a_side_is_unmeasured():
+    measured = PhysicalStorage(dialect="postgresql", status="measured", partitioned=False)
+    blind = PhysicalStorage(dialect="postgresql", status="unavailable")
+    result = compare_physical_storage(measured, blind)
+    assert result.carried is None
+    assert result.status == "unavailable"
+    assert compare_physical_storage(measured, measured).carried is True
+
+
+def test_unknown_dialect_reports_unavailable_not_unpartitioned():
+    result = probe_physical_storage("cassandra", object(), "ks", "t")
+    assert result.status == "unavailable"
+    assert result.partitioned is None
+
+
+# --------------------------------------------------------------------------
+# live PostgreSQL
+# --------------------------------------------------------------------------
+
+_PG = pg_creds("P6")
+
+
+@pytest.mark.skipif(not pg_up("P6"), reason="live PostgreSQL not reachable")
+def test_live_postgres_partitioning_is_measured_from_the_catalog():
+    psycopg2 = pytest.importorskip("psycopg2")
+
+    conn = psycopg2.connect(
+        host=_PG["host"], port=_PG["port"], dbname=_PG["database"],
+        user=_PG["username"], password=_PG["password"], connect_timeout=5,
+    )
+    conn.autocommit = True
+    sfx = uuid.uuid4().hex[:6]
+    part = f"psm_part_{sfx}"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE public."{part}" (id INTEGER, created DATE) '
+                "PARTITION BY RANGE (created)"
+            )
+            cur.execute(
+                f'CREATE TABLE public."{part}_a" PARTITION OF public."{part}" '
+                "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"
+            )
+            measured = probe_physical_storage("postgresql", cur, "public", part)
+            missing = probe_physical_storage("postgresql", cur, "public", f"absent_{sfx}")
+
+        assert measured.status == "measured"
+        assert measured.partitioned is True
+        assert measured.partition_strategy == "range"
+        assert measured.partition_keys == ["created"]
+
+        # An invisible relation must never be certified as "not partitioned".
+        assert missing.status == "unavailable"
+        assert missing.partitioned is None
+
+        report = _plan_report(measured.to_dict())
+        assert _aspect(report, "partitioning")["status"] == "unsupported"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{part}" CASCADE')
+        conn.close()
+
+
+class _FakeSqlServerCursor:
+    """Returns whatever the probe's own SELECT list asks for, in order."""
+
+    def __init__(self, row: tuple) -> None:
+        self._row = row
+        self.description = None
+
+    def execute(self, sql: str, params=None) -> None:  # noqa: ARG002
+        assert "sys.filegroups" in sql
+        assert "fg.is_default" in sql, (
+            "the filegroup default flag must come from the table's own filegroup"
+        )
+        self.description = [("a",), ("b",), ("c",), ("d",)]
+
+    def fetchall(self) -> list[tuple]:
+        return [self._row]
+
+
+def test_sqlserver_secondary_filegroup_is_not_reported_as_default():
+    """A table placed ON [df_fg] must not read back as sitting in the default.
+
+    The old expression answered "is this not a partition scheme?", so every
+    deliberately placed table looked default and was never carried.
+    """
+    measured = probe_physical_storage(
+        "sqlserver", _FakeSqlServerCursor(("df_fg", 0, 1, "id")), "dbo", "t"
+    )
+    assert measured.status == "measured"
+    assert measured.tablespace == "df_fg"
+    assert measured.is_default_tablespace is False
+
+    on_scheme = probe_physical_storage(
+        "sqlserver", _FakeSqlServerCursor(("ps_range", None, 4, "id")), "dbo", "t"
+    )
+    # On a partition scheme there is no single filegroup: unmeasured, not default.
+    assert on_scheme.is_default_tablespace is None
+    assert on_scheme.partitioned is True

@@ -9,6 +9,8 @@ interface JobTrustScoreCardProps {
   compact?: boolean;
   onOpenQuarantine?: () => void;
   onOpenValidate?: () => void;
+  /** Multi-table Gate-8 is the last stream. Open that proof; do not leave the next step as prose. */
+  onOpenGate8?: () => void;
   onOpenMap?: () => void;
   onResume?: () => void;
   onOpenPipeline?: () => void;
@@ -31,6 +33,7 @@ export function JobTrustScoreCard({
   compact = false,
   onOpenQuarantine,
   onOpenValidate,
+  onOpenGate8,
   onOpenMap,
   onResume,
   onOpenPipeline,
@@ -44,6 +47,12 @@ export function JobTrustScoreCard({
       ? { label: "Open quarantine", onClick: onOpenQuarantine }
       : action.code === "reconcile" && onOpenValidate
         ? { label: "Open Validate", onClick: onOpenValidate }
+        : action.code === "append_delta" && onOpenValidate
+          ? { label: "Review Gate-8 proof", onClick: onOpenValidate }
+        : action.code === "last_stream_checksum" && onOpenGate8
+          ? { label: "Open Gate-8", onClick: onOpenGate8 }
+        : action.code === "identity_key" && onOpenMap
+          ? { label: "Open Map / Transform", onClick: onOpenMap }
         : action.code === "map" && onOpenMap
           ? { label: "Back to Map", onClick: onOpenMap }
           : action.code === "resume" && onResume
@@ -84,13 +93,13 @@ export function JobTrustScoreCard({
         </ul>
       )}
       <div className="df2-trust-score-next">
-        <DtIcon name={action.code === "ok" ? "check" : "alert"} size={14} />
+        <DtIcon name={action.code === "ok" || action.code === "append_delta" || action.code === "identity_key" ? "check" : "alert"} size={14} />
         <div>
           <strong>Next step · {action.label}</strong>
           <span>{action.detail}</span>
         </div>
         {cta && (
-          <Button size="sm" variant={action.code === "ok" ? "ghost" : "secondary"} onClick={cta.onClick}>
+          <Button size="sm" variant={action.code === "ok" || action.code === "append_delta" || action.code === "identity_key" ? "ghost" : "secondary"} onClick={cta.onClick}>
             {cta.label}
           </Button>
         )}

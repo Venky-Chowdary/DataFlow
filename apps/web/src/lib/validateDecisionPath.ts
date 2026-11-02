@@ -46,6 +46,9 @@ export interface ValidateDecisionPath {
   executeUnlocked: boolean;
   migrationProven: boolean;
   riskContractIncomplete: boolean;
+  /** Phase C12 — Decision Artifact content hash from Validate (Execute authority). */
+  decisionArtifactHash: string | null;
+  decisionArtifactPresent: boolean;
   headline: string;
   note: string;
 }
@@ -208,6 +211,13 @@ export function buildValidateDecisionPath(
   const risk = riskContractState(preflight);
   const blockers = preflight ? buildDisplayBlockers(preflight, opts?.syncMode) : [];
   const migrationProven = Boolean(preflight?.proof_bundle?.migration_proven);
+  const decisionArtifactHash =
+    preflight?.proof_bundle?.decision_artifact_hash
+    || preflight?.proof_bundle?.decision_artifact?.content_hash
+    || null;
+  const decisionArtifactPresent = Boolean(
+    decisionArtifactHash && String(decisionArtifactHash).length === 64,
+  );
 
   const decisions = blockers.map((item) => ({
     key: item.key,
@@ -283,8 +293,15 @@ export function buildValidateDecisionPath(
       executeUnlocked: unlocked,
       migrationProven,
       riskContractIncomplete: risk.incomplete,
-      headline: unlocked ? "Ready to Execute" : "Validate to unlock Execute",
-      note: "Execute-ready is not migration proven. Post-write Gate-8 full_checksum is required for migration_proven.",
+      decisionArtifactHash: decisionArtifactHash ? String(decisionArtifactHash) : null,
+      decisionArtifactPresent,
+      headline: unlocked
+        ? "Execute unlocked · not migration proven"
+        : "Validate to unlock Execute",
+      note:
+        "Execute consumes the Decision Artifact hash from Validate. "
+        + "Execute-ready is not migration proven — post-write Gate-8 full_checksum required. "
+        + "Sample Validate never claims population uniqueness.",
     };
   }
 
@@ -294,8 +311,12 @@ export function buildValidateDecisionPath(
     executeUnlocked: unlocked,
     migrationProven,
     riskContractIncomplete: risk.incomplete,
+    decisionArtifactHash: decisionArtifactHash ? String(decisionArtifactHash) : null,
+    decisionArtifactPresent,
     headline: `${decisions.length} root cause(s) · follow decision path before Execute`,
-    note: "One root cause may affect many gates. Risk Contract is required for intentional lossy paths. Sample Validate never claims population proof.",
+    note:
+      "One root cause may affect many gates. Decision Artifact is Execute authority. "
+      + "Risk Contract is required for intentional lossy paths. Sample Validate never claims population proof.",
   };
 }
 

@@ -82,11 +82,13 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
     assert coerce_blocks_transfer(issues_phys) is False
 
 
-def test_objectid_bare_text_still_collapses():
+def test_objectid_bare_text_preserves_hex_wire():
     from services.type_system import specialty_carrier_would_collapse
 
-    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is True
-    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR") is True
+    # Unbounded TEXT/VARCHAR hold ObjectId hex; narrow width still collapses.
+    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is False
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR") is False
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR(8)") is True
 
 
 def test_inet_create_new_off_engine_stamps_logical():
@@ -212,6 +214,7 @@ def test_uuid_mysql_create_new_still_solid_with_real_uuids():
 
 def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
     """BQ has no UUID type — Validate must warn polarity, not green UUID→UUID."""
+    from services.migration_risk_contract import create_migration_risk_contract
     from services.semantic_mapper import map_columns
     from services.type_coercion_validator import (
         coerce_blocks_transfer,
@@ -237,6 +240,14 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
     )
     assert mappings[0]["target_type"] == "STRING(36)"
 
+    contract = create_migration_risk_contract(
+        column="device_id",
+        source_type="UUID",
+        destination_type="STRING",
+        approved_by="ops@dataflow.app",
+        reason="UUID→STRING create-new accepted",
+        execution_policy="CAST_AND_CONTINUE",
+    )
     issues = validate_mapping_coercions(
         mappings=[{
             "source": "device_id",
@@ -244,6 +255,7 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
             "confidence": 0.93,
             "create_new": True,
             "risk_acknowledged": True,
+            "risk_contract": contract.to_dict(),
         }],
         source_types={"device_id": "UUID"},
         target_types={"device_id": "STRING"},
@@ -270,12 +282,21 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
 
 def test_create_new_stamped_target_type_authoritative_without_live_ddl():
     """Missing live dest types must not invent UUID→UUID green for BQ create-new."""
+    from services.migration_risk_contract import create_migration_risk_contract
     from services.type_coercion_validator import (
         coerce_blocks_transfer,
         validate_mapping_coercions,
     )
     from services.type_system import resolve_mapping_target_type
 
+    contract = create_migration_risk_contract(
+        column="device_id",
+        source_type="UUID",
+        destination_type="STRING",
+        approved_by="ops@dataflow.app",
+        reason="UUID→STRING create-new accepted",
+        execution_policy="CAST_AND_CONTINUE",
+    )
     mapping = {
         "source": "device_id",
         "target": "device_id",
@@ -283,6 +304,7 @@ def test_create_new_stamped_target_type_authoritative_without_live_ddl():
         "create_new": True,
         "target_type": "STRING",
         "risk_acknowledged": True,
+        "risk_contract": contract.to_dict(),
     }
     assert resolve_mapping_target_type(
         mapping, target_types={}, source_type="UUID"

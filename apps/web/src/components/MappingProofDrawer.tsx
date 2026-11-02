@@ -6,9 +6,16 @@
 import { useMemo, useState } from "react";
 import { Drawer } from "./ui/Drawer";
 import { Dialog } from "./ui/Dialog";
+import { useConfirm } from "./ui/ConfirmDialog";
+import { useToast } from "./Toast";
 import { DtIcon } from "./DtIcon";
 import type { EditableMapping } from "../lib/mapping";
-import { engineStampedRiskChip, hasCreateNewTypeRisk } from "../lib/mapping";
+import {
+  engineStampedRiskChip,
+  hasCreateNewTypeRisk,
+  mappingReviewKindMeta,
+  type MappingReviewKind,
+} from "../lib/mapping";
 import { typeBadgeClass } from "../lib/typeDisplay";
 import { readSession } from "../lib/session";
 
@@ -56,6 +63,7 @@ export interface MappingProofRow {
   confidence: number;
   reasoning?: string;
   requires_review?: boolean;
+  review_kind?: string;
   evidence?: MappingProofEvidence;
   risks?: MappingProofRisk[];
   pii?: string[];
@@ -233,6 +241,7 @@ export function buildClientMappingProof(
       confidence: conf,
       reasoning: m.reason,
       requires_review: m.requiresReview,
+      review_kind: m.reviewKind,
       evidence: {
         strategy: destMode === "create_new" ? "identity_passthrough" : "operator_or_pipeline",
         name_match: nameMatch,
@@ -352,6 +361,7 @@ export function mergeMappingProof(
       confidence,
       reasoning: live.reason || row.reasoning,
       requires_review: live.requiresReview || schemaPending,
+      review_kind: live.reviewKind || row.review_kind,
       risks: withoutTransformRisks,
       sample_preview_clear: live.sample
         ? [live.sample]
@@ -512,7 +522,18 @@ function PairCard({ r, revealPii }: { r: MappingProofRow; revealPii: boolean }) 
           <span key={p} className="df2-badge df2-badge-run df2-badge-xs">{p}</span>
         ))}
         {r.requires_review && (
-          <span className="df2-badge df2-badge-warn df2-badge-xs">review</span>
+          <span
+            className="df2-badge df2-badge-warn df2-badge-xs"
+            title={
+              r.review_kind
+                ? mappingReviewKindMeta(r.review_kind as MappingReviewKind).detail
+                : "Engine held this pair for review"
+            }
+          >
+            {r.review_kind
+              ? mappingReviewKindMeta(r.review_kind as MappingReviewKind).chip
+              : "review"}
+          </span>
         )}
       </div>
 
@@ -596,6 +617,8 @@ export function MappingProofDrawer({
   sourceLabel,
   destLabel,
 }: MappingProofDrawerProps) {
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [expanded, setExpanded] = useState(false);
   const [filter, setFilter] = useState<"all" | "risks" | "review" | "pii">("all");
   const [query, setQuery] = useState("");
@@ -772,12 +795,21 @@ export function MappingProofDrawer({
                 }
                 const role = (readSession()?.role || "").toLowerCase();
                 if (role && !["admin", "owner", "editor", "operator"].includes(role)) {
-                  window.alert("Reveal requires editor/admin role for this workspace.");
+                  toast({
+                    title: "Reveal requires editor/admin role for this workspace.",
+                    tone: "warning",
+                  });
                   return;
                 }
-                if (window.confirm("Reveal unmasked sample values in this drawer? Confirm only on a private screen.")) {
-                  setRevealPii(true);
-                }
+                void confirm({
+                  title: "Reveal unmasked sample values in this drawer?",
+                  message: "Confirm only on a private screen.",
+                  confirmLabel: "Reveal",
+                  cancelLabel: "Cancel",
+                  tone: "warning",
+                }).then((accepted) => {
+                  if (accepted) setRevealPii(true);
+                });
               }}
             >
               {revealPii ? "Hide PII" : "Reveal PII"}

@@ -92,6 +92,10 @@ def test_to_sa_value_coerces_decimal_carrier_and_iso_z():
     assert isinstance(dt_mssql, datetime)
     assert dt_mssql.tzinfo is None
     assert dt_mssql == datetime(2026, 7, 4, 6, 57, 37)
-    # Oracle TIMESTAMP WITH TIME ZONE → aware UTC
-    dt_ora = _to_sa_value("2026-07-04T06:57:37Z", "datetime", db_type="oracle")
+    # Oracle NTZ datetime → naive civil digits (same as SQL Server DATETIME2).
+    dt_ora_ntz = _to_sa_value("2026-07-04T06:57:37Z", "datetime", db_type="oracle")
+    assert dt_ora_ntz.tzinfo is None
+    assert dt_ora_ntz == datetime(2026, 7, 4, 6, 57, 37)
+    # Oracle TIMESTAMPTZ → aware UTC
+    dt_ora = _to_sa_value("2026-07-04T06:57:37Z", "TIMESTAMPTZ", db_type="oracle")
     assert dt_ora == datetime(2026, 7, 4, 6, 57, 37, tzinfo=timezone.utc)

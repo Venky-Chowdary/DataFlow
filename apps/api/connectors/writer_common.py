@@ -3,18 +3,45 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
+import sys
+
 from services.brand_env import getenv_brand
 import re
+from collections.abc import Callable
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from decimal import Decimal
+from functools import lru_cache
+from typing import Any, Final
+
+from sqlalchemy.engine import CursorResult
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
+from services.rule_compiler.apply import evaluate_contract
 from services.transform_engine import apply_transform
-from services.transform_resolver import resolve_transform
-from services.value_serializer import SQL_NULL_SENTINEL
+from services.transform_resolver import LiveDestTypes, resolve_transform
+from services.value_serializer import (
+    DF_MISSING_SENTINEL,
+    SQL_NULL_SENTINEL,
+    Missing,
+    cell_to_string,
+    is_missing_sentinel,
+    is_null_evidence,
+    is_reader_null_cell,
+    json_loads_exact,
+    public_mapped_cell,
+    unescape_wire_text,
+)
 
+from connectors.array_wire import (  # noqa: F401 — re-export canonical helpers
+    _is_numeric_wire,
+    _is_temporal_wire,
+    _parse_pg_array_literal,
+    _pg_array_element,
+    parse_array_wire_elements,
+)
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
     quote_sql_identifier,
@@ -22,6 +49,9 @@ from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical h
     require_safe_identifier,
     sanitize_identifier,
 )
+
+logger = logging.getLogger(__name__)
+_wc = sys.modules[__name__]
 
 # Configurable batch size — default 20 000 rows per commit (enterprise scale)
 CHUNK_SIZE = int(getenv_brand("CHUNK_SIZE", "20000"))
@@ -33,24 +63,205 @@ VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 _active_quarantine_mappings: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "df_quarantine_mappings", default=None
 )
+# Staging / explicit contract-escape hatch for job-level coerce_null.
+# Primary-table writes must never invent coerce_null from env alone.
+_allow_job_coerce_null: ContextVar[bool] = ContextVar(
+    "df_allow_job_coerce_null", default=False
+)
+
+
+def allow_job_coerce_null_writes(enabled: bool = True):
+    """Context manager: permit job-level coerce_null (staging diagnose only)."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        token = _allow_job_coerce_null.set(bool(enabled))
+        try:
+            yield
+        finally:
+            _allow_job_coerce_null.reset(token)
+
+    return _cm()
+
+
+def quarantine_cell_wire(value: Any) -> str:
+    """Serialize one quarantine cell without inventing empty string for SQL NULL.
+
+    Replay / DLQ must round-trip polarity:
+    * ``None`` / ``SQL_NULL_SENTINEL`` → ``SQL_NULL_SENTINEL`` (apply_transform → NULL)
+    * ``DF_MISSING`` → ``DF_MISSING_SENTINEL`` (sparse omit on rewrite)
+    * NaN / NA → ``SQL_NULL_SENTINEL`` (not empty invent)
+    * other values → ``cell_to_string`` (preserve_sql_null)
+    """
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        SQL_NULL_SENTINEL,
+        WireLiteral,
+        cell_to_string,
+        escape_wire_text,
+        is_frame_missing,
+        is_missing_sentinel,
+        is_reader_null_cell,
+    )
+
+    if value is None or is_frame_missing(value):
+        # Frame NaN / NA / NaT first: cell_to_string spells float NaN ``"NaN"``
+        # and ``pd.NA`` cannot be compared, so replay would write text (or
+        # raise) where the row had NULL.
+        return SQL_NULL_SENTINEL
+    if is_missing_sentinel(value):
+        return DF_MISSING_SENTINEL
+    if is_reader_null_cell(value):
+        # Wire NULL stays the bare sentinel — escaping it would invent a
+        # sentinel-spelling literal that decodes to text, not NULL (D113).
+        return SQL_NULL_SENTINEL
+    if isinstance(value, WireLiteral):
+        # A decoded sentinel-spelling literal re-wires escaped so _unwire
+        # returns the literal (never NULL).
+        return escape_wire_text(value)
+    if isinstance(value, str):
+        # Already wire-encoded (``__DF_ESC__`` literal): store verbatim —
+        # re-serializing would stack a second escape layer.
+        return value
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def mapped_row_quarantine_values(row: Any, target_cols: list[str]) -> dict[str, str]:
-    """Target-column dict for quarantine replay (full row, not single bad cell)."""
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    """Target-column dict for quarantine replay (full row, not single bad cell).
+
+    Accepts tuple/list bind images and SQLAlchemy/sparse ``dict`` rows — never
+    ``list(dict)`` key-order invent (that poisoned generic_sql salvage replay).
+    """
 
     out: dict[str, str] = {}
+    if isinstance(row, dict):
+        for col in target_cols or []:
+            key = str(col)
+            if key in row:
+                out[key] = quarantine_cell_wire(row[key])
+            elif col in row:
+                out[key] = quarantine_cell_wire(row[col])
+            else:
+                out[key] = DF_MISSING_SENTINEL
+        return out
     seq = list(row) if row is not None else []
     for i, col in enumerate(target_cols or []):
         if i >= len(seq):
-            out[str(col)] = ""
+            # Column absent from the mapped tuple — sparse omit, not empty invent.
+            out[str(col)] = DF_MISSING_SENTINEL
             continue
-        v = seq[i]
-        if v is None or is_missing_sentinel(v):
-            out[str(col)] = ""
-        else:
-            out[str(col)] = cell_to_string(v)
+        out[str(col)] = quarantine_cell_wire(seq[i])
     return out
+
+
+def omit_missing_fields(
+    pairs: Any,
+    *,
+    drop_empty: bool = True,
+) -> dict[str, Any]:
+    """Build a write payload omitting ``DF_MISSING`` (STOP_COLUMN / coerce_null).
+
+    SaaS/document writers must never serialize ``__DF_MISSING__`` as a live
+    property value. Empty strings are dropped when ``drop_empty`` (CRM upsert
+    class); pass ``drop_empty=False`` when empty is a meaningful clear.
+    """
+
+    out: dict[str, Any] = {}
+    for item in pairs:
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            continue
+        k, v = item[0], item[1]
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(v):
+            continue
+        if drop_empty and str(v) == "":
+            continue
+        out[str(k)] = unescape_wire_text(v)
+    return out
+
+
+def _is_document_column(col: str, dest_types: dict[str, str] | None) -> bool:
+    declared = str((dest_types or {}).get(col) or "")
+    if not declared:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(declared) in {"json", "array", "object", "struct", "map"}
+
+
+def mapped_row_to_json_record(
+    row: tuple | list,
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+    *,
+    omit_sql_null: bool = False,
+    exact_decimal: bool = False,
+    omit_document_sql_null: bool = False,
+) -> dict[str, Any]:
+    """One object-store JSON record — omit ``DF_MISSING`` keys (Kafka-class)."""
+
+    dest_types = dest_types or {}
+    rec: dict[str, Any] = {}
+    for col, val in zip(target_cols, row):
+        if is_missing_sentinel(val):
+            continue
+        converted = to_json_value(val, col, dest_types, exact_decimal=exact_decimal)
+        if converted is None and (
+            omit_sql_null or (omit_document_sql_null and _is_document_column(col, dest_types))
+        ):
+            # A document column can hold JSON null as a value, so its SQL NULL
+            # is the absent key. Every other column keeps its key (D144).
+            continue
+        rec[col] = converted
+    return rec
+
+
+def iter_mapped_json_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+    *,
+    omit_sql_null: bool = False,
+    exact_decimal: bool = False,
+    omit_document_sql_null: bool = False,
+):
+    """Yield JSON records without materializing the full list."""
+    for row in mapped_rows:
+        yield mapped_row_to_json_record(
+            row, target_cols, dest_types, omit_sql_null=omit_sql_null,
+            exact_decimal=exact_decimal, omit_document_sql_null=omit_document_sql_null)
+
+
+def iter_mapped_delimited_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+):
+    """Yield CSV/TSV records: same typed contract, source numeric text kept."""
+    dest_types = dest_types or {}
+
+    for row in mapped_rows:
+        rec: dict[str, Any] = {}
+        for col, val in zip(target_cols, row):
+            if is_missing_sentinel(val):
+                continue
+            rec[col] = to_delimited_value(val, col, dest_types)
+        yield rec
+
+
+def mapped_rows_to_json_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Object-store / document JSON records — omit ``DF_MISSING`` keys (Kafka-class).
+
+    Dense CSV still gets empty cells for omitted keys via DictWriter fieldnames;
+    JSON/JSONL must never emit ``\"col\": null`` for STOP_COLUMN / sparse CDC.
+    """
+    return list(iter_mapped_json_records(mapped_rows, target_cols, dest_types))
 
 
 def project_quarantine_source_values(
@@ -72,12 +283,85 @@ def project_quarantine_source_values(
         if not src:
             continue
         if tgt in target_values:
-            v = target_values[tgt]
-            out[src] = "" if v is None else str(v)
+            out[src] = quarantine_cell_wire(target_values[tgt])
         elif src in target_values:
-            v = target_values[src]
-            out[src] = "" if v is None else str(v)
+            out[src] = quarantine_cell_wire(target_values[src])
     return out
+
+
+def saas_quarantine_values(payload: dict[str, Any] | None) -> dict[str, str]:
+    """Wire a CRM/SaaS payload dict for quarantine replay (NULL polarity honest)."""
+    return {
+        str(k): quarantine_cell_wire(v) for k, v in (payload or {}).items()
+    }
+
+
+def active_quarantine_mappings(mappings: list[dict[str, Any]] | None):
+    """Context manager naming the Map that governs holdouts inside this write.
+
+    The shared type matrix passes its own ``mappings``, but connector-family
+    writers also stamp holdouts directly from bind / salvage paths (generic SQL
+    bind refusal, sparse upsert identity, document field refusal). Naming the Map
+    once around the whole write means those details resolve the same column
+    contract — no writer decides a signed policy on its own.
+    """
+
+    @contextmanager
+    def _cm():
+        token = _active_quarantine_mappings.set(list(mappings) if mappings else None)
+        try:
+            yield
+        finally:
+            _active_quarantine_mappings.reset(token)
+
+    return _cm()
+
+
+def contract_policy_for_target(
+    column: str,
+    mappings: list[dict[str, Any]] | None,
+) -> tuple[str, str]:
+    """The signed execution policy governing one destination column, if any.
+
+    Returns ``(execution_policy, risk_id)``, or ``("", "")`` when no mapping for
+    that column carries a Migration Risk Contract — then the job posture decides
+    alone, as before.
+
+    A write-time type holdout must be judged by the same contract the preflight
+    population scan judged: a signed continue policy is authority to hold the row
+    out under a strict job posture, and a signed fail-closed policy must abort even
+    under a lenient one. A present-but-unverifiable contract fails closed
+    (``FAIL_JOB``), never demoted to the job default.
+    """
+    from services.migration_risk_contract import (
+        mapping_declares_risk_contract,
+        mapping_risk_contract,
+    )
+
+    name = str(column or "").strip().lower()
+    if not name:
+        return "", ""
+    for m in mappings or []:
+        if isinstance(m, dict):
+            target = str(m.get("target") or m.get("target_column") or "").strip()
+            source = str(m.get("source") or m.get("source_column") or "").strip()
+        else:
+            target = str(getattr(m, "target", "") or "").strip()
+            source = str(getattr(m, "source", "") or "").strip()
+        if name not in {target.lower(), source.lower()}:
+            continue
+        if not mapping_declares_risk_contract(m):
+            continue
+        contract = mapping_risk_contract(m)
+        if contract is None:
+            return "FAIL_JOB", ""
+        policy = str(contract.execution_policy or "").strip().upper()
+        if policy == "CAST_FAIL_QUARANTINE":
+            policy = "CAST_AND_CONTINUE"
+        if not policy:
+            return "FAIL_JOB", str(contract.risk_id or "")
+        return policy, str(contract.risk_id or "")
+    return "", ""
 
 
 def append_write_quarantine_detail(
@@ -97,15 +381,50 @@ def append_write_quarantine_detail(
 
     Module 9: stamp first-class quarantine contract fields before append.
     """
-    d = dict(detail)
-    if not (isinstance(d.get("values"), dict) and d["values"]):
-        d["values"] = mapped_row_quarantine_values(mapped_row, target_cols)
+    maps = mappings if mappings is not None else _active_quarantine_mappings.get()
+    from connectors.contract_salvage import contract_row_detail
+
+    # A row the database refused under a strict posture: its column's signed
+    # continue contract decides, as the matrix decides for Python-side holdouts.
+    d = contract_row_detail(dict(detail), maps)
+    # The NULL wire token is not a rejected cell. Upsert quarantine was
+    # recording one ``__DF_SQL_NULL__`` row on every load after the nullable
+    # blank fix. A NOT NULL refusal still names nullability and is kept.
+    raw_value = d.get("value")
+    if isinstance(raw_value, str) and raw_value.strip() == SQL_NULL_SENTINEL:
+        reason = str(d.get("reason") or "").lower()
+        if "not null" not in reason and "non-null" not in reason and "nullability" not in reason:
+            return
+    # Normalize the fault-cell sample so replay overwrite cannot re-invent "".
+    d["value"] = quarantine_cell_wire(d.get("value"))
+    # Full mapped-row image first (SQL NULL polarity), then overlay any CRM
+    # payload keys — HubSpot/SF omit None from props so bag-only would drop NULLs.
+    base_values = mapped_row_quarantine_values(mapped_row, target_cols)
+    if isinstance(d.get("values"), dict) and d["values"]:
+        wired = {str(k): quarantine_cell_wire(v) for k, v in d["values"].items()}
+        d["values"] = {**base_values, **wired}
+    else:
+        d["values"] = base_values
+    # The column's signed contract — not the job posture alone — decides whether
+    # this holdout aborts the load. Stamped here so every writer family inherits
+    # the same answer the preflight population scan gave.
+    if not str(d.get("execution_policy") or "").strip():
+        policy, risk_id = contract_policy_for_target(
+            str(d.get("target") or d.get("column") or ""), maps
+        )
+        if policy:
+            d["execution_policy"] = policy
+            if risk_id and not str(d.get("risk_id") or "").strip():
+                d["risk_id"] = risk_id
     if not (isinstance(d.get("source_values"), dict) and d["source_values"]):
-        maps = mappings if mappings is not None else _active_quarantine_mappings.get()
         if maps:
             src = project_quarantine_source_values(d["values"], maps)
             if src:
                 d["source_values"] = src
+    elif isinstance(d.get("source_values"), dict):
+        d["source_values"] = {
+            str(k): quarantine_cell_wire(v) for k, v in d["source_values"].items()
+        }
     try:
         from services.quarantine_row_contract import normalize_quarantine_row
 
@@ -138,6 +457,65 @@ def resolve_writer_backfill(
         schema_policy=schema_policy,
         mappings=mappings,
     )
+
+
+def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
+    """True when ``target_type`` is an approved ceiling, not a catalog echo.
+
+    Map stamps a ``target_type`` for every bound column, including the ones it
+    merely read out of the destination catalog. Treating that echo as an
+    operator decision freezes the column: a source that drifted wider then
+    quarantines every row as "would truncate on write" while the ALTER that
+    would fix it is refused as widening past the Map stamp. Only an operator
+    edit (or a stamp with no recorded catalog provenance) is a real ceiling.
+    """
+    if not mapping:
+        return False
+    if not str(mapping.get("target_type") or mapping.get("dest_type") or "").strip():
+        return False
+    if mapping.get("user_override") or mapping.get("userOverride"):
+        return True
+    origin = str(mapping.get("target_type_origin") or "").strip().lower()
+    # A sampled-profile origin is not a ceiling: the type was inferred from a
+    # page of values, and the next wider page must be allowed to widen it (D1).
+    # ``drift_widen`` is stamped by schema-drift approval (D107), not by the
+    # operator drawing a type ceiling — a later wider drift must still widen.
+    return origin not in {"destination_catalog", "sampled_profile", "drift_widen"}
+
+
+def effective_dest_types_under_backfill(
+    dest_types: dict[str, str],
+    mappings: list[dict[str, Any]] | None,
+    *,
+    backfill: bool,
+) -> dict[str, str]:
+    """Resolve the carriers a backfill write will actually land against.
+
+    Under backfill the writer widens a drifted column to the source's declared
+    type before inserting, so any consumer that judges the same rows against
+    the pre-drift Map stamp (Gate-8 fingerprints most of all) reaches a
+    different verdict than the write: the digest is taken over quarantined or
+    truncated cells the destination never saw, and reconciliation reports a
+    checksum mismatch on a load that landed correctly.
+    """
+    if not backfill or not mappings:
+        return dict(dest_types or {})
+    from connectors.schema_drift import is_wider_type
+
+    out = dict(dest_types or {})
+    for mapping in mappings:
+        tgt = str(mapping.get("target") or "").strip()
+        if not tgt or tgt not in out:
+            continue
+        if stamp_is_operator_ceiling(mapping):
+            continue
+        source_type = str(mapping.get("source_type") or "").strip()
+        current = str(out.get(tgt) or "").strip()
+        if not source_type or not current:
+            continue
+        if is_wider_type(current, source_type):
+            out[tgt] = source_type
+    return out
 
 
 def desired_types_honoring_map_stamps(
@@ -185,7 +563,7 @@ def desired_types_honoring_map_stamps(
         if explicit_columns is not None:
             is_explicit = col in explicit_columns
         else:
-            is_explicit = bool(str(mapping.get("target_type") or "").strip())
+            is_explicit = stamp_is_operator_ceiling(mapping)
         if is_explicit:
             if candidate and is_wider_type(ceiling, candidate):
                 refusals.append(
@@ -205,7 +583,40 @@ def desired_types_honoring_map_stamps(
     return desired, refusals
 
 
-def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
+def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
+    """A CSV/TSV cell: the typed contract of :func:`to_json_value`, exact text.
+
+    A delimited export has no type system, so a numeric column's declared scale
+    exists only in the characters written. JSON number parsing demotes a value
+    binary64 holds exactly, which turned a source ``10.50`` into ``10.5`` — the
+    same number, a different scale than the source stated, on money columns where
+    the file itself is the deliverable. Typed refusals (empty string into a
+    numeric column) and temporal wire normalization still come from
+    ``to_json_value``; only an already-textual number keeps its own digits.
+    """
+    parsed = to_json_value(value, col, dest_types)
+    if (
+        isinstance(value, str)
+        and isinstance(parsed, (int, float, Decimal))
+        and not isinstance(parsed, bool)
+    ):
+        return value.strip()
+    if isinstance(value, Decimal) and isinstance(parsed, float):
+        # C26's JSON demote is right for the JSON wire (binary64 has no scale),
+        # but a Decimal input already states its scale — ``Decimal("10.50")``
+        # demoted to ``10.5`` loses the trailing digit on the delimited/excel
+        # wire where the file itself is the deliverable. Keep the Decimal so
+        # ``cell_to_string`` writes the stated digits.
+        return value
+    return parsed
+
+
+_EXACT_DECIMAL_TEXT = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def to_json_value(
+    value: Any, col: str, dest_types: dict[str, str], *, exact_decimal: bool = False
+) -> Any:
     """Convert a mapped cell to a JSON-serializable scalar.
 
     Preserves strings/dates as text; parses structural and numeric JSON values
@@ -213,14 +624,31 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     instead of quoted Decimal strings. Temporal logical types are normalized via
     the shared SQL temporal helpers so ISO-Z does not leak inconsistently across
     S3/GCS/ADLS/SFTP/Kafka JSON exports.
+
+    ``DF_MISSING`` (STOP_COLUMN / sparse CDC omit) never serializes as the
+    sentinel string. Prefer ``mapped_rows_to_json_records`` which omits the key
+    entirely (Kafka-class). This helper still maps the sentinel to ``None`` as a
+    last-resort safety net so dense serializers cannot leak ``__DF_MISSING__``.
     """
+    try:
+        from services.value_serializer import absent_sql_bind, is_missing_sentinel
+
+        if is_missing_sentinel(value):
+            return None
+        handled, bound = absent_sql_bind(value)
+        if handled:
+            return bound
+    except Exception:
+        pass
     if value is None:
         return None
+    value = unescape_wire_text(value)
     try:
         from services.type_system import normalize_logical_type
     except Exception:
         normalize_logical_type = lambda x: str(x or "").lower()  # type: ignore[assignment]
-    ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
+    declared = str(dest_types.get(col, "") or "") if dest_types else ""
+    ctype = normalize_logical_type(declared) if dest_types else ""
     if ctype in {"date", "datetime", "time"}:
         from connectors.sql_temporal import (
             coerce_sql_temporal,
@@ -228,37 +656,140 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
             logical_to_temporal_ddl,
         )
 
-        ddl = logical_to_temporal_ddl(ctype) or "DATETIME"
-        coerced = coerce_sql_temporal(value, ddl)
-        wire = format_wire_value(value, ddl)
+        # ``normalize_logical_type`` folds every timestamp flavour into
+        # ``datetime``, so resolving the carrier from it alone downgraded an
+        # offset-bearing column to NTZ ``DATETIME`` and the wire value kept the
+        # local wall clock while losing the offset — a different instant. The
+        # declared type names the carrier, so ask it first.
+        ddl = (
+            logical_to_temporal_ddl(declared)
+            or logical_to_temporal_ddl(ctype)
+            or "DATETIME"
+        )
+        try:
+            coerced = coerce_sql_temporal(value, ddl)
+            wire = format_wire_value(value, ddl)
+        except ValueError:
+            # Dense JSON serializers: keep empty for quarantine upstream —
+            # never invent SQL/JSON null from "".
+            return value
         if wire is not None:
             return wire
         if coerced is not value:
             return coerced
         return value
+    if exact_decimal and ctype in {"decimal", "numeric"} and not isinstance(value, bool):
+        # A JSON number has no binary64 limit. The file sinks dump with
+        # ``json_dumps_exact_numbers``, so a DECIMAL cell is written with the
+        # digits and scale the source stated: ``0.1000000000`` and ``1`` stay
+        # that, instead of ``0.1`` / ``1.0`` beside quoted text for the values
+        # binary64 could not hold (D144).
+        if isinstance(value, Decimal) and value.is_finite():
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
+            return Decimal(value.strip())
+    if ctype in {
+        "integer",
+        "int",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "number",
+    } and isinstance(value, (int, float, Decimal)) and not isinstance(
+        value, bool
+    ):
+        # Native numeric cell (e.g. a source driver that already decoded the
+        # value): demote Decimal to float only when binary64 is exact, so the
+        # JSON wire emits a number; inexact values stay Decimal and serialize
+        # as exact text via ``_decimal_to_json`` (C26/D88 — Kafka and the
+        # object-store writers share this path).
+        from services.value_serializer import _demote_exactly_representable
+
+        return _demote_exactly_representable(value)
     if isinstance(value, str):
         text = value.strip()
         if not text:
+            # Typed sinks: leave raw empty so quarantine_unfit_* / bind hold out —
+            # never invent JSON null / 0 from "".
+            if ctype in {
+                "float",
+                "integer",
+                "decimal",
+                "number",
+                "boolean",
+                "uuid",
+                "json",
+                "array",
+                "struct",
+                "map",
+            }:
+                raise ValueError(
+                    f"empty string cannot coerce to {ctype} — "
+                    "refuse silent NULL invent (quarantine or remap upstream)"
+                )
             return value
         if ctype in {"json", "array", "object", "struct"}:
             try:
                 def _reject(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                return json.loads(text, parse_constant=_reject)
+                parsed = json_loads_exact(text, parse_constant=_reject)
             except ValueError:
                 return value  # leave raw; transform path should have rejected
             except json.JSONDecodeError:
                 return value
-        if ctype in {"text", "string", "varchar", "uuid", "binary"}:
-            return value
-        try:
-            def _reject2(name: str) -> None:
-                raise ValueError(f"non-finite JSON constant: {name}")
+            if parsed is None and text.strip() == "null":
+                from services.value_serializer import JSON_NULL
 
-            return json.loads(text, parse_constant=_reject2)
-        except (json.JSONDecodeError, ValueError):
+                return JSON_NULL
+            return parsed
+        if ctype in {"text", "string", "varchar", "uuid", "binary", ""}:
+            # Empty/unknown logical type: keep string — never invent int/bool/float
+            # via json.loads (object-store export type invent).
+            return unescape_wire_text(value)
+        if ctype in {"boolean", "bool", "bit"}:
+            from connectors.sql_bind import coerce_boolean_wire
+
+            coerced = coerce_boolean_wire(value)
+            if not isinstance(coerced, bool):
+                raise ValueError(
+                    f"JSON export BOOLEAN refused unrecognized value {value!r}"
+                )
+            return coerced
+        if ctype in {
+            "integer",
+            "int",
+            "bigint",
+            "smallint",
+            "tinyint",
+            "decimal",
+            "numeric",
+            "float",
+            "double",
+            "real",
+            "number",
+        }:
+            try:
+                def _reject_num(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
+                parsed = json_loads_exact(text, parse_constant=_reject_num)
+            except (json.JSONDecodeError, ValueError):
+                return value
+            if isinstance(parsed, (int, float, Decimal)) and not isinstance(
+                parsed, bool
+            ):
+                return parsed
             return value
+        # Unknown typed column: leave text — refuse schema invent.
+        return value
     return value
 
 
@@ -303,7 +834,10 @@ def normalize_temporal_cells(
                 if i >= len(cells) or cells[i] is None:
                     continue
                 if bigquery_temporal_ddl(typ):
-                    cells[i] = format_bigquery_bind(cells[i], typ)
+                    try:
+                        cells[i] = format_bigquery_bind(cells[i], typ)
+                    except ValueError:
+                        pass
             out.append(tuple(cells))
         return out
 
@@ -325,7 +859,12 @@ def normalize_temporal_cells(
             ddl = logical_to_temporal_ddl(typ) or (typ if is_temporal_ddl(typ) else None)
             if not ddl:
                 continue
-            cells[i] = coerce_sql_temporal(cells[i], ddl)
+            try:
+                cells[i] = coerce_sql_temporal(cells[i], ddl, engine=eng)
+            except ValueError:
+                # Leave raw for bind_sql_mapped_rows_with_quarantine — do not
+                # abort the whole batch on one empty DATE/TIMESTAMP cell.
+                pass
         out.append(tuple(cells))
     return out
 
@@ -371,6 +910,10 @@ def row_checksum(
     )
 
 
+# Keys per LSN lookup statement; see services.scd2_engine.PK_CLAUSE_MAX_KEYS.
+LSN_LOOKUP_MAX_KEYS = 400
+
+
 def filter_stale_lsn_rows(
     cursor: Any,
     table_name: str,
@@ -381,6 +924,7 @@ def filter_stale_lsn_rows(
     *,
     quote: str = '"',
     placeholder: str = "%s",
+    allow_equal_lsn: bool = False,
 ) -> tuple[list[tuple], int]:
     """Return (rows_to_write, rows_skipped) for an LSN-guarded batch.
 
@@ -394,60 +938,93 @@ def filter_stale_lsn_rows(
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
     lsn_idx = target_cols.index(DF_LSN_COL)
 
-    # Build OR clauses for non-null conflict keys.
-    params: list[Any] = []
-    clauses: list[str] = []
+    # Build OR clauses. Reader-null / blank use IS NULL — never
+    # ``col = '__DF_SQL_NULL__'``, which misses dest NULL PKs and fail-opens
+    # the LSN gate on at-least-once redelivery.
     q = quote_sql_identifier
     if schema:
         qualified = f"{q(schema, quote)}.{q(table_name, quote)}"
     else:
         qualified = f"{q(table_name, quote)}"
-    for row in rows:
-        if any(row[idx] in (None, "") for idx in conflict_idxs):
-            continue
-        parts = []
-        for idx in conflict_idxs:
-            val = row[idx]
-            col = conflict_cols[conflict_idxs.index(idx)]
-            if val is None:
-                parts.append(f"{q(col, quote)} IS NULL")
-            else:
-                parts.append(f"{q(col, quote)} = {placeholder}")
-                params.append(val)
-        if parts:
-            clauses.append("(" + " AND ".join(parts) + ")")
-    if not clauses:
-        return rows, 0
-
-    existing: dict[tuple[Any, ...], Any] = {}
     select_cols = ", ".join(q(c, quote) for c in conflict_cols) + f", {q(DF_LSN_COL, quote)}"
-    stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
-    cursor.execute(stmt, params)
-    for found in cursor.fetchall():
-        key = tuple(found[i] for i in range(len(conflict_cols)))
-        existing[key] = found[-1]
+    existing: dict[tuple[Any, ...], Any] = {}
+    # One predicate per key, issued in bounded chunks: a 2K-row CDC batch as a
+    # single OR chain exceeds SQLite's expression depth (1000) and Oracle/SQL
+    # Server bind limits, and the lookup must fail closed rather than shrink.
+    for start in range(0, len(rows), LSN_LOOKUP_MAX_KEYS):
+        params: list[Any] = []
+        clauses: list[str] = []
+        for row in rows[start : start + LSN_LOOKUP_MAX_KEYS]:
+            parts = []
+            for idx in conflict_idxs:
+                val = row[idx]
+                col = conflict_cols[conflict_idxs.index(idx)]
+                if _is_nullish_conflict_key(val):
+                    parts.append(f"{q(col, quote)} IS NULL")
+                else:
+                    parts.append(f"{q(col, quote)} = {placeholder}")
+                    params.append(val)
+            if parts:
+                clauses.append("(" + " AND ".join(parts) + ")")
+        if not clauses:
+            continue
+        stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
+        cursor.execute(stmt, params)
+        for found in cursor.fetchall():
+            key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
+            existing[key] = found[-1]
 
     to_write: list[tuple] = []
     skipped = 0
     for row in rows:
-        key = tuple(row[idx] for idx in conflict_idxs)
+        key = tuple(_conflict_key_identity(row[idx]) for idx in conflict_idxs)
         incoming = row[lsn_idx]
         prior = existing.get(key)
-        if incoming is not None and compare_lsn(incoming, prior) <= 0:
+        # Align with lsn_is_newer: empty/None incoming must not overwrite a
+        # stamped destination row (at-least-once redelivery regress).
+        equal = (
+            allow_equal_lsn
+            and incoming not in (None, "")
+            and prior not in (None, "")
+            and str(incoming).strip() == str(prior).strip()
+        )
+        if not equal and not lsn_is_newer(incoming, prior):
             skipped += 1
             continue
         to_write.append(row)
     return to_write, skipped
 
 
-def row_fingerprints(rows: list[Any], columns: list[str] | None = None, *, sort_key: str | None = None) -> list[tuple[str, str]]:
+def row_fingerprints(
+    rows: list[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
     """Return the unsorted (row_key, fingerprint) tuples for a list of rows.
 
     Streaming producers can accumulate these tuples across batches and then call
     ``services.reconciliation.fingerprint_checksum`` once at the end, avoiding a
     full materialization of every row as a dict/list.
+
+    ``dest_db_type`` / ``dest_types`` must match what the read-back side passes.
+    Without them a text cell is folded defensively, because a CHAR(n) column pads
+    with spaces that carry no meaning; with them a TEXT cell keeps the spaces it
+    was given. Computing the write pass one way and the read-back the other made
+    every trailing space look like a Gate-8 mismatch on data that had landed
+    exactly as sent.
     """
-    return list(_iter_fingerprints(rows, columns, sort_key=sort_key))
+    return list(
+        _iter_fingerprints(
+            rows,
+            columns,
+            sort_key=sort_key,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    )
 
 
 def dedupe_rows(
@@ -455,21 +1032,47 @@ def dedupe_rows(
     conflict_columns: list[str],
     target_cols: list[str],
 ) -> list[tuple]:
-    """Keep the last occurrence of each conflict key, preserving tuple order."""
+    """Keep the last occurrence of each conflict key, preserving tuple order.
+
+    Conflict names are resolved case-insensitively (strict). Partial composite
+    PKs raise — never silently dedupe on a weaker key and drop sibling rows.
+    """
+    kept, _numbers = dedupe_rows_keeping_numbers(rows, conflict_columns, target_cols)
+    return kept
+
+
+def dedupe_rows_keeping_numbers(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int] | None]:
+    """Dedupe, and report which source row each survivor came from.
+
+    Deduping changes both membership and order, so a parallel list of source row
+    numbers taken before it is stale afterwards. Carrying a stale list forward is
+    worse than carrying none: every later quarantine record then names a
+    confidently wrong row.
+    """
     if not conflict_columns or not rows:
-        return rows
-    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
-    if not indices:
-        return rows
+        return rows, row_numbers
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
+        return rows, row_numbers
+    indices = [target_cols.index(c) for c in conflict]
     seen: dict[tuple, tuple] = {}
-    for row in rows:
-        key = tuple(row[i] for i in indices)
+    seen_numbers: dict[tuple, int] = {}
+    for position, row in enumerate(rows):
+        key = tuple(_conflict_key_identity(row[i]) for i in indices)
         seen[key] = row
-    return list(seen.values())
+        seen_numbers[key] = resolve_row_number(row_numbers, position)
+    if row_numbers is None:
+        return list(seen.values()), None
+    return list(seen.values()), [seen_numbers[k] for k in seen]
 
 
-# Destination metadata column for CDC monotonic apply (PK + LSN guard).
-DF_LSN_COL = "_df_lsn"
+# Destination metadata column for CDC monotonic apply — owned by lsn_guards.
+from connectors.lsn_guards import DF_LSN_COL  # noqa: E402
 
 
 def null_safe_merge_on(
@@ -498,6 +1101,47 @@ def null_safe_merge_on(
     return " AND ".join(parts)
 
 
+def written_ids_from_mapped_rows(
+    mapped_rows: list[Any],
+    target_cols: list[str],
+    conflict_columns: list[str] | None,
+    *,
+    id_limit: int = 500,
+) -> list[str] | None:
+    """Extract single-column PK values for keyed Gate-8 read-back.
+
+    Composite PKs return ``None`` (full-table checksum remains the authority).
+    Upsert/append into a non-empty sink must fingerprint only the batch keys —
+    whole-table digests are not comparable to a partial batch (Airbyte/Fivetran
+    honesty: prove what we wrote, report full cardinality separately).
+    """
+    if not mapped_rows or not target_cols or not conflict_columns:
+        return None
+    if len(conflict_columns) != 1:
+        return None
+    pk = str(conflict_columns[0] or "").strip()
+    if not pk or pk not in target_cols:
+        return None
+    idx = target_cols.index(pk)
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in mapped_rows:
+        if isinstance(row, dict):
+            raw = row.get(pk)
+        else:
+            raw = row[idx] if idx < len(row) else None
+        if raw is None or raw == "":
+            continue
+        marker = str(raw)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        out.append(marker)
+        if len(out) >= max(0, int(id_limit)):
+            break
+    return out or None
+
+
 def gate8_writer_meta(
     mapped_rows: list[Any],
     target_cols: list[str],
@@ -505,6 +1149,7 @@ def gate8_writer_meta(
     *,
     sample_limit: int = 50,
     id_limit: int = 500,
+    conflict_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Stamp Gate-8 reconcile_sample / written_ids onto WriteResult.meta.
 
@@ -523,13 +1168,159 @@ def gate8_writer_meta(
                     for i, c in enumerate(target_cols)
                 }
             )
+    ids = written_ids
+    if ids is None and conflict_columns:
+        ids = written_ids_from_mapped_rows(
+            mapped_rows, target_cols, conflict_columns, id_limit=id_limit
+        )
     meta: dict[str, Any] = {
         "reconcile_sample": sample,
         "source_row_count": len(mapped_rows),
     }
-    if written_ids is not None:
-        meta["written_ids"] = [str(x) for x in written_ids[: max(0, int(id_limit))]]
+    if ids is not None:
+        meta["written_ids"] = [str(x) for x in ids[: max(0, int(id_limit))]]
     return meta
+
+
+def writer_meta_with_source_rows(
+    meta: dict[str, Any] | None,
+    source_row_count: int | None,
+) -> dict[str, Any]:
+    """Put the *reader's* population count where Gate-8 reads it.
+
+    Gate-8 refuses to invent conservation from writer acknowledgements, so a
+    writer that streams from a spooled source (the engine hands over an empty
+    record list once rows spill) must report how many rows the reader produced.
+    Warehouse/native writers that skipped this stamp had correct loads refused
+    as ``source_row_count_unmeasured``.
+    """
+    out = dict(meta or {})
+    if source_row_count is not None and int(source_row_count) >= 0:
+        out["source_row_count"] = int(source_row_count)
+    return out
+
+
+def vector_prepare_cell(val: Any) -> Any:
+    """One flattened vector cell. Reader-null omits; leftover types use dest wire.
+
+    ``SQL_NULL_SENTINEL`` is a string, so a None/Missing-only omit leaked the
+    wire token into metadata. ``str(Decimal("1E+2"))`` invented ``1E+2``.
+    A Decimal stays a Decimal on the canonical text (``1E+2`` → ``100``) so a
+    vector payload can emit a JSON number. Native ``0`` / ``False`` stay present.
+    """
+    from services.value_serializer import is_reader_null_cell, present_cell_text
+
+    if is_reader_null_cell(val):
+        return None
+    if isinstance(val, Decimal):
+        if val.is_nan() or val.is_infinite():
+            return present_cell_text(val)
+        text = present_cell_text(val)
+        if not text:
+            return None
+        try:
+            return Decimal(text)
+        except Exception:
+            return text
+    if isinstance(val, (str, int, float, bool)):
+        return unescape_wire_text(val)
+    return present_cell_text(val)
+
+
+_VECTOR_NUMERIC_LOGICAL = frozenset({"integer", "decimal", "float"})
+_VECTOR_STRING_LOGICAL = frozenset({"", "string", "text"})
+_VECTOR_JSON_NUMBER = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def vector_payload_declared_type(dest_type: str, source_type: str) -> str:
+    """Which declaration owns a vector payload cell.
+
+    A schemaless destination stamps VARCHAR because it has no column DDL.
+    That stamp is not an operator choice to store a numeric source as text.
+    An explicit numeric destination type still wins.
+    """
+    try:
+        from services.type_system import normalize_logical_type
+    except ImportError:
+        return dest_type or source_type
+    dest_l = normalize_logical_type(dest_type) if dest_type else ""
+    src_l = normalize_logical_type(source_type) if source_type else ""
+    if dest_l in _VECTOR_NUMERIC_LOGICAL:
+        return dest_type
+    if dest_l in _VECTOR_STRING_LOGICAL and src_l in _VECTOR_NUMERIC_LOGICAL:
+        return source_type
+    return dest_type or source_type
+
+
+def vector_payload_number(val: Any, declared_type: str) -> Any:
+    """Restore a numeric source literal that arrived as text.
+
+    Stream pages are ``list[list[str]]``. Leaving ``"2.36"`` in the payload
+    makes every downstream reader treat a numeric column as text. Only a
+    declared integer, decimal, or float is parsed, and only when the text is
+    a JSON number. Anything else stays text so a sku of ``"2.36"`` is unchanged.
+    """
+    prepared = vector_prepare_cell(val)
+    if prepared is None or isinstance(prepared, (int, float, bool, Decimal)):
+        return prepared
+    if not isinstance(prepared, str) or not declared_type:
+        return prepared
+    try:
+        from services.type_system import normalize_logical_type
+
+        logical = normalize_logical_type(declared_type)
+    except ImportError:
+        return prepared
+    if logical not in _VECTOR_NUMERIC_LOGICAL:
+        return prepared
+    text = prepared.strip()
+    if not _VECTOR_JSON_NUMBER.match(text):
+        return prepared
+    if logical == "integer" and "." not in text and "e" not in text.lower():
+        try:
+            return int(text, 10)
+        except ValueError:
+            return prepared
+    try:
+        return Decimal(text)
+    except Exception:
+        return prepared
+
+
+def vector_prepare_metadata(meta: Any, *, keep_null: bool = False) -> dict[str, Any]:
+    """Walk a metadata mapping; omit reader-null. Always a dict.
+
+    ``sanitize_json_value`` leaves extract ``SQL_NULL_SENTINEL`` as a string,
+    so Qdrant / Milvus / Weaviate / pgvector / Pinecone stored the wire
+    spelling. ``vector_prepare_cell`` already owns one cell. 0 / false stay.
+    List[str] tags stay a list. ``keep_null`` (pgvector JSONB, D209) keeps a
+    SQL NULL as JSON null instead of dropping the key.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    if not isinstance(meta, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, val in meta.items():
+        if is_reader_null_cell(val):
+            if keep_null:
+                out[str(key)] = None
+            continue
+        if isinstance(val, dict):
+            nested = vector_prepare_metadata(val, keep_null=keep_null)
+            if nested or keep_null:
+                out[str(key)] = nested
+            continue
+        if isinstance(val, list) and all(isinstance(item, str) for item in val):
+            out[str(key)] = val
+            continue
+        prepared = vector_prepare_cell(val)
+        if prepared is None:
+            if keep_null:
+                out[str(key)] = None
+            continue
+        out[str(key)] = prepared
+    return out
 
 
 def vector_gate8_meta(
@@ -542,632 +1333,158 @@ def vector_gate8_meta(
     Airbyte-class vector destinations prove identity via record id + metadata,
     not opaque float arrays — match that honesty bar.
     """
+    from services.value_serializer import present_cell_text
+
     ids: list[str] = []
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        vid = rec.get(id_key)
-        if vid is not None and str(vid).strip() != "":
-            ids.append(str(vid))
+        token = present_cell_text(rec.get(id_key))
+        if token:
+            ids.append(token)
     cols = sorted({k for r in records if isinstance(r, dict) for k in r}) or [id_key]
     return gate8_writer_meta(records, cols, ids)
 
 
-def lsn_family(lsn: Any) -> str:
-    """Return CDC stamp family for LSN-guard compares (Debezium-class).
-
-    Families: ``empty``, ``pg_wal``, ``mysql_binlog``, ``mysql_gtid``,
-    ``oracle_scn``, ``mongo_resume``, ``mssql_lsn``, ``numeric_version``,
-    ``opaque``. Cross-family compares are incomparable — never invent
-    ``newer`` across dialects (silent regression). Oracle SCN must not share
-    ``numeric_version`` with SQL Server CT (bare integers collide).
-    """
-    if lsn is None:
-        return "empty"
-    text = str(lsn).strip()
-    if not text:
-        return "empty"
-    lower = text.lower()
-    if lower.startswith("gtid:"):
-        return "mysql_gtid"
-    if lower.startswith("scn:"):
-        return "oracle_scn"
-    if lower.startswith("mongo:"):
-        return "mongo_resume"
-    # Postgres WAL LSN: hex/hex
-    if "/" in text:
-        hi, _, lo = text.partition("/")
-        if hi and lo and all(c in "0123456789abcdefABCDEF" for c in hi + lo):
-            return "pg_wal"
-    # MySQL binlog file:pos
-    if ":" in text:
-        file_name, _, pos = text.rpartition(":")
-        if file_name and pos.isdigit():
-            return "mysql_binlog"
-    # SQL Server binary LSN hex (0x… or long hex)
-    if lower.startswith("0x") and all(c in "0123456789abcdef" for c in lower[2:]):
-        return "mssql_lsn"
-    if len(text) >= 10 and all(c in "0123456789abcdefABCDEF" for c in text) and not text.isdigit():
-        return "mssql_lsn"
-    if text.isdigit():
-        return "numeric_version"
-    return "opaque"
+# CDC LSN guards (compare / dedupe / dialect predicates) live in
+# ``connectors.lsn_guards``; re-exported for the historical import surface.
+from connectors.lsn_guards import (  # noqa: E402,F401 — re-export
+    bigquery_lsn_match_predicate,
+    compare_lsn,
+    dedupe_rows_by_pk_and_lsn,
+    dedupe_rows_by_pk_and_lsn_keeping_numbers,
+    extract_cdc_lsn,
+    gtid_set_contains,
+    gtid_watermark_window_closed,
+    lsn_family,
+    lsn_is_newer,
+    lsn_sort_key,
+    mysql_lsn_values_newer_sql,
+    parse_mysql_gtid_set,
+    postgres_lsn_update_guard_sql,
+    snowflake_lsn_match_predicate,
+    sqlite_lsn_update_guard_sql,
+)
 
 
-def lsn_sort_key(lsn: Any) -> tuple:
-    """Return a sortable key for PG ``hi/lo``, MySQL ``file:pos``, versions, or opaque tokens.
-
-    Kind order is only valid **within** the same ``lsn_family``. Use
-    ``compare_lsn`` for guards — it refuses cross-family invent.
-    """
-    if lsn is None:
-        return (0, -1, -1, "")
-    text = str(lsn).strip()
-    if not text:
-        return (0, -1, -1, "")
-    lower = text.lower()
-    if lower.startswith("scn:"):
-        body = text.split(":", 1)[1].strip()
-        try:
-            return (1, int(body), 0, "")
-        except (TypeError, ValueError):
-            return (0, 0, 0, body)
-    if lower.startswith("mongo:"):
-        return (0, 0, 0, text.split(":", 1)[1])
-    # Postgres WAL LSN: hex/hex (reject paths that look like URLs).
-    if "/" in text and not lower.startswith("gtid:"):
-        hi, _, lo = text.partition("/")
-        if hi and lo and all(c in "0123456789abcdefABCDEF" for c in hi + lo):
-            try:
-                return (3, int(hi, 16), int(lo, 16), "")
-            except ValueError:
-                pass
-    # MySQL binlog file:pos (pos may already be zero-padded from extract_cdc_lsn).
-    if ":" in text and not lower.startswith("gtid:"):
-        file_name, _, pos = text.rpartition(":")
-        if file_name and pos.isdigit():
-            return (2, file_name, int(pos), "")
-    # Zero-padded / numeric versions (SQL Server CT, etc.).
-    if text.isdigit():
-        return (1, int(text), 0, "")
-    return (0, 0, 0, text)
-
-
-def compare_lsn(left: Any, right: Any) -> int:
-    """Compare two LSN-like values. Returns -1, 0, or 1.
-
-    Same-family stamps compare numerically/lexically. Cross-family pairs are
-    **incomparable** and return ``0`` so LSN guards refuse invent overwrite
-    (Debezium at-least-once + PK high-water-mark class). Empty is older than
-    any concrete stamp.
-    """
-    left_empty = left is None or str(left).strip() == ""
-    right_empty = right is None or str(right).strip() == ""
-    if left_empty and right_empty:
-        return 0
-    if left_empty:
-        return -1
-    if right_empty:
-        return 1
-    fa, fb = lsn_family(left), lsn_family(right)
-    if fa != fb:
-        return 0
-    a, b = lsn_sort_key(left), lsn_sort_key(right)
-    if a < b:
-        return -1
-    if a > b:
-        return 1
-    return 0
-
-
-def lsn_is_newer(incoming: Any, existing: Any) -> bool:
-    """True when ``incoming`` should replace ``existing`` under at-least-once CDC.
-
-    Requires a strictly greater same-family stamp. Equal and cross-family are
-    not newer (idempotent redelivery / refuse invent).
-    """
-    if existing is None or str(existing).strip() == "":
-        return True
-    if incoming is None or str(incoming).strip() == "":
-        return False
-    return compare_lsn(incoming, existing) > 0
-
-
-def parse_mysql_gtid_set(gtid_set: Any) -> dict[str, list[tuple[int, int]]]:
-    """Parse MySQL ``gtid_executed`` into ``{uuid: [(start, end), ...]}``.
-
-    Research: Debezium read-only incremental snapshots use executed GTID sets
-    as low/high watermarks (DBZ-3577). Intervals are inclusive.
-    """
-    text = str(gtid_set or "").strip()
-    if text.lower().startswith("gtid:"):
-        text = text[5:].strip()
-    out: dict[str, list[tuple[int, int]]] = {}
-    if not text:
-        return out
-    for chunk in text.replace("\n", ",").split(","):
-        part = chunk.strip()
-        if not part or ":" not in part:
-            continue
-        uuid, _, ranges = part.partition(":")
-        uuid = uuid.strip()
-        if not uuid:
-            continue
-        intervals: list[tuple[int, int]] = []
-        for rng in ranges.split(":"):
-            rng = rng.strip()
-            if not rng:
-                continue
-            if "-" in rng:
-                a, _, b = rng.partition("-")
-                try:
-                    start, end = int(a), int(b)
-                except ValueError:
-                    continue
-                if end < start:
-                    start, end = end, start
-                intervals.append((start, end))
-            else:
-                try:
-                    n = int(rng)
-                except ValueError:
-                    continue
-                intervals.append((n, n))
-        if intervals:
-            out.setdefault(uuid, []).extend(intervals)
-    return out
-
-
-def gtid_set_contains(haystack: Any, needle: Any) -> bool:
-    """True when every GTID interval in ``needle`` is covered by ``haystack``.
-
-    Used for Debezium-class watermark checks: high watermark contains a
-    streamed event's GTID ⇒ window can close. Cross-empty: empty needle is
-    contained; empty haystack contains nothing non-empty.
-    """
-    needle_map = parse_mysql_gtid_set(needle)
-    if not needle_map:
-        return True
-    hay = parse_mysql_gtid_set(haystack)
-    if not hay:
-        return False
-    for uuid, intervals in needle_map.items():
-        covers = hay.get(uuid) or []
-        if not covers:
-            return False
-        for start, end in intervals:
-            for n in range(start, end + 1):
-                if not any(a <= n <= b for a, b in covers):
-                    return False
-    return True
-
-
-def gtid_watermark_window_closed(
+def transform_error_policy(
+    policy: str | None = None,
     *,
-    low: Any,
-    high: Any,
-    event_gtid: Any = None,
-) -> bool:
-    """True when read-only incremental snapshot GTID window can close.
-
-    Research: Debezium DBZ-3577 — executed GTID set as low/high watermarks.
-    Window closes when ``high`` contains ``low`` (and optional event GTID).
-    Never invent closed from lexicographic string order.
-    """
-    if not gtid_set_contains(high, low):
-        return False
-    if event_gtid is None or str(event_gtid).strip() == "":
-        return True
-    return gtid_set_contains(high, event_gtid)
-
-
-def dedupe_rows_by_pk_and_lsn(
-    rows: list[tuple],
-    conflict_columns: list[str],
-    target_cols: list[str],
-    *,
-    lsn_column: str = DF_LSN_COL,
-) -> list[tuple]:
-    """Keep the highest-LSN row per PK; fall back to last-wins when LSN absent."""
-    if not conflict_columns or not rows:
-        return rows
-    if lsn_column not in target_cols:
-        return dedupe_rows(rows, conflict_columns, target_cols)
-    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
-    if not indices:
-        return rows
-    lsn_idx = target_cols.index(lsn_column)
-    best: dict[tuple, tuple] = {}
-    for row in rows:
-        key = tuple(row[i] for i in indices)
-        prev = best.get(key)
-        if prev is None or compare_lsn(row[lsn_idx], prev[lsn_idx]) >= 0:
-            best[key] = row
-    return list(best.values())
-
-
-def _format_file_pos_lsn(file_name: str, pos: Any) -> str:
-    """Format file:pos LSN for downstream SQL guards.
-
-    MySQL binlog files use zero-padded numeric suffixes (e.g. ``mysql-bin.000003``);
-    for those we zero-pad the position so lexicographic text ordering stays
-    monotonic.  For unpadded file names we emit the plain integer position so
-    unit-test fixtures like ``bin.1:9`` stay readable.
-    """
-    try:
-        int_pos = int(pos)
-    except (TypeError, ValueError):
-        return f"{file_name}:{pos}"
-    # Detect zero-padded numeric token in the file name (MySQL binlog style).
-    if re.search(r"(?<!\d)0\d+(?!\d)", file_name):
-        return f"{file_name}:{int_pos:020d}"
-    return f"{file_name}:{int_pos}"
-
-
-def extract_cdc_lsn(resume_token: Any) -> str | None:
-    """Pull a sortable LSN/position string from a CDC resume token.
-
-    Supports PG ``lsn=``, MySQL ``file:pos`` / ``gtid``, Mongo ``_data``,
-    SQL Server LSN hex, and Oracle SCN. Used to stamp ``_df_lsn`` for
-    at-least-once upsert guards (not exactly-once).
-    """
-    if resume_token is None:
-        return None
-    if isinstance(resume_token, dict):
-        # Nested PG hold / incremental wrappers
-        nested = resume_token.get("token")
-        if isinstance(nested, (dict, str)) and nested:
-            nested_lsn = extract_cdc_lsn(nested)
-            if nested_lsn:
-                return nested_lsn
-        file_name = resume_token.get("file") or resume_token.get("filename")
-        pos = resume_token.get("pos")
-        if file_name is not None and pos is not None:
-            return _format_file_pos_lsn(file_name, pos)
-        gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
-        if gtid is not None and str(gtid).strip():
-            return f"gtid:{str(gtid).strip()}"
-        for key in ("lsn", "scn", "version", "position", "resume_lsn", "pos", "_data"):
-            value = resume_token.get(key)
-            if value is None or not str(value).strip():
-                continue
-            if key == "scn":
-                body = str(value).strip()
-                return body if body.lower().startswith("scn:") else f"scn:{body}"
-            if key == "_data":
-                body = str(value).strip()
-                return body if body.lower().startswith("mongo:") else f"mongo:{body}"
-            if key == "version":
-                try:
-                    return f"{int(value):020d}"
-                except (TypeError, ValueError):
-                    return str(value).strip()
-            return str(value).strip()
-        return None
-    text = str(resume_token).strip()
-    if not text or text in {"None", "null"}:
-        return None
-    # Bare MySQL file:pos strings — pad pos for lexicographic guards.
-    if ":" in text and not text.lower().startswith("gtid:") and "/" not in text and not text.startswith("{"):
-        file_name, _, pos = text.rpartition(":")
-        if file_name and pos.isdigit():
-            return _format_file_pos_lsn(file_name, pos)
-    # JSON CDC tokens (SQL Server native / CT, Oracle LogMiner, etc.)
-    if text.startswith("{"):
-        try:
-            data = json.loads(text)
-        except Exception:
-            data = None
-        if isinstance(data, dict):
-            kind = str(data.get("kind") or "")
-            if kind == "mssql-cdc":
-                lsn = data.get("lsn")
-                if lsn is not None and str(lsn).strip():
-                    return str(lsn).strip()
-            if kind in {"mssql-ct", "sqlserver-ct"}:
-                ver = data.get("version")
-                if ver is not None and str(ver).strip():
-                    # Zero-pad so lexicographic compare stays monotonic for versions.
-                    try:
-                        return f"{int(ver):020d}"
-                    except (TypeError, ValueError):
-                        return str(ver).strip()
-            nested = extract_cdc_lsn(data)
-            if nested:
-                return nested
-    if "lsn=" in text:
-        for part in text.split("|"):
-            if part.startswith("lsn=") and part[4:].strip():
-                return part[4:].strip()
-    return text
-
-
-def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment for ON CONFLICT when ``_df_lsn`` is present.
-
-    Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps use family-aware
-    compare for ``file:pos`` / numeric versions / opaque tokens — never invent
-    cross-family ``newer`` via bare text ``>`` (mirrors :func:`compare_lsn`).
-    """
-    pg_pat = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_pat = r"^[0-9]+$"
-    excl = f'EXCLUDED."{lsn_column}"'
-    dest = f'"{table_name}"."{lsn_column}"'
-    dest_c = f"COALESCE({dest}, '')"
-    both_filepos = (
-        f"({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%' "
-        f"AND {dest_c} LIKE '%%:%%' AND {dest_c} NOT LIKE 'gtid:%%')"
-    )
-    # split_part is Postgres-native (same dialect as ON CONFLICT).
-    filepos_newer = (
-        f"(split_part({excl}, ':', 1) > split_part({dest}, ':', 1) "
-        f"OR (split_part({excl}, ':', 1) = split_part({dest}, ':', 1) "
-        f"AND NULLIF(split_part({excl}, ':', 2), '')::bigint "
-        f"> NULLIF(split_part({dest}, ':', 2), '')::bigint))"
-    )
-    both_numeric = f"({excl} ~ '{num_pat}' AND {dest_c} ~ '{num_pat}')"
-    # Opaque: neither side looks like pg / file:pos / all-digits.
-    both_opaque = (
-        f"({excl} !~ '{pg_pat}' AND {dest_c} !~ '{pg_pat}' "
-        f"AND NOT ({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%') "
-        f"AND NOT ({dest_c} LIKE '%%:%%' AND {dest_c} NOT LIKE 'gtid:%%') "
-        f"AND {excl} !~ '{num_pat}' AND {dest_c} !~ '{num_pat}')"
-    )
-    return (
-        f"( "
-        f"({excl} ~ '{pg_pat}' AND {dest_c} ~ '{pg_pat}' "
-        f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
-        f"OR "
-        f"({excl} !~ '{pg_pat}' AND ("
-        f"{dest} IS NULL OR {dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_numeric} AND {excl}::bigint > {dest}::bigint) "
-        f"OR ({both_opaque} AND {excl} > {dest})"
-        f")) "
-        f")"
-    )
-
-
-def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`") -> str:
-    """Boolean SQL: ``VALUES(lsn)`` is strictly newer than the destination cell.
-
-    Handles empty dest, ``file:pos`` (file then integer pos), numeric versions,
-    and opaque tokens — refuses cross-family invent. Used inside
-    ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
-    """
-    col = f"{quote}{lsn_column}{quote}"
-    inc = f"VALUES({col})"
-    dest = col
-    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    filepos_newer = (
-        f"(SUBSTRING_INDEX({inc}, ':', 1) > SUBSTRING_INDEX({dest}, ':', 1) "
-        f"OR (SUBSTRING_INDEX({inc}, ':', 1) = SUBSTRING_INDEX({dest}, ':', 1) "
-        f"AND CAST(SUBSTRING_INDEX({inc}, ':', -1) AS UNSIGNED) "
-        f"> CAST(SUBSTRING_INDEX({dest}, ':', -1) AS UNSIGNED)))"
-    )
-    both_numeric = f"({inc} REGEXP '{num_re}' AND {dest} REGEXP '{num_re}')"
-    both_opaque = (
-        f"(NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%') "
-        f"AND {inc} NOT REGEXP '{pg_re}' AND {dest} NOT REGEXP '{pg_re}' "
-        f"AND {inc} NOT REGEXP '{num_re}' AND {dest} NOT REGEXP '{num_re}')"
-    )
-    return (
-        f"({dest} IS NULL OR {dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_numeric} AND CAST({inc} AS UNSIGNED) > CAST({dest} AS UNSIGNED)) "
-        f"OR ({both_opaque} AND {inc} > {dest}))"
-    )
-
-
-def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE``.
-
-    Family-aware for ``file:pos`` / numeric / opaque. PG ``hi/lo`` hex is
-    best-effort opaque text here (SQLite lacks portable hex→int); writers also
-    run :func:`filter_stale_lsn_rows` / :func:`compare_lsn` in Python before bind.
-    Cross-family pairs never invent ``newer`` via bare text ``>``.
-    """
-    excl = f'excluded."{lsn_column}"'
-    dest = f'"{table_name}"."{lsn_column}"'
-    both_filepos = (
-        f"({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    # instr/substr — portable without REGEXP extension.
-    excl_file = f"substr({excl}, 1, instr({excl}, ':') - 1)"
-    dest_file = f"substr({dest}, 1, instr({dest}, ':') - 1)"
-    excl_pos = f"CAST(substr({excl}, instr({excl}, ':') + 1) AS INTEGER)"
-    dest_pos = f"CAST(substr({dest}, instr({dest}, ':') + 1) AS INTEGER)"
-    filepos_newer = (
-        f"({excl_file} > {dest_file} "
-        f"OR ({excl_file} = {dest_file} AND {excl_pos} > {dest_pos}))"
-    )
-    # GLOB [0-9]* matches empty too — require at least one digit via length.
-    excl_numeric = (
-        f"({excl} GLOB '[0-9]*' AND {excl} NOT GLOB '*[^0-9]*' AND length({excl}) > 0)"
-    )
-    dest_numeric = (
-        f"({dest} GLOB '[0-9]*' AND {dest} NOT GLOB '*[^0-9]*' AND length({dest}) > 0)"
-    )
-    both_numeric = f"({excl_numeric} AND {dest_numeric})"
-    excl_opaque = (
-        f"(NOT ({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%') "
-        f"AND {excl} NOT LIKE '%/%' AND NOT {excl_numeric})"
-    )
-    dest_opaque = (
-        f"(NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%') "
-        f"AND {dest} NOT LIKE '%/%' AND NOT {dest_numeric})"
-    )
-    both_opaque = f"({excl_opaque} AND {dest_opaque})"
-    return (
-        f"({dest} IS NULL OR {dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_numeric} AND CAST({excl} AS INTEGER) > CAST({dest} AS INTEGER)) "
-        f"OR ({both_opaque} AND {excl} > {dest}))"
-    )
-
-
-def snowflake_lsn_match_predicate(
-    target_alias: str = "t",
-    source_alias: str = "s",
-    lsn_column: str = DF_LSN_COL,
+    allow_coerce_null: bool | None = None,
 ) -> str:
-    """MATCHED guard for Snowflake MERGE — mirrors :func:`compare_lsn` families.
+    """Resolve job error policy — ``coerce_null`` is gated.
 
-    Bare ``s.lsn > t.lsn`` mis-orders PG ``0/100`` vs ``0/20`` and invents
-    cross-family ``newer``. Parse pg / file:pos / numeric; opaque text only
-    when both sides are the same opaque family.
+    Job/env ``coerce_null`` silently NULLs failed cells in the primary table.
+    That is forbidden unless:
+    - a Migration Risk Contract quarantine_policy asks for NULL/COERCE (resolved
+      per-mapping in ``resolve_write_action_for_mapping``), or
+    - the caller explicitly allows it (pre-ingestion staging diagnose path).
     """
-    inc = f'{source_alias}."{lsn_column}"'
-    dest = f'COALESCE({target_alias}."{lsn_column}", \'\')'
-    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    # SPLIT_PART(..., -1) = last segment (pos) in Snowflake.
-    filepos_newer = (
-        f"(SPLIT_PART({inc}, ':', 1) > SPLIT_PART({dest}, ':', 1) "
-        f"OR (SPLIT_PART({inc}, ':', 1) = SPLIT_PART({dest}, ':', 1) "
-        f"AND TRY_TO_NUMBER(SPLIT_PART({inc}, ':', -1)) "
-        f"> TRY_TO_NUMBER(SPLIT_PART({dest}, ':', -1))))"
-    )
-    both_pg = (
-        f"(REGEXP_LIKE({inc}, '{pg_re}') AND REGEXP_LIKE({dest}, '{pg_re}'))"
-    )
-    # Hex hi/lo via TO_NUMBER with hex format mask.
-    inc_hi = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    dest_hi = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    inc_lo = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 2), 'XXXXXXXXXXXXXXXX')"
-    dest_lo = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 2), 'XXXXXXXXXXXXXXXX')"
-    pg_newer = (
-        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
-    )
-    both_numeric = (
-        f"(REGEXP_LIKE({inc}, '{num_re}') AND REGEXP_LIKE({dest}, '{num_re}'))"
-    )
-    inc_opaque = (
-        f"(NOT REGEXP_LIKE({inc}, '{pg_re}') AND NOT REGEXP_LIKE({inc}, '{num_re}') "
-        f"AND NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%'))"
-    )
-    dest_opaque = (
-        f"(NOT REGEXP_LIKE({dest}, '{pg_re}') AND NOT REGEXP_LIKE({dest}, '{num_re}') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%'))"
-    )
-    both_opaque = f"({inc_opaque} AND {dest_opaque})"
-    return (
-        f"({dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_pg} AND {pg_newer}) "
-        f"OR ({both_numeric} AND TRY_TO_NUMBER({inc}) > TRY_TO_NUMBER({dest})) "
-        f"OR ({both_opaque} AND {inc} > {dest}))"
-    )
-
-
-def bigquery_lsn_match_predicate(
-    target_alias: str = "T",
-    source_alias: str = "S",
-    lsn_column: str = DF_LSN_COL,
-) -> str:
-    """MATCHED guard for BigQuery MERGE — mirrors :func:`compare_lsn` families.
-
-    Plain ``S.lsn > T.lsn`` is unsafe for PG ``hi/lo`` hex and invents
-    cross-family ``newer``. Parse pg / file:pos / numeric; opaque text only
-    within the same opaque family.
-    """
-    inc = f"{source_alias}.`{lsn_column}`"
-    dest = f"COALESCE({target_alias}.`{lsn_column}`, '')"
-    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    filepos_newer = (
-        f"(SPLIT({inc}, ':')[OFFSET(0)] > SPLIT({dest}, ':')[OFFSET(0)] "
-        f"OR (SPLIT({inc}, ':')[OFFSET(0)] = SPLIT({dest}, ':')[OFFSET(0)] "
-        f"AND SAFE_CAST(ARRAY_REVERSE(SPLIT({inc}, ':'))[OFFSET(0)] AS INT64) "
-        f"> SAFE_CAST(ARRAY_REVERSE(SPLIT({dest}, ':'))[OFFSET(0)] AS INT64)))"
-    )
-    both_pg = (
-        f"(REGEXP_CONTAINS({inc}, r'{pg_re}') AND REGEXP_CONTAINS({dest}, r'{pg_re}'))"
-    )
-    inc_hi = f"SAFE_CAST(CONCAT('0x', SPLIT({inc}, '/')[OFFSET(0)]) AS INT64)"
-    dest_hi = f"SAFE_CAST(CONCAT('0x', SPLIT({dest}, '/')[OFFSET(0)]) AS INT64)"
-    inc_lo = f"SAFE_CAST(CONCAT('0x', SPLIT({inc}, '/')[OFFSET(1)]) AS INT64)"
-    dest_lo = f"SAFE_CAST(CONCAT('0x', SPLIT({dest}, '/')[OFFSET(1)]) AS INT64)"
-    pg_newer = (
-        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
-    )
-    both_numeric = (
-        f"(REGEXP_CONTAINS({inc}, r'{num_re}') AND REGEXP_CONTAINS({dest}, r'{num_re}'))"
-    )
-    inc_opaque = (
-        f"(NOT REGEXP_CONTAINS({inc}, r'{pg_re}') "
-        f"AND NOT REGEXP_CONTAINS({inc}, r'{num_re}') "
-        f"AND NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%'))"
-    )
-    dest_opaque = (
-        f"(NOT REGEXP_CONTAINS({dest}, r'{pg_re}') "
-        f"AND NOT REGEXP_CONTAINS({dest}, r'{num_re}') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%'))"
-    )
-    both_opaque = f"({inc_opaque} AND {dest_opaque})"
-    return (
-        f"({dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_pg} AND {pg_newer}) "
-        f"OR ({both_numeric} AND SAFE_CAST({inc} AS INT64) > SAFE_CAST({dest} AS INT64)) "
-        f"OR ({both_opaque} AND {inc} > {dest}))"
-    )
-
-
-def transform_error_policy(policy: str | None = None) -> str:
     selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
-    return selected if selected in VALID_ERROR_POLICIES else "quarantine"
+    if selected not in VALID_ERROR_POLICIES:
+        return "quarantine"
+    if selected != "coerce_null":
+        return selected
+    allowed = (
+        bool(allow_coerce_null)
+        if allow_coerce_null is not None
+        else bool(_allow_job_coerce_null.get())
+    )
+    if allowed:
+        return "coerce_null"
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Job/env TRANSFORM_ERROR_POLICY=coerce_null demoted to quarantine — "
+        "primary writes require a Risk Contract NULL/COERCE policy or staging allow"
+    )
+    return "quarantine"
+
+
+def summarize_reject_findings(
+    rejected_details: list[dict[str, Any]] | None, *, limit: int = 3
+) -> str:
+    """Name the columns and reasons behind a refusal.
+
+    A bare "rejected 1 cell finding(s); strict error policy blocks partial
+    write" tells an operator nothing they can act on. Every refusal must carry
+    the offending column, the row, and the engine's own reason so the next
+    correct action (fix the mapping, widen the destination, allow quarantine)
+    is obvious from the run itself.
+    """
+    seen: list[str] = []
+    for d in rejected_details or []:
+        # ``target`` is the table/index the writer refused into; ``column`` is
+        # the cell. Preferring the table named the whole sink on every finding
+        # and left the operator to guess which column was bad.
+        col = str(d.get("column") or d.get("target") or "").strip()
+        reason = " ".join(str(d.get("reason") or "").split())[:180]
+        if not col and not reason:
+            continue
+        row = d.get("row")
+        where = f"{col} (row {row})" if col and row else col or f"row {row}"
+        entry = f"{where}: {reason}" if reason else where
+        if entry not in seen:
+            seen.append(entry)
+        if len(seen) >= limit:
+            break
+    if not seen:
+        return ""
+    return " — " + "; ".join(seen)
+
+
+def _distinct_reject_rows(details: list[dict[str, Any]]) -> int:
+    """Count the distinct rows a finding list touches.
+
+    Writers key findings by whatever identifies a record on that sink, so ``row``
+    also arrives as a document id or a vector id. An ``int()`` on those raised
+    inside the refusal builder and turned a clean fail-closed refusal into an
+    unhandled ValueError; a non-numeric id still identifies one row.
+    """
+    rows: set[object] = set()
+    for detail in details:
+        raw = detail.get("row")
+        if raw is None or raw == "":
+            continue
+        try:
+            numeric = int(raw)
+        except (TypeError, ValueError):
+            rows.add(str(raw))
+            continue
+        if numeric > 0:
+            rows.add(numeric)
+    return len(rows)
 
 
 def reject_on_strict_policy(
     policy: str | None,
     rejected_details: list[dict[str, Any]] | None,
     label: str,
+    transform_errors: list[str] | None = None,
 ) -> str | None:
     """Return an error message when the write must refuse a partial primary write.
 
     Module 1b: Migration Risk Contract FAIL_JOB aborts even when the job-level
     error_policy is ``quarantine``. Continue-policy contract failures
     (CAST_AND_CONTINUE / QUARANTINE_ROW) may hold out rows without aborting.
+
+    ``transform_errors`` is the writer audit list. Strict mode previously aborted
+    on ``transform_errors and policy==fail`` *after* continue-contract holdouts
+    were applied — inventing a full-job failure while quarantine already held
+    empty url/email cells (MySQL→Postgres image→TEXT). Continue-only details
+    must clear both paths.
     """
     details = list(rejected_details or [])
-    if not details:
-        return None
+    errs = [str(e) for e in (transform_errors or []) if e]
 
-    try:
-        from services.migration_risk_contract import (
-            rejected_details_are_continue_contract_only,
-            rejected_details_require_job_abort,
-        )
-    except Exception:
-        rejected_details_require_job_abort = None  # type: ignore[assignment]
-        rejected_details_are_continue_contract_only = None  # type: ignore[assignment]
+    # In-tree SSOT — never soft-import and demote FAIL_JOB / continue contracts.
+    from services.migration_risk_contract import (
+        JOB_ABORT_POLICIES,
+        rejected_details_are_continue_contract_only,
+        rejected_details_require_job_abort,
+    )
 
-    if rejected_details_require_job_abort and rejected_details_require_job_abort(details):
-        try:
-            from services.migration_risk_contract import JOB_ABORT_POLICIES
-        except Exception:
-            JOB_ABORT_POLICIES = {
-                "FAIL_JOB",
-                "STOP_TABLE",
-                "ABORT_TRANSACTION",
-                "RETRY",
-            }
+    if rejected_details_require_job_abort(details):
         n = sum(
             1
             for d in details
@@ -1185,30 +1502,39 @@ def reject_on_strict_policy(
             }
         )
         scope_note = f" ({', '.join(scopes[:4])})" if scopes else ""
+        # Details are per-cell findings; counting them as "rows" invented 28k
+        # rejects on a 2k-row Excel load (operator panic / wrong Resume hint).
+        cell_n = int(n or len(details))
+        row_n = _distinct_reject_rows(details)
         return (
-            f"{label} rejected {n or len(details)} row(s); "
+            f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
+            f"{summarize_reject_findings(details)}"
         )
 
-    if (
-        rejected_details_are_continue_contract_only
-        and rejected_details_are_continue_contract_only(details)
-    ):
-        # Operator contracted continue + quarantine — do not abort the batch.
+    if details and rejected_details_are_continue_contract_only(details):
+        # Operator contracted continue + quarantine — do not abort the batch,
+        # even when transform_errors still list the held-out cells for audit.
         return None
 
     if transform_error_policy(policy) == "fail":
-        return (
-            f"{label} rejected {len(details)} row(s); "
-            "strict error policy blocks partial write"
-        )
+        if details:
+            cell_n = len(details)
+            row_n = _distinct_reject_rows(details)
+            return (
+                f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
+                "strict error policy blocks partial write"
+                f"{summarize_reject_findings(details)}"
+            )
+        if errs:
+            return f"Transform errors: {'; '.join(errs[:3])}"
     return None
 
 
 _VALIDATION_MODE_POLICIES = {
     "maximum": "fail",
     "strict": "fail",
-    "balanced": "quarantine",
+    "balanced": "quarantine", "lenient": "quarantine",
 }
 
 
@@ -1220,6 +1546,26 @@ def transform_error_policy_for_validation_mode(validation_mode: str | None) -> s
     return transform_error_policy()
 
 
+def multi_row_insert_written(result: CursorResult[Any], batch_len: int) -> int:
+    """Rows landed by one multi-row INSERT that did not raise.
+
+    ``rowcount`` after an executemany / insertmanyvalues INSERT is undefined on
+    every dialect that does not declare ``supports_sane_multi_rowcount`` — SQL
+    Server (pymssql and pyodbc) reports only the last parameter sub-batch. Read
+    as the batch total it under-counts a complete write, and the engine's
+    reconcile then charges the difference to rejected rows: a full 10,000-row
+    transfer reported "7,961 rejected" while the destination held all rows. A
+    non-raising multi-row INSERT wrote the whole batch; a failure is the
+    caller's except path.
+    """
+    count = int(result.rowcount)
+    if batch_len <= 1:
+        return batch_len if count < 0 else count
+    if result.context.dialect.supports_sane_multi_rowcount and count >= batch_len:
+        return count
+    return batch_len
+
+
 def _rejected_row_count(
     data_rows: list[list[str]],
     mapped_rows: list[tuple],
@@ -1227,31 +1573,146 @@ def _rejected_row_count(
     policy: str,
     *,
     sparse_rows: list[tuple] | None = None,
+    source_row_count: int | None = None,
+    collapsed_duplicates: int = 0,
 ) -> int:
     """Return the number of rows that were rejected or quarantined.
 
     For ``fail`` / ``quarantine`` the held-out rows are
-    ``len(data_rows) - len(mapped_rows) - len(sparse_rows)`` (quarantine never
-    writes NULL into the primary table for a bad cell; sparse CDC rows are
-    still written via omit-from-SET and must not inflate rejected counts).
+    ``source_count - len(mapped_rows) - len(sparse_rows) - collapsed``.
+    Quarantine never writes NULL into the primary table for a bad cell.
+    Sparse CDC rows are still written via omit-from-SET. In-bundle last-wins
+    keeps one image of a key and must not charge the earlier image as a
+    rejected duplicate — the survivor is the write.
+    ``source_row_count`` is the expanded STRUCT/explode count when the writer
+    ingested through ``SourceRowSpool`` — ``len(data_rows)`` is the unexpanded
+    engine chunk and must not be used after explode.
     For ``coerce_null`` the rows are preserved with a NULL bad cell, so the
     count is distinct source row numbers with at least one rejected cell.
     """
     if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
-    kept = len(mapped_rows) + len(sparse_rows or [])
-    return max(0, len(data_rows) - kept)
+    kept = (
+        len(mapped_rows)
+        + len(sparse_rows or [])
+        + max(0, int(collapsed_duplicates or 0))
+    )
+    n = int(source_row_count) if source_row_count is not None else len(data_rows)
+    return max(0, n - kept)
 
 
 def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str) -> int:
-    """Distinct source rows that were KEPT but had a cell coerced to NULL.
+    """Distinct source rows that were KEPT but had a cell coerced/omitted to NULL.
 
-    Only ``coerce_null`` alters primary cells in place. ``quarantine`` holds the
-    whole row out of the primary write (details go to DLQ) so this is 0.
+    Counts job ``coerce_null`` and continue-policy ``STOP_COLUMN`` / contract
+    coerce so Gate-8 reconcile cannot treat NULL invent as zero alteration.
+    Quarantine / skip / abort holdouts are excluded — those never land on primary.
     """
-    if policy == "coerce_null":
-        return len({d["row"] for d in rejected_details})
-    return 0
+    holdout_actions = {
+        "quarantine",
+        "skip_row",
+        "fail",
+        "stop_table",
+        "abort_transaction",
+        "retry_then_fail",
+        "write_quarantine",
+        "write_fail",
+    }
+    holdout_exec = {
+        "QUARANTINE_ROW",
+        "SKIP_ROW",
+        "FAIL_JOB",
+        "STOP_TABLE",
+        "ABORT_TRANSACTION",
+        "RETRY",
+    }
+    rows: set[Any] = set()
+    for d in rejected_details or []:
+        if not isinstance(d, dict) or "row" not in d:
+            continue
+        action = str(d.get("policy") or "").lower()
+        exec_pol = str(d.get("execution_policy") or "").upper()
+        if action in holdout_actions or exec_pol in holdout_exec:
+            continue
+        if (
+            policy == "coerce_null"
+            or action in {"stop_column", "coerce_null"}
+            or exec_pol == "STOP_COLUMN"
+        ):
+            rows.add(d["row"])
+    return len(rows)
+
+
+def map_rows_for_fingerprint(
+    *,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    target_cols: list[str],
+    column_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    dest_types: dict[str, str] | None = None,
+    preserve_case: bool = True,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    contract_primary_key: str | None = None,
+    empty_cells_as_null: bool = False,
+    destination_column_nullability: dict[str, bool] | None = None,
+    row_number_start: int = 1,
+    struct_already_materialized: bool = False,
+) -> tuple[list[tuple], list[dict[str, Any]]]:
+    """Map rows for Gate-8 fingerprints with write-path quarantine parity.
+
+    Returns ``(mapped_good_rows, rejected_details)``. Callers must pass the same
+    ``dest_kind`` / ``destination_pk_columns`` / ``error_policy`` as the writer
+    so checksum remap cannot invent a different hold-out set than the load.
+
+    After ``build_mapped_rows_with_details``, runs ``apply_write_quarantine_matrix``
+    whenever destination types are known — typed writers quarantine DECIMAL /
+    VARCHAR / BINARY / temporal overflow the same way.
+    """
+    mapped, _errors, rejected = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=error_policy,
+        dest_types=dest_types,
+        preserve_case=preserve_case,
+        dest_kind=dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        empty_cells_as_null=empty_cells_as_null,
+        destination_column_nullability=destination_column_nullability,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+        row_number_start=row_number_start,
+        struct_already_materialized=struct_already_materialized,
+    )
+    rejected_details = list(rejected or [])
+    type_map = dict(dest_types or {}) or dict(column_types or {})
+    if mapped and target_cols and type_map:
+        target_types = [
+            physical_integer_carrier(
+                str(type_map.get(c) or type_map.get(str(c).lower()) or ""),
+                dest_kind,
+            )
+            for c in target_cols
+        ]
+        if any(t.strip() for t in target_types):
+            policy = transform_error_policy(error_policy)
+            mapped = apply_write_quarantine_matrix(
+                mapped,
+                target_cols,
+                target_types,
+                rejected_details,
+                policy,
+                dialect_label=(dest_kind or "destination").strip() or "destination",
+                dest_db=(dest_kind or "").strip(),
+                mappings=list(mappings or []) or None,
+            )
+    return mapped, rejected_details
 
 
 def build_mapped_rows(
@@ -1264,8 +1725,17 @@ def build_mapped_rows(
     error_policy: str | None = None,
     dest_types: dict[str, str] | None = None,
     preserve_case: bool = False,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    contract_primary_key: str | None = None,
 ) -> tuple[list[tuple], list[str]]:
-    """Returns mapped rows and any transform errors (first 10)."""
+    """Returns mapped rows and any transform errors (first 10).
+
+    Prefer ``map_rows_for_fingerprint`` / ``build_mapped_rows_with_details`` when
+    quarantine / Risk Contracts must be surfaced — this wrapper drops
+    rejected_details by design for legacy callers.
+    """
     mapped, errors, _ = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -1275,8 +1745,143 @@ def build_mapped_rows(
         error_policy=error_policy,
         dest_types=dest_types,
         preserve_case=preserve_case,
+        dest_kind=dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
     )
     return mapped, errors
+
+
+def _is_blank_cell(val: Any) -> bool:
+    """File empty→null treats extract NULL / blank as absence.
+
+    Empty and whitespace stay blank (``is_null_evidence``, not
+    ``is_reader_null_cell``). ``0`` / ``False`` stay present. Missing is
+    already omitted before this helper runs.
+    """
+    return is_null_evidence(val)
+
+
+def _is_empty_typed_coerce_error(err: str | None) -> bool:
+    msg = str(err or "").strip().lower()
+    return msg.startswith("empty value cannot coerce")
+
+
+def _target_explicitly_not_null(
+    mapping: dict[str, Any] | None,
+    tgt_name: str,
+    dest_nullability: dict[str, bool],
+) -> bool:
+    """True only when Map/live catalog proves NOT NULL (unknown ⇒ nullable)."""
+    m = mapping if isinstance(mapping, dict) else {}
+    tgt_nullable = m.get("target_nullable")
+    if tgt_nullable is None:
+        tgt_nullable = m.get("nullable")
+    if tgt_nullable is None and dest_nullability:
+        key = str(tgt_name or "").strip()
+        if key in dest_nullability:
+            tgt_nullable = dest_nullability[key]
+        else:
+            tgt_nullable = dest_nullability.get(key.lower())
+    if tgt_nullable is False:
+        return True
+    if isinstance(tgt_nullable, str) and tgt_nullable.strip().lower() in {
+        "false",
+        "0",
+        "no",
+    }:
+        return True
+    return False
+
+
+def _null_into_not_null_error(
+    converted: Any,
+    err: str | None,
+    mapping: dict[str, Any] | None,
+    tgt_name: str,
+    dest_nullability: dict[str, bool],
+) -> str | None:
+    """A NULL bound for a proven NOT NULL column is a cell error (D25).
+
+    A text column's NULL converts without complaint, so the only refusal came
+    from the driver on the whole batch - one NULL failed the job even under a
+    policy that quarantines bad cells. Raising it as a cell error routes it
+    through the same per-cell policy as every other bad value.
+    """
+    if err or converted is not None:
+        return err
+    if _target_explicitly_not_null(mapping, tgt_name, dest_nullability):
+        return f"NULL value for NOT NULL column {tgt_name!r}"
+    return err
+
+
+def _convert_mapped_cell(
+    val: Any,
+    transform: Any,
+    mapping: Any,
+    *,
+    empty_cells_as_null: bool,
+    dest_nullability: dict[str, bool],
+    target: str,
+) -> tuple[Any, str | None]:
+    """One cell through the full write pipeline: transform → code crosswalk →
+    file blank→NULL rule → execute-enforced business-rule contracts.
+
+    First attempt and RETRY re-attempt both run this — an error may only be
+    cleared by the identical pipeline succeeding, never by skipping stages.
+    """
+    from services.blank_cell_contract import blank_typed_cell_is_sql_null
+    from services.code_crosswalk import apply_code_crosswalk
+
+    # Replay stamps transform_override when the operator named the cast.
+    # That boolean cast accepts yes/y/on and no/n/off. A guessed boolean
+    # column still uses the canonical parser and leaves "yes" unchanged
+    # only when the transform was dropped; here the operator asked for it.
+    operator_boolean = bool(
+        isinstance(mapping, dict) and mapping.get("transform_override")
+    )
+    # A name-triggered trim/trim_id rewrites internal whitespace on a normal
+    # load. Apply it only when the operator asked (user_override or
+    # transform_override). collapse_whitespace remains the explicit op.
+    if (
+        isinstance(mapping, dict)
+        and str(transform or "").strip().lower() in {"trim", "trim_id"}
+        and not mapping.get("user_override")
+        and not mapping.get("userOverride")
+        and not mapping.get("transform_override")
+    ):
+        transform = None
+    converted, err = apply_transform(
+        val, transform, accept_informal_boolean=operator_boolean
+    )
+    if not err and isinstance(mapping, dict):
+        converted, xwalk_err = apply_code_crosswalk(converted, mapping)
+        if xwalk_err:
+            err = xwalk_err
+    # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols.
+    # Same function Validate and Gate-8 use. Proven NOT NULL stays an error.
+    if blank_typed_cell_is_sql_null(
+        val,
+        err,
+        mapping if isinstance(mapping, dict) else None,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+        target=target,
+    ):
+        converted, err = None, None
+    if not err and isinstance(mapping, dict):
+        contracts = mapping.get("rule_contracts")
+        if contracts:
+            for contract in contracts:
+                reason = evaluate_contract(converted, contract, missing=False)
+                if reason:
+                    err = (
+                        f"business rule {contract.get('rule_id') or '?'} "
+                        f"failed: {reason}"
+                    )
+                    break
+    return converted, err
 
 
 def build_mapped_rows_with_details(
@@ -1289,19 +1894,55 @@ def build_mapped_rows_with_details(
     error_policy: str | None = None,
     dest_types: dict[str, str] | None = None,
     preserve_case: bool = False,
+    allow_job_coerce_null: bool | None = None,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    destination_column_nullability: dict[str, bool] | None = None,
+    empty_cells_as_null: bool = False,
+    row_number_start: int = 1,
+    accepted_source_rows: list[int] | None = None,
+    struct_already_materialized: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
-    """Returns mapped rows, error messages, and structured rejected-row details."""
+    """Returns mapped rows, error messages, and structured rejected-row details.
+
+    ``empty_cells_as_null`` (file/Excel/CSV sources): blank cells into nullable
+    typed columns become SQL NULL — spreadsheet absence, not silent loss of a
+    present value. A numeric, temporal, boolean, uuid, or binary source cannot
+    store ``""``; that blank is a flattened SQL NULL on a nullable destination
+    even when the flag is off. NOT NULL destinations still fail/quarantine.
+    A text column's empty string stays a stored value.
+    """
     from services.json_intelligence import materialize_struct_policies
 
     column_types = column_types or {}
-    policy = transform_error_policy(error_policy)
+    policy = transform_error_policy(
+        error_policy, allow_coerce_null=allow_job_coerce_null
+    )
     # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
-    headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
+    # Object-store chunked materialize expands once on the full engine batch,
+    # then maps slices — re-flattening each slice would miss keys that only
+    # appear after the first 50 rows of that slice.
+    if not struct_already_materialized:
+        headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
+    # Case-insensitive fallback — Map/header drift must not invent NULL wipes.
+    source_indices_ci = {str(h).lower(): i for i, h in enumerate(headers)}
     sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
     rejected_details: list[dict[str, Any]] = []
+
+    # Live dest nullability (case-insensitive) — write-time NOT NULL escalate SSOT.
+    dest_nullability: dict[str, bool] = {}
+    for k, v in (destination_column_nullability or {}).items():
+        key = str(k or "").strip()
+        if not key:
+            continue
+        dest_nullability[key] = bool(v)
+        dest_nullability[key.lower()] = bool(v)
+        dest_nullability[sanitize_identifier(key, preserve_case=preserve_case)] = bool(v)
 
     mapping_infos = []
     for m in mappings:
@@ -1310,17 +1951,34 @@ def build_mapped_rows_with_details(
 
             if is_intentional_omit(m):
                 continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
+                # Skip only when the target resolver excluded this column. When
+                # it is present in the resolved target set, create-new was
+                # confirmed (``table_exists is False``) and the value must flow —
+                # otherwise every row lands NULL (the direct-write create-new gap).
+                _pending_tgt = sanitize_identifier(
+                    str(m.get("target") or ""), preserve_case=preserve_case
+                )
+                if _pending_tgt not in target_index:
+                    continue
         except Exception:
             pass
         src = m["source"]
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        # Never pass source ``column_types`` as dest_types — that invents a
+        # "live" VARCHAR dest and suppresses Map ``target_type`` coercion
+        # (INTEGER/BOOLEAN/DECIMAL stamps become trim_id/none). Empty dest
+        # means create-new / unknown physical: honor Map target_type.
         transform = resolve_transform(
             m,
             column_types=column_types,
-            dest_types=dest_types or column_types,
+            dest_types=dest_types if dest_types is not None else {},
         )
+        src_idx = source_indices.get(src)
+        if src_idx is None:
+            src_idx = source_indices_ci.get(str(src).lower())
         mapping_infos.append((
-            source_indices.get(src),
+            src_idx,
             target_index.get(tgt, -1),
             transform,
             src,
@@ -1331,63 +1989,126 @@ def build_mapped_rows_with_details(
     # Resolve once per call, not once per cell. This import sat inside the
     # innermost loop, so a 20-column table paid an import-system lookup per cell
     # — billions of them on a large transfer.
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
-    try:
-        from services.migration_risk_contract import resolve_write_action_for_mapping
-    except Exception:
-        resolve_write_action_for_mapping = None  # type: ignore[assignment]
-
-    try:
-        from services.migration_risk_contract import disposition_for_execution_policy
-    except Exception:
-        disposition_for_execution_policy = None  # type: ignore[assignment]
+    # Risk Contract module is in-tree: hard-require it. Soft-import previously
+    # demoted FAIL_JOB / SKIP_ROW / CAST contracts to bare job policy.
+    from services.migration_risk_contract import (
+        disposition_for_execution_policy,
+        resolve_write_action_for_mapping,
+    )
 
     mapped: list[tuple] = []
-    for row_number, raw in enumerate(data_rows, start=1):
+    start_no = max(1, int(row_number_start or 1))
+    # Per-mapping cell memos: (converted, err) for a given value under a fixed
+    # transform is deterministic — no row context enters until the detail
+    # dict below stamps row_number. Repeated values (statuses, currencies,
+    # codes) pay the transform once per unique cell. Bounded; unhashable
+    # cells bypass. Semantics identical — memo stores the same pair the
+    # unmemoized path produced, errors included.
+    _cell_memos: list[dict] = [dict() for _ in mapping_infos]
+    _CELL_MEMO_CAP = 500_000
+    _MEMO_MISS = object()
+    for row_number, raw in enumerate(data_rows, start=start_no):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
         # ok | fail | stop_table | abort_transaction | retry_then_fail |
         # quarantine | skip_row | stop_column | coerce_null
         row_action = "ok"
-        for source_idx, target_idx, transform, src_name, tgt_name, mapping in mapping_infos:
-            val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
-            # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
-            if is_missing_sentinel(val):
-                if target_idx >= 0:
-                    out[target_idx] = DF_MISSING_SENTINEL
-                continue
-            converted, err = apply_transform(val, transform)
+        for m_idx, (source_idx, target_idx, transform, src_name, tgt_name, mapping) in enumerate(
+            mapping_infos
+        ):
+            # Mapped source missing from headers after casefold — refuse NULL invent
+            # (would wipe a good destination column on upsert).
+            if source_idx is None and src_name:
+                converted, err = None, (
+                    f"mapped source column {src_name!r} not found in batch headers "
+                    f"{list(headers)!r} — refuse silent NULL invent"
+                )
+                val = None
+            else:
+                val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
+                # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
+                if is_missing_sentinel(val):
+                    if target_idx >= 0:
+                        out[target_idx] = DF_MISSING_SENTINEL
+                    continue
+                memo = _cell_memos[m_idx]
+                try:
+                    memoized = memo.get(val, _MEMO_MISS)
+                except TypeError:
+                    memoized = _MEMO_MISS
+                if memoized is _MEMO_MISS:
+                    converted, err = _convert_mapped_cell(
+                        val,
+                        transform,
+                        mapping,
+                        empty_cells_as_null=empty_cells_as_null,
+                        dest_nullability=dest_nullability,
+                        target=tgt_name,
+                    )
+                    err = _null_into_not_null_error(
+                        converted, err, mapping, tgt_name, dest_nullability
+                    )
+                    if len(memo) < _CELL_MEMO_CAP and isinstance(
+                        converted, (str, int, float, bool, bytes, type(None))
+                    ):
+                        try:
+                            memo[val] = (converted, err)
+                        except TypeError:
+                            pass
+                else:
+                    converted, err = memoized
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None
             retry_attempted = False
-            if err and resolve_write_action_for_mapping is not None:
+            if err and source_idx is not None:
                 cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                     mapping, policy
                 )
                 # RETRY: exactly one re-attempt of the same transform, then fail.
                 if cell_policy == "retry_then_fail":
                     retry_attempted = True
-                    converted, err = apply_transform(val, transform)
+                    converted, err = _convert_mapped_cell(
+                        val,
+                        transform,
+                        mapping,
+                        empty_cells_as_null=empty_cells_as_null,
+                        dest_nullability=dest_nullability,
+                        target=tgt_name,
+                    )
+                    err = _null_into_not_null_error(
+                        converted, err, mapping, tgt_name, dest_nullability
+                    )
                     if not err:
                         cell_policy = "ok"
                     else:
                         cell_policy = "fail"
+            elif err and source_idx is None:
+                # Unresolvable Map source — always quarantine/fail, not Risk invent.
+                cell_policy = "fail" if policy == "fail" else "quarantine"
+                exec_pol = None
+                risk_id = None
+                retry_attempted = False
             if err:
                 row_has_error = True
-                if resolve_write_action_for_mapping is not None and exec_pol is None:
+                if exec_pol is None:
                     cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                         mapping, policy
                     )
+
                 values = {
-                    h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
+                    h: (
+                        quarantine_cell_wire(raw[i])
+                        if i < len(raw)
+                        else DF_MISSING_SENTINEL
+                    )
                     for i, h in enumerate(headers)
                 }
                 detail: dict[str, Any] = {
                     "row": row_number,
                     "column": src_name,
                     "target": tgt_name,
-                    "value": str(val) if val is not None else "",
+                    "value": quarantine_cell_wire(val),
                     "reason": err,
                     "policy": cell_policy,
                     # Full source row so quarantine replay can rewrite without re-reading.
@@ -1397,8 +2118,7 @@ def build_mapped_rows_with_details(
                 }
                 if exec_pol:
                     detail["execution_policy"] = exec_pol
-                    if disposition_for_execution_policy is not None:
-                        detail["disposition"] = disposition_for_execution_policy(exec_pol)
+                    detail["disposition"] = disposition_for_execution_policy(exec_pol)
                     if exec_pol == "STOP_TABLE":
                         detail["stop_scope"] = "table"
                     elif exec_pol == "STOP_COLUMN":
@@ -1414,32 +2134,30 @@ def build_mapped_rows_with_details(
                         detail["quarantine_required"] = False
                     elif exec_pol == "QUARANTINE_ROW":
                         detail["quarantine_required"] = True
+                    if cell_policy == "coerce_null":
+                        # QA MX3-14: the row landed with a NULL cell — an audit
+                        # finding, not a held-out row to count or replay.
+                        detail["disposition"] = "coerced_null"
+                        detail["quarantine_required"] = False
                 if retry_attempted:
                     detail["retry_attempted"] = True
                     detail["retry_count"] = 1
                 if risk_id:
                     detail["risk_id"] = risk_id
-                # Stamp durable identity for upsert replay (composite / non-id PKs).
+                # Stamp durable identity for upsert replay — full composite when known.
                 pk_cols: list[str] = []
                 try:
-                    from services.primary_key import resolve_identity_key
+                    from services.primary_key import resolve_primary_key_source_columns
 
-                    src_key, tgt_key = resolve_identity_key(
+                    pk_cols = resolve_primary_key_source_columns(
                         mappings=mappings,
                         source_columns=headers,
+                        dest_kind=dest_kind or "",
                         purpose="uniqueness",
+                        destination_pk_columns=destination_pk_columns,
+                        contract_primary_key=contract_primary_key,
+                        stream_contracts=stream_contracts,
                     )
-                    # Prefer source column names — rejected.values is source-shaped.
-                    if src_key and src_key in values:
-                        pk_cols = [src_key]
-                    elif tgt_key:
-                        # Map target → source via mapping when needed.
-                        for mm in mappings:
-                            if str(mm.get("target") or "") == tgt_key and mm.get("source"):
-                                pk_cols = [str(mm["source"])]
-                                break
-                        if not pk_cols and tgt_key in values:
-                            pk_cols = [tgt_key]
                 except Exception:
                     pk_cols = []
                 if not pk_cols:
@@ -1451,17 +2169,22 @@ def build_mapped_rows_with_details(
                         or mm.get("identity")
                     ]
                     pk_cols = [c for c in flagged if c]
-                if not pk_cols:
-                    if "id" in values:
-                        pk_cols = ["id"]
-                    elif "_id" in values:
-                        pk_cols = ["_id"]
+                # Never invent id/_id as PK for quarantine replay — only contract/
+                # mapping/destination-proven columns. Invented PK poisons DLQ identity.
                 if pk_cols:
                     detail["primary_key"] = pk_cols
                     detail["pk_value"] = {
                         c: values.get(c) or values.get(str(c).lower(), "")
                         for c in pk_cols
                     }
+                    # Contract source_pk is the value, never the column-name list.
+                    # Stamping ["id"] made every finding share pk:['id'] and one
+                    # Promote closed the whole ledger.
+                    pk_vals = [detail["pk_value"].get(c) for c in pk_cols]
+                    if pk_vals and all(v is not None and str(v) != "" for v in pk_vals):
+                        detail["source_pk"] = (
+                            pk_vals[0] if len(pk_vals) == 1 else pk_vals
+                        )
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
@@ -1484,16 +2207,47 @@ def build_mapped_rows_with_details(
                         row_action = "quarantine"
                     converted = None
                 elif cell_policy == "stop_column":
-                    # Omit this cell; allow other columns on the same row to write.
+                    # Omit this cell from SET/INSERT projection (Missing), never
+                    # invent SQL NULL — upsert NULL would wipe a prior good value.
                     if row_action == "ok":
                         row_action = "stop_column"
-                    converted = None
+
+                    converted = Missing
                 elif cell_policy == "coerce_null":
+                    # Job coerce_null = dense SQL NULL (INSERT / full-refresh).
+                    # Upsert omit-from-SET must use STOP_COLUMN / sparse CDC Missing —
+                    # never leak the ``__DF_MISSING__`` wire string into mapped rows.
                     if row_action == "ok":
                         row_action = "coerce_null"
                     converted = None
                 else:
                     continue
+                # Write-time NOT NULL parity with G3: refuse NULL invent / omit-as-NULL
+                # into required columns when the Map stamp or dest nullability says so.
+                if cell_policy in {"stop_column", "coerce_null"}:
+                    tgt_nullable = mapping.get("target_nullable")
+                    if tgt_nullable is None:
+                        tgt_nullable = mapping.get("nullable")
+                    if tgt_nullable is None and dest_nullability:
+                        key = str(tgt_name or "").strip()
+                        if key in dest_nullability:
+                            tgt_nullable = dest_nullability[key]
+                        else:
+                            tgt_nullable = dest_nullability.get(key.lower())
+                    if tgt_nullable is False or (
+                        isinstance(tgt_nullable, str)
+                        and tgt_nullable.strip().lower() in {"false", "0", "no"}
+                    ):
+                        detail["reason"] = (
+                            f"{detail.get('reason') or err} — NOT NULL destination "
+                            "refuses STOP_COLUMN/coerce NULL invent"
+                        )
+                        detail["policy"] = (
+                            "fail" if policy == "fail" else "quarantine"
+                        )
+                        cell_policy = detail["policy"]
+                        row_action = cell_policy
+                        converted = None
             if target_idx >= 0:
                 out[target_idx] = converted
         # Rows not written to primary: abort / quarantine / skip.
@@ -1508,10 +2262,367 @@ def build_mapped_rows_with_details(
         if row_has_error and row_action == "ok" and policy in {"fail", "quarantine"}:
             # Legacy path when resolve unavailable — keep prior job semantics.
             continue
-        # stop_column / coerce_null: row is written with omitted/NULL failing cells.
-        mapped.append(tuple(out))
+        # stop_column: Missing omit-from-SET; coerce_null: dense NULL cell.
+        # Never emit the ``__DF_MISSING__`` wire string into public mapped tuples.
+
+        mapped.append(
+            tuple(
+                public_mapped_cell(c, dense_null=False)
+                if c is not None
+                else None
+                for c in out
+            )
+        )
+        if accepted_source_rows is not None:
+            accepted_source_rows.append(row_number)
 
     return mapped, errors, rejected_details
+
+
+def early_array_strategy_gate(
+    *,
+    headers: list[str],
+    mappings: list[dict[str, Any]] | None,
+) -> str | None:
+    """X-31: array_strategy_gate_issues must block BEFORE the parent INSERT.
+
+    Until now the normalize/hybrid contract check only ran inside
+    ``flush_normalized_child_batches`` — after parent rows were already
+    committed, so a scheduled run with a missing ``child_table_spec``
+    half-wrote and then failed. Call this at the top of every writer's
+    mapped-rows path; the returned text is the joined gate issues (or None
+    when the contract is clean)."""
+    try:
+        from services.structural_array import array_strategy_gate_issues
+
+        issues = array_strategy_gate_issues(
+            mappings, known_source_columns=set(headers or [])
+        )
+    except Exception:
+        return None
+    return "; ".join(issues) if issues else None
+
+
+def flush_normalized_child_batches(
+    *,
+    headers: list[str],
+    data_rows: list[list[Any]],
+    mappings: list[dict[str, Any]] | None,
+    dest_db: str,
+    create_table: bool = True,
+    cursor: Any = None,
+    sa_conn: Any = None,
+    quote: str = "`",
+    placeholder: str = "%s",
+    schema: str | None = None,
+) -> dict[str, Any]:
+    """CREATE + INSERT child tables for normalize/hybrid array Map policies.
+
+    Parent rows are written separately (JSON retained). Fail-closed when the
+    operator chose normalize/hybrid without a valid ``child_table_spec``.
+    """
+    from services.structural_array import (
+        array_strategy_gate_issues,
+        build_normalized_child_batches,
+    )
+
+    known = set(headers or [])
+    gate = array_strategy_gate_issues(mappings, known_source_columns=known)
+    if gate:
+        return {
+            "ok": False,
+            "rows_written": 0,
+            "tables": [],
+            "errors": gate,
+        }
+    batches, build_errors = build_normalized_child_batches(
+        headers, data_rows, mappings, dest_db=dest_db
+    )
+    if build_errors:
+        return {
+            "ok": False,
+            "rows_written": 0,
+            "tables": [],
+            "errors": build_errors,
+        }
+    if not batches:
+        return {"ok": True, "rows_written": 0, "tables": [], "errors": []}
+
+    written = 0
+    tables: list[str] = []
+    errors: list[str] = []
+
+    def _qualified(name: str) -> str:
+        safe = require_safe_identifier(name)
+        qname = quote_sql_identifier(safe, quote)
+        if schema:
+            return f"{quote_sql_identifier(require_safe_identifier(schema), quote)}.{qname}"
+        return qname
+
+    for batch in batches:
+        child = str(batch.get("child_table") or "")
+        cols = list(batch.get("columns") or [])
+        types = list(batch.get("ddl_types") or [])
+        rows = list(batch.get("rows") or [])
+        if not child or not cols or not rows:
+            continue
+        try:
+            table_q = _qualified(child)
+            col_q = ", ".join(quote_sql_identifier(c, quote) for c in cols)
+            if create_table:
+                col_defs = ", ".join(
+                    f"{quote_sql_identifier(c, quote)} {t}"
+                    for c, t in zip(cols, types)
+                )
+                # columns = parent_keys + ordinal + value cols — unique for at-least-once.
+                pk_n = int(batch.get("parent_key_count") or 1)
+                uniq_cols = cols[: max(1, pk_n) + 1]
+                uniq_sql = ", ".join(quote_sql_identifier(c, quote) for c in uniq_cols)
+                ddl = (
+                    f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}, "
+                    f"UNIQUE ({uniq_sql}))"
+                )
+                if cursor is not None:
+                    cursor.execute(ddl)
+                elif sa_conn is not None:
+                    import sqlalchemy as sa
+
+                    sa_conn.execute(sa.text(ddl))
+                else:
+                    errors.append("no cursor/connection for child DDL")
+                    return {"ok": False, "rows_written": written, "tables": tables, "errors": errors}
+
+            ph = ", ".join([placeholder] * len(cols))
+            insert_sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({ph})"  # nosec B608
+            from services.shape_contract import require_name_addressed_insert
+
+            insert_sql = require_name_addressed_insert(insert_sql)
+            if cursor is not None:
+                try:
+                    cursor.executemany(insert_sql, rows)
+                except Exception:
+                    # Fallback: ignore duplicate on at-least-once replay.
+                    for row in rows:
+                        try:
+                            cursor.execute(insert_sql, row)
+                        except Exception as row_exc:
+                            msg = str(row_exc).lower()
+                            if "duplicate" in msg or "unique" in msg:
+                                continue
+                            raise
+            else:
+                import sqlalchemy as sa
+
+                for row in rows:
+                    params = {f"p{i}": v for i, v in enumerate(row)}
+                    named_ph = ", ".join(f":p{i}" for i in range(len(cols)))
+                    sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({named_ph})"  # nosec B608
+                    sql = require_name_addressed_insert(sql)
+                    try:
+                        sa_conn.execute(sa.text(sql), params)
+                    except Exception as row_exc:
+                        msg = str(row_exc).lower()
+                        if "duplicate" in msg or "unique" in msg:
+                            continue
+                        raise
+            written += len(rows)
+            tables.append(child)
+        except Exception as exc:
+            errors.append(f"child table {child!r}: {exc}")
+            return {
+                "ok": False,
+                "rows_written": written,
+                "tables": tables,
+                "errors": errors,
+            }
+
+    return {"ok": True, "rows_written": written, "tables": tables, "errors": errors}
+
+
+def refuse_empty_vectorization(
+    *,
+    records: list[Any] | None,
+    data_rows: list[Any] | None,
+) -> str | None:
+    """Empty embed after a mapped payload is silent data loss — fail closed.
+
+    A genuinely empty source may ack 0 rows. Vectorize returning nothing when
+    the writer already held records or data_rows is a 0-row ``success=True``
+    that Validate never approved.
+    """
+    if records or data_rows:
+        return (
+            "Vectorization produced no embeddable rows from a non-empty mapped "
+            "payload — refuse silent 0-row success"
+        )
+    return None
+
+
+def prepare_records_for_vector_write(
+    *,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    contract_primary_key: str | None = None,
+    label: str = "vector",
+    destination_column_nullability: dict[str, bool] | None = None,
+    destination_column_types: dict[str, str] | None = None,
+    keep_null: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    """Apply Map transforms + Risk Contracts before embedding/upsert.
+
+    Records stay **source-header keyed** (legacy ``zip(headers, row)``) so
+    ``content_column`` / ``metadata_columns`` from Studio ``extra`` still resolve,
+    while mapped transforms overlay source+target keys. Unmapped headers pass through.
+    Returns ``(records, rejected_details, abort_message)``.
+    """
+    target_cols: list[str] = []
+    source_for_target: list[str] = []
+    for m in mappings or []:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m):
+                continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
+                continue
+        except Exception:
+            pass
+        src = str(m.get("source") or "").strip()
+        tgt = str(m.get("target") or src).strip()
+        if not tgt:
+            continue
+        if tgt not in target_cols:
+            target_cols.append(tgt)
+            source_for_target.append(src or tgt)
+    if not target_cols:
+        target_cols = list(headers)
+        source_for_target = list(headers)
+
+    live = destination_column_types or {}
+    # Studio/live present → fail-closed coverage (never Map VARCHAR gap-fill).
+    # Create-new with no Studio → Map stamps only.
+    dest_types, cov_err = resolve_studio_or_map_dest_types(
+        list(target_cols or []),
+        list(mappings or []),
+        column_types or {},
+        studio_types=live if isinstance(live, dict) and live else None,
+        product=(label or dest_kind or "vector").strip() or "vector",
+    )
+    if cov_err:
+        return [], [], cov_err
+    # Map path may use VARCHAR default — vector quarantine treats unbounded
+    # string carriers as no-op unless VECTOR(n) specialty is stamped.
+
+    mapped, _errors, rejected = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=list(mappings or []),
+        target_cols=target_cols,
+        column_types=column_types or {},
+        dest_types=dest_types,
+        error_policy=error_policy,
+        dest_kind=dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+        destination_column_nullability=destination_column_nullability,
+    )
+    # Typed specialty holdout (VECTOR(n) length) before embed/upsert — same bar
+    # as SQL writers. No-op when dest_types are unbounded strings.
+    if mapped and target_cols and any(
+        "vector" in str(dest_types.get(c) or "").lower() for c in target_cols
+    ):
+        policy = transform_error_policy(error_policy)
+        target_types = [str(dest_types.get(c) or "") for c in target_cols]
+        mapped = apply_write_quarantine_matrix(
+            mapped,
+            target_cols,
+            target_types,
+            rejected,
+            policy,
+            dialect_label=(dest_kind or label or "vector").strip() or "vector",
+            mappings=list(mappings or []) or None,
+        )
+    abort = reject_on_strict_policy(error_policy, rejected, label)
+    if abort:
+        return [], list(rejected), abort
+
+    # Rows held out of primary write (same set as build_mapped_rows continue).
+    holdout_policies = {
+        "fail",
+        "stop_table",
+        "abort_transaction",
+        "quarantine",
+        "skip_row",
+    }
+    held_out_rows = {
+        int(d["row"])
+        for d in rejected
+        if d.get("row") is not None
+        and str(d.get("policy") or "").lower() in holdout_policies
+    }
+
+    records: list[dict[str, Any]] = []
+    mapped_i = 0
+    for row_number, raw in enumerate(data_rows, start=1):
+        if row_number in held_out_rows:
+            continue
+        if mapped_i >= len(mapped):
+            break
+        tup = mapped[mapped_i]
+        mapped_i += 1
+        # Preserve unmapped source headers for metadata_columns / content_column.
+        source_types = {
+            str(k).lower(): str(v)
+            for k, v in (column_types or {}).items()
+            if k and v
+        }
+        dest_type_map = {
+            str(k).lower(): str(v) for k, v in (dest_types or {}).items() if k
+        }
+        row: dict[str, Any] = {}
+        for i, h in enumerate(headers):
+            declared = vector_payload_declared_type("", source_types.get(h.lower(), ""))
+            raw_cell = raw[i] if i < len(raw) else None
+            cell = vector_payload_number(raw_cell, declared)
+            if cell is not None:
+                row[h] = cell
+            elif keep_null and i < len(raw) and _sql_null_cell(raw_cell):
+                row[h] = None
+        for i, tgt in enumerate(target_cols):
+            src = source_for_target[i] if i < len(source_for_target) else ""
+            declared = vector_payload_declared_type(
+                dest_type_map.get(tgt.lower(), ""),
+                source_types.get((src or tgt).lower(), ""),
+            )
+            val = vector_payload_number(tup[i] if i < len(tup) else None, declared)
+            if val is None:
+                # Omit DF_MISSING / null overlay — do not invent "" into metadata.
+                # A SQL NULL is kept as None when asked (pgvector JSONB, D209).
+                if keep_null and i < len(tup) and _sql_null_cell(tup[i]):
+                    # Never blank a value the header pass already carried.
+                    for name in (tgt, src):
+                        if name and row.get(name) is None:
+                            row[name] = None
+                continue
+            row[tgt] = val
+            if src:
+                row[src] = val
+        records.append(row)
+    return records, list(rejected), None
+
+
+def _sql_null_cell(value: Any) -> bool:
+    """A reader SQL NULL, as opposed to a field the record never had (Missing)."""
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+
+    return is_reader_null_cell(value) and not is_missing_sentinel(value)
 
 
 def sample_values_by_source_from_batch(
@@ -1545,6 +2656,168 @@ def sample_values_by_source_from_batch(
     return out
 
 
+def resolve_studio_or_map_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    *,
+    logical_types: list[str] | None = None,
+    studio_types: dict[str, Any] | None = None,
+    product: str = "destination",
+    dest_db: str = "",
+) -> tuple[dict[str, str], str | None]:
+    """Studio present → fail-closed coverage; else Map stamps for create-new.
+
+    Partial Studio must never soft-fill Map ``VARCHAR`` for gaps (empty→NULL /
+    polarity invent). Callers with an existing typed sink should rematerialize
+    from live DDL after this helper; create-new / empty sinks must refuse
+    ``error`` when Studio was incomplete.
+
+    The Studio branch returns ``LiveDestTypes`` (introspected physical carriers);
+    the Map branch returns a plain dict, because a create-new stamp only projects
+    what the DDL *will* invent. Transform resolution reads that difference.
+    """
+    from connectors.saas_common import merge_saas_live_types
+
+    studio = (
+        studio_types
+        if isinstance(studio_types, dict) and studio_types
+        else None
+    )
+    if studio is not None:
+        live = {
+            str(k): str(v).strip()
+            for k, v in studio.items()
+            if k and str(v or "").strip()
+        }
+        merged, err = merge_saas_live_types(
+            live,
+            list(target_cols or []),
+            studio_types=None,
+            product=product,
+        )
+        return (merged if err else LiveDestTypes(merged)), err
+    return (
+        resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types or {},
+            logical_types=logical_types,
+            live_types=None,
+            default="VARCHAR",
+            dest_db=dest_db,
+        ),
+        None,
+    )
+
+
+def gate_additive_types_under_partial_studio(
+    *,
+    target_cols: list[str],
+    target_types: list[str],
+    existing: set[str] | frozenset[str] | set,
+    mappings: list[dict] | None,
+    studio_err: str | None,
+    product: str,
+    materialize_stamp: Any,
+    col_in_existing: Any = None,
+    dest_db: str = "",
+    column_types: dict[str, str] | None = None,
+) -> tuple[list[str], str | None]:
+    """Under partial Studio, additive ADD must use explicit Map ``target_type``.
+
+    Existing columns keep ``target_types`` (rematerialize/physical owns them).
+    New columns without an operator Map stamp refuse — never invent from
+    source DDL / bare VARCHAR (BigQuery / generic_sql parity). Widthless
+    VARCHAR family stamps inherit measured source ``(n)`` before ADD.
+    """
+    if not studio_err:
+        return list(target_types), None
+    # Pad to target_cols length — deferred Map under partial Studio often leaves
+    # target_types=[] before rematerialize. Append-only stamping mis-zips ADD
+    # types onto the wrong columns (existing col gets the additive stamp).
+    out = [str(t or "") for t in list(target_types or [])]
+    if len(out) < len(target_cols or []):
+        out.extend([""] * (len(target_cols) - len(out)))
+    elif len(out) > len(target_cols or []):
+        out = out[: len(target_cols)]
+    from services.mapping_constraints import write_mappings
+
+    by_tgt: dict[str, dict] = {}
+    for mapping in write_mappings(list(mappings or [])):
+        tgt = str(mapping.get("target") or "").strip()
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+            by_tgt.setdefault(tgt.lower(), mapping)
+    contains = col_in_existing or (lambda col, ex: col in ex)
+    ctypes = column_types or {}
+    inherit = None
+    if dest_db:
+        from services.decision_kernel import inherit_measured_string_width as inherit
+    for i, col in enumerate(target_cols):
+        if not col or contains(col, existing):
+            continue
+        mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+        explicit = str(
+            mapping.get("target_type") or mapping.get("dest_type") or ""
+        ).strip()
+        if not explicit:
+            return out, (
+                f"{product} additive column {col!r} lacks Studio/live type and "
+                "Map target_type under partial Studio — refuse Map VARCHAR ADD "
+                "invent. Stamp the column on Map or disable backfill_new_fields."
+            )
+        if inherit is not None:
+            src_type = str(
+                mapping.get("source_type")
+                or ctypes.get(str(mapping.get("source") or ""))
+                or ""
+            )
+            explicit = inherit(explicit, src_type, dest_db=dest_db) or explicit
+        stamped = materialize_stamp(explicit)
+        if not str(stamped or "").strip():
+            return out, (
+                f"{product} additive column {col!r} Map target_type {explicit!r} "
+                "did not materialize to DDL — refuse Map VARCHAR ADD invent."
+            )
+        out[i] = str(stamped)
+    return out, None
+
+
+def rematerialize_live_dest_types(
+    physical: dict[str, str] | None,
+    target_cols: list[str],
+    *,
+    product: str,
+) -> LiveDestTypes | None:
+    """Live sink carriers only for rematerialize — never Map VARCHAR gap-fill.
+
+    The ``LiveDestTypes`` return type is load-bearing: it is how downstream
+    transform resolution tells a proven physical carrier from a Map projection.
+
+    Returns ``None`` when ``physical`` is empty or does not cover every mapped
+    column (caller must have fail-closed via ``require_physical`` / Studio).
+    """
+    if not physical:
+        return None
+    from connectors.saas_common import merge_saas_live_types
+
+    live_map = {
+        str(k): str(v)
+        for k, v in physical.items()
+        if k and str(v or "").strip()
+    }
+    merged, err = merge_saas_live_types(
+        live_map,
+        list(target_cols or []),
+        studio_types=None,
+        product=product,
+    )
+    if err:
+        return None
+    return LiveDestTypes(merged)
+
+
 def resolve_mapping_dest_types(
     target_cols: list[str],
     mappings: list[dict],
@@ -1553,6 +2826,7 @@ def resolve_mapping_dest_types(
     logical_types: list[str] | None = None,
     live_types: dict[str, str] | None = None,
     default: str = "VARCHAR",
+    dest_db: str = "",
 ) -> dict[str, str]:
     """Resolve per-column carriers for quarantine / coerce (SaaS + Kafka).
 
@@ -1562,31 +2836,56 @@ def resolve_mapping_dest_types(
     3. ``resolve_target_columns`` logical types
     4. source ``column_types``
     5. ``default`` (never invent unbounded ``string`` when typed Map exists)
+
+    Widthless Map VARCHAR-family stamps inherit measured source ``(n)`` so
+    create-new MySQL UNIQUE/PK stay indexable (Airbyte TEXT cliff).
+
+    For rematerialize over live DDL/Registry/AttrDefs, prefer
+    ``rematerialize_live_dest_types`` so gaps never soft-fill Map VARCHAR.
     """
     cols = list(target_cols or [])
     maps = list(mappings or [])
     ctypes = column_types or {}
     logical = list(logical_types or [])
     live = {str(k).lower(): str(v) for k, v in (live_types or {}).items() if k and v}
+    # By-target Map stamp — never index-zip mappings[i] onto target_cols[i]
+    # (omits / reorder mis-stamp invents wrong carriers).
+    from services.mapping_constraints import write_mappings
+
+    by_tgt: dict[str, dict] = {}
+    for mapping in write_mappings(list(maps)):
+        tgt = str(mapping.get("target") or "").strip()
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+            by_tgt.setdefault(tgt.lower(), mapping)
+    from services.decision_kernel import inherit_measured_string_width
+
     out: dict[str, str] = {}
     for i, col in enumerate(cols):
         live_hit = live.get(str(col).lower())
         if live_hit:
             out[col] = live_hit
             continue
-        mapped = ""
-        src = ""
-        if i < len(maps):
-            m = maps[i]
-            mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
-            src = str(m.get("source") or "")
-        out[col] = (
+        m = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+        mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
+        if mapped:
+            from services.type_stamp_grammar import validate_mapping_type_stamps
+
+            validate_mapping_type_stamps([m], context=f"{dest_db or 'destination'} mapping")
+        src = str(m.get("source") or "")
+        src_type = str(ctypes.get(src) or m.get("source_type") or "")
+        chosen = (
             mapped
             or (logical[i] if i < len(logical) else "")
             or ctypes.get(src)
             or ctypes.get(col)
             or default
         )
+        if mapped:
+            chosen = inherit_measured_string_width(
+                mapped, src_type, dest_db=dest_db
+            ) or mapped
+        out[col] = chosen
     return out
 
 
@@ -1598,14 +2897,16 @@ def resolve_target_columns(
     *,
     sample_values_by_source: dict[str, list[str]] | None = None,
     table_exists: bool | None = None,
+    dest_db: str = "",
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
 
-    Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
-    then the source logical type, and finally ``VARCHAR``.
+    Prefers live ``dest_types`` on existing tables (table_exists is not False),
+    then explicit Map ``target_type``, then source logical type, then ``VARCHAR``.
 
-    Explicit Map ``target_type`` is always preserved (Map≡CREATE) — unfit values
-    quarantine on write instead of rewriting approved DDL.
+    Create-new (``table_exists is False``): Map ``target_type`` is preserved
+    (Map≡CREATE) — unfit values quarantine on write instead of rewriting DDL.
+    Widthless VARCHAR-family stamps inherit measured source ``(n)``.
 
     Enterprise GA: create-new without an explicit Map ``target_type`` must **not**
     invent BOOLEAN/INTEGER/DECIMAL from head samples. Keep the source/carrier
@@ -1616,11 +2917,24 @@ def resolve_target_columns(
     target_cols: list[str] = []
     target_types: list[str] = []
     samples = sample_values_by_source or {}
+    live = dest_types or {}
     for m in mappings:
         try:
             from services.mapping_constraints import is_intentional_omit
 
             if is_intentional_omit(m) or not m.get("target"):
+                continue
+            # A pending_dest_schema stamp means "destination existence was
+            # unknown at Map time — do not invent a column." That honesty guard
+            # only applies while existence is still unproven. At the writer,
+            # ``table_exists is False`` is a *confirmed* create-new decision
+            # (``create_table=True``), so the pending mapping resolves to a
+            # create-new identity column (target=source, source/carrier type) —
+            # skipping it here is what produced the false "No column mappings".
+            if (
+                str(m.get("assignment_strategy") or "") == "pending_dest_schema"
+                and table_exists is not False
+            ):
                 continue
         except Exception:
             if not m.get("target"):
@@ -1629,14 +2943,33 @@ def resolve_target_columns(
         if tgt not in target_cols:
             target_cols.append(tgt)
             explicit_target = bool(m.get("target_type"))
-            proposed = (
-                m.get("target_type")
-                or (dest_types or {}).get(tgt)
-                or column_types.get(m["source"], "VARCHAR")
+            live_hit = (
+                live.get(tgt)
+                or live.get(str(tgt).lower())
+                or live.get(str(tgt).upper())
             )
+            # Existing table: live DDL beats Map stamp (same honesty as
+            # resolve_mapping_dest_types / Validate live-first). Create-new and
+            # missing live keep Map≡CREATE / source proposal.
+            if table_exists is not False and live_hit:
+                proposed = live_hit
+            else:
+                proposed = (
+                    m.get("target_type")
+                    or live_hit
+                    or column_types.get(m["source"], "VARCHAR")
+                )
             src = str(m.get("source") or "")
             src_type = column_types.get(src) or m.get("source_type")
             if table_exists is False:
+                if explicit_target:
+                    from services.decision_kernel import inherit_measured_string_width
+
+                    proposed = inherit_measured_string_width(
+                        str(proposed),
+                        str(src_type) if src_type else None,
+                        dest_db=dest_db,
+                    ) or proposed
                 # Explicit Map stamp OR non-explicit source/carrier proposal:
                 # honor_explicit=True prevents sample-driven invent of tighter types.
                 proposed = safe_ddl_logical_type(
@@ -1646,6 +2979,27 @@ def resolve_target_columns(
                     source_type=str(src_type) if src_type else None,
                     honor_explicit=True,
                 )
+                # Map≡CREATE must not honor a sample-invented stamp that collapses
+                # the declared source (DECIMAL(38,0)→BIGINT on the 150k TPC-H route).
+                if src_type and proposed and not (
+                    m.get("user_override") or m.get("userOverride")
+                ):
+                    try:
+                        from services.migration_risk_contract import (
+                            mapping_has_clearing_risk_contract,
+                        )
+
+                        risk_cleared = mapping_has_clearing_risk_contract(m)
+                    except Exception:
+                        risk_cleared = False
+                    if not risk_cleared:
+                        from services.decision_kernel import (
+                            refuse_create_new_numeric_collapse,
+                        )
+
+                        proposed = refuse_create_new_numeric_collapse(
+                            str(src_type), str(proposed), dest_db
+                        )
             target_types.append(str(proposed))
     return target_cols, target_types
 
@@ -1667,12 +3021,18 @@ _BARE_DECIMAL_DEFAULTS: dict[str, tuple[int, int]] = {
 }
 
 
-def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
+def parse_decimal_precision_scale(
+    type_str: str,
+    *,
+    dest_db: str = "",
+) -> tuple[int, int] | None:
     """Parse DECIMAL/NUMERIC/NUMBER/BIGNUMERIC(p[,s]) → (precision, scale).
 
-    Bare ``NUMERIC`` / ``BIGNUMERIC`` use BigQuery platform defaults (38,9) /
-    (76,38). Bare ``DECIMAL`` / ``NUMBER`` return None (ambiguous capacity).
-    MONEY / SMALLMONEY map to SQL Server currency scales.
+    Bare ``NUMERIC`` / ``BIGNUMERIC`` use BigQuery / Spanner platform defaults
+    only when ``dest_db`` is bigquery/spanner (or unset for backward compat on
+    BIGNUMERIC). On PostgreSQL / Redshift, bare ``NUMERIC``/``DECIMAL`` are
+    unbounded → ``None`` (skip fit quarantine). Bare ``DECIMAL`` / ``NUMBER``
+    stay ``None`` when ambiguous. MONEY / SMALLMONEY → SQL Server currency.
     """
     text = (type_str or "").strip()
     upper = re.sub(r"\s+COLLATE\s+\S+", "", text, flags=re.I).strip().upper()
@@ -1688,6 +3048,16 @@ def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
         return None
     base = base_m.group(1).upper()
     if m.group(1) is None:
+        dialect = (dest_db or "").strip().lower()
+        # Postgres bare NUMERIC/DECIMAL is unbounded — never invent BQ (38,9).
+        if dialect in {"postgresql", "postgres", "redshift", "greenplum", "cockroach", "cockroachdb"}:
+            return None
+        if dialect and dialect not in {"bigquery", "spanner", "bq"}:
+            # Other engines: bare DECIMAL/NUMBER stay ambiguous; bare BIGNUMERIC
+            # only exists on BQ-class — still use platform default when named.
+            if base == "BIGNUMERIC":
+                return _BARE_DECIMAL_DEFAULTS.get(base)
+            return None
         return _BARE_DECIMAL_DEFAULTS.get(base)
     precision = int(m.group(1))
     scale = int(m.group(2)) if m.group(2) is not None else 0
@@ -1697,117 +3067,176 @@ def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
 
 
 def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
-    """Return (integer_digits, fractional_scale) for a cell value."""
-    from decimal import Decimal, InvalidOperation, Overflow
+    """Return (integer_digits, fractional_scale) for write fit / bind.
+
+    Trailing zeros are padding (``2000.00`` → scale 0). Create-new invent
+    keeps money scale via ``cell_int_digits_and_scale`` (``1000.00`` → 2).
+
+    SSOT: ``services.decimal_observe.write_int_digits_and_scale``.
+    """
+    from services.decimal_observe import write_int_digits_and_scale
+
+    return write_int_digits_and_scale(value)
+
+
+PG_DECIMAL_ROUND_DIALECTS = frozenset({
+    "postgresql", "postgres", "redshift", "greenplum", "cockroach", "cockroachdb",
+})
+# Back-compat alias for private import sites.
+_PG_DECIMAL_ROUND_DIALECTS = PG_DECIMAL_ROUND_DIALECTS
+
+
+def _schemaless_decimal_capacity_holds(value: Any, *, dest_db: str = "") -> bool:
+    """True when the destination has no per-field decimal width to overflow.
+
+    A document or key-value store declares no column type. Any ``DECIMAL(p,s)``
+    attached to one of its fields was inferred from the documents that happen to
+    be there, so enforcing it quarantines rows against a limit the store does
+    not have: a Redis placeholder holding ``0.00`` typed the field
+    ``DECIMAL(5,4)`` and every real salary after it was held out as overflow.
+
+    The capacity that does exist is the carrier's. MongoDB stores BSON decimal —
+    34 significant digits — and is checked against that. Redis and DynamoDB
+    serialize to JSON text, which has no digit limit.
+    """
+    from services.db_type_utils import normalize_dest_kind
+
+    kind = normalize_dest_kind(dest_db) if dest_db else ""
+    if kind not in {"mongodb", "redis"}:
+        return False
+    if kind == "redis":
+        # JSON text — every finite decimal round-trips.
+        return True
+    from services.decimal_observe import significant_digit_count
+    from services.type_system import DECIMAL128_SIGNIFICANT_DIGITS
 
     try:
-        text = str(value).strip() if value is not None else ""
-        if not text:
-            return 0, 0
-        d = Decimal(text)
-        if not d.is_finite():
-            return 0, 0
-        _sign, digits, exponent = d.as_tuple()
-        scale = -exponent if exponent < 0 else 0
-        int_digits = max(0, len(digits) + exponent)
-        return int_digits, scale
-    except (InvalidOperation, Overflow, ValueError, TypeError):
-        return 0, 0
+        return significant_digit_count(value) <= DECIMAL128_SIGNIFICANT_DIGITS
+    except Exception:
+        return False
 
 
-def fits_decimal(value: Any, precision: int, scale: int) -> bool:
+def fit_skips_reader_null(value: Any) -> bool:
+    """True when a fit/quarantine scan must not treat the cell as present text.
+
+    Extract NULL / Missing are not a VARCHAR token and not an integer overflow.
+    Empty string stays present (INTEGER empty still refuses; VARCHAR length 0 fits).
+    """
+    return is_reader_null_cell(value)
+
+
+def _unfit_cell_absent(cells: list[Any], col_idx: int) -> bool:
+    return col_idx >= len(cells) or is_reader_null_cell(cells[col_idx])
+
+
+def fits_decimal(
+    value: Any,
+    precision: int,
+    scale: int,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True if value can be stored in DECIMAL/NUMBER(precision, scale).
 
-    Scale overflow is fail-closed — never silently quantize/round into (p,s).
+    Trailing wire zeros are stripped (``52.310500000000000`` → scale 4).
+
+    Identity maps are as-is on every engine. Significant scale overflow
+    (digits that are not trailing zeros) fail-closed — including PostgreSQL.
+    PG would round at INSERT; we quarantine instead of writing a different
+    number. Trailing zeros after the decimal still collapse (``52.310500000``
+    is 52.3105) and do not count as overflow.
     """
-    from decimal import Decimal, InvalidOperation, Overflow
+    from decimal import InvalidOperation, Overflow
 
-    if value is None:
+    if is_reader_null_cell(value):
         return True
-    from services.value_serializer import is_missing_sentinel
+    from services.transform_engine import boolean_carrier_numeric_value
 
-    if is_missing_sentinel(value):
+    if boolean_carrier_numeric_value(value, precision, scale) is not None:
+        return True
+    if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
     try:
-        d = Decimal(str(value).strip())
+        if isinstance(value, Decimal):
+            # A typed Decimal is already exact. Round-tripping it through
+            # locale text read ``12.345`` as an ambiguous thousands group and
+            # refused every scale-3 value as overflow.
+            d = value
+        else:
+            text = str(unescape_wire_text(value)).strip()
+            if not text:
+                return True
+            from services.transform_engine import decimal_wire_value
+
+            d = decimal_wire_value(text)
+        if d is None:
+            return False
         if not d.is_finite():
             return False
+        prec = int(precision)
+        scl = int(scale)
+        max_int = max(0, prec - scl)
         int_digits, value_scale = decimal_int_digits_and_scale(d)
-        if value_scale > scale:
+        if value_scale > scl:
             return False
-        max_int = max(0, precision - scale)
-        return int_digits <= max_int and value_scale <= scale
+        return int_digits <= max_int
     except (InvalidOperation, Overflow, ValueError, TypeError):
         return False
 
 
-def quarantine_unfit_decimals(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-    *,
-    dialect_label: str = "DECIMAL",
-) -> list[tuple]:
-    """Hold out / NULL cells that cannot fit DECIMAL/NUMBER(p,s).
+#: Engines whose decimal carrier is spelled ``NUMBER`` in their own catalog.
+_NUMBER_CARRIER_ENGINES = frozenset({"snowflake", "oracle"})
 
-    ``quarantine`` omits the whole row from the primary write (no NULL invent).
-    ``coerce_null`` keeps the row with a NULL cell. ``fail`` leaves rows unchanged
-    so the driver/strict path can abort.
+
+def decimal_reason_label(dialect_label: str, dest_db: str, declared_type: str) -> str:
+    """Name the destination's own decimal carrier in a quarantine reason.
+
+    Snowflake and Oracle spell the carrier ``NUMBER``, so a reason that says
+    ``DECIMAL`` names a type the operator will not find in the destination
+    catalog. Otherwise the mapped type's own keyword wins, and the generic one
+    the caller appended is the last resort.
     """
-    if policy == "fail":
-        return mapped_rows
-    number_cols: list[tuple[int, int, int]] = []
-    for i, typ in enumerate(target_types):
-        parsed = parse_decimal_precision_scale(typ)
-        if parsed:
-            number_cols.append((i, parsed[0], parsed[1]))
-    if not number_cols:
-        return mapped_rows
+    label = (dialect_label or "").strip()
+    engine_key = (dest_db or "").strip().lower() or _infer_dest_db_from_dialect_label(
+        label
+    )
+    declared = re.split(r"[\s(]", (declared_type or "").strip(), maxsplit=1)[0].upper()
+    if engine_key in _NUMBER_CARRIER_ENGINES:
+        carrier = "NUMBER"
+    elif declared in {"NUMBER", "DECIMAL", "NUMERIC", "DEC"}:
+        carrier = declared
+    else:
+        return label
+    engine = re.sub(r"\b(DECIMAL|NUMERIC|NUMBER|DEC)\b\s*$", "", label, flags=re.I)
+    return f"{engine.strip()} {carrier}".strip()
 
-    from services.value_serializer import cell_to_string
 
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, precision, scale in number_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
+_UNITS_CODE_POINTS: Final[str] = "code_points"
+_UNITS_UTF8_BYTES: Final[str] = "utf8_bytes"
+_UNITS_UTF16_CODE_UNITS: Final[str] = "utf16_code_units"
+_ORACLE_BYTE_TYPMOD = re.compile(r"\(\s*\d+\s*BYTE\s*\)")
 
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            if fits_decimal(cells[col_idx], precision, scale):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"decimal does not fit {dialect_label}({precision},{scale}) "
-                    "— quarantined (would truncate/overflow on write)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
+
+@lru_cache(maxsize=8192)
+def string_length_unit(type_str: str, dialect_label: str = "") -> str:
+    """Which length unit a bounded string column counts in.
+
+    The unit follows from the DDL type and destination dialect, never from the
+    value, so it is resolved once per column instead of once per cell.
+    """
+    upper = (type_str or "").upper()
+    dialect = (dialect_label or "").upper()
+    # Oracle BYTE semantics — multi-byte chars consume >1 unit (Informatica FAQ).
+    if _ORACLE_BYTE_TYPMOD.search(upper):
+        return _UNITS_UTF8_BYTES
+    # Redshift VARCHAR(n) is byte-length (AWS) — CJK/emoji would false-green on
+    # code-point counts then truncate/error on write.
+    if "REDSHIFT" in dialect:
+        return _UNITS_UTF8_BYTES
+    # SQL Server / Oracle national types store UTF-16 code units.
+    if "NVARCHAR" in upper or "NCHAR" in upper:
+        return _UNITS_UTF16_CODE_UNITS
+    return _UNITS_CODE_POINTS
 
 
 def string_storage_units(
@@ -1823,9 +3252,8 @@ def string_storage_units(
     - SQL Server / Oracle national types → UTF-16 code units
     - Default ``VARCHAR(n)`` / ``VARCHAR2(n CHAR)`` → Unicode code points
     """
-    from services.value_serializer import cell_to_string
 
-    if value is None:
+    if is_reader_null_cell(value):
         return 0
     if isinstance(value, (bytes, bytearray, memoryview)):
         try:
@@ -1833,20 +3261,15 @@ def string_storage_units(
         except UnicodeDecodeError:
             text = cell_to_string(value)
     else:
-        text = value if isinstance(value, str) else cell_to_string(value)
-    upper = (type_str or "").upper()
-    dialect = (dialect_label or "").upper()
-    # Oracle BYTE semantics — multi-byte chars consume >1 unit (Informatica FAQ).
-    if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper):
+        text = unescape_wire_text(value) if isinstance(value, str) else cell_to_string(value)
+    unit = string_length_unit(type_str or "", dialect_label or "")
+    if unit == _UNITS_CODE_POINTS or text.isascii():
+        # ASCII spends one byte and one UTF-16 unit per code point, so every
+        # unit rule agrees and the encode round-trip is pure overhead.
+        return len(text)
+    if unit == _UNITS_UTF8_BYTES:
         return len(text.encode("utf-8"))
-    # Redshift VARCHAR(n) is byte-length (AWS) — CJK/emoji would false-green on
-    # code-point counts then truncate/error on write.
-    if "REDSHIFT" in dialect:
-        return len(text.encode("utf-8"))
-    # SQL Server / Oracle national types store UTF-16 code units.
-    if any(token in upper for token in ("NVARCHAR", "NCHAR", "NVARCHAR2")):
-        return len(text.encode("utf-16-le")) // 2
-    return len(text)
+    return len(text.encode("utf-16-le")) // 2
 
 
 def fits_varchar(
@@ -1857,18 +3280,19 @@ def fits_varchar(
     dialect_label: str = "",
 ) -> bool:
     """True if value fits a bounded VARCHAR/CHAR/NVARCHAR(width) column."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     return string_storage_units(value, type_str, dialect_label=dialect_label) <= width
 
 
 def binary_storage_bytes(value: Any) -> bytes | None:
     """Decode binary wire to bytes, or None when wire is invalid / empty skip."""
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
     if isinstance(value, str):
+        value = unescape_wire_text(value)
         if not value:
             return b""
         try:
@@ -1882,7 +3306,7 @@ def binary_storage_bytes(value: Any) -> bytes | None:
 
 def fits_binary(value: Any, width: int) -> bool:
     """True if binary wire fits a bounded BINARY/VARBINARY(width) column."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     raw = binary_storage_bytes(value)
     if raw is None:
@@ -1890,743 +3314,534 @@ def fits_binary(value: Any, width: int) -> bool:
     return len(raw) <= width
 
 
-def quarantine_unfit_bitstrings(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-) -> list[tuple]:
-    """Hold out cells that are not valid 0/1 bitstrings or exceed BIT(n)/VARBIT(n).
+def binary_overflow_suggested_type(value: Any, type_str: str) -> str:
+    """Dest-spelled BIT/BINARY that would hold ``value``. Empty when it binds.
 
-    BIT destinations must not receive base64/UTF-8 invent (BYTEA path).
+    Never TEXT / BYTEA invent — those change bit-vs-byte polarity. A shorter
+    fixed ``BIT(n)`` is a pad/fix, not a shrink.
     """
-    if policy == "fail":
-        return mapped_rows
-
-    from connectors.sql_bind import coerce_bitstring_wire
     from services.type_system import (
         is_bitstring_carrier,
         is_varying_bitstring_carrier,
+        parse_binary_carrier_width,
         parse_bitstring_width,
     )
-    from services.value_serializer import cell_to_string
 
-    bit_cols: list[tuple[int, str]] = []
-    for i, typ in enumerate(target_types):
-        if is_bitstring_carrier(typ):
-            bit_cols.append((i, typ))
-    if not bit_cols:
-        return mapped_rows
+    if is_bitstring_carrier(type_str):
+        from connectors.sql_bind import coerce_bitstring_wire
 
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, typ in bit_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            try:
-                bits = coerce_bitstring_wire(
-                    cells[col_idx],
-                    width=parse_bitstring_width(typ),
-                    varying=is_varying_bitstring_carrier(typ),
-                )
-            except ValueError as exc:
-                sample = cell_to_string(cells[col_idx])[:120]
-                append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": f"{exc} — quarantined",
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-                if policy == "coerce_null":
-                    cells[col_idx] = None
-                else:
-                    hold_out = True
-                    break
-                continue
-            if bits is not None:
-                cells[col_idx] = bits
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def quarantine_unfit_binaries(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-    *,
-    dialect_label: str = "VARBINARY",
-) -> list[tuple]:
-    """Hold out / NULL cells that overflow BINARY(n) or fail base64 wire decode.
-
-    Preflight samples miss production outliers; silent truncate / UTF-8 invent
-    is forbidden. Invalid base64 is quarantined (not re-encoded).
-    BIT/VARBIT columns are handled by ``quarantine_unfit_bitstrings``.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import (
-        is_bitstring_carrier,
-        normalize_logical_type,
-        parse_binary_carrier_width,
-    )
-
-    bin_cols: list[tuple[int, int | None, str]] = []
-    for i, typ in enumerate(target_types):
-        if normalize_logical_type(typ) != "binary":
-            continue
-        if is_bitstring_carrier(typ):
-            continue
-        width = parse_binary_carrier_width(typ)
-        bin_cols.append((i, width, typ))
-    if not bin_cols:
-        return mapped_rows
-
-    from services.value_serializer import cell_to_string
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, width, typ in bin_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            raw = binary_storage_bytes(cells[col_idx])
-            if raw is None:
-                sample = cell_to_string(cells[col_idx])[:120]
-                append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"binary wire is not valid base64 for {dialect_label} "
-                    "— quarantined (refuse silent UTF-8 encode)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-                if policy == "coerce_null":
-                    cells[col_idx] = None
-                else:
-                    hold_out = True
-                    break
-                continue
-            if width is not None and len(raw) > width:
-                sample = cell_to_string(cells[col_idx])[:120]
-                append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"binary length {len(raw)} exceeds {dialect_label}({width}) "
-                    "— quarantined (would truncate on write)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=row,
-                target_cols=target_cols,
-            )
-                if policy == "coerce_null":
-                    cells[col_idx] = None
-                else:
-                    hold_out = True
-                    break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def quarantine_unfit_enum_set(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-    *,
-    set_joiner: str = ",",
-) -> list[tuple]:
-    """Hold out / NULL cells outside a destination ENUM/SET member domain.
-
-    MySQL non-strict ENUM stores invalid values as '' — silent wipe. Fail closed.
-    HubSpot checkbox / Salesforce multipicklist use ``set_joiner=';'``.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import parse_enum_or_set_ordered_members
-    from services.value_serializer import cell_to_string
-
-    domain_cols: list[tuple[int, str, str]] = []
-    for i, typ in enumerate(target_types):
-        parsed = parse_enum_or_set_ordered_members(typ)
-        if not parsed:
-            continue
-        kind, members = parsed
-        if not members:
-            continue
-        domain_cols.append((i, kind, typ))
-    if not domain_cols:
-        return mapped_rows
-
-    from connectors.sql_bind import coerce_enum_wire, coerce_set_wire
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, kind, typ in domain_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            try:
-                if kind == "ENUM":
-                    cells[col_idx] = coerce_enum_wire(cells[col_idx], ddl_type=typ)
-                else:
-                    cells[col_idx] = coerce_set_wire(
-                        cells[col_idx], ddl_type=typ, joiner=set_joiner
-                    )
-                continue
-            except ValueError:
-                raw = cell_to_string(cells[col_idx])
-            sample = raw[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"value not in {kind} domain — quarantined "
-                    "(MySQL would store '' / drop SET members silently)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def quarantine_unfit_years(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-) -> list[tuple]:
-    """Hold out / NULL cells outside MySQL YEAR range (0 or 1901–2155).
-
-    Non-strict MySQL stores invalid YEAR as 0000 — silent wipe. Fail closed.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import is_year_carrier, year_value_fits
-    from services.value_serializer import cell_to_string
-
-    year_cols = [i for i, typ in enumerate(target_types) if is_year_carrier(typ)]
-    if not year_cols:
-        return mapped_rows
-
-    from connectors.sql_bind import coerce_year_wire
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx in year_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            try:
-                cells[col_idx] = coerce_year_wire(cells[col_idx])
-                continue
-            except ValueError:
-                pass
-            if year_value_fits(cells[col_idx]):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                        "year outside MySQL YEAR range (0 or 1901–2155) "
-                        "— quarantined (non-strict MySQL would store 0000)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def quarantine_unfit_booleans(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-) -> list[tuple]:
-    """Hold out / NULL cells that are not canonical boolean wire forms.
-
-    Accepts bool / 0|1 / true|false|t|f only. Refuses silent ``yes``/``Y``/``2``
-    invent into BOOLEAN / BIT / TINYINT(1) destinations.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import boolean_value_fits, normalize_logical_type
-    from services.value_serializer import cell_to_string
-
-    bool_cols = [
-        i
-        for i, typ in enumerate(target_types)
-        if normalize_logical_type(typ) == "boolean"
-    ]
-    if not bool_cols:
-        return mapped_rows
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx in bool_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            if boolean_value_fits(cells[col_idx]):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    "non-canonical boolean wire token "
-                    "(accept 0|1|true|false|t|f only) — quarantined"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def quarantine_unfit_temporals(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-) -> list[tuple]:
-    """Hold out temporal cells that would silently lose FSP or timezone polarity.
-
-    - ``TIME(6)`` → ``TIME(0)`` truncates fractional seconds
-    - Offset-aware / ``Z`` wire into NTZ/DATETIME strips the offset (Airbyte invent)
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import (
-        datetime_timezone_polarity,
-        normalize_logical_type,
-        parse_temporal_fractional_precision,
-        temporal_value_exceeds_precision,
-        temporal_value_has_timezone,
-    )
-    from services.value_serializer import cell_to_string
-
-    temporal_cols: list[tuple[int, str, bool, bool]] = []
-    for i, typ in enumerate(target_types):
-        logical = normalize_logical_type(typ)
-        if logical not in {"time", "datetime"}:
-            continue
-        check_fsp = parse_temporal_fractional_precision(typ) is not None
-        check_tz = logical == "datetime" and datetime_timezone_polarity(typ) == "ntz"
-        if not check_fsp and not check_tz:
-            continue
-        temporal_cols.append((i, typ, check_fsp, check_tz))
-    if not temporal_cols:
-        return mapped_rows
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, typ, check_fsp, check_tz in temporal_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            reason = ""
-            if check_fsp and temporal_value_exceeds_precision(cells[col_idx], typ):
-                reason = (
-                    f"fractional seconds exceed destination {typ} "
-                    "— quarantined (refuse silent truncate)"
-                )
-            elif check_tz and temporal_value_has_timezone(cells[col_idx]):
-                reason = (
-                    f"timezone-aware value into NTZ destination {typ} "
-                    "— quarantined (refuse silent offset strip; use explicit UTC transform)"
-                )
-            if not reason:
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": reason,
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=row,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def quarantine_currency_markers_into_numeric(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-) -> list[tuple]:
-    """Hold out cells that still carry currency symbols into numeric/MONEY columns.
-
-    Identity-mapped ``$1,234.56`` must not be silently stripped to 1234.56 or
-    fail mid-batch. Operator must apply an explicit currency transform first.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import (
-        has_currency_marker,
-        is_money_carrier,
-        normalize_logical_type,
-    )
-    from services.value_serializer import cell_to_string
-
-    numeric_cols: list[int] = []
-    for i, typ in enumerate(target_types):
-        logical = normalize_logical_type(typ)
-        if logical in {"decimal", "integer", "float"} or is_money_carrier(typ):
-            numeric_cols.append(i)
-    if not numeric_cols:
-        return mapped_rows
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx in numeric_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            if not has_currency_marker(cells[col_idx]):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    "currency marker present in numeric/MONEY cell "
-                    "— quarantined (refuse silent strip; use currency transform)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
-
-
-def fits_integer(value: Any, type_str: str) -> bool:
-    """True if value fits the signed/unsigned integer destination carrier."""
-    from decimal import Decimal, InvalidOperation
-    from services.type_system import integer_storage_bounds
-
-    bounds = integer_storage_bounds(type_str)
-    if bounds is None:
-        return True
-    if value is None:
-        return True
-    if isinstance(value, bool):
-        # bool is a subclass of int — treat as 0/1.
-        n = int(value)
-    elif isinstance(value, int):
-        n = value
-    else:
         try:
-            text = str(value).strip()
-            if not text:
-                return True
-            n = int(Decimal(text))
-        except (InvalidOperation, ValueError, TypeError, OverflowError):
-            # Non-numeric — leave for type coercion / other quarantine paths.
-            return True
-    lo, hi = bounds
-    return lo <= n <= hi
-
-
-def quarantine_unfit_integers(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-    *,
-    dialect_label: str = "INTEGER",
-) -> list[tuple]:
-    """Hold out / NULL cells that overflow signed/unsigned integer destinations.
-
-    Mirrors DECIMAL/VARCHAR write quarantine: preflight samples can miss production
-    outliers (UINT32 into INT, BIGINT into SMALLINT). Fail-closed — never wrap.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import integer_storage_bounds, normalize_logical_type
-
-    int_cols: list[tuple[int, str]] = []
-    for i, typ in enumerate(target_types):
-        if normalize_logical_type(typ) != "integer":
-            continue
-        if integer_storage_bounds(typ) is None:
-            continue
-        int_cols.append((i, typ))
-    if not int_cols:
-        return mapped_rows
-
-    from services.value_serializer import cell_to_string
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, typ in int_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            if fits_integer(cells[col_idx], typ):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"integer does not fit {dialect_label}({typ}) "
-                    "— quarantined (would overflow/wrap on write)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
+            bits = coerce_bitstring_wire(value, width=None, varying=True)
+        except ValueError:
+            return ""
+        if not bits:
+            return ""
+        need = len(bits)
+        width = parse_bitstring_width(type_str)
+        if width is None or need <= width:
+            return ""
+        if is_varying_bitstring_carrier(type_str):
+            return (
+                f"VARBIT({need})"
+                if "VARBIT" in (type_str or "").upper()
+                else f"BIT VARYING({need})"
             )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
+        return f"BIT({need})"
+
+    raw = binary_storage_bytes(value)
+    if raw is None:
+        return ""
+    need = len(raw)
+    width = parse_binary_carrier_width(type_str)
+    if width is None or need <= width:
+        return ""
+    upper = (type_str or "").upper()
+    if "VARBINARY" in upper:
+        return f"VARBINARY({need})"
+    if "TINYBLOB" in upper:
+        return "BLOB" if need > 255 else type_str
+    if "BINARY" in upper:
+        return f"BINARY({need})"
+    return f"VARBINARY({need})"
 
 
-def quarantine_unfit_strings(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-    *,
-    dialect_label: str = "VARCHAR",
-) -> list[tuple]:
-    """Hold out / NULL cells that exceed bounded VARCHAR/NVARCHAR/CHAR width.
+def _mysql_timestamp_range_violation(
+    target_type: str, value: Any, *, dest_db: str = ""
+) -> bool:
+    """True for a MySQL ``TIMESTAMP`` cell outside the 1970..2038 epoch window."""
+    from services.type_system import _normalize_dest_db
 
-    Preflight only sees samples — production rows longer than samples used to
-    reach SQL Server and silently truncate. Quarantine is fail-closed.
-    Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) are skipped.
+    if not dest_db or _normalize_dest_db(dest_db) != "mysql":
+        return False
+    from services.timezone_policy import (
+        is_mysql_timestamp_carrier,
+        mysql_timestamp_out_of_range,
+    )
+
+    if not is_mysql_timestamp_carrier(target_type):
+        return False
+    return mysql_timestamp_out_of_range(value)
+
+
+# Engines whose ``TIME`` carrier stores only a wall-clock in 0–24h. A
+# pymysql read-back of a MySQL ``'-01:00:00'`` / ``'100:00:00'`` arrives as
+# ``timedelta(days=-1, …)`` / ``timedelta(days=4, …)``; COPY binds its ``str``
+# ("-1 day, 23:00:00") and the engine rejects the literal — the load fails on
+# a raw driver error instead of a typed finding (X-35). MySQL/MariaDB/TiDB
+# ``TIME`` is a ±838h interval carrier and holds these; SQLite TEXT holds
+# anything. Held out here instead.
+_TIME_RANGE_LIMITED_ENGINES = frozenset(
+    {
+        "postgresql",
+        "mssql",
+        "duckdb",
+        "snowflake",
+        "oracle",
+        "db2",
+        "redshift",
+        "bigquery",
+        "clickhouse",
+        "trino",
+        "presto",
+        "databricks",
+        "iceberg",
+        "athena",
+    }
+)
+
+
+def _time_out_of_carrier_range(
+    target_type: str, value: Any, *, dest_db: str = ""
+) -> bool:
+    """True for a TIME cell outside the destination's 0–24h wall-clock range."""
+    import datetime as _dt
+    import re as _re
+
+    if not dest_db:
+        return False
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import normalize_logical_type
+
+    if _normalize_dest_db(dest_db) not in _TIME_RANGE_LIMITED_ENGINES:
+        return False
+    if normalize_logical_type(target_type) != "time":
+        return False
+    if isinstance(value, _dt.timedelta):
+        secs = value.total_seconds()
+        return secs < 0 or secs >= 86400
+    if isinstance(value, _dt.time):
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        m = _re.match(r"^(-?\d+)\s+day[s]?,\s*(\d+):(\d+)", text)
+        if m:
+            days = int(m.group(1))
+            return days < 0 or days >= 1
+        m = _re.match(r"^(-?)(\d+):(\d+):(\d+)", text)
+        if m:
+            hours = int(m.group(2))
+            return m.group(1) == "-" or hours >= 24
+    return False
+
+
+def _mysql_datetime_utc_normalizes(typ: str, dest_db: str) -> bool:
+    """True when MySQL DATETIME will store the UTC clock, not strip an offset.
+
+    ``coerce_sql_temporal`` converts an aware wire to naive UTC before bind
+    and the session ``time_zone`` is pinned to ``+00:00``. Quarantining that
+    wire as an NTZ strip held out every timestamptz row the column can hold.
     """
-    if policy == "fail":
-        return mapped_rows
+    from connectors.sql_temporal import sql_base_type
+    from services.dest_dialect_facts import _normalize_dest_db
 
+    if _normalize_dest_db(dest_db) != "mysql":
+        return False
+    return sql_base_type(typ) == "DATETIME"
+
+
+def _dest_is_instant_only(typ: str, dest_db: str) -> bool:
+    """True when the destination's temporal carrier is an instant-only type.
+
+    MongoDB BSON date, Elasticsearch date, and similar carriers store instants
+    by design — they cannot strip an offset because they always store UTC.
+    Quarantining timezone-aware values for these destinations is a false positive.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import _INSTANT_ONLY_TEMPORAL_ENGINES
+
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    if dest_db in _INSTANT_ONLY_TEMPORAL_ENGINES:
+        # MongoDB BSON date, Elasticsearch date, etc. are always instant carriers
+        return True
+    return False
+
+
+def integer_overflow_suggested_type(
+    value: Any, type_str: str, *, dest_db: str = ""
+) -> str:
+    """Dest-spelled carrier that would hold ``value``. Empty when the cell binds.
+
+    Fractional → exact DECIMAL/NUMBER (never FLOAT — IEEE would corrupt
+    money/clock). Range overflow → BIGINT or Snowflake/Oracle ``NUMBER(38,0)``.
+    Values past signed 64-bit use the decimal widen SSOT. Never TEXT.
+    """
+    why = integer_fit_failure(value, type_str, dest_db=dest_db)
+    if why is None:
+        from services.transform_engine import decimal_wire_value
+
+        wire = decimal_wire_value(value)
+        if wire is None or not wire.is_finite() or wire == wire.to_integral_value():
+            return ""
+        why = "fractional"
+    if "fractional" in why.lower():
+        from services.decimal_observe import decimal_widen_carrier
+
+        return decimal_widen_carrier(
+            value, dest_db=dest_db, current_type=type_str
+        ) or ""
+    if integer_fit_failure(value, "BIGINT", dest_db=dest_db) is None:
+        dialect = (dest_db or "").strip().lower()
+        if dialect in {"snowflake", "oracle"}:
+            return "NUMBER(38,0)"
+        return "BIGINT"
+    from services.decimal_observe import decimal_widen_carrier
+
+    return decimal_widen_carrier(
+        value, dest_db=dest_db, current_type=type_str
+    ) or ""
+
+
+def varchar_overflow_suggested_type(
+    value: Any, type_str: str, *, dest_db: str = ""
+) -> str:
+    """VARCHAR(n) / TEXT that would hold ``value``. Empty when it already fits."""
+    from services.ddl_compatibility import parse_varchar_width
+    from services.value_serializer import present_cell_text
+
+    width = parse_varchar_width(type_str)
+    text = present_cell_text(value)
+    if text is None:
+        text = str(value or "")
+    need = len(text)
+    if width is not None and need <= width:
+        return ""
+    dest_n = max(need, (width or 0) + 1)
+    dialect = (dest_db or "").strip().lower()
+    if dialect in {"mysql", "mariadb"} and dest_n > 65535:
+        return "TEXT"
+    if dialect in {"snowflake"} and dest_n > 16_777_216:
+        return "VARCHAR(16777216)"
+    return f"VARCHAR({dest_n})"
+
+
+def _all_values_fit_suggested_type(
+    values: list[Any] | tuple[Any, ...],
+    suggested: str,
+    *,
+    dest_db: str,
+) -> bool:
+    """True when every cell passes the write predicate for ``suggested``."""
+    if not suggested:
+        return False
+    parsed = parse_decimal_precision_scale(suggested, dest_db=dest_db)
+    if parsed:
+        return all(fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db) for v in values)
+    if suggested.upper() in {"FLOAT", "FLOAT64", "DOUBLE", "REAL", "DOUBLE PRECISION"}:
+        return True
     from services.ddl_compatibility import parse_varchar_width
 
-    width_cols: list[tuple[int, int, str]] = []
-    for i, typ in enumerate(target_types):
-        width = parse_varchar_width(typ)
-        if width is not None:
-            width_cols.append((i, width, typ))
-    if not width_cols:
-        return mapped_rows
+    width = parse_varchar_width(suggested)
+    if suggested.upper() == "TEXT" or (
+        width is not None and all(fits_varchar(v, width, suggested) for v in values)
+    ):
+        return True
+    if width is not None:
+        return False
+    return all(fits_integer(v, suggested, dest_db=dest_db) for v in values)
 
-    from services.value_serializer import cell_to_string
+
+def proven_integer_widen(
+    values: list[Any] | tuple[Any, ...],
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+) -> str:
+    """Dest-spelled integer/float/decimal that ``fits_integer`` / ``fits_decimal`` accept.
+
+    Uses every overflow, not the first cell — a SMALLINT hit at 40000 is
+    BIGINT; a later 10**20 still needs a decimal carrier.
+    """
+    cells = [v for v in values if v is not None and str(v).strip() != ""]
+    if not cells:
+        return ""
+    frac_seed = None
+    for v in cells:
+        why = integer_fit_failure(v, current_type, dest_db=dest_db)
+        if why and "fractional" in why.lower():
+            frac_seed = v
+            break
+    if frac_seed is not None:
+        from services.decimal_observe import proven_decimal_widen
+
+        decimal = proven_decimal_widen(
+            values=cells, dest_db=dest_db, current_type=current_type
+        )
+        if decimal and _all_values_fit_suggested_type(cells, decimal, dest_db=dest_db):
+            return decimal
+        return integer_overflow_suggested_type(
+            frac_seed, current_type, dest_db=dest_db
+        )
+    seen: list[str] = []
+    for v in cells:
+        cand = integer_overflow_suggested_type(v, current_type, dest_db=dest_db)
+        if cand and cand not in seen:
+            seen.append(cand)
+    for cand in seen:
+        if _all_values_fit_suggested_type(cells, cand, dest_db=dest_db):
+            return cand
+    from services.decimal_observe import proven_decimal_widen
+
+    decimal = proven_decimal_widen(
+        values=cells, dest_db=dest_db, current_type=current_type
+    )
+    if decimal and _all_values_fit_suggested_type(cells, decimal, dest_db=dest_db):
+        return decimal
+    return ""
+
+
+def proven_varchar_widen(
+    values: list[Any] | tuple[Any, ...],
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+) -> str:
+    """VARCHAR/TEXT that ``fits_varchar`` accepts for every overflow."""
+    from services.value_serializer import present_cell_text
+
+    cells = [v for v in values if v is not None]
+    if not cells:
+        return ""
+    longest = cells[0]
+    longest_n = -1
+    for raw in cells:
+        text = present_cell_text(raw)
+        if text is None:
+            text = str(raw or "")
+        if len(text) > longest_n:
+            longest = raw
+            longest_n = len(text)
+    suggested = varchar_overflow_suggested_type(
+        longest, current_type, dest_db=dest_db
+    )
+    if suggested and _all_values_fit_suggested_type(
+        cells, suggested, dest_db=dest_db
+    ):
+        return suggested
+    return ""
+
+
+def fits_integer(value: Any, type_str: str, *, dest_db: str = "") -> bool:
+    """True if value fits the signed/unsigned integer destination carrier."""
+    return integer_fit_failure(value, type_str, dest_db=dest_db) is None
+
+
+@lru_cache(maxsize=4096)
+def physical_integer_carrier(type_str: str, dest_db: str) -> str:
+    """The integer column a bare logical ``integer`` stamp lands in on ``dest_db``.
+
+    A create-new destination has no catalog to read, so the Gate-8 remap only
+    sees Map's logical stamp — and ``integer_storage_bounds`` deliberately
+    reports a bare logical stamp as unbounded. The writer, however, materializes
+    that same stamp through ``ddl_type`` (BIGINT on PostgreSQL/MySQL, INTEGER on
+    SQLite) and quarantines what overflows it. Grading the fingerprint against
+    the logical stamp therefore kept a held-out row in the source digest and
+    failed a correct load on two opaque hashes. Physical carriers and non-integer
+    stamps pass through unchanged; engines whose keyword is a big-decimal carrier
+    stay unbounded, exactly as the write does.
+    """
+    from services.type_system import (
+        LOGICAL_INTEGER,
+        ddl_type,
+        integer_storage_bounds,
+        normalize_logical_type,
+    )
+
+    raw = (type_str or "").strip()
+    db = (dest_db or "").strip().lower()
+    if not raw or not db or normalize_logical_type(raw) != LOGICAL_INTEGER:
+        return raw
+    if integer_storage_bounds(raw, dest_db=db) is not None:
+        return raw
+    if raw not in {LOGICAL_INTEGER, "int", "integer"}:
+        return raw
+    if integer_storage_bounds("INTEGER", dest_db=db) is None:
+        # Schemaless / big-decimal engines: no fixed integer column to overflow.
+        return raw
+    physical = str(ddl_type(db, raw) or "").strip()
+    if not physical or integer_storage_bounds(physical, dest_db=db) is None:
+        return raw
+    return physical
+
+
+#: Engines whose REAL / DOUBLE PRECISION store NaN and ±Infinity as values.
+_NONFINITE_FLOAT_ENGINES = frozenset(
+    {"postgresql", "postgres", "timescaledb", "supabase", "cockroachdb"}
+)
+
+
+def engine_stores_nonfinite_float(engine: str) -> bool:
+    """True when a non-finite float is data the destination keeps, not an invent.
+
+    MySQL / SQL Server have no NaN or Infinity (MySQL would store NULL), so
+    those are held out; PostgreSQL stores them, and refusing them made a
+    PG->PG copy of a NaN column impossible (D51).
+    """
+    from services.type_system import _normalize_dest_db
+
+    eng = (engine or "").strip().lower()
+    return bool(eng) and _normalize_dest_db(eng) in _NONFINITE_FLOAT_ENGINES
+
+
+def _is_nonfinite_float(value: Any) -> bool:
+    return isinstance(value, float) and (
+        value != value or value in {float("inf"), float("-inf")}
+    )
+
+
+def bind_sql_mapped_rows_with_quarantine(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    engine: str,
+    dialect_label: str = "SQL",
+    mappings: list[dict[str, Any]] | None = None,
+    row_numbers: list[int] | None = None,
+) -> list[tuple]:
+    """Bind cells and quarantine refusals; see :func:`bind_rows_keeping_numbers`.
+
+    Callers that need to keep track of *which* rows survived — because they will
+    report on the survivors later — should use that variant instead.
+    """
+    bound, _kept = bind_rows_keeping_numbers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        engine=engine,
+        dialect_label=dialect_label,
+        mappings=mappings,
+        row_numbers=row_numbers,
+    )
+    return bound
+
+
+def bind_rows_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    engine: str,
+    dialect_label: str = "SQL",
+    mappings: list[dict[str, Any]] | None = None,
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
+    """Bind cells via ``normalize_sql_bind_value``; quarantine refusals (no crash invent).
+
+    Returns ``(bound_rows, surviving_row_numbers)``. Binding drops the rows it
+    quarantines, so a caller that later reports on the survivors cannot use the
+    numbers it started with — it would name rows that are no longer there.
+
+    Physical DDL can be INT/FLOAT/DECIMAL after Map stamped VARCHAR — empty ``\"\"``
+    must not become SQL NULL on upsert (destination wipe). Raise from sql_bind is
+    held out / STOP_COLUMN under quarantine|fail; ``coerce_null`` (gated) keeps NULL.
+    """
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        cell_to_string,
+    )
+
+    if not mapped_rows:
+        return mapped_rows, []
+
+    # A malformed document is the one JSON case binding cannot refuse: rather
+    # than raising, ``coerce_json_wire`` wraps an unparseable payload as a JSON
+    # string, so a truncated ``{"k": 1`` would land in JSONB as text and every
+    # count and checksum would still agree. Gate it here so every SQL writer
+    # that binds through this path inherits the same fail-closed answer.
+    mapped_rows, row_numbers = quarantine_unfit_json_keeping_numbers(
+        list(mapped_rows),
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=dialect_label,
+        row_numbers=row_numbers,
+    )
+    if not mapped_rows:
+        return [], []
 
     out: list[tuple] = []
+    kept: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
         hold_out = False
-        for col_idx, width, typ in width_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
+        for idx in range(len(cells)):
+            val = cells[idx]
+            if is_reader_null_cell(val):
                 continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
+            ddl = target_types[idx] if idx < len(target_types) else ""
+            if not ddl:
                 continue
-            if fits_varchar(
-                cells[col_idx], width, typ, dialect_label=dialect_label
-            ):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            units = string_storage_units(
-                cells[col_idx], typ, dialect_label=dialect_label
-            )
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"value length {units} exceeds {dialect_label}({width}) "
-                    "— quarantined (would truncate on write)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
+            try:
+                bound = normalize_sql_bind_value(
+                    val, ddl, engine=engine
+                )
+                if _is_nonfinite_float(bound) and not engine_stores_nonfinite_float(engine):
+                    raise ValueError(
+                        f"non-finite float into {dialect_label}({ddl}) "
+                        "— quarantined (refuse silent NULL)"
+                    )
+                cells[idx] = bound
+            except ValueError as exc:
+                sample = cell_to_string(val)[:120]
+                col = target_cols[idx] if idx < len(target_cols) else f"col_{idx}"
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": resolve_row_number(row_numbers, row_idx),
+                        "column": col,
+                        "target": col,
+                        "value": sample,
+                        "reason": (
+                            f"{dialect_label} bind refused {sample!r} for {ddl}: {exc} "
+                            "— quarantined (refuse silent NULL invent)"
+                        ),
+                        "policy": (
+                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
+                        ),
+                        "chars": [],
+                    },
+                    mapped_row=cells,
+                    target_cols=target_cols,
+                    mappings=mappings,
+                )
+                if policy == "coerce_null":
+                    cells[idx] = DF_MISSING_SENTINEL
+                else:
+                    hold_out = True
+                    break
         if hold_out:
             continue
         out.append(tuple(cells))
-    return out
+        kept.append(resolve_row_number(row_numbers, row_idx))
+    return out, kept
 
 
 # Engines whose ARRAY element slot is non-nullable by contract.
@@ -2639,128 +3854,19 @@ _ARRAY_NULL_STRICT_DIALECTS = ("bigquery", "big query", "bq", "clickhouse")
 _ARRAY_NESTED_FORBIDDEN_DIALECTS = ("bigquery", "big query", "bq")
 
 
-def parse_array_wire_elements(value: Any) -> tuple[list[Any] | None, str | None]:
-    """Parse array wire into elements for element-level fidelity checks.
-
-    Returns ``(elements, error)``. ``(None, None)`` means *ambiguous* — a bare
-    scalar that may legitimately be a SET joiner payload or engine-native
-    literal. Ambiguity is never quarantined; only unambiguous breakage is,
-    so this gate cannot produce false holdouts.
-    """
-    if value is None:
-        return None, None
-    if isinstance(value, (list, tuple)):
-        return list(value), None
-    if isinstance(value, dict):
-        return None, "object/dict payload cannot populate an ARRAY column"
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return None, "binary payload cannot populate an ARRAY column"
-    if not isinstance(value, str):
-        return None, None
-
-    text = value.strip()
-    if not text:
-        return None, None
-    if text.startswith("[") and text.endswith("]"):
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return None, "malformed JSON array payload"
-        if not isinstance(parsed, list):
-            return None, "JSON payload is not an array"
-        return parsed, None
-    if text.startswith("{") and text.endswith("}"):
-        # Postgres array literal ``{a,b,NULL}`` (unquoted NULL is a real NULL;
-        # quoted "NULL" is the literal string) — PG docs 8.15.
-        try:
-            parsed_obj = json.loads(text)
-        except Exception:
-            return _parse_pg_array_literal(text), None
-        if isinstance(parsed_obj, dict):
-            return None, "JSON object payload cannot populate an ARRAY column"
-        return _parse_pg_array_literal(text), None
-    return None, None
-
-
-def _parse_pg_array_literal(text: str) -> list[Any]:
-    """Split a Postgres ``{a,b,"c,d",NULL}`` literal into elements."""
-    body = text[1:-1]
-    if not body.strip():
-        return []
-    elements: list[Any] = []
-    buf: list[str] = []
-    in_quotes = False
-    escaped = False
-    for ch in body:
-        if escaped:
-            buf.append(ch)
-            escaped = False
-            continue
-        if ch == "\\":
-            escaped = True
-            continue
-        if ch == '"':
-            in_quotes = not in_quotes
-            buf.append(ch)
-            continue
-        if ch == "," and not in_quotes:
-            elements.append(_pg_array_element(("".join(buf)).strip()))
-            buf = []
-            continue
-        buf.append(ch)
-    elements.append(_pg_array_element(("".join(buf)).strip()))
-    return elements
-
-
-def _pg_array_element(raw: str) -> Any:
-    if raw.upper() == "NULL":
-        return None
-    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
-        return raw[1:-1]
-    return raw
-
-
-def _is_numeric_wire(value: Any) -> bool:
-    """True when a cell parses as a finite number (never invent 0 from text)."""
-    from decimal import Decimal, InvalidOperation
-
-    if isinstance(value, bool) or isinstance(value, (int, float)):
-        return True
-    try:
-        return Decimal(str(value).strip()).is_finite()
-    except (InvalidOperation, ValueError, TypeError, ArithmeticError):
-        return False
-
-
-def _is_temporal_wire(value: Any) -> bool:
-    """True when a cell parses as an ISO-8601 date / time / timestamp."""
-    from datetime import date, datetime, time
-
-    if isinstance(value, (datetime, date, time)):
-        return True
-    text = str(value).strip()
-    if not text:
-        return True
-    # ``fromisoformat`` gained ``Z`` support in 3.11; normalize for older runtimes.
-    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    normalized = normalized.replace(" ", "T", 1) if " " in normalized else normalized
-    for parser in (datetime.fromisoformat, date.fromisoformat, time.fromisoformat):
-        try:
-            parser(normalized)
-            return True
-        except (ValueError, TypeError):
-            continue
-    return False
-
-
-def array_element_unfit_reason(element: Any, carrier: str) -> str | None:
+def array_element_unfit_reason(
+    element: Any,
+    carrier: str,
+    *,
+    dest_db: str = "",
+) -> str | None:
     """Reason an element cannot fit the ARRAY element carrier, else None.
 
     Reuses the scalar fit SSOT (``fits_integer`` / ``fits_decimal`` /
     ``fits_varchar`` / ``boolean_value_fits``) so array fidelity can never
     drift from column fidelity.
     """
-    if element is None:
+    if is_reader_null_cell(element):
         return None
     carrier = (carrier or "").strip()
     if not carrier:
@@ -2777,8 +3883,10 @@ def array_element_unfit_reason(element: Any, carrier: str) -> str | None:
         return None
 
     logical = normalize_logical_type(carrier)
-    decimal_parsed = parse_decimal_precision_scale(carrier)
-    if decimal_parsed and not fits_decimal(element, decimal_parsed[0], decimal_parsed[1]):
+    decimal_parsed = parse_decimal_precision_scale(carrier, dest_db=dest_db)
+    if decimal_parsed and not fits_decimal(
+        element, decimal_parsed[0], decimal_parsed[1], dest_db=dest_db
+    ):
         return f"element does not fit {carrier}"
     if logical == "integer" and integer_storage_bounds(carrier) is not None:
         # ``fits_integer`` intentionally passes non-numeric text through so the
@@ -2790,8 +3898,13 @@ def array_element_unfit_reason(element: Any, carrier: str) -> str | None:
             return f"element does not fit {carrier}"
     if logical == "boolean" and not boolean_value_fits(element):
         return f"element is not a canonical boolean for {carrier}"
-    if logical in {"date", "time", "datetime"} and not _is_temporal_wire(element):
-        return f"element is not a parseable temporal for {carrier}"
+    if logical in {"date", "time", "datetime"}:
+        text = element if isinstance(element, str) else str(element)
+        text = text.strip()
+        if text:
+            parsed, err = apply_transform(text, logical)
+            if err or parsed is None:
+                return f"element is not a parseable temporal for {carrier}"
 
     from services.ddl_compatibility import parse_varchar_width
 
@@ -2799,122 +3912,6 @@ def array_element_unfit_reason(element: Any, carrier: str) -> str | None:
     if width is not None and not fits_varchar(element, width, carrier):
         return f"element exceeds {carrier}"
     return None
-
-
-def quarantine_unfit_arrays(
-    mapped_rows: list[tuple],
-    target_cols: list[str],
-    target_types: list[str],
-    rejected_details: list[dict[str, Any]],
-    policy: str,
-    *,
-    dialect_label: str = "destination",
-) -> list[tuple]:
-    """Hold out ARRAY cells whose payload or elements cannot reach the column.
-
-    Scalar carriers each had a fail-closed gate while ARRAY columns had none —
-    malformed payloads and unfit elements reached PG ``int[]``, BigQuery
-    ``ARRAY<INT64>``, ClickHouse ``Array(T)``, and lakehouse list columns
-    unchecked. Engine rules enforced here:
-
-    - BigQuery result ARRAYs may not contain NULL elements, and arrays of
-      arrays are unsupported (ARRAY of STRUCT is required).
-    - ClickHouse ``Array(T)`` rejects NULL unless declared ``Array(Nullable(T))``.
-    - Postgres permits both NULL arrays and NULL elements.
-
-    Ambiguous scalars (SET joiner text, engine-native literals) are never held
-    out — only unambiguous breakage is.
-    """
-    if policy == "fail":
-        return mapped_rows
-
-    from services.type_system import (
-        LOGICAL_ARRAY,
-        normalize_logical_type,
-        parse_array_element,
-    )
-
-    array_cols: list[tuple[int, str, str]] = []
-    for i, typ in enumerate(target_types):
-        raw = (typ or "").strip()
-        if not raw:
-            continue
-        is_array = raw.endswith("[]") or normalize_logical_type(raw) == LOGICAL_ARRAY
-        if not is_array:
-            continue
-        element = (
-            raw[:-2].strip() if raw.endswith("[]") else (parse_array_element(raw) or "")
-        )
-        array_cols.append((i, element, raw))
-    if not array_cols:
-        return mapped_rows
-
-    label = (dialect_label or "destination").strip() or "destination"
-    low = label.lower()
-    null_strict = any(d in low for d in _ARRAY_NULL_STRICT_DIALECTS)
-    nested_forbidden = any(d in low for d in _ARRAY_NESTED_FORBIDDEN_DIALECTS)
-
-    from services.value_serializer import cell_to_string, is_missing_sentinel
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, element_carrier, typ in array_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            elements, parse_error = parse_array_wire_elements(cells[col_idx])
-            reason = ""
-            if parse_error:
-                reason = f"{parse_error} — quarantined (would not load into {typ})"
-            elif elements is not None:
-                for element in elements:
-                    if element is None:
-                        if null_strict:
-                            reason = (
-                                f"{label} ARRAY element may not be NULL "
-                                f"(declare Array(Nullable(T)) or drop the element) "
-                                f"— quarantined"
-                            )
-                            break
-                        continue
-                    if nested_forbidden and isinstance(element, (list, tuple)):
-                        reason = (
-                            f"{label} does not support arrays of arrays "
-                            "(use ARRAY of STRUCT) — quarantined"
-                        )
-                        break
-                    unfit = array_element_unfit_reason(element, element_carrier)
-                    if unfit:
-                        reason = f"{unfit} — quarantined (would not load into {typ})"
-                        break
-            if not reason:
-                continue
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": cell_to_string(cells[col_idx])[:120],
-                    "reason": f"{label} ARRAY: {reason}",
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
 
 
 def quarantine_unfit_json(
@@ -2928,14 +3925,41 @@ def quarantine_unfit_json(
 ) -> list[tuple]:
     """Hold out payloads that intend to be JSON documents but are malformed.
 
+    See :func:`quarantine_unfit_json_keeping_numbers`; callers that report on
+    the survivors afterwards must use that variant.
+    """
+    kept_rows, _kept = quarantine_unfit_json_keeping_numbers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=dialect_label,
+    )
+    return kept_rows
+
+
+def quarantine_unfit_json_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "destination",
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
+    """Hold out payloads that intend to be JSON documents but are malformed.
+
     ``coerce_json_wire`` losslessly wraps bare scalars, so plain text into a
     JSON column is not a fidelity loss and is left alone. A payload that is
     clearly an intended object/array but fails to parse would instead be
     wrapped as a JSON *string* — silently degrading a document into text.
     That is the fail-closed case.
+
+    Returns ``(kept_rows, surviving_row_numbers)`` so a caller holding source
+    row numbers does not later name rows this gate removed.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import LOGICAL_JSON, normalize_logical_type
 
@@ -2945,13 +3969,15 @@ def quarantine_unfit_json(
         if normalize_logical_type(typ) == LOGICAL_JSON
     ]
     if not json_cols:
-        return mapped_rows
+        return mapped_rows, [
+            resolve_row_number(row_numbers, i) for i in range(len(mapped_rows))
+        ]
 
     label = (dialect_label or "destination").strip() or "destination"
 
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     out: list[tuple] = []
+    kept: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
         hold_out = False
@@ -2962,26 +3988,42 @@ def quarantine_unfit_json(
             if is_missing_sentinel(value):
                 continue
             text = value.strip()
-            looks_structured = (text.startswith("{") and text.endswith("}")) or (
-                text.startswith("[") and text.endswith("]")
-            )
+            # coerce_json_wire wraps failed parses as JSON string literals
+            # (\"{not:valid}\"). Detect that wrap so we still quarantine intended
+            # documents instead of inventing a JSON string scalar.
+            candidate = text
+            if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+                try:
+                    inner = json.loads(text)
+                except Exception:
+                    inner = None
+                if isinstance(inner, str):
+                    candidate = inner.strip()
+            # An opening brace/bracket is the intent; a missing closer is the
+            # most common corruption (truncated export) and must not be read as
+            # "this was only ever text".
+            looks_structured = candidate.startswith("{") or candidate.startswith("[")
             if not looks_structured:
                 continue
             try:
-                json.loads(text)
+                def _reject(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
+                json.loads(candidate, parse_constant=_reject)
                 continue
             except Exception:
                 pass
             append_write_quarantine_detail(
                 rejected_details,
                 {
-                    "row": row_idx + 1,
+                    "row": resolve_row_number(row_numbers, row_idx),
                     "column": target_cols[col_idx],
                     "target": target_cols[col_idx],
                     "value": cell_to_string(value)[:120],
                     "reason": (
-                        f"{label} JSON: malformed document payload — quarantined "
-                        "(would silently store as a JSON string, not an object)"
+                        f"{label} JSON: malformed or non-finite document payload — "
+                        "quarantined (NaN/Infinity must not become null; invalid "
+                        "JSON must not store as a bare string)"
                     ),
                     "policy": "write_quarantine",
                     "chars": [],
@@ -2990,14 +4032,64 @@ def quarantine_unfit_json(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
         if hold_out:
             continue
         out.append(tuple(cells))
-    return out
+        kept.append(resolve_row_number(row_numbers, row_idx))
+    return out, kept
+
+
+def _infer_dest_db_from_dialect_label(dialect_label: str) -> str:
+    """Best-effort dest_db for bare DECIMAL/NUMERIC/INTEGER parse honesty.
+
+    Engines whose bare ``INTEGER``/``DECIMAL`` keyword is *not* the SQL-standard
+    32-bit / (38,x) carrier must be recognised here, otherwise the shared write
+    quarantine invents a bound the destination never enforces and holds out
+    perfectly writable rows (SQLite ``INTEGER`` is 8 bytes; document and object
+    sinks have no integer column at all).
+    """
+    low = (dialect_label or "").strip().lower()
+    if not low:
+        return ""
+    for token, db in (
+        ("sqlite", "sqlite"),
+        ("mongo", "mongodb"),
+        ("dynamodb", "dynamodb"),
+        ("elasticsearch", "elasticsearch"),
+        ("opensearch", "elasticsearch"),
+        ("redis", "redis"),
+        ("kafka", "kafka"),
+        ("salesforce", "salesforce"),
+        ("hubspot", "hubspot"),
+        ("airtable", "airtable"),
+        ("notion", "notion"),
+    ):
+        if token in low:
+            return db
+    if low in {"s3", "gcs", "adls"}:
+        return low
+    if "redshift" in low:
+        return "redshift"
+    if "postgres" in low or "cockroach" in low or "greenplum" in low:
+        return "postgresql"
+    if "bigquery" in low or low.startswith("bq"):
+        return "bigquery"
+    if "spanner" in low:
+        return "spanner"
+    if "snowflake" in low:
+        return "snowflake"
+    if "mysql" in low or "mariadb" in low:
+        return "mysql"
+    if "sql server" in low or "mssql" in low or "azure sql" in low:
+        return "sqlserver"
+    if "oracle" in low:
+        return "oracle"
+    return ""
 
 
 def apply_write_quarantine_matrix(
@@ -3009,6 +4101,8 @@ def apply_write_quarantine_matrix(
     *,
     dialect_label: str = "destination",
     mappings: list[dict[str, Any]] | None = None,
+    dest_db: str = "",
+    source_row_numbers: list[int] | None = None,
 ) -> list[tuple]:
     """Shared fail-closed quarantine matrix for every typed write path.
 
@@ -3019,10 +4113,33 @@ def apply_write_quarantine_matrix(
 
     When ``mappings`` is provided, holdouts dual-stamp ``source_values`` for
     quarantine replay (Wave 34).
+
+    ``source_row_numbers`` aligns each mapped tuple with its 1-based source
+    row (object-store and SQL write-bundle materialize). The matrix still
+    runs the same 12-pass SSOT, one source row at a time, so holdout ``row``
+    stamps stay global across bundles.
     """
-    token = _active_quarantine_mappings.set(mappings)
+    if source_row_numbers is not None:
+        kept, _nums = apply_write_quarantine_matrix_keeping_numbers(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=source_row_numbers,
+        )
+        return kept
+
+    # A caller that did not name a Map must not erase the one the write named.
+    token = _active_quarantine_mappings.set(
+        mappings if mappings is not None else _active_quarantine_mappings.get()
+    )
     try:
         label = (dialect_label or "destination").strip() or "destination"
+        decimal_dest = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(label)
         mapped_rows = quarantine_currency_markers_into_numeric(
             mapped_rows, target_cols, target_types, rejected_details, policy
         )
@@ -3033,6 +4150,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} DECIMAL",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_years(
             mapped_rows, target_cols, target_types, rejected_details, policy
@@ -3041,7 +4159,12 @@ def apply_write_quarantine_matrix(
             mapped_rows, target_cols, target_types, rejected_details, policy
         )
         mapped_rows = quarantine_unfit_temporals(
-            mapped_rows, target_cols, target_types, rejected_details, policy
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_specialty_types(
             mapped_rows, target_cols, target_types, rejected_details, policy
@@ -3053,6 +4176,16 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} INTEGER",
+            dest_db=decimal_dest,
+        )
+        mapped_rows = quarantine_unfit_floats(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=f"{label} FLOAT",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_bitstrings(
             mapped_rows, target_cols, target_types, rejected_details, policy
@@ -3078,21 +4211,23 @@ def apply_write_quarantine_matrix(
                 else ","
             ),
         )
-        mapped_rows = quarantine_unfit_strings(
+        mapped_rows = _wc.quarantine_unfit_strings(
             mapped_rows,
             target_cols,
             target_types,
             rejected_details,
             policy,
             dialect_label=f"{label} VARCHAR",
+            dest_db=decimal_dest,
         )
-        mapped_rows = quarantine_unfit_arrays(
+        mapped_rows = _wc.quarantine_unfit_arrays(
             mapped_rows,
             target_cols,
             target_types,
             rejected_details,
             policy,
             dialect_label=label,
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_json(
             mapped_rows,
@@ -3107,156 +4242,86 @@ def apply_write_quarantine_matrix(
         _active_quarantine_mappings.reset(token)
 
 
-def _specialty_column_kind(type_str: str) -> str | None:
-    """Return specialty kind when destination DDL needs wire-shape quarantine.
-
-    String/VARCHAR carriers (Databricks/Iceberg) are skipped for geo/interval —
-    quarantine applies only when the destination expects specialty bind.
-    """
-    from services.type_system import normalize_logical_type, parse_vector_dimension
-
-    logical = normalize_logical_type(type_str)
-    if logical == "geography":
-        return "geography"
-    if logical == "interval":
-        return "interval"
-    if logical == "vector" and parse_vector_dimension(type_str) is not None:
-        return "vector"
-    upper = (type_str or "").upper()
-    if re.search(
-        r"\b(GEOGRAPHY|GEOMETRY|SDO_GEOMETRY|POINT|LINESTRING|POLYGON|"
-        r"MULTIPOINT|MULTILINESTRING|MULTIPOLYGON|GEOMETRYCOLLECTION)\b",
-        upper,
-    ):
-        return "geography"
-    if re.search(r"\bINTERVAL\b", upper):
-        return "interval"
-    return None
-
-
-def quarantine_unfit_specialty_types(
+def apply_write_quarantine_matrix_keeping_numbers(
     mapped_rows: list[tuple],
     target_cols: list[str],
     target_types: list[str],
     rejected_details: list[dict[str, Any]],
     policy: str,
-) -> list[tuple]:
-    """Hold out cells unfit for GEOGRAPHY / INTERVAL / VECTOR(n) destinations.
+    *,
+    dialect_label: str = "destination",
+    mappings: list[dict[str, Any]] | None = None,
+    dest_db: str = "",
+    source_row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
+    """Same matrix as :func:`apply_write_quarantine_matrix`; also return survivors.
 
-    Specialty types travel as identity payloads (WKT/GeoJSON/ISO-8601/float lists).
-    Fail-closed — never invent empty geometry, wrong interval family, or pad/truncate
-    embedding dimensions (pgvector/Snowflake VECTOR reject wrong width).
+    Binding / in-bundle dedupe / write-time SAVEPOINT quarantine must name the
+    source row that survived, not the index inside the leftover list. Callers
+    that already hold global 1-based numbers pass ``source_row_numbers``.
     """
-    if policy == "fail":
-        return mapped_rows
-    specialty_cols: list[tuple[int, str, str]] = []
-    for i, typ in enumerate(target_types):
-        kind = _specialty_column_kind(typ)
-        if kind:
-            specialty_cols.append((i, kind, typ))
-    if not specialty_cols:
-        return mapped_rows
-
-    from services.schema_inference import (
-        geography_wire_srid,
-        interval_wire_family,
-        is_geography_wire,
-        is_interval_wire,
+    if source_row_numbers is None:
+        kept = apply_write_quarantine_matrix(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=None,
+        )
+        return kept, list(range(1, len(kept) + 1))
+    if len(source_row_numbers) != len(mapped_rows):
+        raise ValueError(
+            "source_row_numbers length must match mapped_rows "
+            "(SQL / object-store bundle materialize)"
+        )
+    # A clean batch keeps every row, so the numbers still line up and the
+    # matrix can derive its per-column type facts once instead of once per row.
+    # The moment anything is quarantined the batch verdict is discarded and the
+    # rows are re-run one at a time, because only then does a detail's ``row``
+    # name the source row rather than an index into the surviving list.
+    mark = len(rejected_details)
+    batch = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=dialect_label,
+        mappings=mappings,
+        dest_db=dest_db,
+        source_row_numbers=None,
     )
-    from services.type_system import (
-        interval_family,
-        parse_geography_srid,
-        parse_vector_dimension,
-        parse_vector_length,
-    )
-    from services.value_serializer import cell_to_string
+    if len(batch) == len(mapped_rows) and len(rejected_details) == mark:
+        return batch, [int(n) for n in source_row_numbers]
+    del rejected_details[mark:]
 
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, kind, typ in specialty_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(cells[col_idx]):
-                continue
-            reason = ""
-            ok = True
-            if kind == "geography":
-                ok = is_geography_wire(cells[col_idx])
-                if ok:
-                    dest_srid = parse_geography_srid(typ)
-                    wire_srid = geography_wire_srid(cells[col_idx])
-                    if (
-                        dest_srid is not None
-                        and wire_srid is not None
-                        and dest_srid != wire_srid
-                    ):
-                        ok = False
-                        reason = (
-                            f"geography SRID mismatch wire={wire_srid} dest={dest_srid} "
-                            "— quarantined (refuse silent reproject)"
-                        )
-            elif kind == "interval":
-                ok = is_interval_wire(cells[col_idx])
-                if ok:
-                    dest_fam = interval_family(typ)
-                    wire_fam = interval_wire_family(cells[col_idx])
-                    if dest_fam and wire_fam and dest_fam != wire_fam:
-                        ok = False
-                        reason = (
-                            f"interval family mismatch wire={wire_fam} dest={dest_fam} "
-                            "— quarantined (YEAR-MONTH ↔ DAY-SECOND collapse)"
-                        )
-            elif kind == "vector":
-                dest_dim = parse_vector_dimension(typ)
-                wire_len = parse_vector_length(cells[col_idx])
-                if dest_dim is None:
-                    ok = True
-                elif wire_len is None:
-                    ok = False
-                    reason = (
-                        f"value is not a parseable VECTOR({dest_dim}) payload "
-                        "— quarantined (refuse invent embedding)"
-                    )
-                elif wire_len != dest_dim:
-                    ok = False
-                    reason = (
-                        f"vector length {wire_len} ≠ destination VECTOR({dest_dim}) "
-                        "— quarantined (refuse pad/truncate embedding)"
-                    )
-            if ok:
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": reason
-                    or (
-                    f"value is not a valid {kind} wire payload "
-                    "— quarantined (would fail destination bind or invent a cast)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=row,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
+    kept: list[tuple] = []
+    nums: list[int] = []
+    for row, src_row in zip(mapped_rows, source_row_numbers):
+        n0 = len(rejected_details)
+        one = apply_write_quarantine_matrix(
+            [row],
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=None,
+        )
+        src = int(src_row)
+        for detail in rejected_details[n0:]:
+            if detail.get("row") == 1:
+                detail["row"] = src
+        if one:
+            kept.extend(one)
+            nums.append(src)
+    return kept, nums
 
 
 def omit_generated_always_columns(
@@ -3293,6 +4358,15 @@ def row_has_missing_sentinel(row: tuple | list) -> bool:
     return any(is_missing_sentinel(v) for v in row)
 
 
+def _dense_write_needs_null_materialize(row: tuple | list) -> bool:
+    """True when a dense row still carries an extract token (not already None)."""
+
+    return any(
+        is_missing_sentinel(v) or (is_reader_null_cell(v) and v is not None)
+        for v in row
+    )
+
+
 def materialize_missing_as_null_for_dense_write(
     mapped_rows: list[tuple],
 ) -> list[tuple]:
@@ -3300,19 +4374,71 @@ def materialize_missing_as_null_for_dense_write(
 
     Sparse CDC upsert must keep ``DF_MISSING`` and omit columns from SET.
     Full-refresh / create-new / dense bulk loads union a schemaless schema —
-    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` string
-    (Snowflake BOOL / Postgres BOOLEAN reject that string).
+    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` / extract
+    ``SQL_NULL_SENTINEL`` string (Snowflake BOOL / Postgres BOOLEAN reject
+    those tokens). Empty string stays present.
     """
-    from services.value_serializer import is_missing_sentinel
 
-    if not mapped_rows or not any(row_has_missing_sentinel(r) for r in mapped_rows):
+    if not mapped_rows or not any(
+        _dense_write_needs_null_materialize(r) for r in mapped_rows
+    ):
         return mapped_rows
     out: list[tuple] = []
     for row in mapped_rows:
-        if not row_has_missing_sentinel(row):
+        if not _dense_write_needs_null_materialize(row):
             out.append(row)
             continue
-        out.append(tuple(None if is_missing_sentinel(v) else v for v in row))
+        out.append(
+            tuple(
+                None
+                if is_missing_sentinel(v) or is_reader_null_cell(v)
+                else v
+                for v in row
+            )
+        )
+    return out
+
+
+def resolve_conflict_targets(
+    conflict_columns: list[str] | None,
+    target_cols: list[str],
+    *,
+    strict: bool = True,
+) -> list[str]:
+    """Map conflict/PK names onto ``target_cols`` with case-insensitive match.
+
+    Warehouse writers (BQ/Snowflake) often see operator PKs in a different case
+    than Map targets — a case-sensitive miss must not silently disable MERGE and
+    drop sparse CDC rows.
+
+    When ``strict`` (default), every non-empty conflict name must resolve. A
+    partial composite PK (one good name + one typo) must not degrade MERGE to a
+    shorter key and touch the wrong rows.
+    """
+    if not conflict_columns or not target_cols:
+        return []
+    lower_map = {str(c).lower(): c for c in target_cols}
+    out: list[str] = []
+    seen: set[str] = set()
+    unresolved: list[str] = []
+    for raw in conflict_columns:
+        key = str(raw or "").strip()
+        if not key:
+            continue
+        resolved = lower_map.get(key.lower())
+        if resolved is None:
+            unresolved.append(key)
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    if strict and unresolved:
+        raise ValueError(
+            "conflict_columns do not fully match mapped targets — unresolved "
+            f"{unresolved!r} vs targets {list(target_cols)!r}; refuse partial "
+            "composite PK degrade"
+        )
     return out
 
 
@@ -3320,11 +4446,66 @@ def split_dense_sparse_rows(
     mapped_rows: list[tuple],
 ) -> tuple[list[tuple], list[tuple]]:
     """Partition mapped rows for bulk vs per-row sparse CDC upsert."""
+    dense, sparse, _dense_rows, _sparse_rows = split_dense_sparse_rows_with_numbers(
+        mapped_rows
+    )
+    return dense, sparse
+
+
+def split_dense_sparse_rows_with_numbers(
+    mapped_rows: list[tuple],
+    *,
+    row_offset: int = 0,
+    source_row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[tuple], list[int], list[int]]:
+    """Partition rows *and* keep where each came from.
+
+    Returns ``(dense, sparse, dense_row_numbers, sparse_row_numbers)`` where the
+    numbers are 1-based positions in the source batch, matching every other
+    quarantine record.
+
+    ``source_row_numbers`` wins when the caller already holds global numbers
+    (SQL write bundles). Otherwise ``row_offset + index + 1`` is the position
+    in the current list.
+
+    Splitting without them meant a rejected sparse row was reported by its index
+    inside the sparse list, so an operator replaying the dead-letter queue was
+    pointed at a different row than the one that failed — the same misattribution
+    that made Airtable name records which never left.
+    """
+    if source_row_numbers is not None and len(source_row_numbers) != len(mapped_rows):
+        raise ValueError(
+            "source_row_numbers length must match mapped_rows (dense/sparse split)"
+        )
     dense: list[tuple] = []
     sparse: list[tuple] = []
-    for row in mapped_rows:
-        (sparse if row_has_missing_sentinel(row) else dense).append(row)
-    return dense, sparse
+    dense_rows: list[int] = []
+    sparse_rows: list[int] = []
+    for index, row in enumerate(mapped_rows):
+        number = (
+            int(source_row_numbers[index])
+            if source_row_numbers is not None
+            else row_offset + index + 1
+        )
+        if row_has_missing_sentinel(row):
+            sparse.append(row)
+            sparse_rows.append(number)
+        else:
+            dense.append(row)
+            dense_rows.append(number)
+    return dense, sparse, dense_rows, sparse_rows
+
+
+def resolve_row_number(row_numbers: list[int] | None, index: int) -> int:
+    """Source row number for a list position, or the position itself.
+
+    Callers that hold a whole batch can let the position stand in. Callers
+    holding a *subset* — sparse rows, a post-bind survivor list — must pass the
+    numbers they kept, or the record will name the wrong row.
+    """
+    if row_numbers is not None and 0 <= index < len(row_numbers):
+        return int(row_numbers[index])
+    return index + 1
 
 
 def combined_mapped_rows_for_checksum(
@@ -3337,19 +4518,30 @@ def combined_mapped_rows_for_checksum(
     return list(dense_rows) + list(sparse_rows)
 
 
+def present_field_bindings(row: dict[str, Any]) -> dict[str, Any]:
+    """Omit Missing; bind reader-null as None (wipe dest, never the extract token).
+
+    Iceberg leftover merge, Redis JSON, Mongo ``$set``, sparse CDC SET, and
+    BigQuery ``insert_rows_json`` share this polarity. Empty string / ``0`` /
+    ``False`` stay present. ``DF_MISSING`` stays omitted so sparse CDC does
+    not NULL-wipe destination columns.
+    """
+
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if is_missing_sentinel(val):
+            continue
+        out[key] = None if is_reader_null_cell(val) else unescape_wire_text(val)
+    return out
+
+
 def sparse_present_bindings(
     row: tuple | list,
     target_cols: list[str],
 ) -> dict[str, Any]:
     """Column→value for cells that are present (not DF_MISSING)."""
-    from services.value_serializer import is_missing_sentinel
 
-    out: dict[str, Any] = {}
-    for col, val in zip(target_cols, row):
-        if is_missing_sentinel(val):
-            continue
-        out[col] = val
-    return out
+    return present_field_bindings(dict(zip(target_cols, row)))
 
 
 def materialize_sparse_row_for_checksum(
@@ -3381,23 +4573,56 @@ def run_sparse_cdc_upsert(
     fetch_existing_row: Callable[[list[Any]], tuple | list | None],
     update_non_pk: Callable[[dict[str, Any], list[Any]], int],
     insert_present: Callable[[dict[str, Any]], None],
+    hydrate_versioned_insert: bool = False,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Shared sparse CDC upsert: omit DF_MISSING, LSN skip, hydrate checksum rows.
 
     ``fetch_existing_row(pk_vals)`` must return a full row in ``target_cols`` order
     (or ``None``). ``update_non_pk(non_pk, pk_vals)`` returns affected rowcount.
+
+    When ``hydrate_versioned_insert`` is True (ClickHouse ReplacingMergeTree-class),
+    INSERT of a sparse image must be a full hydrated row — partial INSERT would
+    become the new version and NULL-wipe omitted attributes after merge/FINAL.
+
+    Empty/missing conflict keys quarantine (via ``rejected_details``) instead of
+    aborting the whole CDC chunk — parity with Snowflake/BigQuery sparse paths.
     """
     from services.cdc_effectively_once import should_apply_pk_row
 
-    conflict = [c for c in conflict_columns if c in target_cols]
+    # Strict casefold resolve — never shrink a composite PK to whatever happens
+    # to match case-sensitively (wrong-row MERGE / INSERT fallback).
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse CDC upsert requires conflict_columns")
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
-    for row in sparse_rows:
+    for row_idx, row in enumerate(sparse_rows):
         present = sparse_present_bindings(row, target_cols)
-        assert_sparse_upsert_has_pk(present, conflict)
+        try:
+            assert_sparse_upsert_has_pk(present, conflict)
+        except ValueError as exc:
+            if rejected_details is None:
+                raise
+            sample = ""
+            try:
+                sample = cell_to_string(
+                    next(iter(present.values()), "")
+                )[:120]
+            except Exception:
+                sample = ""
+            rejected_details.append(
+                {
+                    "row": row_idx,
+                    "column": "*",
+                    "value": sample,
+                    "reason": str(exc)[:300],
+                    "policy": policy,
+                }
+            )
+            continue
         non_pk = {k: v for k, v in present.items() if k not in conflict}
         pk_vals = [present[c] for c in conflict]
         existing_tuple = fetch_existing_row(pk_vals)
@@ -3417,7 +4642,7 @@ def run_sparse_cdc_upsert(
             ).applied:
                 skipped += 1
                 continue
-        if non_pk:
+        if non_pk and not hydrate_versioned_insert:
             affected = update_non_pk(non_pk, pk_vals)
             if affected and affected > 0:
                 written += 1
@@ -3426,13 +4651,52 @@ def run_sparse_cdc_upsert(
                 )
                 continue
         try:
-            insert_present(present)
+            if hydrate_versioned_insert:
+                if existing is None:
+                    # Unknown PK + partial CDC image — refuse inventing a
+                    # versioned row that would NULL-default omitted attrs.
+                    missing = [c for c in target_cols if c not in present]
+                    if missing:
+                        msg = (
+                            "ClickHouse/versioned sparse CDC insert of unknown "
+                            f"primary key refused — omitted columns {missing[:8]}; "
+                            "require a full row image or an existing destination row"
+                        )
+                        if rejected_details is None:
+                            raise ValueError(msg)
+                        sample = ""
+                        try:
+                            sample = cell_to_string(
+                                next(iter(present.values()), "")
+                            )[:120]
+                        except Exception:
+                            sample = ""
+                        rejected_details.append(
+                            {
+                                "row": row_idx,
+                                "column": "*",
+                                "value": sample,
+                                "reason": msg[:300],
+                                "policy": policy,
+                            }
+                        )
+                        continue
+                    insert_present(dict(present))
+                else:
+                    hydrated = materialize_sparse_row_for_checksum(
+                        present, existing, target_cols
+                    )
+                    insert_present(
+                        present_field_bindings(dict(zip(target_cols, hydrated)))
+                    )
+            else:
+                insert_present(present)
             written += 1
             checksum_rows.append(
                 materialize_sparse_row_for_checksum(present, existing, target_cols)
             )
         except Exception:
-            if not non_pk:
+            if hydrate_versioned_insert or not non_pk:
                 raise
             update_non_pk(non_pk, pk_vals)
             written += 1
@@ -3442,11 +4706,202 @@ def run_sparse_cdc_upsert(
     return written, skipped, checksum_rows
 
 
+def overlay_physical_bind_types(
+    target_cols: list[str],
+    target_types: list[str],
+    physical: dict[str, str],
+) -> list[str]:
+    """Prefer live DDL when Map stamped a softer carrier over typed / specialty sinks.
+
+    Empty ``\"\"`` must refuse at bind against physical DATE/INT/BOOL/NUMBER —
+    never survive as VARCHAR and invent NULL on upsert wipe (MySQL/Snowflake
+    parity). Temporal physical types always win. Specialty physical (HSTORE,
+    OID, POINT, INET, …) always wins — Map JSON/INTEGER/GEOGRAPHY must not
+    invent wrong bind polarity over live specialty. Typed physical (INT/BOOL/
+    DECIMAL/JSON/…) always wins over Map stamps on existing tables.
+    Bounded physical ``VARCHAR(n)`` / ``CHAR(n)`` / ``NVARCHAR(n)`` always wins
+    over Map bare/unbounded/wider string stamps so overflow quarantine sees
+    live capacity (Airbyte catalog-width class).
+    """
+    from connectors.sql_temporal import is_temporal_ddl, sql_base_type
+    from services.ddl_compatibility import parse_varchar_width
+    from services.type_system import (
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        is_unlimited_string_carrier,
+        normalize_logical_type,
+        parse_enum_or_set_ordered_members,
+        parse_string_carrier_width,
+        specialty_carrier_base,
+    )
+
+    def _bounded_string_width(carrier: str) -> int | None:
+        return parse_string_carrier_width(carrier) or parse_varchar_width(carrier)
+
+    def _map_stamp_is_string_class(stamp: str) -> bool:
+        text = (stamp or "").strip()
+        if not text:
+            return True
+        if _bounded_string_width(text) is not None:
+            return True
+        if is_unlimited_string_carrier(text):
+            return True
+        base = sql_base_type(text)
+        if base in {
+            "VARCHAR",
+            "CHAR",
+            "NVARCHAR",
+            "NCHAR",
+            "CHARACTER",
+            "STRING",
+            "TEXT",
+            "CLOB",
+            "NCLOB",
+        }:
+            return True
+        return normalize_logical_type(text) in {LOGICAL_STRING, LOGICAL_TEXT}
+
+    if not physical:
+        return list(target_types)
+    out = list(target_types)
+    typed_bases = {
+        "NUMBER",
+        "DECIMAL",
+        "NUMERIC",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "SMALLINT",
+        "TINYINT",
+        "MEDIUMINT",
+        "FLOAT",
+        "FLOAT4",
+        "FLOAT8",
+        "FLOAT16",
+        "FLOAT32",
+        "FLOAT64",
+        "HALF",
+        "HALFFLOAT",
+        "DOUBLE",
+        "REAL",
+        "BOOLEAN",
+        "BOOL",
+        "BIT",
+        "JSON",
+        "JSONB",
+        "UUID",
+        "UNIQUEIDENTIFIER",
+        "MONEY",
+        "SMALLMONEY",
+        "CURRENCY",
+        "BIGNUMERIC",
+    }
+    temporal_extra = {
+        "DATE",
+        "TIME",
+        "DATETIME",
+        "DATETIME64",
+        "DATETIME2",
+        "SMALLDATETIME",
+        "TIMESTAMP",
+        "TIMESTAMP_NTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
+        "TIMESTAMPTZ",
+        "TIMETZ",
+        "DATETIMEOFFSET",
+        "YEAR",
+    }
+    # Semi-structured warehouse carriers — Map VARCHAR must not stick.
+    typed_bases |= {
+        "SUPER",
+        "VARIANT",
+        "OBJECT",
+        "ARRAY",
+        "MAP",
+        "STRUCT",
+        "IPV4",
+        "IPV6",
+        "ENUM8",
+        "ENUM16",
+    }
+    for i, col in enumerate(target_cols):
+        phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
+        if not phys:
+            continue
+        phys_base = sql_base_type(phys)
+        if is_temporal_ddl(phys_base) or phys_base in temporal_extra:
+            out[i] = phys
+        elif specialty_carrier_base(phys):
+            # Live HSTORE/OID/POINT/INET/… beat Map JSON/INTEGER/GEOGRAPHY stamps.
+            out[i] = phys
+        elif parse_enum_or_set_ordered_members(phys) is not None:
+            # MySQL/PG closed ENUM('a','b') / SET('x','y') — Map VARCHAR must not
+            # soft-bind open text over live domain (empty→null / ordinal invent).
+            out[i] = phys
+        elif _bounded_string_width(phys) is not None and _map_stamp_is_string_class(
+            out[i]
+        ):
+            # Live VARCHAR(n)/CHAR(n)/NVARCHAR(n)/STRING(n) beat Map bare VARCHAR
+            # / TEXT / wider stamps — overflow quarantine must see physical capacity.
+            out[i] = phys
+        elif (
+            phys_base in typed_bases
+            or phys_base.endswith("[]")
+            or phys_base.startswith("ARRAY")
+        ):
+            # Live typed physical beats Map DECIMAL≠INT / BOOL≠INT invent,
+            # and Map VARCHAR → DATE/INT/BOOL / ARRAY (empty→NULL refuse path).
+            # ``INTEGER[]`` survives sql_base_type as ``INTEGER[]`` (not ARRAY).
+            out[i] = phys
+    return out
+
+
+def _is_nullish_conflict_key(val: Any, *, empty_is_null: bool = False) -> bool:
+    """True when a conflict-key cell cannot identify a dense upsert row.
+
+    Only SQL NULL / Missing can't: ``NULL = NULL`` is UNKNOWN. ``''`` and
+    whitespace are values — a file's quoted ``""`` and every database's ``''``
+    decode to ``''`` upstream, an unquoted empty file cell already arrives as
+    NULL — and ``'a'`` / ``'a '`` stay distinct keys (D53, D70).
+    ``empty_is_null`` is for a destination that stores ``''`` as NULL (Oracle
+    VARCHAR2): there the stored key would be NULL.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    if is_reader_null_cell(val):
+        return True
+    return empty_is_null and isinstance(val, str) and val == ""
+
+
+def _conflict_key_identity(val: Any) -> Any:
+    """Canonical identity for dest LSN / conflict-key lookup.
+
+    Reader-null and blank collapse to ``None`` so extract ``SQL_NULL_SENTINEL``
+    matches a destination SQL NULL. 0 / false / present text stay themselves.
+    """
+    return None if _is_nullish_conflict_key(val) else unescape_wire_text(val)
+
+
+def conflict_key_wire(val: Any) -> str:
+    """Compose-text for a conflict / SCD2 / mirror identity cell.
+
+    Extract ``SQL_NULL_SENTINEL`` and dest ``None`` share ``\"\"`` so a NULL
+    PK cannot invent a ``__DF_SQL_NULL__`` key. 0 / false stay ``0`` / ``false``.
+    """
+    return cell_to_string(_conflict_key_identity(val))
+
+
 def assert_sparse_upsert_has_pk(
     present: dict[str, Any],
     conflict_columns: list[str],
 ) -> None:
-    """Refuse sparse upsert that omits the conflict key (would invent a row)."""
+    """Refuse sparse upsert that omits or nulls the conflict key (would invent rows).
+
+    SQL ``NULL = NULL`` is UNKNOWN, so equality-based sparse UPDATE/INSERT paths
+    would miss the destination row and INSERT unbounded duplicates. Kafka already
+    refuses null keys; all sparse CDC dialects share this assert.
+    """
     missing = [c for c in conflict_columns if c not in present]
     if missing:
         raise ValueError(
@@ -3454,3 +4909,211 @@ def assert_sparse_upsert_has_pk(
             f"{missing}; refuse silent invent (require binlog_row_image=FULL / "
             "REPLICA IDENTITY FULL)"
         )
+    nullish = [c for c in conflict_columns if _is_nullish_conflict_key(present.get(c))]
+    if nullish:
+        raise ValueError(
+            "sparse CDC upsert has null/empty primary-key column(s) "
+            f"{nullish}; refuse NULL=NULL invent duplicates"
+        )
+
+
+def assert_dense_upsert_keys_present(
+    rows: list[tuple] | list[list] | list[dict[str, Any]],
+    conflict_columns: list[str],
+    target_cols: list[str] | None = None,
+    *,
+    empty_is_null: bool = False,
+) -> None:
+    """Refuse null/empty conflict keys before dense MERGE / NULL-safe ON.
+
+    ``null_safe_merge_on`` treats NULL≡NULL as a match so one staged null-PK
+    row can mass-update every destination row with a null key. Redshift already
+    refuses; BQ/Snowflake/generic MERGE must share this gate.
+    """
+    if not rows or not conflict_columns:
+        return
+    cols = list(conflict_columns)
+    idxs: list[int] | None = None
+    if target_cols is not None:
+        idxs = [target_cols.index(c) for c in cols]
+    for row in rows:
+        if isinstance(row, dict):
+            for c in cols:
+                if _is_nullish_conflict_key(row.get(c), empty_is_null=empty_is_null):
+                    raise ValueError(
+                        f"dense upsert refused null/empty conflict key {c!r} — "
+                        "NULL-safe MERGE would mass-touch destination rows"
+                    )
+            continue
+        if idxs is None:
+            raise ValueError(
+                "dense upsert key check requires target_cols for tuple rows"
+            )
+        for c, idx in zip(cols, idxs):
+            val = row[idx] if idx < len(row) else None
+            if _is_nullish_conflict_key(val, empty_is_null=empty_is_null):
+                raise ValueError(
+                    f"dense upsert refused null/empty conflict key {c!r} — "
+                    "NULL-safe MERGE would mass-touch destination rows"
+                )
+
+def partition_dense_upsert_rows(
+    rows: list[Any],
+    conflict_columns: list[str],
+    *,
+    target_cols: list[str] | None = None,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+    row_offset: int = 0,
+    source_row_numbers: list[int] | None = None,
+    empty_is_null: bool = False,
+) -> list[Any]:
+    """Hold out null conflict-key rows; return rows safe for MERGE.
+
+    Preserves arrival order. When ``rejected_details`` is None, re-raises on the
+    first bad row (fail-closed callers without a quarantine sink).
+    ``source_row_numbers`` keeps holdout ``row`` stamps global across write
+    bundles; otherwise ``row_offset + i + 1`` is the position in this list.
+    """
+    if not rows or not conflict_columns:
+        return list(rows)
+    if source_row_numbers is not None and len(source_row_numbers) != len(rows):
+        raise ValueError(
+            "source_row_numbers length must match rows (dense upsert partition)"
+        )
+    kept: list[Any] = []
+    for i, row in enumerate(rows):
+        try:
+            assert_dense_upsert_keys_present(
+                [row],
+                conflict_columns,
+                target_cols=target_cols,
+                empty_is_null=empty_is_null,
+            )
+            kept.append(row)
+        except ValueError as exc:
+            if rejected_details is None:
+                raise
+            rejected_details.append(
+                {
+                    "row": (
+                        int(source_row_numbers[i])
+                        if source_row_numbers is not None
+                        else row_offset + i + 1
+                    ),
+                    "column": "*",
+                    "value": "",
+                    "reason": str(exc)[:300],
+                    "policy": policy,
+                }
+            )
+    return kept
+
+
+def require_physical_types_for_existing_table(
+    *,
+    table_existed: bool,
+    physical: dict[str, str] | None,
+    dialect_label: str = "destination",
+    target_cols: list[str] | None = None,
+) -> str | None:
+    """Error when an existing table yields empty or incomplete physical DDL.
+
+    Map VARCHAR bind without live types invents NULL on typed sinks — refuse.
+    Partial introspect (some cols missing) leaves Map stamps on those cols —
+    refuse so overlay cannot soft-green empties into live DATE/INT.
+    New / create-new tables may pass empty physical (Map stamps are physical).
+    """
+    if not table_existed:
+        return None
+    label = (dialect_label or "destination").strip() or "destination"
+    if not physical:
+        label_l = label.lower()
+        if label_l in {
+            "elasticsearch",
+            "opensearch",
+            "amazon_elasticsearch",
+            "elastic_cloud",
+        }:
+            hint = (
+                "Re-check index mapping privileges (get_mapping) and that mapped "
+                "fields exist on the index, then retry."
+            )
+        elif label_l in {"mongodb", "dynamodb", "couchbase", "redis"}:
+            hint = (
+                "Re-check collection/table describe privileges and that mapped "
+                "fields are present, then retry."
+            )
+        else:
+            hint = "Re-check grants / information_schema visibility and retry."
+        return (
+            f"{label} physical DDL introspection returned empty for an existing "
+            "table — refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+            f"{hint}"
+        )
+    if target_cols:
+        missing = [
+            c
+            for c in target_cols
+            if not (
+                physical.get(c)
+                or physical.get(str(c).lower())
+                or physical.get(str(c).upper())
+            )
+        ]
+        if missing:
+            sample = ", ".join(missing[:12])
+            more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+            return (
+                f"{label} physical DDL missing for mapped column(s) "
+                f"{sample}{more} — refuse silent Map stamp bind on an existing "
+                "table (empty→NULL invent risk). Re-introspect or remap."
+            )
+    return None
+
+
+# SQL Server IDENTITY_INSERT lives in identity_insert (Phase F8 size freeze).
+# sqlserver_identity re-exports the same names for the studio import path.
+from connectors.identity_insert import (  # noqa: E402,F401
+    IdentityInsertSession,
+    begin_identity_insert,
+    sqlserver_identity_columns,
+)
+
+# --------------------------------------------------------------------------- #
+# Exotic-carrier quarantine passes live in their own module (Phase F8 size
+# freeze) and are re-exported here so every existing import keeps working.
+# --------------------------------------------------------------------------- #
+from connectors.write_quarantine_exotic import (  # noqa: E402
+    _specialty_column_kind,  # noqa: F401 — re-exported for existing importers
+    quarantine_unfit_binaries,
+    quarantine_unfit_bitstrings,
+    quarantine_unfit_enum_set,
+    quarantine_unfit_specialty_types,
+)
+
+_QUARANTINE_FIT_EXPORTS = frozenset(
+    {"quarantine_unfit_arrays", "quarantine_unfit_strings"}
+)
+
+
+def __getattr__(name: str):
+    if name in _QUARANTINE_FIT_EXPORTS:
+        from connectors import writer_quarantine_fit
+
+        value = getattr(writer_quarantine_fit, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+from connectors.writer_quarantine_unfit import (  # noqa: E402,F401 - re-export
+    quarantine_unfit_temporals,
+    quarantine_unfit_floats,
+    quarantine_unfit_integers,
+    quarantine_unfit_decimals,
+    quarantine_unfit_years,
+    quarantine_unfit_booleans,
+    quarantine_currency_markers_into_numeric,
+    integer_fit_failure,
+)

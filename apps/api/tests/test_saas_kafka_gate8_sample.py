@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -62,7 +62,10 @@ def test_run_reconciliation_sample_verified_when_no_full_verifier():
         )
     assert report["passed"] is True, report
     assert report["phase"] == "post_write_sample_verified"
-    assert "sample-verified" in report["message"].lower()
+    # The sample phase must say what it is: screening, never population proof.
+    message = report["message"].lower()
+    assert "sample" in message
+    assert "not population proof" in message
 
 
 def test_verify_target_routes_hubspot_and_kafka():

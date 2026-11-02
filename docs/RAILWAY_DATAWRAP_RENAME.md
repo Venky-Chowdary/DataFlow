@@ -63,7 +63,7 @@ These are **not** renamed in this cutover — changing them mid-flight breaks li
 
 ## Domains / emails (optional DNS)
 
-Docs and UI now say `datawrap.app` / `sales@datawrap.app`. Point DNS when you own the domain; Railway service hostnames can stay as-is.
+Docs and UI now say `www.datawrap.io` / `sales@datawrap.io`. Point DNS when you own the domain; Railway service hostnames can stay as-is.
 
 ## Automatic pickup
 

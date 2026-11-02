@@ -42,9 +42,13 @@ def test_all_source_to_postgresql(source: EndpointConfig):
     if not _is_reachable("localhost", 5432):
         pytest.skip("PostgreSQL emulator not reachable on localhost:5432")
 
-    # pgvector and qdrant are destination-only vector stores in this release.
-    if source.format in ("pgvector", "qdrant"):
+    # qdrant is a destination-only vector store in this route matrix.
+    if source.format == "qdrant":
         pytest.skip("destination-only vector store cannot act as a transfer source")
+    if source.format == "pgvector":
+        from tests.host_facts import require_pgvector
+
+        require_pgvector()
 
     if source.format == "snowflake":
         pytest.importorskip("fakesnow")
@@ -61,6 +65,14 @@ def test_all_source_to_postgresql(source: EndpointConfig):
     columns = ["id", "amount"]
     schema = {"id": "INTEGER", "amount": "DECIMAL"}
     mappings = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]
+    if source.format == "pgvector":
+        records = [
+            {"id": "1", "amount": "1000.00", "embedding": "[1,2,3]"},
+            {"id": "2", "amount": "2000.50", "embedding": "[4,5,6]"},
+        ]
+        columns.append("embedding")
+        schema["embedding"] = "VECTOR(3)"
+        mappings.append({"source": "embedding", "target": "embedding"})
 
     destination = EndpointConfig(
         kind="database",
@@ -73,6 +85,23 @@ def test_all_source_to_postgresql(source: EndpointConfig):
         schema="public",
         table=dest_table,
     )
+    if source.format == "pgvector":
+        import psycopg2
+
+        conn = psycopg2.connect(
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            user="dataflow",
+            password="dataflow",
+        )
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE public.{dest_table} "
+                "(id INTEGER, amount NUMERIC(38,10), embedding TEXT)"
+            )
+        conn.close()
 
     request = TransferRequest(
         source=source,
@@ -95,3 +124,42 @@ def test_all_source_to_postgresql(source: EndpointConfig):
         f"{source.format}: expected 2 transferred, got {result.records_transferred}"
     )
     assert result.reconciliation.get("passed") is True, f"{source.format}: {result.reconciliation}"
+    if source.format == "pgvector":
+        import psycopg2
+        from psycopg2 import sql
+
+        source_conn = psycopg2.connect(
+            host=source.host,
+            port=source.port,
+            database=source.database or "dataflow",
+            user=source.username,
+            password=source.password,
+        )
+        try:
+            with source_conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT embedding FROM {} ORDER BY id").format(
+                        sql.Identifier(source.schema or "public", source.table)
+                    )
+                )
+                source_embeddings = [
+                    str(row[0]).replace(" ", "") for row in cur.fetchall()
+                ]
+        finally:
+            source_conn.close()
+
+        conn = psycopg2.connect(
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            user="dataflow",
+            password="dataflow",
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT embedding FROM public.{dest_table} ORDER BY id")
+                assert [
+                    str(row[0]).replace(" ", "") for row in cur.fetchall()
+                ] == source_embeddings
+        finally:
+            conn.close()

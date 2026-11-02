@@ -1,4 +1,7 @@
 import type { TransferJob } from "./types";
+import { destProvenCount } from "./conservationLedger";
+import type { JobHistory } from "./jobHistory";
+import { jobFilterCounts } from "./jobHistory";
 
 export interface DayThroughput {
   label: string;
@@ -29,7 +32,10 @@ export function buildThroughputSeries(jobs: TransferJob[], days = 7): DayThrough
       return t >= d.getTime() && t < next.getTime();
     });
     const completed = dayJobs.filter((j) => j.status === "completed" || j.status === "completed_with_quarantine");
-    const rows = completed.reduce((s, j) => s + (j.records_processed || 0), 0);
+    const rows = completed.reduce((s, j) => {
+      const dest = destProvenCount(j);
+      return dest == null ? s : s + dest;
+    }, 0);
 
     buckets.push({
       label: d.toLocaleDateString(undefined, { weekday: "short" }),
@@ -46,14 +52,77 @@ export function buildStatusDistribution(jobs: TransferJob[]): JobStatusSlice[] {
   const failed = jobs.filter((j) => j.status === "failed").length;
   const running = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const other = Math.max(0, jobs.length - completed - quarantine - failed - running);
+  return statusSlices(completed, quarantine, running, failed, other);
+}
 
+/**
+ * Mix over the whole scoped history — not the most-recent page of rows.
+ * Counting the page made Overview read "50 jobs" for a 90-job workspace.
+ */
+export function buildStatusDistributionFromHistory(history: JobHistory): JobStatusSlice[] {
+  const sc = history.statusCounts || {};
+  const completed = Number(sc.completed || 0);
+  const quarantine = Number(sc.completed_with_quarantine || 0);
+  const failed = Number(sc.failed || 0);
+  const running = Number(sc.running || 0) + Number(sc.pending || 0);
+  const named = completed + quarantine + failed + running;
+  const other = Math.max(0, history.total - named);
+  return statusSlices(completed, quarantine, running, failed, other);
+}
+
+function statusSlices(
+  completed: number,
+  quarantine: number,
+  running: number,
+  failed: number,
+  other: number,
+): JobStatusSlice[] {
   return [
-    { key: "completed", label: "Completed", count: completed, color: "#10b981" },
-    { key: "quarantine", label: "Completed with quarantine", count: quarantine, color: "#d97706" },
-    { key: "running", label: "Running", count: running, color: "#0ea5e9" },
-    { key: "failed", label: "Failed", count: failed, color: "#ef4444" },
-    { key: "other", label: "Other", count: other, color: "#94a3b8" },
+    { key: "completed", label: "Completed", count: completed, color: "var(--df-logo-ink)" },
+    { key: "quarantine", label: "Completed with quarantine", count: quarantine, color: "var(--df-logo-strap)" },
+    { key: "running", label: "Running", count: running, color: "var(--df-logo-arrow)" },
+    { key: "failed", label: "Failed", count: failed, color: "var(--df-danger)" },
+    { key: "other", label: "Other", count: other, color: "var(--df-text-tertiary)" },
   ].filter((s) => s.count > 0);
+}
+
+/** Operator-visible Overview totals. Same owner as Jobs filter chips. */
+export function buildOverviewJobStats(history: JobHistory): {
+  total: number;
+  completed: number;
+  quarantine: number;
+  failed: number;
+  running: number;
+  successRate: number | null;
+  windowLoaded: number;
+  isWindow: boolean;
+} {
+  const counts = jobFilterCounts(history);
+  return {
+    total: counts.all,
+    completed: counts.completed,
+    quarantine: counts.quarantine,
+    failed: counts.failed,
+    running: counts.running,
+    successRate: counts.all ? Math.round((counts.completed / counts.all) * 100) : null,
+    windowLoaded: history.jobs.length,
+    isWindow: counts.all > history.jobs.length,
+  };
+}
+
+/**
+ * Recent-migrations empty vs loaded-window vs true empty.
+ * Counting the page as "0 jobs" while history.total is 84 was Overview P1-3.
+ */
+export function overviewRecentMigrationsState(opts: {
+  listsLoading: boolean;
+  total: number;
+  loaded: number;
+}): "loading" | "empty" | "window-empty" | "ready" {
+  if (opts.listsLoading && opts.total === 0 && opts.loaded === 0) return "loading";
+  if (opts.total <= 0) return "empty";
+  if (opts.loaded <= 0) return "window-empty";
+  return "ready";
 }
 
 export function sparklineFromThroughput(series: DayThroughput[]): number[] {

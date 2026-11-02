@@ -3,10 +3,32 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from connectors.base import ReadBatch
-from connectors.sqlite_common import sqlite_file_path
+from connectors.sql_snapshot_scan import (
+    close_table_scan,
+    publish_scan_order,
+    scan_filter_value,
+)
+from connectors.sqlite_common import require_sqlite_source_file, sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
+from services.value_serializer import cell_to_string
+
+
+def _cell(value: Any) -> str:
+    """One SQLite cell. Same wire as PostgreSQL / Iceberg / procedure extract.
+
+    Native INTEGER / REAL / BLOB / NULL used to leave the reader as Python
+    types. ``str(1)`` later invented a second spelling from ``cell_to_string``,
+    BLOB stayed raw bytes, and NULL stayed ``None`` instead of the SQL NULL
+    sentinel.
+    """
+    return cell_to_string(value, preserve_sql_null=True)
+
+
+def _row(row: Any) -> tuple[str, ...]:
+    return tuple(_cell(row[i]) for i in range(len(row)))
 
 
 def read_table_batch(
@@ -23,20 +45,27 @@ def read_table_batch(
     limit: int = 100_000,
     offset: int = 0,
     known_total_rows: int | None = None,
+    conn: Any | None = None,
 ) -> ReadBatch:
     """Read a batch of rows from a SQLite table."""
     del port, username, password, schema, ssl
+    from services.source_snapshot import get_source_snapshot_conn
+
     path = sqlite_file_path(database, connection_string, host)
     if not path:
         raise ValueError("SQLite path is required (database or connection_string).")
     if not table:
         raise ValueError("SQLite source table name required.")
+    require_sqlite_source_file(path)
 
     table_quoted = quote_sql_identifier(table)
-    conn = sqlite3.connect(path, timeout=8)
-    conn.row_factory = sqlite3.Row
+    shared = conn if conn is not None else get_source_snapshot_conn()
+    close_conn = shared is None
+    if shared is None:
+        shared = sqlite3.connect(path, timeout=8)
+    shared.row_factory = sqlite3.Row
     try:
-        cur = conn.cursor()
+        cur = shared.cursor()
         if known_total_rows is not None:
             total = known_total_rows
         else:
@@ -57,8 +86,156 @@ def read_table_batch(
             headers = [row[1] for row in cur.fetchall()]
         return ReadBatch(
             headers=headers,
-            rows=[tuple(row) for row in rows],
+            rows=[_row(row) for row in rows],
             total_rows=total,
         )
     finally:
-        conn.close()
+        if close_conn:
+            shared.close()
+
+
+def _primary_key_columns(cur: Any, table_quoted: str) -> list[str]:
+    """Declared PRIMARY KEY columns in key order (``PRAGMA table_info`` pk>0)."""
+    cur.execute(f"PRAGMA table_info({table_quoted})")
+    keyed = [(int(r[5]), str(r[1])) for r in cur.fetchall() if int(r[5] or 0) > 0]
+    return [name for _, name in sorted(keyed)]
+
+
+def _scan_order_columns(cur: Any, table_quoted: str, filter_column: str) -> list[str]:
+    """Order a snapshot scan by the seek key the engine will page on.
+
+    ``rowid`` is insertion order, not key order: a ``BIGINT PRIMARY KEY`` is not
+    a rowid alias, so a scan ordered by rowid disagrees with the keyset seek
+    that continues past its first page and skips every key the heap placed
+    later. Ordering by the declared primary key keeps both owners in step;
+    tables without a key fall back to rowid.
+    """
+    pk = _primary_key_columns(cur, table_quoted)
+    order = [filter_column] if filter_column else []
+    order += [c for c in pk if c.lower() != filter_column.lower()]
+    return order
+
+
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 100_000,
+    known_total_rows: int | None = None,
+    scan_state: dict[str, Any],
+    conn: Any | None = None,
+    filter_column: str = "",
+    filter_after: str | None = None,
+) -> ReadBatch:
+    """Page one ``SELECT … ORDER BY <pk | rowid>`` with ``fetchmany`` — no OFFSET.
+
+    ``filter_column`` / ``filter_after`` bound the scan to ``cursor >= watermark``
+    (COUNT and SELECT alike) and order it by the cursor first — the incremental
+    read for a table with no unique tie-break to seek on.
+    """
+    del port, username, password, schema, ssl, columns
+    from services.source_snapshot import get_source_snapshot_conn
+
+    path = sqlite_file_path(database, connection_string, host)
+    if not path:
+        raise ValueError("SQLite path is required (database or connection_string).")
+    if not table:
+        raise ValueError("SQLite source table name required.")
+    require_sqlite_source_file(path)
+
+    table_quoted = quote_sql_identifier(table)
+    filter_value = scan_filter_value(filter_column, filter_after)
+    where_sql = ""
+    params: tuple[Any, ...] = ()
+    if filter_value is not None:
+        from services.copy_incremental import (
+            sqlite_cursor_operand,
+            sqlite_normalize_cursor_watermark,
+        )
+
+        filter_q = sqlite_cursor_operand(
+            quote_sql_identifier(filter_column), str(filter_value)
+        )
+        # D124/D60/D98: the run seed re-reads the tie group at the watermark,
+        # as the PostgreSQL / MySQL / generic filtered scans do.
+        where_sql = f" WHERE {filter_q} >= ?"
+        params = (sqlite_normalize_cursor_watermark(str(filter_value)),)
+    if not scan_state.get("started"):
+        shared = conn if conn is not None else get_source_snapshot_conn()
+        close_conn = shared is None and conn is None
+        if shared is None:
+            shared = sqlite3.connect(path, timeout=8)
+        shared.row_factory = sqlite3.Row
+        cur = shared.cursor()
+        try:
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM {table_quoted}{where_sql}", params)  # nosec B608
+                total = cur.fetchone()[0]
+            order_cols = _scan_order_columns(
+                cur, table_quoted, filter_column if filter_value is not None else ""
+            )
+            order_prefix = "".join(f"{quote_sql_identifier(c)}, " for c in order_cols)
+            try:
+                cur.execute(
+                    f"SELECT * FROM {table_quoted}{where_sql} ORDER BY {order_prefix}rowid",  # nosec B608
+                    params,
+                )
+                if not order_cols:
+                    order_cols = ["rowid"]
+            except sqlite3.OperationalError:
+                # WITHOUT ROWID tables have no rowid — still one SELECT, no OFFSET.
+                order_sql = f" ORDER BY {order_prefix[:-2]}" if order_prefix else ""
+                cur.execute(
+                    f"SELECT * FROM {table_quoted}{where_sql}{order_sql}",  # nosec B608
+                    params,
+                )
+            headers = [d[0] for d in (cur.description or [])]
+        except Exception:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            if close_conn:
+                try:
+                    shared.close()
+                except Exception:
+                    pass
+            raise
+        scan_state.update(
+            started=True,
+            conn=shared if close_conn else None,
+            cur=cur,
+            headers=headers,
+            total=total,
+        )
+        publish_scan_order(scan_state, order_cols)
+    cur = scan_state["cur"]
+    raw = cur.fetchmany(max(1, int(limit)))
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    if not raw:
+        if not headers:
+            try:
+                cur.execute(f"PRAGMA table_info({table_quoted})")
+                headers = [row[1] for row in cur.fetchall()]
+            except Exception:
+                headers = []
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    return ReadBatch(
+        headers=headers,
+        rows=[_row(row) for row in raw],
+        offset=offset,
+        total_rows=total,
+    )

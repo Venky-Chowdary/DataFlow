@@ -28,6 +28,9 @@ _logger = logging.getLogger(__name__)
 _PREFIX_V1 = "enc:v1:"
 _PREFIX_V0 = "enc:v0:"
 _PREFIX_SM = "sm:"
+_PREFIX_BYOK = "byok:"
+_BYOK_PURPOSE = "connector-secret"
+_BYOK_WRAP_LABEL = "byok-key"
 
 
 class SecretVaultError(RuntimeError):
@@ -171,12 +174,14 @@ _vault_instance: SecretVault | None = None
 
 def _get_vault() -> SecretVault:
     global _vault_instance
-    if _vault_instance is None:
-        backend = (getenv_brand("SECRETS_BACKEND") or "fernet").lower().strip()
-        if backend == "aws_secretsmanager":
-            _vault_instance = AwsSecretsManagerVault()
-        else:
-            _vault_instance = FernetVault()
+    backend = (getenv_brand("SECRETS_BACKEND") or "fernet").lower().strip()
+    want = AwsSecretsManagerVault if backend == "aws_secretsmanager" else FernetVault
+    # The cache must follow the configured backend, not the first-built one:
+    # an instance cached under a different backend keeps answering in the wrong
+    # scheme (an AwsSecretsManagerVault leaking past a monkeypatch's teardown
+    # stamped sm: references where enc: was configured — CI-1 order leak).
+    if not isinstance(_vault_instance, want):
+        _vault_instance = want()
     return _vault_instance
 
 
@@ -184,19 +189,90 @@ def _has_dedicated_secrets_key() -> bool:
     return bool(getenv_brand("SECRETS_KEY", "").strip())
 
 
-def _fernet_key() -> bytes:
+_HKDF_INFO = b"dataflow-connector-secrets-v1"
+_LEGACY_AUTH_FALLBACK_INFO = b"dataflow-connector-secrets-auth-fallback-v1"
+
+
+def _hkdf_32(ikm: bytes, *, info: bytes) -> bytes:
+    """Derive 32 raw key bytes via HKDF-SHA256 (Phase D4)."""
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=info,
+        ).derive(ikm)
+    except Exception:
+        # Non-cryptography environments — not for production encrypt paths.
+        return hashlib.pbkdf2_hmac("sha256", ikm, info, 100_000, dklen=32)
+
+
+def _fernet_key_material() -> bytes:
+    """Return Fernet urlsafe-b64 key bytes (32-byte key, urlsafe-b64 encoded)."""
     raw = getenv_brand("SECRETS_KEY", "").strip()
     if raw:
+        # Prefer raw 32-byte urlsafe Fernet keys (operators who generated Fernet.generate_key()).
         try:
             decoded = base64.urlsafe_b64decode(raw + "==")
             if len(decoded) == 32:
                 return base64.urlsafe_b64encode(decoded)
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-        if len(raw.encode()) >= 32:
-            return base64.urlsafe_b64encode(hashlib.sha256(raw.encode()).digest())
+            logging.getLogger(__name__).warning("SECRETS_KEY b64 decode skipped: %s", exc)
+        # Passphrase / arbitrary secret → HKDF (never single-round SHA-256 alone).
+        derived = _hkdf_32(raw.encode("utf-8"), info=_HKDF_INFO)
+        return base64.urlsafe_b64encode(derived)
+
+    if _is_production():
+        raise SecretVaultError(
+            "Production requires DATAFLOW_SECRETS_KEY separate from DATAFLOW_AUTH_SECRET "
+            "(key separation — connector credentials must not share the session signing secret)."
+        )
+
+    # Dev-only fallback: HKDF(AUTH_SECRET) with distinct info — never plain SHA-256(AUTH).
     auth = getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
-    return base64.urlsafe_b64encode(hashlib.sha256(auth.encode()).digest())
+    _logger.warning(
+        "SECRETS_KEY unset — deriving Fernet key from AUTH_SECRET via HKDF (dev only). "
+        "Set DATAFLOW_SECRETS_KEY before any real credentials are stored."
+    )
+    derived = _hkdf_32(auth.encode("utf-8"), info=_LEGACY_AUTH_FALLBACK_INFO)
+    return base64.urlsafe_b64encode(derived)
+
+
+def _legacy_fernet_keys() -> list[bytes]:
+    """Candidates for decrypting secrets encrypted before Phase D4 HKDF.
+
+    Order: current key first (caller), then legacy SHA-256(SECRETS_KEY) and
+    SHA-256(AUTH_SECRET) urlsafe-b64 Fernet keys.
+    """
+    keys: list[bytes] = []
+    raw = getenv_brand("SECRETS_KEY", "").strip()
+    if raw:
+        try:
+            decoded = base64.urlsafe_b64decode(raw + "==")
+            if len(decoded) == 32:
+                keys.append(base64.urlsafe_b64encode(decoded))
+        except Exception:
+            pass
+        if len(raw.encode("utf-8")) >= 32:
+            keys.append(base64.urlsafe_b64encode(hashlib.sha256(raw.encode("utf-8")).digest()))
+    auth = getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
+    if auth:
+        keys.append(base64.urlsafe_b64encode(hashlib.sha256(auth.encode("utf-8")).digest()))
+    # Dedup
+    seen: set[bytes] = set()
+    out: list[bytes] = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def _fernet_key() -> bytes:
+    return _fernet_key_material()
 
 
 def _get_fernet() -> Any:
@@ -229,12 +305,52 @@ def secrets_encryption_ready() -> bool:
     return _get_vault().secrets_encryption_ready()
 
 
+def tenant_id_from_workspace(workspace_id: str | None) -> str | None:
+    """Resolve the tenant that owns ``workspace_id``, if one exists."""
+    ws = (workspace_id or "").strip()
+    if not ws:
+        return None
+    try:
+        from services.tenant_store import get_tenant_for_workspace
+
+        tenant = get_tenant_for_workspace(ws)
+    except Exception:
+        return None
+    return str(tenant.id) if tenant and getattr(tenant, "id", None) else None
+
+
+def _byok_active_for_tenant(tenant_id: str | None) -> bool:
+    tid = (tenant_id or "").strip()
+    if not tid:
+        return False
+    try:
+        from services.byok_key_manager import get_active_key_for_tenant
+
+        return get_active_key_for_tenant(tid) is not None
+    except Exception:
+        return False
+
+
 def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
-    """Encrypt/store a secret and return an opaque reference."""
+    """Encrypt/store a secret and return an opaque reference.
+
+    When the tenant has an active BYOK key, connector secrets are wrapped with
+    that key (``byok:<key_id>:…``). Platform Fernet still wraps BYOK key
+    material itself (``label=byok-key``) so the envelope is not circular.
+    """
     if not plain or plain == "****" or plain.startswith("["):
         return plain
-    if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0) or plain.startswith(_PREFIX_SM):
+    if (
+        plain.startswith(_PREFIX_V1)
+        or plain.startswith(_PREFIX_V0)
+        or plain.startswith(_PREFIX_SM)
+        or plain.startswith(_PREFIX_BYOK)
+    ):
         return plain
+    if label != _BYOK_WRAP_LABEL and _byok_active_for_tenant(tenant_id):
+        from services.byok_key_manager import tenant_encrypt
+
+        return tenant_encrypt(str(tenant_id).strip(), plain, purpose=_BYOK_PURPOSE)
     return _get_vault().encrypt(plain, tenant_id=tenant_id, label=label)
 
 
@@ -242,6 +358,16 @@ def decrypt_secret(stored: str, *, tenant_id: str | None = None) -> str:
     """Retrieve/decrypt a stored secret reference."""
     if not stored:
         return stored
+    if stored.startswith(_PREFIX_BYOK):
+        tid = (tenant_id or "").strip()
+        if not tid:
+            raise SecretVaultError(
+                "BYOK-wrapped secret requires tenant_id to decrypt. "
+                "Re-open the connector from its workspace."
+            )
+        from services.byok_key_manager import tenant_decrypt
+
+        return tenant_decrypt(tid, stored, purpose=_BYOK_PURPOSE)
     return _get_vault().decrypt(stored, tenant_id=tenant_id)
 
 
@@ -256,12 +382,10 @@ def _fernet_encrypt(plain: str) -> str:
         return f"{_PREFIX_V0}{base64.urlsafe_b64encode(plain.encode('utf-8')).decode('ascii')}"
 
     if _is_production() and not _has_dedicated_secrets_key():
-        auth = getenv_brand("AUTH_SECRET", "")
-        if not auth or auth == "dev-change-me-before-production":
-            raise SecretVaultError(
-                "Production requires DATAFLOW_SECRETS_KEY (or a strong DATAFLOW_AUTH_SECRET) "
-                "for Fernet encryption of connector credentials."
-            )
+        raise SecretVaultError(
+            "Production requires DATAFLOW_SECRETS_KEY separate from DATAFLOW_AUTH_SECRET "
+            "for Fernet encryption of connector credentials."
+        )
 
     token = _get_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
     return f"{_PREFIX_V1}{token}"
@@ -270,17 +394,32 @@ def _fernet_encrypt(plain: str) -> str:
 def _fernet_decrypt(stored: str) -> str:
     if stored.startswith(_PREFIX_V1):
         if not _cryptography_available():
-            if _is_production():
-                raise SecretVaultError(
-                    "Cannot decrypt Fernet secrets: cryptography is not installed in production."
-                )
-            _warn_once()
-            return "[encrypted-secret-unavailable]"
-        token = stored[len(_PREFIX_V1) :]
-        try:
-            return _get_fernet().decrypt(token.encode("ascii")).decode("utf-8")
-        except Exception:
-            return "[decryption-failed]"
+            raise SecretVaultError(
+                "Cannot decrypt Fernet secrets: cryptography is not installed. "
+                "Install cryptography before reading connector credentials."
+            )
+        from cryptography.fernet import Fernet, InvalidToken
+
+        token = stored[len(_PREFIX_V1) :].encode("ascii")
+        candidates = [_fernet_key_material()] + _legacy_fernet_keys()
+        seen: set[bytes] = set()
+        last_exc: Exception | None = None
+        for key in candidates:
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                return Fernet(key).decrypt(token).decode("utf-8")
+            except InvalidToken as exc:
+                last_exc = exc
+                continue
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise SecretVaultError(
+            "Secret decryption failed — wrong SECRETS_KEY or corrupted ciphertext "
+            "(refusing to return a password-shaped sentinel)."
+        ) from last_exc
 
     if stored.startswith(_PREFIX_V0):
         if _is_production():
@@ -291,8 +430,8 @@ def _fernet_decrypt(stored: str) -> str:
         token = stored[len(_PREFIX_V0) :]
         try:
             return base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        except Exception:
-            return stored
+        except Exception as exc:
+            raise SecretVaultError("Legacy enc:v0 secret decode failed") from exc
 
     # Plaintext passthrough is a local-dev convenience only. In production every
     # secret must be an enc:v1 / sm: reference — otherwise a job document or

@@ -1,0 +1,12 @@
+{
+  "lists": [
+    {
+      "id": "list-c",
+      "name": "fixture list three",
+      "date_created": "2024-01-03T00:00:00+00:00",
+      "stats": {"member_count": 7, "unsubscribe_count": 0}
+    }
+  ],
+  "total_items": 101,
+  "constraints": {}
+}

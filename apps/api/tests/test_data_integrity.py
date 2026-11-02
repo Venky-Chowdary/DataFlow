@@ -27,13 +27,22 @@ from services.transform_engine import apply_transform  # noqa: E402
         ("1.5E+3", "integer", 1500),
         ("  42  ", "integer", 42),
         ("true", "boolean", True),
-        ("N", "boolean", False),
+        ("false", "boolean", False),
+        ("0", "boolean", False),
+        ("f", "boolean", False),
     ],
 )
 def test_transform_parses_critical_formats(raw: str, transform: str, expected):
     value, err = apply_transform(raw, transform)
     assert err is None, f"Failed to parse {raw!r}: {err}"
     assert str(value) == str(expected) or value == expected
+
+
+def test_transform_refuses_informal_boolean_N():
+    """Canonical boolean wire is true/t/1 and false/f/0 — refuse Airbyte-class Y/N invent."""
+    _, err = apply_transform("N", "boolean")
+    assert err is not None
+    assert "Invalid boolean" in err
 
 
 def test_transform_rejects_invalid_decimal():
@@ -61,6 +70,73 @@ def test_integrity_blocks_unparseable_financial():
     assert any("unparseable" in i.lower() or "financial" in i.lower() for i in report["issues"])
 
 
+def _signed_contract(policy: str) -> dict:
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="amount",
+        source_type="TEXT",
+        destination_type="NUMERIC",
+        execution_policy=policy,
+        reason="Operator accepts held-out rows for this migration",
+        approved_by="qa@dataflow.local",
+    )
+    payload = contract.to_dict()
+    payload["signature"] = contract.signature
+    return payload
+
+
+def _financial_check(mapping: dict, rows: list[dict]) -> dict:
+    from services.data_integrity import _check_financial_precision
+
+    return _check_financial_precision([mapping], {"amount": "TEXT"}, rows)
+
+
+def _amount_mapping(**extra: object) -> dict:
+    mapping = {
+        "source": "amount",
+        "target": "amount",
+        "confidence": 0.95,
+        "source_type": "TEXT",
+        "target_type": "NUMERIC",
+        "transform": "decimal",
+    }
+    mapping.update(extra)
+    return mapping
+
+
+CONTINUE_POLICIES = ["QUARANTINE_ROW", "SKIP_ROW", "CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"]
+
+
+@pytest.mark.parametrize("policy", CONTINUE_POLICIES)
+def test_financial_rejection_is_a_holdout_under_a_continue_contract(policy):
+    """A signed continue policy names the write-time disposition, so Validate releases."""
+    mapping = _amount_mapping(risk_acknowledged=True, risk_contract=_signed_contract(policy))
+    check = _financial_check(mapping, [{"amount": "10.50"}, {"amount": "abc"}])
+    assert check["blocks_transfer"] is False
+    assert check["issues"] == []
+    assert check["contracted_holdouts"] == ["amount: unparseable financial value 'abc'"]
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        _amount_mapping(),
+        _amount_mapping(risk_acknowledged=True),
+        _amount_mapping(risk_contract=_signed_contract("FAIL_JOB")),
+        _amount_mapping(risk_contract=_signed_contract("STOP_TABLE")),
+        _amount_mapping(risk_contract=_signed_contract("ABORT_TRANSACTION")),
+        _amount_mapping(risk_contract={**_signed_contract("QUARANTINE_ROW"), "reason": "edited"}),
+    ],
+    ids=["no-contract", "boolean-ack", "fail-job", "stop-table", "abort-txn", "tampered"],
+)
+def test_financial_rejection_stays_blocking_without_a_clearing_contract(mapping):
+    check = _financial_check(mapping, [{"amount": "10.50"}, {"amount": "abc"}])
+    assert check["blocks_transfer"] is True
+    assert check["issues"] == ["amount: unparseable financial value 'abc'"]
+    assert "contracted_holdouts" not in check
+
+
 def test_integrity_passes_clean_financial_data():
     rows = [{"amount": "$10,000.00"}, {"amount": "$5,000.00"}, {"amount": "$2,499.00"}]
     mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
@@ -81,7 +157,8 @@ def test_integrity_passes_locale_currency_formats():
         {"amount": "€1.000.000,89"},
         {"amount": "1 000 000.89"},
         {"amount": "(1,234.56)"},
-        {"amount": "USD 1 000,00"},
+        # USD pins US — bindable form is comma thousands, not EU 1 000,00.
+        {"amount": "USD 1,000.00"},
     ]
     mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
     report = run_integrity_audit(
@@ -98,10 +175,39 @@ def test_integrity_passes_locale_currency_formats():
     assert transform is None or transform["passed"] is True
 
 
+def test_integrity_blocks_contradictory_usd_eu_grouping():
+    """USD pins US. Space thousands + comma decimal is EU. Do not invent 1000.
+
+    ``1 000,00`` alone binds. Prefixing USD used to be treated as money in this
+    audit while the write path refused — a green financial check over a row
+    the writer quarantines.
+    """
+    from decimal import Decimal
+
+    from services.transform_engine import decimal_wire_value
+
+    assert decimal_wire_value("1 000,00") == Decimal("1000.00")
+    assert decimal_wire_value("USD 1 000,00") is None
+    rows = [{"amount": "USD 1 000,00"}]
+    mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
+    report = run_integrity_audit(
+        source_columns=["amount"],
+        mappings=mappings,
+        source_schemas=[{"name": "amount", "inferred_type": "DECIMAL"}],
+        sample_rows=rows,
+        validation_mode="strict",
+    )
+    financial = next((c for c in report["checks"] if c["check"] == "financial_precision"), None)
+    assert financial is not None
+    assert financial["passed"] is False
+    assert financial["blocks_transfer"] is True
+    assert any("USD 1 000,00" in i for i in financial["issues"])
+
+
 # ── Required field null checks ─────────────────────────────────────────────
 
 def test_integrity_blocks_nulls_on_required_id():
-    rows = [{"customer_id": ""}, {"customer_id": "C001"}, {"customer_id": ""}]
+    rows = [{"customer_id": None}, {"customer_id": "C001"}, {"customer_id": None}]
     mappings = [{"source": "customer_id", "target": "customer_id", "confidence": 0.95}]
     report = run_integrity_audit(
         source_columns=["customer_id"],
@@ -150,15 +256,22 @@ def test_integrity_blocks_duplicate_primary_keys():
         {"order_id": "ORD-2"},
     ]
     mappings = [{"source": "order_id", "target": "order_id", "confidence": 0.99}]
+    # Uniqueness resolution no longer invents PK from ``*_id`` alone — upsert
+    # sync (or an explicit destination PK) is required to enforce duplicates.
     report = run_integrity_audit(
         source_columns=["order_id"],
         mappings=mappings,
         sample_rows=rows,
         validation_mode="strict",
+        sync_mode="upsert",
+        destination_pk_columns=["order_id"],
     )
     dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
     assert dup_check is not None
-    assert dup_check["blocks_transfer"] is True
+    assert dup_check["blocks_transfer"] is False
+    warning = " ".join(dup_check.get("warnings") or [])
+    assert "Counted once" in warning
+    assert "collapsed" in warning.lower()
 
 
 def test_integrity_balanced_still_blocks_dupes_on_upsert():
@@ -178,14 +291,18 @@ def test_integrity_balanced_still_blocks_dupes_on_upsert():
     )
     dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
     assert dup_check is not None
-    assert dup_check["blocks_transfer"] is True
-    assert dup_check["passed"] is False
-    assert dup_check.get("warnings") or dup_check.get("issues")
+    assert dup_check["blocks_transfer"] is False
+    warning = " ".join(dup_check.get("warnings") or [])
+    assert "Counted once" in warning
+    assert "collapsed" in warning.lower()
 
 
-def test_integrity_source_probe_blocks_even_balanced_append():
-    """Full-table probe findings must keep Validate red after Quarantine/balanced."""
-    # Clean sample (would pass sample-only) + probe says 153 keys repeat.
+def test_integrity_source_probe_warns_append_without_dest_unique():
+    """Append/create-new without dest UNIQUE: probe dups warn — do not hard-block.
+
+    Operators hit Validate-green / Execute-red when sample missed dups but Execute
+    probed; append into a projected CREATE table legally allows duplicate keys.
+    """
     rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
     mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
     findings = [
@@ -200,6 +317,36 @@ def test_integrity_source_probe_blocks_even_balanced_append():
         destination_db_type="postgresql",
         sync_mode="full_refresh_append",
         contract_primary_key="id",
+        destination_pk_columns=[],
+        source_duplicate_findings=findings,
+        source_duplicate_probe_ran=True,
+        source_duplicate_probe_pk="id",
+    )
+    dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
+    assert dup_check is not None
+    assert dup_check["blocks_transfer"] is False
+    assert dup_check["passed"] is True
+    warn_blob = " ".join(str(w) for w in (dup_check.get("warnings") or []))
+    assert "source probe" in warn_blob.lower() or "duplicate" in (dup_check.get("note") or "").lower()
+
+
+def test_integrity_source_probe_blocks_append_when_dest_pk_covers():
+    """Append into a table whose PK/UNIQUE covers the key still fail-closes on probe."""
+    rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
+    mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
+    findings = [
+        {"value": "507f1f77bcf86cd799439011", "count": 4},
+        {"value": "507f1f77bcf86cd799439012", "count": 3},
+    ]
+    report = run_integrity_audit(
+        source_columns=["id"],
+        mappings=mappings,
+        sample_rows=rows,
+        validation_mode="balanced",
+        destination_db_type="postgresql",
+        sync_mode="full_refresh_append",
+        contract_primary_key="id",
+        destination_pk_columns=["id"],
         source_duplicate_findings=findings,
         source_duplicate_probe_ran=True,
         source_duplicate_probe_pk="id",
@@ -407,11 +554,12 @@ def test_integrity_audit_returns_structured_report():
 # ── Encoding / format-control characters ─────────────────────────────────────
 
 def test_encoding_blocks_strict_mode():
-    zwsp = "hello\u200bworld"
+    # A control byte blocks strict; a bare U+200B only warns (D69).
+    nul = "hello\x00world"
     report = run_integrity_audit(
         source_columns=["title"],
         mappings=[{"source": "title", "target": "title", "confidence": 0.99}],
-        sample_rows=[{"title": zwsp}],
+        sample_rows=[{"title": nul}],
         validation_mode="strict",
     )
     enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)
@@ -468,3 +616,107 @@ def test_strip_controls_skip_is_case_insensitive():
     assert enc is not None
     assert enc["blocks_transfer"] is False
     assert not enc["issues"]
+
+
+def test_transform_dry_run_blocks_empty_url_without_contract():
+    """Empty image→url cells hard-block G9 transform_dry_run until Risk Contract."""
+    report = run_integrity_audit(
+        source_columns=["image"],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "confidence": 0.95,
+                "transform": "url",
+                "target_type": "TEXT",
+            }
+        ],
+        source_schemas=[{"name": "image", "inferred_type": "TEXT"}],
+        sample_rows=[{"image": ""}, {"image": ""}, {"image": "https://ok.example/a.png"}],
+        destination_db_type="postgres",
+        validation_mode="strict",
+    )
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is not None
+    assert transform["passed"] is False
+    assert transform["blocks_transfer"] is True
+    assert transform.get("kind") == "transform_errors"
+    # Prose note must not pollute issues[] (fake column extraction).
+    assert not any(str(i).startswith("Preflight blocked") for i in transform.get("issues") or [])
+    assert transform.get("note") and "Preflight blocked" in str(transform["note"])
+
+
+def test_transform_dry_run_passes_empty_url_with_cast_and_continue():
+    """Parity with G8: CAST_AND_CONTINUE demotes empty-url off G9 hard block."""
+    from preflight.risk_contract import make_clearing_risk_contract
+
+    contract = make_clearing_risk_contract(
+        column="image",
+        source_type="TEXT",
+        destination_type="TEXT",
+        execution_policy="CAST_AND_CONTINUE",
+        reason="quarantine empty urls",
+    )
+    report = run_integrity_audit(
+        source_columns=["image"],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "confidence": 0.95,
+                "transform": "url",
+                "target_type": "TEXT",
+                "risk_contract": contract,
+            }
+        ],
+        source_schemas=[{"name": "image", "inferred_type": "TEXT"}],
+        sample_rows=[{"image": ""}, {"image": ""}, {"image": "https://ok.example/a.png"}],
+        destination_db_type="postgres",
+        validation_mode="strict",
+    )
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is not None
+    assert transform["passed"] is True, transform
+    assert transform["blocks_transfer"] is False
+    assert int(transform.get("contracted_holdout_count") or 0) >= 1
+    assert transform.get("contracted_holdouts")
+
+
+def _required_nulls(rows, **kw):
+    report = run_integrity_audit(
+        source_columns=["customer_id"],
+        mappings=[{"source": "customer_id", "target": "customer_id", "confidence": 0.95, **kw.pop("mapping", {})}],
+        sample_rows=rows,
+        validation_mode="strict",
+        **kw,
+    )
+    return next(c for c in report["checks"] if c["check"] == "required_nulls")
+
+
+def test_empty_string_identity_key_is_a_value_not_a_missing_key():
+    """D53: '' is a key the destination stores; only NULL is a missing key."""
+    rows = [{"customer_id": ""}, {"customer_id": "C001"}, {"customer_id": "C002"}]
+    assert _required_nulls(rows, destination_db_type="postgresql")["blocks_transfer"] is False
+
+
+def test_empty_string_identity_key_blocks_where_the_route_stores_it_as_null():
+    """D53: where '' lands as NULL the key is missing, and Validate says why."""
+    rows = [{"customer_id": ""}, {"customer_id": "C001"}, {"customer_id": "C002"}]
+    oracle = _required_nulls(rows, destination_db_type="oracle")
+    assert oracle["blocks_transfer"] is True
+    assert "stores '' as NULL" in " ".join(oracle["issues"])
+    # A file blank into a non-text key column is written as NULL too.
+    file_typed = _required_nulls(
+        rows,
+        destination_db_type="postgresql",
+        empty_cells_as_null=True,
+        mapping={"target_type": "BIGINT"},
+    )
+    assert file_typed["blocks_transfer"] is True
+    file_text = _required_nulls(
+        rows,
+        destination_db_type="postgresql",
+        empty_cells_as_null=True,
+        mapping={"target_type": "VARCHAR(20)"},
+    )
+    assert file_text["blocks_transfer"] is False

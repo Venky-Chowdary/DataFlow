@@ -23,11 +23,16 @@ def test_elasticsearch(
     if not host and not connection_string:
         return ConnectResult(ok=False, tables=[], error="Elasticsearch host or URL is required.")
 
-    if connection_string.strip():
-        url = connection_string.strip()
-    else:
-        scheme = "https" if ssl or port == 443 else "http"
-        url = f"{scheme}://{host or 'localhost'}:{port or 9200}"
+    from connectors.elasticsearch_reader import elasticsearch_url
+
+    url = elasticsearch_url(
+        {
+            "host": host,
+            "port": port,
+            "ssl": ssl,
+            "connection_string": connection_string.strip(),
+        }
+    )
 
     index_hint = (database or "").strip()
 

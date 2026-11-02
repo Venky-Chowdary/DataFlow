@@ -23,7 +23,6 @@ remove. Entries also expire, so a long-lived process eventually re-reads.
 from __future__ import annotations
 
 import logging
-import os
 from services.brand_env import getenv_brand
 import threading
 import time
@@ -242,6 +241,28 @@ def invalidate_by_identity(identity: str, schema: str | None, table: str) -> int
             for key in _CACHE
             if key[0] == identity and key[1] == schema_s and key[2] == table_s
         ]
+        for key in doomed:
+            _CACHE.pop(key, None)
+        if doomed:
+            _STATS.invalidations += len(doomed)
+        _STATS.live = len(_CACHE)
+    return len(doomed)
+
+
+def invalidate_named_tables(*names: str | None) -> int:
+    """Drop every cached answer for the named tables, whichever engine holds them.
+
+    The cache is coherent with this process's own DDL, not with someone else's.
+    A run therefore starts by forgetting what it cached about the tables it is
+    about to move: otherwise a column added upstream within the TTL is read with
+    the old column list and silently never moves (D165). Within the run the
+    entries are rebuilt once and shared by its chunks as before.
+    """
+    wanted = {str(n).lower() for n in names if n}
+    if not wanted:
+        return 0
+    with _LOCK:
+        doomed = [key for key in _CACHE if key[2].lower() in wanted]
         for key in doomed:
             _CACHE.pop(key, None)
         if doomed:

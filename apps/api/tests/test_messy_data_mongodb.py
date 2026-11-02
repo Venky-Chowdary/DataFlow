@@ -28,13 +28,13 @@ from src.transfer.adapters import (  # noqa: E402
 from src.transfer.models import EndpointConfig  # noqa: E402
 
 CSV_MESSY_TEXT = """order_id,amount,created_at,active,notes
-1,"$1,234.56","2024-06-01T12:00:00Z",yes,"Large payment"
-2,"€2.000,00","2024-06-02 08:30:00",true,
-3,"N/A","2024-06-03","false","bad amount"
-4,"0","2024-06-04",1,
-5,"1,000.00","2024-06-05",no,"thousand comma"
-6,"1.000.000,89","2024-06-06",TRUE,
-7,"(100.00)","2024-06-07",FALSE,
+1,"$1,234.56","2024-06-01T12:00:00Z",true,"Large payment"
+2,"€2.000,00","2024-06-02T08:30:00Z",true,
+3,"N/A","2024-06-03T00:00:00Z","false","bad amount"
+4,"0","2024-06-04T00:00:00Z",1,
+5,"1,000.00","2024-06-05T00:00:00Z",false,"thousand comma"
+6,"1.000.000,89","2024-06-06T00:00:00Z",TRUE,
+7,"(100.00)","2024-06-07T00:00:00Z",FALSE,
 """
 CSV_MESSY = CSV_MESSY_TEXT.encode("utf-8")
 
@@ -107,8 +107,8 @@ def test_messy_csv_to_mongodb_preserves_values():
         assert by_id[6]["amount"] == Decimal128(Decimal("1000000.89"))
         assert by_id[7]["amount"] == Decimal128(Decimal("-100.00"))
         assert by_id[7]["active"] is False
-        # N/A amount should be preserved as None rather than 0
-        assert by_id[3].get("amount") is None
+        # N/A amount is quarantined (refuse silent NULL invent) — not in primary write.
+        assert 3 not in by_id
     finally:
         if client:
             client.drop_database(db_name)

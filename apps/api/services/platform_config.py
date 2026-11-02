@@ -12,7 +12,35 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 
 
 def is_railway() -> bool:
-    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_ID"))
+    """Running on / linked to Railway infrastructure (deployed or `railway run`).
+
+    Used for host-hint and volume-path behavior, NOT for production policy —
+    see ``is_railway_deployed`` for the deploy-time signal.
+    """
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_SERVICE_ID")
+        or is_railway_deployed()
+    )
+
+
+def is_railway_deployed() -> bool:
+    """True only inside a deployed Railway service.
+
+    Deployment-scoped markers (RAILWAY_ENVIRONMENT_NAME, RAILWAY_DEPLOYMENT_ID,
+    RAILWAY_REPLICA_ID) are set by Railway at deploy time. RAILWAY_ENVIRONMENT,
+    RAILWAY_SERVICE_ID and RAILWAY_TOKEN are also exported by `railway run`,
+    linked dev shells and CI agents that merely have the CLI installed — they
+    must not flip a dev box or test run into production policy.
+    """
+    return any(
+        os.getenv(k)
+        for k in (
+            "RAILWAY_ENVIRONMENT_NAME",
+            "RAILWAY_DEPLOYMENT_ID",
+            "RAILWAY_REPLICA_ID",
+        )
+    )
 
 
 def is_production() -> bool:
@@ -21,7 +49,8 @@ def is_production() -> bool:
     Fail-closed rules:
     - Explicit ``ENV=production|prod`` → production
     - Explicit ``ENV=development|dev|local|test`` → not production
-    - Railway (unless explicitly marked development) → production
+    - Deployed Railway service (deploy-time markers only — a `railway run`
+      shell or CLI token alone is not production) → production
     - ``ASSUME_PRODUCTION=1`` → production (bare-metal / k8s without ENV)
     - ``REQUIRE_AUTH=1`` with unset ENV → production (misconfigured host)
     - Otherwise unset ENV stays non-production for local developer UX
@@ -31,7 +60,7 @@ def is_production() -> bool:
         return False
     if env in ("production", "prod"):
         return True
-    if is_railway():
+    if is_railway_deployed():
         return True
     if getenv_brand("ASSUME_PRODUCTION", "0").lower() in ("1", "true", "yes"):
         return True
@@ -53,17 +82,50 @@ def _railway_volume_root() -> Path | None:
     return None
 
 
-def data_dir() -> Path:
+def data_dir_path() -> Path:
+    """Where the service keeps its state, without creating it (audit scripts)."""
     vol = _railway_volume_root()
     raw = getenv_brand("DATA_DIR", "").strip()
     if raw:
-        path = Path(raw)
-    elif vol:
-        path = vol / "data"
-    else:
-        path = _API_ROOT / "data"
+        return Path(raw)
+    if vol:
+        return vol / "data"
+    return _API_ROOT / "data"
+
+
+def data_dir() -> Path:
+    path = data_dir_path()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _on_root_filesystem(path: Path) -> bool:
+    """True when ``path`` shares a device with ``/`` — i.e. no volume is mounted."""
+    try:
+        return os.stat(path).st_dev == os.stat("/").st_dev
+    except OSError:
+        return True
+
+
+def persistent_storage_warnings() -> list[str]:
+    """Production notes about state that will not survive a restart.
+
+    Not fatal: the service runs, but every connector, SQLite database and
+    spill under the data directory is lost with the container.
+    """
+    if not is_production():
+        return []
+    path = data_dir()
+    if not _on_root_filesystem(path):
+        return []
+    mount = _railway_volume_root() or Path("/data")
+    return [
+        f"Data directory {path} is on the container's own filesystem, not a "
+        "mounted volume. Connectors, SQLite databases and other state under it "
+        "are lost on every restart or redeploy. Attach a persistent volume "
+        f"mounted at {mount} (Railway: service -> Settings -> Volumes), or set "
+        "DATAFLOW_DATA_DIR to a path on one."
+    ]
 
 
 def upload_dir() -> Path:
@@ -135,8 +197,11 @@ def cors_origins() -> list[str]:
             from services.tenant_store import list_tenants
 
             for tenant in list_tenants():
-                host = (getattr(tenant, "custom_domain", None) or "").strip().lower()
-                if not host:
+                host = (tenant.custom_domain or "").strip().lower()
+                # A record predating workspace scoping serves no workspace, so
+                # its domain is not a browser origin we trust with credentials —
+                # the same refusal domain resolution already makes.
+                if not host or not tenant.workspace_id:
                     continue
                 if host.startswith("http://") or host.startswith("https://"):
                     origins.append(host.rstrip("/"))
@@ -211,6 +276,16 @@ def validate_production_config() -> list[str]:
             "DATAWRAP_SECRETS_KEY (or DATAFLOW_SECRETS_KEY) must be set for "
             "Fernet encryption of connector credentials in production"
         )
+    # D117: only self-serve signup (OTP codes, reset tokens) uses the pepper,
+    # and otp_service fails closed without it. Requiring it with signup off
+    # took every route down for a feature that was not even mounted.
+    from services.signup_config import signup_enabled
+
+    if signup_enabled() and not (getenv_brand("OTP_PEPPER") or "").strip():
+        errors.append(
+            "DATAWRAP_OTP_PEPPER must be set in production — OTP codes and "
+            "password-reset tokens must not fall back to the dev pepper"
+        )
     try:
         import cryptography.fernet  # noqa: F401
     except Exception:
@@ -231,7 +306,29 @@ def validate_production_config() -> list[str]:
     return errors
 
 
+# Railway liveness must answer even when production config is incomplete.
+# Every other route stays closed until the errors are fixed.
+_LIVENESS_PATHS = frozenset({"/health", "/health/ready", "/api/v1/health"})
+
+
+def is_liveness_path(path: str) -> bool:
+    """True only for the deploy probe and the readiness probe.
+
+    A prefix match would leave every future ``/health/…`` route open while
+    the API is refusing traffic.
+    """
+    raw = (path or "").split("?", 1)[0].rstrip("/") or "/"
+    return raw in _LIVENESS_PATHS
+
+
 def enforce_production_config() -> None:
+    """Exit the process when production config is incomplete.
+
+    The API server must not call this from its lifespan. Railway marks the
+    deploy failed with "service unavailable" when the process dies before
+    ``/health`` can answer. The server records the same errors and refuses
+    every route except liveness.
+    """
     errors = validate_production_config()
     if errors:
         for msg in errors:
@@ -262,17 +359,17 @@ def email_provider_config() -> dict[str, Any]:
     cfg: dict[str, Any] = {"provider": provider}
     if provider == "sendgrid":
         cfg["api_key"] = os.getenv("SENDGRID_API_KEY", "")
-        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "datawrap@example.com")
     elif provider == "resend":
-        cfg["api_key"] = os.getenv("RESEND_API_KEY", "")
-        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
+        cfg["api_key"] = getenv_brand("RESEND_API_KEY", os.getenv("RESEND_API_KEY", ""))
+        cfg["from"] = getenv_brand("EMAIL_FROM", "datawrap@example.com")
     elif provider == "mailgun":
         cfg["api_key"] = os.getenv("MAILGUN_API_KEY", "")
         cfg["domain"] = os.getenv("MAILGUN_DOMAIN", "")
         cfg["region"] = os.getenv("MAILGUN_REGION", "us")
-        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "datawrap@example.com")
     else:
-        cfg["from"] = getenv_brand("EMAIL_FROM", getenv_brand("SMTP_FROM", "dataflow@localhost"))
+        cfg["from"] = getenv_brand("EMAIL_FROM", getenv_brand("SMTP_FROM", "datawrap@localhost"))
     return cfg
 
 

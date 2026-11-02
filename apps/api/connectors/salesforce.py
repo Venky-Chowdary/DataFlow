@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.value_serializer import load_http_json
+
 from connectors.saas_common import (
     ReadBatch,
     base_url,
@@ -23,10 +25,39 @@ API_VERSION = "v58.0"
 _SAFE_SFORCE_IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
+# Salesforce rejects OFFSET above 2000 rows (SOQL limit), so offset paging
+# cannot walk a large object — keyset (Id seek) is the only unbounded path.
+SOQL_MAX_OFFSET = 2000
+
+# The OFFSET cap is not a cap on how many rows a query may return: queryMore
+# (``nextRecordsUrl``) walks a result set of any size. Clamping the SOQL LIMIT
+# to the OFFSET cap silently truncated every object past 2000 records to its
+# first 2000 — the read looked successful and the rest of the object was gone.
+# A LIMIT clause is emitted only while it is below the SOQL row ceiling; above
+# it the query is unbounded and the caller's limit bounds the walk.
+SOQL_MAX_QUERY_LIMIT = 50_000
+
+
 def _validate_api_name(name: str, label: str) -> str:
     if not _SAFE_SFORCE_IDENT.match(name or ""):
         raise ValueError(f"Invalid Salesforce {label}: {name!r}")
     return name
+
+
+def soql_literal(value: Any) -> str | None:
+    """Quote a present SOQL literal on the dest cell wire.
+
+    Reader-null / blank is not a seek token. ``str(True)`` invented
+    ``'True'`` so dest ``true`` missed the keyset resume. ``0`` stays
+    ``'0'``.
+    """
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    if text is None:
+        return None
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
 
 
 def test_salesforce(
@@ -93,7 +124,7 @@ def list_sobjects(cfg: dict[str, Any]) -> list[str]:
     )
     r.raise_for_status()
     out: list[str] = []
-    for item in (r.json().get("sobjects") or []):
+    for item in (load_http_json(r).get("sobjects") or []):
         if item.get("queryable") and item.get("name"):
             out.append(str(item["name"]))
     return out
@@ -113,7 +144,7 @@ def describe_sobject(cfg: dict[str, Any], sobject: str) -> list[dict[str, Any]]:
     )
     r.raise_for_status()
     fields: list[dict[str, Any]] = []
-    for f in r.json().get("fields") or []:
+    for f in load_http_json(r).get("fields") or []:
         # Preserve write-safety + picklist metadata. Stripping these made live
         # Map/Validate invent writable formula fields and lose ENUM domains —
         # both are demo-breakers against a real Salesforce org.
@@ -154,9 +185,18 @@ def read_object(
     object: str = "",
     limit: int = 500,
     offset: int = 0,
+    cursor_column: str = "",
+    cursor_after: Any = None,
     **_kwargs: Any,
 ) -> ReadBatch:
-    """Read Salesforce object rows via SOQL."""
+    """Read Salesforce object rows via SOQL.
+
+    ``cursor_column`` (normally ``Id``) switches paging from OFFSET to keyset
+    seek — ``WHERE col > :cursor_after ORDER BY col`` — the only way to walk an
+    object past Salesforce's 2000-row OFFSET cap. The batch reports the last
+    cursor value in ``meta['next_cursor']`` so the caller can resume exactly
+    where the page ended instead of re-counting rows.
+    """
     access_token, url_base = _access(cfg)
     sobject = _validate_api_name(
         (object or object_name(cfg, DEFAULT_OBJECT)).strip(), "object"
@@ -203,6 +243,17 @@ def read_object(
     total_size: int | None = None
     id_field = "Id"
 
+    seek_column = (cursor_column or "").strip()
+    if seek_column:
+        _validate_api_name(seek_column, "cursor field")
+    seek_sql = soql_literal(cursor_after)
+    if not seek_column and offset and int(offset) > SOQL_MAX_OFFSET:
+        raise RuntimeError(
+            f"Salesforce OFFSET is capped at {SOQL_MAX_OFFSET} rows; offset={int(offset)} "
+            "cannot be served. Declare a keyset cursor (Id) so the reader seeks "
+            "instead of counting rows."
+        )
+
     def _run_query(field_list: str, identity_field: str) -> list[dict[str, Any]]:
         nonlocal total_size
         # Validate SOQL identifiers before interpolation.
@@ -212,22 +263,32 @@ def read_object(
         # Prefer queryMore / nextRecordsUrl over OFFSET — Salesforce OFFSET is capped
         # and unsuitable for multi-page replication.
         # ORDER BY identity so wide-schema field chunks merge by the same row set.
-        query = f"SELECT {field_list} FROM {sobject} ORDER BY {identity_field}"  # nosec B608
-        if offset and offset > 0:
+        order_field = seek_column or identity_field
+        where = ""
+        if seek_column and seek_sql is not None:
+            where = f" WHERE {seek_column} > {seek_sql}"
+        query = (
+            f"SELECT {field_list} FROM {sobject}{where} ORDER BY {order_field}"  # nosec B608
+        )
+        if seek_column:
+            # Keyset seek — page with queryMore until the caller's limit is met.
+            query += f" LIMIT {int(limit)}"  # nosec B608
+        elif offset and offset > 0:
             # Shallow preview only — deep resumes must use cursor/keyset contracts.
             query += f" LIMIT {int(limit)} OFFSET {int(offset)}"  # nosec B608
             r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
             r.raise_for_status()
-            data = r.json()
+            data = load_http_json(r)
             if "totalSize" in data and data.get("totalSize") is not None:
                 published = int(data["totalSize"])
                 total_size = published if total_size is None else max(total_size, published)
             return list(data.get("records") or [])
 
-        query += f" LIMIT {min(limit, 2000)}"  # nosec B608
+        if not seek_column and int(limit) <= SOQL_MAX_QUERY_LIMIT:
+            query += f" LIMIT {int(limit)}"  # nosec B608
         r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
         if "totalSize" in data and data.get("totalSize") is not None:
             published = int(data["totalSize"])
             total_size = published if total_size is None else max(total_size, published)
@@ -249,7 +310,7 @@ def read_object(
                 abs_url = next_url
             r = request(method="GET", url=abs_url, token=access_token, timeout=60)
             r.raise_for_status()
-            data = r.json()
+            data = load_http_json(r)
             chunk = list(data.get("records") or [])
             next_url = data.get("nextRecordsUrl")
             if not data.get("done", True) and not next_url:
@@ -294,4 +355,14 @@ def read_object(
     batch.total_rows = total_size
     if schema_warnings:
         batch.meta = {**(batch.meta or {}), "schema_warnings": schema_warnings}
+    if seek_column and records:
+        # Bookmark the page boundary so the next call seeks instead of counting.
+        last = records[-1].get(seek_column)
+        if last is not None:
+            batch.meta = {
+                **(batch.meta or {}),
+                "next_cursor": str(last),
+                "cursor_column": seek_column,
+                "pagination_mode": "keyset",
+            }
     return batch

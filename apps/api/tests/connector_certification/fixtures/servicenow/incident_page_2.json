@@ -1,0 +1,13 @@
+{
+  "result": [
+    {
+      "sys_id": "inc-101",
+      "number": "INC0010101",
+      "short_description": "fixture incident 101",
+      "state": "7",
+      "priority": "3",
+      "sys_created_on": "2024-01-02 08:00:00",
+      "sys_updated_on": "2024-01-03 08:00:00"
+    }
+  ]
+}

@@ -13,8 +13,10 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.value_serializer import (  # noqa: E402
+    bson_safe_document,
     cell_to_string,
     json_default,
+    json_dumps_exact_numbers,
     sanitize_json_value,
 )
 
@@ -81,13 +83,98 @@ def test_decimal_sanitize_json_value_is_exact_string():
 
 
 def test_cell_to_string_preserves_decimal_in_nested_json():
+    """Decimal leaves stay JSON *numbers* inside a document (D74).
+
+    The string-wire policy is for a DECIMAL column cell; inside a JSON
+    document ``"amount": "1000.00"`` retypes the leaf to text, so the digits
+    ride as an unquoted number with every digit intact.
+    """
     payload = {"amount": Decimal("1000.00"), "precision": Decimal("0.0000000000001")}
     text = cell_to_string(payload)
-    parsed = json.loads(text)
-    assert parsed["amount"] == "1000.00"
-    assert parsed["precision"] == "0.0000000000001"
+    compact = text.replace(" ", "")
+    assert '"amount":1000.00' in compact
+    assert '"precision":0.0000000000001' in compact
+    parsed = json.loads(text, parse_float=Decimal)
+    assert parsed["amount"] == Decimal("1000.00")
+    assert parsed["precision"] == Decimal("0.0000000000001")
 
 
 def test_cell_to_string_decimal_scalar_is_text():
     assert cell_to_string(Decimal("1000.00")) == "1000.00"
     assert cell_to_string(Decimal("-999999999999999999.999999")) == "-999999999999999999.999999"
+
+
+def test_exact_number_dump_keeps_scale_and_digits_unquoted():
+    """An exported numeric column stays a JSON number, digit for digit."""
+    text = json_dumps_exact_numbers(
+        {
+            "amount": Decimal("1000.00"),
+            "precision": Decimal("0.0000000000001"),
+            "nested": [{"n": Decimal("-12.5")}],
+        }
+    )
+    assert '"amount": 1000.00' in text
+    assert '"precision": 0.0000000000001' in text
+    assert '"n": -12.5' in text
+    assert json.loads(text, parse_float=Decimal)["amount"] == Decimal("1000.00")
+
+
+def test_control_plane_codec_round_trips_decimal_one():
+    """The exact value that blocked start_transfer must encode and come back."""
+    import bson
+    from bson.errors import InvalidDocument
+
+    from services.value_serializer import control_plane_codec_options
+
+    doc = {"statistics": {"min": Decimal("1")}, "amount": Decimal("10.50")}
+    try:
+        bson.BSON.encode(doc)
+    except InvalidDocument as exc:
+        assert "Decimal('1')" in str(exc)
+    else:
+        raise AssertionError("bare Decimal must be rejected by BSON")
+
+    opts = control_plane_codec_options()
+    encoded = bson.BSON.encode(doc, codec_options=opts)
+    decoded = bson.BSON(encoded).decode(codec_options=opts)
+    assert decoded["statistics"]["min"] == Decimal("1")
+    assert decoded["amount"] == Decimal("10.50")
+    # On disk the carrier is Decimal128, not a float and not a string.
+    raw = bson.BSON(encoded).decode()
+    assert raw["statistics"]["min"].to_decimal() == Decimal("1")
+    wide = Decimal("1." + "1" * 40)
+    wide_doc = bson.BSON.encode({"n": wide}, codec_options=opts).decode()
+    assert wide_doc["n"] == str(wide)
+
+
+def test_bson_safe_document_encodes_decimals_exactly():
+    """A metadata document carrying Decimals must reach BSON without loss."""
+    import bson
+    from bson.decimal128 import Decimal128
+
+    doc = {
+        "amount": Decimal("1000.00"),
+        "rows": [Decimal("1"), {"nested": Decimal("-12.5")}],
+        "plain": "1000.00",
+    }
+    safe = bson_safe_document(doc)
+    assert isinstance(safe["amount"], Decimal128)
+    assert safe["amount"].to_decimal() == Decimal("1000.00")
+    assert safe["rows"][1]["nested"].to_decimal() == Decimal("-12.5")
+    assert safe["plain"] == "1000.00"
+    decoded = bson.BSON.encode(safe).decode()
+    assert decoded["amount"].to_decimal() == Decimal("1000.00")
+
+
+def test_bson_safe_document_keeps_overwide_decimal_digits_as_text():
+    """Wider than Decimal128 keeps its exact digits rather than rounding."""
+    wide = Decimal("1." + "1" * 40)
+    assert bson_safe_document(wide) == str(wide)
+
+
+def test_exact_number_dump_never_unquotes_a_string_cell():
+    payload = {"note": "1000.00", "raw": '\x00df0#12', "amt": Decimal("7")}
+    parsed = json.loads(json_dumps_exact_numbers(payload))
+    assert parsed["note"] == "1000.00"
+    assert parsed["raw"] == "\x00df0#12"
+    assert parsed["amt"] == 7

@@ -8,17 +8,34 @@ import { GENERIC_SQL_INFO } from "./genericSqlMap";
  * ``GET /transfer/capabilities`` via ``loadTransferLiveCatalog`` /
  * ``isTransferLiveType``. This set is used only for:
  *   - ``resolveCatalogIdToType`` alias routing before/without API
- *   - degraded readiness when capabilities fetch fails (honest offline mode)
+ *   - degraded readiness when capabilities fetch fails (honest offline mode).
+ *     `certified: False` brands stay in this set for form routing only;
+ *     `isTransferLiveType` and the error fallback exclude `CATALOG_PLANNED_DRIVER_TYPES`.
  */
 export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+  "yaml", "fixed_width",
   "pdf", "docx", "html",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "adls", "sqlite", "generic_sql", "sftp", "email", "sqlserver", "oracle",
   "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
+  "singer_tap",
+  "kafka",
   "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
   "iceberg",
+]);
+
+/**
+ * Backend `certified: False` — form routing still uses TRANSFER_LIVE_TYPES,
+ * but degraded `isTransferLiveType` must not greenwash them as transfer-live.
+ */
+export const CATALOG_PLANNED_DRIVER_TYPES = new Set([
+  "redshift",
+  "shopify",
+  "zendesk",
+  "notion",
+  "airtable",
 ]);
 
 export type TransferCapsState = "idle" | "loading" | "ready" | "error";
@@ -83,11 +100,13 @@ export async function loadTransferLiveCatalog(
       return unique;
     } catch {
       // Degraded: offline mirror only when API caps are unreachable.
-      _liveDriversFromCatalog = new Set(
-        [...TRANSFER_LIVE_TYPES].map((d) => d.toLowerCase()),
-      );
+      // Never greenwash certified:false brands as transfer-live.
+      const offline = [...TRANSFER_LIVE_TYPES]
+        .map((d) => d.toLowerCase())
+        .filter((d) => !CATALOG_PLANNED_DRIVER_TYPES.has(d) && d !== "email");
+      _liveDriversFromCatalog = new Set(offline);
       _capsState = "error";
-      return [...TRANSFER_LIVE_TYPES];
+      return offline;
     } finally {
       _capsLoadPromise = null;
     }
@@ -146,6 +165,13 @@ const CATALOG_ALIASES: Record<string, string> = {
   neon: "postgresql",
   timescaledb: "postgresql",
   cockroachdb: "postgresql",
+  openshift: "postgresql",
+  okd: "postgresql",
+  openshift_postgresql: "postgresql",
+  cloudnativepg: "postgresql",
+  cnpg: "postgresql",
+  crunchy_postgres: "postgresql",
+  crunchy_pgo: "postgresql",
   jsonl: "jsonl",
   ndjson: "ndjson",
 };
@@ -154,7 +180,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   postgresql: { host: "localhost", port: 5432 },
   mysql: { host: "localhost", port: 3306 },
   mongodb: { host: "localhost", port: 27017 },
-  snowflake: { host: "account.snowflakecomputing.com", port: 443 },
+  snowflake: { host: "", port: 443 },
   bigquery: { host: "bigquery.googleapis.com", port: 443 },
   redshift: { host: "localhost", port: 5439 },
   dynamodb: { host: "us-east-1", port: 443 },
@@ -173,7 +199,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   milvus: { host: "localhost", port: 19530 },
   iceberg: { host: "", port: 0 },
   // Instance URL only — login.salesforce.com cannot serve REST data APIs.
-  salesforce: { host: "https://yourorg.my.salesforce.com", port: 443 },
+  salesforce: { host: "", port: 443 },
   hubspot: { host: "api.hubapi.com", port: 443 },
   stripe: { host: "api.stripe.com", port: 443 },
   csv: { host: "", port: 0 },
@@ -191,6 +217,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   rest_api: { host: "", port: 443 },
   influxdb: { host: "localhost", port: 8086 },
   neo4j: { host: "localhost", port: 7474 },
+  kafka: { host: "localhost", port: 9092 },
   couchbase: { host: "localhost", port: 8093 },
 };
 
@@ -203,6 +230,9 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (TRANSFER_LIVE_TYPES.has(id) || CONNECT_ONLY_TYPES.has(id)) return id;
 
   const direct = CONNECTOR_CATALOG.find((c) => c.id === id);
+  if (direct && "sourceOnly" in direct && direct.sourceOnly) {
+    return direct.id;
+  }
   if (direct && (TRANSFER_LIVE_TYPES.has(direct.id) || CONNECT_ONLY_TYPES.has(direct.id))) {
     return direct.id;
   }
@@ -260,6 +290,7 @@ export function isGenericSql(id: string): boolean {
 export function isTransferLiveType(type: string): boolean {
   const id = (type || "").toLowerCase().trim();
   if (!id) return false;
+  if (CATALOG_PLANNED_DRIVER_TYPES.has(id)) return false;
   // Catalog SSOT when loaded (ready) or degraded offline mirror (error).
   if (_liveDriversFromCatalog && _liveDriversFromCatalog.size > 0) {
     return _liveDriversFromCatalog.has(id);
@@ -269,6 +300,7 @@ export function isTransferLiveType(type: string): boolean {
   if (_capsState === "idle" || _capsState === "loading") {
     return false;
   }
+  if (CATALOG_PLANNED_DRIVER_TYPES.has(id)) return false;
   return TRANSFER_LIVE_TYPES.has(id);
 }
 
@@ -304,6 +336,15 @@ export function getConnectorLabel(type: string, item?: { label?: string } | null
     });
 }
 
+/**
+ * Vendor spelling for a connector id — `postgresql` reads "PostgreSQL", never
+ * "Postgresql". Public pages render ids, so the catalog label is the only
+ * source that gets casing right; CSS `capitalize` cannot.
+ */
+export function connectorDisplayName(id: string): string {
+  return getConnectorLabel(id, CONNECTOR_CATALOG.find((c) => c.id === id));
+}
+
 export function getConnectorDefaults(type: string): { host: string; port: number; label: string } {
   const item = CONNECTOR_CATALOG.find((c) => c.id === type);
   const driver = resolveDriverType(type);
@@ -324,7 +365,7 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   }
 
   const base = BASE_DEFAULTS[driver] || { host: "localhost", port: 0 };
-  return { host: base.host, port: base.port, label };
+  return { host: base.host, port: base.port || item?.port || 0, label };
 }
 
 const REST_API_DEFAULT_HOSTS: Record<string, string> = {
@@ -389,6 +430,41 @@ export function getRestApiDefaultObject(type: string): string {
 
 export function isAwsConnector(type: string): boolean {
   return ["dynamodb", "s3", "redshift", "kinesis"].includes(type);
+}
+
+/** Port written into an http(s) endpoint, or 0 when the URL names none. */
+export function portInEndpointUrl(endpointUrl: string): number {
+  const raw = (endpointUrl || "").trim();
+  if (!raw) return 0;
+  try {
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const parsed = new URL(withScheme);
+    const port = Number(parsed.port);
+    return Number.isFinite(port) && port > 0 ? port : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Listen port saved with the connector.
+ *
+ * AWS and GCP forms used to stamp 443 even when the operator typed 9000, so
+ * MinIO host+port never reached the process that was listening. An endpoint
+ * URL that names a port is that port: the preview must match the URL the
+ * probe actually dials.
+ */
+export function connectorListenPort(
+  type: string,
+  port: number | string | null | undefined,
+  endpointUrl = "",
+): number {
+  const fromUrl = portInEndpointUrl(endpointUrl);
+  if (fromUrl > 0) return fromUrl;
+  const chosen = Number(port);
+  if (Number.isFinite(chosen) && chosen > 0) return chosen;
+  if (isGcpConnector(type) || isAwsConnector(type)) return 443;
+  return 0;
 }
 
 export function isGcpConnector(type: string): boolean {

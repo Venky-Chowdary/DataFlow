@@ -1,15 +1,17 @@
-﻿"""Encoding / collation evidence surfaces as first-class G3/G9 signals."""
+"""Encoding / collation evidence surfaces as first-class G3/G9 signals."""
 
 from services.data_integrity import run_integrity_audit
 from services.type_system import is_case_insensitive_collation, unique_equality_key
 
 
 def test_encoding_control_char_blocks_g9_path_strict():
-    """Format-control chars produce encoding_anomalies that G9 consumes."""
+    """Control chars produce encoding_anomalies that G9 consumes. A format
+    char beside them (U+200B) is reported in the same finding (D69: alone it
+    only warns)."""
     report = run_integrity_audit(
         source_columns=["title"],
         mappings=[{"source": "title", "target": "title", "confidence": 0.99}],
-        sample_rows=[{"title": "hello\u200bworld"}],
+        sample_rows=[{"title": "hello\u200bworld\x00"}],
         validation_mode="strict",
     )
     enc = next(c for c in report["checks"] if c["check"] == "encoding_anomalies")

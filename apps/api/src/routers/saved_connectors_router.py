@@ -14,13 +14,16 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from services.rbac import require_admin_connector_access
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.connector_store import (
+    connector_ui_status,
     create_connector,
     delete_connector,
     get_connector,
@@ -29,7 +32,8 @@ from services.connector_store import (
     mask_connector,
     update_connector,
 )
-from services.team_store import can_read_workspace, can_write_workspace
+from services.workspace_access import resolve_write_workspace, tenant_scope
+from services.connector_telemetry import connector_operation, driver_family
 
 router = APIRouter(prefix="/connectors/saved", tags=["Saved Connectors"])
 
@@ -57,45 +61,113 @@ class ConnectorSaveDTO(BaseModel):
     endpoint_url: str = ""
     path_style: bool = False
     auth_source: str = ""
+    # SFTP trust. The probe tells the operator to save a host-key pin, and the
+    # store already lifts these into ``extra``. They have to be on the DTO or
+    # Pydantic drops them before create/update.
+    host_key: str = ""
+    known_hosts: str = ""
+    host_key_policy: str = ""
+    # SQL Server (generic_sql/ODBC): operator-declared skip of chain
+    # verification for self-signed / private-CA servers. None = unchanged.
+    trust_server_certificate: bool | None = None
+    # Kafka source consumer group (D84). Empty = a group per route.
+    group_id: str = ""
+    # Connector-specific fields outside the canonical set — SaaS/SDK drivers
+    # (site, email, api_token, dc, board_id, …). The store persists them under
+    # ``extra`` and the transfer engine merges them into the driver config.
+    extra: dict[str, Any] = Field(default_factory=dict)
     # Optional: persist an in-form Test result so the list matches on first save.
     last_test_ok: bool | None = None
+
+    @model_validator(mode="after")
+    def _request_bounds(self) -> "ConnectorSaveDTO":
+        from services.connector_request_limits import connector_request_errors
+
+        err = connector_request_errors(
+            name=self.name,
+            db_type=self.type,
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            username=self.username,
+            schema=self.db_schema,
+            connection_string=self.connection_string,
+            require_name=True,
+        )
+        if err:
+            raise ValueError(err)
+        return self
+
+
+class ConnectorPatchDTO(BaseModel):
+    """Partial edit: every field optional; an absent or null field is unchanged.
+
+    PUT replaces the whole connector, so a client sending one field reset every
+    other one to its default. PATCH merges over the stored row (QA round 11,
+    P4); the merged connector passes the same request bounds as a save.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    name: str | None = None
+    type: str | None = None
+    role: str | None = None
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    username: str | None = None
+    password: str | None = None
+    db_schema: str | None = Field(default=None, alias="schema")
+    connection_string: str | None = None
+    ssl: bool | None = None
+    warehouse: str | None = None
+    auth_mode: str | None = None
+    auth_role: str | None = None
+    api_key: str | None = None
+    service_account: str | None = None
+    private_key: str | None = None
+    endpoint_url: str | None = None
+    path_style: bool | None = None
+    auth_source: str | None = None
+    host_key: str | None = None
+    known_hosts: str | None = None
+    host_key_policy: str | None = None
+    trust_server_certificate: bool | None = None
+    group_id: str | None = None
+    # Connector-specific fields (SaaS/SDK extras) — replaces the stored set.
+    extra: dict[str, Any] | None = None
 
 
 def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def _writable_connector_or_404(request: Request, conn: Any) -> Any:
+    """404 an invisible connector, 403 one the actor may only read."""
+    if not conn or not _can_access_connector(request, conn, write=True):
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if not tenant_scope(request).can_write(conn.workspace_id):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return conn
+
+
 def _resolve_workspace(
     request: Request,
     x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> str:
-    """Return the workspace id after verifying the actor can read it."""
-    workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Access to workspace denied")
-    return workspace_id
+    """The header scope after the tenant resolver authorized it ("" = none).
 
-
-def _require_write_workspace(
-    request: Request,
-    x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
-) -> str:
-    """Return the workspace id after verifying the actor can write to it."""
-    workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Write access to workspace denied")
-    return workspace_id
+    Platform admins may name any workspace; anyone else gets a 403 for a
+    workspace they are not a member of. Which rows the caller then sees is
+    ``_can_access_connector``'s job.
+    """
+    return tenant_scope(request, x_workspace_id).requested_workspace_id
 
 
 def _to_ui(c) -> dict[str, Any]:
     d = mask_connector(c)
     d["id"] = d["id"]
-    if c.last_test_ok is True:
-        d["status"] = "configured"
-    elif c.last_test_ok is False and c.last_tested_at:
-        d["status"] = "error"
-    else:
-        d["status"] = "configured"
+    d["status"] = connector_ui_status(c)
     return d
 
 
@@ -129,25 +201,42 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
             out[field] = getattr(existing, field)
     if _is_masked_value(out.get("connection_string")) and getattr(existing, "connection_string", None):
         out["connection_string"] = existing.connection_string
+    # Masked secrets inside ``extra`` (SaaS api_token, secret_key, …) are
+    # placeholders too — restore the stored value or the re-save overwrites
+    # the real credential with ``****``.
+    extra = out.get("extra")
+    existing_extra = getattr(existing, "extra", None) or {}
+    if isinstance(extra, dict) and isinstance(existing_extra, dict):
+        out_extra = dict(extra)
+        for key, item in out_extra.items():
+            if _is_masked_value(item) and existing_extra.get(key):
+                out_extra[key] = existing_extra[key]
+        out["extra"] = out_extra
     return out
 
 
-def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see or mutate this connector (workspace + optional ACL)."""
+def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -> bool:
+    """True if the actor may see this connector (with ``write``: may change it).
+
+    Workspace visibility is the request's tenant scope (D154): members of the
+    connector's workspace, platform admins, and — only while isolation is not
+    enforced — anyone for an unscoped legacy connector. A per-resource ACL can
+    restrict further; changing the connector needs an editor grant there.
+    """
     actor = _actor_email(request)
-    if conn.workspace_id and not can_read_workspace(conn.workspace_id, actor):
+    scope = tenant_scope(request)
+    is_admin = scope.unrestricted
+    if not scope.allows(conn.workspace_id):
         return False
     try:
         from services.resource_acl import assert_resource_acl
 
-        user = getattr(request.state, "user", None) or {}
-        is_admin = str(user.get("role") or "").lower() == "admin"
         assert_resource_acl(
             tenant_id=conn.workspace_id or "",
             resource_type="connector",
             resource_id=str(getattr(conn, "id", "") or ""),
             principal=actor,
-            min_role="viewer",
+            min_role="editor" if write else "viewer",
             is_admin=is_admin,
         )
     except PermissionError:
@@ -164,13 +253,10 @@ def get_saved_connectors(
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _resolve_workspace(request, workspace_id)
+    _resolve_workspace(request, workspace_id)
+    conns = list_connectors(role)
     return {
-        "connectors": [
-            _to_ui(c)
-            for c in list_connectors(role, workspace_id=workspace_id)
-            if _can_access_connector(request, c)
-        ]
+        "connectors": [_to_ui(c) for c in conns if _can_access_connector(request, c)]
     }
 
 
@@ -195,13 +281,38 @@ def _persist_form_test_status(connector_id: str, last_test_ok: bool | None) -> N
         mark_tested(connector_id, False)
 
 
+def _refuse_unsafe_egress(data: dict[str, Any], existing: Any = None) -> None:
+    """Refuse to persist a connector whose dial targets break the egress policy.
+
+    Audit-first for private hosts and never applied to an unchanged target
+    (``connector_save_refusal``); metadata and link-local always refuse.
+    """
+    from services.egress_guard import connector_save_refusal
+
+    refusal = connector_save_refusal(data, existing)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+    from connectors.sftp_common import sftp_edit_port_error
+
+    # D208: a URL-shaped SFTP host and a port field that disagree.
+    conflict = sftp_edit_port_error(
+        data.get("type") or getattr(existing, "type", ""),
+        data.get("host"),
+        data.get("port"),
+        getattr(existing, "port", None) if existing is not None else None,
+    )
+    if conflict:
+        raise HTTPException(status_code=400, detail=conflict)
+
+
 @router.post("")
 def save_connector(
     body: ConnectorSaveDTO,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = resolve_write_workspace(request, workspace_id)
+    require_admin_connector_access(request, body.type)
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
@@ -214,6 +325,7 @@ def save_connector(
             break
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
+    _refuse_unsafe_egress(data, existing)
     conn = create_connector(data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
@@ -227,18 +339,66 @@ def update_saved_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = _resolve_workspace(request, workspace_id)
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     existing = get_connector(connector_id, workspace_id=workspace_id)
-    if not existing or not _can_access_connector(request, existing):
-        raise HTTPException(status_code=404, detail="Connector not found")
+    _writable_connector_or_404(request, existing)
+    require_admin_connector_access(request, body.type, existing.type)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
+    _refuse_unsafe_egress(data, existing)
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     _persist_form_test_status(connector_id, form_test)
+    refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
+    return _to_ui(refreshed)
+
+
+@router.patch("/{connector_id}")
+def patch_saved_connector(
+    connector_id: str,
+    body: ConnectorPatchDTO,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Change only the fields named; RBAC, secrets and egress exactly as PUT."""
+    workspace_id = _resolve_workspace(request, workspace_id)
+    existing = get_connector(connector_id, workspace_id=workspace_id)
+    _writable_connector_or_404(request, existing)
+    patch = {
+        k: v for k, v in body.model_dump(by_alias=True, exclude_unset=True).items() if v is not None
+    }
+    # A masked / empty secret is "unchanged" — never written over the saved one.
+    for field in (*_Secret_fields, "connection_string"):
+        if field in patch and _is_masked_value(patch[field]):
+            patch.pop(field)
+    stored = existing.to_dict()
+    merged = {**stored, **patch}
+    from services.connector_request_limits import connector_request_errors
+
+    err = connector_request_errors(
+        name=str(merged.get("name") or ""),
+        db_type=str(merged.get("type") or ""),
+        host=str(merged.get("host") or ""),
+        port=merged.get("port"),
+        database=str(merged.get("database") or ""),
+        username=str(merged.get("username") or ""),
+        schema=str(merged.get("schema") or ""),
+        connection_string=str(merged.get("connection_string") or ""),
+        require_name=True,
+    )
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    require_admin_connector_access(request, merged.get("type"), existing.type)
+    if not patch:
+        return _to_ui(existing)
+    _refuse_unsafe_egress(merged, existing)
+    patch["workspace_id"] = existing.workspace_id or workspace_id
+    updated = update_connector(connector_id, patch, workspace_id=workspace_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Connector not found")
     refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
     return _to_ui(refreshed)
 
@@ -249,10 +409,9 @@ def remove_saved_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = _resolve_workspace(request, workspace_id)
     conn = get_connector(connector_id, workspace_id=workspace_id)
-    if not conn or not _can_access_connector(request, conn):
-        raise HTTPException(status_code=404, detail="Connector not found")
+    _writable_connector_or_404(request, conn)
     if not delete_connector(connector_id, workspace_id=workspace_id):
         raise HTTPException(status_code=404, detail="Connector not found")
     return {"ok": True}
@@ -284,10 +443,9 @@ def rotate_saved_connector_secrets(
 
     from services.audit_log import actor_from_request, append_audit_event
 
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = _resolve_workspace(request, workspace_id)
     existing = get_connector(connector_id, workspace_id=workspace_id)
-    if not existing or not _can_access_connector(request, existing):
-        raise HTTPException(status_code=404, detail="Connector not found")
+    _writable_connector_or_404(request, existing)
 
     payload = body.model_dump(exclude_none=True)
     if not payload:
@@ -331,7 +489,7 @@ def rotate_saved_connector_secrets(
             details={
                 "fields": sorted(k for k in payload if k != "credentials_rotated_at"),
                 "pool_invalidated": pool_invalidated,
-                "credentials_rotated_at": rotated_at,
+                "rotation_timestamp": rotated_at,
             },
         )
     except Exception:
@@ -357,10 +515,21 @@ def test_saved_connector(
     conn = get_connector(connector_id, workspace_id=workspace_id)
     if not conn or not _can_access_connector(request, conn):
         raise HTTPException(status_code=404, detail="Connector not found")
+    require_admin_connector_access(request, conn.type)
 
     from services.connector_probe import probe_saved_connector
 
-    ok, message, cfg = probe_saved_connector(connector_id, workspace_id=workspace_id)
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(conn.type or ""),
+        surface="saved_test",
+        connector_id=connector_id,
+    ):
+        ok, message, cfg = probe_saved_connector(
+            connector_id,
+            workspace_id=workspace_id,
+            surface="saved_test",
+        )
 
     # Persist any auto-resolved auth fields (e.g., MongoDB authSource) so the
     # saved connector works end-to-end without re-entering the connection string.
@@ -368,4 +537,11 @@ def test_saved_connector(
         update_connector(connector_id, {"auth_source": cfg.get("auth_source", "")}, workspace_id=workspace_id)
 
     mark_tested(connector_id, ok)
-    return {"success": ok, "message": message, "auth_source": cfg.get("auth_source", "")}
+    # Echo last_test_ok so the UI can patch the list immediately — never leave a
+    # sticky "Test failed" badge after a green probe (Test-all vs individual drift).
+    return {
+        "success": ok,
+        "message": message,
+        "last_test_ok": ok,
+        "auth_source": cfg.get("auth_source", ""),
+    }

@@ -8,6 +8,7 @@ Writes ``apps/api/data/proofs/universal_bind_wire_matrix.json`` with pass/fail c
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import sys
@@ -48,7 +49,7 @@ from tests.universal_bind_samples import (  # noqa: E402
     TOP_CONNECTOR_DESTS,
 )
 
-_PROOF = _API_ROOT / "data" / "proofs" / "universal_bind_wire_matrix.json"
+_PROOF = data_dir() / "proofs" / "universal_bind_wire_matrix.json"
 
 # Destinations that reject ISO-Z string literals for temporal DDL (SQL bind class).
 _SQL_BIND_ENGINES = frozenset({

@@ -1,0 +1,116 @@
+{
+  "name": "jira",
+  "docs": "https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/",
+  "base_url": "https://{site}.atlassian.net",
+  "auth": {
+    "type": "basic"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "issues",
+      "path": "rest/api/3/search/jql",
+      "records_path": "issues",
+      "primary_key": [
+        "id"
+      ],
+      "request_params": {
+        "jql": "ORDER BY updated ASC"
+      },
+      "cursor": {
+        "field": "fields.updated",
+        "request_param": "jql",
+        "format": "iso8601",
+        "lookback_s": 60,
+        "request_template": "updated >= \"{cursor:%Y/%m/%d %H:%M}\" ORDER BY updated ASC"
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 100,
+        "page_size_param": "maxResults",
+        "cursor_param": "nextPageToken",
+        "cursor_path": "nextPageToken"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "status": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "projects",
+      "path": "rest/api/3/project/search",
+      "records_path": "values",
+      "primary_key": [
+        "id"
+      ],
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "maxResults",
+        "offset_param": "startAt",
+        "stop_path": "isLast"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "projectTypeKey": {
+            "type": "string"
+          },
+          "isPrivate": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  ]
+}

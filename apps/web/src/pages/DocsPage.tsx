@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { DocsShotReel } from "../components/docs/DocsShotReel";
+import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { StatCard } from "../components/ui/StatCard";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { fetchCatalogStats } from "../lib/api";
+import { isHelpDocRoute, type HelpDocId } from "../lib/helpDocs";
+import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
+import { DocArticlePage, DocsPortal } from "./marketing/DocsPortal";
 
 interface CatalogStats {
   total: number;
@@ -88,13 +92,9 @@ const WORKSPACE_SHOTS = [
 ] as const;
 
 function DocsHero({
-  transferLive,
-  total,
   activeSection,
   onJump,
 }: {
-  transferLive: number;
-  total: number;
   activeSection: string;
   onJump: (id: string) => void;
 }) {
@@ -106,34 +106,25 @@ function DocsHero({
         </span>
         <h2 className="df2-docs-hero-title">Move any schema anywhere — proven.</h2>
         <p className="df2-docs-hero-sub">
-          One governed path — map, preflight G1–G8, write with quarantine, and checksum reconcile —
+          One governed path — map, preflight G1–G9, write with quarantine, and checksum reconcile —
           so every surface (Studio, Pipelines, Pilot, MCP) proves the load.
         </p>
         <div className="df2-docs-hero-actions">
-          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => onJump("pipeline")}>
-            <DtIcon name="transfer" size={14} /> How a transfer runs
-          </button>
-          <button type="button" className="df2-btn df2-btn-sm" onClick={() => onJump("preflight")}>
-            <DtIcon name="shield" size={14} /> Preflight gates
-          </button>
-        </div>
-        <div className="df2-docs-hero-stats">
-          <div className="df2-docs-hero-stat">
-            <strong>{transferLive.toLocaleString()}</strong>
-            <span>Transfer-ready drivers</span>
-          </div>
-          <div className="df2-docs-hero-stat">
-            <strong>{total.toLocaleString()}</strong>
-            <span>Catalog tiles</span>
-          </div>
-          <div className="df2-docs-hero-stat">
-            <strong>8</strong>
-            <span>Preflight gates</span>
-          </div>
-          <div className="df2-docs-hero-stat">
-            <strong>0</strong>
-            <span>Silent drops by design</span>
-          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => onJump("pipeline")}
+            leadingIcon={<DtIcon name="transfer" size={14} />}
+          >
+            How a transfer runs
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => onJump("preflight")}
+            leadingIcon={<DtIcon name="shield" size={14} />}
+          >
+            Preflight gates
+          </Button>
         </div>
       </div>
       <nav className="df2-docs-hero-progress" aria-label="On this page">
@@ -200,12 +191,12 @@ function ArchitectureDiagram() {
       >
         <defs>
           <linearGradient id="df2-docs-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#14b8a6" />
-            <stop offset="55%" stopColor="#0d9488" />
-            <stop offset="100%" stopColor="#0f766e" />
+            <stop offset="0%" stopColor="var(--df-logo-arrow)" />
+            <stop offset="55%" stopColor="var(--df-logo-ink)" />
+            <stop offset="100%" stopColor="var(--df-logo-tile)" />
           </linearGradient>
           <marker id="df2-docs-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-            <path d="M0,0 L0,6 L9,3 z" fill="#0d9488" />
+            <path d="M0,0 L0,6 L9,3 z" fill="var(--df-logo-ink)" />
           </marker>
           <filter id="df2-docs-soft" x="-20%" y="-20%" width="140%" height="140%">
             <feDropShadow dx="0" dy="4" stdDeviation="6" floodColor="#0f172a" floodOpacity="0.08" />
@@ -286,7 +277,7 @@ function ArchitectureDiagram() {
         </div>
         <div className="df2-docs-legend-item">
           <span className="df2-docs-legend-dot df2-docs-legend-dot--amber" />
-          <span>Streaming / CDC</span>
+          <span>Streaming / CDC (at-least-once)</span>
         </div>
         <div className="df2-docs-legend-item">
           <span className="df2-docs-legend-dot df2-docs-legend-dot--teal" />
@@ -400,8 +391,8 @@ function TrustPillars() {
   const pillars = [
     {
       icon: "shield",
-      title: "Zero data loss",
-      desc: "Every field is tracked from source to target. Rejected rows are quarantined, not silently dropped.",
+      title: "No silent data loss",
+      desc: "Every field is tracked from source to target. Rejected rows are quarantined and surfaced, never dropped quietly — a run that cannot account for a row fails instead of reporting green.",
     },
     {
       icon: "key",
@@ -444,7 +435,37 @@ function UseCase({ title, body }: { title: string; body: string }) {
   );
 }
 
-export function DocsPage() {
+/** Signed-in `#/help` / `#/help/<slug>` — same articles as marketing, app chrome not MarketingSite. */
+function WorkspaceHelp({
+  article,
+  onOpenTransfer,
+}: {
+  article: HelpDocId | "help";
+  onOpenTransfer?: () => void;
+}) {
+  const navigateHelp = (route: PublicRoute) => {
+    if (route === "help" || isHelpDocRoute(route)) {
+      window.location.hash = hashForPublicRoute(route);
+    }
+  };
+  const onGetStarted = () => onOpenTransfer?.();
+  return (
+    <div className="df2-workspace-docs">
+      {article === "help" ? (
+        <DocsPortal onNavigate={navigateHelp} onGetStarted={onGetStarted} />
+      ) : (
+        <DocArticlePage
+          docId={article}
+          onNavigate={navigateHelp}
+          onGetStarted={onGetStarted}
+          hideMarketingCta
+        />
+      )}
+    </div>
+  );
+}
+
+function DocsWalkthrough() {
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [statsError, setStatsError] = useState(false);
   const [activeSection, setActiveSection] = useState<string>(DOC_SECTIONS[0].id);
@@ -460,8 +481,8 @@ export function DocsPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live ?? 130;
-  const total = stats?.total ?? 734;
+  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live;
+  const total = stats?.catalog_tiles ?? stats?.total;
 
   return (
     <PageShell
@@ -471,7 +492,7 @@ export function DocsPage() {
       className="df2-page-docs"
     >
       <PageFrame className="df2-docs-workspace">
-      <DocsHero transferLive={transferLive} total={total} activeSection={activeSection} onJump={jumpTo} />
+      <DocsHero activeSection={activeSection} onJump={jumpTo} />
 
       <div className="df2-docs-shell">
         <aside className="df2-docs-toc" aria-label="Documentation sections">
@@ -491,10 +512,18 @@ export function DocsPage() {
             ))}
           </nav>
           <div className="df2-docs-toc-card">
+            {/* The headline number is the live one. A catalog tile is not a
+                transfer-live driver, so it never gets the dominant type. */}
             <StatCard
-              label="Connector catalog"
-              value={total.toLocaleString()}
-              sub={statsError ? "Catalog offline" : `${transferLive.toLocaleString()} transfer-ready`}
+              label="Transfer-ready drivers"
+              value={statsError || transferLive == null ? "—" : transferLive.toLocaleString()}
+              sub={
+                statsError
+                  ? "Catalog offline"
+                  : transferLive == null || total == null
+                    ? "Loading catalog honesty…"
+                    : `of ${total.toLocaleString()} catalog tiles — tiles are not transfer-live`
+              }
               icon="database"
               tone="blue"
             />
@@ -517,13 +546,16 @@ export function DocsPage() {
                 <strong>Connectors</strong> — add or test sources/destinations; watch Test passed vs failed.
               </li>
               <li>
-                <strong>Transfer Studio</strong> — Source → Destination → Map → Validate → Run.
+                <strong>Transfer Studio</strong> — Source → Destination → Transform → Map → Validate → Run.
               </li>
               <li>
                 <strong>Job Theater</strong> — open the job and verify reconcile / row fidelity.
               </li>
               <li>
                 <strong>Query / Pilot</strong> — inspect data or triage failures in plain language.
+              </li>
+              <li>
+                <strong>Settings → Team</strong> — Viewer / Editor / Admin (there is no Owner role). Workspace switch is live across Settings and the top bar.
               </li>
             </ol>
             <DocsShotReel
@@ -698,4 +730,18 @@ export function DocsPage() {
       </PageFrame>
     </PageShell>
   );
+}
+
+/** Help nav (`#/docs`) is the walkthrough. Pilot citations (`#/help/<slug>`) reuse the article SSOT. */
+export function DocsPage({
+  helpArticle = null,
+  onOpenTransfer,
+}: {
+  helpArticle?: HelpDocId | "help" | null;
+  onOpenTransfer?: () => void;
+}) {
+  if (helpArticle) {
+    return <WorkspaceHelp article={helpArticle} onOpenTransfer={onOpenTransfer} />;
+  }
+  return <DocsWalkthrough />;
 }

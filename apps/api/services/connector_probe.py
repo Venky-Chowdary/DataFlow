@@ -7,7 +7,14 @@ call the same ``run_probe(type, cfg)`` with the same decrypted secrets.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+from services.connector_auth import engine_login_role
+from services.connector_telemetry import connector_operation, driver_family
+from services.ops_events import emit_event
+
+_LOG = logging.getLogger("dataflow.connector")
 
 
 def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
@@ -22,7 +29,12 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         def get(key: str, default: Any = "") -> Any:
             return getattr(conn, key, default)
 
-    return {
+    extra = get("extra") if isinstance(get("extra"), dict) else {}
+    raw = conn if isinstance(conn, dict) else {"extra": extra}
+    from connectors.sftp_common import host_key_settings
+
+    trust = {k: v for k, v in host_key_settings({**extra, **raw}).items() if v}
+    cfg = {
         "host": get("host") or "",
         "port": int(get("port") or 0),
         "database": get("database") or "",
@@ -33,8 +45,8 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         "warehouse": get("warehouse") or "",
         "ssl": bool(get("ssl")),
         "auth_mode": get("auth_mode") or "",
-        "auth_role": get("auth_role") or "",
-        "role": get("auth_role") or get("role") or "",
+        "auth_role": engine_login_role(get("auth_role")),
+        "role": engine_login_role(get("auth_role")),
         "api_key": get("api_key") or "",
         "service_account": get("service_account") or "",
         "private_key": get("private_key") or "",
@@ -43,12 +55,17 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         "auth_source": get("auth_source") or "",
         "type": get("type") or "",
     }
+    if extra:
+        cfg["extra"] = dict(extra)
+    cfg.update(trust)
+    return cfg
 
 
 def probe_saved_connector(
     connector_id: str,
     *,
     workspace_id: str | None = None,
+    surface: str = "saved_connector",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Live connectivity probe identical to Connectors Test for a saved id.
 
@@ -58,38 +75,124 @@ def probe_saved_connector(
     from services.connector_store import get_connector
 
     conn = get_connector(connector_id, workspace_id=workspace_id)
-    if not conn:
-        return False, f"Connector '{connector_id}' not found", {}
+    if conn is None and workspace_id:
+        # The connector was already resolved by exact id before this probe —
+        # a stored workspace value that disagrees with the caller's scope must
+        # not make an addressable doc "not found" (X-24). The scope narrows a
+        # lookup; it cannot be the reason an id that resolved stops resolving.
+        conn = get_connector(connector_id, workspace_id=None)
+        if conn is not None:
+            # Tenancy: the retry only heals a same-scope miss. A doc stored
+            # under a *different* workspace than the caller's claim is not the
+            # caller's to probe — fail closed (X-24 P2 hardening).
+            doc_ws = (getattr(conn, "workspace_id", None) or "").strip() or None
+            if doc_ws and doc_ws != workspace_id:
+                conn = None
+    raw_doc: dict[str, Any] | None = None
+    if conn is None:
+        # Some deployments list connectors through mongodb_service while the
+        # store layer misses the same doc (file fallback, collection shape).
+        # The probe must resolve any id list_connectors can show (X-24).
+        try:
+            from services.connector_store import _doc_to_connector
+            from services.mongodb_service import get_mongodb_service
 
-    password = conn.password or ""
-    conn_str = conn.connection_string or ""
-    if "[encrypted-secret-unavailable]" in password or "[decryption-failed]" in password:
-        return (
-            False,
-            (
-                "Saved credentials cannot be decrypted. Re-enter the password or "
-                "connection string on the Connectors page, then Test again."
-            ),
-            {},
-        )
-    if "[encrypted-secret-unavailable]" in conn_str or "[decryption-failed]" in conn_str:
-        return (
-            False,
-            (
-                "Saved connection string cannot be decrypted. Re-enter it on the "
-                "Connectors page, then Test again."
-            ),
-            {},
-        )
+            raw = get_mongodb_service().get_connector(connector_id)
+            if isinstance(raw, dict):
+                # Same tenancy gate as the scoped retry: a raw doc under a
+                # workspace the caller did not claim is not visible here.
+                doc_ws = (raw.get("workspace_id") or "").strip() or None
+                if workspace_id and doc_ws and doc_ws != workspace_id:
+                    raw = None
+            if isinstance(raw, dict):
+                try:
+                    conn = _doc_to_connector(raw)
+                except Exception as exc:
+                    # The doc exists — it resolved for the list path — but its
+                    # record cannot be materialized (e.g. an undecryptable
+                    # stored credential). "Not found" lies about that (X-24).
+                    raw_doc = raw
+                    _LOG.warning(
+                        "connector probe: doc %s could not be materialized: %s",
+                        connector_id,
+                        type(exc).__name__,  # never exc text: decrypt errors may carry secret material
+                    )
+        except Exception:
+            conn = None
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(getattr(conn, "type", "") if conn else ""),
+        surface=surface,
+        connector_id=connector_id,
+    ) as op:
+        if not conn:
+            if raw_doc is not None:
+                op.failed(category="record_unreadable")
+                return (
+                    False,
+                    f"Connector '{connector_id}' exists but its saved record "
+                    "could not be read (a stored field is malformed — usually "
+                    "an undecryptable credential). Re-save it from the "
+                    "Connectors UI, then Test again.",
+                    {},
+                )
+            op.failed(category="not_found")
+            return False, f"Connector '{connector_id}' not found", {}
 
-    from src.transfer.connector_registry import run_probe
+        password = conn.password or ""
+        conn_str = conn.connection_string or ""
+        if "[encrypted-secret-unavailable]" in password or "[decryption-failed]" in password:
+            emit_event(
+                _LOG,
+                "connector.secret.undecryptable",
+                outcome="failed",
+                level=logging.ERROR,
+                driver_family=driver_family(conn.type or ""),
+                connector_id=connector_id,
+                affected_field="password",
+            )
+            op.failed(category="secret_undecryptable")
+            return (
+                False,
+                (
+                    "Saved credentials cannot be decrypted. Re-enter the password or "
+                    "connection string on the Connectors page, then Test again."
+                ),
+                {},
+            )
+        if "[encrypted-secret-unavailable]" in conn_str or "[decryption-failed]" in conn_str:
+            emit_event(
+                _LOG,
+                "connector.secret.undecryptable",
+                outcome="failed",
+                level=logging.ERROR,
+                driver_family=driver_family(conn.type or ""),
+                connector_id=connector_id,
+                affected_field="connection_string",
+            )
+            op.failed(category="secret_undecryptable")
+            return (
+                False,
+                (
+                    "Saved connection string cannot be decrypted. Re-enter it on the "
+                    "Connectors page, then Test again."
+                ),
+                {},
+            )
 
-    cfg = probe_cfg_from_saved(conn)
-    try:
-        ok, message = run_probe(conn.type or "", cfg)
-    except Exception as exc:
-        return False, f"Connection failed: {exc}", cfg
-    return ok, message, cfg
+        from src.transfer.connector_registry import humanize_connection_error, run_probe
+
+        cfg = probe_cfg_from_saved(conn)
+        try:
+            ok, message = run_probe(conn.type or "", cfg)
+        except Exception as exc:
+            op.errored(exc)
+            return False, humanize_connection_error(conn.type or "", exc), cfg
+        if ok:
+            op.succeeded()
+        elif not op.outcome:
+            op.failed(category="probe_failed")
+        return ok, message, cfg
 
 
 def endpoint_from_saved_connector(
@@ -100,9 +203,18 @@ def endpoint_from_saved_connector(
     schema: str = "",
     database: str = "",
     workspace_id: str | None = None,
+    override_acknowledged: bool = False,
 ):
-    """Build an EndpointConfig from the saved connector (credentials never empty)."""
+    """Build an EndpointConfig from the saved connector (credentials never empty).
+
+    The saved connector owns the destination identity; an inline Studio
+    ``database`` only wins under :mod:`services.destination_identity` precedence,
+    and the outcome is stamped on ``extra['destination_identity']`` so Validate
+    and Execute resolve to the same target and can show the operator which
+    value won.
+    """
     from services.connector_store import get_connector
+    from services.destination_identity import resolve_destination_database
     from src.transfer.models import EndpointConfig
 
     conn = get_connector(connector_id, workspace_id=workspace_id)
@@ -112,13 +224,25 @@ def endpoint_from_saved_connector(
     from services.dialect_profiles import normalize_schema
 
     db_type = (conn.type or "").lower()
+    identity = resolve_destination_database(
+        saved_database=cfg["database"] or "",
+        requested_database=database,
+        db_type=db_type,
+        override_acknowledged=override_acknowledged,
+    )
+    extra = dict(cfg.get("extra") or {}) if isinstance(cfg.get("extra"), dict) else {}
+    extra["destination_identity"] = identity.as_dict()
+    from connectors.sftp_common import host_key_settings
+
+    extra.update({k: v for k, v in host_key_settings(cfg).items() if v})
     return EndpointConfig(
+        extra=extra,
         kind="database",
         format=db_type,
         connector_id=connector_id,
         host=cfg["host"],
         port=int(cfg["port"] or 0),
-        database=database or cfg["database"] or "",
+        database=identity.database,
         schema=normalize_schema(
             db_type,
             schema or cfg.get("schema") or "",
