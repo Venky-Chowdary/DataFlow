@@ -1,0 +1,200 @@
+/**
+ * Jobs → Studio: plan how to reopen a job's route (Source + Destination) from
+ * its stored transfer_request. Pure, so every source/destination shape is
+ * covered by tests rather than by one clicked-through route.
+ *
+ * Job documents come back with secrets masked, so an inline connection (MCP,
+ * API) cannot be replayed as-is; it is matched to a saved connector by
+ * type + host + port + database instead.
+ */
+import type { Connector } from "./types";
+
+type Endpoint = Record<string, unknown>;
+
+export type JobRouteSource =
+  | { kind: "connector"; connectorId: string; connectorType: string; table: string; collection: string }
+  | { kind: "journal"; journalId: string; stream: string }
+  | { kind: "stored_file"; fileId: string; filename: string }
+  | { kind: "missing"; reason: "inline_file" | "unsaved_connection" | "ambiguous_connection"; label: string };
+
+export type JobRouteDestination =
+  | { kind: "file_export"; format: string; outputPath: string; database: string }
+  | {
+    kind: "database";
+    connectorId: string;
+    type: string;
+    connectionString: string;
+    database: string;
+    table: string;
+    /** No saved connector and no replayable connection: the operator must pick one. */
+    missingLabel: string;
+  };
+
+export interface JobStudioRoutePlan {
+  syncMode: string;
+  source: JobRouteSource;
+  destination: JobRouteDestination;
+}
+
+const text = (v: unknown): string => (typeof v === "string" ? v : "");
+
+const TYPE_ALIASES: Record<string, string> = {
+  postgres: "postgresql",
+  pg: "postgresql",
+  mssql: "sqlserver",
+  sql_server: "sqlserver",
+  mongo: "mongodb",
+  mariadb: "mysql",
+};
+
+function normType(t: string): string {
+  const base = t.trim().toLowerCase().split("+")[0];
+  return TYPE_ALIASES[base] ?? base;
+}
+
+const DEFAULT_PORTS: Record<string, number> = {
+  postgresql: 5432,
+  mysql: 3306,
+  sqlserver: 1433,
+  oracle: 1521,
+  mongodb: 27017,
+};
+
+interface Address {
+  type: string;
+  host: string;
+  port: number;
+  database: string;
+}
+
+/** Host/port/database of an endpoint, from its fields or its (masked) URL. */
+export function endpointAddress(ep: Endpoint): Address {
+  let type = normType(text(ep.format) || text(ep.type) || text(ep.db_type));
+  let host = text(ep.host);
+  let port = typeof ep.port === "number" ? ep.port : Number(text(ep.port)) || 0;
+  let database = text(ep.database);
+  const url = text(ep.connection_string);
+  if (url.includes("://")) {
+    try {
+      // Masked passwords ("****") still parse; only the address is read.
+      const u = new URL(url.replace(/^([a-z0-9+.-]+):\/\//i, "http://"));
+      const scheme = normType(url.split("://")[0]);
+      if (!type) type = scheme;
+      if (!host) host = u.hostname;
+      if (!port && u.port) port = Number(u.port);
+      if (!database) database = decodeURIComponent(u.pathname.replace(/^\//, "").split("/")[0] || "");
+    } catch {
+      // Not a URL (DSN / key=value): the explicit fields are all we have.
+    }
+  }
+  return { type, host: host.toLowerCase(), port: port || DEFAULT_PORTS[type] || 0, database };
+}
+
+function sameAddress(a: Address, c: Connector): boolean {
+  const ca = endpointAddress({
+    type: c.type,
+    host: c.host,
+    port: c.port,
+    database: c.database,
+    connection_string: c.connection_string,
+  });
+  if (!a.type || a.type !== ca.type) return false;
+  if (!a.host || a.host !== ca.host) return false;
+  if (a.port && ca.port && a.port !== ca.port) return false;
+  return !a.database || !ca.database || a.database === ca.database;
+}
+
+/** The saved connector this endpoint ran against, by id, else by address. */
+export function matchSavedConnector(
+  ep: Endpoint,
+  connectors: readonly Connector[],
+): { connector?: Connector; ambiguous: boolean } {
+  const id = text(ep.connector_id);
+  if (id) {
+    const byId = connectors.find((c) => c.id === id);
+    if (byId) return { connector: byId, ambiguous: false };
+  }
+  const addr = endpointAddress(ep);
+  let hits = connectors.filter((c) => sameAddress(addr, c));
+  if (hits.length > 1) {
+    const user = text(ep.username);
+    const exactDb = hits.filter((c) => (c.database || "") === addr.database);
+    if (exactDb.length) hits = exactDb;
+    if (hits.length > 1 && user) {
+      const byUser = hits.filter((c) => (c.username || "") === user);
+      if (byUser.length) hits = byUser;
+    }
+  }
+  if (hits.length === 1) return { connector: hits[0], ambiguous: false };
+  return { ambiguous: hits.length > 1 };
+}
+
+function addressLabel(ep: Endpoint): string {
+  const a = endpointAddress(ep);
+  const where = [a.host, a.database].filter(Boolean).join("/");
+  return [a.type, where].filter(Boolean).join(" at ") || "the job's connection";
+}
+
+const isMasked = (url: string) => url.includes("****");
+
+export function planJobStudioRoute(job: unknown, connectors: readonly Connector[]): JobStudioRoutePlan {
+  const tr = ((job as { transfer_request?: Endpoint } | null)?.transfer_request ?? {}) as Endpoint;
+  const src = (tr.source ?? {}) as Endpoint;
+  const dst = (tr.destination ?? {}) as Endpoint;
+  const srcExtra = (src.extra ?? {}) as Endpoint;
+
+  let destination: JobRouteDestination;
+  const dstKind = text(dst.kind);
+  if (dstKind === "file_export" || dstKind === "file" || (text(dst.output_path) && dstKind !== "database")) {
+    destination = {
+      kind: "file_export",
+      format: text(dst.format) || "csv",
+      outputPath: text(dst.output_path),
+      database: text(dst.database),
+    };
+  } else {
+    const { connector, ambiguous } = matchSavedConnector(dst, connectors);
+    const url = text(dst.connection_string);
+    const replayable = Boolean(url) && !isMasked(url) && !text(dst.password);
+    destination = {
+      kind: "database",
+      connectorId: connector?.id ?? "",
+      type: connector?.type ?? (text(dst.format) || text(dst.type)),
+      connectionString: !connector && replayable ? url : "",
+      database: text(dst.database) || connector?.database || endpointAddress(dst).database,
+      table: text(dst.table) || text(dst.collection),
+      missingLabel: connector || replayable
+        ? ""
+        : `${addressLabel(dst)}${ambiguous ? " (several saved connectors match)" : ""}`,
+    };
+  }
+
+  let source: JobRouteSource;
+  const srcKind = text(src.kind) || "database";
+  if (srcKind === "file") {
+    if (text(srcExtra.journal_id)) {
+      source = { kind: "journal", journalId: text(srcExtra.journal_id), stream: text(srcExtra.journal_stream) };
+    } else if (text(srcExtra.file_id)) {
+      source = {
+        kind: "stored_file",
+        fileId: text(srcExtra.file_id),
+        filename: text(tr.source_filename) || text(srcExtra.filename) || "",
+      };
+    } else {
+      source = { kind: "missing", reason: "inline_file", label: text(tr.source_filename) || "the job's file" };
+    }
+  } else {
+    const { connector, ambiguous } = matchSavedConnector(src, connectors);
+    source = connector
+      ? {
+        kind: "connector",
+        connectorId: connector.id,
+        connectorType: connector.type,
+        table: text(src.table),
+        collection: text(src.collection),
+      }
+      : { kind: "missing", reason: ambiguous ? "ambiguous_connection" : "unsaved_connection", label: addressLabel(src) };
+  }
+
+  return { syncMode: text(tr.sync_mode), source, destination };
+}

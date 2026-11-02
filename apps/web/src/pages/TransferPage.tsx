@@ -89,6 +89,7 @@ import {
   openJournal,
   profileStoredUpload,
 } from "../lib/api";
+import { planJobStudioRoute } from "../lib/jobStudioRoute";
 import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import {
@@ -2383,67 +2384,69 @@ export function TransferPage({
    * the job read (stored upload, journal or connection) and the same destination.
    */
   const restoreRouteFromJob = async (job: unknown) => {
-    const tr = ((job as { transfer_request?: Record<string, unknown> } | null)?.transfer_request ?? {}) as Record<string, unknown>;
-    const src = (tr.source ?? {}) as Record<string, unknown>;
-    const dst = (tr.destination ?? {}) as Record<string, unknown>;
-    const srcExtra = (src.extra ?? {}) as Record<string, unknown>;
-    const text = (v: unknown) => (typeof v === "string" ? v : "");
-    if (text(tr.sync_mode)) setSyncMode(text(tr.sync_mode) as SyncMode);
+    const plan = planJobStudioRoute(job, connectors);
+    if (plan.syncMode) setSyncMode(plan.syncMode as SyncMode);
 
-    const dstConn = text(dst.connector_id) ? connectors.find((c) => c.id === dst.connector_id) : undefined;
-    if (dstConn) applyConnectorSelection(dstConn.id);
-    if (text(dst.kind) === "file" || text(dst.output_path)) {
+    const dst = plan.destination;
+    if (dst.kind === "file_export") {
       setDestKindMode("file_export");
-      if (text(dst.output_path)) setDestOutputPath(text(dst.output_path));
-      if (text(dst.format)) setExportFormat(text(dst.format));
+      setExportFormat(dst.format);
+      if (dst.outputPath) setDestOutputPath(dst.outputPath);
     } else {
       setDestKindMode("database");
-      if (!dstConn && text(dst.format)) setDestType(text(dst.format));
-      const conn = text(dst.connection_string);
-      if (!dstConn && conn && !conn.includes("****")) setDestConnectionString(conn);
-      if (!dstConn && text(dst.database)) setTargetDb(text(dst.database));
-      const table = text(dst.table) || text(dst.collection);
-      if (table) setTargetCollection(table);
+      if (dst.connectorId) applyConnectorSelection(dst.connectorId);
+      else {
+        if (dst.type) setDestType(dst.type);
+        if (dst.connectionString) setDestConnectionString(dst.connectionString);
+      }
+      if (dst.database) setTargetDb(dst.database);
+      if (dst.table) setTargetCollection(dst.table);
+      if (dst.missingLabel) {
+        toast({
+          title: "Pick the destination again",
+          message: `This job wrote to ${dst.missingLabel}, which is not a saved connector here, and job records never keep passwords. Save it under Connectors or pick another destination — mappings and settings are kept.`,
+          tone: "warning",
+        });
+      }
     }
 
-    const srcConn = text(src.connector_id) ? connectors.find((c) => c.id === src.connector_id) : undefined;
-    if (srcConn) {
-      if (CLOUD_SOURCE_TYPES.has(srcConn.type)) setSourceKind("cloud");
-      else if (!FILE_FORMAT_SOURCE_TYPES.has(srcConn.type)) setSourceKind("database");
-      setSourceConnectorId(srcConn.id);
-      if (text(src.table)) setSourceTable(text(src.table));
-      if (text(src.collection)) setSourceCollection(text(src.collection));
+    const src = plan.source;
+    if (src.kind === "connector") {
+      if (CLOUD_SOURCE_TYPES.has(src.connectorType)) setSourceKind("cloud");
+      else if (!FILE_FORMAT_SOURCE_TYPES.has(src.connectorType)) setSourceKind("database");
+      setSourceConnectorId(src.connectorId);
+      if (src.table) setSourceTable(src.table);
+      if (src.collection) setSourceCollection(src.collection);
       return;
     }
-    if (text(src.kind) !== "file") {
-      toast({
-        title: "Pick the source again",
-        message: "This job's source connection is not saved in this workspace, so it cannot be reopened. Mappings and settings are kept.",
-        tone: "warning",
-      });
+    if (src.kind === "journal") {
+      await openJournalAsSource(src.journalId, src.stream);
+      return;
+    }
+    if (src.kind === "missing") {
+      toast(src.reason === "inline_file"
+        ? {
+          title: "Source file not stored",
+          message: `${src.label} was sent inline, so it cannot be reopened. Upload it again — mappings and settings are kept.`,
+          tone: "warning",
+        }
+        : {
+          title: "Pick the source again",
+          message: src.reason === "ambiguous_connection"
+            ? `Several saved connectors match ${src.label}. Pick the one this job read — mappings and settings are kept.`
+            : `This job read ${src.label}, which is not a saved connector here, and job records never keep passwords. Save it under Connectors, then pick it — mappings and settings are kept.`,
+          tone: "warning",
+        });
       setStep(STEP_SOURCE);
       return;
     }
-    if (text(srcExtra.journal_id)) {
-      await openJournalAsSource(text(srcExtra.journal_id), text(srcExtra.journal_stream));
-      return;
-    }
-    const fileId = text(srcExtra.file_id);
-    if (!fileId) {
-      toast({
-        title: "Source file not stored",
-        message: "This job's file was sent inline, so it cannot be reopened. Upload it again — mappings and settings are kept.",
-        tone: "warning",
-      });
-      setStep(STEP_SOURCE);
-      return;
-    }
+    const fileId = src.fileId;
     setSourceKind("file");
     setFile(null);
     setUploading(true);
     try {
       const data = await profileStoredUpload(fileId);
-      const filename = data.filename || text(tr.source_filename) || "source";
+      const filename = data.filename || src.filename || "source";
       setParsed(data);
       setRestoredFileName(filename);
       setActiveData({
