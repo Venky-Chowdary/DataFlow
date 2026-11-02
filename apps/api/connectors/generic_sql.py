@@ -579,15 +579,31 @@ def adapt_mssql_sql(sql: str) -> str:
     return sql.replace("%s", "?")
 
 
+def _adapt_mssql_sql_for(cur: Any, sql: str) -> str:
+    """Placeholder style for the DBAPI this cursor really is.
+
+    A pooled engine can outlive the process's current driver pick (the pool
+    keys on the endpoint), so a pymssql cursor must never get ``?`` because
+    pyodbc is the preferred driver now — that failed as "Incorrect syntax
+    near '?'". Unknown cursor types fall back to the driver pick.
+    """
+    module = type(cur).__module__
+    if module.startswith("pymssql"):
+        return sql
+    if module.startswith("pyodbc") and isinstance(sql, str):
+        return sql.replace("%s", "?")
+    return adapt_mssql_sql(sql)
+
+
 class _MssqlQmarkCursor:
     def __init__(self, cur: Any):
         self._cur = cur
 
     def execute(self, sql, *args, **kwargs):
-        return self._cur.execute(adapt_mssql_sql(sql), *args, **kwargs)
+        return self._cur.execute(_adapt_mssql_sql_for(self._cur, sql), *args, **kwargs)
 
     def executemany(self, sql, *args, **kwargs):
-        return self._cur.executemany(adapt_mssql_sql(sql), *args, **kwargs)
+        return self._cur.executemany(_adapt_mssql_sql_for(self._cur, sql), *args, **kwargs)
 
     def __enter__(self):
         entered = self._cur.__enter__() if hasattr(self._cur, "__enter__") else self._cur
