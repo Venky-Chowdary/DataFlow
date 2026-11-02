@@ -350,13 +350,135 @@ class PilotWorkingMemory:
             self._persist()
 
 
+class _MongoSlots:
+    """One slot kind (focus / pending / proposal) in the shared collection.
+
+    Offers the few dict operations :class:`PilotWorkingMemory` uses, so the
+    focus, pending and proposal logic stays in one place for both backends.
+    """
+
+    def __init__(self, coll: Any, kind: str, stamp: str):
+        self._coll = coll
+        self._kind = kind
+        self._stamp = stamp
+
+    def _id(self, sid: str) -> str:
+        return f"{self._kind}:{sid}"
+
+    def get(self, sid: str, default: Any = None) -> Any:
+        row = self._coll.find_one({"_id": self._id(sid)})
+        return dict(row["doc"]) if row and isinstance(row.get("doc"), dict) else default
+
+    def __setitem__(self, sid: str, doc: dict[str, Any]) -> None:
+        self._coll.replace_one(
+            {"_id": self._id(sid)},
+            {
+                "_id": self._id(sid),
+                "kind": self._kind,
+                "sid": sid,
+                "stamp": float(doc.get(self._stamp) or 0),
+                "doc": json.loads(json.dumps(doc, default=str)),
+            },
+            upsert=True,
+        )
+
+    def pop(self, sid: str, default: Any = None) -> Any:
+        row = self._coll.find_one_and_delete({"_id": self._id(sid)})
+        return row["doc"] if row else default
+
+    def clear(self) -> None:
+        self._coll.delete_many({"kind": self._kind})
+
+    def expire(self, cutoff: float) -> None:
+        self._coll.delete_many({"kind": self._kind, "stamp": {"$lte": cutoff}})
+
+
+class MongoWorkingMemory(PilotWorkingMemory):
+    """Working memory shared by every API replica.
+
+    With a pod-local file, a follow-up ("the second one", "do it") that lands
+    on another replica loses its focus and staged proposal. Expired slots are
+    deleted on a short interval and ignored on read until then.
+    """
+
+    _GC_INTERVAL_SEC = 30.0
+
+    def __init__(self, collection: Any | None = None, ttl_sec: int = _DEFAULT_TTL_SEC):
+        self.path = None  # file-backend attribute; unused here
+        self.ttl_sec = max(60, int(ttl_sec))
+        self._lock = threading.RLock()
+        if collection is None:
+            from services.control_plane_store import mongo_collection
+
+            collection = mongo_collection("pilot_memory")
+        if collection is None:
+            raise RuntimeError(
+                "Shared Pilot memory requires the pilot_memory Mongo collection. "
+                "Refusing a pod-local file store."
+            )
+        self._coll = collection
+        self._focus = _MongoSlots(collection, "focus", "updated_at")  # type: ignore[assignment]
+        self._pending = _MongoSlots(collection, "pending", "created_at")  # type: ignore[assignment]
+        self._proposals = _MongoSlots(collection, "proposal", "created_at")  # type: ignore[assignment]
+        self._last_gc = 0.0
+
+    def _persist(self) -> None:
+        return None
+
+    def _gc_locked(self) -> None:
+        now = _now()
+        if now - self._last_gc < self._GC_INTERVAL_SEC:
+            return
+        self._last_gc = now
+        try:
+            for slots in (self._focus, self._pending, self._proposals):
+                slots.expire(now - self.ttl_sec)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a missed sweep only delays deletion; reads still honour the TTL
+            _log.debug("pilot memory gc skipped", exc_info=True)
+
+    def _fresh(self, doc: Any, stamp: str) -> Any:
+        if doc and float(doc.get(stamp) or 0) + self.ttl_sec > _now():
+            return doc
+        return None
+
+    def get_focus(self, session_id: str) -> PilotFocus | None:
+        sid = (session_id or "").strip()
+        if not sid or not self._fresh(self._focus.get(sid), "updated_at"):
+            return None
+        return super().get_focus(sid)
+
+    def get_pending(self, session_id: str) -> PendingSlot | None:
+        sid = (session_id or "").strip()
+        if not sid or not self._fresh(self._pending.get(sid), "created_at"):
+            return None
+        return super().get_pending(sid)
+
+    def get_proposal(self, session_id: str) -> PilotProposal | None:
+        sid = (session_id or "").strip()
+        if not sid or not self._fresh(self._proposals.get(sid), "created_at"):
+            return None
+        return super().get_proposal(sid)
+
+
 _memory: PilotWorkingMemory | None = None
 _memory_lock = threading.Lock()
 
 
 def get_working_memory() -> PilotWorkingMemory:
+    """Return the process working memory.
+
+    It follows the confirm ledger's backend: when acks are shared in Mongo
+    (multi-replica), focus and staged proposals are too, so a follow-up turn
+    routed to another replica keeps its context.
+    """
     global _memory
     with _memory_lock:
-        if _memory is None:
+        from services.process_role import ack_backend
+
+        if ack_backend() == "mongo":
+            if not isinstance(_memory, MongoWorkingMemory):
+                _memory = MongoWorkingMemory()
+            return _memory
+        if _memory is None or isinstance(_memory, MongoWorkingMemory):
             _memory = PilotWorkingMemory()
         return _memory
