@@ -1998,13 +1998,24 @@ def build_mapped_rows_with_details(
 
     mapped: list[tuple] = []
     start_no = max(1, int(row_number_start or 1))
+    # Per-mapping cell memos: (converted, err) for a given value under a fixed
+    # transform is deterministic — no row context enters until the detail
+    # dict below stamps row_number. Repeated values (statuses, currencies,
+    # codes) pay the transform once per unique cell. Bounded; unhashable
+    # cells bypass. Semantics identical — memo stores the same pair the
+    # unmemoized path produced, errors included.
+    _cell_memos: list[dict] = [dict() for _ in mapping_infos]
+    _CELL_MEMO_CAP = 500_000
+    _MEMO_MISS = object()
     for row_number, raw in enumerate(data_rows, start=start_no):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
         # ok | fail | stop_table | abort_transaction | retry_then_fail |
         # quarantine | skip_row | stop_column | coerce_null
         row_action = "ok"
-        for source_idx, target_idx, transform, src_name, tgt_name, mapping in mapping_infos:
+        for m_idx, (source_idx, target_idx, transform, src_name, tgt_name, mapping) in enumerate(
+            mapping_infos
+        ):
             # Mapped source missing from headers after casefold — refuse NULL invent
             # (would wipe a good destination column on upsert).
             if source_idx is None and src_name:
@@ -2020,17 +2031,32 @@ def build_mapped_rows_with_details(
                     if target_idx >= 0:
                         out[target_idx] = DF_MISSING_SENTINEL
                     continue
-                converted, err = _convert_mapped_cell(
-                    val,
-                    transform,
-                    mapping,
-                    empty_cells_as_null=empty_cells_as_null,
-                    dest_nullability=dest_nullability,
-                    target=tgt_name,
-                )
-                err = _null_into_not_null_error(
-                    converted, err, mapping, tgt_name, dest_nullability
-                )
+                memo = _cell_memos[m_idx]
+                try:
+                    memoized = memo.get(val, _MEMO_MISS)
+                except TypeError:
+                    memoized = _MEMO_MISS
+                if memoized is _MEMO_MISS:
+                    converted, err = _convert_mapped_cell(
+                        val,
+                        transform,
+                        mapping,
+                        empty_cells_as_null=empty_cells_as_null,
+                        dest_nullability=dest_nullability,
+                        target=tgt_name,
+                    )
+                    err = _null_into_not_null_error(
+                        converted, err, mapping, tgt_name, dest_nullability
+                    )
+                    if len(memo) < _CELL_MEMO_CAP and isinstance(
+                        converted, (str, int, float, bool, bytes, type(None))
+                    ):
+                        try:
+                            memo[val] = (converted, err)
+                        except TypeError:
+                            pass
+                else:
+                    converted, err = memoized
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None
