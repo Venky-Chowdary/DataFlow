@@ -994,9 +994,13 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
     return True
 
 
-def mark_tested(connector_id: str, ok: bool) -> None:
-    """Persist probe result. ``last_test_ok`` is the authority for UI health."""
-    tested_at = _now()
+def mark_tested(connector_id: str, ok: bool, *, tested_at: str | None = None) -> None:
+    """Persist probe result. ``last_test_ok`` is the authority for UI health.
+
+    ``tested_at`` is when the probe ran, if not now (a create that probed
+    before its Confirm).
+    """
+    tested_at = tested_at or _now()
     patch = {"last_tested_at": tested_at, "last_test_ok": bool(ok)}
     if _use_mongo():
         try:

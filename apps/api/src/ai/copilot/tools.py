@@ -2321,6 +2321,12 @@ class DataPilotTools:
                         "workspace_id": str(draft.get("workspace_id") or ""),
                     },
                 )
+                if probe_ok:
+                    from datetime import datetime, timezone
+
+                    # Confirm saves this verdict, so the new connector is not
+                    # "untested" after the probe it just passed (D238).
+                    draft["probe_passed_at"] = datetime.now(timezone.utc).isoformat()
                 if not probe_ok:
                     from .ack_ledger import redact_payload
 

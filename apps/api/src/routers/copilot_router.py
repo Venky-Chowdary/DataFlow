@@ -763,11 +763,18 @@ async def copilot_confirm(
                 status_code=409,
                 detail=connector_name_conflict_message(str(payload.get("name") or "")),
             )
+        probe_passed_at = str(payload.get("probe_passed_at") or "")
         try:
-            conn = create_connector(payload)
+            conn = create_connector(
+                {k: v for k, v in payload.items() if k != "probe_passed_at"}
+            )
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("save connector", exc)) from exc
+        if probe_passed_at:
+            from services.connector_store import mark_tested
+
+            mark_tested(conn.id, True, tested_at=probe_passed_at)
         result = {
             "connector_id": conn.id,
             "name": conn.name,
