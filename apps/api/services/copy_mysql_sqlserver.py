@@ -85,6 +85,7 @@ def _select_into_sqlserver(
     select_sql: str,
     insert_sql: str,
     batch_size: int,
+    ddls: list[str] | None = None,
 ) -> int:
     from pymysql.cursors import SSCursor
 
@@ -104,7 +105,7 @@ def _select_into_sqlserver(
             if not rows:
                 break
             for row in rows:
-                batch.append(bind_row_for_sqlserver(dst_cur, tuple(row)))
+                batch.append(bind_row_for_sqlserver(dst_cur, tuple(row), ddls))
                 if len(batch) >= batch_size:
                     bulk_executemany(dst_cur, insert_sql, batch)
                     copied += len(batch)
@@ -325,6 +326,7 @@ def copy_mysql_to_sqlserver(
                     select_sql=sql,
                     insert_sql=insert_sql,
                     batch_size=batch_size,
+                    ddls=sqlserver_ddls,
                 )
                 dest_conn.commit()
         finally:

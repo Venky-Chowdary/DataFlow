@@ -72,6 +72,7 @@ def _arrow_into_sqlserver(
     table: Any,
     insert_sql: str,
     batch_size: int,
+    ddls: list[str] | None = None,
 ) -> int:
     copied = 0
     batch: list[tuple[Any, ...]] = []
@@ -82,11 +83,11 @@ def _arrow_into_sqlserver(
         for row in zip(*cols):
             batch.append(tuple(row))
             if len(batch) >= batch_size:
-                bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
+                bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r, ddls) for r in batch])
                 copied += len(batch)
                 batch.clear()
     if batch:
-        bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
+        bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r, ddls) for r in batch])
         copied += len(batch)
     return copied
 
@@ -214,7 +215,9 @@ def copy_iceberg_to_sqlserver(
         _enable_fast_executemany(write_cur)
         set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
         try:
-            copied = _arrow_into_sqlserver(write_cur, pa_table, insert_sql, batch_size)
+            copied = _arrow_into_sqlserver(
+                write_cur, pa_table, insert_sql, batch_size, ddls=sqlserver_ddls
+            )
             if swap_at_end:
                 from services.dest_overwrite_swap import sqlserver_swap_staged_dest
 

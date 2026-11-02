@@ -111,6 +111,7 @@ def _copy_into_sqlserver(
     copy_sql: str,
     insert_sql: str,
     converters: list[Callable[[str | None], Any]],
+    ddls: list[str] | None = None,
 ) -> int:
     sink = _CopyExecutemanySink(
         dst_cur,
@@ -118,6 +119,7 @@ def _copy_into_sqlserver(
         converters,
         pg_sqlserver_copy_batch(),
         len(converters),
+        ddls=ddls,
     )
     try:
         src_cur.copy_expert(copy_sql, sink)
@@ -388,6 +390,7 @@ def copy_postgres_to_sqlserver(
                         copy_sql=sql,
                         insert_sql=insert_sql,
                         converters=converters,
+                        ddls=sqlserver_ddls,
                     )
                     dest_conn.commit()
             finally:

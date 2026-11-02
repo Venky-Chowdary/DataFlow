@@ -9,6 +9,8 @@ quoters delegate to the canonical ``quote_sql_identifier``.
 
 from __future__ import annotations
 
+import re
+from functools import lru_cache
 from typing import Any, Callable
 
 from services.brand_env import getenv_brand
@@ -358,8 +360,12 @@ def _cursor_is_pymssql(cur: Any) -> bool:
     """True when the dest cursor is backed by pymssql (FreeTDS), which cannot
     RPC-pack a Python ``Decimal`` at wide precision — a DECIMAL(38,10) value
     aborts the batch with TDS error 8023. Canonical text binds instead;
-    SQL Server converts varchar→decimal implicitly (X-25)."""
-    return type(cur).__module__.startswith("pymssql")
+    SQL Server converts varchar→decimal implicitly (X-25).
+
+    Unwraps the qmark adapter the way ``_cursor_is_pyodbc`` does: checking
+    only the wrapper type made every pymssql bind rule a no-op (D229)."""
+    inner = getattr(cur, "_cur", cur)
+    return type(inner).__module__.startswith("pymssql")
 
 
 def _cursor_is_pyodbc(cur: Any) -> bool:
@@ -387,7 +393,47 @@ def _sqlserver_time_bind(value: Any) -> Any:
     return value
 
 
-def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
+_SQLSERVER_FRACTIONAL_DDL = re.compile(
+    r"^\s*(DATETIME2|DATETIMEOFFSET)\s*(?:\(\s*(\d+)\s*\))?", re.IGNORECASE
+)
+
+
+@lru_cache(maxsize=256)
+def _pymssql_fractional_binders(
+    ddls: tuple[str, ...],
+) -> tuple[Callable[[Any], Any] | None, ...]:
+    """Per-column text binders for fractional-second temporal columns.
+
+    pymssql (FreeTDS) packs a Python ``datetime`` as a TDS DATETIME — three
+    fractional digits — so a DATETIME2(6) column received .307000 for
+    .307449 (D229). Canonical fractional text converts server-side at the
+    column's own precision.
+    """
+    from connectors.sqlserver_datetime2 import (
+        sqlserver_datetime2_bind_text,
+        sqlserver_datetimeoffset_bind_text,
+    )
+
+    binders: list[Callable[[Any], Any] | None] = []
+    for ddl in ddls:
+        m = _SQLSERVER_FRACTIONAL_DDL.match(str(ddl or ""))
+        digits = int(m.group(2)) if m and m.group(2) else 7
+        if not m or digits <= 3:
+            binders.append(None)
+        elif m.group(1).upper() == "DATETIME2":
+            binders.append(
+                lambda v, p=digits: sqlserver_datetime2_bind_text(v, precision=p)
+            )
+        else:
+            binders.append(
+                lambda v, p=digits: sqlserver_datetimeoffset_bind_text(v, precision=p)
+            )
+    return tuple(binders)
+
+
+def bind_row_for_sqlserver(
+    cur: Any, row: tuple[Any, ...], ddls: list[str] | None = None
+) -> tuple[Any, ...]:
     """Bind one row for the SQL Server driver this cursor uses.
 
     pymssql: ``Decimal`` values are sent as canonical decimal text
@@ -400,13 +446,22 @@ def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
     plain decimal text, no exponent, scale kept — binds every row;
     SQL Server converts varchar→decimal implicitly (X-25).
     ``timedelta`` (pymysql TIME) becomes ``datetime.time`` on both drivers.
+    pymssql with ``ddls``: DATETIME2/DATETIMEOFFSET(p>3) values bind as
+    fractional text (D229).
     """
     if _cursor_is_pymssql(cur):
         from decimal import Decimal
 
-        return tuple(
+        bound = tuple(
             format(v, "f") if isinstance(v, Decimal) else _sqlserver_time_bind(v)
             for v in row
+        )
+        if not ddls or len(ddls) != len(bound):
+            return bound
+        binders = _pymssql_fractional_binders(tuple(ddls))
+        return tuple(
+            b(v) if b is not None and v is not None else v
+            for b, v in zip(binders, bound, strict=True)
         )
     if _cursor_is_pyodbc(cur):
         from decimal import Decimal
@@ -599,8 +654,10 @@ class _CopyExecutemanySink:
         converters: list[Callable[[str | None], Any]],
         batch_size: int,
         expected_cols: int,
+        ddls: list[str] | None = None,
     ) -> None:
         self._cur = dst_cur
+        self._ddls = ddls
         self._insert_sql = insert_sql
         self._converters = converters
         self._batch_size = batch_size
@@ -670,7 +727,7 @@ class _CopyExecutemanySink:
         bulk_executemany(
             self._cur,
             self._insert_sql,
-            [bind_row_for_sqlserver(self._cur, r) for r in self._batch],
+            [bind_row_for_sqlserver(self._cur, r, self._ddls) for r in self._batch],
         )
         self.rows += len(self._batch)
         self._batch.clear()

@@ -195,11 +195,11 @@ def copy_mongo_to_sqlserver(
                         )
                     )
                     if len(batch) >= batch_size:
-                        bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r) for r in batch])
+                        bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r, sqlserver_ddls) for r in batch])
                         copied += len(batch)
                         batch.clear()
             if batch:
-                bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r) for r in batch])
+                bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r, sqlserver_ddls) for r in batch])
                 copied += len(batch)
             if swap_at_end:
                 from services.dest_overwrite_swap import sqlserver_swap_staged_dest

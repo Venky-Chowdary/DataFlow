@@ -65,6 +65,7 @@ from services.copy_sqlserver_sqlserver import (
 )
 
 from services.copy_range_proof import range_keys_match  # noqa: E402
+from services.copy_sql_pairs import bind_row_for_sqlserver  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def _select_into_sqlserver(
     params: list[Any],
     insert_sql: str,
     batch_size: int,
+    ddls: list[str] | None = None,
 ) -> int:
     copied = 0
     cur = source_conn.cursor()
@@ -99,7 +101,7 @@ def _select_into_sqlserver(
             if not rows:
                 break
             for row in rows:
-                batch.append(tuple(row))
+                batch.append(bind_row_for_sqlserver(dst_cur, tuple(row), ddls))
                 if len(batch) >= batch_size:
                     dst_cur.executemany(insert_sql, batch)
                     copied += len(batch)
@@ -294,6 +296,7 @@ def copy_oracle_to_sqlserver(
                     params=params,
                     insert_sql=insert_sql,
                     batch_size=batch_size,
+                    ddls=sqlserver_ddls,
                 )
                 dest_conn.commit()
         finally:
