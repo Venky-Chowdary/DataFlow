@@ -100,3 +100,38 @@ def test_manifest_identity_seeds_named_stream_only() -> None:
     seeded = seed_sdk_contract_defaults("zendesk", "users", contracts)
     # users stream exists in the manifest and declares the same identity.
     assert seeded[0]["cursor_field"] == "generated_timestamp"
+
+
+def test_sdk_transfer_bridge_keeps_absent_and_null_fields_as_sql_null() -> None:
+    """A JSON field that is null or absent is SQL NULL, never empty text.
+
+    Writing it as ``""`` makes a typed integer column (Zendesk ``assignee_id``
+    on an unassigned ticket) fail the whole job, and turns NULL into empty
+    string on text columns.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/repos/acme/widgets/issues",
+            FixtureResponse(
+                body=[
+                    {"id": 1, "title": "first", "body": None},
+                    {"id": 2, "title": ""},
+                ]
+            ),
+        )
+        cfg = {
+            "type": "github",
+            "base_url": fixture.base_url,
+            "owner": "acme",
+            "repo": "widgets",
+            "access_token": "synthetic-token",
+        }
+        batch = read_object(cfg=cfg, object="issues", limit=100)
+
+    body = batch.headers.index("body")
+    title = batch.headers.index("title")
+    assert batch.rows[0][body] == SQL_NULL_SENTINEL
+    assert batch.rows[1][body] == SQL_NULL_SENTINEL
+    assert batch.rows[1][title] == ""

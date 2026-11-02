@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -227,6 +228,16 @@ def _destination(path: Path, stream: str) -> EndpointConfig:
     )
 
 
+_PAGE_TOKEN = re.compile(
+    r"[?&](page=[2-9]|offset=[1-9a-z]|cursor=|starting_after=|nextPageToken=)"
+)
+
+
+def _carries_no_page_token(record: Any) -> bool:
+    """A page-one request: the engine may probe page one before reading."""
+    return not _PAGE_TOKEN.search(record.target) and b"-cur" not in (record.body or b"")
+
+
 def _configure_route(
     fixture: FixtureServer,
     kind: str,
@@ -377,7 +388,7 @@ def _configure_route(
     else:
         responses = [first, second, last]
     method = "POST" if kind == "notion" else "GET"
-    fixture.add_route(route, responses=responses, method=method)
+    fixture.add_route(route, responses=responses, method=method, first_page=_carries_no_page_token)
     return route
 
 

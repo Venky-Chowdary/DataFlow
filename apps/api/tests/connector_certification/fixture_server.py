@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socket import SHUT_RDWR
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 
@@ -32,6 +32,7 @@ class FixtureServer:
     def __init__(self) -> None:
         self._routes: dict[tuple[str, str], tuple[FixtureResponse, ...]] = {}
         self._route_calls: dict[tuple[str, str], int] = {}
+        self._first_page: dict[tuple[str, str], Callable[[RequestRecord], bool]] = {}
         self._lock = threading.RLock()
         self.request_log: list[RequestRecord] = []
         owner = self
@@ -112,7 +113,15 @@ class FixtureServer:
         *,
         responses: Iterable[FixtureResponse] | None = None,
         method: str = "GET",
+        first_page: Callable[[RequestRecord], bool] | None = None,
     ) -> None:
+        """Register a scripted response sequence.
+
+        ``first_page`` names the requests that carry no pagination token: a
+        real API serves page one for them however often they come (a schema
+        probe before the read), so they restart the sequence instead of
+        consuming the next scripted page.
+        """
         route_key = (method.upper(), path)
         sequence = tuple(responses) if responses is not None else (response or FixtureResponse(),)
         if not sequence:
@@ -120,6 +129,10 @@ class FixtureServer:
         with self._lock:
             self._routes[route_key] = sequence
             self._route_calls[route_key] = 0
+            if first_page is None:
+                self._first_page.pop(route_key, None)
+            else:
+                self._first_page[route_key] = first_page
 
     def _record_and_get_response(self, record: RequestRecord) -> FixtureResponse:
         route_key = (record.method, record.path)
@@ -128,7 +141,8 @@ class FixtureServer:
             responses = self._routes.get(route_key)
             if not responses:
                 return FixtureResponse(status=404, body={"error": "route not found"})
-            index = self._route_calls.get(route_key, 0)
+            is_first = self._first_page.get(route_key)
+            index = 0 if is_first is not None and is_first(record) else self._route_calls.get(route_key, 0)
             self._route_calls[route_key] = index + 1
             return responses[min(index, len(responses) - 1)]
 

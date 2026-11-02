@@ -376,7 +376,7 @@ def read_object(
             if name not in headers:
                 headers.append(name)
     rows = [
-        [cell_to_string(record.get(header, "")) for header in headers]
+        [cell_to_string(record.get(header), preserve_sql_null=True) for header in headers]
         for record in page.records
     ]
     state = dict(page.state or {})
