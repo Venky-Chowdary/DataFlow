@@ -44,7 +44,11 @@ import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
-import { ContinuityRecoveryForm, stripContinuityRecoveryProse } from "./transfer/ContinuityRecoveryForm";
+import {
+  CONTINUITY_FAILURE_REASONS,
+  ContinuityRecoveryForm,
+  stripContinuityRecoveryProse,
+} from "./transfer/ContinuityRecoveryForm";
 import { StagingRollbackPanel, stagingDiscardRecorded } from "./transfer/StagingRollbackPanel";
 import { useConfirm } from "./ui/ConfirmDialog";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
@@ -617,9 +621,13 @@ export function JobTheaterView({
   });
   const breakerFailure = failureHint?.code === "circuit_breaker_open" || Boolean(breakerContractId);
   const failureDetails = (job.error_details || {}) as Record<string, unknown>;
-  const continuityFailure = isFailed && failureDetails.reason === "destination_continuity_mismatch";
+  const continuityFailure = isFailed && CONTINUITY_FAILURE_REASONS.has(String(failureDetails.reason || ""));
   const continuityMissing = continuityFailure && failureDetails.mismatch === "destination_missing";
-  const continuityControls = continuityFailure && Boolean(onRebaselineContinuity || onRebuildFullRefresh);
+  // Accepting the removal moves the continuity baseline but not the watermark,
+  // so a cursor reset is recovered only by re-reading the source.
+  const cursorReset = failureDetails.reason === "cursor_destination_reset";
+  const acceptContinuity = cursorReset ? undefined : onRebaselineContinuity;
+  const continuityControls = continuityFailure && Boolean(acceptContinuity || onRebuildFullRefresh);
   const failureText = job.error || job.message || "The job stopped before completing. Review the event log below and re-run.";
   // The engine's recovery prose names API routes; when the controls below exist, they are the recovery.
   const shownFailureText = continuityControls ? stripContinuityRecoveryProse(failureText) : failureText;
@@ -882,7 +890,7 @@ export function JobTheaterView({
             {continuityControls && (
               <ContinuityRecoveryForm
                 missing={continuityMissing}
-                onAccept={onRebaselineContinuity}
+                onAccept={acceptContinuity}
                 onRebuild={onRebuildFullRefresh}
               />
             )}

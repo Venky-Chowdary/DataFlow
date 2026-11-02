@@ -91,8 +91,16 @@ def test_refuse_unusable_cursor_state_reports_missing_table(monkeypatch, tmp_pat
     sqlite3.connect(db).close()
     cfg = {"type": "sqlite", "database": str(db)}
     monkeypatch.setattr(gate, "countable_dest_rows", lambda *a, **k: 0)
-    with pytest.raises(ValueError, match="destination table is missing"):
+    with pytest.raises(ValueError, match="destination table is missing") as raised:
         gate.refuse_unusable_cursor_state(_scope(), "sqlite", cfg, "ghost")
+    # The job record carries a machine reason so Run offers a real Rebuild
+    # control instead of "No mapped remediation" and cursor-clear API prose.
+    from src.transfer.job_failure import _job_failure_fields
+
+    details, _ = _job_failure_fields(raised.value)
+    assert details["reason"] == "cursor_destination_reset"
+    assert details["mismatch"] == "destination_missing"
+    assert details["table"] == "ghost"
 
 
 def test_dest_reset_classifies_deterministic_first_fire():

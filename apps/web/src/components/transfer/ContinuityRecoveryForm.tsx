@@ -7,8 +7,15 @@ export const CONTINUITY_GATE_ID = "g24_append_continuity";
 
 /** Engine recovery prose names MCP tools and REST routes; the controls below replace it in the UI. */
 export function stripContinuityRecoveryProse(text: string): string {
-  return text.split(/\s+To recover:/)[0];
+  return text.split(/\s+To recover:|\s+Clear the cursor \(/)[0];
 }
+
+/** Failure reasons whose recovery is the continuity form, not API prose. */
+export const CONTINUITY_FAILURE_REASONS = new Set([
+  "destination_continuity_mismatch",
+  // A watermark outlived its destination: only a full re-read restores history.
+  "cursor_destination_reset",
+]);
 
 interface ContinuityRecoveryFormProps {
   /** The verified table is gone (vs. edited in place). */

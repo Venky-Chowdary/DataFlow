@@ -138,6 +138,9 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "message": human.get("message"),
         "confidence": human.get("confidence"),
     }
+    stamped = getattr(exc, "failure_details", None)
+    if isinstance(stamped, dict):
+        details.update(stamped)
     # Prefer operator-facing message for job.error / SSE while keeping raw in details.
     extras: dict[str, Any] = {
         "error_code": human.get("code"),

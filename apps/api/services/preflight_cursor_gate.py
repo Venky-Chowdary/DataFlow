@@ -370,6 +370,19 @@ def dest_object_missing(
         return None
 
 
+class CursorDestinationReset(ValueError):
+    """A bounded read refused because its destination no longer holds the history.
+
+    ``failure_details`` lets the job record carry a machine-readable reason, so
+    the operator surface can offer the real recovery (rebuild with a full
+    refresh) instead of the MCP / REST prose in the message.
+    """
+
+    def __init__(self, message: str, *, details: dict[str, Any]):
+        super().__init__(message)
+        self.failure_details = details
+
+
 def _dest_state_text(dest_missing: bool | None) -> str:
     if dest_missing is True:
         return "the destination table is missing"
@@ -688,10 +701,18 @@ def refuse_unusable_cursor_state(
         raise ValueError(cursor_identity_issue(scope))
     if not scope.bounded:
         return
+    dest_missing = dest_object_missing(dest_type, dest_cfg, dest_table)
     issue = cursor_destination_reset_issue(
         scope,
         countable_dest_rows(dest_type, dest_cfg, dest_table),
-        dest_missing=dest_object_missing(dest_type, dest_cfg, dest_table),
+        dest_missing=dest_missing,
     )
     if issue:
-        raise ValueError(issue)
+        raise CursorDestinationReset(issue, details={
+            "reason": "cursor_destination_reset",
+            "mismatch": "destination_missing" if dest_missing is True else "destination_empty",
+            "table": dest_table,
+            "cursor_column": scope.cursor_column,
+            "watermark": str(scope.watermark),
+            "cursor_key": scope.cursor_key,
+        })
