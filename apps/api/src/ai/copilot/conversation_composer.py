@@ -40,7 +40,7 @@ def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
 
     if n_conn == 0 and n_jobs == 0:
         return (
-            "I'm **Datawrap Pilot**. I am not a general chatbot. I read your "
+            "I'm **Datawrap Pilot**, your workspace assistant. I read your "
             "live workspace — connectors, tables, jobs, pipelines, and Validate "
             "proof — and I compose from that evidence. Nothing moves until you "
             "**Confirm**.\n\n"
@@ -49,7 +49,7 @@ def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
         )
 
     lead = (
-        f"I'm **Datawrap Pilot**. I am not a general chatbot. Right now I can "
+        f"I'm **Datawrap Pilot**, your workspace assistant. Right now I can "
         f"see **{n_conn}** saved connector(s) and **{n_jobs}** recent job(s)"
     )
     if failed:

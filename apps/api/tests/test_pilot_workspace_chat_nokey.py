@@ -205,3 +205,45 @@ def test_overview_of_my_workspace_is_a_briefing_not_a_tab():
     assert ground_plan("open overview", [("navigate", {"screen": "overview"})], None) == [
         ("navigate", {"screen": "overview"})
     ]
+
+
+_FAILED_LIST = (
+    "**1** of your **3** job(s) failed:\n"
+    "• `0002aaaaaaaaaaaaaaaaaaaa` · orders -> orders_copy_2: **failed** — Destination unreachable"
+)
+
+
+@pytest.mark.parametrize("ask", ["how do I fix it?", "retry it", "what was the error?", "what went wrong", "ok, rerun it"])
+def test_fix_or_retry_after_failed_list_reads_that_job(ask):
+    hist = [{"role": "user", "content": "which jobs failed"}, {"role": "assistant", "content": _FAILED_LIST}]
+    assert ground_plan(ask, [("list_jobs", {})], hist) == [("get_job", {"job_id": "0002aaaaaaaaaaaaaaaaaaaa"})]
+
+
+def test_fix_it_without_a_failed_job_on_screen_is_left_alone():
+    hist = [{"role": "assistant", "content": "You have 4 saved connector(s)."}]
+    assert ground_plan("how do I fix it?", [("explain_product", {})], hist) == [("explain_product", {})]
+
+
+def test_switching_template_while_a_transform_is_staged():
+    hist = [{"role": "assistant", "content": "Create transform “Dedupe Keep Latest” — press Confirm."}]
+    assert ground_plan("actually make it scd2 history instead", [("list_jobs", {})], hist) == [
+        ("create_transform_recipe", {"template_key": "scd2-history"})
+    ]
+    assert ground_plan("actually make it scd2 history instead", [("list_jobs", {})], None) == [("list_jobs", {})]
+
+
+def test_status_typos_are_in_the_workspace_vocabulary():
+    from src.ai.copilot.spelling import correct_workspace_typos
+
+    assert "failed" in correct_workspace_typos("hw many jobs faild")
+
+
+def test_unnamed_connector_read_asks_which_instead_of_not_found(monkeypatch):
+    from src.ai.copilot import schema_tools
+
+    monkeypatch.setattr(schema_tools, "_connector_dict", lambda *a, **k: None)
+    monkeypatch.setattr(schema_tools, "_only_saved_connector", lambda: None)
+    _, unnamed = schema_tools._safe_connector("", "", "sample_connector_object")
+    _, named = schema_tools._safe_connector("", "Nope DB", "sample_connector_object")
+    assert unnamed.error.startswith("Which saved connector")
+    assert named.error.startswith("Connector not found")

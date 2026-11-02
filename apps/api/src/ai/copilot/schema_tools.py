@@ -419,11 +419,13 @@ def _safe_connector(
         conn = _only_saved_connector()
     if not conn:
         ex = example_connector_name()
+        named = (connector_id or "").strip() or (name or "").strip()
+        lead = "Connector not found." if named else "Which saved connector should I read for that?"
         return None, _tool_result(
             tool,
             success=False,
             error=(
-                "Connector not found. Name a saved connector, e.g. "
+                f"{lead} Name a saved connector, e.g. "
                 f'"columns on {example_table_name()} in {ex}".'
             ),
         )

@@ -32,6 +32,10 @@ import re
 WORKSPACE_VOCABULARY: frozenset[str] = frozenset(
     {
         "briefing",
+        "cancelled",
+        "completed",
+        "failed",
+        "running",
         "collections",
         "column",
         "columns",

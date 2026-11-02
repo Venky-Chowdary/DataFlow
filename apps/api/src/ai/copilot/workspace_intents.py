@@ -89,6 +89,9 @@ def ground_plan(
     # "overview of my workspace" asks for the briefing, not the Overview tab.
     if names == {"navigate"} and _WORKSPACE_SUMMARY_RE.search(message or ""):
         return [("brief_workspace", {})]
+    followed = _failed_job_followup(message, history) or _template_switch(message, history)
+    if followed:
+        return followed
     here = subject_of(message)
     prior = conversation_subject(history)
 
@@ -140,6 +143,10 @@ def match_transform_template(message: str) -> str:
     """Template key a "create the dedupe transform" request names, or ""."""
     if not (_CREATE_VERB_RE.search(message or "") and _TRANSFORM_NOUN_RE.search(message or "")):
         return ""
+    return _template_by_tokens(message)
+
+
+def _template_by_tokens(message: str) -> str:
     from services.transform_recipe_templates import TEMPLATES
 
     asked = _tokens(message)
@@ -149,3 +156,43 @@ def match_transform_template(message: str) -> str:
         if overlap > score:
             best, score = key, overlap
     return best
+
+
+_FAILED_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|so|and|then)[,\s]+)?(?:"
+    r"how\s+(?:do|can|should)\s+(?:i|we)\s+fix\s+(?:it|that|this|them)"
+    r"|(?:can\s+you\s+)?fix\s+(?:it|that|this)"
+    r"|(?:can\s+you\s+)?(?:retry|re-?run|restart|run)\s+(?:it|that|this)(?:\s+again)?"
+    r"|what\s+(?:was|is)\s+the\s+(?:error|problem|issue|cause)"
+    r"|what\s+went\s+wrong"
+    r")\b",
+    re.I,
+)
+_FAILED_JOB_LINE_RE = re.compile(r"`([a-f0-9]{20,26})`[^\n]*\bfailed\b", re.I)
+
+
+def _failed_job_followup(message: str, history: list[dict] | None) -> list[tuple[str, dict]]:
+    """"how do I fix it" after a failed-jobs list is about the failed job on screen."""
+    if not _FAILED_FOLLOWUP_RE.match(message or ""):
+        return []
+    from .followup import last_assistant_content
+
+    hit = _FAILED_JOB_LINE_RE.search(last_assistant_content(history) or "")
+    return [("get_job", {"job_id": hit.group(1)})] if hit else []
+
+
+_SWITCH_RE = re.compile(
+    r"\b(?:instead|rather|make\s+it|switch\s+to|go\s+with|use|pick|the\s+\w+(?:\s+\w+)?\s+one)\b", re.I
+)
+
+
+def _template_switch(message: str, history: list[dict] | None) -> list[tuple[str, dict]]:
+    """"actually make it scd2 history instead" while a transform is on screen."""
+    if not _SWITCH_RE.search(message or ""):
+        return []
+    from .followup import last_assistant_content
+
+    if "transform" not in (last_assistant_content(history) or "").lower():
+        return []
+    key = _template_by_tokens(message)
+    return [("create_transform_recipe", {"template_key": key})] if key else []
