@@ -213,7 +213,11 @@ _FAILED_LIST = (
 )
 
 
-@pytest.mark.parametrize("ask", ["how do I fix it?", "retry it", "what was the error?", "what went wrong", "ok, rerun it"])
+@pytest.mark.parametrize("ask", [
+    "how do I fix it?", "retry it", "what was the error?", "what went wrong", "ok, rerun it",
+    "why did it fail", "why did it fail?", "so why did that fail", "what happened", "why?",
+    "what caused it",
+])
 def test_fix_or_retry_after_failed_list_reads_that_job(ask):
     hist = [{"role": "user", "content": "which jobs failed"}, {"role": "assistant", "content": _FAILED_LIST}]
     assert ground_plan(ask, [("list_jobs", {})], hist) == [("get_job", {"job_id": "0002aaaaaaaaaaaaaaaaaaaa"})]

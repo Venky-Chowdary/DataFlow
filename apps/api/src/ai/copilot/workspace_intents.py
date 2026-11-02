@@ -179,6 +179,10 @@ _FAILED_FOLLOWUP_RE = re.compile(
     r"|(?:can\s+you\s+)?(?:retry|re-?run|restart|run)\s+(?:it|that|this)(?:\s+again)?"
     r"|what\s+(?:was|is)\s+the\s+(?:error|problem|issue|cause)"
     r"|what\s+went\s+wrong"
+    r"|what\s+happened"
+    r"|what\s+caused\s+(?:it|that|this|the\s+failure)"
+    r"|why\s+(?:did|does|is|was)\s+(?:it|that|this|the\s+job)\s+(?:fail(?:ed|ing)?|break|broken|error)"
+    r"|why(?:\s+(?:not|so))?(?=\s*\?*\s*$)"
     r")\b",
     re.I,
 )

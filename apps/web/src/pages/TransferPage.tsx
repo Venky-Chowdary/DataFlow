@@ -5924,6 +5924,22 @@ export function TransferPage({
     leaveTheaterToValidate();
   }, [leaveTheaterToValidate]);
 
+  /**
+   * A run that failed (or was stopped) disproved the verdict it launched on:
+   * the destination or source moved after Validate. Returning to Validate must
+   * ask for a fresh preflight, not show the old green verdict beside the dead
+   * run's "Open live progress".
+   */
+  const runFailed = result?.success === false;
+  const backFromTheaterToValidate = useCallback(() => {
+    if (runFailed) {
+      setTransferLaunch(null);
+      setPreflight(null);
+      setValidatedContractKey(null);
+    }
+    leaveTheaterToValidate();
+  }, [runFailed, leaveTheaterToValidate]);
+
   const replayJournalFromTheater = (journalId: string, stream: string) => {
     setTransferLaunch(null);
     leaveTheaterToValidate();
@@ -8733,7 +8749,7 @@ export function TransferPage({
               preflight={preflight || undefined}
               onComplete={handleJobComplete}
               onNewTransfer={resetTransferStudio}
-              onBackToValidate={leaveTheaterToValidate}
+              onBackToValidate={backFromTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
               onRebaselineContinuity={continuityRecoveryAvailable ? async (reason) => {
                 await acceptContinuityBaseline(reason);
