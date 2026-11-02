@@ -250,15 +250,15 @@ class PilotContextBuilder:
     # the fallback and the record that a source was unreachable; swallowing the
     # error here would hand back an empty list that reads as a true answer.
     def _read_connectors(self) -> list[dict]:
-        from services.workspace_filter import current_workspace_filter
+        """Read the same connector store ``list_connectors`` answers from."""
+        from services.connector_access import caller_workspace_id
+        from services.connector_store import list_connectors
 
-        from ...services.mongodb_service import get_mongodb_service
-        visible = current_workspace_filter()
-        return [
-            {"name": c.get("name"), "type": c.get("type"), "database": c.get("database"), "host": c.get("host")}
-            for c in get_mongodb_service().list_connectors()
-            if visible is None or visible.matches(c.get("workspace_id"))
-        ]
+        out = []
+        for c in list_connectors(workspace_id=caller_workspace_id() or None):
+            d = c.to_dict() if hasattr(c, "to_dict") else dict(c) if isinstance(c, dict) else {}
+            out.append({k: d.get(k) for k in ("name", "type", "database", "host")})
+        return out
 
     def _read_jobs(self) -> list[dict]:
         from services.workspace_filter import current_workspace_filter

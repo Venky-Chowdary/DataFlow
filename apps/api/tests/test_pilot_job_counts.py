@@ -41,7 +41,8 @@ def test_failure_question_counts_failures_across_the_whole_history():
         },
         "which jobs failed?",
     )
-    assert "**13** of your **50** job(s) failed" in answer
+    # A cancelled run was stopped on purpose; it is not a failure.
+    assert "**12** of your **50** job(s) failed" in answer
 
 
 def test_no_failures_states_the_real_total():

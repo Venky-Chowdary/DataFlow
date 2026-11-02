@@ -247,3 +247,34 @@ def test_unnamed_connector_read_asks_which_instead_of_not_found(monkeypatch):
     _, named = schema_tools._safe_connector("", "Nope DB", "sample_connector_object")
     assert unnamed.error.startswith("Which saved connector")
     assert named.error.startswith("Connector not found")
+
+
+@pytest.mark.parametrize("ask", ["which jobs failed", "how many jobs failed"])
+def test_failed_jobs_ask_reads_the_ledger_without_the_docs_lead(ask):
+    planned = [("explain_product", {"query": ask}), ("list_jobs", {"limit": 10})]
+    assert ground_plan(ask, planned, None) == [("list_jobs", {"limit": 25})]
+
+
+def test_what_a_failed_job_means_keeps_the_docs():
+    planned = [("explain_product", {"query": "q"}), ("list_jobs", {"limit": 10})]
+    assert ground_plan("what does a failed job mean", planned, None) == planned
+
+
+def test_a_cancelled_job_is_not_counted_as_failed():
+    out = {
+        "jobs": [
+            {"id": "a", "status": "failed", "source": "s", "destination": "d"},
+            {"id": "b", "status": "cancelled", "source": "s", "destination": "d"},
+        ],
+        "total": 2,
+        "status_counts": {"failed": 1, "cancelled": 1},
+    }
+    text = narrate_jobs(out, "which jobs failed")
+    assert text.startswith("**1** of your **2** job(s) failed")
+    assert "cancelled" not in text
+
+
+def test_a_why_did_it_fail_question_keeps_the_failure_docs():
+    planned = [("explain_product", {"query": "q"}), ("list_jobs", {"limit": 10})]
+    ask = "my connector test passed but the transfer failed, why"
+    assert ground_plan(ask, planned, None) == planned

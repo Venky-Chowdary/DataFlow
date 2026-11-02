@@ -7,7 +7,7 @@ presented as the answer contradicted the Jobs page and lost the operator's trust
 
 import re
 
-FAILED_STATUSES = frozenset({"failed", "cancelled", "canceled", "error"})
+FAILED_STATUSES = frozenset({"failed", "error"})
 
 _FAILURE_WORDS = ("fail", "failed", "failure", "error", "broken")
 

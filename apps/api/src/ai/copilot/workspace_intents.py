@@ -111,7 +111,21 @@ def ground_plan(
     )
     if names in _WEAK_PLANS or misread_aggregate:
         return [("list_jobs", {"limit": 25})]
+    # "which jobs failed" led with the failure-handling docs above the ledger.
+    if (
+        names == {"explain_product", "list_jobs"}
+        and _LEDGER_ASK_RE.search(message or "")
+        and not _CONCEPT_RE.search(message or "")
+    ):
+        return [("list_jobs", {"limit": 25})]
     return planned
+
+
+_LEDGER_ASK_RE = re.compile(r"\b(?:which|how\s+many|list|show|any|count|number\s+of)\b", re.I)
+_CONCEPT_RE = re.compile(
+    r"\b(?:what\s+(?:does|do|is|are)|means?|explain|why\s+(?:do|does|would)|how\s+(?:does|do)\s+(?:a|the))\b",
+    re.I,
+)
 
 
 _CREATE_VERB_RE = re.compile(

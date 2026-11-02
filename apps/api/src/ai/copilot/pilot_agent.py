@@ -914,6 +914,7 @@ _PROPOSAL_TOOLS = frozenset(
 _ACTION_TOOL_NAMES = frozenset(
     {
         "create_connector",
+        "create_transform_recipe",
         "create_schedule",
         "run_schedule_now",
         "start_transfer",
@@ -3608,6 +3609,16 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if o.get("type_risks"):
                     lines.append(f"• Type risks: {len(o['type_risks'])}")
                 parts.append("\n".join(lines))
+            elif tr.name == "create_transform_recipe" and tr.success:
+                prev = tr.output.get("preview") or {}
+                cols = ", ".join(f"`{c}`" for c in (prev.get("input_columns") or [])[:8])
+                parts.append(
+                    f"Ready to save transform **{prev.get('name') or 'recipe'}**: "
+                    f"{prev.get('description') or ''}\n"
+                    f"{prev.get('steps') or 0} step(s)"
+                    + (f" over {cols}" if cols else "")
+                    + ".\n\nConfirm below to save it to **Transforms**. Nothing is saved until you do."
+                )
             elif tr.name == "create_connector" and tr.success:
                 prev = tr.output.get("preview") or {}
                 parts.append(
