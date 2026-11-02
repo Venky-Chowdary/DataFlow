@@ -2610,6 +2610,97 @@ async def delete_connector(connector_id: str, request: Request):
 # FILE UPLOAD & TRANSFER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def profile_file_upload(content: bytes, filename: str, *, use_ocr: bool = False, read_options=None) -> dict:
+    """Parse, profile and register file bytes — the one Source-step profile.
+
+    ``/connectors/upload`` and journal replay (``/journals/{id}/open``) both
+    return this shape, so Map and Validate see the same population either way.
+    """
+    if read_options is None:
+        from services.read_options import parse_read_options_payload
+
+        read_options = parse_read_options_payload("")
+    result = FileParser.parse(
+        content,
+        filename,
+        enable_ocr=use_ocr,
+        read_options=read_options,
+    )
+
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error)
+
+    if result.row_count == 0:
+        detail = "File contains no records"
+        if not read_options.is_default:
+            detail += f" through the declared read window ({read_options.describe()})"
+        raise HTTPException(status_code=400, detail=detail)
+
+    if not result.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
+        )
+
+    schema = FileParser.infer_schema(result.data)
+    try:
+        from services.data_profiler import merge_profiler_schema, profile_dataset
+
+        profile = profile_dataset(result.columns, result.data)
+        schema = merge_profiler_schema(schema, profile["schema"])
+    except Exception:
+        profile = None
+    sample_cap = 100
+    sample = result.data[:sample_cap]
+
+    validation_report = None
+    if result.file_type in ("csv", "tsv"):
+        import sys
+        from pathlib import Path
+        _api_root = Path(__file__).resolve().parents[2]
+        if str(_api_root) not in sys.path:
+            sys.path.insert(0, str(_api_root))
+        from services.csv_validator import validate_csv_content
+        validation_report = validate_csv_content(content, result.columns, schema)
+
+    from services.pdf_ocr import ocr_dependency_status
+
+    sheets: list[dict] = []
+    if result.file_type == "excel":
+        from services.excel_parser import list_excel_sheets
+
+        sheets = list_excel_sheets(content)
+
+    stored_file_id = ""
+    try:
+        from services.file_parser import store_upload
+
+        stored = store_upload(filename or "upload.csv", content)
+        stored_file_id = str(stored.get("file_id") or "")
+    except Exception:
+        stored_file_id = ""
+
+    return {
+        "success": True,
+        "filename": filename,
+        "file_id": stored_file_id or None,
+        "file_type": result.file_type,
+        "sheets": sheets,
+        "read_options": read_options.to_wire(),
+        "row_count": result.row_count,
+        "columns": result.columns,
+        "schema": schema,
+        "sample_data": sample,
+        "data": sample,
+        "validation": validation_report,
+        "profile": profile,
+        "ocr_used": bool(result.ocr_used),
+        "ocr_page_count": int(result.ocr_page_count or 0),
+        "ocr_status": ocr_dependency_status(),
+    }
+
+
+
 @router.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -2627,84 +2718,9 @@ async def upload_file(
     try:
         content = await read_upload(file)
         use_ocr = enable_ocr.lower() in ("true", "1", "yes")
-        result = FileParser.parse(
-            content,
-            file.filename,
-            enable_ocr=use_ocr,
-            read_options=read_options,
+        return profile_file_upload(
+            content, file.filename, use_ocr=use_ocr, read_options=read_options,
         )
-
-        if not result.success:
-            raise HTTPException(status_code=400, detail=result.error)
-
-        if result.row_count == 0:
-            detail = "File contains no records"
-            if not read_options.is_default:
-                detail += f" through the declared read window ({read_options.describe()})"
-            raise HTTPException(status_code=400, detail=detail)
-
-        if not result.columns:
-            raise HTTPException(
-                status_code=400,
-                detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
-            )
-
-        schema = FileParser.infer_schema(result.data)
-        try:
-            from services.data_profiler import merge_profiler_schema, profile_dataset
-
-            profile = profile_dataset(result.columns, result.data)
-            schema = merge_profiler_schema(schema, profile["schema"])
-        except Exception:
-            profile = None
-        sample_cap = 100
-        sample = result.data[:sample_cap]
-
-        validation_report = None
-        if result.file_type in ("csv", "tsv"):
-            import sys
-            from pathlib import Path
-            _api_root = Path(__file__).resolve().parents[2]
-            if str(_api_root) not in sys.path:
-                sys.path.insert(0, str(_api_root))
-            from services.csv_validator import validate_csv_content
-            validation_report = validate_csv_content(content, result.columns, schema)
-
-        from services.pdf_ocr import ocr_dependency_status
-
-        sheets: list[dict] = []
-        if result.file_type == "excel":
-            from services.excel_parser import list_excel_sheets
-
-            sheets = list_excel_sheets(content)
-
-        stored_file_id = ""
-        try:
-            from services.file_parser import store_upload
-
-            stored = store_upload(file.filename or "upload.csv", content)
-            stored_file_id = str(stored.get("file_id") or "")
-        except Exception:
-            stored_file_id = ""
-
-        return {
-            "success": True,
-            "filename": file.filename,
-            "file_id": stored_file_id or None,
-            "file_type": result.file_type,
-            "sheets": sheets,
-            "read_options": read_options.to_wire(),
-            "row_count": result.row_count,
-            "columns": result.columns,
-            "schema": schema,
-            "sample_data": sample,
-            "data": sample,
-            "validation": validation_report,
-            "profile": profile,
-            "ocr_used": bool(result.ocr_used),
-            "ocr_page_count": int(result.ocr_page_count or 0),
-            "ocr_status": ocr_dependency_status(),
-        }
 
     except (HTTPException, PayloadTooLarge):
         raise

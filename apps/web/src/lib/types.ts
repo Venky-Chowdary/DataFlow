@@ -575,12 +575,52 @@ export interface Gate8ReconciliationPayload {
   } | null;
 }
 
+/** Where a committed journal lives: shared object storage, or this host only. */
+export interface JournalStorage {
+  durable?: boolean;
+  backend?: string;
+  uri?: string;
+  reason?: string;
+}
+
 export interface JobJournalOutcome {
+  /** Capture is in flight: the run is terminal but the journal has not committed yet. */
+  pending?: boolean;
   captured?: boolean;
   reason?: string;
   journal_id?: string;
-  streams?: { name: string; rows: number; sha256: string }[];
+  streams?: { name: string; rows: number; sha256: string; format?: string; bytes?: number }[];
   expires_at?: number;
+  storage?: JournalStorage;
+}
+
+/** A committed capture-once journal (`GET /journals`). */
+export interface JournalManifest {
+  journal_id: string;
+  job_id?: string;
+  workspace_id?: string;
+  source?: { kind?: string; format?: string; connector_id?: string; object?: string; filename?: string };
+  sync_mode?: string;
+  delivered_rows?: number;
+  streams?: { name: string; file?: string; format?: string; rows?: number; bytes?: number; sha256?: string; columns?: string[] }[];
+  captured_at?: number;
+  committed_at?: number;
+  expires_at?: number;
+  storage?: JournalStorage;
+}
+
+/** `POST /journals/{id}/open`: the upload profile plus the verified journal stream. */
+export interface OpenedJournal extends ParsedUpload {
+  filename?: string;
+  journal: {
+    journal_id: string;
+    stream: string;
+    rows?: number;
+    sha256?: string;
+    source?: JournalManifest["source"];
+    expires_at?: number;
+    storage?: JournalStorage;
+  };
 }
 
 export interface JobProgress extends TransferJob {
@@ -588,7 +628,7 @@ export interface JobProgress extends TransferJob {
   /** Capture-once journal outcome (opt-in per run). */
   journal?: JobJournalOutcome | null;
   /** Set when this run replayed a journal instead of reading the live source. */
-  journal_replay?: { journal_id: string; stream: string; rows: number; sha256: string } | null;
+  journal_replay?: { journal_id: string; stream: string; rows: number; sha256: string; format?: string } | null;
   phase?: string;
   message?: string;
   error?: string;

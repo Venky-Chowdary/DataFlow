@@ -4,10 +4,12 @@ import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
+import { Button } from "./ui/Button";
 import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
 import {
   cancelJob,
   executeJobRollback,
+  fetchJob,
   fetchJobMappingProof,
   resetContractBreaker,
   resumeJob,
@@ -78,6 +80,8 @@ interface JobTheaterProps {
   onRebaselineContinuity?: (reason: string) => Promise<void>;
   /** Append-continuity failure: switch the route to full refresh and return to Validate. */
   onRebuildFullRefresh?: () => void;
+  /** Captured journal: open Transfer Studio with this journal stream as the source. */
+  onReplayJournal?: (journalId: string, stream: string) => void;
   /** Persist the Validate-approved contract onto a schedule (completed Theater). */
   onSchedule?: () => void;
   /** Resume from last checkpoint without leaving Transfer Studio. */
@@ -177,6 +181,7 @@ export function JobTheater({
   onBackToMap,
   onRebaselineContinuity,
   onRebuildFullRefresh,
+  onReplayJournal,
   onSchedule,
   onResumed,
   onOpenJob,
@@ -364,6 +369,44 @@ export function JobTheater({
     return stop;
   }, [jobId]);
 
+  // The live stream closes at the terminal status; the journal outcome is
+  // written just after it, so a terminal run re-reads the job until it lands.
+  const terminal = isJobTerminal(job?.status || "");
+  const journalPending = terminal && Boolean(job?.journal?.pending);
+  const journalUnread = terminal && job != null && job.journal === undefined && job.journal_replay === undefined;
+  useEffect(() => {
+    if (!journalPending && !journalUnread) return;
+    const maxAttempts = journalPending ? 10 : 3;
+    let cancelled = false;
+    let attempt = 0;
+    const tick = async () => {
+      attempt += 1;
+      try {
+        const fresh = await fetchJob(jobId);
+        if (cancelled) return;
+        const settled = fresh.journal ? !fresh.journal.pending : !journalPending && attempt >= maxAttempts;
+        if (settled || fresh.journal_replay || attempt >= maxAttempts) {
+          setJob((j) => (j ? {
+            ...j,
+            journal: fresh.journal?.pending
+              ? { captured: false, reason: "The journal outcome was not recorded — check Jobs → Journals." }
+              : fresh.journal ?? null,
+            journal_replay: fresh.journal_replay ?? j.journal_replay ?? null,
+          } : j));
+          return;
+        }
+      } catch {
+        if (cancelled || attempt >= maxAttempts) return;
+      }
+      timer = window.setTimeout(() => void tick(), 800);
+    };
+    let timer = window.setTimeout(() => void tick(), 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [journalPending, journalUnread, jobId]);
+
   const handleCancel = async () => {
     if (cancelling || doneRef.current) return;
     setCancelling(true);
@@ -437,6 +480,7 @@ export function JobTheater({
       onBackToMap={onBackToMap}
       onRebaselineContinuity={onRebaselineContinuity}
       onRebuildFullRefresh={onRebuildFullRefresh}
+      onReplayJournal={onReplayJournal}
       onSchedule={onSchedule}
       onOpenJob={onOpenJob}
     />
@@ -463,6 +507,8 @@ interface JobTheaterViewProps {
   onBackToMap?: () => void;
   onRebaselineContinuity?: (reason: string) => Promise<void>;
   onRebuildFullRefresh?: () => void;
+  /** Captured journal: open Transfer Studio with this journal stream as the source. */
+  onReplayJournal?: (journalId: string, stream: string) => void;
   onSchedule?: () => void;
   onOpenJob?: (jobId: string) => void;
 }
@@ -488,6 +534,7 @@ export function JobTheaterView({
   onBackToMap,
   onRebaselineContinuity,
   onRebuildFullRefresh,
+  onReplayJournal,
   onSchedule,
   onOpenJob,
 }: JobTheaterViewProps) {
@@ -1720,20 +1767,35 @@ export function JobTheaterView({
           </small>
         </article>
         {(journal || journalReplay) && (
-        <article className={`df2-theater-v3-sla-card${journal && !journal.captured ? " is-warn" : ""}`}>
+        <article className={`df2-theater-v3-sla-card${journal && !journal.captured && !journal.pending ? " is-warn" : ""}`}>
           <span>{journalReplay ? "Replayed journal" : "Source journal"}</span>
           <strong>
             {journalReplay
-              ? `${Number(journalReplay.rows || 0).toLocaleString()} rows`
-              : journal?.captured ? `${journalRows.toLocaleString()} rows kept` : "Not kept"}
+              ? (Number(journalReplay.rows) > 0 ? `${Number(journalReplay.rows).toLocaleString()} rows` : "Source file replayed")
+              : journal?.pending ? "Committing…" : journal?.captured ? (journalRows > 0 ? `${journalRows.toLocaleString()} rows kept` : "Source file kept") : "Not kept"}
           </strong>
           <small>
             {journalReplay
               ? <>Read from journal <code>{journalReplay.journal_id}</code> — the live source was not touched</>
-              : journal?.captured
+              : journal?.pending
+                ? "Verifying and storing the captured extraction"
+                : journal?.captured
                 ? <>Replay with <code>{journal.journal_id}</code> as the source journal id{journal.expires_at ? ` · expires ${new Date(journal.expires_at * 1000).toLocaleDateString()}` : ""}</>
                 : journal?.reason || "This run's extraction was not journaled"}
           </small>
+          {journal?.captured && journal.journal_id && onReplayJournal && (
+            <div className="df2-journals-actions">
+              {(journal.streams?.length ? journal.streams : [{ name: "" }]).slice(0, 4).map((stream) => (
+                <Button
+                  key={stream.name || "stream"}
+                  size="sm"
+                  onClick={() => onReplayJournal(journal.journal_id as string, (journal.streams?.length ?? 0) > 1 ? stream.name : "")}
+                >
+                  {(journal.streams?.length ?? 0) > 1 ? `Replay ${stream.name}` : "Replay to another destination"}
+                </Button>
+              ))}
+            </div>
+          )}
         </article>
         )}
         {fkCycle.length > 0 && (

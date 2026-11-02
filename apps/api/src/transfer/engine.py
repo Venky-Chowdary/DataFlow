@@ -765,6 +765,18 @@ class UniversalTransferEngine:
             journal, journal_skip = transfer_journal.begin_capture(
                 request, job_id, resume=resume
             )
+            if journal is not None:
+                # The progress stream ends at the terminal status, which lands
+                # before the journal commits: say a capture is in flight so the
+                # operator surface waits for the outcome instead of hiding it.
+                try:
+                    _job_store().update_job_fields(
+                        job_id,
+                        {"journal": {"pending": True, "journal_id": journal.journal_id}},
+                        touch_updated_at=False,
+                    )
+                except Exception:
+                    logger.warning("Could not mark journal capture on %s", job_id, exc_info=True)
             try:
                 result = self._execute_tracked_in_workspace(request, job_id, resume)
             except BaseException:

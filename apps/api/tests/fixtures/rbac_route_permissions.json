@@ -280,6 +280,7 @@
   "POST /api/v1/iam/scim-token": "iam.manage",
   "POST /api/v1/iam/service-accounts": "iam.manage",
   "POST /api/v1/journals/prune": "job.plan",
+  "POST /api/v1/journals/{journal_id}/open": "job.plan",
   "POST /api/v1/mcp": "PUBLIC",
   "POST /api/v1/mcp/": "PUBLIC",
   "POST /api/v1/mcp/tools/call": "MCP_TOOL_GATE",

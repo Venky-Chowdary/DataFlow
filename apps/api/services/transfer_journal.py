@@ -24,9 +24,11 @@ Contract (what the journal does and does not promise):
   dropped and nothing is stringified silently.
 - Isolation: journals live under their workspace; replay refuses a journal the
   caller's workspace scope does not cover.
-- Durability: files are fsynced before the rename. They are as durable as the
-  volume behind ``DATAFLOW_JOURNAL_DIR`` (default ``<upload_dir>/journals``);
-  point it at replicated storage for production. Retention is
+- Durability: files are fsynced before the rename, then mirrored to the shared
+  object store (S3 / MinIO / ``BLOB_ROOT``) so any replica can list, replay or
+  delete the journal. The manifest's ``storage`` block says whether that
+  happened; without a shared store the journal is host-local
+  (``DATAFLOW_JOURNAL_DIR``, default ``<upload_dir>/journals``) and says so. Retention is
   ``DATAFLOW_JOURNAL_RETENTION_DAYS`` (default 7), enforced by ``prune_journals``.
 """
 
@@ -195,8 +197,10 @@ class JournalWriter:
         state = self._streams.get(key)
         if state is None:
             suffix = "jsonl" if fmt == "jsonl" else fmt
-            state = _StreamState(name=key, path=self.dir / f"{key}.{suffix}", fmt=fmt)
-            state.handle = open(self.dir / f"{key}.{suffix}.partial", "wb")
+            # A file stream is named after its file: "orders.csv" stays orders.csv.
+            stem = key if key.lower().endswith(f".{suffix}") else f"{key}.{suffix}"
+            state = _StreamState(name=key, path=self.dir / stem, fmt=fmt)
+            state.handle = open(self.dir / f"{stem}.partial", "wb")
             self._streams[key] = state
         return state
 
@@ -367,7 +371,10 @@ class JournalWriter:
                 "committed_at": now,
                 "expires_at": now + retention_seconds(),
             }
+            manifest["storage"] = _mirror_streams(self.dir, manifest)
             _atomic_write_json(self.dir / MANIFEST_NAME, manifest)
+            if manifest["storage"].get("durable"):
+                _mirror_manifest(self.dir, manifest)
         logger.info(
             "transfer journal %s committed: %d stream(s), %d row(s)",
             self.journal_id, len(streams), self.captured_rows,
@@ -376,9 +383,12 @@ class JournalWriter:
             "captured": True,
             "journal_id": self.journal_id,
             "streams": [
-                {"name": s["name"], "rows": s["rows"], "sha256": s["sha256"]} for s in streams
+                {"name": s["name"], "rows": s["rows"], "sha256": s["sha256"],
+                 "format": s["format"], "bytes": s["bytes"]}
+                for s in streams
             ],
             "expires_at": manifest["expires_at"],
+            "storage": manifest["storage"],
         }
 
 
@@ -398,6 +408,117 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, path)
+
+
+# --------------------------------------------------- durable mirror ----
+# A committed journal is mirrored to the shared object store (S3 / MinIO /
+# BLOB_ROOT) under ``journals/<workspace>/<journal_id>/``: streams first, the
+# manifest last, so a remote manifest only exists once every stream it names
+# is there. Any replica can then list, replay (hydrating a verified local copy)
+# or delete it. Without a shared store the journal is host-local and the
+# manifest says so — it is never reported durable on a guess.
+
+REMOTE_PREFIX = "journals"
+LOCAL_ONLY_REASON = (
+    "no shared object store is configured (S3_BUCKET or BLOB_ROOT), so the journal "
+    "lives only on this host's volume"
+)
+
+
+def _remote_prefix(workspace_dir: str, journal_id: str) -> str:
+    return f"{REMOTE_PREFIX}/{workspace_dir}/{journal_id}/"
+
+
+def _mirror_streams(journal_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from services.object_store import durable_backend, key_uri, stage_file
+
+        backend = durable_backend()
+    except Exception:  # noqa: BLE001 — storage misconfiguration must not fail the run
+        logger.warning("journal mirror: object store unavailable", exc_info=True)
+        backend = ""
+    if not backend:
+        return {"durable": False, "backend": "local", "reason": LOCAL_ONLY_REASON}
+    prefix = _remote_prefix(journal_dir.parent.name, journal_dir.name)
+    for stream in manifest.get("streams") or []:
+        if not stage_file(prefix + str(stream["file"]), journal_dir / str(stream["file"])):
+            _drop_remote(prefix)
+            return {
+                "durable": False,
+                "backend": "local",
+                "reason": f"uploading stream {stream['name']} to {backend} failed, so the "
+                "journal is kept on this host only",
+            }
+    return {"durable": True, "backend": backend, "uri": key_uri(prefix)}
+
+
+def _mirror_manifest(journal_dir: Path, manifest: dict[str, Any]) -> None:
+    from services.object_store import stage_file
+
+    prefix = _remote_prefix(journal_dir.parent.name, journal_dir.name)
+    if stage_file(prefix + MANIFEST_NAME, journal_dir / MANIFEST_NAME, "application/json"):
+        return
+    _drop_remote(prefix)
+    manifest["storage"] = {
+        "durable": False,
+        "backend": "local",
+        "reason": "uploading the journal manifest failed, so the journal is kept on this host only",
+    }
+    _atomic_write_json(journal_dir / MANIFEST_NAME, manifest)
+
+
+def _drop_remote(prefix: str) -> None:
+    try:
+        from services.object_store import delete_prefix
+
+        delete_prefix(prefix)
+    except Exception:  # noqa: BLE001
+        logger.warning("journal mirror: could not remove %s", prefix, exc_info=True)
+
+
+def _remote_manifests(journal_id: str = "") -> list[tuple[str, dict[str, Any]]]:
+    """``(workspace_dir, manifest)`` for mirrored journals (optionally one id)."""
+    try:
+        from services.object_store import durable_backend, fetch_bytes, key_uri, list_keys
+
+        if not durable_backend():
+            return []
+        keys = list_keys(f"{REMOTE_PREFIX}/")
+    except Exception:  # noqa: BLE001
+        logger.warning("journal mirror: listing failed", exc_info=True)
+        return []
+    out = []
+    for key in keys:
+        parts = key.split("/")
+        if len(parts) != 4 or parts[3] != MANIFEST_NAME:
+            continue
+        if journal_id and parts[2] != journal_id:
+            continue
+        raw = fetch_bytes(key_uri(key))
+        try:
+            data = json.loads(raw or b"")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("journal_id") == parts[2]:
+            out.append((parts[1], data))
+    return out
+
+
+def _hydrate(workspace_dir: str, manifest: dict[str, Any]) -> Path:
+    """Download a mirrored journal into the local root; manifest last."""
+    from services.object_store import fetch_to_file
+
+    journal_id = str(manifest["journal_id"])
+    journal_dir = journal_root() / workspace_dir / journal_id
+    prefix = _remote_prefix(workspace_dir, journal_id)
+    for stream in manifest.get("streams") or []:
+        name = Path(str(stream.get("file") or "")).name
+        if not name or not fetch_to_file(prefix + name, journal_dir / name):
+            raise JournalError(
+                f"Journal {journal_id} stream {stream.get('name')} could not be fetched from shared storage."
+            )
+    _atomic_write_json(journal_dir / MANIFEST_NAME, manifest)
+    return journal_dir
 
 
 # -------------------------------------------------------- run registry ----
@@ -522,9 +643,11 @@ def _journal_dirs() -> Iterable[Path]:
     return [d for ws in root.iterdir() if ws.is_dir() for d in ws.iterdir() if d.is_dir()]
 
 
-def find_journal(journal_id: str) -> tuple[Path, dict[str, Any]]:
+def find_journal(journal_id: str, *, hydrate: bool = True) -> tuple[Path, dict[str, Any]]:
+    """Locate a journal locally, else in shared storage (hydrating when asked)."""
     if not _JOURNAL_ID_RE.match(str(journal_id or "")):
         raise JournalError("Journal id is malformed.")
+    not_found = JournalError(f"Journal {journal_id} was not found in this workspace.")
     for journal_dir in _journal_dirs():
         if journal_dir.name != journal_id:
             continue
@@ -532,18 +655,32 @@ def find_journal(journal_id: str) -> tuple[Path, dict[str, Any]]:
         if manifest is None:
             continue
         if not _workspace_allows(str(manifest.get("workspace_id") or "")):
-            break
+            raise not_found
         return journal_dir, manifest
-    raise JournalError(f"Journal {journal_id} was not found in this workspace.")
+    for workspace_dir, manifest in _remote_manifests(journal_id):
+        if not _workspace_allows(str(manifest.get("workspace_id") or "")):
+            raise not_found
+        if hydrate:
+            return _hydrate(workspace_dir, manifest), manifest
+        return journal_root() / workspace_dir / journal_id, manifest
+    raise not_found
 
 
 def list_journals() -> list[dict[str, Any]]:
     out = []
+    seen: set[str] = set()
     for journal_dir in _journal_dirs():
         manifest = _load_manifest(journal_dir)
         if manifest is None or not _workspace_allows(str(manifest.get("workspace_id") or "")):
             continue
+        seen.add(str(manifest.get("journal_id")))
         out.append(manifest)
+    for _ws, manifest in _remote_manifests():
+        if str(manifest.get("journal_id")) in seen:
+            continue
+        if _workspace_allows(str(manifest.get("workspace_id") or "")):
+            seen.add(str(manifest.get("journal_id")))
+            out.append(manifest)
     out.sort(key=lambda m: float(m.get("committed_at") or 0), reverse=True)
     return out
 
@@ -598,13 +735,16 @@ def apply_replay_source(request: Any) -> bool:
         "stream": resolved["stream"]["name"],
         "rows": resolved["stream"]["rows"],
         "sha256": resolved["stream"]["sha256"],
+        "format": resolved["stream"].get("format") or "jsonl",
     }
     return True
 
 
 def delete_journal(journal_id: str) -> None:
-    journal_dir, _ = find_journal(journal_id)
-    shutil.rmtree(journal_dir, ignore_errors=False)
+    journal_dir, _ = find_journal(journal_id, hydrate=False)
+    if journal_dir.is_dir():
+        shutil.rmtree(journal_dir, ignore_errors=False)
+    _drop_remote(_remote_prefix(journal_dir.parent.name, journal_dir.name))
 
 
 def prune_journals(now: float | None = None, *, orphan_grace_seconds: float = 86400.0) -> dict[str, int]:
@@ -626,5 +766,10 @@ def prune_journals(now: float | None = None, *, orphan_grace_seconds: float = 86
             continue
         if float(manifest.get("expires_at") or 0) and now > float(manifest["expires_at"]):
             shutil.rmtree(journal_dir, ignore_errors=True)
+            _drop_remote(_remote_prefix(journal_dir.parent.name, journal_dir.name))
+            counts["expired"] += 1
+    for workspace_dir, manifest in _remote_manifests():
+        if float(manifest.get("expires_at") or 0) and now > float(manifest["expires_at"]):
+            _drop_remote(_remote_prefix(workspace_dir, str(manifest["journal_id"])))
             counts["expired"] += 1
     return counts

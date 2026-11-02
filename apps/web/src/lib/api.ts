@@ -1,4 +1,4 @@
-import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
+import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
@@ -5135,6 +5135,29 @@ export interface ContinuityRebaselineResult {
 }
 
 /** Accept the current destination (or its removal) as the append-continuity baseline. Audited; reason required. */
+export async function listJournals(): Promise<JournalManifest[]> {
+  const res = await apiFetch(`${API_BASE}/journals`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load journals"));
+  const body = await res.json();
+  return Array.isArray(body?.journals) ? body.journals : [];
+}
+
+export async function deleteJournal(journalId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/journals/${encodeURIComponent(journalId)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not delete the journal"));
+}
+
+/** Verify a journal stream server-side and profile it as the Source step. */
+export async function openJournal(journalId: string, stream = ""): Promise<OpenedJournal> {
+  const qs = stream ? `?stream=${encodeURIComponent(stream)}` : "";
+  const res = await apiFetch(`${API_BASE}/journals/${encodeURIComponent(journalId)}/open${qs}`, {
+    method: "POST",
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not open the journal"));
+  return res.json();
+}
+
 export async function rebaselineContinuity(
   destination: Record<string, unknown>,
   reason: string,

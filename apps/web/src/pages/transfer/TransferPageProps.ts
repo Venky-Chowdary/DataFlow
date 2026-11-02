@@ -38,5 +38,8 @@ export interface TransferPageProps {
     destTable?: string;
     /** Persist mappings onto this parked draft when the footer Schedules. */
     scheduleId?: string;
+    /** Replay a capture-once journal stream as the Source. */
+    journalId?: string;
+    journalStream?: string;
   } | null;
 }

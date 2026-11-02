@@ -86,6 +86,7 @@ import {
   type VectorFieldRouting,
   type VectorRoutingPlan,
   rebaselineContinuity,
+  openJournal,
 } from "../lib/api";
 import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
@@ -194,6 +195,7 @@ import {
 import {
   Connector,
   EnhancedAnalysis,
+  OpenedJournal,
   ParsedUpload,
   PreflightResult,
   SourceReadOptions,
@@ -512,6 +514,12 @@ export function TransferPage({
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
   const [captureJournal, setCaptureJournal] = useState(false);
+  /** Source is a verified capture-once journal stream, not an uploaded file. */
+  const [replayJournal, setReplayJournal] = useState<(OpenedJournal["journal"] & { filename: string }) | null>(null);
+  const sourceFileName = file?.name ?? replayJournal?.filename;
+  useEffect(() => {
+    if (file || sourceKind !== "file" || !parsed) setReplayJournal(null);
+  }, [file, sourceKind, parsed]);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
   const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
   const [vectorMetadataColumns, setVectorMetadataColumns] = useState("");
@@ -821,7 +829,9 @@ export function TransferPage({
 
   const writeViaStagingSupported = destSupportsWriteViaStaging(destDriverType);
   const captureJournalBlockedReason =
-    syncMode === "cdc"
+    replayJournal
+      ? "This run replays a journal — it is not captured again."
+      : syncMode === "cdc"
       ? "Unavailable for CDC — change streams keep their own durable log."
       : sourceKind === "file" || sourceKind === "database"
         ? ""
@@ -1161,7 +1171,7 @@ export function TransferPage({
     || syncMode === "scd2"
     || syncMode === "mirror";
   const sourceStreamName = sourceKind === "file"
-    ? file?.name.replace(/\.[^/.]+$/, "") || "uploaded_file"
+    ? sourceFileName?.replace(/\.[^/.]+$/, "") || "uploaded_file"
     : sourceKind === "cloud"
       ? cloudPath.split("/").filter(Boolean).pop() || "cloud_object"
       : sourceCollection || sourceTable || "source_stream";
@@ -1353,8 +1363,8 @@ export function TransferPage({
     if (sourceKind === "file") {
       return {
         kind: "file",
-        format: parsed?.file_type ?? file?.name.split(".").pop() ?? "csv",
-        filename: file?.name,
+        format: parsed?.file_type ?? sourceFileName?.split(".").pop() ?? "csv",
+        filename: sourceFileName,
         ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
       };
     }
@@ -1402,7 +1412,7 @@ export function TransferPage({
   };
 
   const buildPlanPayload = useCallback(() => ({
-    name: file?.name ?? sourceStreamName,
+    name: sourceFileName ?? sourceStreamName,
     source: buildSourceEndpoint(),
     destination: destKindMode === "file_export"
       ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
@@ -1726,7 +1736,7 @@ export function TransferPage({
               validation_mode: validationMode,
               file_format: parsed?.file_type
                 ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
-                ?? file?.name.split(".").pop(),
+                ?? sourceFileName?.split(".").pop(),
               use_llm: true,
               source_samples: buildSourceSamples(),
               destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
@@ -1745,7 +1755,7 @@ export function TransferPage({
             validation_mode: validationMode,
             file_format: parsed?.file_type
               ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
-              ?? file?.name.split(".").pop(),
+              ?? sourceFileName?.split(".").pop(),
             use_llm: true,
             source_samples: buildSourceSamples(),
             destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
@@ -2362,6 +2372,44 @@ export function TransferPage({
     setStep(STEP_SOURCE);
   }, [seedSourceConnector, connectors]);
 
+  /** Replay: profile a verified journal stream server-side and make it the Source. */
+  const openJournalAsSource = async (journalId: string, stream: string) => {
+    setSourceKind("file");
+    setFile(null);
+    setParsed(null);
+    setAnalysis(null);
+    setPreflight(null);
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const data = await openJournal(journalId, stream);
+      const filename = data.filename || `${data.journal.stream}.jsonl`;
+      const baseName = filename.replace(/\.[^/.]+$/, "");
+      setParsed(data);
+      setReplayJournal({ ...data.journal, filename });
+      setActiveData({
+        name: baseName,
+        filename,
+        columns: data.columns,
+        row_count: data.row_count,
+        samples: buildColumnSamples(data.columns, data.data ?? data.sample_data),
+        schema: data.schema,
+      });
+      if (!targetCollection) setTargetCollection(data.journal.source?.object || baseName);
+      toast({
+        title: "Journal opened as the source",
+        message: `${data.row_count.toLocaleString()} rows passed the SHA-256 check. Choose a destination — the live source is not read.`,
+        tone: "success",
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setUploadError(message);
+      toast({ title: "Journal could not be opened", message, tone: "error" });
+    } finally {
+      setUploading(false);
+    }
+  };
+
   // Jobs → Studio: land on Validate/Map, seed mappings, open repair proposal.
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
@@ -2463,6 +2511,9 @@ export function TransferPage({
     }
     if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
 
+    if (seedStudioIntent.journalId) {
+      void openJournalAsSource(seedStudioIntent.journalId, seedStudioIntent.journalStream || "");
+    }
     const scheduleRoute = Boolean(seedStudioIntent.sourceConnectorId && seedStudioIntent.destConnectorId);
 
     if (seedStudioIntent.step === "map") {
@@ -2473,6 +2524,7 @@ export function TransferPage({
       setStep(STEP_VALIDATE);
     }
 
+    if (seedStudioIntent.journalId) return;
     const jobHint = seedStudioIntent.jobId
       ? ` from job ${seedStudioIntent.jobId.slice(0, 8)}…`
       : "";
@@ -2634,7 +2686,7 @@ export function TransferPage({
           target_columns: destColumns.length ? destColumns : undefined,
           target_schema: destSchemaMap,
           validation_mode: validationMode,
-          file_format: data.file_type ?? file?.name.split(".").pop(),
+          file_format: data.file_type ?? sourceFileName?.split(".").pop(),
           use_llm: true,
           source_samples: buildColumnSamples(data.columns, rows),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
@@ -5419,6 +5471,9 @@ export function TransferPage({
               ? callableSourceExtra(sourceReadMode, procedureCall, procedureParams) || {}
               : {}),
             ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
+            ...(replayJournal
+              ? { journal_id: replayJournal.journal_id, ...(replayJournal.stream ? { journal_stream: replayJournal.stream } : {}) }
+              : {}),
           };
           if (captureJournal && !captureJournalBlockedReason) extra.journal_capture = true;
           if (syncMode === "cdc") {
@@ -5589,7 +5644,7 @@ export function TransferPage({
       ) {
         const rows = parsed.data ?? parsed.sample_data ?? [];
         const localResult = runLocalFileExport({
-          sourceFilename: file?.name ?? "export",
+          sourceFilename: sourceFileName ?? "export",
           rows,
           mappings: columnMappings,
           format: exportFormat,
@@ -5722,6 +5777,13 @@ export function TransferPage({
     setTransferLaunch(null);
     leaveTheaterToValidate();
   }, [leaveTheaterToValidate]);
+
+  const replayJournalFromTheater = (journalId: string, stream: string) => {
+    setTransferLaunch(null);
+    leaveTheaterToValidate();
+    setStep(STEP_SOURCE);
+    void openJournalAsSource(journalId, stream);
+  };
 
   const leaveTheaterToMap = useCallback(() => {
     setActiveJobId(null);
@@ -6077,7 +6139,7 @@ export function TransferPage({
       : "Choose destination";
   const sourceLabel = studioSourceLabel({
     sourceKind,
-    fileName: file?.name,
+    fileName: sourceFileName,
     cloudPath,
     sourceConnectorName: sourceConnector?.name,
   });
@@ -6144,7 +6206,7 @@ export function TransferPage({
   }, [studioFlags.canvas, step, reviewSig, columnMappings.length, analyzing, preflighting]);
 
   const mapSourceType = sourceKind === "file"
-    ? (parsed?.file_type ?? file?.name.split(".").pop() ?? "file")
+    ? (parsed?.file_type ?? sourceFileName?.split(".").pop() ?? "file")
     : (sourceConnector?.type ?? "database");
   const mapSourceSubtitle = sourceKind === "file"
     ? `Uploaded file${parsed?.file_type ? ` · ${parsed.file_type.toUpperCase()}` : ""}${parsed?.row_count ? ` · ${parsed.row_count.toLocaleString()} rows` : ""}`
@@ -6798,7 +6860,27 @@ export function TransferPage({
                   onApply={applyReadWindow}
                 />
               )}
-              {file && parsed ? (
+              {replayJournal && parsed && !file ? (
+                <div className="df2-upload-result df2-upload-result-compact" data-testid="journal-replay-source">
+                  <div className="df2-upload-result-main">
+                    <span className="df2-badge df2-badge-live df2-badge-filename" title={replayJournal.sha256 ? `SHA-256 ${replayJournal.sha256}` : replayJournal.journal_id}>
+                      <DtIcon name="check" size={14} /> Journal {replayJournal.journal_id}
+                    </span>
+                    <span className="df2-upload-result-meta">
+                      {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns · checksum verified · {replayJournal.storage?.durable ? "shared storage" : "this host only"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-sm"
+                    disabled={uploading}
+                    onClick={() => { setParsed(null); setReplayJournal(null); }}
+                    title="Use a file instead of this journal"
+                  >
+                    <DtIcon name="x" size={14} /> Clear
+                  </button>
+                </div>
+              ) : file && parsed ? (
                 <div className="df2-upload-result df2-upload-result-compact">
                   <div className="df2-upload-result-main">
                     <span className="df2-badge df2-badge-live df2-badge-filename" title={file.name}><DtIcon name="check" size={14} /> {file.name}</span>
@@ -6847,7 +6929,7 @@ export function TransferPage({
                   </button>
                 </div>
               )}
-              {file && parsed && (
+              {(file || replayJournal) && parsed && (
                 <>
                   {["pdf", "docx", "html", "htm"].includes((parsed.file_type || "").toLowerCase()) && (
                     <p className="df2-label-hint" role="status">
@@ -8490,6 +8572,7 @@ export function TransferPage({
                 await acceptContinuityBaseline(reason);
                 leaveFailedRunToValidate();
               } : undefined}
+              onReplayJournal={replayJournalFromTheater}
               onRebuildFullRefresh={continuityRecoveryAvailable ? () => {
                 setSyncMode("full_refresh_overwrite");
                 leaveFailedRunToValidate();

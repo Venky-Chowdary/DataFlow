@@ -1996,6 +1996,52 @@
   margin-bottom: 14px;
 }
 
+.df2-journals-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.df2-journals-drawer .df2-table td {
+  vertical-align: middle;
+}
+
+/* Narrow screens: each journal is a stacked card so Replay/Delete stay visible. */
+@media (max-width: 640px) {
+  .df2-journals-drawer .df2-table thead {
+    display: none;
+  }
+  .df2-journals-drawer .df2-table,
+  .df2-journals-drawer .df2-table tbody,
+  .df2-journals-drawer .df2-table tr,
+  .df2-journals-drawer .df2-table td {
+    display: block;
+    width: 100%;
+  }
+  .df2-journals-drawer .df2-table tr {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--df-border, rgba(15, 23, 42, 0.08));
+  }
+  .df2-journals-drawer .df2-table td {
+    height: auto;
+    min-height: 0;
+    padding: 2px 0;
+    border: 0;
+    line-height: 1.45;
+    font-family: inherit;
+  }
+  .df2-journals-drawer .df2-table td[data-label]::before {
+    content: attr(data-label) " · ";
+    color: var(--df-text-muted, #64748b);
+    font-size: 12px;
+  }
+  .df2-journals-drawer .df2-journals-actions {
+    justify-content: flex-start;
+    padding-top: 6px;
+  }
+}
+
 .df2-jobs-log-table-wrap {
   overflow: auto;
   flex: 1 1 auto;

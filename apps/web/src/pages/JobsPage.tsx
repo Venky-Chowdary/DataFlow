@@ -4,6 +4,8 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
 import { JobTheater } from "../components/JobTheater";
 import { JobNameEditor } from "../components/jobs/JobNameEditor";
+import { JournalsDrawer } from "../components/jobs/JournalsDrawer";
+import { JobJournalNote } from "../components/jobs/JobJournalNote";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
@@ -94,6 +96,9 @@ export type JobsStudioIntent = {
   destTable?: string;
   /** Persist mappings onto this draft — do not POST a second empty schedule. */
   scheduleId?: string;
+  /** Replay a capture-once journal: Studio's Source becomes this verified journal stream. */
+  journalId?: string;
+  journalStream?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -307,6 +312,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
+  const [journalsOpen, setJournalsOpen] = useState(false);
   const appliedFocusRef = useRef<string | null>(null);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
@@ -935,11 +941,16 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 </FilterBar>
               }
               actions={
-                onRefresh ? (
-                  <Button size="sm" onClick={onRefresh} leadingIcon={<DtIcon name="activity" size={14} />}>
-                    Refresh
+                <>
+                  <Button size="sm" variant="ghost" onClick={() => setJournalsOpen(true)} leadingIcon={<DtIcon name="database" size={14} />}>
+                    Journals
                   </Button>
-                ) : undefined
+                  {onRefresh && (
+                    <Button size="sm" onClick={onRefresh} leadingIcon={<DtIcon name="activity" size={14} />}>
+                      Refresh
+                    </Button>
+                  )}
+                </>
               }
             />
 
@@ -1075,6 +1086,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                       onFailed={handleComplete}
                       onCancelled={handleComplete}
                       onOpenJob={(jobId) => setSelectedId(jobId)}
+                      onReplayJournal={onStartTransfer ? (journalId, journalStream) => openStudio({ step: "source", journalId, journalStream: journalStream || undefined }) : undefined}
                     />
                   </div>
                 ) : liveJob && selected ? (
@@ -1176,6 +1188,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               onOpenValidate={() => openValidateInStudio()}
                             />
                             <RunCarryNotes job={liveJob} />
+                            <JobJournalNote
+                              job={liveJob}
+                              onReplay={onStartTransfer ? (journalId, journalStream) => openStudio({ step: "source", journalId, journalStream: journalStream || undefined }) : undefined}
+                            />
                             <SchemaFidelityNotes job={liveJob} />
                             <IdentityAlignmentNote job={liveJob} />
                             <JobTrustScoreCard
@@ -2319,6 +2335,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
           />
         </Drawer>
       )}
+      <JournalsDrawer
+        open={journalsOpen}
+        onClose={() => setJournalsOpen(false)}
+        onReplay={onStartTransfer ? (journalId, journalStream) => {
+          setJournalsOpen(false);
+          openStudio({ step: "source", journalId, journalStream: journalStream || undefined });
+        } : undefined}
+      />
     </PageShell>
   );
 }
