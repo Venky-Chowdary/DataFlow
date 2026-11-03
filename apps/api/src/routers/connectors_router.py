@@ -2210,8 +2210,20 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         logger.warning("quarantine replay PK resolve failed: %s", exc, exc_info=exc)
         conflict_columns = []
 
-    write_mode = "upsert" if conflict_columns else "insert"
-    if write_mode == "insert":
+    from services.destination_key_collision_probe import (
+        sync_mode_appends_without_key_resolution,
+    )
+
+    # Replay writes the way the route wrote. An append route's table may hold
+    # the same key twice by design, so a keyed upsert there tried to CREATE a
+    # UNIQUE index over rows the append legitimately wrote (D257). The key
+    # still scopes the read-back to the replayed rows.
+    parent_appends = sync_mode_appends_without_key_resolution(
+        str(getattr(transfer_req, "sync_mode", "") or "")
+    )
+    write_mode = "insert" if parent_appends else "upsert"
+    replay_sync_mode = "full_refresh_append" if parent_appends else "incremental_deduped"
+    if not conflict_columns:
         # Refuse silent insert replay — partial loads + insert duplicates rows.
         # Operator must set primary key on Map / stream contract first.
         raise HTTPException(
@@ -2228,7 +2240,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     # sync_mode must match write_mode so Gate-8 allow_extra / sample proof
     # treats this as keyed upsert — not soft append.
     child_payload = dict(payload)
-    child_payload["sync_mode"] = "incremental_deduped"
+    child_payload["sync_mode"] = replay_sync_mode
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
     from src.transfer.contract_engine import enforce_bound_contract, stamp_request_contract
@@ -2271,11 +2283,11 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             validation_mode=transfer_req.validation_mode or "balanced",
             backfill_new_fields=bool(transfer_req.backfill_new_fields),
             write_mode=write_mode,
-            conflict_columns=conflict_columns or None,
-            # Replay is a keyed upsert of the remediated rows. It is never a
-            # full-refresh overwrite, and a failure must not replace an object
-            # that already landed (R11-001).
-            sync_mode="incremental_deduped",
+            conflict_columns=None if parent_appends else (conflict_columns or None),
+            # Replay is a keyed upsert of the remediated rows (an insert on an
+            # append route). It is never a full-refresh overwrite, and a
+            # failure must not replace an object that already landed (R11-001).
+            sync_mode=replay_sync_mode,
             protect_landed_object=True,
         )
         rejected = int(dest_summary.get("rejected_rows") or 0)
@@ -2283,7 +2295,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         # checksum / keyed sample). Upsert into a live table may have extras;
         # sync_mode + reconcile_sample make allow_extra + sample proof honest.
         dest_summary = dict(dest_summary or {})
-        dest_summary["sync_mode"] = "incremental_deduped"
+        dest_summary["sync_mode"] = replay_sync_mode
         dest_summary["source_row_count"] = len(records)
         # C21: the ladder must scope its destination read-back to the
         # replayed keys, not the whole table. Without conflict_columns the
