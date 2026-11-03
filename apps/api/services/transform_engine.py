@@ -27,6 +27,9 @@ from services.value_serializer import json_default, json_loads_exact
 
 #: An unadorned ASCII integer — no sign but ``-``, no separator, no exponent.
 _PLAIN_ASCII_INT_RE = re.compile(r"^-?[0-9]{1,38}$")
+#: Unadorned ASCII decimal. Exactly three fraction digits is excluded: Auto
+#: reads ``1.234`` as possibly grouped, so it keeps the full resolver.
+_PLAIN_ASCII_DECIMAL_RE = re.compile(r"[+-]?[0-9]+(?:\.(?:[0-9]{1,2}|[0-9]{4,}))?\Z")
 #: Already-canonical ISO calendar date, which needs validation but no pattern search.
 _ISO_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
@@ -1253,6 +1256,13 @@ def _parse_decimal(value: str, *, allow_markers: bool = True) -> str | None:
     if not allow_markers and _numeric_text_has_markers(value):
         return None
     text = value.strip()
+    if _PLAIN_ASCII_DECIMAL_RE.match(text):
+        # Nothing for currency, NFKC or separator resolution to change: the
+        # per-row cursor, filter and checksum paths spent most of a large
+        # run's CPU proving that, cell by cell.
+        from services.value_serializer import safe_decimal_text
+
+        return safe_decimal_text(Decimal(text))
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
         return None
