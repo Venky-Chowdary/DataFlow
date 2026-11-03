@@ -414,8 +414,12 @@ def _compute_active_checksum(
     soft_delete_column: str,
     batch_size: int,
     dest_types: dict[str, str] | None = None,
+    physical: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Active-row digest: one streamed SELECT. Never OFFSET.
+
+    ``physical`` maps a target name to the spelling the catalog stores; the
+    digest stays keyed by the target name the write pass fingerprinted.
 
     ``dest_types`` are the column types the write pass fingerprinted against;
     the read-back must be steered by the same types or a decimal held in a
@@ -426,7 +430,10 @@ def _compute_active_checksum(
     from services.reconciliation_api import stream_select_checksum
 
     dialect_name = _dialect_of(conn)
-    cols_quoted = ",".join(quote_stored_identifier(dialect_name, c) for c in target_cols)
+    stored = physical or {}
+    cols_quoted = ",".join(
+        quote_stored_identifier(dialect_name, stored.get(c, c)) for c in target_cols
+    )
     if soft_delete_column:
         col_quoted = quote_stored_identifier(dialect_name, soft_delete_column)
         pred = sql_bool_is_not_true(dialect_name, col_quoted)
@@ -950,8 +957,17 @@ def apply_inferred_soft_deletes(
     qualified = _qualified_name(table, schema_name, engine_dialect)
     stg_name = _staging_table_name()
     stg_qualified = _qualified_name(stg_name, schema_name, engine_dialect)
+    # Hand-built SQL quotes every identifier, so on a case-folding engine the
+    # logical "id" is a different column from the ID the table stores (D250,
+    # ORA-00904 on Oracle). Address the catalog's own spelling.
+    from connectors.generic_sql import _resolve_physical_column_idents
+
+    stored = _resolve_physical_column_idents(
+        engine, table, schema_name, [*pk_columns, *target_cols]
+    )
+    pk_physical = [stored.get(c, c) for c in pk_columns]
     pk_quoted = ", ".join(
-        quote_stored_identifier(engine_dialect, c) for c in pk_columns
+        quote_stored_identifier(engine_dialect, c) for c in pk_physical
     )
     placeholders = ", ".join(f":p{i}" for i in range(len(pk_columns)))
     insert_sql = (
@@ -996,7 +1012,7 @@ def apply_inferred_soft_deletes(
                 conn,
                 qualified,
                 stg_qualified,
-                pk_columns,
+                pk_physical,
                 soft_delete_column=soft_delete_column,
                 dialect=dialect_name,
                 target_table=table,
@@ -1010,6 +1026,7 @@ def apply_inferred_soft_deletes(
                 soft_delete_column if delete_mode == "soft" else "",
                 batch_size,
                 dest_types=target_fingerprint_types(mappings, schema),
+                physical=stored,
             )
             conn.commit()
             _drop_pk_staging(conn, stg_qualified)
