@@ -283,7 +283,7 @@ def test_incomplete_population_fit_still_blocks_string_width_narrowing() -> None
                 "target_type": "VARCHAR(64)",
             }
         ],
-        sample_rows=rows,
+        sample_rows=rows[:1],
         population_rows=rows,
         rows_are_population=True,
         destination_column_types={"note": "VARCHAR(64)"},
@@ -449,7 +449,7 @@ def test_width_blocker_does_not_depend_on_issue_wording(monkeypatch) -> None:
                 "target_type": "VARCHAR(64)",
             }
         ],
-        sample_rows=rows,
+        sample_rows=rows[:1],
         population_rows=rows,
         rows_are_population=True,
         destination_column_types={"note": "VARCHAR(64)"},

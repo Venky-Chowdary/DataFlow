@@ -589,6 +589,7 @@ def scan_existing_table_population_fit(
         sync_mode=sync_mode,
         dest_table_exists=destination_table_exists,
         deadline_monotonic=deadline_monotonic,
+        deadline_floor_rows=len(sample_rows or ()),
         on_progress=on_progress,
     )
     if population_walk_error:

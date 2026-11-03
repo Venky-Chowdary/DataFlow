@@ -28,6 +28,7 @@ Asymmetry is deliberate and load-bearing:
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1051,6 +1052,7 @@ def scan_rows(
     undecidable: Iterable[str] = (),
     safe_by_declaration: Iterable[str] = (),
     deadline_monotonic: float | None = None,
+    deadline_floor_rows: int = 0,
     on_progress: Callable[[int], None] | None = None,
 ) -> FitScanReport:
     """Scan ``rows`` against the writer's own fit predicates.
@@ -1059,8 +1061,14 @@ def scan_rows(
     row (the file/batch it is about to write, not a preview). The scan downgrades
     that claim to PARTIAL by itself if the budget cuts the walk short — evidence
     is never stronger than the walk that produced it.
+
+    ``deadline_floor_rows``: the deadline cannot stop the walk before this many
+    rows — the rows the caller already holds (its sample). A budget spent by
+    earlier gates once cut a 3-row walk at row 1, and g3f then forecast one
+    holdout where the sample transform and the write both held out three (D260).
     """
     bounded = tuple(targets)
+    deadline_floor = max(1, int(deadline_floor_rows or 0))
     started = time.monotonic()
     if not bounded:
         return FitScanReport(
@@ -1210,14 +1218,17 @@ def scan_rows(
         if scanned >= budget:
             truncated = True
             truncated_reason = "row"
+            # The row in hand is not scanned yet: the envelope starts at it.
+            row_iter = itertools.chain((row,), row_iter)
             break
         if (
             deadline_monotonic is not None
-            and scanned > 0
+            and scanned >= deadline_floor
             and time.monotonic() >= deadline_monotonic
         ):
             truncated = True
             truncated_reason = "time"
+            row_iter = itertools.chain((row,), row_iter)
             break
         scanned += 1
         now = time.monotonic()
@@ -1645,6 +1656,7 @@ def scan_population_fit(
     sync_mode: str = "",
     dest_table_exists: bool | None = None,
     deadline_monotonic: float | None = None,
+    deadline_floor_rows: int = 0,
     on_progress: Callable[[int], None] | None = None,
 ) -> FitScanReport:
     """Resolve bounded targets from the mappings, then scan the rows."""
@@ -1670,6 +1682,7 @@ def scan_population_fit(
         undecidable=undecidable,
         safe_by_declaration=safe,
         deadline_monotonic=deadline_monotonic,
+        deadline_floor_rows=deadline_floor_rows,
         on_progress=on_progress,
     )
 
@@ -1840,12 +1853,25 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
     if held_out:
         rows = sum(f.unfit_rows for f in held_out)
         cols = ", ".join(f"{f.target.source} → {f.target.target_type}" for f in held_out)
+        walked_all = report.envelope_complete and all(
+            f.target.carrier in _WIDENABLE_CARRIERS for f in held_out
+        )
+        if report.evidence == EVIDENCE_PARTIAL and not walked_all:
+            stop = "time budget" if report.truncated_reason == "time" else "row budget"
+            covered = report.rows_scanned + report.envelope_rows_scanned
+            count = (
+                f"At least {rows} row(s) will be held out in quarantine on write "
+                f"(the scan stopped at the {stop} after {covered} of "
+                f"{report.rows_total or covered} source row(s); the "
+                "remaining rows are unproven)"
+            )
+        else:
+            count = f"{rows} row(s) will be held out in quarantine on write"
         return {
             "id": GATE_ID,
             "status": "warn",
             "message": (
-                f"{rows} row(s) will be held out in quarantine on write — "
-                f"{cols} exceeds the destination carrier under a signed "
+                f"{count} — {cols} exceeds the destination carrier under a signed "
                 "continue-policy contract"
             ),
             "duration_ms": duration_ms,
