@@ -97,10 +97,10 @@ def _sql_null_count(
 def _mongo_null_count(
     cfg: dict[str, Any], collection: str, cursor_column: str
 ) -> int:
-    from services.mongodb_service import get_mongodb_service
+    from connectors.mongodb_common import _mongo_client
+    from src.transfer.adapters import mongodb_connection_string
 
-    svc = get_mongodb_service()
-    client = svc.client_from_config(cfg)
+    client = _mongo_client(mongodb_connection_string(cfg))
     db_name = str(cfg.get("database") or "")
     coll = client[db_name][collection]
     # Mongo "null" matches both missing and explicit-null fields — the same
