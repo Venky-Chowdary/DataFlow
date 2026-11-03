@@ -45,13 +45,14 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
 
     from services.transform_engine import decimal_wire_value, integer_wire_value
 
-    int_hits = sum(1 for s in non_empty if integer_wire_value(s) is not None)
-    float_hits = sum(1 for s in non_empty if decimal_wire_value(s) is not None)
-    dt_hits = sum(1 for s in non_empty if _sample_is_datetime_watermark(s))
-
     n = len(non_empty)
+    # DATETIME wins first, so the number parsers only run when it does not:
+    # this is called per comparison on keyset walks over every row.
+    dt_hits = sum(1 for s in non_empty if _sample_is_datetime_watermark(s))
     if dt_hits / n >= 0.8:
         return WatermarkType.DATETIME
+    int_hits = sum(1 for s in non_empty if integer_wire_value(s) is not None)
+    float_hits = sum(1 for s in non_empty if decimal_wire_value(s) is not None)
     if int_hits / n >= 0.9:
         return WatermarkType.INTEGER
     if float_hits / n >= 0.85:
