@@ -603,6 +603,7 @@ def _coerce_eos_row(
     column that stores an offset string untouched.
     """
     from connectors.sql_bind import normalize_sql_bind_value
+    from connectors.sqlserver_datetime2 import bind_sqlserver_fractional_ddl
     from services.type_system import materialize_dest_ddl
 
     out: dict[str, Any] = {}
@@ -612,7 +613,9 @@ def _coerce_eos_row(
         if not ddl:
             out[col] = raw
             continue
-        out[col] = normalize_sql_bind_value(raw, ddl, engine=dialect)
+        out[col] = bind_sqlserver_fractional_ddl(
+            normalize_sql_bind_value(raw, ddl, engine=dialect), ddl, engine=dialect
+        )
     return out
 
 

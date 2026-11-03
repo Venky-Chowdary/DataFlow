@@ -235,3 +235,27 @@ def install_sqlserver_datetime2_bind() -> None:
 
     DATETIMEOFFSET.bind_processor = offset_bind_processor  # type: ignore[method-assign]
     _INSTALLED = True
+
+
+_FRACTIONAL_DDL = re.compile(r"^\s*(DATETIME2|DATETIMEOFFSET)\s*(?:\(\s*(\d+)\s*\))?", re.IGNORECASE)
+
+
+def bind_sqlserver_fractional_ddl(value: Any, ddl: str, *, engine: str) -> Any:
+    """Fractional text for a DATETIME2/DATETIMEOFFSET(p>3) cell named by its DDL.
+
+    A raw ``datetime`` reaches the driver as a 3-digit timestamp on both pyodbc
+    (SQL_TIMESTAMP) and pymssql (TDS DATETIME); text converts server-side at the
+    column's own precision. Writers that bind by DDL rather than by a reflected
+    SQLAlchemy type (the CDC applier, D249) use this.
+    """
+    if value is None or isinstance(value, str) or not is_sqlserver_engine(engine):
+        return value
+    match = _FRACTIONAL_DDL.match(str(ddl or ""))
+    if not match:
+        return value
+    digits = int(match.group(2)) if match.group(2) else 7
+    if digits <= 3:
+        return value
+    if match.group(1).upper() == "DATETIME2":
+        return sqlserver_datetime2_bind_text(value, precision=digits)
+    return sqlserver_datetimeoffset_bind_text(value, precision=digits)
