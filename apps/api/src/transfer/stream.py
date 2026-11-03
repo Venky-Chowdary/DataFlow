@@ -298,6 +298,28 @@ def _arm_strict_keyed_backup(
     return backups
 
 
+def _undo_failed_write(run: Any, exc: BaseException) -> BaseException:
+    """Undo a failed run's writes (or drop the table it created); return ``exc``.
+
+    Shared by the batch-error handler and the post-loop "nothing written"
+    failures: a run that held out every row has still created its table, and
+    leaving it makes the next run bind to a table nobody approved (D258).
+    """
+    try:
+        from services.batch_undo import undo_failed_batch_if_dest_was_empty
+
+        note = undo_failed_batch_if_dest_was_empty(
+            destination=run.cfg.destination,
+            dest_summary=run.tally.dest_summary,
+            sync_mode=run.cfg.effective_sync,
+        )
+        if note:
+            setattr(exc, "failed_batch_undo_note", note)
+    except Exception:  # noqa: BLE001 - undo must not hide the write failure
+        logging.getLogger(__name__).warning("Failed-write undo did not run", exc_info=True)
+    return exc
+
+
 def _fk_orphans_fail_closed(validation_mode: str) -> bool:
     return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
 
@@ -2695,20 +2717,7 @@ def _stream_database_transfer_impl(
                 ),
             )
         if not isinstance(_row_exc, TransferCancelled):
-            try:
-                from services.batch_undo import (
-                    undo_failed_batch_if_dest_was_empty,
-                )
-
-                _undo_note = undo_failed_batch_if_dest_was_empty(
-                    destination=run.cfg.destination,
-                    dest_summary=run.tally.dest_summary,
-                    sync_mode=run.cfg.effective_sync,
-                )
-                if _undo_note:
-                    setattr(_row_exc, "failed_batch_undo_note", _undo_note)
-            except Exception:  # noqa: BLE001 - undo must not hide the write failure
-                pass
+            _undo_failed_write(run, _row_exc)
         _kafka_failure_offset_note(run.cfg.src_type, run.tally.dest_summary, _row_exc)
         raise
     finally:
@@ -2846,7 +2855,9 @@ def _stream_database_transfer_impl(
     if run.tally.written == 0:
         details = "; ".join(filter(None, warning_samples[:10]))
         if details:
-            raise ValueError(f"No rows were written to the destination: {details}")
+            raise _undo_failed_write(
+                run, ValueError(f"No rows were written to the destination: {details}")
+            )
         if run.tally.rejected_total:
             # Quarantine is not an empty source. Reporting "empty" here sent
             # operators to look at data that was in fact read, rejected and
@@ -2858,10 +2869,13 @@ def _stream_database_transfer_impl(
                     reasons.append(reason)
                 if len(reasons) >= 3:
                     break
-            raise ValueError(
-                f"All {run.tally.rejected_total} row(s) were quarantined, so nothing was "
-                "written to the destination"
-                + (f" — {'; '.join(reasons)}" if reasons else "")
+            raise _undo_failed_write(
+                run,
+                ValueError(
+                    f"All {run.tally.rejected_total} row(s) were quarantined, so nothing "
+                    "was written to the destination"
+                    + (f" — {'; '.join(reasons)}" if reasons else "")
+                ),
             )
         if run.cfg.columns and (getattr(run.cfg.destination, "extra", None) or {}).get(
             "create_empty_source"
