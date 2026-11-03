@@ -163,6 +163,35 @@ def copy_oracle_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            # Identity INSERT would duplicate a complete snapshot. Equal COUNT
+            # is skip, as on the other SQLite identity copies; a different
+            # COUNT still declines to the row path.
+            if dest_count_before == source_count:
+                for conn, what in ((dest_conn, "SQLite dest"), (source_conn, "Oracle source")):
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        logger.debug("%s rollback skipped", what, exc_info=True)
+                proof = f"dest_count:{dest_count_before}"
+                return FastPathResult(
+                    rows_copied=source_count,
+                    source_rows=source_count,
+                    source_checksum=proof,
+                    target_rows=dest_count_before,
+                    target_checksum=proof,
+                    source_snapshot={
+                        "oracle_lock": "share",
+                        "copy_workers": 1,
+                        "copy_split": "skip",
+                        "copy_partitions": 1,
+                        "partitions_skipped": 1,
+                        "partitions_loaded": 0,
+                        "shard_mode": "table",
+                        "oracle_read": "share_select",
+                        "sqlite_write": "skip",
+                    },
+                    proof_scope="dest_count_equals_source_snapshot_count",
+                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"
