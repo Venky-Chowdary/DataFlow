@@ -53,7 +53,10 @@ export function isUnlimitedStringCarrier(inferred: string | null | undefined): b
   ) {
     return true;
   }
-  return false;
+  // Warehouse LOB ceiling (Snowflake VARCHAR(16777216), Redshift VARCHAR(65535))
+  // is that engine's TEXT, not a tight sink — same rule as the API.
+  const width = text.match(/\b(?:n?varchar2?|character\s+varying|string)\s*\(\s*(\d+)/i);
+  return Boolean(width && Number.parseInt(width[1], 10) >= 65535);
 }
 
 export function isStringFamily(inferred: string | null | undefined): boolean {
