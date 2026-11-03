@@ -146,7 +146,7 @@ def run_fleet_job(job_id: str) -> None:
     # reclaim must not force Module 14 refuse on append/Excel (0 rows written).
     from services.execution_engine_contract import resolve_reclaim_resume
 
-    resume = resolve_reclaim_resume(job)
+    resume = resolve_reclaim_resume(job, request)
     _run_transfer(job_id, request, resume=resume)
 
 

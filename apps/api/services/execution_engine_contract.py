@@ -538,13 +538,41 @@ def job_has_durable_progress(job: dict | None) -> bool:
         return False
 
 
-def resolve_reclaim_resume(job: dict | None) -> bool:
+def resolve_reclaim_resume(job: dict | None, request: Any = None) -> bool:
     """Whether orphan/claim reclaim should pass ``resume=True``.
 
     Pending jobs and mid-flight reclaim with **no** durable progress must run
     as a fresh start — forcing resume on append/Excel falsely fails Module 14.
+
+    A full-refresh overwrite always restarts from the start: its clear and
+    reload converge, while its checkpoint may count rows of a held write
+    transaction the stopped worker never committed. Resuming it ran into the
+    keyless-insert refusal, which told the operator to re-run with the very
+    overwrite mode the job already had (D261).
     """
+    if _reclaim_sync_is_overwrite(job, request):
+        return False
     return job_has_durable_progress(job)
+
+
+def _reclaim_sync_is_overwrite(job: dict | None, request: Any) -> bool:
+    from services.sync_cursor import (
+        is_overwrite_sync,
+        resolve_effective_sync_mode,
+        resolve_sync_contract,
+    )
+
+    if request is not None:
+        contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+        mode = resolve_effective_sync_mode(
+            getattr(request, "sync_mode", None),
+            contract.sync_mode if contract else None,
+        )
+    elif isinstance(job, dict):
+        mode = job.get("sync_mode")
+    else:
+        mode = None
+    return is_overwrite_sync(mode)
 
 
 def kafka_offset_commit_must_fail_closed(exc: BaseException) -> ExecutionContractError:

@@ -260,7 +260,7 @@ def settle_orphan(
 
     from services.execution_engine_contract import resolve_reclaim_resume
 
-    resume = bool(resolve_reclaim_resume(job))
+    resume = bool(resolve_reclaim_resume(job, request))
     attempt = reclaims + 1
     message = (
         f"Resuming after the worker stopped (automatic resume {attempt} of "
