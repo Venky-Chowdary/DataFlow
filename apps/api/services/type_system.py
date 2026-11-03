@@ -4472,6 +4472,22 @@ _UNICODE_ONLY_DESTS: frozenset[str] = frozenset(
         "presto",
         "spark",
         "mongodb",
+        # Document, search, key-value, stream, graph, vector and lakehouse
+        # stores keep text as UTF-8 (JSON / UTF-8 strings); none has a
+        # code-page text type (D248). Cassandra stays out: it has ``ascii``.
+        "elasticsearch",
+        "opensearch",
+        "dynamodb",
+        "couchbase",
+        "redis",
+        "kafka",
+        "neo4j",
+        "weaviate",
+        "qdrant",
+        "pinecone",
+        "milvus",
+        "influxdb",
+        "iceberg",
     }
 )
 
