@@ -312,6 +312,9 @@ def inspect_destination_for_preflight(
                     connection_string=str(fk_cfg.get("connection_string") or ""),
                     ssl=bool(fk_cfg.get("ssl")),
                     table=str(stream),
+                    catalog_type=str(fk_cfg.get("type") or ""),
+                    strict_namespace=True,
+                    introspect_purpose="destination",
                     # The login's own identity (warehouse, role, key): without it
                     # this catalog read opened a second Snowflake login (D187).
                     **{

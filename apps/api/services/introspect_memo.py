@@ -39,6 +39,25 @@ def introspect_memo_scope() -> Iterator[None]:
         _memo.reset(token)
 
 
+def introspection_request_key(db_type: str, kwargs: dict[str, Any]) -> str:
+    """One key per catalog request, whichever caller spelled it.
+
+    An argument left empty is the introspector's default, so ``api_key=''`` and
+    an omitted ``api_key`` are the same request. Keying on the raw spelling made
+    three destination reads of one SQL Server table miss each other (D244).
+    """
+    return repr(
+        (
+            db_type,
+            sorted(
+                (str(k), repr(v))
+                for k, v in kwargs.items()
+                if v is not None and v != "" and v != {}
+            ),
+        )
+    )
+
+
 def memoized_introspection(
     db_type: str, kwargs: dict[str, Any], read: Callable[[], dict[str, Any]]
 ) -> dict[str, Any]:
@@ -46,7 +65,7 @@ def memoized_introspection(
     memo = _memo.get()
     if memo is None:
         return read()
-    key = repr((db_type, sorted((str(k), repr(v)) for k, v in kwargs.items())))
+    key = introspection_request_key(db_type, kwargs)
     if key not in memo:
         memo[key] = read()
     return copy.deepcopy(memo[key])

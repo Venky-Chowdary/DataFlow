@@ -234,6 +234,7 @@ def _introspect_table_schema_rich(
         auth_role=str(cfg.get("auth_role") or ""),
         private_key=str(cfg.get("private_key") or ""),
         strict_namespace=strict_namespace,
+        introspect_purpose="destination" if physical_carriers else "",
         # Object stores dial the connector's endpoint/port from it (D142).
         reader_cfg=cfg if is_object_store_type(db_type) else None,
         # TLS / service-name / driver keywords the writer will use.
@@ -291,6 +292,7 @@ def _introspect_table_schema_rich(
             auth_source=cfg.get("auth_source", ""),
             api_key=cfg.get("api_key", ""),
             strict_namespace=strict_namespace,
+            introspect_purpose="destination" if physical_carriers else "",
             **connection_options(cfg),
         )
         if info_retry.get("ok") and info_retry.get("columns"):

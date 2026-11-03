@@ -549,6 +549,8 @@ def introspect_connector_table(
         # Object stores dial the connector's endpoint/port from it (D142).
         reader_cfg=cfg if execute_shape or is_object_store_type(db_type) else None,
         introspect_purpose=purpose,
+        # A destination read never adopts another schema's table of the name.
+        strict_namespace=str(purpose or "").strip().lower() == "destination",
     )
     ok = bool(info.get("ok"))
     columns = _normalize_columns(info) if ok else []
