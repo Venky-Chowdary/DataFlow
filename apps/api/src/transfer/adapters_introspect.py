@@ -327,6 +327,39 @@ def _introspect_table_schema_rich(
     return {}, {}, keys
 
 
+def source_schema_catalog_payload(
+    db_type: str,
+    columns: list[str],
+    rich: tuple[dict[str, str], dict[str, bool], dict[str, Any]],
+    *,
+    fallback_types: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Create-new fidelity catalog for one introspected source table.
+
+    Every path that may CREATE the destination hands this to the writer, so
+    keys, nullability and collation equality are planned by one owner. A
+    path that omits it gets a types-only CREATE on the server default
+    collation (D252: SQL Server CI_AS landed as MySQL utf8mb4_0900_ai_ci).
+    """
+    types, nulls, keys = rich
+    if not (types or nulls or keys):
+        return None
+    from services.schema_fidelity import (
+        build_catalog_from_introspect,
+        catalog_to_payload,
+    )
+
+    return catalog_to_payload(
+        build_catalog_from_introspect(
+            dialect=db_type,
+            columns=list(columns or []),
+            column_types=types or dict(fallback_types or {}),
+            nullable=nulls,
+            keys=keys,
+        )
+    )
+
+
 def _introspect_table_schema(
     db_type: str,
     cfg: dict[str, Any],

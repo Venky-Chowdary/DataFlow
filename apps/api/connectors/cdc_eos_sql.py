@@ -597,6 +597,7 @@ def apply_change_batch_exactly_once(
     stream_name: str = "",
     crash_after: str | None = None,
     writer_fence: int = 0,
+    source_schema_catalog: dict[str, Any] | None = None,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply one CDC batch under dest-owned watermark EOS.
 
@@ -681,6 +682,7 @@ def apply_change_batch_exactly_once(
             batch_id=batch_id,
             crash_after=crash_after,
             writer_fence=writer_fence,
+            source_schema_catalog=source_schema_catalog,
         )
         log_apply_outcome(dest_type=dest, stream_key=stream_key, result=result)
         return (

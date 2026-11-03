@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -483,6 +484,66 @@ def _col_sql_type(
     return emitted
 
 
+def _eos_collation_clauses(
+    dialect: str,
+    source_schema_catalog: dict[str, Any] | None,
+    mappings: list[dict[str, Any]],
+    target_cols: list[str],
+    pk_cols: list[str],
+    logical_by: dict[str, str] | None,
+) -> dict[str, list[str]]:
+    """CHARACTER SET / COLLATE the create-new fidelity planner carries per column.
+
+    The CDC apply creates its own table, so without this it took the server
+    default collation (D252: SQL Server CI_AS became MySQL utf8mb4_0900_ai_ci,
+    and the next run refused the accent-polarity change DataFlow had made).
+    """
+    if not source_schema_catalog:
+        return {}
+    from services.schema_fidelity import resolve_create_fidelity_plan
+
+    try:
+        plan = resolve_create_fidelity_plan(
+            source_schema_catalog=source_schema_catalog,
+            mappings=mappings,
+            target_columns=list(target_cols),
+            target_types=[
+                _col_sql_type(dialect, c, pk_cols, _logical_for(c, logical_by))
+                for c in target_cols
+            ],
+            dest_dialect=dialect,
+            carry_keys=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - the certificate stays types-only
+        _logger.warning(
+            "CDC create-new collation plan failed (%s); the destination takes "
+            "its default collation",
+            type(exc).__name__,
+        )
+        return {}
+    out: dict[str, list[str]] = {}
+    for col, clauses in (getattr(plan, "column_suffixes", {}) or {}).items():
+        keep = [
+            str(c).strip()
+            for c in clauses or []
+            if re.match(r"\s*(CHARACTER\s+SET|COLLATE)\b", str(c), re.I)
+        ]
+        if keep:
+            out[str(col)] = keep
+    return out
+
+
+def _with_collation(
+    typ: str, col: str, collation_by_col: dict[str, list[str]] | None
+) -> str:
+    clauses = _logical_for(col, collation_by_col) if collation_by_col else None
+    for clause in clauses or []:
+        word = "COLLATE" if clause.upper().startswith("COLLATE") else "CHARACTER SET"
+        if word not in typ.upper():
+            typ = f"{typ} {clause}"
+    return typ
+
+
 def _logical_for(col: str, logical_by_col: dict[str, str] | None) -> str | None:
     if not logical_by_col:
         return None
@@ -511,6 +572,7 @@ def _ensure_dest_table(
     columns: list[str],
     pk_cols: list[str],
     logical_by_col: dict[str, str] | None = None,
+    collation_by_col: dict[str, list[str]] | None = None,
 ) -> None:
     """Create a missing dest table from the planned types.
 
@@ -521,7 +583,11 @@ def _ensure_dest_table(
     table_q = _q(table_name, dialect)
     col_sql = []
     for col in columns:
-        typ = _col_sql_type(dialect, col, pk_cols, _logical_for(col, logical_by_col))
+        typ = _with_collation(
+            _col_sql_type(dialect, col, pk_cols, _logical_for(col, logical_by_col)),
+            col,
+            collation_by_col,
+        )
         suffix = " PRIMARY KEY" if pk_cols == [col] else ""
         col_sql.append(f"{_q(col, dialect)} {typ}{suffix}")
     if len(pk_cols) > 1:
@@ -550,8 +616,12 @@ def _ensure_dest_table(
                 dialect,
                 table_q,
                 col,
-                _col_sql_type(
-                    dialect, col, pk_cols, _logical_for(col, logical_by_col)
+                _with_collation(
+                    _col_sql_type(
+                        dialect, col, pk_cols, _logical_for(col, logical_by_col)
+                    ),
+                    col,
+                    collation_by_col,
                 ),
             )
         ))
@@ -853,7 +923,10 @@ def _prepare_eos_schema(
         for member in members:
             table, columns, pk_cols = member[0], member[1], member[2]
             logical_by = member[3] if len(member) > 3 else None
-            _ensure_dest_table(conn, dialect, table, columns, pk_cols, logical_by)
+            collations = member[4] if len(member) > 4 else None
+            _ensure_dest_table(
+                conn, dialect, table, columns, pk_cols, logical_by, collations
+            )
 
 
 def _sa_apply_member(
@@ -1097,6 +1170,7 @@ def apply_eos_sqlalchemy(
     batch_id: str,
     crash_after: str | None = None,
     writer_fence: int = 0,
+    source_schema_catalog: dict[str, Any] | None = None,
 ) -> EosApplyResult:
     from connectors.generic_sql import _engine
     from services.engine_pool import release_engine
@@ -1107,9 +1181,21 @@ def apply_eos_sqlalchemy(
     engine = _engine(cfg)
     wm_token = _enter_wm_scope(engine, dialect)
     try:
-        _, _, target_cols, logical_by = _eos_write_shape(dialect, mappings, column_types)
+        shape_maps, _, target_cols, logical_by = _eos_write_shape(
+            dialect, mappings, column_types
+        )
+        collations = _eos_collation_clauses(
+            dialect,
+            source_schema_catalog,
+            shape_maps,
+            target_cols,
+            pk_target_cols,
+            logical_by,
+        )
         _prepare_eos_schema(
-            engine, dialect, [(dest_table, target_cols, pk_target_cols, logical_by)]
+            engine,
+            dialect,
+            [(dest_table, target_cols, pk_target_cols, logical_by, collations)],
         )
         with engine.begin() as conn:
             result = _sa_apply_member(
@@ -1179,6 +1265,14 @@ def apply_eos_sa_bundle(
                     (shape := _eos_write_shape(dialect, s.mappings, s.column_types))[2],
                     s.pk_target_cols,
                     shape[3],
+                    _eos_collation_clauses(
+                        dialect,
+                        getattr(s, "source_schema_catalog", None),
+                        shape[0],
+                        shape[2],
+                        s.pk_target_cols,
+                        shape[3],
+                    ),
                 )
                 for s in streams
             ],

@@ -1984,19 +1984,15 @@ def _stream_database_transfer_impl(
             keyset_pk_cols = ["_id"] + [c for c in keyset_pk_cols if c != "_id"]
     if _src_keys or _src_schema_nulls or _src_schema_types:
         try:
-            from services.schema_fidelity import (
-                build_catalog_from_introspect,
-                catalog_to_payload,
+            from src.transfer.adapters_introspect import (
+                source_schema_catalog_payload,
             )
 
-            run.cfg.source_schema_catalog = catalog_to_payload(
-                build_catalog_from_introspect(
-                    dialect=run.cfg.src_read_type,
-                    columns=list(run.cfg.columns or []),
-                    column_types=_src_schema_types or dict(run.cfg.schema or {}),
-                    nullable=_src_schema_nulls,
-                    keys=_src_keys,
-                )
+            run.cfg.source_schema_catalog = source_schema_catalog_payload(
+                run.cfg.src_read_type,
+                list(run.cfg.columns or []),
+                _src_rich_catalog,
+                fallback_types=dict(run.cfg.schema or {}),
             )
         except Exception as exc:
             logger.debug("source schema catalog build failed: %s", exc, exc_info=exc)

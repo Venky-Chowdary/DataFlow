@@ -2401,6 +2401,7 @@ from src.transfer.adapters_introspect import (  # noqa: E402,F401
     _columns_type_and_nullability,
     _introspect_table_schema,
     _introspect_table_schema_rich,
+    source_schema_catalog_payload,
 )
 
 def __getattr__(name: str):

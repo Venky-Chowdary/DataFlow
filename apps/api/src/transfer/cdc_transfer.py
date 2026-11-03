@@ -1299,6 +1299,7 @@ def _apply_change_batch(
     pk_source_cols: list[str] | None = None,
     align_lock: dict[str, Any] | None = None,
     allow_equal_lsn: bool = False,
+    source_schema_catalog: dict[str, Any] | None = None,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_exactly_once import (
@@ -1367,6 +1368,7 @@ def _apply_change_batch(
             cursor_key=cursor_key,
             stream_name=stream_name,
             writer_fence=writer_fence,
+            source_schema_catalog=source_schema_catalog,
         )
         if dest_summary is None:
             dest_summary = {}
@@ -1458,6 +1460,7 @@ def _apply_change_batch(
             job_id=job_id,
             sync_mode="cdc",
             allow_equal_lsn=allow_equal_lsn,
+            source_schema_catalog=source_schema_catalog,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1489,6 +1492,7 @@ def _apply_change_batch(
             job_id=job_id,
             sync_mode="cdc",
             allow_equal_lsn=allow_equal_lsn,
+            source_schema_catalog=source_schema_catalog,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -2003,6 +2007,13 @@ def _run_cdc_shared_multi_table(
             "cursor_field": str(contract.cursor_field or ""),
             "mappings": use_maps,
             "mappings_inherited": not declared,
+            "source_schema_catalog": _cdc_source_schema_catalog(
+                src_type,
+                src_cfg,
+                name,
+                [str(m.get("source") or "") for m in use_maps if m.get("source")],
+                dict(schema or {}),
+            ),
             "cursor_key": build_cursor_key(
                 source_type=src_type,
                 source_database=str(src_cfg.get("database") or ""),
@@ -2349,6 +2360,7 @@ def _run_cdc_shared_multi_table(
                         pk_target_cols=pk_target,
                         stream_key=str(cfg["cursor_key"]),
                         headers=list(headers),
+                        source_schema_catalog=cfg.get("source_schema_catalog"),
                     )
                 )
             if should_ack_shared_batch(change):
@@ -2404,6 +2416,7 @@ def _run_cdc_shared_multi_table(
                     backfill_new_fields=backfill_new_fields,
                     job_id=str(job_id or ""),
                     census_acc=shared_accum.acc_for(str(dest_table or stream or "")),
+                    source_schema_catalog=cfg.get("source_schema_catalog"),
                 )
             chunk_idx += 1
         total_rows += rows_written + deleted
@@ -2817,6 +2830,39 @@ def _run_cdc_multi_stream_sequential(
     return total_rows, ddl_log, last_summary, headers
 
 
+def _cdc_source_schema_catalog(
+    src_type: str,
+    src_cfg: dict[str, Any],
+    table_name: str,
+    columns: list[str],
+    fallback_types: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Source catalog for the CDC create-new path (same owner as the row path).
+
+    None when the source is not a SQL catalog or cannot be introspected; the
+    writer then reports a types-only CREATE rather than claiming a carry.
+    """
+    from .stream import _PK_INTROSPECT_TYPES
+
+    if src_type not in _PK_INTROSPECT_TYPES or not (table_name or "").strip():
+        return None
+    try:
+        from .adapters import (
+            _introspect_table_schema_rich,
+            source_schema_catalog_payload,
+        )
+
+        rich = _introspect_table_schema_rich(
+            src_type, src_cfg, table_name, list(columns or [])
+        )
+        return source_schema_catalog_payload(
+            src_type, list(columns or []), rich, fallback_types=fallback_types
+        )
+    except Exception as exc:  # noqa: BLE001 - writer certifies types-only
+        logger.debug("CDC source schema catalog failed: %s", exc, exc_info=exc)
+        return None
+
+
 def _catalog_cdc_primary_key(
     src_type: str,
     src_cfg: dict[str, Any],
@@ -3037,6 +3083,9 @@ def _run_cdc_single_stream(
         list(schema.keys()), inherited=mappings_inherited
     )
     column_types = {c: schema.get(c, "string") for c in headers}
+    source_schema_catalog = _cdc_source_schema_catalog(
+        src_type, src_cfg, table_name, headers, column_types
+    )
     align_lock: dict[str, Any] = {}
     # Non-empty only when log capture was refused and cursor polling took over.
     capture_downgrade: dict[str, str | bool] = {}
@@ -3503,6 +3552,7 @@ def _run_cdc_single_stream(
                 pk_source_cols=pk_source_cols,
                 align_lock=align_lock,
                 allow_equal_lsn=allow_equal_lsn,
+                source_schema_catalog=source_schema_catalog,
                 writer_fence=int(
                     getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
                 ),

@@ -1378,6 +1378,7 @@ class EosBundleStream:
     pk_target_cols: list[str]
     stream_key: str
     headers: list[str] = field(default_factory=list)
+    source_schema_catalog: dict[str, Any] | None = None
 
 
 @dataclass
