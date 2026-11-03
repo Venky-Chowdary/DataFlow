@@ -2015,34 +2015,12 @@ def run_file_preflight(
 
     # D243: execute refuses a pre-load recipe on a route that merges against
     # stored history. Preflight must refuse the same recipe, not pass it green.
-    from services.multi_stream_plan import history_shape_refusal
+    from services.multi_stream_plan import history_shape_route_gate
 
-    shape_route_gate: dict[str, Any] | None = None
-    active_steps = [
-        s
-        for s in (shape_recipe or {}).get("steps") or []
-        if isinstance(s, dict) and s.get("enabled") is not False
-    ]
-    shape_route_refusal = (
-        history_shape_refusal(sync_mode)
-        if active_steps and sync_mode != "scd2"
-        else ""
-    )
-    if shape_route_refusal:
-        shape_route_gate = {
-            "id": "g_shape_route",
-            "status": "block",
-            "message": shape_route_refusal,
-            "duration_ms": 0,
-            "details": {"sync_mode": sync_mode, "kind": "shape_route"},
-        }
-        blockers.append(
-            {
-                "id": "g_shape_route",
-                "message": shape_route_refusal,
-                "details": dict(shape_route_gate["details"]),
-            }
-        )
+    shape_route_gate = history_shape_route_gate(shape_recipe, sync_mode)
+    if shape_route_gate:
+        blockers.append({k: shape_route_gate[k] for k in ("id", "message")}
+                        | {"details": dict(shape_route_gate["details"])})
     shape_route_blocked = shape_route_gate is not None
 
     # Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER)

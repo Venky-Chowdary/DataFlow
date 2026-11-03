@@ -197,6 +197,27 @@ def history_shape_refusal(sync_mode: str) -> str:
     )
 
 
+
+def history_shape_route_gate(shape_recipe: Any, sync_mode: str) -> dict[str, Any] | None:
+    """Preflight gate for a pre-load recipe on a history-merging route (D243).
+
+    Same refusal text execute raises, so preflight cannot pass what execute refuses.
+    """
+    steps = (shape_recipe or {}).get("steps") if isinstance(shape_recipe, Mapping) else None
+    active = [s for s in steps or [] if isinstance(s, dict) and s.get("enabled") is not False]
+    if not active or sync_mode == "scd2":
+        return None
+    refusal = history_shape_refusal(sync_mode)
+    if not refusal:
+        return None
+    return {
+        "id": "g_shape_route",
+        "status": "block",
+        "message": refusal,
+        "duration_ms": 0,
+        "details": {"sync_mode": sync_mode, "kind": "shape_route"},
+    }
+
 def _extra_dict(endpoint: Any) -> dict[str, Any]:
     if endpoint is None:
         return {}
