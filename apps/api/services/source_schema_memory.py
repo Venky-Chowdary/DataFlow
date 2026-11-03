@@ -211,7 +211,7 @@ def evaluate_source_drift(
     if evolution.get("should_pause") or hard:
         return SourceSchemaVerdict(
             BLOCK,
-            _describe(hard or breaking),
+            _describe(hard or breaking or additive),
             breaking,
             additive,
             fingerprint,
@@ -269,7 +269,9 @@ def _describe(breaking: list[dict[str, Any]]) -> str:
         before = entry.get("old_type") or entry.get("from_type")
         after = entry.get("new_type") or entry.get("to_type")
         target = entry.get("to") or entry.get("new_name")
-        if kind == "primary_key_change":
+        if kind == "add_column":
+            parts.append(f"added column {column}" + (f" ({after})" if after else ""))
+        elif kind == "primary_key_change":
             old_pk = entry.get("old_primary_key") or []
             new_pk = entry.get("new_primary_key") or []
             parts.append(f"primary key {list(old_pk)} → {list(new_pk)}")
@@ -282,6 +284,12 @@ def _describe(breaking: list[dict[str, Any]]) -> str:
         else:
             parts.append(f"{column} ({kind})")
     more = f" (+{len(breaking) - 5} more)" if len(breaking) > 5 else ""
+    if breaking and all(str(e.get("kind")) == "add_column" for e in breaking):
+        # Only a pause-on-any-change policy refuses an unmapped new column.
+        return (
+            "Source schema changed since the last run and the schema policy "
+            "pauses on any change: " + "; ".join(parts) + more
+        )
     return (
         "Source schema changed since the last run in a way this transfer reads: "
         + "; ".join(parts)
