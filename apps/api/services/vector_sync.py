@@ -82,10 +82,28 @@ def vector_record_key(
         for column in (identity_columns or ())
         if record.get(column) is not None and str(record[column]).strip()
     ]
-    key = vector_doc_key(values)
-    return key or str(
-        record.get("id", record.get("_id", record.get("source_id", ""))) or ""
-    )
+    return vector_doc_key(values) or vector_fallback_identity(record)
+
+
+_FALLBACK_IDENTITY_FIELDS = ("id", "_id", "source_id")
+
+
+def vector_fallback_identity(record: Mapping[str, Any]) -> str:
+    """Document id when no key is declared: ``id``, ``_id`` or ``source_id``.
+
+    Matched case-insensitively: an Oracle / Snowflake reader hands back ``ID``,
+    which left every object's ``source_id`` empty and the identity check
+    counting 0 of 30 (D251).
+    """
+    folded: dict[str, Any] = {}
+    for key in record:
+        folded.setdefault(str(key).lower(), key)
+    for name in _FALLBACK_IDENTITY_FIELDS:
+        key = name if name in record else folded.get(name)
+        if key is not None:
+            value = record.get(key)
+            return "" if value is None else str(value)
+    return ""
 
 
 def vector_chunk_identity(source_id: Any, chunk_index: Any) -> str:

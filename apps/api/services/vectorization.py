@@ -752,13 +752,9 @@ def vectorize_records(
             if rec.get(identity_col) is not None
             and str(rec[identity_col]).strip()
         ]
-        from services.vector_sync import vector_doc_key
+        from services.vector_sync import vector_doc_key, vector_fallback_identity
 
-        source_id = vector_doc_key(identity_values)
-        if not source_id:
-            source_id = str(
-                rec.get("id", rec.get("_id", rec.get("source_id", "")))
-            )
+        source_id = vector_doc_key(identity_values) or vector_fallback_identity(rec)
         metadata = (dict(record) if document_contract else rec.copy())
         if content_column and content_column in metadata and not document_contract:
             del metadata[content_column]
