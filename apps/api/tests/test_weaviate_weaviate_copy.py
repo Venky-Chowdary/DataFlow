@@ -168,7 +168,7 @@ def test_live_weaviate_weaviate_empty_dest_copy():
         )
         assert copy_result.source_rows == 30
         assert weaviate_object_count(_weaviate_cfg(dest), dest) == 30
-        assert copy_result.source_snapshot.get("weaviate_read") == "list"
+        assert copy_result.source_snapshot.get("weaviate_read") == "cursor_list"
     finally:
         from services.copy_weaviate_common import weaviate_delete_class
 
