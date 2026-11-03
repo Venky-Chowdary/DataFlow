@@ -1019,6 +1019,10 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     columns = _refine_columns_by_samples(
                         conn, columns, target, resolved_schema
                     )
+                # Keys and constraints are catalog facts a destination read
+                # needs most: skipping them with the sample refinement made an
+                # upsert into run 1's own keyed table plan CREATE UNIQUE INDEX.
+                if columns:
                     unique_meta = _pg_fetch_unique_keys(cur, resolved_schema, target)
                     if advisory_keys:
                         unique_meta = _mark_unique_keys_advisory(unique_meta)
