@@ -78,6 +78,7 @@ def apply_create_new_risk_stamps(
     from services.type_system import (
         assess_create_new_type_risk,
         ddl_type,
+        is_timezone_polarity_loss,
         reinvent_would_drop_dest_instant_carrier,
     )
 
@@ -136,6 +137,16 @@ def apply_create_new_risk_stamps(
                 # whether single precision was ever declared, so it wins here.
                 # Other logical types keep the stamp, which may carry
                 # sample-observed precision the source token does not.
+                tgt = physical_from_src
+            elif (
+                physical_from_src
+                and is_timezone_polarity_loss(src, physical_from_stamp or stamped, dest_db=db)
+                and not is_timezone_polarity_loss(src, physical_from_src, dest_db=db)
+            ):
+                # The stamp was read off naive samples, but the source column is
+                # an instant (a declared source zone makes it one). Keeping the
+                # stamp created a wall-clock column that refuses every zoned
+                # value as "timezone-aware into NTZ" (D259).
                 tgt = physical_from_src
             # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
             # Never erase that with source-derived TEXT create-new.
