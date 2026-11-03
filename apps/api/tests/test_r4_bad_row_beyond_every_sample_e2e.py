@@ -36,11 +36,13 @@ def _amount(i: int) -> str:
 
 
 def _csv() -> str:
-    lines = ["id,name,amount"]
+    lines = ["id,name,amount,qty"]
     for i in range(1, ROWS + 1):
         amount = "12.5x" if i == BAD else _amount(i)
         name = "" if i % 997 == 0 else f"name {i}"
-        lines.append(f"{i},{name},{amount}")
+        # D217: a second refused cell on the same row is still one held-out row.
+        qty = "zz" if i == BAD else str(i)
+        lines.append(f"{i},{name},{amount},{qty}")
     return "\n".join(lines) + "\n"
 
 
@@ -57,7 +59,7 @@ def _dest(engine: str):
             pytest.skip(f"PostgreSQL not reachable: {exc}")
         db.autocommit = True
         return db, {**cfg, "schema": "public"}, (
-            "CREATE TABLE public.{t} (id INTEGER PRIMARY KEY, name TEXT, amount NUMERIC(12,2))"
+            "CREATE TABLE public.{t} (id INTEGER PRIMARY KEY, name TEXT, amount NUMERIC(12,2), qty INTEGER)"
         )
     pymysql = pytest.importorskip("pymysql")
     cfg = {
@@ -73,7 +75,7 @@ def _dest(engine: str):
                              connect_timeout=3)
     except pymysql.MySQLError as exc:
         pytest.skip(f"MySQL not reachable: {exc}")
-    return db, cfg, "CREATE TABLE {t} (id INT PRIMARY KEY, name TEXT, amount DECIMAL(12,2))"
+    return db, cfg, "CREATE TABLE {t} (id INT PRIMARY KEY, name TEXT, amount DECIMAL(12,2), qty INT)"
 
 
 @pytest.fixture
