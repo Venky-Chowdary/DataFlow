@@ -504,7 +504,7 @@ def sample_connector_object(
             success=False,
             error=(
                 f"**{conn.get('name') or driver}** is a {driver} connector, which "
-                "DataFlow supports as destination-only: it has no reader, so there "
+                "Datawrap supports as destination-only: it has no reader, so there "
                 f'are no rows to sample. Its object count works: "count {table} on '
                 f'{conn.get("name") or "this connector"}".'
             ),
