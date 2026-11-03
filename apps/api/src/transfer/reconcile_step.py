@@ -4469,7 +4469,7 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         from connectors.sql_identifiers import snowflake_fold_identifier
 
         return eng, get_connection(
-            account=normalize_account(str(cfg.get("host") or "")),
+            account=normalize_account(str(cfg.get("account") or cfg.get("host") or "")),
             username=str(cfg.get("username") or ""),
             password=str(cfg.get("password") or ""),
             database=str(cfg.get("database") or ""),
