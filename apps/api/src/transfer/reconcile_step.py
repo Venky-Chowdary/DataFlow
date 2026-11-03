@@ -3353,18 +3353,17 @@ def _maybe_attach_verification_ladder(
                 _rej_keys.add(str(_pk))
                 continue
             _row = _d.get("row")
-            if isinstance(_row, dict):
-                _v = _row.get(pk_column)
-            elif isinstance(_row, (str, int, float)):
-                _v = _row  # scalar row payload = the row's pk value
-            else:
-                _v = None
+            _v = _row.get(pk_column) if isinstance(_row, dict) else None
             if _v is None:
                 for _vals_key in ("source_values", "values"):
                     _vals = _d.get(_vals_key)
                     if isinstance(_vals, dict) and _vals.get(pk_column) is not None:
                         _v = _vals.get(pk_column)
                         break
+            if _v is None and isinstance(_row, (str, int, float)):
+                # Only a bare payload: writers also put the 1-based row number
+                # here, so the named key values above take precedence.
+                _v = _row
             if _v is not None:
                 _rej_keys.add(str(_v))
         if _rej_keys:
