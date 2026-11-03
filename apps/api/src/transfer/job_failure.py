@@ -791,7 +791,10 @@ def _fail_job_preflight(
     writes, dest COUNT(*) not taken. Omitting it leaves the read unmeasured,
     which is only honest when nothing was counted.
     """
-    from services.quarantine_from_preflight import quarantine_rows_from_preflight
+    from services.quarantine_from_preflight import (
+        preflight_quarantine_row_count,
+        quarantine_rows_from_preflight,
+    )
 
     from services.blocker_titles import collapse_operator_message, is_schema_drift_echo
 
@@ -810,8 +813,7 @@ def _fail_job_preflight(
             saw_drift = True
         blocker_reasons.append(text)
     qrows = quarantine_rows_from_preflight(pf)
-    row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
-    rejected_rows = len(row_ids) if row_ids else len(qrows)
+    rejected_rows = preflight_quarantine_row_count(qrows)
     error_details = {
         "reason": "Preflight blocked transfer",
         "blockers": blocker_reasons,
