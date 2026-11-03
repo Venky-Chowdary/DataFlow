@@ -694,6 +694,26 @@ def _job_store() -> Any:
     """Module-level job store lookup (tests patch ``get_mongodb_service``)."""
     return get_mongodb_service()
 
+def takes_streaming_route(request: Any) -> bool:
+    """True when this run uses the streaming runner rather than the buffered path.
+
+    Mirror / SCD2 streaming is a staging merge only some destinations can
+    drive; every other destination takes the buffered merge, which supports
+    them, instead of failing in the streaming runner (D250).
+    """
+    from services.multi_stream_plan import staging_merge_dest_refusal
+
+    if not supports_streaming(request.source, request.destination):
+        return False
+    if request.priority_column or getattr(request, "write_via_staging", False):
+        return False
+    contract = resolve_sync_contract(request.stream_contracts)
+    sync = resolve_effective_sync_mode(
+        request.sync_mode, contract.sync_mode if contract else None
+    )
+    return not staging_merge_dest_refusal(sync, request.destination.format)
+
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -1612,11 +1632,7 @@ class UniversalTransferEngine:
                 success=False, error=msg, operation=request.operation, job_id=job_id
             )
 
-        if (
-            supports_streaming(request.source, request.destination)
-            and not request.priority_column
-            and not getattr(request, "write_via_staging", False)
-        ):
+        if takes_streaming_route(request):
             try:
                 return self._execute_streaming(
                     request,

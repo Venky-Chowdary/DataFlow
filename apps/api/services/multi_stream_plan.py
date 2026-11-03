@@ -157,6 +157,34 @@ def approved_recipe_refusal(payload: Any, approved_hash: str) -> str:
     return ""
 
 
+_STAGING_MERGE_SYNCS = frozenset({"scd2", "full_refresh_mirror", "mirror"})
+# Destinations the mirror / SCD2 staging-merge runner can drive. Preflight and
+# ``stream_scd2_mirror_transfer`` both read this one set (D250).
+STAGING_MERGE_DESTS = frozenset({
+    "generic_sql", "postgresql", "mysql", "sqlite", "snowflake", "bigquery", "redshift",
+})
+_STAGING_MERGE_DEST_LABELS = (
+    "PostgreSQL, MySQL, SQLite, Snowflake, BigQuery, Redshift, generic SQLAlchemy"
+)
+
+
+def staging_merge_dest_refusal(sync_mode: str, dest_format: str) -> str:
+    """Why a mirror / SCD2 run cannot write ``dest_format``; "" when it can."""
+    sync = (sync_mode or "").strip().lower()
+    if sync not in _STAGING_MERGE_SYNCS:
+        return ""
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = resolve_driver_type(str(dest_format or "")) or str(dest_format or "")
+    if driver in STAGING_MERGE_DESTS:
+        return ""
+    return (
+        f"The {sync} sync mode is implemented for these destinations: "
+        f"{_STAGING_MERGE_DEST_LABELS}. '{dest_format}' is not supported for {sync} yet. Use "
+        "incremental upsert (or cdc where the source supports it) on this destination."
+    )
+
+
 def history_shape_refusal(sync_mode: str) -> str:
     sync = (sync_mode or "").strip().lower()
     if sync not in _HISTORY_SYNCS:

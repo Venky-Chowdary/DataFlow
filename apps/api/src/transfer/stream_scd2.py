@@ -138,15 +138,11 @@ def stream_scd2_mirror_transfer(
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)
 
-    # Supported SQL-backed destinations that can be driven through SQLAlchemy.
-    _SQL_STREAMING_DESTS = {
-        "generic_sql", "postgresql", "mysql", "sqlite", "snowflake", "bigquery", "redshift",
-    }
-    if dest_type not in _SQL_STREAMING_DESTS:
-        raise NotImplementedError(
-            f"{effective_sync} streaming transfer is currently implemented for SQL destinations; "
-            f"'{destination.format}' is not yet supported."
-        )
+    from services.multi_stream_plan import staging_merge_dest_refusal
+
+    refusal = staging_merge_dest_refusal(effective_sync, dest_type)
+    if refusal:
+        raise NotImplementedError(refusal.replace(f"'{dest_type}'", f"'{destination.format}'"))
 
     dest_cfg = resolve_connector_config(destination)
     # get_sql_schema() already respects dialect defaults; ignore the default
