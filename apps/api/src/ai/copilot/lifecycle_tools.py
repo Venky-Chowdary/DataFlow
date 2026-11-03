@@ -874,13 +874,13 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
     conn_str = str(conn.get("connection_string") or "")
     if conn_str:
         try:
-            from connectors.url_authority import parse_url_authority
+            from connectors.url_authority import connection_string_endpoint
 
-            auth = parse_url_authority(conn_str)
-            if auth.host:
+            endpoint = connection_string_endpoint(conn_str)
+            if endpoint:
                 effective_host, effective_port = (
-                    auth.host,
-                    auth.port or effective_port,
+                    endpoint[0],
+                    endpoint[1] or effective_port,
                 )
         except Exception:
             pass

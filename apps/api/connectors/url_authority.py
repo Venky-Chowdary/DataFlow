@@ -174,3 +174,60 @@ def rebuild_url(
     if auth.fragment:
         url = f"{url}#{auth.fragment}"
     return url
+
+
+_HOST_SEGMENT_KEYS = ("server", "data source", "address", "addr", "host", "hostname")
+
+
+def _connection_string_segments(raw: str) -> dict[str, str]:
+    """``Key=Value;`` segments, lower-cased keys; a braced ODBC value may hold ``;``."""
+    import re
+
+    out: dict[str, str] = {}
+    for m in re.finditer(r"(?:^|;)\s*([A-Za-z][A-Za-z0-9 _.-]*?)\s*=\s*(\{[^}]*\}|[^;]*)", raw):
+        value = m.group(2).strip()
+        if value.startswith("{") and value.endswith("}"):
+            value = value[1:-1]
+        out.setdefault(m.group(1).strip().lower(), value)
+    return out
+
+
+def connection_string_endpoint(raw: str) -> tuple[str, int] | None:
+    """The ``(host, port)`` a connection string dials, or None when it names none.
+
+    A URL dials its authority. A ``Key=Value;`` string (Azure storage, ODBC,
+    ADO.NET) is not a URL: read as one, the whole string — AccountKey and Pwd
+    included — came back as the "host" and was echoed on every connector
+    brief (D264). Only a host the string actually names is ever returned.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if "://" in text.split(";", 1)[0]:
+        url = parse_url_authority(text)
+        return (url.host, url.port) if url.host else None
+    seg = _connection_string_segments(text)
+    if not seg:
+        return None
+    blob = seg.get("blobendpoint") or seg.get("dfsendpoint")
+    if blob:
+        url = parse_url_authority(blob)
+        return (url.host, url.port) if url.host else None
+    account = seg.get("accountname")
+    if account:
+        suffix = seg.get("endpointsuffix") or "core.windows.net"
+        return f"{account}.blob.{suffix}", 0
+    for key in _HOST_SEGMENT_KEYS:
+        value = seg.get(key)
+        if not value:
+            continue
+        value = value.split(":", 1)[1] if value.lower().startswith(("tcp:", "np:", "lpc:")) else value
+        host, _, port_s = value.partition(",")
+        host = host.strip()
+        port = int(port_s.strip()) if port_s.strip().isdigit() else 0
+        if not port and host.count(":") == 1:
+            h, p = host.rsplit(":", 1)
+            if p.isdigit():
+                host, port = h, int(p)
+        return (host, port) if host else None
+    return None
