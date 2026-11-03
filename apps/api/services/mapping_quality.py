@@ -381,26 +381,29 @@ def _is_dialect_sanctioned_carrier(
     from services.dest_schema_authority import destination_schema_is_sampled
     from services.type_system import is_lossy_coercion, materialize_dest_ddl
 
+    from services.decision_kernel import InventContext, invent_dest_type
+
     try:
         if is_lossy_coercion(source_type, target_type, dest_db=dest_db):
             return False
-        if destination_schema_is_sampled(dest_db):
-            # No DDL here: the write's carrier is the destination type map's
-            # (Redis stores DECIMAL as exact JSON text); the SQL materializer
-            # only echoes the source type back.
-            from services.decision_kernel import InventContext, invent_dest_type
-
-            expected = str(
+        # Create-new's own carrier. The SQL materializer echoes a bare
+        # ARRAY/STRUCT/MAP back (no such SQL Server/MySQL/Oracle type), so
+        # alone it graded run 1's NVARCHAR(MAX)/JSON/CLOB a custom transform
+        # and a sparse rerun stalled at 0.70 (D255).
+        expected = {
+            str(
                 invent_dest_type(source_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
                 or ""
             ).strip()
-        else:
-            expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
+        }
+        if not destination_schema_is_sampled(dest_db):
+            # Sampled engines have no DDL: the SQL materializer only echoes
+            # the source type back there (Redis stores DECIMAL as JSON text).
+            expected.add(str(materialize_dest_ddl(dest_db, source_type) or "").strip())
     except Exception:
         return False
-    if not expected:
-        return False
-    return _logical_type(expected) == _logical_type(target_type)
+    target_logical = _logical_type(target_type)
+    return any(e and _logical_type(e) == target_logical for e in expected)
 
 
 #: Engines whose existing-table column types are catalog DDL, not a profile.
