@@ -298,6 +298,23 @@ def _arm_strict_keyed_backup(
     return backups
 
 
+def _seed_write_complete_summary(summary: dict[str, Any], checkpoint: Any) -> None:
+    """Carry the committed write pass into a run resumed at reconcile (D263).
+
+    Every batch was already committed, and its findings are on the DLQ, so this
+    pass writes nothing. Reconcile still needs that pass's key-aligned sample and
+    its quarantine findings, or it reads the committed load as unproven and the
+    held-out rows as missing.
+    """
+    sample = list(getattr(checkpoint, "reconcile_sample", None) or [])
+    if sample:
+        summary["reconcile_sample"] = sample
+    details = list(getattr(checkpoint, "rejected_details", None) or [])
+    if details:
+        summary["rejected_details"] = details
+        summary["quarantine_dlq_persisted_count"] = len(details)
+
+
 def _checkpoint_for_job(run: Any, checkpoint: Any) -> dict[str, Any]:
     """The checkpoint the job document sees, with the findings this run holds.
 
@@ -973,7 +990,16 @@ def _stream_database_transfer_impl(
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     resume_key_resolved = False
     from services.copy_kafka_common import kafka_family_name as _kafka_family
-    if resuming and run.cfg.write_mode == "insert" and _kafka_family(run.cfg.dest_type) != "kafka":
+    from src.transfer.resume_state import write_pass_complete
+
+    # Captured before the stream rewrites the checkpoint for this pass.
+    run.cfg.resume_write_complete = bool(resuming and write_pass_complete(checkpoint))
+    if (
+        resuming
+        and not run.cfg.resume_write_complete
+        and run.cfg.write_mode == "insert"
+        and _kafka_family(run.cfg.dest_type) != "kafka"
+    ):
         resume_key_resolved = True
         if not run.cfg.pk_target_cols:
             # No stream contract, but the destination itself may enforce a key.
@@ -1711,6 +1737,8 @@ def _stream_database_transfer_impl(
     # population checksum for this run.
     resumed_pass = bool(run.tally.written or offset)
     run.tally.dest_summary: dict[str, Any] = {}
+    if run.cfg.resume_write_complete:
+        _seed_write_complete_summary(run.tally.dest_summary, checkpoint)
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
     # inside the held txn) — stamped onto dest_summary at stream end.
     run.tally.route_backup_state: dict[str, Any] = {}

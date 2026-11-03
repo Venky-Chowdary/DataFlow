@@ -84,6 +84,7 @@ class RunConfig:
     _schema_absorb_lock: Any = None
     ddl_log: Any = None
     _RECONCILE_SAMPLE_CAP: Any = None
+    resume_write_complete: bool = False
 
 
 @dataclass

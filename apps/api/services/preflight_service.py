@@ -370,6 +370,8 @@ def run_file_preflight(
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
     resume: bool = False,
+    # The resumed run only verifies: every batch was already committed.
+    resume_write_complete: bool = False,
     source_encoding: dict[str, Any] | None = None,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
@@ -1453,6 +1455,7 @@ def run_file_preflight(
         stream_contracts=stream_contracts,
         source_table=source_table,
         resume=resume,
+        resume_write_complete=resume_write_complete,
         incremental_cursor_column=read_scope.cursor_column,
         incremental_watermark=read_scope.watermark,
         incremental_tiebreak_column=read_scope.primary_key,

@@ -422,6 +422,7 @@ def probe_append_key_collisions(
     stream_contracts: list[dict[str, Any]] | None = None,
     source_table: str = "",
     resume: bool = False,
+    resume_write_complete: bool = False,
     incremental_cursor_column: str = "",
     incremental_watermark: str | None = None,
     incremental_tiebreak_column: str = "",
@@ -438,6 +439,10 @@ def probe_append_key_collisions(
     overwrite already say what a colliding key becomes, so they are not probed.
     """
     if not sync_mode_appends_without_key_resolution(sync_mode):
+        return None
+    # Every batch of this job is already committed; the resumed run writes
+    # nothing, so the keys at rest are its own rows, not a collision (D263).
+    if resume and resume_write_complete:
         return None
     if destination_table_exists is not True:
         return None

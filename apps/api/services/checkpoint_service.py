@@ -122,6 +122,9 @@ class Checkpoint:
     #: True when ``cursor_value`` is the shared log position for the route,
     #: not one table's query cursor.
     cdc_shared_reader: bool = False
+    #: Bounded key-aligned sample of written rows, kept once the write pass is
+    #: complete so a run resumed at reconcile can still prove its write (D263).
+    reconcile_sample: list[dict[str, Any]] = field(default_factory=list)
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -190,6 +193,7 @@ class Checkpoint:
             "target_rows_before": self.target_rows_before,
             "cdc_stream": self.cdc_stream,
             "cdc_shared_reader": self.cdc_shared_reader,
+            "reconcile_sample": self.reconcile_sample,
         }
 
     @classmethod

@@ -216,6 +216,7 @@ from services.checkpoint_service import (
     Checkpoint,
     CheckpointService,
 )
+from src.transfer import resume_state as _resume_state
 from src.transfer.resume_state import resolve_resume_checkpoint
 
 from . import job_submission, lifecycle_events
@@ -3437,6 +3438,7 @@ class UniversalTransferEngine:
                         date_locale=request.date_locale,
                         number_locale=getattr(request, "number_locale", "") or "",
                         resume=resume,
+                        resume_write_complete=_resume_state.resumes_at_reconcile(resume, checkpoint),
                         **parity,
                     )
                     pf = attach_budget_findings(pf, _budget)
@@ -3969,6 +3971,7 @@ class UniversalTransferEngine:
                     workspace_id=str(getattr(request, "workspace_id", "") or ""),
                 )
 
+            _resume_state.mark_write_pass_complete(job_id, checkpoint_service, dest_summary)
             with _reconcile_phase_heartbeat(
                 mongo,
                 job_id,
