@@ -25,6 +25,14 @@ for path in (_src_root, _api_root):
 sys.path.insert(0, str(_src_root))
 sys.path.insert(0, str(_api_root))
 
+# The preflight package is tested from this checkout. An editable install of
+# another checkout (a worktree's venv) must not supply ``preflight`` to tests
+# that import it before ``services.preflight_service`` adds this path.
+_preflight_src = str(_api_root.parents[1] / "packages" / "preflight" / "src")
+while _preflight_src in sys.path:
+    sys.path.remove(_preflight_src)
+sys.path.insert(0, _preflight_src)
+
 # Pin the bare package name before tests import `src.*`.  Without this, Python
 # can cache src/services as `services` when a runner exposes src on sys.path,
 # causing compatibility shims to import themselves recursively.
