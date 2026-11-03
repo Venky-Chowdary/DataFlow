@@ -407,6 +407,10 @@ _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS = frozenset(
 )
 
 
+#: Rows a keyed append read-back may return for the sampled keys: every stored
+#: version of up to 50 keys, so this batch's version is never cut off (D247).
+_HISTORY_READBACK_ROW_CAP = 2000
+
 # --- run-scoped proof scratch (leak fix) ------------------------------------
 # The proof stores are sqlite files that grow to hundreds of MB on large runs.
 # Every store file lives in a directory something owns: the proof's scope, or
@@ -7473,6 +7477,15 @@ def _run_reconciliation_impl(
         # Compare EVERY mapped column. Truncating to 20 falsely treated columns
         # 21+ as NULL (Mongo→MySQL users with 24 fields: Gate-8 failed on
         # referral_invite_modal_dismissed with source 0 vs invented NULL).
+        # An append destination keeps every version of a key, so a keyed read
+        # capped at the batch size returns earlier versions instead of this
+        # batch's (D247); read the keys' history and align per version.
+        from services.sync_cursor import is_append_sync
+
+        history_keys = bool(key_values) and is_append_sync(sync_mode_early)
+        read_limit = min(50, len(sample_records))
+        if history_keys:
+            read_limit = _HISTORY_READBACK_ROW_CAP
         try:
             target_sample = _read_target_sample_retrying(
                 "sample compare",
@@ -7481,7 +7494,7 @@ def _run_reconciliation_impl(
                 schema=schema,
                 table_name=table_name,
                 columns=target_cols or None,
-                limit=min(50, len(sample_records)),
+                limit=read_limit,
                 sort_key=sort_key,
                 key_values=key_values or None,
             )
@@ -7524,6 +7537,7 @@ def _run_reconciliation_impl(
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
                 inserted_keys=dest_summary.get("inserted_keys"),
                 source_locale=str(dest_summary.get("number_locale") or ""),
+                history_keys=history_keys,
             )
             full_compare_ctx.update(
                 db_type=db_type, cfg=cfg, schema=schema, table_name=table_name,

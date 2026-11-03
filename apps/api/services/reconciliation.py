@@ -4100,6 +4100,59 @@ def _skip_kept_existing_key(
     return str(key) not in inserted
 
 
+def _align_history_versions(
+    source_records: list[dict[str, Any]],
+    target_dicts: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    *,
+    sort_key: str,
+    source_sort_key: str,
+) -> list[dict[str, Any]]:
+    """Keep, per key, the destination version closest to the source row.
+
+    Closeness is the count of mapped cells equal after ``normalize_cell``; the
+    full typed compare then runs on that one version, so a corrupted append row
+    still fails when no stored version matches it.
+    """
+    versions: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for d in target_dicts:
+        key = normalize_cell(d.get(sort_key))
+        if key not in versions:
+            versions[key] = []
+            order.append(key)
+        versions[key].append(d)
+    sources = {
+        normalize_cell(rec.get(source_sort_key)): rec
+        for rec in source_records
+        if isinstance(rec, dict)
+    }
+    pairs = [
+        (str(m.get("source") or ""), str(m.get("target") or "").lower())
+        for m in mappings
+        if m.get("source") and m.get("target")
+    ]
+
+    def _score(src: dict[str, Any], tgt: dict[str, Any]) -> int:
+        lowered = {str(k).lower(): v for k, v in tgt.items()}
+        return sum(
+            1
+            for s_col, t_col in pairs
+            if t_col in lowered
+            and normalize_cell(src.get(s_col)) == normalize_cell(lowered[t_col])
+        )
+
+    aligned: list[dict[str, Any]] = []
+    for key in order:
+        candidates = versions[key]
+        src = sources.get(key)
+        if len(candidates) == 1 or src is None:
+            aligned.extend(candidates[:1] if src is None else candidates)
+            continue
+        aligned.append(max(reversed(candidates), key=lambda t: _score(src, t)))
+    return aligned
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
@@ -4115,9 +4168,14 @@ def sample_compare_rows(
     duplicate_policy: str = "",
     inserted_keys: set[str] | list[str] | None = None,
     source_locale: str = "",
+    history_keys: bool = False,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
+
+    ``history_keys`` is for append routes, where the destination keeps every
+    version of a key: a key's read-back holds this batch's row and earlier
+    ones, and each source row aligns to the version that best matches it.
     Rows are aligned by a unique key, so upserts and out-of-order writes compare
     correctly. Without one the comparison is declined rather than guessed.
 
@@ -4163,6 +4221,14 @@ def sample_compare_rows(
 
     target_by_key: dict[str, dict[str, Any]] = {}
     duplicate_alignment_key = ""
+    if sort_key and history_keys:
+        target_dicts = _align_history_versions(
+            source_records,
+            target_dicts,
+            mappings,
+            sort_key=sort_key,
+            source_sort_key=source_sort_key or sort_key,
+        )
     if sort_key:
         for d in target_dicts:
             key = normalize_cell(d.get(sort_key))
