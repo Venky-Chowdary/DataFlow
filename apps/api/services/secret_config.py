@@ -90,7 +90,41 @@ def mask_secrets_in_text(text: str) -> str:
             + trailing
         )
 
-    return url_pattern.sub(redact, masked)
+    return _mask_assigned_secrets(url_pattern.sub(redact, masked))
+
+
+# ``Key=Value;`` connection strings (Azure storage / Service Bus, ODBC, ADO.NET,
+# JDBC properties) carry the secret as a segment, not as URI userinfo: the
+# AccountKey of an ADLS connector was echoed verbatim on every connector
+# response (D253). A braced ODBC value may itself contain ``;``.
+_SEGMENT_ASSIGNMENT = re.compile(
+    r"(?P<pre>(?:^|;)\s*)(?P<key>[A-Za-z][A-Za-z0-9 _.-]*?)(?P<sep>\s*=\s*)"
+    r"(?P<val>\{[^}]*\}|[^;]*)"
+)
+# libpq keyword DSN: ``host=h user=u password=secret``.
+_LIBPQ_SECRET = re.compile(
+    r"(?i)(?P<pre>(?:^|\s))(?P<key>password|passwd|pwd|sslpassword)(?P<sep>\s*=\s*)"
+    r"(?P<val>'(?:[^'\\]|\\.)*'|[^\s;]+)"
+)
+
+
+def _mask_assigned_secrets(text: str) -> str:
+    from services.log_redaction import is_sensitive_key
+
+    def segment(match: re.Match[str]) -> str:
+        value = match.group("val")
+        if not value.strip() or not is_sensitive_key(match.group("key").strip()):
+            return match.group(0)
+        return match.group("pre") + match.group("key") + match.group("sep") + "****"
+
+    def libpq(match: re.Match[str]) -> str:
+        return match.group("pre") + match.group("key") + match.group("sep") + "****"
+
+    if "=" not in text:
+        return text
+    if ";" in text:
+        text = _SEGMENT_ASSIGNMENT.sub(segment, text)
+    return _LIBPQ_SECRET.sub(libpq, text)
 
 
 class RedactedConfig(Mapping[str, Any]):
