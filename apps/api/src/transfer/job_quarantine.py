@@ -9,6 +9,8 @@ plan for what already landed.
 
 from __future__ import annotations
 
+import json
+
 import logging
 from typing import Any
 
@@ -68,11 +70,21 @@ def quarantined_row_count(details: list[dict[str, Any]]) -> int:
     for d in details:
         if not isinstance(d, dict):
             continue
-        if d.get("row") is None:
+        row = d.get("row")
+        if row is None:
             anonymous += 1
         else:
-            rows.add(d.get("row"))
+            rows.add(_row_identity(row))
     return len(rows) + anonymous
+
+
+def _row_identity(row: Any) -> Any:
+    """Hashable identity for a finding's row: its number, or the record itself."""
+    try:
+        hash(row)
+        return row
+    except TypeError:
+        return json.dumps(row, sort_keys=True, default=str)
 
 
 def align_reported_rejects(summary: dict[str, Any]) -> int:
