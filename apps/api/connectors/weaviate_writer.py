@@ -156,11 +156,66 @@ def test_weaviate(
         return False, str(exc)
 
 
+# Properties the writer itself stores on every object.
+_WRITER_PROPERTIES = frozenset({
+    "content", "source_id", "chunk_index", "filename", "page", "heading", "element_type",
+})
+
+
+def weaviate_property_name(name: str, live_names: Any = ()) -> str:
+    """The Weaviate property a mapped column is stored as.
+
+    Weaviate lower-cases a property's first letter, so Oracle's NAME was stored
+    as ``nAME`` and ID as ``iD`` (D251). A folded all-upper-case identifier is
+    stored lower-case; any other name follows Weaviate's own rule. A property
+    the class already has under the same name in any case keeps its spelling,
+    and a lower-cased name never takes over a property the writer owns.
+    """
+    text = str(name or "")
+    if not text:
+        return text
+    folded = text.lower()
+    for existing in live_names or ():
+        if str(existing).lower() == folded:
+            return str(existing)
+    weaviate_rule = text[:1].lower() + text[1:]
+    if text.isupper() and folded not in _WRITER_PROPERTIES:
+        return folded
+    return weaviate_rule
+
+
+def _weaviate_property_keys(keys: Any, live_names: Any = ()) -> dict[str, str]:
+    """Stored property per metadata key; two keys never share one property."""
+    out: dict[str, str] = {}
+    taken: set[str] = set()
+    ordered = sorted(keys, key=lambda k: weaviate_property_name(k, live_names) != k)
+    for key in ordered:
+        name = weaviate_property_name(key, live_names)
+        if name in taken:
+            name = key[:1].lower() + key[1:]
+        if name in taken:
+            name = key
+        out[key] = name
+        taken.add(name)
+    return out
+
+
+def _live_property_names(schema_doc: Any) -> list[str]:
+    if not isinstance(schema_doc, dict):
+        return []
+    return [
+        str(p["name"])
+        for p in schema_doc.get("properties") or []
+        if isinstance(p, dict) and p.get("name")
+    ]
+
+
 def build_weaviate_objects(
     vector_rows: list[dict[str, Any]],
     *,
     class_name: str,
     dimension: int,
+    live_property_names: Any = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Map Datawrap vector rows to Weaviate batch objects (testable, no I/O).
 
@@ -182,7 +237,9 @@ def build_weaviate_objects(
     for row in vector_rows:
         from connectors.writer_common import vector_prepare_metadata
 
-        props = vector_prepare_metadata(row.get("metadata") or {})
+        meta = vector_prepare_metadata(row.get("metadata") or {})
+        stored = _weaviate_property_keys(list(meta), live_property_names)
+        props = {stored[k]: v for k, v in meta.items()}
         props["content"] = vector_cell_token(row.get("content"))
         props["source_id"] = vector_cell_token(row.get("source_id"))
         try:
@@ -651,6 +708,7 @@ def write_mapped_rows(
 
     # Probe live class properties before Map bind so text≠int invent is closed.
     live_prop_types: dict[str, str] = {}
+    live_names: list[str] = []
     studio_live = _kwargs.get("destination_column_types")
     if isinstance(studio_live, dict):
         live_prop_types.update(
@@ -694,6 +752,7 @@ def write_mapped_rows(
             class_existed = True
             try:
                 schema_types = _weaviate_live_property_types(class_resp.json())
+                live_names = _live_property_names(class_resp.json())
             except Exception:
                 schema_types = {}
             if not schema_types and not studio_typed_all:
@@ -981,7 +1040,10 @@ def write_mapped_rows(
         )
 
     objects, embed_rejected = build_weaviate_objects(
-        vector_rows, class_name=class_name, dimension=dimension
+        vector_rows,
+        class_name=class_name,
+        dimension=dimension,
+        live_property_names=live_names,
     )
     rejected = list(map_rejected) + list(embed_rejected)
     if not objects and rejected:

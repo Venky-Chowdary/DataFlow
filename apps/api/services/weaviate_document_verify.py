@@ -66,7 +66,7 @@ def gate8_weaviate_report(
     source_schema: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The Gate-8 report for a Weaviate class, or ``None`` to keep the identity-only one."""
-    from connectors.weaviate_writer import read_document_properties
+    from connectors.weaviate_writer import read_document_properties, weaviate_property_name
 
     if not isinstance(source_rows, int) or source_rows < 0:
         return None
@@ -84,6 +84,10 @@ def gate8_weaviate_report(
     except Exception as exc:  # noqa: BLE001 — the identity-only report stands
         logger.warning("Weaviate value proof unavailable: %s", type(exc).__name__)
         return None
+    # Read each field back under the property the writer stored it as.
+    stored = {key: weaviate_property_name(key, data_types) for _s, key in fields}
+    renamed = {key: name for key, name in stored.items() if name != key}
+    fields = [(source, stored[key]) for source, key in fields]
     instant = {k for _s, k in fields if data_types.get(k) in ("date", "date[]")}
     proof = compare_documents(
         src, docs, fields, numeric_keys(mappings, source_schema), boolean_keys(mappings), instant
@@ -96,6 +100,7 @@ def gate8_weaviate_report(
         "row_object_expansion": expansion,
         "content_caps": caps,
         "source_provenance": provenance.get("source", ""),
+        "property_names": renamed,
     }
     report = {
         **base,
@@ -122,6 +127,10 @@ def gate8_weaviate_report(
         if caps
         else ""
     )
+    if renamed:
+        cap_note += " Stored as Weaviate properties: " + ", ".join(
+            f"{key} -> {name}" for key, name in sorted(renamed.items())
+        ) + "."
     return {
         **report,
         "passed": True,
