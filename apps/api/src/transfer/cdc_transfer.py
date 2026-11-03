@@ -2830,15 +2830,20 @@ def _run_cdc_multi_stream_sequential(
     return total_rows, ddl_log, last_summary, headers
 
 
-def _capture_harvest_refused(cdc: Any) -> bool:
-    """True when the reader could not harvest the source log itself."""
+def _capture_harvest_pending_reason(cdc: Any) -> str | None:
+    """Why the capture head may sit behind committed source changes, else None."""
     reader = getattr(cdc, "capture_harvest_refused", None)
     if not callable(reader):
-        return False
+        return None
     try:
-        return bool(reader())
+        refused = reader()
     except Exception:  # noqa: BLE001 - unknown harvest state is not a refusal
-        return False
+        return None
+    if not refused:
+        return None
+    if str(refused) == "capture_agent_lagging":
+        return "capture_agent_lagging"
+    return "harvest_unverified"
 
 
 def _cdc_source_schema_catalog(
@@ -4085,22 +4090,27 @@ def _run_cdc_single_stream(
                             committed_position=post_drain_token,
                             rows=missing_image,
                         )
+                        # A capture job behind the source log hides the change
+                        # from both the reader and the head it is checked
+                        # against, so it outranks the head comparisons below.
+                        harvest_pending = _capture_harvest_pending_reason(cdc)
                         if not rescan_complete:
                             capture_pending_reason = "rescan_incomplete"
+                        elif harvest_pending:
+                            capture_pending_reason = harvest_pending
                         elif stream_behind:
                             capture_pending_reason = "stream_behind"
                         elif not head_position:
                             capture_pending_reason = "head_unavailable"
                         elif not head_reached:
                             capture_pending_reason = "head_not_reached"
-                        elif _capture_harvest_refused(cdc):
-                            capture_pending_reason = "harvest_unverified"
                         else:
                             capture_pending_reason = None
                         evidence["capture_pending"] = bool(
                             stream_behind
                             or not head_reached
-                            or capture_pending_reason == "harvest_unverified"
+                            or capture_pending_reason
+                            in ("harvest_unverified", "capture_agent_lagging")
                         )
                         evidence["capture_pending_reason"] = capture_pending_reason
                         evidence["capture_head_position"] = head_position

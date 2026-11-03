@@ -27,7 +27,15 @@ _CAPTURE_PENDING_REASONS = {
         "the SQL Server Agent capture job has harvested; a change committed after "
         "it is not visible to CDC yet"
     ),
+    "capture_agent_lagging": (
+        "the SQL Server Agent capture job owns the log reader and finished no "
+        "fresh scan within the wait budget, so changes committed since its last "
+        "harvest are not visible to CDC yet"
+    ),
 }
+#: The source log holds changes the capture job has not harvested: the
+#: mismatch is capture lag, not destination drift.
+_HARVEST_PENDING_REASONS = frozenset({"harvest_unverified", "capture_agent_lagging"})
 
 
 def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
@@ -41,6 +49,21 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
     dest = str(evidence.get("dest_table") or "the destination")
     pk = ", ".join(str(f) for f in evidence.get("pk_fields") or []) or "key"
     noun = "row" if count == 1 else "rows"
+    reason_key = str(evidence.get("capture_pending_reason") or "")
+    if evidence.get("capture_pending") is True and reason_key in _HARVEST_PENDING_REASONS:
+        message = (
+            f"Capture pending: {count} {noun} in {dest} (evidenced by {pk}) do not "
+            f"match the source yet because {_CAPTURE_PENDING_REASONS[reason_key]}. "
+            "This is capture lag, not drift. Check the capture job is running "
+            "(sys.sp_cdc_help_jobs) and rerun once it has caught up"
+        )
+        if reason_key == "harvest_unverified":
+            message += " or grant the CDC login db_owner"
+        message += (
+            "; or run repair_cdc_drift (the confirmed repair action) to re-copy "
+            "exactly those keys under the CDC fence."
+        )
+        return message + _reader_range_text(evidence)
     message = (
         f"CDC verification found {count} {noun} in {dest} whose values do not match "
         f"the source image (evidenced by {pk}). Run repair_cdc_drift (the confirmed "
@@ -54,20 +77,19 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
             "the change reader had not reached the capture head",
         )
         message += f" Capture is pending ({reason}), so a rerun may also converge them."
-        if evidence.get("capture_pending_reason") == "harvest_unverified":
-            message += (
-                " Check the capture job is running (sys.sp_cdc_help_jobs) or grant "
-                "the CDC login db_owner, then rerun."
-            )
+    return message + _reader_range_text(evidence)
+
+
+def _reader_range_text(evidence: dict[str, Any]) -> str:
     before = str(evidence.get("reader_position_before") or "").strip()
     after = str(evidence.get("reader_position") or "").strip()
     head = str(evidence.get("capture_head_position") or "").strip()
     if before or after:
-        message += f" Change reader covered {before or '?'} to {after or before}"
-        message += f"; capture head {head}." if head else "."
-    elif head:
-        message += f" Capture head {head}."
-    return message
+        text = f" Change reader covered {before or '?'} to {after or before}"
+        return text + (f"; capture head {head}." if head else ".")
+    if head:
+        return f" Capture head {head}."
+    return ""
 
 
 def _build_drift_evidence(

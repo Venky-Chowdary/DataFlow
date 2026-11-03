@@ -35,6 +35,26 @@ from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 from services.value_serializer import wire_cell
 
+#: SQL Agent's capture job holds the log reader, so this reader's own
+#: sp_cdc_scan is refused (error 22903) whatever the login's rights.
+CAPTURE_AGENT_OWNS_LOG_READER = "capture_agent_owns_log_reader"
+#: The capture job owns the log reader and finished no fresh scan in time.
+CAPTURE_AGENT_LAGGING = "capture_agent_lagging"
+
+
+def _capture_agent_owns_log_reader(exc: BaseException) -> bool:
+    text = str(exc)
+    return "22903" in text or "sp_replcmds" in text
+
+
+def _capture_wait_budget_sec() -> float:
+    from services.brand_env import getenv_brand
+
+    try:
+        return max(0.0, float(getenv_brand("MSSQL_CDC_CAPTURE_WAIT_SEC", "") or 60))
+    except ValueError:
+        return 60.0
+
 # Re-export for existing ``from connectors.sqlserver_cdc_native import CdcLsnGapError``.
 __all_gap__ = ("CdcLsnGapError",)
 
@@ -1140,7 +1160,11 @@ class SqlServerNativeCdc:
                     self._harvest_refused = None
                 except Exception as exc:
                     logger.debug("sp_cdc_scan skipped: %s", exc)
-                    self._harvest_refused = type(exc).__name__
+                    self._harvest_refused = (
+                        CAPTURE_AGENT_OWNS_LOG_READER
+                        if _capture_agent_owns_log_reader(exc)
+                        else type(exc).__name__
+                    )
                     return
                 try:
                     with conn.cursor() as cur:
@@ -1180,8 +1204,45 @@ class SqlServerNativeCdc:
         except Exception as exc:
             logger.debug("sp_cdc_scan skipped: %s", exc)
 
+    def _await_capture_agent_scan(self, budget_sec: float) -> bool:
+        """True once the Agent capture job has run a scan that began after now.
+
+        A scan started before a commit can miss it, so one scan ending after
+        ``t0`` is not proof. Scans of a database run one after another: a
+        second scan end after the first one past ``t0`` began after ``t0`` and
+        read every transaction committed before it.
+        """
+        deadline = time.monotonic() + budget_sec
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT GETDATE()")
+                    t0 = cur.fetchone()[0]
+                    first_end = None
+                    while True:
+                        cur.execute(
+                            "SELECT MAX(end_time) FROM sys.dm_cdc_log_scan_sessions "
+                            "WHERE session_id > 0"
+                        )
+                        row = cur.fetchone()
+                        last_end = row[0] if row else None
+                        if last_end is not None and last_end > t0:
+                            if first_end is None:
+                                first_end = last_end
+                            elif last_end > first_end:
+                                return True
+                        if time.monotonic() >= deadline:
+                            return False
+                        time.sleep(1.0)
+        except Exception as exc:  # noqa: BLE001 - unknown scan state is not caught up
+            logger.debug("capture-agent scan wait failed: %s", exc)
+            return False
+
     def capture_head_position(self) -> str | None:
         self.force_cdc_scan()
+        if self.capture_harvest_refused() == CAPTURE_AGENT_OWNS_LOG_READER:
+            caught_up = self._await_capture_agent_scan(_capture_wait_budget_sec())
+            self._harvest_refused = None if caught_up else CAPTURE_AGENT_LAGGING
         with self._conn() as conn:
             with conn.cursor() as cur:
                 max_lsn = self._max_lsn(cur)
@@ -1194,7 +1255,8 @@ class SqlServerNativeCdc:
 
         Without sp_cdc_scan the capture head is only what the SQL Server Agent
         capture job has harvested, so a committed change it has not harvested
-        yet is invisible to CDC (D252: a read-only login).
+        yet is invisible to CDC (D252: a read-only login, or a privileged one
+        while the capture job owns the log reader and lags).
         """
         return getattr(self, "_harvest_refused", None)
 
