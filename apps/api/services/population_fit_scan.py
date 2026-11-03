@@ -130,6 +130,10 @@ class BoundedTarget:
     #: instant carrier (BSON ``date``). The write stamps UTC midnight — a date
     #: has no zone to invent — so the scan binds the cell as a DATE.
     calendar_day_source: bool = False
+    #: The write stores a blank cell of this column as SQL NULL (a file blank,
+    #: or a database carrier with no empty-string domain). Otherwise ``''`` is
+    #: a stored value the typed carrier refuses (blank_cell_contract).
+    blank_is_null: bool = True
 
     @property
     def aborts_job(self) -> bool:
@@ -655,6 +659,9 @@ def bounded_targets(
             calendar_day_source=_calendar_day_on_instant_carrier(
                 declared_source, target_type, dest_db=dest_db
             ),
+            blank_is_null=_blank_stores_sql_null(
+                declared_source, source_kind=source_kind, source_format=source_format
+            ),
         )
         if carrier == CARRIER_TYPED:
             # A parse bound has no width to compare declarations against: a
@@ -682,6 +689,26 @@ def bounded_targets(
         tuple(dict.fromkeys(undecidable)),
         tuple(dict.fromkeys(safe)),
     )
+
+
+def _blank_stores_sql_null(
+    declared_source: str, *, source_kind: str, source_format: str
+) -> bool:
+    """Whether the write keeps a blank cell as SQL NULL instead of refusing it.
+
+    Mirrors ``blank_cell_contract.nullable_typed_blank_is_absence``: a file or
+    record-batch blank is absence, and so is a blank from a database carrier
+    that cannot store ``''``. A text source's ``''`` is a value; the writer
+    holds it out of a typed column, so the scan has to count it (D260).
+    """
+    from services.blank_cell_contract import source_carrier_cannot_store_empty
+    from services.preflight_source_kind import source_is_record_batch
+
+    if source_is_record_batch(source_kind, source_format):
+        return True
+    if (source_kind or "").strip().lower() != "database":
+        return False
+    return bool(declared_source) and source_carrier_cannot_store_empty(declared_source)
 
 
 def _is_fractional(value: Any) -> bool:
@@ -1149,6 +1176,7 @@ def scan_rows(
                 and not value.strip()
                 and bounded[idx].carrier != CARRIER_DOMAIN
                 and not _is_year_carrier(bounded[idx].target_type)
+                and bounded[idx].blank_is_null
             ):
                 continue
             if bounded[idx].carrier == CARRIER_STRING:
