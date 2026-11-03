@@ -55,7 +55,11 @@ def test_pymssql_bind_negative_offset_and_declared_precision():
 def test_pyodbc_keeps_the_processor_sqlalchemy_gives_it():
     # SQLAlchemy's ODBC processor already renders the fraction and the offset.
     process = _processor(sa_pyodbc.dialect(), mssql.DATETIMEOFFSET(7))
-    assert process(_VALUE) == "2025-01-02 03:04:05.123456+05:30"
+    # SQL Server reads the offset with or without a space; SQLAlchemy 2.0.54
+    # added one, so the literal is not the contract.
+    rendered = process(_VALUE)
+    assert datetime.fromisoformat(rendered.replace(" +", "+")) == _VALUE
+    assert ".123456" in rendered
 
 
 def test_writer_refuses_a_fraction_a_datetimeoffset_below_six_digits_would_round():
