@@ -2854,7 +2854,7 @@ def _stream_database_transfer_impl(
 
     if run.tally.written == 0:
         details = "; ".join(filter(None, warning_samples[:10]))
-        if details:
+        if details and not run.tally.rejected_total:
             raise _undo_failed_write(
                 run, ValueError(f"No rows were written to the destination: {details}")
             )
