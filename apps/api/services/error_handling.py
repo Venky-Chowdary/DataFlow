@@ -194,6 +194,22 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 # `fix` must list *likely checks* — never a single guaranteed remedy.
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
+        # First: the reasons quoted after this sentence name columns, and the
+        # driver-text rules below would title it a missing destination column.
+        ("were quarantined, so nothing was written",),
+        {
+            "code": "all_rows_quarantined",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "Every row was held in quarantine, so nothing was written",
+            "fix": (
+                "Open the job's quarantine to see each row's reason. Fix the mapping, the "
+                "transform or the source values it names, then run Validate and start a new "
+                "transfer — Resume would hold out the same rows again."
+            ),
+        },
+    ),
+    (
         # First, because a transform refusal names a column and would otherwise be
         # read as a destination-column error by the driver-text rules below —
         # sending the operator to Map for a decision that belongs to Transform,
@@ -1033,6 +1049,8 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 f"{title}. Driver reported: {raw}. "
                 "This does not say the destination was missing, and it is not a capacity problem."
             )
+        elif matched.get("code") == "all_rows_quarantined":
+            message = f"{title}. {raw}."
         elif matched.get("code") == "shape_refused_row":
             message = (
                 f"{title}. Driver reported: {raw}. "
