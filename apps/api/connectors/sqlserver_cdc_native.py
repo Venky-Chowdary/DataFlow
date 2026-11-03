@@ -286,6 +286,18 @@ def _lsn_to_hex(val: Any) -> str:
     return text
 
 
+def _log_stats_lsn_to_hex(text: Any) -> str:
+    """``sys.dm_db_log_stats`` ``'00000041:00007ED0:0001'`` -> binary(10) hex."""
+    parts = str(text or "").strip().split(":")
+    if len(parts) != 3:
+        return ""
+    try:
+        vlf, block, slot = (int(p, 16) for p in parts)
+    except ValueError:
+        return ""
+    return f"{vlf:08x}{block:08x}{slot:04x}"
+
+
 def compare_mssql_hex_lsn(left: str, right: str) -> int:
     """Compare SQL Server LSN hex strings as binary values (pad to equal length)."""
     a = _hex_to_lsn(left)
@@ -1253,13 +1265,22 @@ class SqlServerNativeCdc:
         *,
         database_max_lsn: str | None = None,
     ) -> str:
-        """Return a handoff at or beyond the database and capture floors."""
+        """Return a handoff at or beyond the database and capture floors.
+
+        Taken before the dump reads a row: every commit at or below it is in the
+        snapshot, so streaming starts there and never replays older images.
+        """
         cap = capture or self.capture_instance
         max_lsn = (
             self._max_lsn(cur)
             if database_max_lsn is None
             else database_max_lsn
         )
+        log_end_lsn = self._database_log_end_lsn(cur)
+        if log_end_lsn and (
+            not max_lsn or compare_mssql_hex_lsn(log_end_lsn, max_lsn) > 0
+        ):
+            max_lsn = log_end_lsn
         start_lsn = self._capture_start_lsn_for(cur, cap) if cap else ""
         min_lsn = self._min_lsn_for(cur, cap) if cap else ""
         handoff_lsn = start_lsn
@@ -1283,6 +1304,27 @@ class SqlServerNativeCdc:
             handoff_lsn,
         )
         return handoff_lsn
+
+    def _database_log_end_lsn(self, cur) -> str:
+        """Last LSN the database log has written, harvested by capture or not.
+
+        ``fn_cdc_get_max_lsn`` only reaches what the capture agent has scanned,
+        so with a lagging agent it sits below commits a snapshot already reads
+        and those replay over newer snapshot rows (D254). Empty when the server
+        refuses ``sys.dm_db_log_stats`` (pre-2016 SP2 or no VIEW DATABASE STATE).
+        """
+        try:
+            cur.execute("SELECT log_end_lsn FROM sys.dm_db_log_stats(DB_ID())")
+            row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001 - optional DMV, caller falls back
+            logger.warning(
+                "SQL Server CDC snapshot handoff cannot read the database log end "
+                "LSN (%s); using the capture agent's max LSN, so changes the agent "
+                "has not harvested yet may replay over the snapshot",
+                type(exc).__name__,
+            )
+            return ""
+        return _log_stats_lsn_to_hex(row[0]) if row and row[0] else ""
 
     def _min_lsn_for(self, cur, capture_instance: str) -> str:
         cur.execute("SELECT sys.fn_cdc_get_min_lsn(%s)", (capture_instance,))

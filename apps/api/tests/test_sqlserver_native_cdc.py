@@ -72,6 +72,7 @@ def test_native_snapshot_handoff_and_capture_resolve() -> None:
     # resolve capture, max_lsn, schema columns, page1, page2, empty
     cur.fetchone.side_effect = [
         (bytes.fromhex("0abc"),),  # max lsn
+        (None,),  # database log end lsn (dm_db_log_stats)
         (bytes.fromhex("0abc"),),  # min lsn (floor)
         (bytes.fromhex("0abc"),),  # capture start lsn
     ]
@@ -597,6 +598,7 @@ def test_snapshot_handoff_clamps_to_capture_min_lsn() -> None:
     cur = MagicMock()
     cur.fetchone.side_effect = [
         (bytes.fromhex("0a"),),  # max_lsn below floor
+        (None,),  # database log end lsn (dm_db_log_stats)
         (bytes.fromhex("0b"),),  # capture min_lsn
         (bytes.fromhex("0b"),),  # capture start_lsn
     ]
