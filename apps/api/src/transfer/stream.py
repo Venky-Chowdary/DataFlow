@@ -298,6 +298,26 @@ def _arm_strict_keyed_backup(
     return backups
 
 
+def _checkpoint_for_job(run: Any, checkpoint: Any) -> dict[str, Any]:
+    """The checkpoint the job document sees, with the findings this run holds.
+
+    The stream keeps each batch's findings on the run (already on the DLQ), not
+    on the saved checkpoint. Without them the job summary reads "N rejected, no
+    finding" as a unit rolled back before any row was judged, which is false
+    for rows held out with a reason (D258). The persisted count stops the job
+    side from writing those findings to the DLQ a second time.
+    """
+    out = checkpoint.to_dict()
+    summary = run.tally.dest_summary if isinstance(run.tally.dest_summary, dict) else {}
+    details = summary.get("rejected_details") or []
+    if details and not out.get("rejected_details"):
+        out["rejected_details"] = list(details)
+        out["quarantine_dlq_persisted_count"] = int(
+            summary.get("quarantine_dlq_persisted_count") or 0
+        )
+    return out
+
+
 def _undo_failed_write(run: Any, exc: BaseException) -> BaseException:
     """Undo a failed run's writes (or drop the table it created); return ``exc``.
 
@@ -2627,7 +2647,7 @@ def _stream_database_transfer_impl(
             checkpoint.kafka_cursor = run.cur.kafka_cursor
             checkpoint_service.require_save(checkpoint)
         if on_checkpoint:
-            on_checkpoint(idx, run.cfg.chunks, run.tally.written, checkpoint.to_dict())
+            on_checkpoint(idx, run.cfg.chunks, run.tally.written, _checkpoint_for_job(run, checkpoint))
 
     first_idx = chunk_idx + 1
 

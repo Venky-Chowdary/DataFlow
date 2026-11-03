@@ -199,7 +199,10 @@ def _persist_checkpoint_quarantine_delta(
     details = list((checkpoint or {}).get("rejected_details") or [])
     if not details:
         return
-    prev = int(last_persisted[0] or 0)
+    prev = max(
+        int(last_persisted[0] or 0),
+        int((checkpoint or {}).get("quarantine_dlq_persisted_count") or 0),
+    )
     if len(details) <= prev:
         return
     new_details = details[prev:]
