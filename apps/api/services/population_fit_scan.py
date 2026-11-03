@@ -696,8 +696,8 @@ def _blank_stores_sql_null(
 ) -> bool:
     """Whether the write keeps a blank cell as SQL NULL instead of refusing it.
 
-    Mirrors ``blank_cell_contract.nullable_typed_blank_is_absence``: a file or
-    record-batch blank is absence, and so is a blank from a database carrier
+    Mirrors ``blank_cell_contract.nullable_typed_blank_is_absence``: a file,
+    record-batch or unknown-kind blank is absence, and so is a blank from a database carrier
     that cannot store ``''``. A text source's ``''`` is a value; the writer
     holds it out of a typed column, so the scan has to count it (D260).
     """
@@ -706,9 +706,9 @@ def _blank_stores_sql_null(
 
     if source_is_record_batch(source_kind, source_format):
         return True
-    if (source_kind or "").strip().lower() != "database":
-        return False
-    return bool(declared_source) and source_carrier_cannot_store_empty(declared_source)
+    if (source_kind or "").strip().lower() != "database" or not declared_source:
+        return True
+    return source_carrier_cannot_store_empty(declared_source)
 
 
 def _is_fractional(value: Any) -> bool:
