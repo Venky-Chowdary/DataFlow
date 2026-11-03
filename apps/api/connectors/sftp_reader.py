@@ -161,8 +161,13 @@ def _remote_sha256(sftp: Any, path: str) -> str:
     return digest.hexdigest()
 
 
-def list_file_stats_on(sftp: Any, directory: str, pattern: str = "") -> list[dict[str, Any]]:
-    """Name, size, mtime, and sha256 for files in ``directory``.
+def list_file_stats_on(
+    sftp: Any, directory: str, pattern: str = "", *, checksum: bool = True
+) -> list[dict[str, Any]]:
+    """Name, size, mtime, and (``checksum``) sha256 for files in ``directory``.
+
+    The sha256 streams every listed file. A name-only listing (introspect) must
+    not pay that: it downloaded the whole directory per probe (D244).
 
     A glob is applied here. ``orders_*.csv`` is not a remote path paramiko
     can ``getfo``. Dotfiles and directories are not pickup candidates.
@@ -185,14 +190,14 @@ def list_file_stats_on(sftp: Any, directory: str, pattern: str = "") -> list[dic
                 continue
         remote = f"{path.rstrip('/')}/{name}" if path not in {"", ".", "/"} else name
         mtime = getattr(entry, "st_mtime", None)
-        rows.append(
-            {
-                "name": name,
-                "size": int(getattr(entry, "st_size", 0) or 0),
-                "mtime": "" if mtime is None else str(int(mtime)),
-                "checksum": _remote_sha256(sftp, remote),
-            }
-        )
+        row: dict[str, Any] = {
+            "name": name,
+            "size": int(getattr(entry, "st_size", 0) or 0),
+            "mtime": "" if mtime is None else str(int(mtime)),
+        }
+        if checksum:
+            row["checksum"] = _remote_sha256(sftp, remote)
+        rows.append(row)
     return rows
 
 
@@ -201,6 +206,7 @@ def list_file_stats(
     cfg: dict[str, Any],
     directory: str = "",
     pattern: str = "",
+    checksum: bool = True,
     **_kwargs: Any,
 ) -> list[dict[str, Any]]:
     """Processed-file identity for one SFTP directory: name, size, mtime, sha256."""
@@ -210,7 +216,7 @@ def list_file_stats(
     path = directory or sftp_cfg.path or "."
     transport, sftp = connect_sftp(sftp_cfg)
     try:
-        return list_file_stats_on(sftp, path, pattern)
+        return list_file_stats_on(sftp, path, pattern, checksum=checksum)
     finally:
         sftp.close()
         transport.close()
@@ -226,5 +232,7 @@ def list_files(
     """List files in a remote SFTP directory, optionally filtered by a glob."""
     return [
         str(row["name"])
-        for row in list_file_stats(cfg=cfg, directory=directory, pattern=pattern)
+        for row in list_file_stats(
+            cfg=cfg, directory=directory, pattern=pattern, checksum=False
+        )
     ]
