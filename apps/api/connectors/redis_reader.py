@@ -326,56 +326,100 @@ def scan_all_keys(client: Any, pattern: str, *, page: int = 1000) -> list[str]:
             return keys
 
 
-def _read_redis_value(client: Any, key: str, ktype: str) -> str:
-    """Typed Redis value read — never WRONGTYPE on set/zset/stream; refuse truncation."""
+_REDIS_SIZE_CMD = {"list": "llen", "zset": "zcard", "stream": "xlen"}
+_REDIS_WHOLE_CMD = {"hash": "hgetall", "set": "smembers"}
+_REDIS_CAP_NOUN = {"list": "elements", "set": "members", "zset": "members", "stream": "entries"}
+
+
+def _run_redis_commands(client: Any, specs: list[tuple[str, tuple, dict]]) -> list[Any]:
+    """Run commands in one round trip on a real client; one by one otherwise.
+
+    D244: a per-key TYPE + value read cost two round trips per key, so 30 hashes
+    over a ~300 ms tunnel spent ~70 s of a 45 s preflight budget.
+    """
+    if not specs:
+        return []
+    import redis
+
+    if isinstance(client, redis.Redis):
+        pipe = client.pipeline(transaction=False)
+        for cmd, args, kwargs in specs:
+            getattr(pipe, cmd)(*args, **kwargs)
+        return list(pipe.execute())
+    return [getattr(client, cmd)(*args, **kwargs) for cmd, args, kwargs in specs]
+
+
+def _refuse_over_cap(key: str, ktype: str, size: int) -> None:
+    if size > _REDIS_COLLECTION_CAP:
+        raise RuntimeError(
+            f"Redis {ktype} {key!r} has {size} {_REDIS_CAP_NOUN[ktype]} exceeding "
+            f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
+        )
+
+
+def _range_spec(key: str, ktype: str) -> tuple[str, tuple, dict]:
+    if ktype == "list":
+        return "lrange", (key, 0, _REDIS_COLLECTION_CAP - 1), {}
+    if ktype == "zset":
+        return "zrange", (key, 0, _REDIS_COLLECTION_CAP - 1), {"withscores": True}
+    return "xrange", (key,), {"count": _REDIS_COLLECTION_CAP}
+
+
+def _format_redis_value(ktype: str, raw: Any) -> str:
     if ktype == "hash":
         return json.dumps(
-            {(_decode(f)): _decode(v) for f, v in client.hgetall(key).items()},
+            {(_decode(f)): _decode(v) for f, v in (raw or {}).items()},
             default=json_default,
         )
-    if ktype == "list":
-        llen = int(client.llen(key) or 0)
-        if llen > _REDIS_COLLECTION_CAP:
-            raise RuntimeError(
-                f"Redis list {key!r} has {llen} elements exceeding "
-                f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
-            )
-        vals = [_decode(v) for v in client.lrange(key, 0, _REDIS_COLLECTION_CAP - 1)]
-        return json.dumps(vals, default=json_default)
-    if ktype == "set":
-        members = list(client.smembers(key))
-        if len(members) > _REDIS_COLLECTION_CAP:
-            raise RuntimeError(
-                f"Redis set {key!r} has {len(members)} members exceeding "
-                f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
-            )
-        vals = [_decode(v) for v in members]
-        return json.dumps(vals, default=json_default)
+    if ktype in {"list", "set"}:
+        return json.dumps([_decode(v) for v in raw or []], default=json_default)
     if ktype == "zset":
-        zcard = int(client.zcard(key) or 0)
-        if zcard > _REDIS_COLLECTION_CAP:
-            raise RuntimeError(
-                f"Redis zset {key!r} has {zcard} members exceeding "
-                f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
-            )
-        pairs = client.zrange(key, 0, _REDIS_COLLECTION_CAP - 1, withscores=True)
-        vals = [[_decode(m), redis_zset_score_carrier(s)] for m, s in pairs]
+        vals = [[_decode(m), redis_zset_score_carrier(sc)] for m, sc in raw or []]
         return json.dumps(vals, default=json_default)
     if ktype == "stream":
-        xlen = int(client.xlen(key) or 0)
-        if xlen > _REDIS_COLLECTION_CAP:
-            raise RuntimeError(
-                f"Redis stream {key!r} has {xlen} entries exceeding "
-                f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
-            )
-        entries = client.xrange(key, count=_REDIS_COLLECTION_CAP)
         vals = [
             {"id": _decode(eid), "fields": {(_decode(f)): _decode(v) for f, v in fields.items()}}
-            for eid, fields in entries
+            for eid, fields in raw or []
         ]
         return json.dumps(vals, default=json_default)
     # string / unknown — GET (or empty on miss).
-    return _decode(client.get(key))
+    return _decode(raw)
+
+
+def _read_redis_values(client: Any, typed_keys: list[tuple[str, str]]) -> list[str]:
+    """Typed values for many keys in at most two round trips; refuse truncation."""
+    first = _run_redis_commands(
+        client,
+        [
+            (_REDIS_SIZE_CMD.get(t) or _REDIS_WHOLE_CMD.get(t) or "get", (k,), {})
+            for k, t in typed_keys
+        ],
+    )
+    ranged: list[int] = []
+    for i, ((key, ktype), raw) in enumerate(zip(typed_keys, first)):
+        if ktype in _REDIS_SIZE_CMD:
+            _refuse_over_cap(key, ktype, int(raw or 0))
+            ranged.append(i)
+        elif ktype == "set":
+            first[i] = list(raw or [])
+            _refuse_over_cap(key, ktype, len(first[i]))
+    for i, raw in zip(
+        ranged,
+        _run_redis_commands(client, [_range_spec(*typed_keys[i]) for i in ranged]),
+    ):
+        first[i] = raw
+    return [_format_redis_value(t, raw) for (_k, t), raw in zip(typed_keys, first)]
+
+
+def _read_redis_value(client: Any, key: str, ktype: str) -> str:
+    """Typed Redis value read — never WRONGTYPE on set/zset/stream; refuse truncation."""
+    return _read_redis_values(client, [(key, ktype)])[0]
+
+
+def _read_redis_rows(client: Any, keys: list[str]) -> list[list[str]]:
+    types = [_decode(t) for t in _run_redis_commands(client, [("type", (k,), {}) for k in keys])]
+    values = _read_redis_values(client, list(zip(keys, types)))
+    return [[k, v, t] for k, v, t in zip(keys, values, types)]
 
 
 def read_keys_batch(
@@ -399,15 +443,15 @@ def read_keys_batch(
 
         while len(rows) < limit and not state.exhausted:
             # Drain buffered keys before issuing another SCAN.
-            while state.pending_keys and len(rows) < limit:
+            take: list[str] = []
+            while state.pending_keys and len(rows) + len(take) < limit:
                 key = state.pending_keys.pop(0)
                 if key in state.emitted_keys:
                     continue
                 state.emitted_keys.add(key)
                 state.keys_seen += 1
-                ktype = _decode(client.type(key))
-                val = _read_redis_value(client, key, ktype)
-                rows.append([key, val, ktype])
+                take.append(key)
+            rows.extend(_read_redis_rows(client, take))
 
             if len(rows) >= limit:
                 break
