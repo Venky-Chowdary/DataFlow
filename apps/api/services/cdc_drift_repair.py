@@ -49,6 +49,14 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
             "the change reader had not reached the capture head",
         )
         message += f" Capture is pending ({reason}), so a rerun may also converge them."
+    before = str(evidence.get("reader_position_before") or "").strip()
+    after = str(evidence.get("reader_position") or "").strip()
+    head = str(evidence.get("capture_head_position") or "").strip()
+    if before or after:
+        message += f" Change reader covered {before or '?'} to {after or before}"
+        message += f"; capture head {head}." if head else "."
+    elif head:
+        message += f" Capture head {head}."
     return message
 
 

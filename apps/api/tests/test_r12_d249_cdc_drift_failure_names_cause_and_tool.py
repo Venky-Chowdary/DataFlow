@@ -39,3 +39,26 @@ def test_exception_text_matches_operator_message():
     exc = CdcDriftRequiresFencedRepair({**EVIDENCE, "drift_count": 1, "keys": EVIDENCE["keys"][:1]})
     assert str(exc).startswith("CDC verification found 1 row in mx_pg_ms_cdc")
     assert "repair_cdc_drift" in str(exc)
+
+
+def test_drift_failure_names_the_change_positions_it_reached():
+    """D254: the operator sees which LSN range the reader covered."""
+    evidence = {
+        **EVIDENCE,
+        "drift_count": 1,
+        "keys": EVIDENCE["keys"][:1],
+        "capture_pending": True,
+        "capture_pending_reason": "head_not_reached",
+        "reader_position_before": "0000002f000014c10003",
+        "reader_position": "0000002f000014c10003",
+        "capture_head_position": "0000002f0000153a0003",
+    }
+    message = str(CdcDriftRequiresFencedRepair(evidence))
+    assert (
+        "Change reader covered 0000002f000014c10003 to 0000002f000014c10003; "
+        "capture head 0000002f0000153a0003." in message
+    ), message
+
+
+def test_drift_failure_without_positions_adds_no_range():
+    assert "Change reader" not in str(CdcDriftRequiresFencedRepair(EVIDENCE))
