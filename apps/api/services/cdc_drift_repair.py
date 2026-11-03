@@ -14,11 +14,42 @@ class CdcDriftRequiresFencedRepair(RuntimeError):
 
     def __init__(self, evidence: dict[str, Any]) -> None:
         self.evidence = evidence
-        super().__init__(
-            "Exactly-once CDC found destination drift. Re-copy the evidenced keys "
-            "with the confirmed repair action, then resume. This is state "
-            "convergence / reconciliation, not log replay."
+        super().__init__(cdc_drift_operator_message(evidence))
+
+
+_CAPTURE_PENDING_REASONS = {
+    "rescan_incomplete": "the source re-scan did not finish",
+    "stream_behind": "the change reader ended behind the capture head",
+    "head_unavailable": "the capture head position could not be read",
+    "head_not_reached": "the change reader had not reached the capture head",
+}
+
+
+def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
+    """Name what drifted, where, and the exact tool that repairs it.
+
+    The cause is the destination/source value mismatch the CDC check found;
+    a capture that had not caught up is context for it, never the headline.
+    Key values stay masked: the repair tool resolves the evidenced key ids.
+    """
+    count = int(evidence.get("drift_count") or len(evidence.get("keys") or []))
+    dest = str(evidence.get("dest_table") or "the destination")
+    pk = ", ".join(str(f) for f in evidence.get("pk_fields") or []) or "key"
+    noun = "row" if count == 1 else "rows"
+    message = (
+        f"CDC verification found {count} {noun} in {dest} whose values do not match "
+        f"the source image (evidenced by {pk}). Run repair_cdc_drift (the confirmed "
+        "repair action) on this job to re-copy exactly those keys under the CDC "
+        "fence, then resume. This is state convergence / reconciliation, not log "
+        "replay."
+    )
+    if evidence.get("capture_pending") is True:
+        reason = _CAPTURE_PENDING_REASONS.get(
+            str(evidence.get("capture_pending_reason") or ""),
+            "the change reader had not reached the capture head",
         )
+        message += f" Capture is pending ({reason}), so a rerun may also converge them."
+    return message
 
 
 def _build_drift_evidence(
