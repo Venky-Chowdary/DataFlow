@@ -1137,8 +1137,10 @@ class SqlServerNativeCdc:
                     with conn.cursor() as cur:
                         cur.execute("EXEC sys.sp_cdc_scan")
                     conn.commit()
+                    self._harvest_refused = None
                 except Exception as exc:
                     logger.debug("sp_cdc_scan skipped: %s", exc)
+                    self._harvest_refused = type(exc).__name__
                     return
                 try:
                     with conn.cursor() as cur:
@@ -1186,6 +1188,15 @@ class SqlServerNativeCdc:
         if not max_lsn:
             return None
         return f"{str(max_lsn).lower().removeprefix('0x').zfill(20)}.c"
+
+    def capture_harvest_refused(self) -> str | None:
+        """Why this reader could not harvest the log itself, else None.
+
+        Without sp_cdc_scan the capture head is only what the SQL Server Agent
+        capture job has harvested, so a committed change it has not harvested
+        yet is invisible to CDC (D252: a read-only login).
+        """
+        return getattr(self, "_harvest_refused", None)
 
     def capture_reader_position(self) -> str | None:
         poll_to_lsn = str(getattr(self, "_last_completed_poll_to_lsn", "") or "")

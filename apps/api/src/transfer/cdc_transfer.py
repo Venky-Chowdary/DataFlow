@@ -2830,6 +2830,17 @@ def _run_cdc_multi_stream_sequential(
     return total_rows, ddl_log, last_summary, headers
 
 
+def _capture_harvest_refused(cdc: Any) -> bool:
+    """True when the reader could not harvest the source log itself."""
+    reader = getattr(cdc, "capture_harvest_refused", None)
+    if not callable(reader):
+        return False
+    try:
+        return bool(reader())
+    except Exception:  # noqa: BLE001 - unknown harvest state is not a refusal
+        return False
+
+
 def _cdc_source_schema_catalog(
     src_type: str,
     src_cfg: dict[str, Any],
@@ -4082,10 +4093,14 @@ def _run_cdc_single_stream(
                             capture_pending_reason = "head_unavailable"
                         elif not head_reached:
                             capture_pending_reason = "head_not_reached"
+                        elif _capture_harvest_refused(cdc):
+                            capture_pending_reason = "harvest_unverified"
                         else:
                             capture_pending_reason = None
-                        evidence["capture_pending"] = (
-                            stream_behind or not head_reached
+                        evidence["capture_pending"] = bool(
+                            stream_behind
+                            or not head_reached
+                            or capture_pending_reason == "harvest_unverified"
                         )
                         evidence["capture_pending_reason"] = capture_pending_reason
                         evidence["capture_head_position"] = head_position

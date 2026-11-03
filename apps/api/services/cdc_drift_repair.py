@@ -22,6 +22,11 @@ _CAPTURE_PENDING_REASONS = {
     "stream_behind": "the change reader ended behind the capture head",
     "head_unavailable": "the capture head position could not be read",
     "head_not_reached": "the change reader had not reached the capture head",
+    "harvest_unverified": (
+        "this login cannot run sys.sp_cdc_scan, so the capture head is only what "
+        "the SQL Server Agent capture job has harvested; a change committed after "
+        "it is not visible to CDC yet"
+    ),
 }
 
 
@@ -49,6 +54,11 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
             "the change reader had not reached the capture head",
         )
         message += f" Capture is pending ({reason}), so a rerun may also converge them."
+        if evidence.get("capture_pending_reason") == "harvest_unverified":
+            message += (
+                " Check the capture job is running (sys.sp_cdc_help_jobs) or grant "
+                "the CDC login db_owner, then rerun."
+            )
     before = str(evidence.get("reader_position_before") or "").strip()
     after = str(evidence.get("reader_position") or "").strip()
     head = str(evidence.get("capture_head_position") or "").strip()
