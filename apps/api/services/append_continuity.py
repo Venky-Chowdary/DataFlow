@@ -789,6 +789,7 @@ def rebaseline(
     # Only keys this rebaseline owns are read and moved: a host key another
     # workspace's connector also resolves to is that workspace's baseline.
     owned_keys = _keys_this_rebaseline_owns(target, endpoint)
+    skipped_shared_keys = [k for k in target.all_keys if k not in owned_keys]
     store_error = ""
     try:
         previous = next(
@@ -828,6 +829,9 @@ def rebaseline(
             "store_error": store_error,
             "current": dict(current) if current else None,
             "destination_missing": removal,
+            # Shared keys left alone: runs that key on them (an endpoint built
+            # from the inline host) keep the old baseline.
+            "skipped_shared_keys": skipped_shared_keys,
         },
     )
     if store_error:
@@ -875,6 +879,7 @@ def rebaseline(
         "previous": prev_view,
         "current": dict(current) if current else None,
         "destination_missing": removal,
+        "skipped_shared_keys": skipped_shared_keys,
     }
 
 

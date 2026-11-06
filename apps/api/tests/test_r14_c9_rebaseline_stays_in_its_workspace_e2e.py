@@ -196,10 +196,14 @@ def test_a_rebaseline_reports_only_its_own_previous_baseline_and_names_the_share
 
         endpoint_b = _endpoint("ws-b")
         ac.rebaseline(endpoint_b, actor="b@example.com", reason="B accepts 2", workspace_id="ws-b")
+        host_key = ac.resolve_target(endpoint_b).alt_keys[0]
         endpoint_a = _endpoint("ws-a")
         out = ac.rebaseline(endpoint_a, actor="a@example.com", reason="A accepts 2",
                             workspace_id="ws-a")
         assert out["previous"] is None, out["previous"]  # A had none; B's is not A's
-        assert events[-1]["details"]["previous"] is None
+        assert out["skipped_shared_keys"] == [host_key], out
+        details = events[-1]["details"]
+        assert details["skipped_shared_keys"] == [host_key], details
+        assert details["previous"] is None
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
