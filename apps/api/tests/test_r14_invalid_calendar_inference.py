@@ -39,13 +39,26 @@ def test_database_narrowing_is_unchanged():
 
 def test_a_file_column_with_one_impossible_day_is_a_date_column():
     assert infer_column([*REAL, "2024-02-30"], field_name="d", invalid_calendar_votes=True)["logical_type"] == "DATE"
-    cols = infer_columns_from_rows(["d"], [[v] for v in [*REAL, "2024-02-30"]])
-    assert cols[0]["inferred_type"] == "DATE"
+    rows = [[v] for v in [*REAL, "2024-02-30"]]
+    assert infer_columns_from_rows(["d"], rows, invalid_calendar_votes=True)[0]["inferred_type"] == "DATE"
+
+
+def test_a_database_batch_keeps_its_text_column_text():
+    # Neo4j / Couchbase / InfluxDB sample documents through the same row
+    # inference: 19 real dates and one '2024-02-30' stay VARCHAR by default.
+    rows = [[v] for v in [*REAL, "2024-02-30"]]
+    assert infer_columns_from_rows(["d"], rows)[0]["inferred_type"] == "VARCHAR"
+    from services import schema_introspect, schema_introspect_stores
+    from pathlib import Path
+
+    for mod in (schema_introspect, schema_introspect_stores):
+        assert "invalid_calendar_votes=True" not in Path(mod.__file__).read_text()
 
 
 @pytest.mark.parametrize("samples", [
     ["1234-56-78", "2210-44-19"],                    # no real date at all
-    ["2024-01-01", "1234-56-78", "2210-44-19"],      # impossible days are not a minority
+    ["2024-01-01", "2024-02-30", "2024-04-31"],      # impossible days are not a minority
+    [*REAL, "1234-56-78"],                           # month 56 is never a vote
     [*REAL[:3], "2024-02-30"],                       # 1 of 4 = 25% >= the share
     [*REAL, "2024-02-30", "next tuesday"],           # a word keeps the column text
 ])
@@ -57,8 +70,23 @@ def test_the_share_is_the_documented_constant():
     assert INVALID_CALENDAR_MAX_SHARE == 0.2
 
 
+@pytest.mark.parametrize("token", ["1234-56-78", "2024-00-10", "2024-13-01", "2024-02-00",
+                                   "2024-01-32", "0000-00-00", "2024-13-01 10:00:00"])
+def test_only_a_day_or_clock_overflow_inside_a_real_month_votes(token):
+    # Month 00 / over 12, day 00 / over 31, year 0000: another layout or no
+    # date at all — never re-voted DATE.
+    assert _invalid_calendar_family(token) == ""
+
+
+def test_a_yyyy_dd_mm_file_is_not_typed_date():
+    # Day/month swapped rows: 13..31 land in the month slot. They must not be
+    # out-voted into a DATE column (they would load as other days).
+    swapped = [f"2024-{d:02d}-01" for d in range(1, 13)] * 2 + ["2024-25-01", "2024-28-01"]
+    assert infer_column(swapped, field_name="d", invalid_calendar_votes=True)["logical_type"] != "DATE"
+
+
 @pytest.mark.parametrize("token,family", [
-    ("2024-02-30", "DATE"), ("1234-56-78", "DATE"), ("2024-02-30 10:00:00", "TIMESTAMP"),
+    ("2024-02-30", "DATE"), ("2025-04-31", "DATE"), ("2024-02-30 10:00:00", "TIMESTAMP"),
     ("2024-02-30 10:00:00+05:00", "TIMESTAMPTZ"), ("2024-02-30T10:00:00Z", "TIMESTAMPTZ"),
     ("2024-02-30 10:00:00 UTC", "TIMESTAMPTZ"), ("2024-02-10 25:61:00-03", "TIMESTAMPTZ"),
 ])

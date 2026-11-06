@@ -445,7 +445,8 @@ def store_upload(filename: str, content: bytes) -> dict:
     elif columns_override is not None:
         columns = columns_override
     else:
-        columns = infer_columns_from_rows(headers, rows)
+        # A file's own rows: an impossible day among real dates is a row holdout.
+        columns = infer_columns_from_rows(headers, rows, invalid_calendar_votes=True)
     preview_rows = rows[:5]
     path = upload_path_for(UPLOAD_DIR, file_id, filename)
     path.write_bytes(content)

@@ -515,20 +515,32 @@ def _refuses_numeric_inference(text: str) -> bool:
 
 
 def _invalid_calendar_family(text: str) -> str:
-    """``DATE`` / ``TIMESTAMP`` / ``TIMESTAMPTZ`` for an ISO-shaped value naming no real day or clock.
+    """``DATE`` / ``TIMESTAMP`` / ``TIMESTAMPTZ`` for a day or clock overflow, else ``""``.
 
-    ``classify_value`` keeps such a value text (database narrowing, catalog
-    TEXT columns, Elasticsearch keyword samples are never re-typed by it). Only
-    the record-batch inference (``infer_column(..., invalid_calendar_votes=
-    True)``) counts it as a vote for its temporal family — see there. The
-    zone suffix (``Z``, ``UTC``, ``±HH[:MM]``) keeps a zoned stamp zoned.
+    Only an ISO value whose month is real and whose day runs past that month's
+    length (``2024-02-30``, ``2025-04-31``: day <= 31), or whose date is real and
+    clock is not (``2024-02-10 25:61:00``), re-votes. Month 00 or over 12, day 00
+    or over 31 and year 0000 are not a date with an impossible day — they are
+    another layout (a YYYY-DD-MM file) or not a date at all, and voting DATE for
+    them would load swapped rows silently wrong. ``classify_value`` keeps all of
+    these text; only the file inference (``infer_column(...,
+    invalid_calendar_votes=True)``) counts the vote. A zone suffix keeps a
+    zoned stamp zoned.
     """
+    import calendar
+
     from connectors.sql_temporal import _CLOCK_RE, _ISO_CIVIL_RE, invalid_calendar_reason
 
     if _CLOCK_RE.match(text) is not None or not invalid_calendar_reason(text):
         return ""
     m = _ISO_CIVIL_RE.match(text)
     if m is None:
+        return ""
+    year, month, day = int(m.group("y")), int(m.group("m")), int(m.group("d"))
+    if year == 0 or not 1 <= month <= 12 or not 1 <= day <= 31:
+        return ""
+    day_overflow = day > calendar.monthrange(year, month)[1]
+    if not day_overflow and not m.group("clock"):
         return ""
     if not m.group("clock"):
         return "DATE"
@@ -555,7 +567,11 @@ def _count_invalid_calendar_votes(
 
     bad = [f for f in (_invalid_calendar_family(v.strip()) for v in non_empty) if f]
     real = sum(counts.get(t, 0) for t in _TEMPORAL_VOTES)
+    # Explicit: every other sample is a real date/time (the non-text votes are
+    # temporal only) and the text votes are exactly these overflows.
     if not bad or real == 0 or counts.get("VARCHAR", 0) != len(bad):
+        return
+    if not (set(counts) - {"VARCHAR"}) <= set(_TEMPORAL_VOTES):
         return
     if len(bad) >= INVALID_CALENDAR_MAX_SHARE * (len(bad) + real):
         return
@@ -1408,13 +1424,21 @@ def honor_declared_strings(
     return out
 
 
-def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_samples: int = 50) -> list[dict]:
+def infer_columns_from_rows(
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    max_samples: int = 50,
+    invalid_calendar_votes: bool = False,
+) -> list[dict]:
+    """Column records from rows. ``invalid_calendar_votes`` only for a file's own
+    rows (uploads, object stores, SFTP) — never a database's sampled documents
+    (Neo4j, Couchbase, InfluxDB), whose catalog text stays text."""
     columns = []
     sample_rows = rows[:max_samples]
     for i, name in enumerate(headers):
         samples = [str(row[i]) if i < len(row) else "" for row in sample_rows]
-        # A file's rows: an impossible day among real dates is a row holdout.
-        intel = infer_column(samples, field_name=name, invalid_calendar_votes=True)
+        intel = infer_column(samples, field_name=name, invalid_calendar_votes=invalid_calendar_votes)
         columns.append(
             {
                 "name": name.strip() or f"column_{i + 1}",
