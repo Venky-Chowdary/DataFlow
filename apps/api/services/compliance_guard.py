@@ -13,7 +13,13 @@ import re
 from decimal import Decimal
 from typing import Any, Iterable
 
-from services.pii_guard import PII_PATTERNS, _is_decimal_literal, luhn_valid
+from services.pii_guard import (
+    EMAIL_VALUE_RE,
+    PII_PATTERNS,
+    SSN_VALUE_RE,
+    _is_decimal_literal,
+    luhn_valid,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -21,7 +27,7 @@ _logger = logging.getLogger(__name__)
 # same ones unanchored). This module is the one column classifier: the
 # preflight gate, the mapper's column profile and create_schedule all read
 # PII through :func:`pii_value_category` (D94) — no second detector.
-EMAIL_RE = PII_PATTERNS["email"]
+EMAIL_RE = EMAIL_VALUE_RE
 # Digits plus the separators printed numbers use; a leading ``(`` is an area
 # code, ``(555) 123-4567`` (D94). The digit count is checked separately
 # against E.164's 7..15 so the shape alone never decides.
@@ -32,7 +38,7 @@ _DOTTED_QUAD_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 # ICAO 9303 TD3 (passport) machine-readable zone, 44 characters per line.
 _MRZ_LINE1_RE = re.compile(r"^P[A-Z<][A-Z][A-Z<]{2}[A-Z<]{39}$")
 _MRZ_LINE2_RE = re.compile(r"^[A-Z0-9<]{9}\d[A-Z][A-Z<]{2}\d{7}[MFX<]\d{7}[A-Z0-9<]{14}[0-9<]\d$")
-SSN_RE = PII_PATTERNS["ssn"]
+SSN_RE = SSN_VALUE_RE
 # Calendar shapes (ISO / slash) are not PII by themselves. DOB is name-gated
 # in ``_NAME_PATTERN_GROUPS`` — Fivetran / Airbyte / Collibra classifiers treat
 # date-of-birth as a semantic class, not "any 01/02/2024". Value-only matching
@@ -426,7 +432,10 @@ def detect_pii_fields(
         sensitive_fields.append(col)
         field_risk[col] = categories
         field_evidence[col] = [
-            {"category": cat, "rule": "column_name"} for cat in dict.fromkeys(name_hits)
+            # ``sampled`` False: the sample had no value for this column, so
+            # the name is all the evidence there is (and the hold says so).
+            {"category": cat, "rule": "column_name", "sampled": bool(non_empty)}
+            for cat in dict.fromkeys(name_hits)
         ] + [
             # Content is evidence in its own right, also where the name agrees:
             # "phone by column name" alone read as a name-only detector (D94).
@@ -470,20 +479,20 @@ _CONTENT_RULES = frozenset({"sample_value", "embedded_value"})
 def direct_identifier_columns(pii_report: dict[str, Any]) -> list[str]:
     """Columns whose *content* is an email, phone or IP address.
 
-    A column name alone counts only when the sample showed no value for it
-    (``email_opt_in`` holds booleans, not addresses — its name must not force
-    a hold when the content is there to say otherwise).
+    Content evidence only: ``email_opt_in`` holds booleans, not addresses,
+    and an empty or sparse table has shown nothing yet. A name-only finding
+    is still reported (marked "no sample" when the column had no value) but
+    never forces the review hold on its own.
     """
     evidence = pii_report.get("field_evidence") or {}
-    sampled = set(pii_report.get("sampled_fields") or [])
     out: list[str] = []
     for col, items in evidence.items():
-        for item in items:
-            if str(item.get("category")) not in _DIRECT_IDENTIFIER_CATEGORIES:
-                continue
-            if str(item.get("rule")) in _CONTENT_RULES or col not in sampled:
-                out.append(col)
-                break
+        if any(
+            str(item.get("category")) in _DIRECT_IDENTIFIER_CATEGORIES
+            and str(item.get("rule")) in _CONTENT_RULES
+            for item in items
+        ):
+            out.append(col)
     return sorted(out)
 
 

@@ -153,3 +153,34 @@ def test_confirmed_rerun_merges_ack_over_the_route_confirmation(world, monkeypat
     assert approval["reason"] == "second pass"
     # The parent keeps whatever it had: acting on a job never rewrites its approval.
     assert "confirmation" not in parent
+
+
+def test_every_confirm_kind_that_creates_a_job_is_stamped_at_the_seam(world, monkeypatch):
+    """sync_now never had its own stamp: the one in ``_finalize`` covers it,
+    and any confirm kind added later."""
+    import services.sync_now as sync_now
+
+    def _begin(payload):
+        jid = world.mongo.create_transfer_job({"status": "pending", "source": "s", "destination": "d",
+                                               "triggered_by": "ops@example.com",
+                                               "transfer_request": {}})
+        return {"job_id": jid, "mode": "sync"}, None
+
+    monkeypatch.setattr(sync_now, "begin_sync_now", _begin)
+    ack_id = world.ledger.put(kind="sync_now", payload={"mode": "sync", "parent_job_id": "p-1",
+                                                        "transfer_request": {}},
+                              preview={"confirm_reason": "sync"})
+    res = world.client.post("/api/v1/copilot/confirm",
+                            json={"ack_id": ack_id, "actor": "ops@example.com", "reason": "resync"})
+    assert res.status_code == 200, res.text
+    job = world.mongo.get_job(res.json()["job_id"])
+    approval = _governance(job)["approval"]
+    assert approval and approval["ack_id"] == ack_id and approval["approved_by"] == "ops@example.com"
+    assert approval["reason"] == "resync"
+    import inspect
+
+    import src.routers.copilot_router as cr
+
+    src = inspect.getsource(cr.copilot_confirm)
+    # One stamp, in the seam helper; no branch stamps on its own.
+    assert src.count("_stamp_confirmation(") == 1

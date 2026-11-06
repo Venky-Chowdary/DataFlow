@@ -150,7 +150,7 @@ def bind_connector_caller(caller: ConnectorCaller | None) -> Iterator[None]:
     try:
         with bound_workspace_filter(
             combined,
-            stamp=current_workspace_stamp() or caller.authorized_workspace_id(),
+            stamp=current_workspace_stamp(for_write=False) or caller.authorized_workspace_id(),
             actor=current_actor() or caller.actor,
         ):
             yield

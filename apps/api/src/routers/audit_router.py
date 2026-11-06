@@ -80,19 +80,13 @@ def _require_platform_admin(request: Request, scope, permission: str) -> None:
     admin (every self-serve signup is one) may neither run them nor read the
     platform figures they return.
     """
-    if scope.unrestricted:
-        return
-    from services.audit_coverage import record_authz_denial
+    from services.workspace_access import require_platform_admin
 
-    record_authz_denial(
+    require_platform_admin(
         request,
-        required_permission=permission,
-        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
-        reason="platform_admin_required",
-    )
-    raise HTTPException(
-        status_code=403,
-        detail="This acts on the platform-wide audit trail: platform administrators only.",
+        scope,
+        permission,
+        "This acts on the platform-wide audit trail: platform administrators only.",
     )
 
 

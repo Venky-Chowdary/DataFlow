@@ -117,6 +117,7 @@ def _finding_lines(compliance: dict[str, Any]) -> list[str]:
         col = str(finding.get("column") or "")
         why = ", ".join(
             f"{e.get('category')} by {str(e.get('rule') or '').replace('_', ' ')}"
+            + (", no sample" if e.get("sampled") is False else "")
             for e in finding.get("evidence") or []
         ) or ", ".join(finding.get("categories") or [])
         parts.append(f"{col} ({why})")

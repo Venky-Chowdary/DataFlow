@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from services.effective_role import workspace_id_from_request_headers
 from services.brand import PRODUCT_SLUG
 
 from services.byok_key_manager import (
@@ -183,7 +184,7 @@ def _require_tenant_admin(request: Request, workspace_id: str) -> None:
 
 
 def _named_workspace_id(request: Request) -> str:
-    return (request.headers.get("x-workspace-id") or "").strip()
+    return workspace_id_from_request_headers(request.headers)
 
 
 @router.get("/settings")
@@ -888,7 +889,7 @@ def _resolve_request_tenant(request: Request, workspace_id: str | None = None):
     tenant_id = getattr(request.state, "tenant_id", None)
     if tenant_id:
         return get_tenant(tenant_id)
-    ws = workspace_id or request.headers.get("x-workspace-id", "") or getattr(request.state, "tenant_workspace_id", "")
+    ws = workspace_id or workspace_id_from_request_headers(request.headers) or getattr(request.state, "tenant_workspace_id", "")
     return get_tenant_for_workspace(ws) if ws else None
 
 
@@ -953,7 +954,7 @@ async def get_all_tenants(request: Request):
     """
     from src.services import auth_service
 
-    named = (request.headers.get("x-workspace-id") or "").strip()
+    named = workspace_id_from_request_headers(request.headers)
     tenants = list_tenants()
     if auth_service.auth_required() and not _is_platform_admin(request):
         tenants = [
@@ -974,7 +975,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
     # A tenant is read back by the workspace the request is scoped to, so it must
     # be created against one. An unnamed workspace produced a tenant no GET could
     # ever resolve — saved, invisible, and never authorized against a workspace.
-    named = (request.headers.get("x-workspace-id") or "").strip()
+    named = workspace_id_from_request_headers(request.headers)
     workspace_id = (body.workspace_id or "").strip() or named
     if not workspace_id:
         raise HTTPException(
@@ -985,6 +986,12 @@ async def post_tenant(body: TenantCreateBody, request: Request):
     # scope to write into someone else's workspace is the stronger refusal.
     if not _can_admin_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required to create a tenant")
+    from services.team_store import get_workspace
+
+    # A tenant bound to a workspace that does not exist (a platform admin's
+    # view id, a typo) could never be read back by any request (D218).
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=400, detail=f"Workspace {workspace_id} does not exist")
     if body.workspace_id and named and body.workspace_id.strip() != named:
         raise HTTPException(
             status_code=403,
@@ -1304,7 +1311,7 @@ def _posture_scope_workspace(request: Request, tenant: Tenant | None) -> str:
     one, else the caller's own workspace (single membership / bound key)."""
     if tenant and tenant.workspace_id:
         return tenant.workspace_id
-    named = (request.headers.get("x-workspace-id") or "").strip() or str(
+    named = workspace_id_from_request_headers(request.headers) or str(
         getattr(request.state, "tenant_workspace_id", "") or ""
     )
     if named:

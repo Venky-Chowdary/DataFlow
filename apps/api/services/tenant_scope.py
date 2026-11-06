@@ -128,9 +128,11 @@ class TenantScope:
 
     @property
     def header_workspace_id(self) -> str:
-        """The authorized header workspace as rows store it ("" = none, and
-        for the Unassigned view, which names no workspace)."""
-        return "" if self.views_unassigned else self.requested_workspace_id
+        """The authorized header workspace as rows store it: "" for none and
+        for either view (All names every workspace, Unassigned names none).
+        Every "did the request name a workspace" check reads this, so a view
+        id is never filtered or stamped as if it were one."""
+        return "" if self.requested_workspace_id in WORKSPACE_VIEWS else self.requested_workspace_id
 
     @property
     def workspace_id(self) -> str:
@@ -156,11 +158,11 @@ class TenantScope:
         legacy = not self.enforced
         if self.views_unassigned:
             return self._requested_only()
-        if self.requested_workspace_id:
+        if self.header_workspace_id:
             if not legacy and self.unrestricted and legacy_admin_view_enabled():
-                _audit_legacy_view(self.actor, self.requested_workspace_id)
+                _audit_legacy_view(self.actor, self.header_workspace_id)
                 legacy = True
-            return WorkspaceFilter(frozenset({self.requested_workspace_id}), legacy)
+            return WorkspaceFilter(frozenset({self.header_workspace_id}), legacy)
         if self.unrestricted:
             return WorkspaceFilter.everything()
         return WorkspaceFilter(self.member_workspace_ids, legacy)
@@ -171,7 +173,7 @@ class TenantScope:
         For platform records that were never tenant data (the audit trail):
         an unscoped audit row is another account's login or admin action.
         """
-        if self.requested_workspace_id:
+        if self.views_unassigned or self.header_workspace_id:
             return self._requested_only()
         if self.unrestricted:
             return WorkspaceFilter.everything()
@@ -183,7 +185,7 @@ class TenantScope:
         Exact match, like those stores always were; a restricted actor with no
         workspace gets nothing rather than the platform-wide figure.
         """
-        if self.requested_workspace_id:
+        if self.views_unassigned or self.header_workspace_id:
             return self._requested_only()
         if self.unrestricted:
             return WorkspaceFilter.everything()
@@ -221,7 +223,7 @@ class TenantScope:
                     "workspaces. Choose a workspace to create or export in."
                 ),
             )
-        ws = self.requested_workspace_id
+        ws = self.header_workspace_id
         if not ws and (self.enforced or not write or (self.memberships and not self.unrestricted)):
             ws = self.default_workspace_id
         if not ws:
@@ -264,7 +266,11 @@ def workspace_views(unrestricted: bool) -> list[dict[str, Any]]:
     when the job store cannot answer), so the Unassigned entry says whether
     there is anything to claim.
     """
-    if not unrestricted:
+    # The views exist to reach what isolation hides from a named workspace.
+    # With isolation off (the single operator, auth off) a request already
+    # sees every row, legacy ones included, and the switcher must render as
+    # it always did (the studio-ui pixel baselines).
+    if not unrestricted or not require_workspace_isolation():
         return []
     legacy_jobs: int | None
     try:
@@ -382,15 +388,22 @@ def bind_tenant_scope(scope: TenantScope | None) -> Iterator[None]:
     """Bind ``scope`` for store-level reads in this request/turn (see
     ``services.workspace_filter.bound_workspace_filter``)."""
     stamp = ""
+    refusal: HTTPException | None = None
     if scope is not None:
         try:
             stamp = scope.target_workspace_id(write=True)
-        except HTTPException:
+        except HTTPException as exc:
+            # No workspace to write into (a platform admin's Unassigned or All
+            # view, a rejected header, no membership). Binding "" here let
+            # every stamping store write a legacy row (D218); the stores now
+            # get this refusal from current_workspace_stamp() instead.
             stamp = ""
+            refusal = exc
     with bound_workspace_filter(
         scope.filter if scope is not None else None,
         stamp,
         scope.actor if scope is not None else "",
+        stamp_refusal=refusal,
     ):
         yield
 

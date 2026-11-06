@@ -429,15 +429,27 @@ async def _run_lifecycle_confirm(
     if kind == "repair_cdc_drift":
         from services.cdc_drift_repair import run_fenced_drift_repair
         from services.cdc_lease import CdcLeaseConflict
+        from services.workspace_access import resolve_tenant_scope
 
         role, actor = _caller(http_request)
+        # The repair checks the job against the caller's workspace exactly. A
+        # platform admin in the All view names none; the job's own workspace
+        # stands in when the scope may read it (D218).
+        scope = resolve_tenant_scope(http_request)
+        repair_workspace_id = scope.header_workspace_id
+        if not repair_workspace_id:
+            from services.mongodb_service import get_mongodb_service
+
+            job_doc = get_mongodb_service().get_job(job_id) or {}
+            if scope.allows(job_doc.get("workspace_id")):
+                repair_workspace_id = str(job_doc.get("workspace_id") or "")
         try:
             return await asyncio.to_thread(
                 run_fenced_drift_repair,
                 job_id,
                 list(payload.get("key_ids") or []),
                 actor=actor,
-                workspace_id=workspace_id,
+                workspace_id=repair_workspace_id,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -651,8 +663,9 @@ async def copilot_confirm(
         if studio_payload is None:
             raise HTTPException(status_code=404, detail=payload_error or "Approval not found")
         staged_workspace_id = str(studio_payload.get("workspace_id") or "").strip()
-        caller_workspace_id = workspace_id_from_request_headers(http_request.headers)
-        if staged_workspace_id and staged_workspace_id != caller_workspace_id:
+        # The caller's tenant scope, not a raw header: a platform admin's All
+        # view names no workspace yet may confirm in every one (D218).
+        if staged_workspace_id and not tenant_scope(http_request).allows(staged_workspace_id):
             raise HTTPException(
                 status_code=403,
                 detail="This Studio approval belongs to a different workspace.",
@@ -660,6 +673,27 @@ async def copilot_confirm(
     # The audit actor is the authenticated identity when there is one; the
     # client-supplied name is only a fallback for open deployments.
     actor = session_actor or request.actor or "pilot-ui"
+
+    def _finalize(result: dict[str, Any], *, extra: dict[str, Any] | None = None) -> None:
+        """Close the ack and, when the mutation created a job, record the
+        approval on it. One seam for every confirm kind (D6): a kind that
+        acts on an existing job (cancel, resume) names it in its payload and
+        keeps that job's original approval."""
+        new_job_id = str(result.get("job_id") or "").strip()
+        if new_job_id and new_job_id != str(payload.get("job_id") or "").strip():
+            _stamp_confirmation(
+                new_job_id,
+                ack_id=ack_id,
+                actor=actor,
+                reason=request.reason or "confirmed",
+                extra=extra,
+            )
+        ledger.finalize(
+            ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
 
     payload, err = ledger.claim(
         ack_id,
@@ -684,7 +718,6 @@ async def copilot_confirm(
             raise HTTPException(status_code=400, detail="Unsupported Studio remediation kind")
 
         run_id = str(payload.get("run_id") or "").strip()
-        caller_workspace_id = workspace_id_from_request_headers(http_request.headers)
         if run_id:
             from services.preflight_run_store import get_preflight_run
 
@@ -696,7 +729,7 @@ async def copilot_confirm(
                 run_workspace_id = str(preflight_run.get("workspace_id") or "").strip()
             else:
                 run_workspace_id = str(getattr(preflight_run, "workspace_id", "") or "").strip()
-            if run_workspace_id and run_workspace_id != caller_workspace_id:
+            if run_workspace_id and not tenant_scope(http_request).allows(run_workspace_id):
                 ledger.release_claim(ack_id)
                 raise HTTPException(
                     status_code=403,
@@ -710,12 +743,7 @@ async def copilot_confirm(
             "label": str(preview.get("label") or ""),
             "destructive": remediation_kind == "quarantine_and_rerun",
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "start_transfer":
@@ -730,18 +758,7 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("start transfer", exc)) from exc
-        _stamp_confirmation(
-            str(result.get("job_id") or ""),
-            ack_id=ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-        )
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "sync_now":
@@ -773,12 +790,7 @@ async def copilot_confirm(
                 transfer_request,
                 resume=False,
             )
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_connector":
@@ -818,22 +830,25 @@ async def copilot_confirm(
             "name": conn.name,
             "type": conn.type,
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_transform_recipe":
-        from services.effective_role import workspace_id_from_request_headers
         from services.transform_library import get_transform_library
         from services.transform_recipe_templates import clone_template
+        from services.workspace_access import resolve_tenant_scope
 
+        # The recipe lands where a create lands: the header workspace, else the
+        # actor's own; a platform admin's view or no workspace is a 400, never
+        # a recipe saved under "__all__" or in the legacy bucket (D218).
+        try:
+            recipe_workspace_id = resolve_tenant_scope(http_request).target_workspace_id(write=True)
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
         recipe = clone_template(
             str(payload.get("template_key") or ""),
-            workspace_id=workspace_id_from_request_headers(http_request.headers) or "",
+            workspace_id=recipe_workspace_id,
         )
         if recipe is None:
             ledger.release_claim(ack_id)
@@ -844,12 +859,7 @@ async def copilot_confirm(
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("save transform", exc)) from exc
         result = {"recipe_id": saved.id, "name": saved.name, "steps": len(saved.steps)}
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "run_schedule":
@@ -903,19 +913,7 @@ async def copilot_confirm(
             "name": str(payload.get("name") or getattr(sched, "name", "") or ""),
             "status": "queued",
         }
-        _stamp_confirmation(
-            str(job_id or ""),
-            ack_id=ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            extra={"action": "run_schedule", "schedule_id": schedule_id},
-        )
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result, extra={"action": "run_schedule", "schedule_id": schedule_id})
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_schedule":
@@ -943,12 +941,7 @@ async def copilot_confirm(
             "enabled": sched.enabled,
             "next_run_at": sched.next_run_at or "",
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     from ..ai.copilot.lifecycle_tools import ACK_KIND_BY_TOOL
@@ -962,24 +955,7 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure(kind.replace('_', ' '), exc)) from exc
-        # D6: a lifecycle ack that created a job (rerun, retry, replay) records
-        # its approval on that job. Acting on an existing job (cancel, resume)
-        # must not overwrite the approval that started it.
-        new_job_id = str(result.get("job_id") or "").strip()
-        if new_job_id and new_job_id != str(payload.get("job_id") or "").strip():
-            _stamp_confirmation(
-                new_job_id,
-                ack_id=ack_id,
-                actor=actor,
-                reason=request.reason or "confirmed",
-                extra={"action": kind},
-            )
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result, extra={"action": kind})
         # Confirm itself succeeded, but a CDC prepare that changed nothing
         # (role is not superuser, wal_level stayed replica) is not "ok"
         # (R4-D11). Other lifecycle results omit ``applied``.

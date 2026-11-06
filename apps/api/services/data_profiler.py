@@ -20,7 +20,9 @@ from services.transform_engine import (
 )
 from services.value_serializer import wire_cell_text
 
-EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+# Email is read through the gate's classifier (D94): one definition of an
+# address across preflight, mapper and profiler (unicode local parts included).
+from services.compliance_guard import is_email_value
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{12}$"
 )
@@ -126,7 +128,7 @@ def _infer_pattern(values: list[str]) -> str | None:
         return None
     sample = values[:100]
     scores = {
-        "email": sum(1 for v in sample if EMAIL_RE.match(v)),
+        "email": sum(1 for v in sample if is_email_value(v)),
         "uuid": sum(1 for v in sample if UUID_RE.match(v)),
         "phone": sum(1 for v in sample if PHONE_RE.match(v)),
         "date": sum(1 for v in sample if DATE_PATTERN_RE.match(v) or _parse_date(v)),
@@ -197,7 +199,7 @@ def _type_scores(values: list[str]) -> dict[str, float]:
             scores["UUID"] += 1
         if raw.startswith("{") or raw.startswith("["):
             scores["JSON"] += 0.5
-        if EMAIL_RE.match(raw):
+        if is_email_value(raw):
             scores["VARCHAR"] += 0.3
     non_empty = sum(1 for v in values if v) or 1
     return {k: round(v / non_empty, 3) for k, v in scores.items()}
@@ -261,7 +263,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
 
     pattern = _infer_pattern(non_empty)
     pii = bool(re.search(r"email|phone|ssn|password|secret|name|address", name, re.I))
-    if pii and best_type in {"VARCHAR", "TEXT"} and any(bool(EMAIL_RE.match(s)) for s in non_empty[:8]):
+    if pii and best_type in {"VARCHAR", "TEXT"} and any(bool(is_email_value(s)) for s in non_empty[:8]):
         pii = True
 
     # Uniqueness estimate — high distinct ratio on id-like columns

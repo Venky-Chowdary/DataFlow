@@ -123,10 +123,24 @@ def test_a_name_alone_does_not_make_a_boolean_column_a_direct_identifier():
     out = score_compliance_risk(cols, rows)
     assert out["direct_identifier_columns"] == []
     assert out["requires_review"] is False
-    # Without any sampled value the name is all the evidence there is.
+    # Without any sampled value the name is all the evidence there is: it is
+    # reported as such, and never holds a table that has shown nothing yet.
+    from services.preflight_proof_bundle import _finding_lines
+
     unsampled = score_compliance_risk(["id", "email", "phone"], [])
-    assert unsampled["direct_identifier_columns"] == ["email", "phone"]
-    assert unsampled["requires_review"] is True
+    assert unsampled["sensitive_fields"] == ["email", "phone"]
+    assert unsampled["direct_identifier_columns"] == []
+    assert unsampled["requires_review"] is False
+    assert _finding_lines(unsampled) == [
+        "email (email by column name, no sample)",
+        "phone (phone by column name, no sample)",
+    ]
+    # A sparse sample (one row, both empty) is the same case.
+    sparse = score_compliance_risk(["id", "email", "phone"], [{"id": 1, "email": "", "phone": None}])
+    assert sparse["requires_review"] is False
+    assert "no sample" in _finding_lines(sparse)[0]
+    # Once the content is there the hold is, and the text drops the caveat.
+    assert "no sample" not in " ".join(_finding_lines(score_compliance_risk(_EM_COLS, _EM_ROWS)))
 
 
 @pytest.mark.parametrize("value", [
@@ -141,6 +155,26 @@ def test_a_name_alone_does_not_make_a_boolean_column_a_direct_identifier():
 ])
 def test_free_text_look_alikes_are_not_embedded_pii(value):
     assert embedded_pii_categories(value) == []
+
+
+@pytest.mark.parametrize("value", ["+tag@example.com", ".dot@example.com", "a.b+c@sub.example.co.uk", "山田@example.jp"])
+def test_whole_value_email_classification_is_anchored_not_word_bounded(value):
+    # ``\b`` + fullmatch rejected a local part that starts on a non-word
+    # character; the classifier uses an anchored pattern (the masker keeps \b).
+    assert pii_value_category(value) == "email"
+    assert embedded_pii_categories(f"mail me: {value} today") == ["email"]
+
+
+def test_the_profiler_and_the_sample_quality_check_agree_with_the_gate():
+    from services.data_profiler import _infer_pattern
+    from services.sample_quality import analyze_column_quality
+
+    values = ["山田@example.jp", "+tag@example.com", "ada@example.com"]
+    assert all(is_email_value(v) for v in values)
+    # The profiler's dominant pattern and the gate agree on every one of them.
+    assert _infer_pattern(values) == "email"
+    quality = analyze_column_quality("email", values, inferred_type="TEXT")
+    assert not [i for i in (quality.get("issues") or []) if "invalid email" in str(i)], quality
 
 
 def test_the_mapper_reads_email_and_phone_through_the_same_classifier():

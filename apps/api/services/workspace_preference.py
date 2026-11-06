@@ -12,9 +12,11 @@ deterministically, in this order:
 2. the account's own workspace: its personal workspace (the one signup made),
    else its earliest membership (``tenant_scope.ordered_memberships``);
 3. only for an account that belongs to no workspace at all (a bootstrap
-   platform admin on a fresh deployment): the workspace it created, else the
-   All-workspaces view — landing in the oldest workspace narrowed every
-   screen to one tenant the admin never chose ("Test · 2").
+   platform admin on a fresh deployment): the workspace it created, else —
+   while isolation is enforced — the All-workspaces view, since landing in
+   the oldest workspace narrowed every screen to one tenant the admin never
+   chose ("Test · 2"). With isolation off the oldest workspace stays the
+   fallback, as before: nothing is hidden from it.
 
 A platform admin's last-used view (All workspaces / Unassigned) is
 remembered like a workspace.
@@ -93,7 +95,8 @@ def landing_workspace_id(scope: Any) -> str:
     members = [ws for ws, _role in getattr(scope, "memberships", ()) or ()]
     unrestricted = bool(getattr(scope, "unrestricted", False))
     last = last_used_workspace(actor) if actor and actor != "anonymous" else ""
-    if last and unrestricted and last in WORKSPACE_VIEWS:
+    enforced = bool(getattr(scope, "enforced", False))
+    if last and unrestricted and enforced and last in WORKSPACE_VIEWS:
         return last
     if last and (last in members or unrestricted) and team_store.get_workspace(last) is not None:
         return last
@@ -101,11 +104,13 @@ def landing_workspace_id(scope: Any) -> str:
         return members[0]
     if not unrestricted:
         return ""
-    own = [
-        ws for ws in team_store.list_workspaces()
-        if ws.created_by == team_store.normalize_email(actor)
-    ]
-    return own[0].id if own else ALL_WORKSPACES
+    everything = team_store.list_workspaces()
+    own = [ws for ws in everything if ws.created_by == team_store.normalize_email(actor)]
+    if own:
+        return own[0].id
+    if enforced:
+        return ALL_WORKSPACES
+    return everything[0].id if everything else ""
 
 
 __all__ = ["landing_workspace_id", "last_used_workspace", "remember_workspace"]

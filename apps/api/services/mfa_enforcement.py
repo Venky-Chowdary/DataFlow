@@ -121,7 +121,9 @@ def _request_credentials(request: Request) -> tuple[str, dict | None]:
 
 
 def _named_workspace(request: Request) -> str:
-    return (request.headers.get("x-workspace-id") or "").strip()
+    from services.effective_role import workspace_id_from_request_headers
+
+    return workspace_id_from_request_headers(request.headers)
 
 
 def evaluate(request: Request, *, token: str = "", cookie_doc: dict | None = None) -> dict[str, Any]:

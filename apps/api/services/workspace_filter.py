@@ -123,16 +123,37 @@ _bound_actor: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+# Why this request has no workspace to write into (the refusal the route
+# would answer), or None when the stamp is usable. A request in a platform
+# admin's view (Unassigned / All with no workspace of their own) used to bind
+# stamp "" and every store that stamps rows wrote them into the legacy bucket
+# (D218). The stores read the stamp through :func:`current_workspace_stamp`,
+# so the one seam raises instead.
+_bound_stamp_refusal: contextvars.ContextVar[BaseException | None] = contextvars.ContextVar(
+    "bound_workspace_stamp_refusal", default=None
+)
+
+
 @contextlib.contextmanager
 def bound_workspace_filter(
-    workspace_filter: WorkspaceFilter | None, stamp: str = "", actor: str = ""
+    workspace_filter: WorkspaceFilter | None,
+    stamp: str = "",
+    actor: str = "",
+    stamp_refusal: BaseException | None = None,
 ) -> Iterator[None]:
+    """``stamp_refusal`` is raised by every write-side stamp read inside the
+    block; ``None`` keeps the refusal of the enclosing bind (a nested
+    connector-scoped bind must not reopen a refused write)."""
     token = _bound.set(workspace_filter)
     stamp_token = _bound_stamp.set(stamp)
     actor_token = _bound_actor.set(actor)
+    refusal_token = _bound_stamp_refusal.set(
+        stamp_refusal if stamp_refusal is not None else _bound_stamp_refusal.get()
+    )
     try:
         yield
     finally:
+        _bound_stamp_refusal.reset(refusal_token)
         _bound_actor.reset(actor_token)
         _bound_stamp.reset(stamp_token)
         _bound.reset(token)
@@ -144,9 +165,19 @@ def current_actor() -> str:
     return _bound_actor.get()
 
 
-def current_workspace_stamp() -> str:
+def current_workspace_stamp(*, for_write: bool = True) -> str:
     """The workspace for a row this request writes into a store that has no
-    explicit workspace parameter (preflight runs, plans, drafts)."""
+    explicit workspace parameter (preflight runs, plans, drafts).
+
+    A bound request that has no workspace to write into raises its refusal
+    here, so no store stamps ``""`` and lands a new row in the legacy bucket
+    (D218). ``for_write=False`` is the read ("which workspace does this turn
+    act in"): ``""`` for such a request.
+    """
+    if for_write:
+        refusal = _bound_stamp_refusal.get()
+        if refusal is not None:
+            raise refusal
     return _bound_stamp.get()
 
 

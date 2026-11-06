@@ -493,7 +493,7 @@ def run_with_deadline(
         return get_executor().run(
             tool,
             work,
-            workspace=current_workspace_stamp(),
+            workspace=current_workspace_stamp(for_write=False),
             seconds=limit,
             describe_timeout=lambda: _timeout_message(tool, limit, progress),
             label=lambda: stuck_label(tool, progress),

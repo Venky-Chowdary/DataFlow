@@ -210,7 +210,7 @@ def workspace_scope_unresolved() -> bool:
     with no X-Workspace-Id). A ``workspace`` census there would be every
     workspace under the wrong label (D219)."""
     visible = current_workspace_filter()
-    return visible is not None and visible.is_everything and not current_workspace_stamp()
+    return visible is not None and visible.is_everything and not current_workspace_stamp(for_write=False)
 
 
 def list_transfer_jobs(
@@ -237,7 +237,7 @@ def list_transfer_jobs(
     elif workspace_id == "":
         # "This workspace" is the one the turn acts in. A platform admin's tenant
         # filter is every workspace, which used to win over it (D219).
-        stamp = current_workspace_stamp()
+        stamp = current_workspace_stamp(for_write=False)
         if stamp:
             workspace_filter = (workspace_filter or WorkspaceFilter.everything()).intersect(
                 WorkspaceFilter.only(stamp)

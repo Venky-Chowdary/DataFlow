@@ -165,3 +165,40 @@ def test_transient_failures_keep_their_cause_on_the_retry_row(world, monkeypatch
     assert "status=503" in pending[0]["last_error"]
     details = world["events"][0][1]["details"]
     assert details["retryable"] is True and details["terminal"] is False and details["status"] == 503
+
+
+def test_mail_health_is_about_the_last_day_not_all_history(world, monkeypatch):
+    """One refusal last month must not read as a broken mailer forever."""
+    monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)
+    row = _enqueue("signup.verify")
+    real_now = mail_outbox._now_iso
+    monkeypatch.setattr(mail_outbox, "_now_iso", lambda: "2026-01-01T00:00:00+00:00")
+    signup_service._deliver_outbox_row(row)
+    monkeypatch.setattr(mail_outbox, "_now_iso", real_now)
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    with TestClient(app) as client:
+        body = client.get("/api/v1/ops/mail").json()
+    assert body["counts"]["failed"] == 1
+    assert body["health_window_hours"] == 24
+    assert body["failures_in_window"] == 0
+    assert body["healthy"] is True
+    # A fresh refusal flips it.
+    signup_service._deliver_outbox_row(_enqueue("password.reset"))
+    with TestClient(app) as client:
+        body = client.get("/api/v1/ops/mail").json()
+    assert body["failures_in_window"] == 1 and body["healthy"] is False
+
+
+def test_platform_admin_gate_is_the_shared_one():
+    import inspect
+
+    import src.routers.audit_router as audit
+    import src.routers.ops_router as ops
+    from services.workspace_access import require_platform_admin
+
+    assert "require_platform_admin(" in inspect.getsource(ops.get_mail_outbox_health)
+    assert "require_platform_admin(" in inspect.getsource(audit._require_platform_admin)
+    assert "record_authz_denial" not in inspect.getsource(ops.get_mail_outbox_health)
+    assert callable(require_platform_admin)

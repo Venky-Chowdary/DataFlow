@@ -137,6 +137,13 @@ def test_a_named_workspace_hides_legacy_and_the_unassigned_scope_is_admin_only(r
 
 
 def test_nothing_new_lands_in_unassigned(r9):
+    """Not only at the route: every store that stamps rows from the bound
+    scope (preflight runs, transfer plans, drafts) is refused in a view."""
+    from fastapi import HTTPException
+
+    from services import preflight_run_store, transfer_plan_store
+    from services.tenant_scope import TenantScope, bind_tenant_scope
+
     root = _root(r9, UNASSIGNED)
     res = root.post("/api/v1/schedules/", json={
         "name": "d218", "source_connector_id": "x", "source_table": "t",
@@ -144,6 +151,74 @@ def test_nothing_new_lands_in_unassigned(r9):
     })
     assert res.status_code == 400, res.text
     assert "read-only view" in res.text
+
+    # A plan saved through the real route in the Unassigned view is refused,
+    # and nothing landed in the legacy bucket.
+    before = len([p for p in transfer_plan_store.list_plans(limit=500) if not (getattr(p, "workspace_id", "") or "")])
+    res = root.post("/api/v1/transfer/plans", json={"name": "d218 plan"})
+    assert res.status_code == 400, res.text
+    assert "read-only view" in res.text
+    after = len([p for p in transfer_plan_store.list_plans(limit=500) if not (getattr(p, "workspace_id", "") or "")])
+    assert after == before
+
+    # The seam itself, for every view and for an admin with no workspace of
+    # its own in the All view: current_workspace_stamp() raises the route's 400.
+    for view in (UNASSIGNED, ALL):
+        scope = TenantScope(actor="root@example.test", unrestricted=True, enforced=True,
+                            memberships=(), requested_workspace_id=view)
+        with bind_tenant_scope(scope):
+            with pytest.raises(HTTPException) as exc:
+                preflight_run_store.save_preflight_run(
+                    {"passed": False, "blockers": ["x"], "warnings": []},
+                    source_label="s", dest_label="d", validation_mode="strict",
+                )
+            assert exc.value.status_code == 400, view
+            with pytest.raises(HTTPException):
+                transfer_plan_store.create_plan({"name": "seam"})
+    assert len([p for p in transfer_plan_store.list_plans(limit=500) if not (getattr(p, "workspace_id", "") or "")]) == before
+
+
+def test_a_recipe_and_a_tenant_cannot_be_created_under_a_view(r9):
+    import src.ai.copilot.ack_ledger as ack_mod
+    from services.transform_library import get_transform_library
+
+    library = get_transform_library()
+    ids_before = {r.id for r in library.list("")}
+    for view in (ALL, UNASSIGNED):
+        root = _root(r9, view)
+        ack_id = ack_mod.get_ack_ledger().put(
+            kind="create_transform_recipe",
+            payload={"template_key": "standardise-email-hash-pii"},
+            preview={"name": "Standardise Email + Hash PII"},
+        )
+        res = root.post("/api/v1/copilot/confirm", json={"ack_id": ack_id, "reason": "d218"})
+        assert res.status_code == 400, (view, res.text)
+        # A view id is never a recipe's workspace, and nothing landed unscoped.
+        for ws in (view, ""):
+            try:
+                rows = library.list(ws)
+            except TypeError:
+                rows = []
+            assert not [r for r in rows if getattr(r, "id", "") not in ids_before], (view, ws)
+        # A tenant: the header names no workspace, and a view id does not exist.
+        res = root.post("/api/v1/workspace/tenant", json={"name": "Acme Corp"})
+        assert res.status_code == 400, (view, res.text)
+        assert "workspace_id is required" in res.text
+        res = root.post("/api/v1/workspace/tenant", json={"name": "Acme Corp", "workspace_id": view})
+        assert res.status_code == 400, (view, res.text)
+        assert "does not exist" in res.text
+
+
+def test_views_are_offered_only_while_isolation_is_enforced(r9, monkeypatch):
+    """The single-operator deployment (auth off, isolation off) renders the
+    switcher exactly as before the views existed: the studio-ui pixel
+    baselines are captured there."""
+    import services.tenant_scope as ts
+
+    monkeypatch.setattr(ts, "require_workspace_isolation", lambda: False)
+    listed = _root(r9, None).get("/api/v1/team/workspaces").json()
+    assert listed["views"] == []
+    assert listed["default_workspace_id"] != ALL
 
 
 def test_an_admin_with_no_workspace_lands_on_all_and_keeps_the_view_it_used(r9):
@@ -153,7 +228,10 @@ def test_an_admin_with_no_workspace_lands_on_all_and_keeps_the_view_it_used(r9):
     assert listed["default_workspace_id"] == ALL
     me = root.get("/api/v1/auth/me", headers={"X-Workspace-Id": UNASSIGNED})
     assert me.status_code == 200, me.text
-    assert me.json()["workspace_id"] == UNASSIGNED
+    # A view is never echoed as the workspace a row is stamped with...
+    assert me.json()["workspace_id"] == ""
+    # ...but it is the landing choice from now on.
+    assert me.json()["default_workspace_id"] == UNASSIGNED
     again = _root(r9, None)
     assert again.get("/api/v1/team/workspaces").json()["default_workspace_id"] == UNASSIGNED
     assert again.get("/api/v1/auth/me").json()["default_workspace_id"] == UNASSIGNED

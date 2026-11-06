@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -304,6 +305,9 @@ async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any
     return {"ok": True, "retention": probe.to_dict(), **probe.job_fields()}
 
 
+_MAIL_HEALTH_WINDOW_HOURS = 24
+
+
 @router.get("/mail")
 async def get_mail_outbox_health(
     request: Request,
@@ -323,28 +327,29 @@ async def get_mail_outbox_health(
     from services import mail_outbox
     from services.email_sender import email_provider_name
     from services.notification_service import USER_AGENT
-    from services.workspace_access import tenant_scope
+    from services.workspace_access import require_platform_admin, tenant_scope
 
-    scope = tenant_scope(request)
-    if not scope.unrestricted:
-        from services.audit_coverage import record_authz_denial
-
-        record_authz_denial(
-            request,
-            required_permission="ops.mail.read",
-            effective_role=str(getattr(request.state, "effective_role", "") or "member"),
-            reason="platform_admin_required",
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="The mail outbox is platform-wide: platform administrators only.",
-        )
+    require_platform_admin(
+        request,
+        tenant_scope(request),
+        "ops.mail.read",
+        "The mail outbox is platform-wide: platform administrators only.",
+    )
     counts = mail_outbox.counts()
     failures = mail_outbox.recent_failures(limit=limit)
+    # "Healthy" is about now, not history: one refusal last month must not
+    # read as a broken mailer forever. The histogram keeps the history.
+    since = (datetime.now(timezone.utc) - timedelta(hours=_MAIL_HEALTH_WINDOW_HOURS)).isoformat()
+    recent = [
+        f for f in mail_outbox.recent_failures(limit=200)
+        if str(f.get("finished_at") or f.get("next_attempt_at") or f.get("created_at") or "") >= since
+    ]
     return {
         "provider": email_provider_name(),
         "user_agent": USER_AGENT,
         "counts": counts,
         "recent_failures": failures,
-        "healthy": counts.get("failed", 0) == 0 and not failures,
+        "health_window_hours": _MAIL_HEALTH_WINDOW_HOURS,
+        "failures_in_window": len(recent),
+        "healthy": not recent,
     }

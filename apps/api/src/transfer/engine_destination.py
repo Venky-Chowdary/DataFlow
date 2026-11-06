@@ -102,7 +102,7 @@ def _connect_destination(
             return get_executor().run(
                 "destination_connect",
                 _probe,
-                workspace=current_workspace_stamp(),
+                workspace=current_workspace_stamp(for_write=False),
                 seconds=seconds,
                 describe_timeout=_timeout_message,
                 label=lambda: f"destination_connect: reading the destination schema ({target})",

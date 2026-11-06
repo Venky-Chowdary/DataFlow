@@ -28,6 +28,14 @@ PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "ip_address": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
 
+# Whole-value forms of the email / SSN patterns for classifying a cell
+# (``services.compliance_guard``). The ``\b`` forms above find tokens inside
+# text; anchored with ``fullmatch`` they reject a value that starts or ends on
+# a non-word character, so "+tag@example.com" and ".dot@example.com" stopped
+# classifying as addresses (D94 review).
+EMAIL_VALUE_RE: re.Pattern[str] = re.compile(r"^[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}$")
+SSN_VALUE_RE: re.Pattern[str] = re.compile(r"^\d{3}-\d{2}-\d{4}$")
+
 # Union of every pattern above: a value matches no label iff it fails this.
 # Used as an exact one-pass gate so a clean column costs one scan, not five.
 _PII_UNION: re.Pattern[str] = re.compile(

@@ -1719,7 +1719,7 @@ def _current_workspace() -> str:
     from services.egress_guard import current_egress_workspace
     from services.workspace_filter import current_workspace_stamp
 
-    return current_workspace_stamp() or current_egress_workspace()
+    return current_workspace_stamp(for_write=False) or current_egress_workspace()
 
 
 def pii_hash_key(workspace_id: str | None = None) -> str:
