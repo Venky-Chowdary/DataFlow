@@ -3026,6 +3026,7 @@ def dry_run_sample(
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> tuple[bool, list[str]]:
     """Apply write-path transforms to the sample window.
 
@@ -3079,6 +3080,7 @@ def dry_run_sample(
         dest_types=dest_types,
         database_extract=database_extract,
         file_row_quarantine=file_row_quarantine,
+        validation_mode=validation_mode,
     )
 
 
@@ -3095,6 +3097,7 @@ def _dry_run_sample_body(
     dest_types: dict[str, str],
     database_extract: bool = False,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> tuple[bool, list[str]]:
     from services.column_case import header_index
     from services.transform_resolver import resolve_transform
@@ -3145,13 +3148,32 @@ def _dry_run_sample_body(
         # a quarantine holdout — position in the sample must not fail the load
         # (R4-D02). An all-bad column cannot represent the mapping, and a
         # database extract stays fail-fast, so both keep the hard error list.
-        if file_row_quarantine and ok > 0:
+        from services.validation_mode_contract import (
+            CAST_SHARE_RULE,
+            cast_share_holds_out,
+            mode_holdout_kind,
+            mode_holds_out_refusal,
+        )
+
+        # The column's ONE verdict (share-bounded; strict holds nothing out).
+        held = sum(
+            1 for e in bad if mode_holds_out_refusal(validation_mode, e, record_batch=bool(file_row_quarantine))
+        )
+        if mode_holdout_kind(
+            validation_mode, failed=len(bad), held=held, cast_ok=ok,
+            record_batch=bool(file_row_quarantine),
+        ):
             errors.append(
                 f"holdout {m['source']}→{m['target']}: "
                 f"{len(bad)} sample row(s) will quarantine and the rest will load "
                 f"({bad[0]})"
             )
             continue
+        if held == len(bad) and ok > 0 and not cast_share_holds_out(len(bad), ok):
+            errors.append(
+                f"{m['source']}→{m['target']}: {len(bad)} of {len(bad) + ok} sampled "
+                f"cells fail — {CAST_SHARE_RULE}"
+            )
         shown = bad[:max_errors_per_mapping]
         for err in shown:
             errors.append(f"{m['source']}→{m['target']}: {err}")

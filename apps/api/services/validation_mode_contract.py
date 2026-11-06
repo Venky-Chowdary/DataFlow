@@ -208,9 +208,20 @@ def confidence_floor_for_mode(mode: str | None) -> float:
     return float(mode_contract(mode)["confidence_floor"])
 
 
-#: Lenient's column bound (``mode_holdout_kind``): at least this share of the
-#: non-empty sampled cells must cast for the rest to be held out per cell.
+#: The column bound for every per-row cast holdout (``mode_holdout_kind``): at
+#: least this share of the non-empty sampled cells must cast for the rest to be
+#: held out per row. 1 castable of 500 is a wrong mapping, not 499 rows to
+#: quarantine. The one owner of the share; every gate reads it through here.
 LENIENT_MIN_CAST_SHARE = 0.5
+CAST_SHARE_RULE = (
+    "a column's refused cells are held out per row only while at least half of "
+    "its sampled cells cast; past that the mapping itself is refused"
+)
+
+
+def cast_share_holds_out(failed: int, cast_ok: int) -> bool:
+    """True while enough sampled cells cast for the refused ones to be row holdouts."""
+    return cast_ok > 0 and cast_ok >= LENIENT_MIN_CAST_SHARE * (cast_ok + failed)
 
 
 def mode_holds_out_refusal(
@@ -243,19 +254,20 @@ def mode_holds_out_refusal(
 def mode_holdout_kind(
     mode: str | None, *, failed: int, held: int, cast_ok: int, record_batch: bool
 ) -> str:
-    """The column-level answer: ``"cast_failure"`` (lenient), ``"invalid_calendar"``
-    (balanced, fewer than one in five sampled values — ``connectors.sql_temporal.
-    INVALID_CALENDAR_MAX_SHARE``), or ``""`` (block). ``held`` counts the failures
-    :func:`mode_holds_out_refusal` held out; every failure must be one, and some
-    sampled cell must cast — an all-bad column is never a holdout.
+    """THE column verdict: ``"cast_failure"`` (lenient), ``"invalid_calendar"``
+    (balanced on a file, fewer than one in five sampled values — ``connectors.
+    sql_temporal.INVALID_CALENDAR_MAX_SHARE``), or ``""`` (block; strict always).
+    ``held`` counts the failures :func:`mode_holds_out_refusal` held out; every
+    failure must be one. Every per-row cast holdout is also bounded by
+    :func:`cast_share_holds_out` (``CAST_SHARE_RULE``); an all-bad column is
+    never a holdout. The coercion probe (G3), the dry run (G5), Gate-8's
+    pre-write check, Target DDL, schema drift and the integrity audit's
+    financial and expectation checks all ask this one function per column.
     """
     if failed <= 0 or held != failed or cast_ok <= 0:
         return ""
     if _holds_out_every_refusal(mode):
-        # A column is a cast with some bad cells only while most sampled cells
-        # cast: at least half (LENIENT_MIN_CAST_SHARE). 1 castable of 500 is a
-        # wrong mapping, not 499 rows to quarantine.
-        return "cast_failure" if cast_ok >= LENIENT_MIN_CAST_SHARE * (cast_ok + failed) else ""
+        return "cast_failure" if cast_share_holds_out(failed, cast_ok) else ""
     from connectors.sql_temporal import invalid_calendar_share_holds_out
 
     if record_batch and invalid_calendar_share_holds_out(failed, failed + cast_ok):

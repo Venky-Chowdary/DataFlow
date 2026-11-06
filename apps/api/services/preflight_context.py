@@ -218,6 +218,7 @@ class FilePreflightContext(PreflightContext):
                 dest_nullability=self._dest_nullability(),
                 database_extract=database_extract,
                 file_row_quarantine=_source_is_record_batch(self),
+                validation_mode=str(getattr(self.plan, "validation_mode", "") or "strict"),
             )
         except Exception as exc:
             _ps.logger.debug("dry-run sample failed: %s", exc, exc_info=exc)

@@ -264,6 +264,7 @@ def _check_transform_dry_run(
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -300,6 +301,7 @@ def _check_transform_dry_run(
         dest_nullability=dest_nullability,
         database_extract=database_extract,
         file_row_quarantine=file_row_quarantine,
+        validation_mode=validation_mode,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -375,10 +377,58 @@ def _column_has_numeric_value(rows: list[dict[str, Any]], column: str) -> bool:
     return False
 
 
+def _mixed_numeric_column_held(
+    rows: list[dict[str, Any]], column: str, validation_mode: str | None
+) -> bool:
+    """The column's ONE verdict for a mixed numeric file column (mode_holdout_kind)."""
+    from services.transform_engine import decimal_wire_value
+    from services.validation_mode_contract import mode_holdout_kind, mode_holds_out_refusal
+
+    ok = bad = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cell = lookup_row_value(row, column, None)
+        if cell is None or str(cell).strip() == "":
+            continue
+        if decimal_wire_value(cell) is None:
+            bad += 1
+        else:
+            ok += 1
+    held = bad if mode_holds_out_refusal(validation_mode) else 0
+    return bool(mode_holdout_kind(validation_mode, failed=bad, held=held, cast_ok=ok, record_batch=True))
+
+
+def _share_refused_columns(checks: list[dict[str, Any]]) -> set[str]:
+    """Source columns the dry run refused under the cast share (CAST_SHARE_RULE)."""
+    from services.validation_mode_contract import CAST_SHARE_RULE
+
+    out: set[str] = set()
+    for check in checks:
+        for issue in check.get("issues") or []:
+            text = str(issue)
+            if CAST_SHARE_RULE in text and "→" in text:
+                out.add(text.split("→", 1)[0].split(":", 1)[0].strip())
+    return out
+
+
+def _check_names_any(check: dict[str, Any], columns: set[str]) -> bool:
+    """True when one of the check's findings is about one of ``columns``."""
+    for issue in list(check.get("issues") or []) + [
+        str(f.get("column") or "") for f in check.get("blocking_failures") or [] if isinstance(f, dict)
+    ]:
+        text = str(issue)
+        head = re.split(r"[\s:→(]", text.strip(), maxsplit=1)[0] if text.strip() else ""
+        if head in columns or any(text.startswith(f"{c}→") or text.startswith(f"{c} ") for c in columns):
+            return True
+    return False
+
+
 def _demote_mixed_file_numeric_expectations(
     exp: dict[str, Any],
     rows: list[dict[str, Any]],
     mappings: list[dict],
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     """A minority non-numeric cell in a file is a quarantine, not a failed load.
 
@@ -397,8 +447,8 @@ def _demote_mixed_file_numeric_expectations(
             continue
         source = str(mapping.get("source") or "")
         target = str(mapping.get("target") or "")
-        if _column_has_numeric_value(rows, source) or (
-            target and _column_has_numeric_value(rows, target)
+        if _mixed_numeric_column_held(rows, source, validation_mode) or (
+            target and _mixed_numeric_column_held(rows, target, validation_mode)
         ):
             if source:
                 quarantine_columns.add(source)
@@ -431,6 +481,7 @@ def _check_financial_precision(
     rows: list[dict[str, Any]],
     *,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     """Detect values that could silently lose magnitude (e.g. comma/currency parsing failures)."""
     from services.migration_risk_contract import mapping_has_clearing_risk_contract
@@ -504,12 +555,30 @@ def _check_financial_precision(
         # No contract + a file + at least one good amount: quarantine the bad
         # cells. A present contract (FAIL_JOB, tampered) stays fail-closed.
         # Magnitude shifts above stay in ``issues`` either way.
+        from services.validation_mode_contract import (
+            CAST_SHARE_RULE,
+            cast_share_holds_out,
+            mode_holdout_kind,
+            mode_holds_out_refusal,
+        )
+
+        # The column's ONE verdict: the mode holds the unparseable amounts out
+        # per row only within the share (strict and balanced never do).
+        held = len(unparseable) if mode_holds_out_refusal(validation_mode) else 0
         if holdouts_contracted:
             contracted.extend(unparseable)
-        elif file_row_quarantine and parsed_ok > 0 and not contract_present:
+        elif not contract_present and unparseable and mode_holdout_kind(
+            validation_mode, failed=len(unparseable), held=held, cast_ok=parsed_ok,
+            record_batch=file_row_quarantine,
+        ):
             file_notes.extend(unparseable)
         else:
             issues.extend(unparseable)
+            if held and parsed_ok > 0 and not cast_share_holds_out(len(unparseable), parsed_ok):
+                issues.append(
+                    f"{src}: {len(unparseable)} of {len(unparseable) + parsed_ok} sampled "
+                    f"amounts fail — {CAST_SHARE_RULE}"
+                )
     blocks = len(issues) > 0
     report: dict[str, Any] = {
         "check": "financial_precision",
@@ -2460,6 +2529,7 @@ def run_integrity_audit(
                 database_extract=database_extract,
                 dest_nullability=dest_nullability,
                 file_row_quarantine=file_row_quarantine,
+                validation_mode=validation_mode,
             )
         )
         checks.append(
@@ -2468,6 +2538,7 @@ def run_integrity_audit(
                 source_types,
                 rows,
                 file_row_quarantine=file_row_quarantine,
+                validation_mode=validation_mode,
             )
         )
         checks.append(
@@ -2580,7 +2651,7 @@ def run_integrity_audit(
             in_file_dedupe=in_file_dedupe,
         )
         if file_row_quarantine:
-            exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings)
+            exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings, validation_mode)
         checks.append({
             "check": "expectations_suite",
             "passed": exp.get("passed", True),
@@ -2603,12 +2674,20 @@ def run_integrity_audit(
     if mode_holds_out_refusal(mode):
         # Cell and sample findings quarantine at write. They must not refuse
         # the load. A missing schema or an unreadable sample still blocks:
-        # there is nothing to quarantine against.
+        # there is nothing to quarantine against. Neither does a column whose
+        # ONE verdict (mode_holdout_kind, the cast share) refuses it: the dry
+        # run names those columns, and every check about them keeps blocking.
         structural = {"source_columns_available", "sample_available"}
+        share_refused = _share_refused_columns(checks)
         for check in checks:
             if check.get("check") in structural:
                 continue
             if check.get("check") == "in_file_dedupe_unsupported":
+                continue
+            if share_refused and check.get("blocks_transfer") and _check_names_any(check, share_refused):
+                from services.validation_mode_contract import CAST_SHARE_RULE
+
+                check["note"] = f"Not held out: {CAST_SHARE_RULE}"
                 continue
             if (
                 check.get("check") == "duplicate_keys"

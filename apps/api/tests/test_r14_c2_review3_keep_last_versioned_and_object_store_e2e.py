@@ -266,3 +266,96 @@ def test_held_out_sample_filter_drops_by_value_only_for_cast_refusals():
     not_null = [{"row": 9, "column": "k", "value": "C",
                  "reason": 'null value in column "k" violates not-null constraint'}]
     assert _without_held_out_cells(sample, not_null) == sample
+
+
+# ── 6. ONE verdict per column (mode_holdout_kind) for every gate ──────────
+@pytest.mark.parametrize("mode, good, bad, holds", [
+    ("lenient", 1, 9, False), ("lenient", 6, 4, True), ("lenient", 5, 5, True),
+    ("strict", 6, 4, False), ("balanced", 6, 4, False),
+])
+def test_every_cast_holdout_site_asks_the_one_verdict(mode, good, bad, holds):
+    from services.coercion_probe import analyze_coercion
+    from services.data_integrity import _check_financial_precision
+    from services.transform_engine import dry_run_sample
+    from services.validation_mode_contract import CAST_SHARE_RULE, mode_holdout_kind
+
+    values = ["12.50"] * good + [f"x{i}" for i in range(bad)]
+    m = {"source": "price", "target": "price", "target_type": "DECIMAL(10,2)", "transform": "decimal",
+         "confidence": 1}
+    rows = [{"price": v} for v in values]
+    held = bad if mode == "lenient" else 0
+    assert bool(mode_holdout_kind(mode, failed=bad, held=held, cast_ok=good, record_batch=True)) is holds
+    fin = _check_financial_precision([m], {"price": "VARCHAR"}, rows, file_row_quarantine=True,
+                                     validation_mode=mode)
+    assert fin["blocks_transfer"] is (not holds), fin
+    ok, errors = dry_run_sample(headers=["price"], sample_rows=[[v] for v in values], mappings=[m],
+                                column_types={"price": "VARCHAR"}, file_row_quarantine=True,
+                                validation_mode=mode)
+    assert any(e.startswith("holdout ") for e in errors) is holds, errors
+    if mode == "lenient" and not holds:
+        assert any(CAST_SHARE_RULE in e for e in errors) and any(CAST_SHARE_RULE in i for i in fin["issues"])
+    report = analyze_coercion(sample_rows=rows, mappings=[m], source_types={"price": "VARCHAR"},
+                              dest_types={"price": "DECIMAL(10,2)"}, dest_db_type="postgresql",
+                              validation_mode=mode, file_row_quarantine=True)
+    col = next(c for c in report["columns"] if c["source"] == "price")
+    assert bool(col.get("holdout_kind")) is holds, col
+    if not holds:
+        assert col["severity"] == "block", col  # no verdict, no warning
+
+
+def _gates_for(client, mode, lines):
+    from services.mongodb_service import get_mongodb_service
+
+    table = f"r14g_{uuid.uuid4().hex[:6]}"
+    h.execute("postgresql", f'CREATE TABLE public."{table}" (k text, d integer)')  # nosec B608
+    data = {"source_kind": "file", "dest_kind": "database", "dest_table": table, "async_mode": "false",
+            "validation_mode": mode, "sync_mode": "full_refresh_overwrite",
+            "schema_policy": "propagate_columns", **PG_DEST}
+    try:
+        resp = client.post("/api/v1/transfer/run", data=data,
+                           files={"file": ("i.csv", ("\n".join(lines) + "\n").encode(), "text/csv")})
+        body = resp.json()
+        job_id = body.get("job_id") or (body.get("detail") or {}).get("job_id")
+        job = get_mongodb_service().get_job(job_id) or {}
+        gates = {g.get("id"): g.get("status") for g in (job.get("preflight") or {}).get("gates") or []}
+        landed = h.query("postgresql", f'SELECT count(*) FROM public."{table}"')[0][0]  # nosec B608
+        return resp, gates, landed
+    finally:
+        h.drop_table("postgresql", table)
+
+
+@pytest.mark.parametrize("mode", ["lenient", "strict"])
+def test_one_castable_of_forty_into_integer_every_gate_blocks(client, mode):
+    resp, gates, landed = _gates_for(client, mode, ["k,d", "a,5"] + [f"b{i},word{i}" for i in range(39)])
+    assert resp.status_code == 422, resp.text[:600]
+    for gate in ("g3_schema_contract", "g5_dry_run", "g6_target_ddl", "g8_reconciliation"):
+        assert gates.get(gate) == "block", (mode, gate, gates)
+    assert landed == 0
+
+
+def test_lenient_mostly_castable_integer_column_loads_and_quarantines(client):
+    lines = ["k,d"] + [f"a{i},{i}" for i in range(30)] + [f"b{i},word{i}" for i in range(10)]
+    resp, gates, landed = _gates_for(client, "lenient", lines)
+    assert resp.status_code == 200, resp.text[:800]
+    for gate in ("g3_schema_contract", "g5_dry_run", "g6_target_ddl", "g8_reconciliation"):
+        assert gates.get(gate) in ("pass", "warn"), (gate, gates)
+    assert landed == 30
+
+
+def test_a_mostly_unparseable_file_column_is_refused_naming_the_share_rule(client):
+    from services.validation_mode_contract import CAST_SHARE_RULE
+
+    table = f"r14sh_{uuid.uuid4().hex[:6]}"
+    h.execute("postgresql", f'CREATE TABLE public."{table}" (k text, price numeric(10,2))')  # nosec B608
+    lines = ["k,price", "a,12.50"] + [f"b{i},x{i}" for i in range(9)]
+    data = {"source_kind": "file", "dest_kind": "database", "dest_table": table, "async_mode": "false",
+            "validation_mode": "lenient", "sync_mode": "full_refresh_overwrite",
+            "schema_policy": "propagate_columns", **PG_DEST}
+    try:
+        resp = client.post("/api/v1/transfer/run", data=data,
+                           files={"file": ("p.csv", ("\n".join(lines) + "\n").encode(), "text/csv")})
+        assert resp.status_code == 422, resp.text[:800]
+        assert CAST_SHARE_RULE in resp.text, resp.text[:2000]
+        assert h.query("postgresql", f'SELECT count(*) FROM public."{table}"') == [(0,)]  # nosec B608
+    finally:
+        h.drop_table("postgresql", table)

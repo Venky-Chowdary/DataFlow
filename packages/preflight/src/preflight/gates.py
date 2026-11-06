@@ -118,18 +118,6 @@ def _risk_cleared(m: Any) -> bool:
     return mapping_risk_cleared(m)
 
 
-def _numeric_cast_failure(err: str) -> bool:
-    """A bad literal (``Invalid integer``), not a policy or carrier refusal.
-
-    Timezone invent, NOT NULL, and ``does not fit`` stay hard blocks. A mixed
-    file sample of those is not a quarantine holdout.
-    """
-    text = str(err or "").casefold()
-    return text.startswith(
-        ("invalid integer", "invalid decimal", "invalid number")
-    )
-
-
 def _holds_out(mode: str, reason: str | None = None, *, record_batch: bool) -> bool:
     """The validation mode's holdout policy (``services.validation_mode_contract``).
 
@@ -3232,49 +3220,38 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     # The coercion probe's per-column decision (invalid-calendar holdout),
     # read here instead of re-deciding on the cell's value.
     probe_by_source = _probe_columns(ctx)
-    if file_load:
-        for probe in ctx.plan.mappings:
-            if _is_intentional_omit_mapping(probe) or not probe.target:
-                continue
-            if _risk_cleared(probe) or _mapping_contract_present(probe):
-                continue
-            if _skips_fingerprint(probe.transform):
-                continue
-            ok_cells = 0
-            cast_bad = 0
-            other_bad = 0
-            calendar_holdout_source = (
-                (probe_by_source.get(probe.source) or {}).get("holdout_kind") == "invalid_calendar"
-            )
-            for probe_row in sample_rows:
-                probe_raw = _serialize_for_write(_row_cell(probe_row, probe.source, ""))
-                _probe_val, probe_err = _apply_write_path_transform(
-                    probe_raw, probe.transform
-                )
-                if probe_err and _spreadsheet_blank_is_sql_null(
-                    ctx, probe_raw, probe_err, probe
-                ):
-                    ok_cells += 1
-                elif probe_err and _numeric_cast_failure(probe_err):
-                    cast_bad += 1
-                elif (
-                    probe_err
-                    and calendar_holdout_source
-                    and _holds_out(g8_mode, probe_err, record_batch=file_load)
-                ):
-                    # The probe held this column's impossible days out (QA
-                    # browser 3); only a cell refused for that reason counts.
-                    cast_bad += 1
-                elif probe_err:
-                    other_bad += 1
-                else:
-                    ok_cells += 1
-            dest_col = dest_by_name.get(str(probe.target or "").lower())
-            not_null = dest_col is not None and not bool(
-                getattr(dest_col, "nullable", True)
-            )
-            if ok_cells > 0 and cast_bad > 0 and other_bad == 0 and not not_null:
-                file_holdout_targets.add(str(probe.target))
+    # Each column's ONE verdict (validation_mode_contract.mode_holdout_kind,
+    # share-bounded; strict holds nothing out) decides the pre-write holdout
+    # targets — the any-mode "one cell casts" file rule held a strict 1-of-40
+    # INTEGER column out and passed 40 rows (QA C2 review 3 #6).
+    from services.validation_mode_contract import mode_holdout_kind
+
+    for probe in ctx.plan.mappings:
+        if _is_intentional_omit_mapping(probe) or not probe.target:
+            continue
+        if _risk_cleared(probe) or _mapping_contract_present(probe):
+            continue
+        if _skips_fingerprint(probe.transform):
+            continue
+        ok_cells = 0
+        failed_cells = 0
+        held_cells = 0
+        for probe_row in sample_rows:
+            probe_raw = _serialize_for_write(_row_cell(probe_row, probe.source, ""))
+            _probe_val, probe_err = _apply_write_path_transform(probe_raw, probe.transform)
+            if probe_err and _spreadsheet_blank_is_sql_null(ctx, probe_raw, probe_err, probe):
+                ok_cells += 1
+            elif probe_err:
+                failed_cells += 1
+                held_cells += int(_holds_out(g8_mode, probe_err, record_batch=file_load))
+            else:
+                ok_cells += 1
+        dest_col = dest_by_name.get(str(probe.target or "").lower())
+        not_null = dest_col is not None and not bool(getattr(dest_col, "nullable", True))
+        if not not_null and mode_holdout_kind(
+            g8_mode, failed=failed_cells, held=held_cells, cast_ok=ok_cells, record_batch=file_load
+        ):
+            file_holdout_targets.add(str(probe.target))
     mapped_rows: list[dict[str, Any]] = []
     # Parallel to mapped_rows: source rows that survive quarantine holdouts.
     # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]

@@ -1083,20 +1083,6 @@ def analyze_coercion(
             contract_present = isinstance(
                 m.get("risk_contract") or m.get("riskContract"), dict
             )
-            # Only a mixed numeric cast (Invalid integer / decimal) is a file
-            # holdout. Timezone invent, NOT NULL, and carrier overflow stay
-            # blocking even when other cells in the column succeed.
-            cast_reasons = [
-                str(item.get("reason") or "")
-                for item in sample_failures
-                if isinstance(item, dict)
-            ]
-            numeric_cast = bool(cast_reasons) and all(
-                reason.casefold().startswith(
-                    ("invalid integer", "invalid decimal", "invalid number")
-                )
-                for reason in cast_reasons
-            )
             # The mode's holdout policy, decided once from every failure's
             # refusal reason (validation_mode_contract.mode_holdout_kind):
             # balanced on a file holds out only invalid-calendar refusals below
@@ -1109,20 +1095,9 @@ def analyze_coercion(
                 cast_ok=ok,
                 record_batch=file_row_quarantine,
             )
-            calendar_holdout = column_holdout == "invalid_calendar"
-            if mapping_has_clearing_risk_contract(m) or (
-                file_row_quarantine
-                and ok > 0
-                and not contract_present
-                and numeric_cast
-            ):
-                severity = "warn"
-            elif calendar_holdout:
-                severity = "warn"
-            else:
-                # Lenient keeps "block" here: its gates pass with a quarantine
-                # forecast (G3 lenient branch) — same policy, worded there.
-                severity = "block"
+            # The column's ONE verdict (validation_mode_contract.mode_holdout_kind,
+            # share-bounded): a held column is a warning, everything else blocks.
+            severity = "warn" if mapping_has_clearing_risk_contract(m) or column_holdout else "block"
             holdout_kind = column_holdout
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
