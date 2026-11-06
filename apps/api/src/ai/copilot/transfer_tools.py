@@ -507,6 +507,12 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _uncleared_coercion_blocks(mapping: dict[str, Any]) -> bool:
+    from services.type_coercion_validator import coercion_blocks_transfer
+
+    return coercion_blocks_transfer(list(mapping.get("coercion_issues") or []))
+
+
 # risk_acceptance.on_cast_failure → signed contract quarantine_policy.
 _ON_CAST_FAILURE_POLICIES = {
     "quarantine": "holdout_rejected_rows",
@@ -515,13 +521,47 @@ _ON_CAST_FAILURE_POLICIES = {
 
 
 def _regrade_signed_coercions(
-    mapping: dict[str, Any], mappings: list[dict[str, Any]]
+    mapping: dict[str, Any],
+    mappings: list[dict[str, Any]],
+    *,
+    dest_db_type: str = "",
+    dest_exists: bool | None = None,
+    samples: dict[str, list] | None = None,
+    validation_mode: str = "strict",
+    schema_policy: str = "manual_review",
 ) -> dict[str, Any]:
-    """Grade coercion issues against the contracts this plan just signed (D234)."""
-    from services.type_coercion_validator import regrade_coercion_issues_for_contracts
+    """Grade coercion issues on the mapping set this plan will execute (D234).
 
-    issues = regrade_coercion_issues_for_contracts(mapping.get("coercion_issues"), mappings)
-    cleared = {str(i.get("message") or "") for i in issues if i.get("cleared_by_risk_contract")}
+    The pipeline graded the columns before the plan applied column
+    transforms, the declared source zone and the contracts it signs, so a
+    stale ``severity="block"`` sat beside a preflight that judged the final
+    mappings and passed (``ts TIMESTAMPTZ -> DATE`` lossy/block next to the
+    identical ``tstz`` graded preserve). Re-grading the final set with the same
+    validator makes the plan's coercions and its preflight read one input.
+    """
+    from services.type_coercion_validator import (
+        regrade_coercion_issues_for_contracts,
+        validate_mapping_coercions,
+    )
+
+    final = [m for m in mappings if isinstance(m, dict)]
+    regraded = validate_mapping_coercions(
+        final,
+        source_types={str(m.get("source") or ""): str(m.get("source_type") or "") for m in final},
+        target_types={str(m.get("target") or ""): str(m.get("target_type") or "") for m in final},
+        schema_policy=schema_policy,
+        validation_mode=validation_mode,
+        dest_db_type=dest_db_type,
+        dest_table_exists=dest_exists,
+        samples_by_source=samples,
+    ) if final else list(mapping.get("coercion_issues") or [])
+    issues = regrade_coercion_issues_for_contracts(regraded, mappings)
+    still_blocking = {str(i.get("message") or "") for i in issues if i.get("severity") == "block"}
+    cleared = {
+        str(i.get("message") or "")
+        for i in (mapping.get("coercion_issues") or [])
+        if i.get("severity") == "block"
+    } - still_blocking
     return {
         **mapping,
         "coercion_issues": issues,
@@ -1366,7 +1406,15 @@ def plan_transfer(
         if not blocked_for_contract:
             break
 
-    mapping = _regrade_signed_coercions(mapping, mappings)
+    mapping = _regrade_signed_coercions(
+        mapping,
+        mappings,
+        dest_db_type=_engine_format(dst_info),
+        dest_exists=map_dest_exists,
+        samples=samples,
+        validation_mode=validation_mode,
+        schema_policy=schema_policy,
+    )
 
     contract_refusal = _plan_contract_refusal(
         contract_id,
@@ -1505,8 +1553,11 @@ def plan_transfer(
             "quality_issues": (mapping.get("quality_issues") or [])[:10],
             "coercion_issues": (mapping.get("coercion_issues") or [])[:10],
             "preflight": preflight,
-            # Align with Execute unlock — passed alone must not invent safe_to_start.
-            "safe_to_start": _is_execute_cleared(preflight),
+            # Align with Execute unlock — passed alone must not invent safe_to_start,
+            # and an uncleared block-severity coercion on the final mappings
+            # is never reported beside safe_to_start=true (D234).
+            "safe_to_start": _is_execute_cleared(preflight)
+            and not _uncleared_coercion_blocks(mapping),
             **_preview_bound_contract(contract_id, require_signed_contract),
             **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
