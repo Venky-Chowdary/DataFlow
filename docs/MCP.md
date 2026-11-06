@@ -81,6 +81,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `rank_connector_tables` | `query.use` | `read` |
 | `rebaseline_transfer` | `job.manage` | `mutate` |
 | `recommend_sync_mode` | `workspace.read` | `read` |
+| `recover_schedule_destination` | `schedule.manage` | `mutate` |
 | `remediate_validation` | `job.plan` | `plan` |
 | `repair_cdc_drift` | `job.manage` | `mutate` |
 | `replay_quarantine` | `job.manage` | `mutate` |
@@ -106,6 +107,18 @@ the job's recorded CDC drift evidence; the fenced re-copy of the selected keys
 runs only after `confirm_action`, which re-checks `job.manage`, the workspace and
 that the evidence belongs to the job and table. This is state convergence /
 reconciliation, not log replay.
+
+`recover_schedule_destination` (`schedule_id` or `name`, `action`, `reason`)
+answers a schedule parked on a `DESTINATION_CONTINUITY` finding — its
+incremental-append destination was dropped or changed outside the pipeline.
+`action: "rebaseline"` accepts the destination as it is now (or its removal),
+so the next run appends from the cursor; `action: "rebuild"` reloads it from
+the source with one full re-sync, after which the cadence continues
+incrementally. It stages a confirmation; `confirm_action` runs the same handler
+as `POST /api/v1/schedules/{id}/recover`, which re-checks `schedule.manage` and
+the workspace, refuses a schedule parked on a different finding, records
+`schedule.destination.recovered` with the reason, closes the finding and
+re-arms the schedule.
 
 Unknown tools are denied. `confirm_action` is not implicitly enabled when
 another mutating tool is allowed; it is governed independently.
