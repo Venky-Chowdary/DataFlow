@@ -245,6 +245,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "plaintext). Testing the connector states the real encryption."
                     ),
                 },
+                "ssl_mode": {
+                    "type": "string",
+                    "enum": ["require", "prefer", "disable"],
+                    "description": (
+                        "Explicit TLS mode; overrides ssl. require = TLS or no connection; "
+                        "prefer = TLS when offered; disable = MySQL family only, a "
+                        "plaintext session where the server allows it."
+                    ),
+                },
                 "schema": {"type": "string"},
                 "warehouse": {
                     "type": "string",
@@ -2210,6 +2219,7 @@ class DataPilotTools:
         connection_string: str = "",
         service_account: str = "",
         ssl: bool = False,
+        ssl_mode: str = "",
         schema: str = "",
         warehouse: str = "",
         role: str = "",
@@ -2251,6 +2261,7 @@ class DataPilotTools:
                 "connection_string": connection_string,
                 "service_account": service_account,
                 "ssl": ssl,
+                **({"ssl_mode": ssl_mode} if ssl_mode else {}),
                 "host_key": host_key,
                 "known_hosts": known_hosts,
                 "host_key_policy": host_key_policy,
@@ -2281,6 +2292,12 @@ class DataPilotTools:
             return ToolResult(
                 name="create_connector", success=False, output=None, error=integrity
             )
+        from services.connector_store import validate_ssl_mode
+
+        try:
+            validate_ssl_mode(str(draft.get("type") or ""), {"ssl_mode": draft.get("ssl_mode")})
+        except ValueError as exc:
+            return ToolResult(name="create_connector", success=False, output=None, error=str(exc))
         ok, missing = draft_is_complete(draft)
         if not ok:
             from .ack_ledger import redact_payload

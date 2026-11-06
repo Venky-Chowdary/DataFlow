@@ -124,96 +124,21 @@ def local_infile_allowed(conn: Any, path: str) -> Iterator[None]:
         allowed.discard(token)
 
 
-# --- TLS: what was asked, what the session really is -------------------------
-# ``ssl=True``  -> REQUIRED: TLS or no connection, never plaintext.
-# ``ssl=False`` -> PREFERRED (secure default): TLS whenever the server offers it.
-#                  It means "TLS not required", not "TLS off" — PyMySQL
-#                  negotiates TLS by itself, which is why QA saw an encrypted
-#                  session with ssl=false (MySQL D10).
-# ``ssl-mode=DISABLED`` in the connection string (the MySQL client's own URI
-#                  option; ``ssl_mode=disabled`` / ``sslmode=disable`` too) ->
-#                  DISABLED: the operator's explicit choice of plaintext, used
-#                  only where the server allows it. A server that requires
-#                  secure transport is re-dialled with TLS — an upgrade, never a
-#                  silent downgrade — and a public proxy host always keeps TLS.
-TLS_REQUIRED = "required"
-TLS_PREFERRED = "preferred"
-TLS_DISABLED = "disabled"
-_ER_SECURE_TRANSPORT_REQUIRED = 3159
-
-
-def requested_tls_mode(*, ssl: bool, connection_string: str, public_proxy: bool) -> str:
-    """REQUIRED / PREFERRED / DISABLED for this dial (see the table above)."""
-    if ssl or public_proxy:
-        return TLS_REQUIRED
-    from urllib.parse import parse_qsl, urlsplit
-
-    query = urlsplit(connection_string or "").query if "?" in (connection_string or "") else ""
-    for key, value in parse_qsl(query, keep_blank_values=True):
-        name = key.strip().lower().replace("-", "_")
-        val = value.strip().lower()
-        if name in {"ssl_mode", "sslmode"} and val in {"disabled", "disable"}:
-            return TLS_DISABLED
-        if name in {"ssl_mode", "sslmode"} and val in {"required", "require", "verify_ca",
-                                                       "verify_identity", "verify-full"}:
-            return TLS_REQUIRED
-    return TLS_PREFERRED
-
-
-def strip_tls_mode_params(connection_string: str) -> str:
-    """The DSN without its TLS-mode option, for drivers that do not know the name.
-
-    ``ssl-mode`` is the MySQL client's URI option, not a PyMySQL keyword, so a
-    SQLAlchemy URL carrying it would hand it to ``connect()``. The mode itself
-    is read by :func:`requested_tls_mode`. A DSN that was only the option
-    (``?ssl-mode=DISABLED``) becomes empty: host and port come from the form.
-    """
-    raw = connection_string or ""
-    if "?" not in raw:
-        return raw
-    from urllib.parse import parse_qsl, urlencode
-
-    head, _, query = raw.partition("?")
-    kept = [
-        (k, v) for k, v in parse_qsl(query, keep_blank_values=True)
-        if k.strip().lower().replace("-", "_") not in {"ssl_mode", "sslmode"}
-    ]
-    if not head.strip():
-        return ""
-    return f"{head}?{urlencode(kept)}" if kept else head
-
-
-def session_encryption(conn: Any) -> dict[str, Any]:
-    """The session's actual encryption, read from the server (``Ssl_cipher``)."""
-    requested = str(getattr(conn, "_dataflow_tls_requested", "") or "")
-    out: dict[str, Any] = {"requested": requested, "encrypted": False, "cipher": "",
-                           "version": "", "note": str(getattr(conn, "_dataflow_tls_note", "") or "")}
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_cipher', 'Ssl_version')")
-            status = {str(r[0]).lower(): str(r[1] or "") for r in cur.fetchall()}
-        out["cipher"] = status.get("ssl_cipher", "")
-        out["version"] = status.get("ssl_version", "")
-        out["encrypted"] = bool(out["cipher"])
-    except Exception as exc:  # noqa: BLE001 — report what the socket says instead
-        logger.debug("Ssl_cipher read failed: %s", exc)
-        sock = getattr(conn, "_sock", None)
-        cipher = getattr(sock, "cipher", None)
-        if callable(cipher) and cipher():
-            out.update(encrypted=True, cipher=str(cipher()[0]), version=str(cipher()[1]))
-    return out
-
-
-def describe_session_encryption(enc: dict[str, Any]) -> str:
-    """One line for a connector test / brief: the truth, then what was asked."""
-    asked = {TLS_REQUIRED: "TLS required", TLS_PREFERRED: "TLS preferred (ssl off = not required)",
-             TLS_DISABLED: "TLS disabled by ssl-mode=DISABLED"}.get(enc.get("requested") or "", "")
-    if enc.get("encrypted"):
-        head = f"session encrypted ({enc.get('version') or 'TLS'} {enc.get('cipher')})".replace("  ", " ")
-    else:
-        head = "session NOT encrypted"
-    note = f"; {enc['note']}" if enc.get("note") else ""
-    return f"{head} — {asked}{note}" if asked else f"{head}{note}"
+# --- TLS: one decision for every MySQL dial lives in connectors.mysql_tls -----
+from connectors.mysql_tls import (  # noqa: E402,F401 - re-exported for callers
+    TLS_DISABLED,
+    TLS_PREFERRED,
+    TLS_REQUIRED,
+    TLS_VERIFY_CA,
+    TLS_VERIFY_IDENTITY,
+    TlsModeError,
+    TlsPlan,
+    describe_session_encryption,
+    dial_pymysql,
+    mysql_tls_plan,
+    session_encryption,
+    strip_tls_params,
+)
 
 
 def get_connection(
@@ -239,8 +164,6 @@ def get_connection(
     even then the server may read only a file staged with
     :func:`local_infile_allowed`.
     """
-    import pymysql
-
     ep = resolve_sql_endpoint(
         family="mysql",
         host=host,
@@ -300,13 +223,8 @@ def get_connection(
         "local_infile": purpose_l in LOCAL_INFILE_PURPOSES
         and _install_local_infile_guard(),
     }
-    tls_mode = requested_tls_mode(
-        ssl=bool(ssl), connection_string=connection_string, public_proxy=public_proxy
-    )
-    if tls_mode == TLS_REQUIRED:
-        kwargs["ssl"] = {"ssl": {}}
-    elif tls_mode == TLS_DISABLED:
-        kwargs["ssl_disabled"] = True
+    tls_plan = mysql_tls_plan(ssl=bool(ssl), connection_string=connection_string,
+                              host=ep["host"])
     from src.ai.copilot.tool_deadline import remaining_seconds
 
     left = remaining_seconds()
@@ -321,31 +239,13 @@ def get_connection(
     from services.egress_guard import assert_connector_dial_allowed
 
     assert_connector_dial_allowed(ep["host"], connection_string)
-    tls_note = ""
     try:
-        try:
-            conn = pymysql.connect(**kwargs)
-        except pymysql.err.OperationalError as exc:
-            if not (tls_mode == TLS_DISABLED and exc.args
-                    and exc.args[0] == _ER_SECURE_TRANSPORT_REQUIRED):
-                raise
-            # The server requires secure transport: dial again with TLS. The
-            # explicit plaintext choice cannot be honoured, and that is said.
-            kwargs.pop("ssl_disabled", None)
-            kwargs["ssl"] = {"ssl": {}}
-            tls_note = "server requires secure transport, so TLS was used"
-            logger.warning("MySQL %s requires TLS; ssl-mode=DISABLED not honoured", ep["host"])
-            conn = pymysql.connect(**kwargs)
+        conn = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"])
     except Exception as exc:
         hint = private_cloud_host_hint(ep["host"], connection_string)
         if hint:
             raise RuntimeError(f"{exc}{hint}") from exc
         raise
-    try:
-        conn._dataflow_tls_requested = tls_mode
-        conn._dataflow_tls_note = tls_note
-    except Exception:  # noqa: BLE001 — a driver object that refuses attributes
-        logger.debug("could not record the requested TLS mode", exc_info=True)
 
     # TCP keepalive so public proxies do not drop idle bulk-write sockets.
     try:

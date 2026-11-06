@@ -806,10 +806,11 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
     if db_type and not str(cfg.get("type") or "").strip():
         cfg["type"] = db_type
     if connection_string and _drivername(db_type).startswith("mysql"):
-        from connectors.mysql_conn import strip_tls_mode_params
+        from connectors.mysql_tls import strip_tls_params
 
-        # The TLS mode is a connect arg (see _build_engine), not a URL keyword.
-        connection_string = strip_tls_mode_params(connection_string)
+        # TLS is the plan's (see _build_engine), never a URL keyword: a kept
+        # ``ssl_disabled=true`` made an ssl=True dial plaintext.
+        connection_string = strip_tls_params(connection_string)
         cfg = {**cfg, "connection_string": connection_string}
 
     if connection_string:
@@ -1199,26 +1200,39 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
         connect_args = _connect_args_for(url, cfg)
         url_head = (url if isinstance(url, str) else str(driver)).lower()
+        mysql_tls = None
         if "pymysql" in driver or url_head.startswith(("mysql", "mariadb")):
-            # Same TLS contract as connectors.mysql_conn (QA MySQL D10): ssl=True
-            # is REQUIRED here too, ssl-mode=DISABLED is the explicit plaintext.
-            from connectors.mysql_conn import TLS_DISABLED, TLS_REQUIRED, requested_tls_mode
-            from connectors.write_resilience import is_public_proxy_host
+            # One TLS decision and one dial with connectors.mysql_conn (QA MySQL
+            # D10), judged on the host the DSN really dials.
+            from connectors.mysql_tls import mysql_tls_plan
+            from connectors.sql_dsn import resolve_sql_endpoint
 
-            tls = requested_tls_mode(
-                ssl=bool(cfg.get("ssl")), connection_string=str(cfg.get("connection_string") or ""),
-                public_proxy=is_public_proxy_host(str(cfg.get("host") or "")),
+            dial = resolve_sql_endpoint(
+                family="mysql", host=str(cfg.get("host") or ""), port=int(cfg.get("port") or 0),
+                database=str(cfg.get("database") or ""), username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""), default_port=3306,
             )
-            if tls == TLS_REQUIRED:
-                connect_args["ssl"] = {"ssl": {}}
-            elif tls == TLS_DISABLED:
-                connect_args["ssl_disabled"] = True
+            mysql_tls = mysql_tls_plan(
+                ssl=bool(cfg.get("ssl")), connection_string=str(cfg.get("connection_string") or ""),
+                host=str(dial.get("host") or ""), ssl_ca=str(cfg.get("ssl_ca") or ""),
+            )
+            mysql_host = str(dial.get("host") or "")
         engine = create_engine(
             url,
             pool_pre_ping=True,
             connect_args=connect_args,
             **pool_settings(),
         )
+        if mysql_tls is not None:
+            from sqlalchemy import event as _sa_event
+
+            from connectors.mysql_tls import dial_pymysql
+
+            @_sa_event.listens_for(engine, "do_connect")
+            def _mysql_dial(_dialect, _rec, _cargs, cparams):  # noqa: ANN001
+                return dial_pymysql(dict(cparams), plan=mysql_tls, host=mysql_host)
+
         from sqlalchemy import event
 
         from services.dest_dialect_facts import _normalize_dest_db

@@ -6,7 +6,7 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import (
     APIRouter,
@@ -127,6 +127,14 @@ class ConnectorConfig(BaseModel):
             "session's actual encryption."
         ),
     )
+    ssl_mode: Optional[Literal["", "prefer", "require", "disable"]] = Field(
+        default=None,
+        description=(
+            "Explicit TLS mode: require (TLS or no connection), prefer (TLS when "
+            "offered), disable (MySQL family only: plaintext where the server allows "
+            "it). Unset keeps `ssl`: true = require, false = prefer."
+        ),
+    )
     auth_mode: Optional[str] = Field(default=None, description="Authentication mode")
     auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
     api_key: Optional[str] = Field(default=None, description="API key")
@@ -190,6 +198,7 @@ class TestConnectionRequest(BaseModel):
     connection_string: Optional[str] = None
     warehouse: Optional[str] = ""
     ssl: Optional[bool] = False
+    ssl_mode: Optional[Literal["", "prefer", "require", "disable"]] = None
     auth_mode: Optional[str] = ""
     auth_role: Optional[str] = ""
     api_key: Optional[str] = None
@@ -224,9 +233,20 @@ class TransferRequest(BaseModel):
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _refuse_unhonourable_ssl_mode(conn_type: str, ssl_mode: Optional[str]) -> None:
+    """422 for a TLS mode the connector cannot honour (ssl_mode "disable" off MySQL)."""
+    from services.connector_store import validate_ssl_mode
+
+    try:
+        validate_ssl_mode(conn_type, {"ssl_mode": ssl_mode})
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
     require_admin_connector_access(http_request, request.type)
+    _refuse_unhonourable_ssl_mode(request.type, request.ssl_mode)
     with connector_operation(
         "probe",
         driver_family="unknown",
@@ -303,6 +323,8 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
                 "auth_source": request.auth_source or "",
             }
 
+        from services.connector_store import dial_connection_string
+
         cfg = {
             "host": request.host or "",
             "port": request.port or 0,
@@ -310,8 +332,11 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "username": request.username or "",
             "password": request.password or "",
             "schema": request.db_schema or "",
-            "connection_string": request.connection_string or "",
-            "ssl": bool(request.ssl) if request.ssl is not None else False,
+            "connection_string": dial_connection_string(
+                request.type, request.ssl_mode or "", request.connection_string or ""
+            ),
+            "ssl": (request.ssl_mode == "require") if request.ssl_mode
+            else (bool(request.ssl) if request.ssl is not None else False),
             "warehouse": request.warehouse or "",
             "type": request.type,
             "auth_mode": auth_mode,
@@ -381,6 +406,7 @@ async def create_connector(
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
+    _refuse_unhonourable_ssl_mode(config.type, config.ssl_mode)
     connector_data = {
         "name": config.name,
         "type": config.type,
@@ -393,6 +419,7 @@ async def create_connector(
         "connection_string": config.connection_string,
         "warehouse": config.warehouse,
         "ssl": config.ssl,
+        **({"ssl_mode": config.ssl_mode} if config.ssl_mode is not None else {}),
         "auth_mode": config.auth_mode,
         "auth_role": config.auth_role,
         "auth_source": config.auth_source,

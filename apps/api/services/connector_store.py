@@ -161,14 +161,21 @@ def listen_port_for_connector(conn_type: str, raw: Any, host: Any = "") -> int:
 #   "require" - the user turned SSL/TLS on. The connection is strictly
 #               encrypted and is never retried in plaintext.
 #   "prefer"  - negotiate TLS, plaintext allowed (explicit, API/import only).
-#   ""        - unset: the user never asked for TLS. Negotiates like "prefer".
+#   "disable" - MySQL family only: the user explicitly asked for a plaintext
+#               session. Honoured only where the server allows it; a server
+#               requiring secure transport is re-dialled with TLS and that is
+#               recorded (connectors.mysql_conn.dial_pymysql). Carried to the
+#               dial as the MySQL URI option ``ssl-mode=DISABLED``
+#               (:func:`dial_connection_string`).
+#   ""        - unset: the user never asked. Negotiates like "prefer"; a
+#               legacy non-PostgreSQL ``ssl=True`` still means "require".
 # Documents written before this field existed carry only the boolean ``ssl``,
 # which this store used to default to True when a caller omitted it - so a
 # legacy ``ssl=True`` cannot be told apart from an injected default. Such
 # documents are read as unset ("") until the connector is saved again.
 # For the PostgreSQL family ``SavedConnector.ssl`` is the derived strict flag
 # (``ssl_mode == "require"``), so every downstream ``ssl=True`` means required.
-SSL_MODES = ("", "prefer", "require")
+SSL_MODES = ("", "prefer", "require", "disable")
 _TLS_MODE_TYPES = frozenset({"postgresql", "redshift"})
 
 
@@ -211,13 +218,66 @@ def stamp_ssl_mode(doc: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, A
     return doc
 
 
+def _is_mysql_family(conn_type: str) -> bool:
+    try:
+        from src.transfer.engine_family import family_or_kind
+    except ImportError:  # pragma: no cover
+        from transfer.engine_family import family_or_kind
+    return family_or_kind(conn_type or "") == "mysql"
+
+
+def validate_ssl_mode(conn_type: str, data: Mapping[str, Any]) -> None:
+    """Refuse a TLS mode this connector cannot honour (raised as ValueError -> 4xx)."""
+    mode = data.get("ssl_mode")
+    if mode is None:
+        return
+    if mode not in SSL_MODES:
+        raise ValueError(
+            f"ssl_mode '{mode}' is not one of require, prefer, disable (or empty for unset)."
+        )
+    if mode == "disable" and not _is_mysql_family(conn_type):
+        raise ValueError(
+            "ssl_mode 'disable' is supported for MySQL-family connectors only; "
+            f"a {conn_type} connector cannot promise a plaintext session."
+        )
+
+
 def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
-    """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document."""
+    """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document.
+
+    Back-compat: a document with no mode keeps its boolean (non-PostgreSQL
+    ``ssl=True`` is "require", ``ssl=False`` is "prefer"); an explicit mode wins.
+    """
     mode = data.get("ssl_mode")
     mode = mode if mode in SSL_MODES else ""
     if _has_tls_mode(conn_type):
         return mode == "require", mode
+    if mode == "require":
+        return True, mode
+    if mode in {"prefer", "disable"}:
+        return False, mode
     return bool(data.get("ssl", True)), mode
+
+
+def dial_connection_string(conn_type: str, ssl_mode: str, connection_string: str) -> str:
+    """The connection string a dial uses: the saved one, plus an explicit "disable".
+
+    Every MySQL path (PyMySQL and SQLAlchemy) already reads ``ssl-mode`` from
+    the DSN (``connectors.mysql_tls.mysql_tls_plan``), so the saved choice
+    rides there rather than as a second TLS parameter on every call site.
+    """
+    raw = connection_string or ""
+    if ssl_mode != "disable" or not _is_mysql_family(conn_type):
+        return raw
+    from connectors.mysql_tls import TLS_DISABLED, TlsModeError, mysql_tls_plan
+
+    try:
+        if mysql_tls_plan(ssl=False, connection_string=raw).mode == TLS_DISABLED:
+            return raw
+    except TlsModeError:
+        # The DSN states its own (unsatisfiable) mode; the dial reports it.
+        return raw
+    return f"{raw}{'&' if '?' in raw else '?'}ssl-mode=DISABLED"
 
 
 @dataclass
@@ -848,6 +908,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
+    validate_ssl_mode(conn_type, data)
     ssl, ssl_mode = resolve_tls(conn_type, stamp_ssl_mode(dict(data), data))
     conn = SavedConnector(
         id=str(uuid.uuid4()),
@@ -952,6 +1013,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
         if before is not None:
             data = split_sftp_host_edit(data, data.get("type") or before.type, before.port)
     def _merge(existing: SavedConnector) -> SavedConnector:
+        validate_ssl_mode(str(data.get("type") or existing.type), data)
         merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
         merged["extra"] = _merged_extra(
             existing.extra, data,
@@ -981,6 +1043,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # only a masked/empty placeholder, and a legacy plaintext secret is
             # re-encrypted by _encrypt_connector_doc — every successful update
             # heals the record instead of refusing it.
+            validate_ssl_mode(str(data.get("type") or raw.get("type") or ""), data)
             merged = stamp_ssl_mode({**raw, **data, "_id": raw.get("_id")}, data)
             merged["extra"] = _merged_extra(
                 raw.get("extra"), data,

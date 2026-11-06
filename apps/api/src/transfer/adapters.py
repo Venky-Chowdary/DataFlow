@@ -740,6 +740,7 @@ def _lookup_saved_connector(
 ) -> dict[str, Any] | None:
     """Find a saved connector in the file-backed store, falling back to MongoDB."""
     try:
+        from services.connector_store import dial_connection_string
         from services.connector_store import get_connector as fs_get
 
         conn = fs_get(connector_id, workspace_id=workspace_id)
@@ -751,9 +752,14 @@ def _lookup_saved_connector(
                 "schema": conn.schema,
                 "username": conn.username,
                 "password": conn.password,
-                "connection_string": conn.connection_string,
+                # An explicit ssl_mode "disable" rides to every MySQL dial as the
+                # DSN's ssl-mode option (connector_store.dial_connection_string).
+                "connection_string": dial_connection_string(
+                    conn.type, getattr(conn, "ssl_mode", ""), conn.connection_string
+                ),
                 "warehouse": conn.warehouse,
                 "ssl": conn.ssl,
+                "ssl_mode": getattr(conn, "ssl_mode", ""),
                 "type": conn.type,
                 "auth_mode": getattr(conn, "auth_mode", ""),
                 "auth_role": getattr(conn, "auth_role", ""),
@@ -772,10 +778,16 @@ def _lookup_saved_connector(
         logger.debug("connector store lookup failed: %s", exc, exc_info=exc)
     try:
         mongo = get_mongodb_service()
-        return mongo.get_connector(connector_id)
+        doc = mongo.get_connector(connector_id)
     except Exception as exc:
         logger.debug("mongodb connector lookup failed: %s", exc, exc_info=exc)
         return None
+    if isinstance(doc, dict) and doc.get("ssl_mode") == "disable":
+        from services.connector_store import dial_connection_string
+
+        doc = {**doc, "connection_string": dial_connection_string(
+            str(doc.get("type") or ""), "disable", str(doc.get("connection_string") or ""))}
+    return doc
 
 
 

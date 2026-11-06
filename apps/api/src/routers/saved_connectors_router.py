@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -52,6 +52,9 @@ class ConnectorSaveDTO(BaseModel):
     db_schema: str = Field(default="public", alias="schema")
     connection_string: str = ""
     ssl: bool = False
+    #: Explicit TLS mode: "require" | "prefer" | "disable" (MySQL family only).
+    #: None leaves the boolean ``ssl`` in charge (true = require, false = prefer).
+    ssl_mode: Literal["", "prefer", "require", "disable"] | None = None
     warehouse: str = ""
     auth_mode: str = ""
     auth_role: str = ""
@@ -330,7 +333,12 @@ def save_connector(
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
     _refuse_unsafe_egress(data, existing)
-    conn = create_connector(data)
+    try:
+        conn = create_connector(data)
+    except ValueError as exc:
+        if "ssl_mode" not in str(exc):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
     return _to_ui(refreshed)
@@ -352,7 +360,12 @@ def update_saved_connector(
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
     _refuse_unsafe_egress(data, existing)
-    updated = update_connector(connector_id, data, workspace_id=workspace_id)
+    try:
+        updated = update_connector(connector_id, data, workspace_id=workspace_id)
+    except ValueError as exc:
+        if "ssl_mode" not in str(exc):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     _persist_form_test_status(connector_id, form_test)
