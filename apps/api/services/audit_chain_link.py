@@ -207,11 +207,21 @@ def append_with_retry(
     build: Callable[[], dict[str, Any]],
     insert: Callable[[dict[str, Any]], dict[str, Any]],
     *,
-    attempts: int = 25,
+    attempts: int = 40,
 ) -> dict[str, Any]:
-    """Build-and-insert until no other writer took the same position."""
+    """Build-and-insert until no other writer took the same position.
+
+    After a lost race the writer waits a short random time (growing, capped
+    at 50 ms) before re-reading the tip: without it, several processes
+    re-reading and re-inserting in lockstep could starve one writer for every
+    attempt on a busy host (CI: "lost 25 position races"), and an audit write
+    must not fail because others are writing.
+    """
+    import random
+    import time
+
     last: BaseException | None = None
-    for _ in range(attempts):
+    for attempt in range(attempts):
         event = build()
         try:
             return insert(event)
@@ -219,4 +229,5 @@ def append_with_retry(
             if not is_duplicate_position(exc):
                 raise
             last = exc
+            time.sleep(random.uniform(0.0, min(0.05, 0.002 * (2 ** min(attempt, 5)))))
     raise RuntimeError(f"audit chain append lost {attempts} position races") from last
