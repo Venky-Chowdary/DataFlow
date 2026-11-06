@@ -118,11 +118,42 @@ def keep_last_reads_whole(request: Any) -> bool:
         str(getattr(source, "kind", "") or ""), str(getattr(source, "format", "") or "")
     ):
         return False
+    if multi_stream_keep_last_refusal(
+        str(getattr(source, "format", "") or ""), getattr(request, "stream_contracts", None)
+    ):
+        return False  # the multi-stream runner refuses it (fail closed)
     options = route_duplicate_options(
         dict(getattr(source, "extra", None) or {}),
         dict(getattr(getattr(request, "destination", None), "extra", None) or {}),
     )
     return options.get("in_file_dedupe") == "keep_last"
+
+
+def multi_stream_keep_last_refusal(source_format: str, stream_contracts: Any) -> str:
+    """Why keep_last cannot run on a multi-object record-batch read, or "".
+
+    keep_last on an object store collapses one object read whole (the
+    buffered route, :func:`keep_last_reads_whole`). A run that selects two or
+    more objects is streamed object by object without that collapse, and the
+    buffered route reads only one — so it is refused at Validate and at
+    schedule save, and the runner fails closed (QA C2 review 3, A2).
+    """
+    from services.preflight_source_kind import source_is_record_batch
+    from services.sync_cursor import resolve_selected_sync_contracts
+
+    if not source_is_record_batch("database", source_format):
+        return ""
+    contracts = [c for c in stream_contracts or [] if isinstance(c, dict)]
+    selected = resolve_selected_sync_contracts(contracts)
+    if len(selected) < 2:
+        return ""
+    return (
+        f"in_file_dedupe=keep_last collapses one object read whole; this run "
+        f"selects {len(selected)} objects, which are streamed one by one without "
+        "that collapse, so it is not applied. Run each object as its own transfer "
+        "(one selected stream) with keep_last, or remove the duplicate keys at the "
+        "source."
+    )
 
 
 def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
@@ -170,8 +201,10 @@ def schedule_keep_last_refusal(payload: Any) -> str:
             src_type = str(getattr(found, "type", "") or (found or {}).get("type", "") if found else "")
         except Exception:  # noqa: BLE001 — unresolved: Validate decides
             return ""
-    if not src_type or source_is_record_batch("database", src_type):
+    if not src_type:
         return ""
+    if source_is_record_batch("database", src_type):
+        return multi_stream_keep_last_refusal(src_type, data.get("stream_contracts"))
     table = str(data.get("source_table") or "")
     contracts = [c for c in data.get("stream_contracts") or [] if isinstance(c, dict)] or [{
         "name": table, "selected": True, "cursor_field": str(data.get("cursor_column") or ""),

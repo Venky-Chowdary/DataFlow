@@ -131,6 +131,17 @@ def run_non_cdc_multi_stream_sequential(
             limit=limit,
             skip_preflight=skip_preflight,
         )
+    from services.duplicate_policy import (
+        DuplicatePolicyError,
+        multi_stream_keep_last_refusal,
+        route_duplicate_options,
+    )
+
+    keep_last_refusal = multi_stream_keep_last_refusal(str(source.format or ""), stream_contracts)
+    if keep_last_refusal and route_duplicate_options(
+        dict(source.extra or {}), dict(destination.extra or {})
+    ).get("in_file_dedupe") == "keep_last":
+        raise DuplicatePolicyError(keep_last_refusal)  # never streamed uncollapsed
 
     # Foreign keys are the one aspect a single-table create cannot carry: the
     # parent must exist first. Measure the source references, load parents

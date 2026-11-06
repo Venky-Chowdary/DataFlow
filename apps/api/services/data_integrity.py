@@ -2523,6 +2523,10 @@ def run_integrity_audit(
             sync_mode, stream_contracts=stream_contracts,
             source_type=source_db_type, stream_name=stream_name,
         )
+    elif str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last":
+        from services.duplicate_policy import multi_stream_keep_last_refusal
+
+        keep_last_refusal = multi_stream_keep_last_refusal(source_db_type, stream_contracts)
     keep_last_on_table = bool(keep_last_refusal)
     if keep_last_on_table:
         in_file_dedupe = "block"

@@ -14,6 +14,8 @@
 g3f. Population fit asks the same verdict: a column the probe refuses is never
    forecast as "held out", and a mode holdout is not called a signed contract.
 A1. block with a cursor already declared offers keep_last, and it runs.
+A2. keep_last on a multi-object read is refused (Validate, schedule save, the
+   runner) instead of loading one object; each object alone lands collapsed.
 A3. A topic's wording is not a table's; an append sync is not offered append.
 """
 
@@ -542,3 +544,82 @@ def test_duplicate_wording_is_source_and_sync_aware():
             assert "keyed sync" in routes, routes
     assert table_duplicate_routes("incremental_deduped", source_type="kafka") == DUPLICATE_KEY_ROUTES_LOG_ORDERED
     assert "duplicate_policy=append" in table_duplicate_routes("full_refresh_overwrite")
+
+
+# ── A2. keep_last on a multi-object read: refused, never one object silently ─
+def test_multi_object_keep_last_is_refused_at_every_door():
+    from services.duplicate_policy import (
+        DuplicatePolicyError,
+        keep_last_reads_whole,
+        multi_stream_keep_last_refusal,
+        schedule_keep_last_refusal,
+    )
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from src.transfer.stream_multi import run_non_cdc_multi_stream_sequential
+
+    two = [{"name": "a.csv", "selected": True}, {"name": "b.csv", "selected": True}]
+    one = [{"name": "a.csv", "selected": True}, {"name": "b.csv", "selected": False}]
+    refusal = multi_stream_keep_last_refusal("s3", two)
+    assert "2 objects" in refusal and "own transfer" in refusal, refusal
+    assert multi_stream_keep_last_refusal("s3", one) == ""
+    assert multi_stream_keep_last_refusal("postgresql", two) == ""
+    src = EndpointConfig(kind="database", format="s3", table="a.csv", extra={"in_file_dedupe": "keep_last"})
+    dst = EndpointConfig(kind="database", format="postgresql", table="t")
+    assert keep_last_reads_whole(TransferRequest(source=src, destination=dst, stream_contracts=one))
+    assert not keep_last_reads_whole(TransferRequest(source=src, destination=dst, stream_contracts=two))
+    assert schedule_keep_last_refusal({"in_file_dedupe": "keep_last", "source_type": "s3",
+                                       "stream_contracts": two}) == refusal
+    assert schedule_keep_last_refusal({"in_file_dedupe": "keep_last", "source_type": "s3",
+                                       "stream_contracts": one}) == ""
+    with pytest.raises(DuplicatePolicyError, match="2 objects"):
+        run_non_cdc_multi_stream_sequential(src, dst, [], {}, stream_contracts=two)
+
+
+def _s3_run(client, endpoint, keys, dst, *, dedupe="keep_last"):
+    from urllib.parse import urlparse
+
+    from tests.conftest import LOCAL_OBJECT_STORE_BUCKET
+
+    parsed = urlparse(endpoint)
+    contracts = [{"name": k, "sync_mode": "full_refresh_overwrite", "primary_key": "sku", "selected": True}
+                 for k in keys]
+    data = {"source_kind": "database", "dest_kind": "database", "source_format": "s3",
+            "source_host": parsed.hostname or "127.0.0.1", "source_port": str(parsed.port or 443),
+            "source_database": LOCAL_OBJECT_STORE_BUCKET, "source_username": "test",
+            "source_password": "test", "source_connection_string": endpoint,
+            "source_table": keys[0], "dest_table": dst, "async_mode": "false",
+            "validation_mode": "lenient", "sync_mode": "full_refresh_overwrite", **PG_DEST,
+            "stream_contracts_json": json.dumps(contracts),
+            "source_extra_json": json.dumps({"in_file_dedupe": dedupe})}
+    return client.post("/api/v1/transfer/run", data=data)
+
+
+def test_two_s3_objects_with_keep_last_are_refused_and_each_alone_lands(client, local_object_store):
+    if not local_object_store:
+        pytest.skip("no local object store endpoint (moto)")
+    import boto3
+
+    from tests.conftest import LOCAL_OBJECT_STORE_BUCKET
+
+    s3 = boto3.client("s3", endpoint_url=local_object_store, aws_access_key_id="test",
+                      aws_secret_access_key="test", region_name="us-east-1")
+    keys = []
+    for name in ("a", "b"):
+        key = f"r14/ms_{name}_{uuid.uuid4().hex[:6]}.csv"
+        body = "sku,name\n" + "".join(f"SKU-{i:02d},{name} item {i}\n" for i in range(1, 6)) + f"SKU-03,{name} dup\n"
+        s3.put_object(Bucket=LOCAL_OBJECT_STORE_BUCKET, Key=key, Body=body.encode())
+        keys.append(key)
+    dst = f"r14ms_{uuid.uuid4().hex[:6]}"
+    try:
+        both = _s3_run(client, local_object_store, keys, dst)
+        assert both.status_code == 422, both.text[:800]
+        assert "selects 2 objects" in both.text, both.text[:2000]
+        assert h.query("postgresql", "SELECT count(*) FROM information_schema.tables "
+                       f"WHERE table_name = '{dst}'") == [(0,)]  # nothing written, not one object
+        for name, key in zip(("a", "b"), keys):
+            alone = _s3_run(client, local_object_store, [key], dst)
+            assert alone.status_code == 200, alone.text[:1200]
+            got = dict(h.query("postgresql", f'SELECT sku, name FROM public."{dst}"'))  # nosec B608
+            assert len(got) == 5 and got["SKU-03"] == f"{name} dup", got
+    finally:
+        h.drop_table("postgresql", dst)
