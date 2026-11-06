@@ -127,6 +127,12 @@ def mysql_tls_plan(
     ``ssl_verify_*``). A CA or a verify flag *raises* the mode to VERIFY_CA
     (VERIFY_IDENTITY with ``ssl_verify_identity``); a client certificate
     (mTLS) raises it to at least REQUIRED. Nothing lowers a stricter request.
+
+    A CA always means "verify the server against it". A DSN that names
+    ``ssl_ca`` and also says ``ssl_verify_cert=false`` is still dialled as
+    VERIFY_CA, with the certificate checked. The ``false`` cannot switch off a
+    check the CA asked for. To encrypt without verifying, drop the CA and ask
+    for ``ssl-mode=REQUIRED``.
     """
     from connectors.write_resilience import is_public_proxy_host
 

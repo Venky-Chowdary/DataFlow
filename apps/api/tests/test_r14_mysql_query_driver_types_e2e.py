@@ -173,3 +173,46 @@ def test_a_procedure_at_execute_is_typed_by_its_cursor_and_stable_across_runs(cl
         _sql("mysql", f"DROP PROCEDURE IF EXISTS `{proc}`")
         _sql("mysql", f"DROP TABLE IF EXISTS `{src_t}`")
         h.drop_table("postgresql", dst_t)
+
+
+def test_a_saved_procedure_schedule_with_a_declared_result_schema_keeps_its_types(client):
+    """Third review: the same guard on a saved pipeline. The source connector carries a
+    design-time ``procedure_result_schema``, and two schedule beats (digit text,
+    then 'ü1') keep v as text with every value intact."""
+    from tests.test_r12_mongo_incremental_schedule_e2e import _beat
+
+    token = uuid.uuid4().hex[:8]
+    src_t, dst_t, proc = f"r14d5s_{token}", f"r14d5sd_{token}", f"r14d5sp_{token}"
+    _seed("mysql", src_t, [(i, str(i)) for i in range(1, 80)])
+    _sql("mysql", f"CREATE PROCEDURE `{proc}`() SELECT id, JSON_UNQUOTE(JSON_EXTRACT(doc, '$.v')) "
+                  f"AS v FROM `{src_t}`")
+    src = _connector("mysql", {**_cfg("mysql"), "extra": {
+        "procedure_result_schema": {"id": "INTEGER", "v": "TEXT"}}}, "source")
+    dst = _connector("postgresql", _pg_cfg(), "destination")
+    try:
+        resp = client.post("/api/v1/schedules/", json={
+            "name": f"r14d5s {token}", "source_connector_id": src, "source_table": "",
+            "source_read_mode": "procedure", "procedure_call": f"CALL {proc}()",
+            "dest_connector_id": dst, "dest_table": dst_t, "interval": "hourly",
+            "sync_mode": "full_refresh_overwrite",
+            "mappings": [{"source": c, "target": c, "confidence": 1.0} for c in ("id", "v")],
+            "enabled": True})
+        assert resp.status_code == 201, resp.text
+        sid = resp.json()["id"]
+        for run in (1, 2):
+            beat = _beat(sid)
+            job = beat["job"]
+            assert job.get("status") == "completed", (run, beat["started"], job.get("error"),
+                                                      getattr(beat["schedule"], "last_status", None))
+            dtype = h.query("postgresql", "SELECT data_type FROM information_schema.columns "
+                                          f"WHERE table_name = '{dst_t}' AND column_name = 'v'")[0][0]
+            assert dtype == "text", (run, dtype)
+            got = {r[0]: r[1] for r in h.query("postgresql", f'SELECT id, v FROM "{dst_t}"')}
+            assert got == _expected("mysql", src_t), run
+            if run == 1:
+                _sql("mysql", f"INSERT INTO `{src_t}` VALUES (500, %s)",
+                     (json.dumps({"v": "ü1"}, ensure_ascii=False),))
+    finally:
+        _sql("mysql", f"DROP PROCEDURE IF EXISTS `{proc}`")
+        _sql("mysql", f"DROP TABLE IF EXISTS `{src_t}`")
+        h.drop_table("postgresql", dst_t)

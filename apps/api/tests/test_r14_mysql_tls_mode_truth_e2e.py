@@ -331,11 +331,15 @@ def _three_paths(cfg: dict, dsn: str, options: dict | None = None):
     from connectors.mysql_change_stream import MySqlChangeStreamCdc
     from connectors.mysql_conn import get_connection, session_encryption
 
+    from services.connector_store import dial_connection_string
+
     out = []
+    # PyMySQL dials read TLS from the DSN only. The resolved endpoint has the
+    # form options folded in (adapters.resolve_connector_config).
     conn = get_connection(host=cfg["host"], port=cfg["port"], database=cfg["database"],
                           username=cfg["username"], password=cfg["password"],
-                          connection_string=dsn, ssl=False, purpose="probe",
-                          tls_options=options)
+                          connection_string=dial_connection_string("mysql", "", dsn, options),
+                          ssl=False, purpose="probe")
     try:
         enc = session_encryption(conn)
         out.append((enc["encrypted"], enc["verified"]))
@@ -432,3 +436,11 @@ def test_a_resolved_endpoint_carries_its_form_ca_into_every_dial():
     cfg = resolve_connector_config(ep)
     assert "ssl_ca=" in cfg["connection_string"]
     assert _three_paths(tls, cfg["connection_string"]) == [(True, True)] * 3
+
+
+def test_a_ca_with_verify_cert_false_is_still_verify_ca():
+    """Documented on mysql_tls_plan: a CA always verifies; the "false" cannot undo it."""
+    from connectors.mysql_tls import TLS_VERIFY_CA, mysql_tls_plan
+
+    plan = mysql_tls_plan(ssl=False, connection_string="?ssl_ca=/x/ca.pem&ssl_verify_cert=false")
+    assert plan.mode == TLS_VERIFY_CA and plan.kwargs["ssl"]["verify_mode"] is True

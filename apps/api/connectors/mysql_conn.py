@@ -151,7 +151,6 @@ def get_connection(
     connection_string: str,
     ssl: bool,
     purpose: str = "write",
-    tls_options: Any = None,
 ) -> Any:
     """Open a MySQL connection.
 
@@ -224,11 +223,12 @@ def get_connection(
         "local_infile": purpose_l in LOCAL_INFILE_PURPOSES
         and _install_local_infile_guard(),
     }
-    # ``tls_options``: the form's CA / client certificate / verify options, the
-    # same plan input generic_sql and the binlog reader take (saved and
-    # resolved endpoints also carry them in the DSN).
+    # TLS comes from ``ssl`` and the DSN only. A saved or resolved endpoint
+    # carries its form CA / client certificate / verify options in the DSN
+    # (``connector_store.dial_connection_string``), so this dial, generic_sql
+    # and the binlog reader all read the same plan input.
     tls_plan = mysql_tls_plan(ssl=bool(ssl), connection_string=connection_string,
-                              host=ep["host"], options=tls_options)
+                              host=ep["host"])
     from src.ai.copilot.tool_deadline import remaining_seconds
 
     left = remaining_seconds()
