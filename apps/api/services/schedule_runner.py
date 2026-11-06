@@ -900,6 +900,9 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "error": (doc.get("error") or "")[:500],
         "row_accounting": dict(ledger),
     }
+    from services.schedule_run_lifecycle import ledger_row_counts
+
+    entry.update(ledger_row_counts(ledger))
     if doc.get("catch_up"):
         entry["catch_up"] = True
     if doc.get("_run_reason_code"):

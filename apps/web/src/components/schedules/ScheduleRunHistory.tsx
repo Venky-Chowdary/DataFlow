@@ -135,8 +135,9 @@ export function ScheduleRunHistory({ scheduleId, refreshKey, onOpenJob, onEditMa
           const coerced = run.coerced_null_rows ?? 0;
           const rows = formatJobRowMetric({
             status: run.status,
-            records_processed: run.records_transferred,
-            records_transferred: run.records_transferred,
+            // The job ledger's count when the run record carries it (QA C17).
+            records_processed: run.rows_written ?? run.records_transferred,
+            records_transferred: run.rows_written ?? run.records_transferred,
             row_accounting: run.row_accounting,
           });
           const reason = runReason(run);

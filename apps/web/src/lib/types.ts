@@ -1748,6 +1748,10 @@ export interface ScheduleRun {
   finished_at: string;
   duration_seconds: number;
   records_transferred: number;
+  /** From the job's row_accounting (QA C17); null when the ledger did not say. */
+  rows_read?: number | null;
+  rows_written?: number | null;
+  rows_quarantined?: number | null;
   rejected_rows: number;
   coerced_null_rows: number;
   error: string;
