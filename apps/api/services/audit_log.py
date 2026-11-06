@@ -546,6 +546,17 @@ def _action_matches(action: str | None, value: str) -> bool:
 SEARCH_SCAN_LIMIT = 20000
 
 
+class AuditEventPage(list):
+    """Events, plus whether a projected search stopped at ``SEARCH_SCAN_LIMIT``.
+
+    ``search_truncated`` is True when the search walked the whole scan window
+    and found fewer than the page asked for: older matches may exist beyond it,
+    so "no more results" would be a claim the search did not check.
+    """
+
+    search_truncated: bool = False
+
+
 def _search_matches(search: str, ev: dict[str, Any]) -> bool:
     needle = search.strip().lower()
     return any(needle in str(ev.get(field) or "").lower() for field in ("action", "resource", "actor"))
@@ -625,13 +636,16 @@ def list_audit_events(
             else:
                 sort_order = [(key, -direction) for key, direction in CHAIN_ORDER]
             if search and search.strip() and search_projection is not None:
-                found: list[dict[str, Any]] = []
+                found = AuditEventPage()
+                scanned = 0
                 for doc in coll.find(query).sort(sort_order).limit(SEARCH_SCAN_LIMIT):
+                    scanned += 1
                     ev = {k: v for k, v in doc.items() if k != "_id"}
                     if _search_matches(search, search_projection(ev)):
                         found.append(ev)
                         if len(found) >= limit:
                             break
+                found.search_truncated = scanned >= SEARCH_SCAN_LIMIT and len(found) < limit
                 return found
             cursor = (
                 coll.find(query)

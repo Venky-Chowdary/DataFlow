@@ -224,6 +224,7 @@ async def list_events(
         search_projection=masker,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    search_truncated = bool(getattr(events, "search_truncated", False))
     from services.audit_actor_display import add_actor_display
 
     events, masked = _reader_view(masker, add_actor_display(events))
@@ -232,6 +233,8 @@ async def list_events(
             "events": events,
             "count": len(events),
             "key_ids_masked": masked,
+            # A projected search stopped at its scan window: older matches may exist.
+            "search_truncated": search_truncated,
             "workspace_id": workspace_id or None,
             "tenant_id": tenant_id or None,
             "next_after_seq": next_seq,
