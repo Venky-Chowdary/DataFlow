@@ -899,9 +899,6 @@ def propose_dest_widens(
     """
     if not target_schema:
         return []
-    from connectors.schema_drift import is_wider_type
-    from connectors.writer_common import stamp_is_operator_ceiling
-
     out: list[dict[str, Any]] = []
     for m in mappings or []:
         src = str(m.get("source") or "")
@@ -912,24 +909,47 @@ def propose_dest_widens(
         tgt_type = str(ci_get(target_schema, tgt) or "")
         if not src_type or not tgt_type:
             continue
-        # Same logical family only: TEXT is a universal carrier the lattice
-        # calls "wider" than NUMERIC, but retiping a numeric column to text
-        # is a family change — a true narrow stays fail-closed (D107).
-        if normalize_logical_type(src_type) != normalize_logical_type(tgt_type):
-            continue
-        if (
-            is_wider_type(tgt_type, src_type, dest_db=dest_db)
-            and not stamp_is_operator_ceiling(m)
-        ):
-            out.append({
-                "kind": "widen_type",
-                "column": src,
-                "target": tgt,
-                "old_type": tgt_type.upper(),
-                "new_type": widened_dest_carrier(tgt_type, src_type),
-                "reason": "dest_widen_available",
-            })
+        widen = dest_widen_proposal(m, src, tgt, src_type, tgt_type, dest_db=dest_db)
+        if widen:
+            out.append(widen)
     return out
+
+
+def dest_widen_proposal(
+    mapping: dict[str, Any],
+    src: str,
+    tgt: str,
+    src_type: str,
+    tgt_type: str,
+    *,
+    dest_db: str = "",
+) -> dict[str, Any] | None:
+    """The additive ``widen_type`` entry for one pair, or None: the one rule.
+
+    Both widen lanes (the live-contract loop in ``detect_schema_drift`` and
+    the engine's ``propose_dest_widens``) ask this. A proposal needs the same
+    logical family (TEXT is a universal carrier the lattice calls "wider" than
+    NUMERIC, but retyping a numeric column to text is a family change - a true
+    narrow stays fail-closed, D107), a strictly wider source carrier and a
+    stamp that is not an operator ceiling.
+    """
+    from connectors.schema_drift import is_wider_type
+    from connectors.writer_common import stamp_is_operator_ceiling
+
+    if normalize_logical_type(src_type) != normalize_logical_type(tgt_type):
+        return None
+    if not is_wider_type(tgt_type, src_type, dest_db=dest_db):
+        return None
+    if stamp_is_operator_ceiling(mapping):
+        return None
+    return {
+        "kind": "widen_type",
+        "column": src,
+        "target": tgt,
+        "old_type": tgt_type.upper(),
+        "new_type": widened_dest_carrier(tgt_type, src_type),
+        "reason": "dest_widen_available",
+    }
 
 
 def stamp_approved_widens(
@@ -1529,23 +1549,11 @@ def detect_schema_drift(
             # policy can approve it and the writer's widen path carries it.
             # An explicit operator Map stamp is a ceiling — that pair stays a
             # real fidelity finding.
-            from connectors.schema_drift import is_wider_type
-            from connectors.writer_common import stamp_is_operator_ceiling
-
-            if (
-                is_wider_type(tgt_type, str(src_type), dest_db=dest_db)
-                and normalize_logical_type(str(src_type))
-                == normalize_logical_type(str(tgt_type))
-                and not stamp_is_operator_ceiling(m)
-            ):
-                widen_proposals.append({
-                    "kind": "widen_type",
-                    "column": src,
-                    "target": tgt,
-                    "old_type": str(tgt_type).upper(),
-                    "new_type": widened_dest_carrier(str(tgt_type), str(src_type)),
-                    "reason": "dest_widen_available",
-                })
+            widen = dest_widen_proposal(
+                m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db
+            )
+            if widen:
+                widen_proposals.append(widen)
                 continue
 
             if is_precision_collapse_coercion(

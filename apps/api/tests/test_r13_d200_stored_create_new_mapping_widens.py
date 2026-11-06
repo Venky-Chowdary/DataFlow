@@ -107,3 +107,31 @@ def test_acknowledged_widen_alters_the_created_table_and_loads_exact(isolated, d
     finally:
         h.drop("postgresql", table)
         h.drop(dest, out)
+
+
+def test_a_row_rebound_to_a_live_column_is_not_a_projection():
+    """D161 after D200: the stamp is DataFlow's carrier only for the column it makes.
+
+    Onto an existing ``f REAL`` the kernel re-binds the plan's row to the live
+    column (``bind_existing``, ``create_new`` False) but the row keeps the
+    plan's ``kernel_invent`` provenance. That leftover is no grounds to ALTER
+    somebody else's column: DOUBLE PRECISION -> REAL stays the fidelity
+    collapse. A stored run-1 create-new stamp still widens (D200).
+    """
+    from services.schema_drift import propose_dest_widens
+
+    rebound = [{"source": "f", "target": "f", "source_type": "DOUBLE PRECISION",
+                "target_type": "REAL", "create_new": False,
+                "assignment_strategy": "bind_existing",
+                "target_type_provenance": "kernel_invent"}]
+    assert stamp_is_operator_ceiling(rebound[0]) is True
+    assert propose_dest_widens(
+        rebound, source_schema={"f": "DOUBLE PRECISION"}, target_schema={"f": "REAL"},
+        dest_db="postgresql",
+    ) == []
+    own = _stored("VARCHAR(20)", "NUMERIC(8,2)")
+    props = propose_dest_widens(
+        own, source_schema={"name": "VARCHAR(200)", "amt": "NUMERIC(12,4)"},
+        target_schema={"name": "VARCHAR(20)", "amt": "NUMERIC(8,2)"}, dest_db="postgresql",
+    )
+    assert sorted(p["column"] for p in props) == ["amt", "name"]

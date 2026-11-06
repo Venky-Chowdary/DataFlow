@@ -459,6 +459,31 @@ def resolve_writer_backfill(
     )
 
 
+def stamp_is_dataflow_projection(mapping: dict[str, Any] | None) -> bool:
+    """True when DataFlow projected this row's carrier for a column it creates.
+
+    The kernel stamps ``target_type_provenance="kernel_invent"``; a create-new
+    plan marks ``create_new`` or an identity / create-compatible strategy.
+    Such a stamp is the product's own projection, not an operator's limit.
+
+    A row the kernel re-bound to a live column (``bind_existing``: the table
+    was already there and its carrier won) is not a projection, whatever
+    invent provenance it still carries from the plan: ``f REAL`` on somebody
+    else's table is their column, and DOUBLE PRECISION into it stays the
+    fidelity collapse it is rather than an offer to ALTER it (D161).
+    """
+    if not mapping:
+        return False
+    if str(mapping.get("assignment_strategy") or "") == "bind_existing":
+        return False
+    return bool(
+        str(mapping.get("target_type_provenance") or "").strip().lower() == "kernel_invent"
+        or mapping.get("create_new")
+        or str(mapping.get("assignment_strategy") or "")
+        in {"identity_passthrough", "create_compatible_new"}
+    )
+
+
 def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
     """True when ``target_type`` is an approved ceiling, not a catalog echo.
 
@@ -473,12 +498,7 @@ def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
         return False
     if not str(mapping.get("target_type") or mapping.get("dest_type") or "").strip():
         return False
-    if (
-        str(mapping.get("target_type_provenance") or "").strip().lower() == "kernel_invent"
-        or mapping.get("create_new")
-        or str(mapping.get("assignment_strategy") or "")
-        in {"identity_passthrough", "create_compatible_new"}
-    ):
+    if stamp_is_dataflow_projection(mapping):
         # DataFlow projected this carrier for the column it created (the kernel
         # stamps target_type_provenance="kernel_invent"); nobody drew it as a
         # limit. Approve / Accept risk in Map sets user_override on that same
