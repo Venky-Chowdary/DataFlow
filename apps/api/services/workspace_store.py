@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 from services.platform_config import data_dir
@@ -33,16 +35,41 @@ class InvalidTimezone(ValueError):
     pass
 
 
+@lru_cache(maxsize=1)
+def _iana_zones() -> frozenset[str]:
+    """The zone database's names, read once (it walks the tzdata tree)."""
+    from zoneinfo import available_timezones
+
+    return frozenset(available_timezones())
+
+
+_ZONE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+)*$")
+_NOT_ZONES = frozenset({"localtime", "posixrules", "Factory"})
+
+
+def _is_zone_link(zone: str) -> bool:
+    """A backward-compatible tzdata link (``US/Eastern``) some builds leave out
+    of ``available_timezones`` but the zone database still resolves. Only a
+    plain zone-shaped name is tried — never a path."""
+    if not _ZONE_NAME.match(zone) or zone in _NOT_ZONES:
+        return False
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
+        return False
+    return True
+
+
 def validate_timezone(name: str) -> str:
     """The IANA zone ``name`` names, or ``InvalidTimezone``.
 
     Checked against the zone database itself (``zoneinfo.available_timezones``),
     so a well-formed but invented name like ``Mars/Olympus`` is refused.
     """
-    from zoneinfo import available_timezones
-
     zone = (name or "").strip()
-    if zone in {"UTC", "Etc/UTC"} or zone in available_timezones():
+    if zone in {"UTC", "Etc/UTC"} or zone in _iana_zones() or _is_zone_link(zone):
         return zone
     raise InvalidTimezone(
         f"{zone!r} is not an IANA time zone. Use a name such as UTC, "

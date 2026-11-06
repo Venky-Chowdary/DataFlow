@@ -1027,6 +1027,12 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
     elif interval not in INTERVALS and rolling_minutes(interval) is None:
         raise ValueError(f"Invalid interval: {interval}")
     sync_mode = accepted_schedule_sync_mode(sync_mode)
+    # The zone is checked for every cadence, not only cron: a preset schedule
+    # stored ``Mars/Olympus`` (Security 15). One IANA validator for settings
+    # and schedules (``workspace_store.validate_timezone``).
+    from services.workspace_store import validate_timezone
+
+    validate_timezone(tz or "UTC")
     if cron:
         try:
             validate_cron(cron)
