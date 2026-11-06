@@ -414,7 +414,6 @@ def _read_destination_sample(
             db_type == "generic_sql"
             and (dest.get("connection_string") or "").lower().startswith("oracle")
         ):
-            from services.reconciliation import TargetSampleUnavailable
             from services.reconciliation_oracle import (
                 OracleCatalogUnreadable,
                 read_oracle_target_sample,
