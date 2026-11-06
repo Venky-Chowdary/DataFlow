@@ -22,8 +22,9 @@ for every key:
 * the source moved and the destination does not equal what was written
   either -> the destination is not what this run wrote: it stays compared.
 
-The witness lives in this process only (keyed by job id) and is bounded by the
-ladder budget. A run resumed at reconcile, or a route that never filled it,
+The witness lives in this process only (keyed by job id), is bounded by the
+ladder budget, and is released when the job ends (``keyed_write_witness_scope``
+in ``execute_tracked``), whatever the outcome. A run resumed at reconcile, or a route that never filled it,
 has no witness; the ladder then cannot attribute a difference and says so.
 """
 
@@ -32,6 +33,8 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Iterable
 
 PART_SEP = "\x1f"
@@ -133,6 +136,24 @@ def take_keyed_write_witness(job_id: Any) -> KeyedWriteWitness | None:
         return None
     with _LOCK:
         return _REGISTRY.pop(str(job_id), None)
+
+
+def held_witness_job_ids() -> list[str]:
+    """Job ids whose witness is still in memory (diagnostics and tests)."""
+    with _LOCK:
+        return list(_REGISTRY)
+
+
+@contextmanager
+def keyed_write_witness_scope(job_id: Any) -> Iterator[None]:
+    """Job scope: whatever the outcome (completed, failed, cancelled, raised),
+    the job's witness leaves memory when the job ends. The ladder normally
+    takes it first; a run that fails before the ladder would otherwise keep
+    up to a ladder budget of digests alive until four later jobs evict it."""
+    try:
+        yield
+    finally:
+        take_keyed_write_witness(job_id)
 
 
 def _indexed(rows: list[dict], columns: list[str], labels: tuple[str, ...], **fp_kw: Any):

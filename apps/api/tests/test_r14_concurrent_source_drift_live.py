@@ -292,3 +292,60 @@ def test_a_reread_without_a_witness_stays_advisory_but_never_silent(world, monke
     unattributed = report.get("value_discrepancy_unattributed") or {}
     assert unattributed.get("columns") == ["amount"] and unattributed.get("reason") == "no_write_witness"
     assert any("cannot be told from a destination loss" in w for w in report.get("warnings") or [])
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed_before_ladder", "raised_before_ladder"])
+def test_no_witness_outlives_its_job(world, monkeypatch, outcome):
+    """The witness leaves memory when the job ends, whatever the outcome —
+    including a run that fails before the ladder ever takes it."""
+    import services.keyed_write_witness as kww
+
+    fake, conn, src, dst = world
+    assert _run(fake, src, dst).success  # occupy the destination
+    begun: list[tuple[str, object]] = []
+    orig_begin = stream_mod.begin_keyed_write_witness
+
+    def _begin(**kw):
+        witness = orig_begin(**kw)
+        begun.append((str(kw["job_id"]), witness))
+        return witness
+
+    monkeypatch.setattr(stream_mod, "begin_keyed_write_witness", _begin)
+    ladder_calls: list[int] = []
+    orig_ladder = rs._maybe_attach_verification_ladder
+    monkeypatch.setattr(
+        rs, "_maybe_attach_verification_ladder",
+        lambda report, **kw: ladder_calls.append(1) or orig_ladder(report, **kw),
+    )
+    if outcome != "completed":
+        exc = RuntimeError if outcome == "raised_before_ladder" else ConnectionError
+
+        def _reread_dies(*_a, **_kw):
+            raise exc("the source re-read lost its connection")
+
+        monkeypatch.setattr(stream_mod, "reread_pagination_plan", _reread_dies)
+    try:
+        res = _run(fake, src, dst)
+    except Exception:  # noqa: BLE001 — the raising outcome may propagate
+        res = None
+    assert begun and begun[0][1] is not None, "the route did not start a witness"
+    job_id = begun[0][0]
+    if outcome == "completed":
+        assert res is not None and res.success and ladder_calls
+    else:
+        assert not ladder_calls and (res is None or not res.success)
+    assert job_id not in kww.held_witness_job_ids()
+
+
+def test_the_job_scope_releases_the_witness_when_the_body_raises():
+    import services.keyed_write_witness as kww
+
+    witness = kww.begin_keyed_write_witness(
+        job_id="scope-raise", key_columns=["id"], sync_mode="upsert",
+        inline_fingerprints_used=False, resumed=False,
+    )
+    assert witness is not None and "scope-raise" in kww.held_witness_job_ids()
+    with pytest.raises(KeyboardInterrupt):
+        with kww.keyed_write_witness_scope("scope-raise"):
+            raise KeyboardInterrupt
+    assert "scope-raise" not in kww.held_witness_job_ids()
