@@ -88,16 +88,21 @@ def schedule_mapping_findings(raw: Any, validation_mode: str = "") -> list[dict[
     """
     import copy
 
-    from preflight.gates import mapping_confidence_layers
+    from preflight.gates import g4_confidence_floor, mapping_confidence_layers
 
     from services.mapping_constraints import is_intentional_omit
     from services.mapping_pipeline import assert_mappings_executable
+    from services.migration_risk_contract import hydrate_mappings_risk_contracts
     from services.preflight_service import confidence_threshold_for_mode
 
     rows = persisted_mapping_rows(raw)
     if not rows:
         return []
-    floor = max(0.55, float(confidence_threshold_for_mode(validation_mode or "strict") or 0.85))
+    floor = g4_confidence_floor(confidence_threshold_for_mode(validation_mode or "strict"))
+    # Map drafts are signed first, exactly as Validate and Execute sign them
+    # (hydrate_mappings_risk_contracts): an unsigned continue-policy contract
+    # that a run would accept must not be refused at save.
+    rows = hydrate_mappings_risk_contracts(copy.deepcopy(rows))
     active = [r for r in rows if not is_intentional_omit(r)]
     findings = [
         {"gate": "g4_mapping_confidence", "layer": layer, "message": message, "mappings": names}

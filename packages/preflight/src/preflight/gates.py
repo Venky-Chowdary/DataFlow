@@ -1844,6 +1844,13 @@ def _mapping_field(m: Any, name: str, default: Any) -> Any:
     return raw if raw not in (None, "") else default
 
 
+def g4_confidence_floor(threshold: Any) -> float:
+    """G4's confidence floor for a plan's threshold. Client fail-closed: the Map
+    threshold is the floor; never below 0.55, 0.85 when unset. One owner for the
+    gate and for a schedule save (QA C10)."""
+    return max(0.55, float(threshold or 0.85))
+
+
 def _pair(m: Any) -> str:
     return f"{_mapping_field(m, 'source', '?')}→{_mapping_field(m, 'target', '?')}"
 
@@ -1946,10 +1953,9 @@ def mapping_confidence_layers(
 
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
-    threshold = ctx.plan.confidence_threshold
     # Client fail-closed: Map threshold is the G4 floor. Soft band (threshold−0.3)
     # previously let low-confidence exact-name remaps pass into Execute.
-    confidence_floor = max(0.55, float(threshold or 0.85))
+    confidence_floor = g4_confidence_floor(ctx.plan.confidence_threshold)
     active = [m for m in ctx.plan.mappings if not _is_intentional_omit_mapping(m)]
     g4_scope = evidence_scope(
         kind="mapping_confidence",

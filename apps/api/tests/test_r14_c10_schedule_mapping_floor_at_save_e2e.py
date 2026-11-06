@@ -177,3 +177,59 @@ def test_a_create_that_persists_onto_an_existing_draft_is_judged_too(client):
         assert ok.status_code == 201 and ok.json()["id"] == draft_id, ok.text
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
+
+
+def test_an_unsigned_continue_policy_contract_saves_and_runs_as_execute_reads_it(client):
+    """Review of 52de05a44: the save judged raw rows while Validate/Execute sign
+    Map drafts first, so a lossy cast at 0.95 with an unsigned CAST_AND_CONTINUE
+    contract was a 422 at save yet a clean run."""
+    from services.connector_store import create_connector
+    from services.schedule_mapping_contract import schedule_mapping_findings
+
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    src_table, dest_table = f"c10h_src_{token}", f"c10h_dst_{token}"
+    draft = {"source_column": "flag", "target_column": "flag", "source_type": "TEXT",
+             "destination_type": "INTEGER", "execution_policy": "CAST_AND_CONTINUE",
+             "approved_by": "qa@example.com", "reason": "Cast TEXT flags; quarantine non-numeric",
+             "expected_precision_loss": True, "quarantine_policy": "QUARANTINE_ROW_on_cast_failure",
+             "retry_policy": "none", "rollback_strategy": "DOCUMENT_ONLY"}
+    rows = [{"source": "id", "target": "id", "confidence": 0.99},
+            {"source": "flag", "target": "flag", "confidence": 0.95, "source_type": "TEXT",
+             "target_type": "INTEGER", "fidelity": "lossy_cast", "type_narrowing": True,
+             "risk_contract": dict(draft)}]
+    assert schedule_mapping_findings(rows, "strict") == []
+    try:
+        cur.execute(f"CREATE TABLE {src_table} (id BIGINT PRIMARY KEY, flag TEXT)")  # nosec B608
+        cur.executemany(f"INSERT INTO {src_table} VALUES (%s, %s)",  # nosec B608
+                        [(1, "0"), (2, "1"), (3, "1")])
+        src = create_connector({"name": f"c10h-src-{token}", "type": "postgresql", "role": "source",
+                                "workspace_id": "", "ssl": False, **h.PG, "schema": "public"})
+        dst = create_connector({"name": f"c10h-dst-{token}", "role": "destination",
+                                "workspace_id": "", "ssl": False, **h.dest_config("postgresql")})
+        resp = client.post("/api/v1/schedules/", json={
+            "name": f"c10h {token}", "source_connector_id": src.id, "source_table": src_table,
+            "dest_connector_id": dst.id, "dest_table": dest_table, "interval": "hourly",
+            "sync_mode": "full_refresh_overwrite", "mappings": rows, "enabled": True})
+        assert resp.status_code == 201, resp.text
+        run = _beat(resp.json()["id"])
+        assert run["job"].get("status") in ("completed", "completed_with_quarantine"), run["job"].get("error")
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
+        h.drop_table("postgresql", dest_table)
+
+
+def test_the_save_floor_is_g4s_floor():
+    from preflight.gates import g4_confidence_floor
+
+    from services.preflight_service import confidence_threshold_for_mode
+
+    for mode in ("strict", "balanced", "maximum", "lenient"):
+        floor = g4_confidence_floor(confidence_threshold_for_mode(mode))
+        from services.schedule_mapping_contract import schedule_mapping_findings
+
+        just_below = [{"source": "a", "target": "a", "confidence": round(floor - 0.01, 2)}]
+        at_floor = [{"source": "a", "target": "a", "confidence": floor}]
+        assert schedule_mapping_findings(just_below, mode), mode
+        assert schedule_mapping_findings(at_floor, mode) == [], mode
