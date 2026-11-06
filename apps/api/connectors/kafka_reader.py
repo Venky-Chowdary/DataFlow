@@ -472,6 +472,19 @@ def _kafka_column_types(records: list[dict[str, Any]]) -> tuple[dict[str, str], 
     return native, decisions
 
 
+def _schema_records(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """``(decodable records, poison count)`` for a sample the plan types from.
+
+    The transfer reader routes an undecodable message to the rejected-rows
+    channel and never emits its ``_kafka_value`` / ``_kafka_poison`` cells. A
+    plan typed from the raw sample mapped those two columns anyway, and every
+    run then failed "Source column missing: _kafka_value" before the poison
+    message could be quarantined (D286).
+    """
+    clean = [r for r in records if not r.get("_kafka_poison")]
+    return clean, len(records) - len(clean)
+
+
 def _records_to_batch(
     records: list[dict[str, Any]],
     columns: list[str] | None,
@@ -568,8 +581,12 @@ def read_topic_to_end(
     topic: str,
     columns: list[str] | None = None,
     limit: int,
+    skip_poison: bool = False,
 ) -> tuple[ReadBatch, bool]:
     """Every message from the log start to the end offsets at call time.
+
+    ``skip_poison`` (the plan's type census) leaves undecodable messages out
+    of the columns, exactly as the transfer reader does.
 
     For Gate-8 read-back of a Kafka destination. The transfer reader stops
     after a few polls (one batch), so a read-back of a 3,000-message produce
@@ -611,6 +628,8 @@ def read_topic_to_end(
             for tp in list(remaining):
                 if consumer.position(tp) >= remaining[tp]:
                     del remaining[tp]
+        if skip_poison:
+            records, _poison = _schema_records(records)
         return _records_to_batch(records, columns, None), not remaining
     finally:
         consumer.close()
@@ -667,7 +686,11 @@ def sample_topic_batch(
                     break
             if got == 0:
                 break
-        return _records_to_batch(records, None, None)
+        clean, poison = _schema_records(records)
+        batch = _records_to_batch(clean, None, None)
+        if poison:
+            batch.meta = {**(batch.meta or {}), "kafka_poison_messages": poison}
+        return batch
     finally:
         consumer.close()
 
@@ -735,7 +758,9 @@ def infer_topic_schema(
     # bound keeps the sample's types and says so.
     census_note = ""
     try:
-        census, complete = read_topic_to_end(cfg=cfg, topic=topic, limit=_TYPE_CENSUS_LIMIT)
+        census, complete = read_topic_to_end(
+            cfg=cfg, topic=topic, limit=_TYPE_CENSUS_LIMIT, skip_poison=True
+        )
     except Exception as exc:
         census, complete = None, False
         logger.debug("Kafka type census failed: %s", exc)

@@ -37,7 +37,10 @@ def rebase_batch_rejects(
         if not isinstance(raw, dict):
             continue
         detail = dict(raw)
-        local_row = int(detail.get("row") or 0)
+        raw_row = detail.get("row")
+        # A record-valued finding (shape divert, Kafka poison message) names
+        # its record, not a batch line: there is no number to rebase (D286).
+        local_row = 0 if isinstance(raw_row, (dict, list)) else int(raw_row or 0)
         if local_row > 0:
             detail["batch_row"] = local_row
             detail["batch_offset"] = int(batch_start)
@@ -52,7 +55,7 @@ def rows_with_findings(details: list[dict[str, Any]]) -> int:
     """Distinct source rows that carry a finding of their own."""
     return len(
         {
-            d.get("row")
+            _row_identity(d.get("row"))
             for d in details
             if isinstance(d, dict) and d.get("row") is not None
         }
