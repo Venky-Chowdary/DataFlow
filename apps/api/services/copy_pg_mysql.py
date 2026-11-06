@@ -417,9 +417,13 @@ def _fifo_copy_into_mysql(
                 columns=columns,
             )
             dst_cur.execute("SHOW WARNINGS")
+            # Read them before the session restore below: its SET statements
+            # replace this cursor's result set, and every truncation /
+            # clamp warning was then judged "none" (E1-018).
+            warnings = list(dst_cur.fetchall() or [])
         finally:
             restore_mysql_bulk_load_session(dst_cur)
-        blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
+        blocked = blocking_load_data_warnings(warnings)
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 

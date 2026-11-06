@@ -330,7 +330,9 @@ def _note_failed_batch_undo(
             f"Rejected row(s) were preserved in the destination table {qt} "
             "for review and replay."
         )
-    elif dest_summary.get("partial_batch_undo") == "cleared":
+    elif dest_summary.get("partial_batch_undo") == "cleared" and (
+        dest_summary.get("rejected_details") or int(dest_summary.get("rejected_rows") or 0)
+    ):
         note = (
             "Rejected-row evidence is retained in this job's quarantine "
             "record for inspection and replay."

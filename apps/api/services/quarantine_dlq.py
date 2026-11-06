@@ -424,10 +424,17 @@ def quarantine_details_from_dlq(
             # The row is a record (dict/list), not a scalar — dedupe on its
             # canonical serialization; an unhashable member made every read
             # of a shape-divert quarantine crash with TypeError.
+            # The record image is part of the identity: two distinct records
+            # refused for the same reason in the same column (row numbers can
+            # repeat across write units) are two findings, never one (E1-018).
+            # A finding persisted twice carries the same image and still dedupes.
+            image = d.get("source_values") or d.get("values")
             key = (
                 _hashable_row_key(row),
                 str(d.get("column") or ""),
                 str(d.get("reason") or "")[:160],
+                _hashable_row_key(image) if isinstance(image, dict) else "",
+                _hashable_row_key(d.get("value")),
             )
             if key in seen:
                 continue
