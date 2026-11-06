@@ -1703,18 +1703,53 @@ _SOURCE_KEYS = frozenset(
 TIMEZONE_NORMALIZED_ACTION = "schedule.timezone.normalized"
 
 
-def normalize_invalid_timezones(*, actor: str = "system:schedule-timezone") -> list[dict[str, str]]:
-    """One-time repair: a stored zone that is not an IANA zone becomes UTC, audited.
+#: Below this many zones (or without a backward link resolving) the zone
+#: database is incomplete: a valid alias would read as invalid, so nothing
+#: is normalised (S4a, second review). ``tzdata`` in requirements.txt makes
+#: the database independent of the host OS.
+_HEALTHY_ZONE_COUNT = 400
+TIMEZONE_NORMALIZATION_CLAIM = "schedule_timezone_normalization_v1"
+
+
+def zone_database_healthy() -> bool:
+    """Whether this host can judge zone validity (IANA links included)."""
+    from zoneinfo import ZoneInfo, available_timezones
+
+    try:
+        ZoneInfo("America/New_York")
+        ZoneInfo("US/Eastern")  # a ``backward`` link: absent on trimmed OS zone data
+    except Exception:  # noqa: BLE001 — any failure means "cannot judge"
+        return False
+    return len(available_timezones()) >= _HEALTHY_ZONE_COUNT
+
+
+def normalize_invalid_timezones(
+    *, actor: str = "system:schedule-timezone", force: bool = False
+) -> list[dict[str, str]]:
+    """One-time repair of stored zones that are not IANA zones, on the record.
 
     Rows written before zones were validated (Security 15) could hold
-    ``Mars/Olympus``; a cron schedule then could not compute its next run.
-    The scheduler calls this at start-up. Each repaired row files
-    ``schedule.timezone.normalized`` (from, to) in its workspace, so the
-    change is on the record rather than silent. Idempotent.
+    ``Mars/Olympus``. Each such row's zone becomes UTC and — because a UTC
+    cadence is a time nobody chose — an enabled row is **paused** (no
+    ``next_run_at``; a disabled row never gets one), with a skipped entry in
+    its run history naming the reason, and a ``schedule.timezone.normalized``
+    audit event (from, to, paused) in its workspace. Guards:
+
+    * nothing is rewritten unless the zone database is healthy (an incomplete
+      host database would turn valid aliases like ``Asia/Calcutta`` into UTC);
+    * it runs once per deployment (Mongo claim), not on every start;
+    * each write is conditional on the stored value still being the invalid
+      one, so a user's PATCH in between wins.
     """
     from services.audit_log import append_audit_event
+    from services.maintenance_claim import claim_run
     from services.workspace_store import InvalidTimezone, validate_timezone
 
+    if not zone_database_healthy():
+        logger.warning("Schedule zone normalisation skipped: this host's zone database is incomplete")
+        return []
+    if not force and claim_run(TIMEZONE_NORMALIZATION_CLAIM, timedelta(days=36500)) is False:
+        return []
     repaired: list[dict[str, str]] = []
     for sched in list_schedules():
         zone = (sched.timezone or "").strip()
@@ -1725,9 +1760,10 @@ def normalize_invalid_timezones(*, actor: str = "system:schedule-timezone") -> l
             continue
         except InvalidTimezone:
             pass
-        if update_schedule(sched.id, {"timezone": "UTC"}) is None:
+        changed = _normalize_zone_if_unchanged(sched.id, zone)
+        if changed is None:
             continue
-        row = {"schedule_id": sched.id, "from": zone, "to": "UTC"}
+        row = {"schedule_id": sched.id, "from": zone, "to": "UTC", "paused": changed}
         repaired.append(row)
         append_audit_event(
             action=TIMEZONE_NORMALIZED_ACTION,
@@ -1739,6 +1775,46 @@ def normalize_invalid_timezones(*, actor: str = "system:schedule-timezone") -> l
             details={**row, "reason": "stored zone is not an IANA time zone"},
         )
     return repaired
+
+
+def _normalize_zone_if_unchanged(schedule_id: str, invalid_zone: str) -> bool | None:
+    """Set the zone to UTC and pause the row, only if it still holds ``invalid_zone``.
+
+    Returns whether the row was paused (it was enabled), or ``None`` when the
+    stored zone had already changed (a PATCH won) or the row is gone.
+    """
+    note = {
+        "status": "skipped",
+        "reason_code": "timezone_normalized",
+        "reason": (
+            f"The stored time zone {invalid_zone!r} is not an IANA zone; it was set to UTC "
+            "and the schedule was paused. Set the intended zone, then re-enable it."
+        ),
+        "started_at": _now(),
+        "finished_at": _now(),
+    }
+    svc = _mongo_backend()
+    if svc:
+        coll = svc.get_database()["pipeline_schedules"]
+        before = coll.find_one_and_update(
+            {"_id": schedule_id, "timezone": invalid_zone},
+            {"$set": {"timezone": "UTC", "enabled": False, "next_run_at": None},
+             "$push": {"run_history": note}},
+        )
+        return None if before is None else bool(before.get("enabled"))
+    with _NAME_LOCK:
+        schedules = _load_all()
+        for s in schedules:
+            if s.id != schedule_id:
+                continue
+            if (s.timezone or "").strip() != invalid_zone:
+                return None
+            was_enabled = bool(s.enabled)
+            s.timezone, s.enabled, s.next_run_at = "UTC", False, None
+            s.run_history = list(s.run_history or []) + [note]
+            _save_all(schedules)
+            return was_enabled
+    return None
 
 
 def update_schedule(

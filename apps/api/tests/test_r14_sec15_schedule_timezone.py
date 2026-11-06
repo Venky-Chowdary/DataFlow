@@ -104,16 +104,75 @@ def test_runner_backs_off_a_legacy_row(ent):
     assert due.replace(tzinfo=due.tzinfo or timezone.utc) > before
 
 
-def test_scheduler_start_normalises_invalid_zones_to_utc_on_the_record(ent):
+@pytest.fixture
+def healthy_zones(monkeypatch):
+    from services import schedule_store
+
+    monkeypatch.setattr(schedule_store, "zone_database_healthy", lambda: True)
+
+
+def test_scheduler_start_normalises_invalid_zones_to_utc_on_the_record(ent, healthy_zones):
     from services.schedule_store import get_schedule, normalize_invalid_timezones
 
     ws = ent.workspace("Legacy tz normalise")
     bad = _legacy(ws, interval="cron", cron="0 9 * * *")
     good = _legacy(ws, zone="Asia/Kolkata")
     repaired = normalize_invalid_timezones()
-    assert repaired == [{"schedule_id": bad.id, "from": "Mars/Olympus", "to": "UTC"}]
-    assert get_schedule(bad.id).timezone == "UTC"
+    assert repaired == [{"schedule_id": bad.id, "from": "Mars/Olympus", "to": "UTC", "paused": True}]
+    after = get_schedule(bad.id)
+    # S4b: a UTC cadence is a time nobody chose — the row is paused, with no next run,
+    # and its history says why.
+    assert after.timezone == "UTC" and after.enabled is False and after.next_run_at is None
+    assert after.run_history[-1]["reason_code"] == "timezone_normalized"
     assert get_schedule(good.id).timezone == "Asia/Kolkata"
-    assert normalize_invalid_timezones() == []  # idempotent
+    assert normalize_invalid_timezones(force=True) == []  # idempotent
     events = [e for e in ent.audit(ws, action="schedule.timezone.normalized")]
     assert len(events) == 1 and events[0]["details"]["from"] == "Mars/Olympus"
+
+
+def test_normalisation_runs_once_per_deployment_not_every_start(ent, healthy_zones):
+    from services.schedule_store import get_schedule, normalize_invalid_timezones
+
+    ws = ent.workspace("Legacy tz once")
+    normalize_invalid_timezones()
+    late = _legacy(ws)
+    assert normalize_invalid_timezones() == []  # a second start does nothing
+    assert get_schedule(late.id).timezone == "Mars/Olympus"
+
+
+def test_an_incomplete_zone_database_rewrites_nothing(ent, monkeypatch):
+    """S4a: on a host without backward links, Asia/Calcutta must not become UTC."""
+    from services import schedule_store
+
+    monkeypatch.setattr(schedule_store, "zone_database_healthy", lambda: False)
+    ws = ent.workspace("Legacy tz unhealthy")
+    alias = _legacy(ws, zone="Asia/Calcutta")
+    assert schedule_store.normalize_invalid_timezones(force=True) == []
+    assert schedule_store.get_schedule(alias.id).timezone == "Asia/Calcutta"
+
+
+def test_a_patch_between_read_and_write_wins(ent, healthy_zones, monkeypatch):
+    """S4c: the rewrite is conditional on the stored invalid value."""
+    from services import schedule_store
+
+    ws = ent.workspace("Legacy tz race")
+    sched = _legacy(ws)
+    stale = schedule_store.list_schedules()
+    # A user fixes the zone after the normaliser read its list.
+    assert schedule_store.update_schedule(sched.id, {"timezone": "Europe/Berlin"}) is not None
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda *a, **k: stale)
+    assert schedule_store.normalize_invalid_timezones(force=True) == []
+    after = schedule_store.get_schedule(sched.id)
+    assert after.timezone == "Europe/Berlin" and after.enabled is True
+
+
+def test_disabled_legacy_row_stays_disabled_with_no_next_run(ent, healthy_zones):
+    from services.schedule_store import get_schedule, normalize_invalid_timezones, update_schedule
+
+    ws = ent.workspace("Legacy tz disabled")
+    sched = _legacy(ws)
+    update_schedule(sched.id, {"enabled": False})
+    repaired = normalize_invalid_timezones(force=True)
+    assert repaired == [{"schedule_id": sched.id, "from": "Mars/Olympus", "to": "UTC", "paused": False}]
+    after = get_schedule(sched.id)
+    assert after.enabled is False and after.next_run_at is None
