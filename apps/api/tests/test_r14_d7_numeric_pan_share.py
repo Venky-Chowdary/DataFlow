@@ -167,3 +167,17 @@ def test_a_pan_token_with_any_prefix_or_suffix_is_a_card_column(col):
 def test_known_non_card_pan_words_are_not_card_columns(col):
     risk = detect_pii_fields([col], [{col: "x"}]).get("field_risk", {})
     assert "pci_pan" not in risk.get(col, []), col
+
+
+@pytest.mark.parametrize("prefix,length", [("9792", 16), ("1", 15)])
+def test_troy_and_uatp_pans_flag_a_neutral_bigint_column(prefix, length):
+    rng = _random.Random(prefix)
+    values = [_pan(rng, prefix, length) for _ in range(20)]
+    assert "pci_pan" in _risk("value", values, "BIGINT").get("value", []), prefix
+
+
+def test_a_sixteen_digit_number_starting_with_1_is_not_uatp():
+    from services.compliance_guard import _card_iin
+
+    assert _card_iin("1" + "0" * 14) is True        # 15 digits: UATP
+    assert _card_iin("1" + "0" * 15) is False       # 16 digits: not a network
