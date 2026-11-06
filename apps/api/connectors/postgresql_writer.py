@@ -2228,6 +2228,7 @@ def write_mapped_rows(
                 desired_types,
                 backfill=backfill_new_fields,
                 skip_cols=widen_skip_key_columns(conflict_columns, mappings),
+                key_columns=list(conflict_columns or []),
                 source_types=source_type_by_col,
                 suppressed_out=suppressed_widens,
             )

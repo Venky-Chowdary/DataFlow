@@ -1148,6 +1148,7 @@ def widen_existing_columns_native(
     source_types: dict[str, str] | None = None,
     suppressed_out: dict[str, str] | None = None,
     temporal_fsp_without_backfill: bool = False,
+    key_columns: list[str] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
@@ -1195,6 +1196,19 @@ def widen_existing_columns_native(
         and is_wider_type(existing[col], new_type, dest_db=dialect)
     }
     mysql_modifies: list[tuple[str, str, str, str]] = []
+    # A key column's ALTER is refused before any DDL when something depends on
+    # it: PostgreSQL cannot retype a column a view or generated column reads,
+    # and a referencing foreign key on either engine must change with it.
+    keys = {str(c).casefold() for c in key_columns or []}
+    for col in growing:
+        if col.casefold() in keys:
+            dependents = _key_widen_dependents(cursor, dialect, schema, table_name, col)
+            if dependents:
+                raise WidenNotSupported(
+                    f"Could not widen key column {col} on {table_name}: "
+                    f"{', '.join(dependents)} depend on it. Change or drop them first, "
+                    "then re-run; nothing was altered and no rows were written."
+                )
     for col, new_type in zip(target_cols, target_types):
         if col in skip:
             continue
@@ -1267,10 +1281,10 @@ def widen_existing_columns_native(
                 raise_widen_lock_timeout(table_name, col, exc, attempts=1)
             # Ignore "already correct width" / concurrent-alter races and
             # harmless syntax issues.
-            if any(
-                phrase in err
-                for phrase in ("already", "cannot alter", "not supported")
-            ):
+            # Not "cannot alter": PostgreSQL says that for a column a view or a
+            # generated column depends on, and skipping it loaded the run
+            # against the narrow column.
+            if any(phrase in err for phrase in ("already", "not supported")):
                 logger.debug(
                     "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
                 )
@@ -1283,6 +1297,70 @@ def widen_existing_columns_native(
     if mysql_modifies:
         log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
     return log
+
+
+_PG_KEY_DEPENDENTS_SQL = (
+    # views / rules reading the column
+    "SELECT DISTINCT 'view ' || v.relname FROM pg_depend d "
+    "JOIN pg_rewrite r ON r.oid = d.objid JOIN pg_class v ON v.oid = r.ev_class "
+    "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+    "WHERE d.refobjid = to_regclass(%s) AND a.attname = %s AND v.oid <> d.refobjid "
+    "UNION "
+    # stored generated columns computed from it
+    "SELECT DISTINCT 'generated column ' || g.attname FROM pg_attrdef ad "
+    "JOIN pg_attribute g ON g.attrelid = ad.adrelid AND g.attnum = ad.adnum "
+    "JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = ad.oid "
+    "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+    "WHERE g.attgenerated = 's' AND ad.adrelid = to_regclass(%s) AND a.attname = %s "
+    "UNION "
+    # foreign keys referencing it
+    "SELECT DISTINCT 'foreign key ' || c.conname || ' on ' || c.conrelid::regclass::text "
+    "FROM pg_constraint c JOIN pg_attribute a "
+    "ON a.attrelid = c.confrelid AND a.attnum = ANY (c.confkey) "
+    "WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s) AND a.attname = %s"
+)
+
+_MYSQL_KEY_DEPENDENTS_SQL = (
+    "SELECT CONCAT('foreign key ', CONSTRAINT_NAME, ' on ', TABLE_NAME) "
+    "FROM information_schema.KEY_COLUMN_USAGE "
+    "WHERE REFERENCED_TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) "
+    "AND REFERENCED_TABLE_NAME = %s AND REFERENCED_COLUMN_NAME = %s "
+    "UNION "
+    "SELECT CONCAT('generated column ', COLUMN_NAME) FROM information_schema.COLUMNS "
+    "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s "
+    "AND GENERATION_EXPRESSION LIKE %s"
+)
+
+
+def _key_widen_dependents(
+    cursor: Any, dialect: str, schema: str | None, table_name: str, column: str
+) -> list[str]:
+    """Views, generated columns and referencing foreign keys that depend on ``column``.
+
+    An unreadable catalog returns ``[]``: the ALTER then runs and the engine's
+    own refusal surfaces by name (it is no longer swallowed).
+    """
+    try:
+        if dialect in ("postgresql", "postgres", "redshift"):
+            from connectors.sql_identifiers import quote_table_ref
+
+            ref = quote_table_ref(
+                table_name, schema or None, dialect="postgresql", sanitize=False,
+                preserve_case=True,
+            )
+            cursor.execute(_PG_KEY_DEPENDENTS_SQL, (ref, column) * 3)
+        elif dialect in ("mysql", "mariadb"):
+            like = "%`" + column.replace("%", r"\%").replace("_", r"\_") + "`%"
+            cursor.execute(
+                _MYSQL_KEY_DEPENDENTS_SQL,
+                (schema or "", table_name, column, schema or "", table_name, like),
+            )
+        else:
+            return []
+        return sorted({str(r[0]) for r in cursor.fetchall() or [] if r and r[0]})
+    except Exception as exc:  # noqa: BLE001 — unread: the engine refuses by name instead
+        logger.debug("key dependents probe failed for %s.%s: %s", table_name, column, exc)
+        return []
 
 
 def _execute_mysql_modifies(

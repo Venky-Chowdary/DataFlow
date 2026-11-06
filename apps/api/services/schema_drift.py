@@ -759,6 +759,14 @@ def resolve_schema_evolution(
             # An identical schema is not a change and must not demand review.
             action = "review"
             reasons.append("type_locked_review_required")
+    elif policy in PROPAGATE_POLICIES and any(
+        str(a.get("kind")) == "widen_type" and a.get("key") for a in additive
+    ):
+        # "PK ... still pause" (SCHEMA_POLICY_HONESTY): widening a key column
+        # rewrites the table under an exclusive lock, so the run waits for an
+        # explicit acknowledgement (which this pause yields to).
+        action = "pause"
+        reasons.append("key_widen_needs_acknowledgement")
     elif policy in PROPAGATE_POLICIES and (additive or soft or unmapped):
         action = "propagate"
         reasons.append(f"auto_propagate under {policy}")
@@ -924,6 +932,41 @@ def propose_dest_widens(
     return out
 
 
+def key_widen_approval_message(widens: list[dict[str, Any]]) -> str:
+    """The refusal for an unapproved widen of a key column: what the ALTER costs."""
+    keyed = [w for w in widens if w.get("key")]
+    pairs = ", ".join(
+        f"{w.get('column') or w.get('target')} {w.get('old_type')} → {w.get('new_type')}"
+        for w in keyed[:6]
+    )
+    return (
+        f"Widening key column(s) {pairs} rewrites the whole table: PostgreSQL holds an "
+        "ACCESS EXCLUSIVE lock for the rewrite and MySQL copies the table "
+        "(ALGORITHM=COPY) — reads and writes wait until it finishes. A key widen needs "
+        "this run's explicit approval (schema_drift_acknowledged=true); "
+        "schema_policy=propagate_* alone never ALTERs a key."
+    )
+
+
+def strip_client_widen_stamps(mappings: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Request mappings without the approved-widen stamps only planning may set.
+
+    ``dest_widen`` and ``target_type_origin="drift_widen"`` are written by
+    ``stamp_approved_widens`` for this run's approved widens; a client that
+    sends them would approve an ALTER (a key's included) nobody approved.
+    """
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        clean = {k: v for k, v in m.items() if k != "dest_widen"}
+        if str(clean.get("target_type_origin") or "").strip().lower() == "drift_widen":
+            clean.pop("target_type_origin", None)
+        out.append(clean)
+    return out
+
+
 def dest_key_limit(indexes_meta: dict[str, Any] | None) -> int:
     """The destination's index key byte limit, from its index catalog's row format."""
     from services.schema_fidelity import mysql_max_key_bytes
@@ -1051,6 +1094,14 @@ def dest_widen_proposal(
         )
         if keep:
             return None
+    from connectors.schema_drift import split_key_part
+
+    # SQLite cannot retype a column in place (the writer skips the widen), so
+    # there is no table rewrite there to approve.
+    keyed = str(dest_db or "").strip().lower() != "sqlite" and any(
+        split_key_part(c)[1] is None and split_key_part(c)[0].casefold() == tgt.casefold()
+        for g in key_groups or [] for c in g
+    )
     return {
         "kind": "widen_type",
         "column": src,
@@ -1058,6 +1109,9 @@ def dest_widen_proposal(
         "old_type": tgt_type.upper(),
         "new_type": new_type.upper(),
         "reason": "dest_widen_available",
+        # A key column's widen rewrites the table under a lock: it needs this
+        # run's explicit acknowledgement, never a propagate policy alone.
+        **({"key": True} if keyed else {}),
     }
 
 
@@ -1145,6 +1199,7 @@ def plan_destination_evolution(
     adopt_unmapped: bool = False,
     key_groups: list[list[str]] | None = None,
     max_key_bytes: int = 3072,
+    key_widens_approved: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     """Apply approved destination evolution to the plan, once.
 
@@ -1174,6 +1229,8 @@ def plan_destination_evolution(
         active, source_schema=source_schema, target_schema=types, dest_db=dest_db,
         key_groups=key_groups, max_key_bytes=max_key_bytes,
     )
+    # A key widen is applied only on this run's explicit acknowledgement.
+    widens = [w for w in widens if key_widens_approved or not w.get("key")]
     applied.extend(stamp_approved_widens(planned, widens))
     by_target = {str(k).lower(): k for k in types}
     for change in widens:
@@ -1399,6 +1456,14 @@ def schema_review_copy(drift: dict[str, Any], *, policy: str, column_phrase: str
         for item in items
         if item not in widens
     ]
+    if widens and any(w.get("key") for w in widens) and not any(additive):
+        return {
+            "gate_id": "schema_mismatch",
+            "message": key_widen_approval_message(widens) + column_phrase,
+            "remediation_kind": "approve_type_widening",
+            "ack_required": True,
+            "rule_id": "schema_mismatch.key_widening",
+        }
     if widens and not any(additive):
         # A column the source widened is not a missing column (D191): name the
         # change and the one parameter that approves the ALTER.

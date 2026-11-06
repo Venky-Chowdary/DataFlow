@@ -518,6 +518,8 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
         "dataflow.dest_type": (body.dest_type or ""),
         "dataflow.correlation_id": get_correlation_id(),
     }
+    from services.schema_drift import strip_client_widen_stamps
+
     with (
         start_span("studio.validate", attributes=span_attrs, kind="internal")
         if start_span is not None
@@ -527,7 +529,8 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             columns=preflight_columns,
             column_types=source_column_types,
             row_count=body.row_count,
-            mappings=preflight_mappings,
+            # Approved-widen stamps are planning's to set, never a client's.
+            mappings=strip_client_widen_stamps(preflight_mappings),
             destination_connected=destination_connected,
             destination_error=dest_error,
             source_connected=source_connected,

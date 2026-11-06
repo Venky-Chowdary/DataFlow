@@ -817,6 +817,7 @@ def run_file_preflight(
                 key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                            contract_primary_key, destination_indexes_meta),
                 max_key_bytes=dest_key_limit(destination_indexes_meta),
+                key_widens_approved=bool(schema_drift_acknowledged),
             )
         )
 

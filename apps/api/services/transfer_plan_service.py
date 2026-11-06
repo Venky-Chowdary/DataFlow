@@ -418,11 +418,14 @@ def run_plan_preflight(
         dict(live_target_schema) if dest_recreated and live_target_schema else None
     )
 
+    from services.schema_drift import strip_client_widen_stamps
+
     pf = run_file_preflight(
         columns=shaped_image.columns,
         column_types=shaped_image.column_types,
         row_count=plan.row_count_estimate,
-        mappings=plan_mappings,
+        # Approved-widen stamps are planning's to set, never a client's.
+        mappings=strip_client_widen_stamps(plan_mappings),
         destination_connected=bool(dest_meta.get("connected")),
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,

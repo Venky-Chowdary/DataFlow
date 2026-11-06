@@ -2168,13 +2168,16 @@ def _run_preflight(
         measured_exists = dest_probe.get("table_exists")
         table_exists = measured_exists if isinstance(measured_exists, bool) else dest_exists
 
+        from services.schema_drift import strip_client_widen_stamps
+
         result = run_file_preflight(
             destination_connector_id=str(dst_conn.get("id") or ""),
             columns=columns,
             column_types=column_types,
             column_nullability={r["name"]: bool(r.get("nullable", True)) for r in src_rows},
             row_count=row_count,
-            mappings=mappings,
+            # Approved-widen stamps are planning's to set, never a client's.
+            mappings=strip_client_widen_stamps(mappings),
             destination_connected=bool(dest_probe.get("connected")),
             # The probe's own reason (e.g. a TLS handshake against a plaintext
             # Redis) is the operator's fix; "not reachable" alone is not.
