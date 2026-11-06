@@ -1542,8 +1542,17 @@ def reject_on_strict_policy(
         rejected_details_require_job_abort,
     )
 
+    # A signed contract asked for this abort when a finding carries a
+    # fail-closed policy, or any signed policy whose resolved action aborts
+    # (CAST_AND_CONTINUE with quarantine_policy FAIL resolves to ``fail``).
     contract_abort = any(
-        str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES for d in details
+        str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES
+        or (
+            str(d.get("execution_policy") or "").strip()
+            and str(d.get("policy") or "").lower()
+            in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+        )
+        for d in details
     )
     if rejected_details_require_job_abort(details) and not contract_abort:
         # D267: no signed contract asked for this abort — the strict job posture

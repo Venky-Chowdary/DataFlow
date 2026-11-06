@@ -98,15 +98,29 @@ def _run(src: Path, dest: EndpointConfig, mongo, *, sign: str):
     return result, mongo.jobs.get(job_id, {})
 
 
-def _assert_holdout(result, job, failing=("amount", "flag", "d")) -> None:
+def _assert_holdout(result, job, failing=("amount", "flag", "d"), *, signed: str) -> None:
     assert result.success is True, result.error
     assert result.records_transferred == 29
     assert job.get("status") == "completed_with_quarantine"
     details = job.get("rejected_details") or []
     assert {d.get("column") for d in details} == set(failing)
     assert {d.get("row") for d in details} == {30}
-    assert all(d.get("execution_policy") == "QUARANTINE_ROW" for d in details)
     assert all(d.get("policy") == "quarantine" for d in details)
+    by_col = {d["column"]: d for d in details}
+    signed_finding = by_col[signed]
+    assert signed_finding.get("execution_policy") == "QUARANTINE_ROW"
+    assert signed_finding.get("risk_id")
+    # Honest attribution: the contract covers its own column only. The other
+    # cells rode out with the row and say so, without borrowing the contract.
+    for col, d in by_col.items():
+        if col == signed:
+            continue
+        assert not d.get("execution_policy"), d
+        assert not d.get("risk_id"), d
+        assert d.get("held_with_row") is True
+        assert d.get("held_by_policy") == "QUARANTINE_ROW"
+        assert d.get("held_by_risk_id") == signed_finding["risk_id"]
+        assert d.get("held_by_column") == signed
 
 
 def test_signed_holdout_covers_the_unsigned_cells_of_the_same_row(tmp_path, mongo):
@@ -118,7 +132,7 @@ def test_signed_holdout_covers_the_unsigned_cells_of_the_same_row(tmp_path, mong
     dest = EndpointConfig(kind="database", format="sqlite", database=str(dst), table="r9_neo")
     for _run_no in (1, 2):  # second run into the table DataFlow created
         result, job = _run(src, dest, mongo, sign="flag")
-        _assert_holdout(result, job, failing=("flag", "d"))
+        _assert_holdout(result, job, failing=("flag", "d"), signed="flag")
         con = sqlite3.connect(str(dst))
         rows = con.execute("SELECT id, name FROM r9_neo ORDER BY id").fetchall()
         con.close()
@@ -165,7 +179,7 @@ def test_signed_holdout_into_new_postgres_table(tmp_path, mongo):
     _seed(src)
     try:
         result, job = _run(src, dest, mongo, sign="amount")
-        _assert_holdout(result, job)
+        _assert_holdout(result, job, signed="amount")
         con = psycopg2.connect(host="localhost", port=5432, database="dataflow", user="dataflow", password="dataflow")
         with con.cursor() as cur:
             cur.execute(f'SELECT count(*), count(*) FILTER (WHERE id = 30) FROM public."{table}"')
@@ -178,3 +192,30 @@ def test_signed_holdout_into_new_postgres_table(tmp_path, mongo):
             cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
             cur.execute(f'DROP TABLE IF EXISTS public."{table}_df_quarantine"')
         con.close()
+
+
+def test_a_signed_fail_closed_cast_contract_is_named_as_the_contract_abort():
+    """CAST_AND_CONTINUE with quarantine_policy FAIL resolves to ``fail``; the
+    refusal must name the contract, not claim the column is unsigned."""
+    from connectors.writer_common import reject_on_strict_policy
+
+    details = [{"row": 3, "column": "amount", "policy": "fail", "reason": "bad cast",
+                "execution_policy": "CAST_AND_CONTINUE", "risk_id": "mrc-1"}]
+    msg = reject_on_strict_policy("fail", details, "PostgreSQL") or ""
+    assert "Migration Risk Contract abort policy" in msg
+    assert "no signed Risk Contract covers" not in msg
+
+
+def test_held_with_row_findings_are_continue_not_abort():
+    from services.migration_risk_contract import (
+        rejected_details_are_continue_contract_only,
+        rejected_details_require_job_abort,
+    )
+
+    details = [
+        {"row": 30, "column": "flag", "policy": "quarantine", "execution_policy": "QUARANTINE_ROW", "risk_id": "mrc-9"},
+        {"row": 30, "column": "d", "policy": "quarantine", "held_with_row": True,
+         "held_by_policy": "QUARANTINE_ROW", "held_by_risk_id": "mrc-9"},
+    ]
+    assert rejected_details_require_job_abort(details) is False
+    assert rejected_details_are_continue_contract_only(details) is True

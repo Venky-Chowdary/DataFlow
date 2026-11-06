@@ -118,10 +118,13 @@ def hold_row_under_signed_contract(row_details: list[dict[str, Any]]) -> str:
     whole row is already out. Aborting there turned the operator's signed
     holdout of row 30 into "abort policy blocks partial write (FAIL_JOB)".
 
-    The unsigned findings ride with the row and are stamped with the governing
-    contract (``held_with_row``). Returns the row action (``quarantine`` /
-    ``skip_row``), or ``""`` when no signed holdout covers the row or a finding
-    carries a fail-closed contract of its own — then the strict posture stands.
+    The unsigned findings ride with the row. They keep their own (empty)
+    contract attribution — the signed contract covers *its* column, not theirs
+    — and record the holdout as ``held_with_row`` / ``held_by_risk_id`` /
+    ``held_by_policy``, which the abort / continue predicates read. Returns the
+    row action (``quarantine`` / ``skip_row``), or ``""`` when no signed holdout
+    covers the row or a finding carries a fail-closed contract of its own — then
+    the strict posture stands.
     """
     from services.migration_risk_contract import (
         CONTINUE_POLICIES,
@@ -151,13 +154,13 @@ def hold_row_under_signed_contract(row_details: list[dict[str, Any]]) -> str:
     pol = str(governing.get("execution_policy") or "").strip().upper()
     for d in posture:
         d["policy"] = action
-        d["execution_policy"] = pol
+        # Row disposition, not contract attribution: execution_policy and
+        # risk_id stay empty — no contract was signed for this column.
         d["disposition"] = disposition_for_execution_policy(pol)
         d["held_with_row"] = True
+        d["held_by_policy"] = pol
+        d["held_by_column"] = str(governing.get("target") or governing.get("column") or "")
         if governing.get("risk_id"):
-            d["risk_id"] = governing["risk_id"]
-        if action == "quarantine":
-            d["quarantine_required"] = True
-        else:
-            d["quarantine_required"] = False
+            d["held_by_risk_id"] = governing["risk_id"]
+        d["quarantine_required"] = action == "quarantine"
     return action
