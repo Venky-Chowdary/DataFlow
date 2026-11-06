@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
+from services.mirror_delete_notice import MIRROR_EXPLAIN_TEXT
+
 # A generated passage carries the module that makes it true, not a Help href, so
 # an operator (or a reviewer) can check the claim at its source.
 FACT_DOC_SLUG = "product-facts"
@@ -185,11 +187,8 @@ _SYNC_MODE_BEHAVIOUR: dict[str, str] = {
         "known keys update, and destination rows the source does not have are "
         "left alone"
     ),
-    "mirror": (
-        "is upsert plus deletion — destination rows whose key the source no "
-        "longer has are removed, so the destination ends up matching the source "
-        "exactly. It deletes data, so nothing aliases onto it implicitly"
-    ),
+    # One wording with the run, the plan warning and the UI (D38).
+    "mirror": MIRROR_EXPLAIN_TEXT,
     "cdc": (
         "is a log-based read that streams inserts, updates and deletes from the "
         "source log rather than re-reading the table. The default delivery "

@@ -35,6 +35,16 @@ MIRROR_LEDGER_SOFT_TEXT = (
     "Keys missing from the source stay as _deleted rows; physical COUNT(*) does not drop."
 )
 WARNING_ID = "mirror_hard_delete"
+#: How the product explains mirror (explain_product, capability cards). Mirror
+#: soft-deletes by default; saying it "removes" rows contradicted the run (D38).
+MIRROR_EXPLAIN_TEXT = (
+    "is upsert plus deletion handling — destination rows whose key the source no "
+    "longer has are soft-deleted by default: kept and flagged _deleted (with "
+    "_deleted_at), so the active rows (WHERE NOT _deleted) match the source while "
+    "physical COUNT(*) does not drop. delete_mode=hard physically deletes them "
+    "instead, announced before the run. It changes destination data, so nothing "
+    "aliases onto it implicitly"
+)
 
 
 def _mode_of(contract: Mapping[str, Any]) -> str:

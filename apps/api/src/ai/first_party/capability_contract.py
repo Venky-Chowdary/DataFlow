@@ -871,6 +871,7 @@ def mirror_versus_upsert_card() -> CapabilityCard | None:
         return None
     try:
         from services.sync_cursor import CANONICAL_SYNC_MODES
+        from services.mirror_delete_notice import MIRROR_EXPLAIN_TEXT
     except Exception:
         return None
     if "mirror" not in CANONICAL_SYNC_MODES:
@@ -878,10 +879,8 @@ def mirror_versus_upsert_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="What is the difference between mirror and upsert",
         text=(
-            "Mirror is upsert plus deletion — destination rows whose key the "
-            "source no longer has are removed. "
-            "Upsert leaves those destination-only rows alone. "
-            "Mirror deletes data, so nothing aliases onto it implicitly."
+            f"Mirror {MIRROR_EXPLAIN_TEXT}. "
+            "Upsert leaves those destination-only rows alone."
         ),
         source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
         category="transfer",
