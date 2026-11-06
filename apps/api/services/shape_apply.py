@@ -171,6 +171,40 @@ class ShapeRunner:
         """
         return self._engine.take_diverted()
 
+    def divert_details(self, diverted: Sequence[Any]) -> list[dict[str, Any]]:
+        """Quarantine findings for diverted rows — one shape for every route.
+
+        ``row`` carries the record as it reached the step (replay rebuilds the
+        row from it). A column step also names its column and the value it
+        could not transform, so Inspect shows the cell like any write reject.
+        """
+        steps = list(self.recipe.enabled_steps)
+        out: list[dict[str, Any]] = []
+        for d in diverted or []:
+            record = dict(getattr(d, "record", None) or {})
+            step = steps[d.step] if 0 <= int(d.step) < len(steps) else None
+            column = str(getattr(step, "column", "") or "") if step is not None else ""
+            detail: dict[str, Any] = {
+                "row": record,
+                "reason": f"transform divert — step {d.step} '{d.op}': {d.reason}",
+                "failure_reason": d.reason,
+                "policy": "quarantine",
+                "transform_attempted": f"shape step {d.step} '{d.op}'",
+                "shape_step": d.step,
+                "shape_op": d.op,
+                "source_row_index": d.row_index + 1,
+            }
+            if column:
+                detail["column"] = column
+                detail["value"] = record.get(column)
+            if getattr(d, "dedupe_key", None) is not None and getattr(
+                d, "winner_row_index", None
+            ) is not None:
+                detail["dedupe_key"] = list(d.dedupe_key)
+                detail["winner_row"] = d.winner_row_index + 1
+            out.append(detail)
+        return out
+
     def drain_matrix(self) -> tuple[list[str], list[list[Any]]]:
         """Rows buffering steps held until end-of-stream, as a matrix page.
 

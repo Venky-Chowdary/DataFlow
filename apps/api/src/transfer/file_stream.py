@@ -2186,18 +2186,7 @@ def stream_file_to_database(
 
         persist_rejected_rows(
             job_id=str(job_id),
-            rejected_details=[
-                {
-                    "row": d.record,
-                    "reason": f"transform divert — step {d.step} '{d.op}': {d.reason}",
-                    "failure_reason": d.reason,
-                    "transform_attempted": f"shape step {d.step} '{d.op}'",
-                    "shape_step": d.step,
-                    "shape_op": d.op,
-                    "source_row_index": d.row_index + 1,
-                }
-                for d in diverted
-            ],
+            rejected_details=shape_runner.divert_details(diverted),
             source="shape_divert",
             connector=str(
                 getattr(destination, "format", None)

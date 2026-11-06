@@ -1534,7 +1534,15 @@ async def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
+    from services.quarantine_dlq import _hashable_row_key
+
+    # A shape-divert finding carries its record in ``row`` (a dict): count it by
+    # its canonical image, never hash the dict (QA MySQL-D4: HTTP 500).
+    row_ids = {
+        _hashable_row_key(d.get("row"))
+        for d in details
+        if isinstance(d, dict) and d.get("row") is not None
+    }
     finding_rows = len(row_ids) if row_ids else len(details)
     rejected_rows = int(
         job.get("rejected_details_total")

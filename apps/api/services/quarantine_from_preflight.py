@@ -328,6 +328,10 @@ def quarantine_evidence_source(
         return "preflight"
     if job.get("rejected_details"):
         return "write"
+    if rows and any(d.get("shape_op") or d.get("policy") == "quarantine" for d in rows):
+        # Durable DLQ rows a run held out (shape diverts, write rejects) are
+        # write-time quarantine even when the job document carries no sample.
+        return "write"
     return "preflight" if rows else "none"
 
 

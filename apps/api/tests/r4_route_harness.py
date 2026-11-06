@@ -196,13 +196,17 @@ def blockers_of(payload: Any) -> list[str]:
 
 
 def wait_job(job_id: str, timeout_s: float = 180.0) -> dict:
+    from services.job_status import is_terminal
     from services.mongodb_service import get_mongodb_service
 
     deadline = time.monotonic() + timeout_s
     job: dict = {}
     while time.monotonic() < deadline:
         job = get_mongodb_service().get_job(job_id) or {}
-        if str(job.get("status") or "") in {"completed", "failed", "partial", "cancelled"}:
+        status = str(job.get("status") or "")
+        # completed_with_quarantine / _with_warnings are terminal too: waiting
+        # them out cost every quarantine test the whole timeout.
+        if is_terminal(status) or status == "partial":
             return job
         time.sleep(0.25)
     return job
