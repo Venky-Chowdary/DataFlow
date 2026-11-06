@@ -1,4 +1,4 @@
-"""One validator for the two transfer policy enums: ``validation_mode`` and ``schema_policy``.
+"""One validator for the transfer policy enums: ``validation_mode``, ``schema_policy``, ``sync_mode``.
 
 QA round 12 (bugs 6 and 7): an unknown value was queued. ``validation_mode``
 silently ran as ``strict`` (``normalize_validation_mode`` fails closed) and an
@@ -62,6 +62,12 @@ def _vocabulary(field: str) -> tuple[frozenset[str], dict[str, str]]:
         return SCHEMA_POLICIES, SCHEMA_POLICY_ALIASES
     if field == "delete_mode":
         return DELETE_MODES, {}
+    if field == "sync_mode":
+        # The engine's canonical modes and the spellings other layers use
+        # (schedule ``incremental``, Pilot ``incremental_upsert``, ``merge``).
+        from services.sync_cursor import _SYNC_MODE_ALIASES, CANONICAL_SYNC_MODES
+
+        return CANONICAL_SYNC_MODES, _SYNC_MODE_ALIASES
     raise KeyError(field)
 
 
@@ -100,6 +106,8 @@ def canonical_policy_value(field: str, value: Any) -> str:
     if not isinstance(value, str):
         raise PolicyValueError(field, value)
     key = value.strip().lower()
+    if field == "sync_mode":
+        key = key.replace("-", "_").replace(" ", "_")
     if not key:
         return ""
     values, aliases = _vocabulary(field)
@@ -115,6 +123,15 @@ def canonical_validation_mode(value: Any) -> str:
 
 def canonical_schema_policy(value: Any) -> str:
     return canonical_policy_value("schema_policy", value)
+
+
+def canonical_sync_mode(value: Any) -> str:
+    """One sync-mode vocabulary for a one-off transfer and a schedule (QA MySQL D13).
+
+    ``upsert`` was accepted by ``/transfer/execute`` and refused with 422 by
+    ``POST /schedules``, whose model restated the modes as a Literal without it.
+    """
+    return canonical_policy_value("sync_mode", value)
 
 
 class DeleteModeNotAllowed(ValueError):

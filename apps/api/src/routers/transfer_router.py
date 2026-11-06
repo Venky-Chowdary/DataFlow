@@ -278,6 +278,14 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     sync_mode: str = "full_refresh_overwrite"
 
+    @field_validator("sync_mode", mode="before")
+    @classmethod
+    def _sync_mode_vocabulary(cls, value: Any) -> Any:
+        """Same vocabulary as POST /schedules (QA MySQL D13); unknown is a 422."""
+        from services.transfer_policy_values import canonical_sync_mode
+
+        return canonical_sync_mode(value) or "full_refresh_overwrite"
+
     @field_validator("mappings")
     @classmethod
     def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
@@ -1353,6 +1361,9 @@ async def run_universal_transfer(
     # Same 422 as the JSON routes; blank still means "inherit the plan".
     validation_mode = form_policy_value("validation_mode", validation_mode)
     schema_policy = form_policy_value("schema_policy", schema_policy)
+    if (sync_mode or "").strip():
+        # One sync-mode vocabulary with POST /schedules (QA MySQL D13).
+        sync_mode = form_policy_value("sync_mode", sync_mode)
     try:
         assert_delivery_guarantee_allowed(delivery_guarantee)
     except DeliveryGuaranteeError as exc:

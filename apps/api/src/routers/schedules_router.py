@@ -69,17 +69,22 @@ def _bound_schedule(request: Request, schedule_id: str, *, write: bool = False) 
     assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=write)
     return sched
 
-SyncMode = Literal[
-    "full_refresh_overwrite",
-    "full_refresh_append",
-    "incremental",
-    "incremental_append",
-    "incremental_deduped",
-    "cdc",
-    "scd2",
-    "mirror",
-    "reverse_etl",
-]
+def _schedule_sync_mode(value: Any) -> Any:
+    """The one sync-mode vocabulary (services.transfer_policy_values), schedule spelling.
+
+    A Literal copy of the modes here omitted ``upsert``, so a mode the one-off
+    route and the store accept was a 422 on schedule create (QA MySQL D13).
+    """
+    if value is None:
+        return None
+    from services.schedule_store import accepted_schedule_sync_mode
+    from services.transfer_policy_values import canonical_sync_mode
+
+    if not canonical_sync_mode(value):
+        return "full_refresh_overwrite"
+    return accepted_schedule_sync_mode(str(value))
+
+
 IntervalPreset = Literal["hourly", "daily", "weekly"]
 
 
@@ -100,7 +105,12 @@ class ScheduleCreate(PolicyFieldsModel):
     interval: str = "daily"
     cron: str = ""
     timezone: str = "UTC"
-    sync_mode: SyncMode = "full_refresh_overwrite"
+    sync_mode: str = "full_refresh_overwrite"
+
+    @field_validator("sync_mode", mode="before")
+    @classmethod
+    def _sync_mode_vocabulary(cls, value: Any) -> Any:
+        return _schedule_sync_mode(value)
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
@@ -181,7 +191,12 @@ class ScheduleUpdate(PolicyFieldsModel):
     interval_preset: Optional[str] = None
     cron: Optional[str] = None
     timezone: Optional[str] = None
-    sync_mode: Optional[SyncMode] = None
+    sync_mode: Optional[str] = None
+
+    @field_validator("sync_mode", mode="before")
+    @classmethod
+    def _sync_mode_vocabulary(cls, value: Any) -> Any:
+        return _schedule_sync_mode(value)
     validation_mode: Optional[str] = None
     schema_policy: Optional[str] = None
     backfill_new_fields: Optional[bool] = None

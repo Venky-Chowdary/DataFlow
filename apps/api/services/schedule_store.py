@@ -48,20 +48,16 @@ INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly":
 # :00, four minutes after :56 (R12-002). A step that does not divide 60 is
 # this token, measured from the previous run, not a clock cron.
 _ROLLING_MINUTE = re.compile(r"^every_(\d+)m$")
-SYNC_MODES = {
-    "full_refresh_overwrite",
-    "full_refresh_append",
-    "incremental",
-    "incremental_append",
-    "incremental_deduped",
-    # D208: full-source upsert on every beat (no watermark). Before this a
-    # schedule could only say upsert as incremental_deduped.
-    "upsert",
-    "cdc",
-    "scd2",
-    "mirror",
-    "reverse_etl",
-}
+def _schedule_sync_modes() -> frozenset[str]:
+    from services.sync_cursor import CANONICAL_SYNC_MODES
+
+    # The engine's one vocabulary (services.transfer_policy_values / sync_cursor,
+    # QA MySQL D13) plus the stored schedule spelling ``incremental``, which
+    # keeps its token (it runs as incremental_append).
+    return frozenset(CANONICAL_SYNC_MODES | {"incremental"})
+
+
+SYNC_MODES = _schedule_sync_modes()
 
 
 def _first_contract_snapshot(contracts: Any) -> str:
@@ -1009,9 +1005,9 @@ def accepted_schedule_sync_mode(sync_mode: str) -> str:
     token = (sync_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in SYNC_MODES:
         return token
-    from services.sync_cursor import normalize_sync_mode
+    from services.transfer_policy_values import canonical_sync_mode
 
-    resolved = normalize_sync_mode(token, default="")
+    resolved = canonical_sync_mode(token)
     if resolved in SYNC_MODES:
         return resolved
     raise ValueError(f"Invalid sync_mode: {sync_mode}")
