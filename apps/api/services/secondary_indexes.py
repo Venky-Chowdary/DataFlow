@@ -57,11 +57,15 @@ class IndexColumn:
     #: different index, so this travels with the column rather than being
     #: stripped at parse time.
     opclass: str = ""
+    #: MySQL / MariaDB prefix length (``KEY ix (name(32))``); 0 = the whole column.
+    prefix_length: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {"name": self.name, "descending": self.descending}
+        payload: dict[str, Any] = {"name": self.name, "descending": self.descending}
         if self.opclass:
             payload["opclass"] = self.opclass
+        if self.prefix_length:
+            payload["prefix_length"] = self.prefix_length
         return payload
 
 
@@ -367,7 +371,7 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
             cursor,
             """
             SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-                   COLLATION, INDEX_TYPE, EXPRESSION
+                   COLLATION, INDEX_TYPE, EXPRESSION, SUB_PART
             FROM information_schema.STATISTICS
             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
@@ -385,16 +389,18 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
             cursor,
             """
             SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-                   COLLATION, INDEX_TYPE
+                   COLLATION, INDEX_TYPE, SUB_PART
             FROM information_schema.STATISTICS
             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
             """,
             (schema, table),
         )
-        rows = [(*r, None) for r in raw]
+        rows = [(*r[:6], None, *r[6:7]) for r in raw]
     grouped: dict[str, dict[str, Any]] = {}
-    for name, non_unique, _seq, column, collation, index_type, expression in rows:
+    for row in rows:
+        name, non_unique, _seq, column, collation, index_type, expression = row[:7]
+        sub_part = row[7] if len(row) > 7 else None
         entry = grouped.setdefault(
             str(name),
             {"unique": not int(non_unique or 0), "cols": [], "expr": "", "type": str(index_type or "")},
@@ -402,7 +408,10 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         if expression:
             entry["expr"] = entry["expr"] or str(expression)
             continue
-        entry["cols"].append(IndexColumn(str(column), descending=str(collation or "A").upper() == "D"))
+        entry["cols"].append(IndexColumn(
+            str(column), descending=str(collation or "A").upper() == "D",
+            prefix_length=int(sub_part or 0),
+        ))
     items = [
         SourceIndex(
             name=name,

@@ -976,6 +976,8 @@ def dest_key_groups(
     contract's identity key (single column or comma-separated composite),
     which the writer enforces with a unique index.
     """
+    from connectors.schema_drift import key_part
+
     groups: list[list[str]] = []
     if isinstance(contract_key, str):
         contract_cols = [c.strip() for c in contract_key.split(",") if c.strip()]
@@ -985,7 +987,10 @@ def dest_key_groups(
         [str(c) for c in pk_columns or [] if str(c or "").strip()],
         *([str(c) for c in (uk or {}).get("columns") or []] for uk in unique_keys or []),
         *(
-            [str((c or {}).get("name") or "") for c in (ix or {}).get("columns") or []]
+            [
+                key_part(str((c or {}).get("name") or ""), (c or {}).get("prefix_length"))
+                for c in (ix or {}).get("columns") or []
+            ]
             for ix in ((indexes_meta or {}).get("items") or [])
             if isinstance(ix, dict) and not ix.get("expression")
         ),

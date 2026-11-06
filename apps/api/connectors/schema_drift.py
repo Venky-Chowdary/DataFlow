@@ -827,13 +827,24 @@ def _mysql_string_carrier(ddl: str) -> bool:
     }
 
 
+def key_part(name: str, prefix_length: int | None = None) -> str:
+    """A key-group entry: the column, or ``name(N)`` for a MySQL prefix part."""
+    return f"{name}({int(prefix_length)})" if prefix_length else str(name)
+
+
+def split_key_part(part: str) -> tuple[str, int | None]:
+    """``(column, prefix_length)`` of a key-group entry (``None``: the whole column)."""
+    m = re.fullmatch(r"(.+)\((\d+)\)", str(part or "").strip())
+    return (m.group(1), int(m.group(2))) if m else (str(part or ""), None)
+
+
 def _mysql_indexed_key_groups(
     cursor: Any, schema: str | None, table_name: str, column: str
 ) -> list[list[str]]:
-    """Column lists of every MySQL/MariaDB index (PRIMARY, UNIQUE, plain) that holds ``column``."""
+    """Every MySQL/MariaDB index (PRIMARY, UNIQUE, plain) holding ``column``, prefix parts as ``name(N)``."""
     try:
         cursor.execute(
-            """SELECT index_name, column_name
+            """SELECT index_name, column_name, sub_part
                FROM information_schema.statistics
                WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
                  AND table_name = %s
@@ -848,9 +859,13 @@ def _mysql_indexed_key_groups(
     for row in rows:
         if not row or len(row) < 2:
             continue
-        groups.setdefault(str(row[0]), []).append(str(row[1]))
+        sub_part = row[2] if len(row) > 2 else None
+        groups.setdefault(str(row[0]), []).append(key_part(str(row[1]), sub_part))
     want = column.casefold()
-    return [cols for cols in groups.values() if any(c.casefold() == want for c in cols)]
+    return [
+        cols for cols in groups.values()
+        if any(split_key_part(c)[0].casefold() == want for c in cols)
+    ]
 
 
 def _mysql_keyed_widen_carrier(
@@ -919,7 +934,9 @@ def keyed_widen_carrier(
     budget_dialect = {"sqlserver": "mssql", "oracle": "oracle"}.get(family, "")
     per_char = full_value_key_char_bytes(budget_dialect)
     want = column.casefold()
-    groups = [g for g in key_groups or [] if any(c.casefold() == want for c in g)]
+    groups = [
+        g for g in key_groups or [] if any(split_key_part(c)[0].casefold() == want for c in g)
+    ]
     unbounded_text = _is_string_like(normalize_logical_type(new_type)) and not (
         parse_string_carrier_width(new_type)
     )
@@ -1000,8 +1017,10 @@ def _mysql_key_group_width(
         mysql_key_unit_bytes,
     )
 
-    folded = [c.casefold() for c in key_cols]
-    growing = [f for f in folded if f in grow]
+    parts = [split_key_part(c) for c in key_cols]
+    folded = [name.casefold() for name, _prefix in parts]
+    prefix = {name.casefold(): n for name, n in parts if n}
+    growing = [f for f in folded if f in grow and f not in prefix]
     for f in growing:
         t = grow[f]
         if mysql_index_requires_prefix(t) and not re.match(
@@ -1018,9 +1037,13 @@ def _mysql_key_group_width(
         named = re.search(r"CHARACTER SET|CHARSET|COLLATE", t, flags=re.I) or _mysql_binary_carrier(t)
         return mysql_key_unit_bytes(t if named else (existing.get(f) or t))
 
-    remaining = max_key_bytes - sum(
-        mysql_key_part_bytes(existing.get(f, "")) for f in folded if f not in grow
-    )
+    def fixed_cost(f: str) -> int:
+        # A prefix part costs its prefix, in its own unit, whatever it widens to.
+        if f in prefix:
+            return prefix[f] * mysql_key_unit_bytes(existing.get(f, ""))
+        return mysql_key_part_bytes(existing.get(f, ""))
+
+    remaining = max_key_bytes - sum(fixed_cost(f) for f in folded if f not in growing)
     open_parts = list(growing)
     while open_parts:
         share = remaining // len(open_parts)
@@ -1074,7 +1097,12 @@ def mysql_keyed_widen_carrier(
     from services.schema_fidelity import mysql_index_requires_prefix
 
     want = column.casefold()
-    groups = [g for g in key_groups or [] if any(c.casefold() == want for c in g)]
+    # Only an index holding the whole column caps it: a prefix part
+    # (``KEY ix (name(32))``) indexes 32 characters whatever the column's width.
+    groups = [
+        g for g in key_groups or []
+        if any(split_key_part(c)[1] is None and split_key_part(c)[0].casefold() == want for c in g)
+    ]
     if not groups or not _mysql_growable(new_type):
         return new_type, False
     by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
