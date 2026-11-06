@@ -7146,7 +7146,7 @@ def destination_temporal_fractional_digits(
         # introspected as ``TIMESTAMPTZ(6)``, and reading those six digits
         # made Gate-8 compare an Oracle .123456 against the stored .123 and
         # fail every run after the first on a signed, declared narrowing (D278).
-        return DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+        return int(DOCUMENT_INSTANT_FRACTIONAL_DIGITS)
     explicit = parse_temporal_fractional_precision(text)
     if explicit is not None:
         return explicit
