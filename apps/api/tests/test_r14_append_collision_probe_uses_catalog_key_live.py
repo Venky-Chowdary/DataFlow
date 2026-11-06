@@ -67,3 +67,26 @@ def test_append_probe_keys_on_the_catalog_pk_not_a_column_named_id(isolated):  #
     finally:
         h.drop("mysql", table)
         h.drop("postgresql", out)
+
+
+def test_no_key_append_into_a_destination_unique_key_is_refused_at_validate(isolated):  # noqa: F811
+    """No contract or source key; the destination enforces UNIQUE(code) (not its PK)."""
+    if not h._port_up(3306) or not h._port_up(5432):
+        pytest.skip("live MySQL / PostgreSQL not reachable")
+    table = f"uq_{h.token()}"
+    out = f"{table}_d"
+    try:
+        h.run_sql("mysql", f"CREATE TABLE {table} (code VARCHAR(10), note VARCHAR(20), "
+                  "updated_at DATETIME(6)) DEFAULT CHARSET=utf8mb4")
+        h.run_sql("postgresql", f"CREATE TABLE {out} (code VARCHAR(10) UNIQUE, note VARCHAR(20), "
+                  "updated_at TIMESTAMP)",
+                  f"INSERT INTO {out} VALUES ('a', 'stored', '2024-01-01')")  # nosec B608
+        h.run_sql("mysql", f"INSERT INTO {table} VALUES (%s, %s, %s)",  # nosec B608
+                  params=[("a", "again", "2024-02-01"), ("東京", "", "2024-02-02")])
+        run = _run(isolated, table, out)
+        assert not run.success
+        assert "code" in (run.error or "") and "Blocking issues detected" in run.error, run.error
+        assert h.run_sql("postgresql", f"SELECT COUNT(*) FROM {out}")[0][0] == 1  # nosec B608
+    finally:
+        h.drop("mysql", table)
+        h.drop("postgresql", out)

@@ -38,6 +38,7 @@ def _run(
     destination_table_exists: bool = True,
     resume: bool = False,
     contract_primary_key: str = "",
+    destination_unique_keys: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from services.preflight_service import run_file_preflight
 
@@ -67,6 +68,7 @@ def _run(
         validation_mode="strict",
         resume=resume,
         contract_primary_key=contract_primary_key,
+        destination_unique_keys=destination_unique_keys or [],
     )
     return result
 
@@ -190,7 +192,8 @@ def test_append_blocks_the_same_mapped_row_when_there_is_no_key(tmp_path: Path) 
     )
     fresh_gate = _gate(fresh, "g6_target_ddl")
     assert fresh_gate["status"] == "pass", fresh_gate
-    assert "no collision" in fresh_gate["message"]
+    # No key anywhere: only exact rows were checked, and the gate says so.
+    assert "no declared key; checked for exact duplicate rows only" in fresh_gate["message"]
 
 
 def test_composite_key_blocks_only_the_whole_pair(tmp_path: Path) -> None:
@@ -388,3 +391,47 @@ def test_resume_flag_is_recorded_on_the_probe_result(tmp_path: Path) -> None:
     assert res.status == "ran"
     assert res.findings, "overlap must stay visible as evidence"
     assert res.idempotent_apply is True
+
+
+def test_no_key_append_into_a_destination_unique_key_blocks(tmp_path: Path) -> None:
+    """No contract or source key, but the destination enforces UNIQUE(id): the insert would abort."""
+    db_path = tmp_path / "uq.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT UNIQUE, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES (?, ?)", ("a", "A"))
+    conn.commit()
+    conn.close()
+    result = _run(
+        db_path=str(db_path),
+        sample_rows=[{"id": "a", "name": "A2"}, {"id": "", "name": "東京"}],
+        sync_mode="append",
+        destination_pk_columns=[],
+        destination_unique_keys=[{"name": "uq_id", "columns": ["id"], "primary": False}],
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "block", g6
+    assert "enforces uniqueness" in g6["message"] and "id" in g6["message"], g6
+    assert result["passed"] is False
+
+
+def test_no_key_append_into_a_heap_checks_exact_rows_only_and_says_so(tmp_path: Path) -> None:
+    """A heap with no key anywhere: the same ``id`` with another ``name`` is a new row.
+
+    Only a byte-identical row is detectable, and G6 says that instead of "no collision".
+    """
+    db_path = tmp_path / "heap2.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES (?, ?)", ("a", "A"))
+    conn.commit()
+    conn.close()
+    result = _run(
+        db_path=str(db_path),
+        sample_rows=[{"id": "a", "name": "A2"}, {"id": "  ", "name": None}],
+        sync_mode="append",
+        destination_pk_columns=[],
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "pass", g6
+    assert "no declared key; checked for exact duplicate rows only" in g6["message"], g6
+    assert "no collision" not in g6["message"]

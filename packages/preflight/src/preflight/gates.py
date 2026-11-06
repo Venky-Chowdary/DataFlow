@@ -2533,13 +2533,23 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     collision_evidence: dict[str, Any] = {}
     if collision is not None:
         collision_evidence = {
+            "identity_basis": str(getattr(collision, "identity_basis", "") or ""),
             "status": str(getattr(collision, "status", "") or ""),
             "key_column": getattr(collision, "key_column", "") or "",
             "values_probed": int(getattr(collision, "values_probed", 0) or 0),
         }
         if not getattr(collision, "findings", None):
             key = collision_evidence["key_column"] or "identity key"
-            if collision_evidence["status"] == "ran":
+            if collision_evidence["status"] == "ran" and (
+                getattr(collision, "identity_basis", "") == "full_row"
+            ):
+                # No key is declared anywhere: a repeated identity is not
+                # detectable, only a byte-identical row. Never "no collision".
+                collision_proven = (
+                    "Target DDL compatible — no declared key; checked for exact "
+                    "duplicate rows only"
+                )
+            elif collision_evidence["status"] == "ran":
                 collision_proven = (
                     f"Target DDL compatible — append batch probed against stored "
                     f"{key} values, no collision"

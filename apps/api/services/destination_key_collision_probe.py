@@ -106,6 +106,10 @@ class DestinationCollisionResult:
     # True when this batch is the interrupted run being delivered again.
     # A heap would store that overlap a second time, so resume still blocks.
     resume_redelivery: bool = False
+    # Which identity was probed: ``contract`` / ``destination_pk`` /
+    # ``destination_unique`` / ``source_key``, or ``full_row`` when no key is
+    # declared anywhere and only exact duplicate rows were checked.
+    identity_basis: str = "declared"
 
     @property
     def ran(self) -> bool:
@@ -448,22 +452,53 @@ def probe_append_key_collisions(
     if destination_table_exists is not True:
         return None
 
-    pairs = _identity_pairs(
-        mappings=mappings,
-        source_columns=source_columns,
-        dest_kind=dest_kind,
-        validation_mode=validation_mode,
+    identities = append_identity_pair_sets(
+        mappings=mappings, source_columns=source_columns,
         destination_pk_columns=destination_pk_columns,
-        contract_primary_key=contract_primary_key,
-        stream_contracts=stream_contracts,
-        source_table=source_table,
-        destination_table=destination_table,
+        destination_unique_keys=destination_unique_keys,
+        contract_primary_key=contract_primary_key, stream_contracts=stream_contracts,
+        source_table=source_table, destination_table=destination_table,
         source_key_columns=source_key_columns,
-        declared_only=True,
     )
-    if not pairs:
+    if not identities:
         return None
+    # Every enforced destination key aborts the insert on a repeat, so each is
+    # probed; the first collision is the verdict. With none, the first probe
+    # that could not run is reported (never read as proof), else the first.
+    results: list[DestinationCollisionResult] = []
+    for pairs, basis in identities:
+        result = _probe_identity(
+            pairs,
+            sample_rows=sample_rows, destination_config=destination_config,
+            destination_db_type=destination_db_type, destination_table=destination_table,
+            destination_pk_columns=destination_pk_columns,
+            destination_unique_keys=destination_unique_keys, resume=resume,
+            incremental_cursor_column=incremental_cursor_column,
+            incremental_watermark=incremental_watermark,
+            incremental_tiebreak_column=incremental_tiebreak_column,
+        )
+        result.identity_basis = basis
+        if result.findings:
+            return result
+        results.append(result)
+    return next((r for r in results if not r.ran), results[0])
 
+
+def _probe_identity(
+    pairs: list[tuple[str, str]],
+    *,
+    sample_rows: list[dict[str, Any]] | None,
+    destination_config: Mapping[str, Any] | None,
+    destination_db_type: str,
+    destination_table: str,
+    destination_pk_columns: list[str] | None,
+    destination_unique_keys: list[dict[str, Any]] | None,
+    resume: bool,
+    incremental_cursor_column: str,
+    incremental_watermark: str | None,
+    incremental_tiebreak_column: str,
+) -> DestinationCollisionResult:
+    """Probe one identity (column pairs) against the destination."""
     target_columns = [target for _source, target in pairs]
     enforced = destination_enforces_columns(
         target_columns,
@@ -533,6 +568,61 @@ def probe_append_key_collisions(
     return result
 
 
+def append_identity_pair_sets(
+    *,
+    mappings: list[dict[str, Any]] | None,
+    source_columns: list[str] | None,
+    destination_pk_columns: list[str] | None,
+    destination_unique_keys: list[dict[str, Any]] | None,
+    contract_primary_key: str | None,
+    stream_contracts: list[dict[str, Any]] | None,
+    source_table: str,
+    destination_table: str,
+    source_key_columns: list[str] | None = None,
+) -> list[tuple[list[tuple[str, str]], str]]:
+    """Every identity an append is probed on, in order, with its basis.
+
+    The contract key, then every key the destination enforces (its primary key,
+    then each UNIQUE key, single or composite) — any of them aborts the insert
+    on a repeat — then the source catalog key. Never a column guessed by name
+    (Rfam ``clan``: ``id`` is a label, ``clan_acc`` the key). With none declared
+    anywhere the mapped row is the identity (``full_row``): only exact
+    duplicate rows are checked, and the gate says so.
+    """
+    from services.primary_key import _map_identity_names_to_source
+
+    mapped = _mapped_pairs(mappings)
+    target_by_source = {source: target for source, target in mapped}
+    mapped_targets = {target.casefold() for _source, target in mapped}
+    stream = str(destination_table or source_table or "")
+    contract = _contract_identity_names(contract_primary_key, stream_contracts, stream)
+    candidates: list[tuple[list[str], str, bool]] = [(contract, "contract", False)]
+    candidates.append((list(destination_pk_columns or []), "destination_pk", True))
+    candidates.extend(
+        (list((uk or {}).get("columns") or []), "destination_unique", True)
+        for uk in destination_unique_keys or []
+        if isinstance(uk, dict) and not uk.get("expression") and not uk.get("filter_predicate")
+    )
+    candidates.append((list(source_key_columns or []), "source_key", False))
+    out: list[tuple[list[tuple[str, str]], str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for names, basis, is_target in candidates:
+        cleaned = [str(n).strip() for n in names if str(n or "").strip()]
+        if not cleaned or (is_target and any(n.casefold() not in mapped_targets for n in cleaned)):
+            continue
+        sources = _map_identity_names_to_source(
+            cleaned, mappings=list(mappings or []), source_columns=list(source_columns or [])
+        )
+        pairs = [(src, target_by_source.get(src, src)) for src in sources]
+        folded = tuple(sorted(t.casefold() for _s, t in pairs))
+        if pairs and folded not in seen:
+            seen.add(folded)
+            out.append((pairs, basis))
+    if not out and mapped:
+        out.append((mapped, "full_row"))
+    return out
+
+
 def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     for item in mappings or []:
@@ -545,14 +635,12 @@ def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]
     return pairs
 
 
-def _declared_identity_names(
+def _contract_identity_names(
     contract_primary_key: str | None,
     stream_contracts: list[dict[str, Any]] | None,
     stream_name: str,
-    destination_pk_columns: list[str] | None,
-    source_key_columns: list[str] | None,
 ) -> list[str]:
-    """The first declared identity: contract key, destination PK, source catalog key."""
+    """The contract's identity columns (single selected stream fallback, as engine_preflight)."""
     from services.primary_key import extract_contract_primary_key_columns
 
     contract = extract_contract_primary_key_columns(
@@ -560,16 +648,11 @@ def _declared_identity_names(
     )
     selected = [c for c in stream_contracts or [] if isinstance(c, dict) and c.get("selected", True)]
     if not contract and len(selected) == 1:
-        # One selected stream is this write's, whatever it is named (engine_preflight).
+        # One selected stream is this write's, whatever it is named.
         contract = extract_contract_primary_key_columns(selected)
-    contract = contract or [
+    return contract or [
         p.strip() for p in str(contract_primary_key or "").split(",") if p.strip()
     ]
-    for names in (contract, destination_pk_columns, source_key_columns):
-        cleaned = [str(n).strip() for n in names or [] if str(n or "").strip()]
-        if cleaned:
-            return cleaned
-    return []
 
 
 def _identity_pairs(
@@ -583,39 +666,16 @@ def _identity_pairs(
     stream_contracts: list[dict[str, Any]] | None,
     source_table: str,
     destination_table: str,
-    source_key_columns: list[str] | None = None,
-    declared_only: bool = False,
 ) -> list[tuple[str, str]]:
     """Source/target columns that identify a row, else every mapped column.
 
     The identity resolver is the same one uniqueness already uses. When it
     names nothing, the mapped row itself is the identity: appending that row
-    again is the same data.
-
-    ``declared_only`` (the append probe) takes a declared identity only — the
-    contract key, else the destination's primary key, else the source catalog
-    key (``source_key_columns``), else the mapped row — and never the
-    resolver's name guess: on Rfam ``clan`` the guessed ``id`` is a label, and a
-    new clan repeating it was refused as "already stored on id".
+    again is the same data. (The append probe does not use this name-aware
+    resolver: see :func:`append_identity_pair_sets`.)
     """
     mapped = _mapped_pairs(mappings)
     target_by_source = {source: target for source, target in mapped}
-    if declared_only:
-        names = _declared_identity_names(
-            contract_primary_key, stream_contracts,
-            str(destination_table or source_table or ""),
-            destination_pk_columns, source_key_columns,
-        )
-        if names:
-            from services.primary_key import _map_identity_names_to_source
-
-            return [
-                (source, target_by_source.get(source, source))
-                for source in _map_identity_names_to_source(
-                    names, mappings=list(mappings or []), source_columns=list(source_columns or [])
-                )
-            ]
-        return mapped
     try:
         from services.primary_key import resolve_primary_key_source_columns
 

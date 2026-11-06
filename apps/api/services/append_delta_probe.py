@@ -58,7 +58,7 @@ def probe_append_key_collisions_over_delta(
 ):
     """``probe_append_key_collisions`` fed the whole delta when it can be walked."""
     from services.destination_key_collision_probe import (
-        _identity_pairs,
+        append_identity_pair_sets,
         probe_append_key_collisions,
         sync_mode_appends_without_key_resolution,
     )
@@ -71,18 +71,19 @@ def probe_append_key_collisions_over_delta(
         and str(source_kind or "").lower() in {"database", "cloud"}
     ):
         try:
-            pairs = _identity_pairs(
+            # Every identity the probe checks, so the delta carries all their columns.
+            pairs = []
+            for identity, _basis in append_identity_pair_sets(
                 mappings=probe_kw.get("mappings"), source_columns=probe_kw.get("source_columns"),
-                dest_kind=str(probe_kw.get("dest_kind") or ""),
-                validation_mode=str(probe_kw.get("validation_mode") or ""),
                 destination_pk_columns=probe_kw.get("destination_pk_columns"),
+                destination_unique_keys=probe_kw.get("destination_unique_keys"),
                 contract_primary_key=probe_kw.get("contract_primary_key"),
                 stream_contracts=probe_kw.get("stream_contracts"),
                 source_table=str(probe_kw.get("source_table") or ""),
                 destination_table=str(probe_kw.get("destination_table") or ""),
                 source_key_columns=probe_kw.get("source_key_columns"),
-                declared_only=True,
-            )
+            ):
+                pairs.extend(p for p in identity if p not in pairs)
             rows = _delta_key_rows(
                 pairs=pairs,
                 cursor_column=str(probe_kw.get("incremental_cursor_column") or ""),
