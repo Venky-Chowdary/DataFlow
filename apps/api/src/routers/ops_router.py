@@ -219,14 +219,19 @@ def _capture_connector(request: Request, connector_id: str, workspace_id: str, *
 
     from services.workspace_access import tenant_scope
 
-    ws = (
-        resolve_write_workspace(request, workspace_id)
-        if write
-        else resolve_read_workspace(request, workspace_id)
-    )
-    # A platform admin with no workspace named sees every workspace's captures;
-    # anyone else sees only rows their workspace recorded (C11 review).
-    unrestricted = bool(tenant_scope(request, workspace_id).unrestricted) and not ws
+    # One scope for reading and cleaning (review): a platform admin who names
+    # no workspace acts unrestricted on both; anyone else, or an admin who
+    # names one, acts in that workspace on both.
+    scope = tenant_scope(request, workspace_id)
+    unrestricted = bool(scope.unrestricted) and not (workspace_id or "").strip()
+    if unrestricted:
+        ws = ""
+    else:
+        ws = (
+            resolve_write_workspace(request, workspace_id)
+            if write
+            else resolve_read_workspace(request, workspace_id)
+        )
     connector = get_connector(connector_id, ws or None)
     if connector is None:
         raise HTTPException(status_code=404, detail="Connector not found")

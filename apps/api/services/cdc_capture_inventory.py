@@ -167,9 +167,14 @@ def server_identity(cfg: dict[str, Any], *, sid: str | None = None) -> str:
 
 
 def _coll(name: str) -> Any | None:
-    from services.control_plane_store import mongo_collection
+    """The shared collection; None without a control plane (file fallback).
 
-    return mongo_collection(name)
+    Raises ``ControlPlaneUnavailable`` when one is configured but unreachable:
+    ownership and the auto-drop switch must never fall back to a node file.
+    """
+    from services.control_plane_store import shared_collection
+
+    return shared_collection(name)
 
 
 def _file(name: str):
@@ -271,6 +276,47 @@ def _release_alert(entry_id: str, state: str, previous: Any) -> None:
         _write_file_rows(_REGISTRY, "captures", rows)
 
 
+def _legacy_server_key(cfg: dict[str, Any]) -> str:
+    """The row key 52268a5b1 wrote: raw ``host:port/database``, loopback folded."""
+    host = str(cfg.get("host") or "localhost").strip().lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        host = "loopback"
+    return f"{host}:{str(cfg.get('port') or 5432).strip()}/{str(cfg.get('database') or 'postgres').strip()}"
+
+
+def migrate_legacy_rows(cfg: dict[str, Any], server: str) -> int:
+    """Re-key rows written before the server identity / workspace scope existed.
+
+    A legacy row carries no workspace: it gets its connector's owner workspace
+    (none known: platform scope only). Returns how many rows moved.
+    """
+    from services.connector_store import connector_owner_workspace
+
+    moved = 0
+    for row in list_registered_captures(_legacy_server_key(cfg)):
+        cid = str(row.get("connector_id") or "")
+        new = {
+            **{k: v for k, v in row.items() if k != "_id"},
+            "id": _entry_id(server, row["slot_name"]),
+            "server": server,
+            "endpoint": endpoint_key(cfg),
+            "workspace_id": row.get("workspace_id") or (connector_owner_workspace(cid)[1] if cid else ""),
+            "migrated_from": row.get("server"),
+        }
+        coll = _coll(_REGISTRY)
+        if coll is not None:
+            coll.update_one({"_id": new["id"]}, {"$setOnInsert": new}, upsert=True)
+            coll.delete_many({"_id": {"$in": [row.get("id")]}})
+        else:
+            with _file_locked(_REGISTRY):
+                rows = [r for r in _file_rows(_REGISTRY, "captures") if r.get("id") != row.get("id")]
+                if not any(r.get("id") == new["id"] for r in rows):
+                    rows.append(new)
+                _write_file_rows(_REGISTRY, "captures", rows)
+        moved += 1
+    return moved
+
+
 def forget_capture(cfg: dict[str, Any], slot_name: str) -> None:
     """Close the ownership row of a slot that is gone from the source."""
     try:
@@ -362,14 +408,6 @@ def record_pg_capture(
 # ── Who uses a slot ─────────────────────────────────────────────────────────
 
 
-def _same_server(other: dict[str, Any], cfg: dict[str, Any], server: str) -> bool:
-    if other.get("connector_id") and other.get("connector_id") == cfg.get("connector_id"):
-        return True
-    if endpoint_key(other) == endpoint_key(cfg):
-        return True
-    return server.startswith("pg:") and server_identity(other) == server
-
-
 def _schedule_slot_names(sched: Any, cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Slots the schedule derives, under the raw and the resolved database."""
     out: dict[str, dict[str, Any]] = {}
@@ -393,8 +431,20 @@ def _derive_slots(sched: Any, cfg: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
-def schedule_slot_users(cfg: dict[str, Any], server: str) -> dict[str, list[dict[str, Any]]]:
-    """slot name -> every live CDC schedule (any workspace) on this server that uses it."""
+#: Key in the users map for schedules whose slot names could not be derived.
+UNDERIVABLE = "__underivable__"
+
+
+def schedule_slot_users(cfg: dict[str, Any], server: str = "") -> dict[str, list[dict[str, Any]]]:
+    """slot name -> every live CDC schedule (any workspace, any connector) deriving it.
+
+    Matched by the derived slot name — it already embeds the database, the
+    table and the route's cursor hash — never by server identity, which a
+    rotated password or a DNS blip makes unreadable (review: that failed open).
+    A PostgreSQL CDC schedule whose names cannot be derived is listed under
+    :data:`UNDERIVABLE` with its tables, and every slot on those tables is
+    treated as in use (fails closed). ``cfg``/``server`` are kept for callers.
+    """
     from services.connector_store import get_connector
     from services.schedule_store import list_schedules
     from services.sync_cursor import normalize_sync_mode
@@ -409,17 +459,65 @@ def schedule_slot_users(cfg: dict[str, Any], server: str) -> dict[str, list[dict
             if connector is None or (connector.type or "").lower() not in {"postgresql", "postgres"}:
                 continue
             other = {**connector.to_dict(), "connector_id": connector.id}
-            if not _same_server(other, cfg, server):
-                continue
-            for slot in _schedule_slot_names(sched, other):
+            slots = _schedule_slot_names(sched, other)
+            use = {"schedule_id": sched.id, "workspace_id": sched.workspace_id or ""}
+            if not slots:
+                users.setdefault(UNDERIVABLE, []).append(
+                    {**use, "publication_name": "", "tables": _schedule_tables(sched)}
+                )
+            for slot in slots:
                 users.setdefault(slot["slot_name"], []).append(
-                    {
-                        "schedule_id": sched.id,
-                        "workspace_id": sched.workspace_id or "",
-                        "publication_name": slot.get("publication_name") or "",
-                    }
+                    {**use, "publication_name": slot.get("publication_name") or ""}
                 )
     return users
+
+
+def _schedule_tables(sched: Any) -> list[str]:
+    from services.cdc_capture_release import _capture_tables
+
+    tables = _capture_tables(sched)
+    return [str(t).split(".")[-1].lower() for t in ([tables] if isinstance(tables, str) else tables)]
+
+
+def _underivable_uses(users: dict[str, list[dict[str, Any]]], slot_name: str,
+                      tables: list[str]) -> list[dict[str, Any]]:
+    """Schedules we could not derive whose tables this slot may capture."""
+    bare = {str(t).split(".")[-1].lower() for t in tables}
+    return [
+        u for u in users.get(UNDERIVABLE, [])
+        if bare & set(u["tables"]) or any(f"_{t}_" in slot_name.lower() for t in u["tables"])
+    ]
+
+
+def _live_jobs() -> list[dict[str, Any]]:
+    """Pending/queued/running/retrying jobs (system scope), slim."""
+    from services.mongodb_service import get_mongodb_service
+
+    svc = get_mongodb_service()
+    statuses = sorted(_LIVE_JOB_STATUSES)
+    if type(svc).__name__ == "MemoryMongoDBService":
+        return [dict(j) for j in getattr(svc, "_jobs", {}).values()
+                if str(j.get("status") or "") in _LIVE_JOB_STATUSES]
+    coll = svc.get_database()["transfer_jobs"]
+    return list(coll.find(
+        {"status": {"$in": statuses}},
+        {"cursor_key": 1, "status": 1, "sync_mode": 1, "transfer_request.source": 1,
+         "transfer_request.sync_mode": 1},
+    ).limit(500))
+
+
+def _job_holds(job: dict[str, Any], entry: dict[str, Any]) -> bool:
+    if entry.get("cursor_key") and job.get("cursor_key") == entry.get("cursor_key"):
+        return True
+    req = job.get("transfer_request") or {}
+    src = req.get("source") or {}
+    sync = str(req.get("sync_mode") or job.get("sync_mode") or "").lower()
+    if not sync.startswith("cdc") or not entry.get("connector_id"):
+        return False
+    if str(src.get("connector_id") or "") != str(entry.get("connector_id")):
+        return False
+    table = str(src.get("table") or "").split(".")[-1].lower()
+    return table in {str(t).split(".")[-1].lower() for t in entry.get("tables") or []}
 
 
 def _route_running(entry: dict[str, Any] | None, slot_name: str) -> bool:
@@ -440,16 +538,18 @@ def _route_running(entry: dict[str, Any] | None, slot_name: str) -> bool:
         _logger.info("CDC lease check failed for %s: %s", slot_name, exc)
         return True
     job_ids = {str((entry or {}).get(k) or "") for k in ("created_by_job", "last_job_id")} - {""}
-    if not job_ids:
-        return False
     try:
         from services.mongodb_service import get_mongodb_service
 
         svc = get_mongodb_service()
-        return any(
+        if any(
             str((svc.get_job(jid) or {}).get("status") or "") in _LIVE_JOB_STATUSES
             for jid in job_ids
-        )
+        ):
+            return True
+        # A queued job of the same route that has no lease and is not named on
+        # the row yet (review): by cursor key, or by connector + table + cdc.
+        return any(_job_holds(job, entry or {}) for job in _live_jobs())
     except Exception as exc:  # noqa: BLE001
         _logger.info("CDC job check failed for %s: %s", slot_name, exc)
         return True
@@ -608,13 +708,18 @@ def _slot_item(
     workspace_id: str,
     unrestricted: bool,
     unregistered: re.Pattern[str],
+    users_all: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     name = slot["slot_name"]
+    users_all = users_all or {}
+    # The slot's own publication only: its row's, or its own schedule's —
+    # never a same-table stem match, which is another route's (review B1/S3).
+    own_uses = [u for u in uses if _scope_allows(u["workspace_id"], workspace_id, unrestricted)]
     pub = str((entry or {}).get("publication_name") or "") or next(
-        (u["publication_name"] for u in uses if u.get("publication_name")), ""
+        (u["publication_name"] for u in own_uses if u.get("publication_name")), ""
     )
-    if not pub:
-        pub = next((p for p in pubs if _paired(p, [name])), "")
+    if not uses:
+        uses = _underivable_uses(users_all, name, list((entry or {}).get("tables") or []))
     if entry or uses:
         ownership = "datawrap"
     elif unregistered.match(name) and slot.get("plugin") in _UNREGISTERED_PLUGINS:
@@ -698,6 +803,7 @@ def inventory_pg_captures(
             sid = _read_system_identifier(cur)
             server = server_identity(cfg, sid=sid or "")
             slots, pubs = _read_source(cur)
+            migrate_legacy_rows(cfg, server)
             registry = {
                 e["slot_name"]: e
                 for e in list_registered_captures(f"ep:{endpoint_key(cfg)}")
@@ -733,7 +839,7 @@ def inventory_pg_captures(
             _slot_item(
                 slot, entry=entry, uses=uses, present=present_by_slot.get(slot["slot_name"], {}),
                 pubs=pubs, workspace_id=workspace_id, unrestricted=unrestricted,
-                unregistered=unregistered,
+                unregistered=unregistered, users_all=users,
             )
         )
     offered = {i["publication_name"] for i in items if i.get("publication_name")}
@@ -822,9 +928,37 @@ def _drop_reporting(cfg: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]
         return {"action": "failed", "reason": str(exc)[:300]}
 
 
-def _still_unused(cfg: dict[str, Any], item: dict[str, Any]) -> str:
-    """Re-check right before a drop; returns why not, or "" when it may go."""
+def _publication_users(
+    cfg: dict[str, Any], pub: str, slot: str, users: dict[str, list[dict[str, Any]]]
+) -> list[str]:
+    """Other slot rows (any workspace) or schedules that use this publication."""
+    if not pub:
+        return []
+    out = [
+        f"slot {e['slot_name']}"
+        for e in list_registered_captures(server_identity(cfg))
+        + list_registered_captures(f"ep:{endpoint_key(cfg)}")
+        if e.get("publication_name") == pub and e.get("slot_name") != slot
+    ]
+    out += [
+        f"schedule {u['schedule_id']}"
+        for name, uses in users.items()
+        if name != slot
+        for u in uses
+        if u.get("publication_name") == pub
+    ]
+    return out
+
+
+def _still_unused(cfg: dict[str, Any], item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Re-check right before a drop: ``(why not, what may go)``.
+
+    The slot goes only when no schedule derives it and no run holds it; its
+    publication goes with it only when no other slot row or schedule uses
+    that publication — otherwise the slot alone is dropped.
+    """
     slot = str(item.get("slot_name") or "")
+    pub = str(item.get("publication_name") or "")
     try:
         server = server_identity(cfg)
         registry = {
@@ -833,16 +967,21 @@ def _still_unused(cfg: dict[str, Any], item: dict[str, Any]) -> str:
             + list_registered_captures(server)
         }
         entry = registry.get(slot) or next(
-            (e for e in registry.values() if e.get("publication_name") == item.get("publication_name")),
-            None,
+            (e for e in registry.values() if pub and e.get("publication_name") == pub), None
         )
-        if slot and schedule_slot_users(cfg, server).get(slot):
-            return "a CDC schedule uses it"
+        users = schedule_slot_users(cfg, server)
+        if slot and (users.get(slot) or _underivable_uses(users, slot, list((entry or {}).get("tables") or []))):
+            return "a CDC schedule uses it", item
         if _route_running(entry or {"cursor_key": item.get("cursor_key")}, slot):
-            return "a CDC run holds it"
+            return "a CDC run holds it", item
+        others = _publication_users(cfg, pub, slot, users)
+        if others and not slot:
+            return f"publication {pub} is used by {', '.join(others)}", item
+        if others:
+            return "", {**item, "publication_name": None, "publication_kept_for": others}
     except Exception as exc:  # noqa: BLE001 - doubt keeps the slot
-        return f"in-use check failed: {exc}"[:300]
-    return ""
+        return f"in-use check failed: {exc}"[:300], item
+    return "", item
 
 
 def cleanup_pg_captures(
@@ -938,10 +1077,13 @@ def _cleanup_one(
         return {**base, "action": "skipped", "reason": reason}
     if dry_run:
         return {**base, "action": "would_drop"}
-    why = _still_unused(cfg, item)
+    why, target = _still_unused(cfg, item)
     if why:
         return {**base, "action": "skipped", "reason": why}
-    return {**base, **_drop_reporting(cfg, item)}
+    out = {**base, **_drop_reporting(cfg, target)}
+    if target.get("publication_kept_for"):
+        out["publication_kept_for"] = target["publication_kept_for"]
+    return out
 
 
 # ── The automatic-drop setting (shared across replicas) ────────────────────
@@ -1111,9 +1253,12 @@ def _sweep_one(
     # The grace runs from the later of "tables gone" and "setting turned on":
     # turning the setting on never drops at once a slot seen gone long ago.
     gone = min(_gone_for(since, now), _gone_for(auto_drop.get("enabled_at") or now.isoformat(), now))
-    if gone < grace or not item["cleanup_allowed"] or _still_unused(cfg, item):
+    if gone < grace or not item["cleanup_allowed"]:
         return out
-    detail = _drop_reporting(cfg, item)
+    why, target = _still_unused(cfg, item)
+    if why:
+        return out
+    detail = _drop_reporting(cfg, target)
     out.update(detail)
     if detail.get("action") == "dropped":
         from services.audit_coverage import record_security_event
@@ -1148,6 +1293,23 @@ def _sweep_one_safely(
         return {"slot_name": item.get("slot_name"), "action": "failed", "reason": str(exc)[:300]}
 
 
+def _connector_for_endpoint(entry: dict[str, Any]) -> str:
+    """A saved PostgreSQL connector whose resolved endpoint is the row's."""
+    from services.connector_store import list_connectors
+    from services.workspace_filter import bound_workspace_filter
+
+    endpoint = str(entry.get("endpoint") or "")
+    if not endpoint:
+        return ""
+    with bound_workspace_filter(None):
+        for conn in list_connectors():
+            if (conn.type or "").lower() in {"postgresql", "postgres"} and endpoint_key(
+                conn.to_dict()
+            ) == endpoint:
+                return conn.id
+    return ""
+
+
 def sweep_source_gone_captures(*, min_interval_sec: float = 300.0) -> list[dict[str, Any]]:
     """Detect orphaned Datawrap slots, warn and alert; drop only when the setting allows.
 
@@ -1173,9 +1335,15 @@ def sweep_source_gone_captures(*, min_interval_sec: float = 300.0) -> list[dict[
     outcomes: list[dict[str, Any]] = []
     by_connector: dict[str, list[dict[str, Any]]] = {}
     for entry in list_registered_captures():
-        cid = str(entry.get("connector_id") or "")
+        cid = str(entry.get("connector_id") or "") or _connector_for_endpoint(entry)
         if cid:
             by_connector.setdefault(cid, []).append(entry)
+        else:
+            _logger.warning(
+                "CDC capture %s was recorded without a saved connector and none matches "
+                "its endpoint %s; the beat cannot inspect it — list it from a connector "
+                "on that server.", entry.get("slot_name"), entry.get("endpoint"),
+            )
     grace = _grace_seconds()
     auto_drop = auto_drop_state()
     now = datetime.now(timezone.utc)

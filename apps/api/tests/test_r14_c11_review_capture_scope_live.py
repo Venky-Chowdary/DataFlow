@@ -267,7 +267,9 @@ def test_s3_a_pre_registry_routes_publication_is_never_offered_and_resume_adopts
     _coll("cdc_capture_registry").delete_many({"slot_name": slot})
     listing = world.listing(world.ent.admin, world.x)
     item = _item(listing, slot)
-    assert item["ownership"] == "datawrap_named" and item["publication_name"] == pub, item
+    # Not recorded: its publication is never guessed from the table stem
+    # (that is how another route's publication got dropped, second review).
+    assert item["ownership"] == "datawrap_named" and item["publication_name"] is None, item
     assert not [c for c in listing["captures"] if c["state"] == "orphaned_publication"], listing
     out = world.cleanup(world.ent.admin, world.x, publication_names=[pub], include_unregistered=True)
     assert out["dropped"] == [] and pub in _pubs(), out
@@ -391,3 +393,133 @@ def test_nit_grace_counts_from_enabling_and_absent_drops_are_not_drops(world, mo
         world.ent.admin.patch("/api/v1/workspace/settings", json={"cdc_orphan_auto_drop": False})
     absent = inv._drop({**_SRC, "connector_id": world.x}, {"slot_name": slot, "publication_name": ""})
     assert absent["action"] == "already_absent", absent
+
+
+# ── Second review (dc2791d14) ──────────────────────────────────────────────
+
+
+def _plain_slot(world, plugin: str = "pgoutput") -> str:
+    """A Datawrap-named slot on the route's table with no publication on record."""
+    name = f"df_dataflow_{world.table}_{uuid.uuid4().hex[:8]}"
+    _sql("SELECT pg_create_logical_replication_slot(%s, %s)", (name, plugin))
+    return name
+
+
+def test_r2_an_orphan_on_the_same_table_never_takes_another_routes_publication(world):
+    from services.cdc_capture_inventory import list_registered_captures, record_pg_capture
+
+    job = world.run_cdc()
+    live_slot = world.ours().pop()
+    world.schedule(job)
+    live_pub = [e for e in list_registered_captures() if e["slot_name"] == live_slot][0][
+        "publication_name"
+    ]
+    assert live_pub in _pubs()
+    # Workspace B: an orphaned slot on the same table, no publication recorded.
+    orphan = _plain_slot(world, "test_decoding")
+    record_pg_capture(
+        {**_SRC, "connector_id": world.y_other_ws, "job_id": "gone"},
+        slot_name=orphan, publication_name="", cursor_key=f"k-{world.token}",
+        schema="public", tables=[world.table], plugin="test_decoding",
+    )
+    listing = world.listing(world.b, world.y_other_ws)
+    assert live_pub not in json.dumps(listing), "B's listing names A's publication"
+    out = world.cleanup(world.b, world.y_other_ws)
+    assert out["dropped"] == [orphan], out
+    assert live_pub in _pubs(), "B's cleanup dropped A's live publication"
+    # A platform admin naming an unrecorded look-alike on the same table.
+    stray = _plain_slot(world)
+    out = world.cleanup(world.ent.admin, world.x, slot_names=[stray], include_unregistered=True)
+    assert out["dropped"] == [stray], out
+    assert live_pub in _pubs()
+    # A's route still runs.
+    world.run_cdc()
+
+
+def test_r2_a_publication_another_row_uses_is_kept_when_the_slot_goes(world):
+    from services.cdc_capture_inventory import list_registered_captures, record_pg_capture
+
+    world.run_cdc()
+    live_slot = world.ours().pop()
+    live_pub = [e for e in list_registered_captures() if e["slot_name"] == live_slot][0][
+        "publication_name"
+    ]
+    twin = _plain_slot(world)
+    record_pg_capture(
+        {**_SRC, "connector_id": world.x, "job_id": "gone"}, slot_name=twin,
+        publication_name=live_pub, cursor_key=f"twin-{world.token}", schema="public",
+        tables=[world.table], plugin="pgoutput",
+    )
+    out = world.cleanup(world.a, world.x, slot_names=[twin])
+    assert out["dropped"] == [twin], out
+    assert out["results"][0].get("publication_kept_for"), out
+    assert live_pub in _pubs() and live_slot in _slots()
+
+
+def test_r5_an_unreadable_connector_identity_still_counts_its_schedule(world):
+    from services.connector_store import update_connector
+
+    job = world.run_cdc()
+    slot = world.ours().pop()
+    world.schedule(job)
+    # The schedule's connector can no longer log in (rotated password).
+    update_connector(world.x, {"password": "rotated-wrong"})
+    item = _item(world.listing(world.a, world.y_same_ws), slot)
+    assert item["state"] == "in_use", item
+    assert world.cleanup(world.a, world.y_same_ws)["dropped"] == []
+    assert slot in _slots()
+
+
+def test_r7_legacy_rows_are_migrated_and_a_pending_job_by_cursor_key_holds_the_slot(world):
+    from services.cdc_capture_inventory import _coll, list_registered_captures
+    from services.mongodb_service import get_mongodb_service
+
+    world.run_cdc()
+    slot = world.ours().pop()
+    row = [e for e in list_registered_captures() if e["slot_name"] == slot][0]
+    # A 52268a5b1 row: raw host:port/db key, no workspace.
+    legacy_server = f"loopback:{_SRC['port']}/{_SRC['database']}"
+    coll = _coll("cdc_capture_registry")
+    coll.delete_many({"slot_name": slot})
+    coll.insert_one({**{k: v for k, v in row.items() if k not in ("workspace_id",)},
+                     "_id": f"{legacy_server}|{slot}", "id": f"{legacy_server}|{slot}",
+                     "server": legacy_server})
+    item = _item(world.listing(world.a, world.x), slot)
+    assert item is not None and item["ownership"] == "datawrap", item
+    moved = [e for e in list_registered_captures() if e["slot_name"] == slot]
+    assert [m["server"] for m in moved] == [row["server"]] and moved[0]["workspace_id"] == world.ws_a
+    # A queued run of the same route: no lease, not named on the row.
+    svc = get_mongodb_service()
+    queued = svc.create_transfer_job({"name": f"q-{world.token}", "workspace_id": world.ws_a})
+    svc.get_database()["transfer_jobs"].update_one(
+        {"name": f"q-{world.token}"}, {"$set": {"status": "pending", "cursor_key": row["cursor_key"]}}
+    )
+    assert queued
+    item = _item(world.listing(world.a, world.x), slot)
+    assert item["state"] == "running", item
+    assert world.cleanup(world.a, world.x)["dropped"] == []
+
+
+def test_r7_a_platform_admin_reads_and_cleans_the_same_scope(world):
+    world.run_cdc()
+    slot = world.ours().pop()
+    listing = world.listing(world.ent.admin, world.x)
+    assert _item(listing, slot) is not None
+    res = world.ent.admin.post("/api/v1/ops/cdc-captures/cleanup",
+                               json={"connector_id": world.x, "dry_run": True})
+    assert res.status_code == 200, res.text
+    assert slot in [r["slot_name"] for r in res.json()["results"]], res.json()
+
+
+def test_r7_a_row_without_a_connector_is_swept_through_its_endpoint(world, monkeypatch):
+    import services.cdc_capture_inventory as inv
+    import services.notification_service as ns
+    from services.cdc_capture_inventory import _coll, list_registered_captures
+
+    monkeypatch.setattr(ns, "notify_workspace", lambda *a, **k: [])
+    world.run_cdc()
+    slot = world.ours().pop()
+    _coll("cdc_capture_registry").update_many({"slot_name": slot}, {"$set": {"connector_id": ""}})
+    assert [e["connector_id"] for e in list_registered_captures() if e["slot_name"] == slot] == [""]
+    out = inv.sweep_source_gone_captures(min_interval_sec=0)
+    assert any(o.get("slot_name") == slot for o in out), out
