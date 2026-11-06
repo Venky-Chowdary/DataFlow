@@ -56,6 +56,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "audit.verify.read": "The audit chain was verified.",
     "audit.verify_pack.read": "An audit proof pack was verified.",
     "audit.chain.reanchor": "A platform admin planned or applied an audit chain re-anchor.",
+    "audit.key_history.reanchor": "A platform admin planned or applied an audit key-history re-anchor.",
     "audit.secret_scan.read": "Audit events were scanned for sensitive values.",
     "scim.user.create": "A SCIM user was created.",
     "scim.user.replace": "A SCIM user was replaced.",
