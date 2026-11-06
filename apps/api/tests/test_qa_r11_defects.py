@@ -308,8 +308,13 @@ def test_empty_object_store_integer_is_null_not_quarantine():
     assert mapped == [("A", 4), ("B", None)]
 
 
-def test_bad_rows_at_the_end_of_a_file_do_not_drop_the_prefix(tmp_path):
-    """Bad casts after a good prefix quarantine those rows and keep the rest (R4-D02)."""
+@pytest.mark.parametrize("mode", ["lenient", "strict"])
+def test_bad_rows_at_the_end_of_a_file_do_not_drop_the_prefix(tmp_path, mode):
+    """Bad casts after a good prefix quarantine those rows and keep the rest (R4-D02).
+
+    That is lenient's verdict (validation_mode_contract.mode_holdout_kind);
+    strict holds nothing out, so there the same file blocks (QA C2 review 3 #6).
+    """
     from src.transfer.file_stream import stream_file_to_database
     from src.transfer.models import EndpointConfig
     from services.preflight_service import run_file_preflight
@@ -342,9 +347,13 @@ def test_bad_rows_at_the_end_of_a_file_do_not_drop_the_prefix(tmp_path):
         destination_db_type="sqlite",
         source_kind="file",
         skip_population_fit=True,
+        validation_mode=mode,
     )
     decision = (result.get("proof_bundle") or {}).get("transfer_decision") or {}
     reason = str(decision.get("reason") or "")
+    if mode == "strict":
+        assert decision.get("decision") == "block", reason
+        return
     assert "Sample transform / cast failures" not in reason
     assert "Lossy / fidelity collapse" not in reason
     assert decision.get("decision") != "block"
@@ -370,7 +379,7 @@ def test_bad_rows_at_the_end_of_a_file_do_not_drop_the_prefix(tmp_path):
             },
         ],
         schema={"id": "INTEGER", "qty": "INTEGER"},
-        validation_mode="balanced",
+        validation_mode=mode,
         skip_preflight=True,
     )
     assert written == 8

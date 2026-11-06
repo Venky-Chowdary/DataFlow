@@ -76,8 +76,13 @@ def test_bad_row_near_the_top_of_a_file_quarantines_and_loads_the_rest(tmp_path)
     assert rows == [(2, 10), (3, 20)]
 
 
-def test_mixed_sample_does_not_block_on_sample_transform():
-    """A bad first row plus good rows is a holdout, not a blocking sample transform."""
+@pytest.mark.parametrize("mode", ["lenient", "strict"])
+def test_mixed_sample_does_not_block_on_sample_transform(mode):
+    """A bad first row plus good rows is a holdout, not a blocking sample transform.
+
+    That is lenient's verdict (validation_mode_contract.mode_holdout_kind);
+    strict holds nothing out, so there it blocks (QA C2 review 3 #6).
+    """
     from services.preflight_service import run_file_preflight
 
     result = run_file_preflight(
@@ -100,11 +105,15 @@ def test_mixed_sample_does_not_block_on_sample_transform():
         destination_table_exists=True,
         destination_db_type="sqlite",
         skip_population_fit=True,
+        validation_mode=mode,
     )
     decision = (
         (result.get("proof_bundle") or {}).get("transfer_decision") or {}
     )
     reason = str(decision.get("reason") or "")
+    if mode == "strict":
+        assert decision.get("decision") == "block", reason
+        return
     assert "Sample transform / cast failures" not in reason
     assert decision.get("decision") != "block"
     kinds = [
