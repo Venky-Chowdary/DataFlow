@@ -549,6 +549,10 @@ def reanchor_key_history(*, actor: str, reason: str, dry_run: bool = False) -> d
     dropped — they cannot be told from forged ones — so records before the
     re-anchor naming a key off the history read as lost keys, and relabels
     after it are still caught. ``dry_run`` reports what it would do.
+
+    Also the upgrade path from the a350ff42a row format (never released;
+    test deployments only): those rows fail the current MAC and read as
+    tampered until a platform admin re-anchors.
     """
     coll = _history_coll()
     if coll is None:

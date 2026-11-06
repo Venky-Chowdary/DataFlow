@@ -566,6 +566,12 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
     the history's epoch to it and drops entries whose MAC fails; records
     before it naming a key off the history then read as lost keys, never
     verified. A workspace admin cannot do this.
+
+    Upgrade note: key-history rows written in the a350ff42a format (MAC
+    without namespace, epoch without a chain anchor) fail the current MAC and
+    read as ``key_history_tampered`` until re-anchored here. That format was
+    never released, so only test deployments of the integration branch are
+    affected.
     """
     from services import audit_chain_keystore as keystore
     from services.audit_log import actor_from_request
