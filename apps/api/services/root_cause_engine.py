@@ -640,6 +640,10 @@ def _is_duplicate_signal(
     blob_early = _blob(message, details)
     if re.search(r"wal_level|logical decoding", blob_early, re.I):
         return False
+    # A server that forces a PRIMARY KEY on CREATE (MySQL D2) is a target-DDL
+    # requirement; no duplicate row is involved.
+    if re.search(r"sql_require_primary_key|innodb_force_primary_key", blob_early, re.I):
+        return False
     if re.search(r"poll cursor .+ is the primary key", blob_early, re.I):
         return False
     if details.get("duplicate_keys") or details.get("identity_duplicates"):

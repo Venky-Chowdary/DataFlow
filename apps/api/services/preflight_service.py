@@ -1162,7 +1162,7 @@ def run_file_preflight(
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
         proven_width_narrowings=proven_string_narrowings,
-        population_fit_report=pre_gate_fit_report,
+        population_fit_report=pre_gate_fit_report, destination_config=destination_config,
     )
 
     # Two questions, two truths, and an approved pre-load transform separates
