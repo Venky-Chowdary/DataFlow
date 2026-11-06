@@ -195,7 +195,7 @@ def begin_keyed_write_witness(
         reason = "not_a_keyed_upsert"
     elif int(expected_rows or 0) > MAX_LADDER_ROWS:
         reason = "population_exceeds_ladder_budget"
-    from services.destination_write_lock import EXCLUSIVE, destination_lock_mode
+    from services.destination_write_lock import EXCLUSIVE, destination_lock_mode, lock_enabled
 
     witness: KeyedWriteWitness | None = None
     with _LOCK:
@@ -203,6 +203,8 @@ def begin_keyed_write_witness(
         if not reason and jid not in _ACTIVE_JOBS:
             # A caller outside execute_tracked: nothing would release it.
             reason = "outside_a_tracked_job"
+        if not reason and not lock_enabled():
+            reason = "destination_write_lock_off"
         if not reason and destination_lock_mode(jid) != EXCLUSIVE:
             # Another DataFlow job may write the table inside this run's window
             # and be overwritten late; the witness would excuse it (review M2).
@@ -217,7 +219,17 @@ def begin_keyed_write_witness(
             witness.expected_rows = max(int(expected_rows or 0), 0)
             _REGISTRY[jid] = witness
     if isinstance(summary, dict):
-        summary[SUMMARY_KEY] = {"started": witness is not None, "reason": reason}
+        summary[SUMMARY_KEY] = {
+            "started": witness is not None, "reason": reason,
+            "destination_write_lock": {"enabled": lock_enabled(), "mode": destination_lock_mode(jid)},
+        }
+    if reason == "destination_write_lock_off" and jid:
+        from services.would_apply_audit import audit_would_apply
+
+        audit_would_apply(
+            "gate8.would_attribute_concurrent_drift", resource=jid, dedupe_key=jid,
+            details={"keys": list(key_columns or [])}, flag="DATAFLOW_DEST_WRITE_LOCK",
+        )
     return witness
 
 

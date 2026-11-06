@@ -25,6 +25,13 @@ import pytest
 from tests.test_r14_ladder_composite_key_scope_live import _l2, _run, world  # noqa: F401 — fixture
 
 
+@pytest.fixture(autouse=True)
+def _destination_write_lock_on(monkeypatch):
+    """Re-read attribution needs DATAFLOW_DEST_WRITE_LOCK=1 (off by default:
+    then this route is disclosed-unattributed, see ZERO_LOSS P5)."""
+    monkeypatch.setenv("DATAFLOW_DEST_WRITE_LOCK", "1")
+
+
 def test_a_silently_rewritten_cell_fails_the_job_naming_key_and_column(world):
     fake, conn, src, dst = world
     assert _run(fake, src, dst).success

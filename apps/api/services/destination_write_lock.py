@@ -44,6 +44,17 @@ _LOCK = threading.Lock()
 _HELD: dict[str, tuple[Any, str]] = {}
 
 
+#: Off by default (review of f3a4c29b0): with it off no lock is taken, so no
+#: witness attributes and re-read routes stay disclosed-unattributed.
+FLAG = "DATAFLOW_DEST_WRITE_LOCK"
+
+
+def lock_enabled() -> bool:
+    from services.brand_env import getenv_brand_bool
+
+    return getenv_brand_bool(FLAG, False)
+
+
 class DestinationBusy(RuntimeError):
     """Another job held the destination table past the wait deadline."""
 
@@ -82,6 +93,8 @@ def _keyed_sync(request: Any) -> bool:
 def hold_destination_write_lock(request: Any, job_id: Any) -> str:
     """Take this job's destination-table lock (see module doc); returns the mode."""
     jid = str(job_id or "")
+    if not lock_enabled():
+        return ""
     dest = getattr(request, "destination", None)
     fmt = str(getattr(dest, "format", "") or "").strip().lower()
     if not jid or fmt not in {"postgresql", "postgres"} or destination_lock_mode(jid):

@@ -30,6 +30,12 @@ import src.transfer.reconcile_step as rs
 import src.transfer.stream as stream_mod
 from tests.test_r14_ladder_composite_key_scope_live import PG, _dest, _run, world  # noqa: F401
 
+
+@pytest.fixture(autouse=True)
+def _destination_write_lock_on(monkeypatch):
+    """These tests exercise attribution, which needs DATAFLOW_DEST_WRITE_LOCK=1."""
+    monkeypatch.setenv("DATAFLOW_DEST_WRITE_LOCK", "1")
+
 CONCURRENT = "UPDATE \"{src}\" SET amount = '9.99' WHERE region = 'eu' AND id = 5"
 
 

@@ -32,6 +32,12 @@ from tests.test_r14_concurrent_source_drift_live import _inject_concurrent_updat
 from tests.test_r14_ladder_composite_key_scope_live import PG, _dest, _run, world  # noqa: F401
 
 
+
+@pytest.fixture(autouse=True)
+def _destination_write_lock_on(monkeypatch):
+    """These tests exercise attribution, which needs DATAFLOW_DEST_WRITE_LOCK=1."""
+    monkeypatch.setenv("DATAFLOW_DEST_WRITE_LOCK", "1")
+
 def _run_as(fake, src, dst, job_id, *, pk=("region", "id")):
     req = TransferRequest(
         source=EndpointConfig(kind="database", format="postgresql", schema="public", table=src, **PG),

@@ -293,6 +293,15 @@ where the source side came from:
       key was not in the write-time population. L1 and the key census still
       grade the counts. A key the run did not write is never "drift".
     * Neither side equals what was written: the key stays compared and vetoes.
+* **`DATAFLOW_DEST_WRITE_LOCK` (default off).** With the flag off, no
+  destination lock is taken and no witness attributes. Re-read routes stay on
+  the disclosed-unattributed path below: a concurrent source update is
+  disclosed, not attributed, and on a scope Gate-8 marked not comparable a
+  destination rewrite is disclosed (`value_discrepancy_unattributed`), not
+  vetoed. The job summary records the setting
+  (`keyed_write_witness.destination_write_lock`). Each keyed run that would
+  have attributed is audited as `gate8.would_attribute_concurrent_drift`.
+  With the flag on, the lock below applies.
 * **Concurrent DataFlow writers** (review M2): a witness attributes only when
   its job held the destination table's write lock exclusive, from before the
   read until the job ended (`services/destination_write_lock.py`, PostgreSQL

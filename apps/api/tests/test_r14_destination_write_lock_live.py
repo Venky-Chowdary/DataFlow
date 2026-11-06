@@ -12,6 +12,8 @@ table takes it shared, so B waits for A and lands 3.00 last.
 
 from __future__ import annotations
 
+import pytest
+
 import threading
 import uuid
 from decimal import Decimal
@@ -22,6 +24,12 @@ import src.transfer.stream_db_chunk as chunk_mod
 from tests.test_r14_ladder_composite_key_scope_live import _dest, _run, world  # noqa: F401
 from tests.test_r14_witness_review_live import _run_as
 
+
+
+@pytest.fixture(autouse=True)
+def _destination_write_lock_on(monkeypatch):
+    """These tests exercise attribution, which needs DATAFLOW_DEST_WRITE_LOCK=1."""
+    monkeypatch.setenv("DATAFLOW_DEST_WRITE_LOCK", "1")
 
 def test_review_m2_two_jobs_on_one_table_never_regress_it(world, monkeypatch):
     fake, conn, src, dst = world
@@ -88,3 +96,24 @@ def test_a_keyed_job_on_a_table_another_job_is_writing_runs_unwitnessed(world, m
     assert (res.destination_summary or {}).get("keyed_write_witness", {}).get("reason") == (
         "no_exclusive_destination_lock"
     )
+
+
+def test_with_the_flag_off_no_lock_is_taken_and_drift_is_disclosed(world, monkeypatch):
+    """Default: no destination lock, so no witness attributes; a concurrent
+    source update on a not-comparable scope stays advisory and is disclosed."""
+    from tests.test_r14_concurrent_source_drift_live import _inject_concurrent_update
+
+    monkeypatch.delenv("DATAFLOW_DEST_WRITE_LOCK", raising=False)
+    fake, conn, src, dst = world
+    conn.cursor().execute(f"INSERT INTO \"{dst}\" VALUES ('ap', 99, 9.99, 'loaded elsewhere')")
+    assert _run(fake, src, dst).success
+    _inject_concurrent_update(monkeypatch, conn, src, when="before_ladder")
+    res = _run(fake, src, dst)
+    assert res.success, res.error
+    witness = (res.destination_summary or {}).get("keyed_write_witness") or {}
+    assert witness.get("reason") == "destination_write_lock_off"
+    assert witness.get("destination_write_lock") == {"enabled": False, "mode": ""}
+    report = res.reconciliation or {}
+    assert "concurrent_source_drift" not in report
+    assert (report.get("value_discrepancy_unattributed") or {}).get("columns") == ["amount"]
+    assert not dwl._HELD
