@@ -253,6 +253,16 @@ def _proof_source_batches(
             source_endpoint=source_endpoint, src_cfg=src_cfg, read_cols=read_cols
         )
         return
+    from .proof_api_source import is_api_source, iter_api_source_batches
+
+    if is_api_source(src_type):
+        yield from iter_api_source_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        )
+        return
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import quote_sql_identifier
@@ -1669,9 +1679,9 @@ def _transform_applied_proof_impl(
             sel_cols0 = list(
                 dict.fromkeys(list(digest_cols) + list(scope_pk))
             )
-            qc0 = ", ".join(
-                quote_sql_identifier(c, dq0) for c in sel_cols0
-            )
+            from .writer_column_spelling import physical_select_list
+
+            qc0 = physical_select_list(sel_cols0, dq0)
 
             def _scoped_gen(batches):
                 nonlocal actual_rows
@@ -2130,7 +2140,9 @@ def _transform_applied_proof_impl(
             sel_cols = list(
                 dict.fromkeys(list(digest_cols) + list(scope_pk))
             )
-            qc = ", ".join(quote_sql_identifier(c, dq) for c in sel_cols)
+            from .writer_column_spelling import physical_select_list
+
+            qc = physical_select_list(sel_cols, dq)
             stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
             if scd2_opts:
                 from services.scd2_engine import scd2_is_current_predicate
@@ -6835,7 +6847,11 @@ def _run_reconciliation_impl(
             or []
         )
         if isinstance(stashed, list):
-            sample_records = [r for r in stashed if isinstance(r, dict)]
+            from .writer_column_spelling import rekey_writer_sample
+
+            sample_records = rekey_writer_sample(
+                [r for r in stashed if isinstance(r, dict)], mapping_dicts
+            )
     pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
     # X-OW1: derive the batch key list from whichever row collection this path
     # actually holds — engine-copy runs may carry full `records` without a

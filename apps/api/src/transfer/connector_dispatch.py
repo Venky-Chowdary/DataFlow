@@ -189,6 +189,14 @@ def _dial_scope(driver: str, cfg: dict[str, Any]):
     )
 
 
+#: Readers that take ``read_object(cfg=, object=, limit=, offset=)`` — SaaS
+#: APIs and non-SQL stores with no SQLAlchemy dialect. Shared with the Gate-8
+#: transform proof so it re-reads these sources through the same reader (D269).
+REGISTRY_OBJECT_READERS = frozenset(
+    {"salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "iceberg"}
+)
+
+
 def read_via_registry(
     driver: str,
     *,
@@ -242,7 +250,7 @@ def _read_via_registry_unscoped(
         )
     # SaaS readers use read_object(cfg=, object=, limit=). Iceberg needs the full
     # resolved config (warehouse, region, extra catalog properties) too.
-    if driver in {"salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "iceberg"}:
+    if driver in REGISTRY_OBJECT_READERS:
         saas_kwargs: dict[str, Any] = {}
         if cursor_column:
             # Keyset seek for SaaS APIs whose OFFSET paging is capped.

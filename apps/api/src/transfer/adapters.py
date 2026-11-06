@@ -1501,6 +1501,11 @@ def write_destination_database(
         write_mode = decided.write_mode
         options["write_mode"] = decided.write_mode
     match_token = set_match_action(decided.match_action)
+    # The population handed to the writer, counted before it can release the
+    # list. A writer stamps ``source_row_count`` as the rows it *accepted*;
+    # Gate-8 then subtracted the quarantined rows a second time ("source 29,
+    # rejected 1 ... expected target 28 vs target 29", D269).
+    records_in = None if spill is not None else len(records or [])
     try:
         # The Map governs holdouts for the whole write, including the bind and
         # salvage paths that stamp their own details.
@@ -1524,6 +1529,12 @@ def write_destination_database(
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
     if census_payload is not None and isinstance(summary, dict):
         summary[CENSUS_KEY] = census_payload
+    if isinstance(summary, dict) and "source_row_count_source" not in summary:
+        # Reader-side count: STRUCT explode is added back via rows_expanded below.
+        population = spill.unexpanded_row_count if spill is not None else records_in
+        if isinstance(population, int) and population >= 0:
+            summary["source_row_count"] = int(population)
+            summary["source_row_count_source"] = "engine_write_population"
     if spill is not None and isinstance(summary, dict):
         summary["engine_record_spill"] = {
             "spilled": spill.spilled,
