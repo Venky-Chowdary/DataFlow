@@ -194,8 +194,12 @@ def job_phase_heartbeat(
     progress_pct: Any = None,
     records_processed: int | None = None,
     total_rows: int | None = None,
+    until: Any = None,
 ) -> Iterator[None]:
     """Pulse a long phase so the job does not look stalled (D19).
+
+    ``until`` (optional, no arguments) ends the pulse early once it returns
+    true, e.g. when committed batches start reporting their own progress.
 
     ``reconcile_phase_heartbeat`` owns the 98–99 band; this is the same
     contract for any other phase — connect, destination create, slow source
@@ -208,6 +212,8 @@ def job_phase_heartbeat(
 
     def _pulse() -> None:
         while not stop.wait(interval_s):
+            if until is not None and until():
+                return
             elapsed = int(time.monotonic() - started)
             kwargs: dict[str, Any] = {
                 "phase": phase,

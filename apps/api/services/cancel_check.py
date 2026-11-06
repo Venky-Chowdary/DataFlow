@@ -10,9 +10,10 @@ cancel stops further writes instead of being noticed at the end.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from services.error_handling import TransferCancelled
 
@@ -202,6 +203,55 @@ class ProgressMeter:
             )
         except Exception as exc:  # noqa: BLE001 - progress must never fail a write
             logger.debug("progress heartbeat skipped for %s: %s", self._job_id, exc)
+
+
+#: Seconds between pulses while a run waits on one blocking step (D19).
+BLOCKING_STEP_PULSE_SECONDS = 15.0
+
+
+@contextlib.contextmanager
+def blocking_step(message: str, *, phase: str = "writing") -> Iterator[None]:
+    """Say what the run is waiting on, and keep the job's heartbeat moving.
+
+    Between the engine's last phase message and the first committed batch the
+    run can wait minutes on one call (the source executing its query, a first
+    page over a slow link). Nothing reached the job row in that window: it read
+    "Connecting to destination and creating table..." with ``updated_at``
+    frozen while the wait was the *source* (D19). Inside this scope the message
+    names the real wait at once and the existing phase pulse
+    (``job_phase_heartbeat``) stamps elapsed time until rows start arriving;
+    from then on the per-batch meter is the heartbeat. A no-op outside a run,
+    for a cancelled job (the status fence refuses it) and for a superseded
+    attempt.
+    """
+    meter = _meter.get()
+    if meter is None:
+        yield
+        return
+    mongo, job_id = meter._mongo, meter._job_id
+    rows_at_entry = meter.mark()
+    try:
+        job = _read_job(mongo, job_id) or {}
+        live = str(job.get("status") or "") == "running" and not _is_superseded(job)
+        if live:
+            mongo.update_job_status(job_id, "running", phase=phase, message=message)
+    except Exception as exc:  # noqa: BLE001 - a status line must never fail the read
+        logger.debug("blocking-step message skipped for %s: %s", job_id, exc)
+        live = False
+    if not live:
+        yield
+        return
+    from src.transfer.reconcile_heartbeat import job_phase_heartbeat
+
+    with job_phase_heartbeat(
+        mongo,
+        job_id,
+        phase=phase,
+        message=message,
+        interval_s=BLOCKING_STEP_PULSE_SECONDS,
+        until=lambda: meter.mark() > rows_at_entry,
+    ):
+        yield
 
 
 def set_progress_meter(meter: "ProgressMeter | None") -> None:

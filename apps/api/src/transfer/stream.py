@@ -169,6 +169,19 @@ def _source_name(source: EndpointConfig) -> str:
 from .batch_readers import _read_batch_impl  # noqa: E402
 
 
+def _first_page_message(run: Any) -> str:
+    """``Reading the first rows from the source (mysql 10.0.0.5:3306)...``."""
+    from src.ai.copilot.tool_deadline import describe_target
+
+    cfg = run.cfg.src_cfg if isinstance(run.cfg.src_cfg, dict) else {}
+    where = describe_target(cfg) or str(cfg.get("database") or "")
+    label = " ".join(p for p in (str(run.cfg.src_type or ""), where) if p)
+    return (
+        f"Reading from the source ({label or 'source'}) - waiting for it to "
+        "answer; rows are counted as they arrive…"
+    )
+
+
 def _read_batch(*args, **kwargs):
     """Retry transient source-read errors without leaking partial state."""
     budget = RetryBudget(
@@ -722,35 +735,39 @@ def _stream_database_transfer_impl(
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
-        fast = None if (
-            pending_shape
-            or writer_owns_evolution
-            or dest_proc_plan is not None
-            or run.cfg.fk_orphan_guard is not None
-            or bool(risk_contract_columns)
-        ) else _try_copy_fast_path(
-            source=run.cfg.source,
-            destination=run.cfg.destination,
-            mappings=run.cfg.mappings,
-            schema=run.cfg.schema,
-            src_type=run.cfg.src_read_type,
-            dest_type=run.cfg.dest_type,
-            src_cfg=run.cfg.src_cfg,
-            dest_cfg=run.cfg.dest_cfg,
-            effective_sync=run.cfg.effective_sync,
-            incremental=run.cfg.incremental,
-            source_filter=run.cfg.source_filter,
-            limit=run.cfg.limit,
-            checkpoint=checkpoint,
-            incremental_cursor=run.cfg.cursor_source_col if run.cfg.incremental else "",
-            incremental_watermark=pre_copy_watermark,
-            incremental_pk=(run.cfg.cursor_pk_source or "") if run.cfg.incremental else "",
-            incremental_key=(
-                (run.cfg.pk_source_cols[0] if run.cfg.pk_source_cols else "")
-                if run.cfg.incremental else ""
-            ),
-            job_id=run.cfg.job_id,
-        )
+        from services.cancel_check import blocking_step
+
+        # D19: a COPY waits on the source's query before its first row.
+        with blocking_step(_first_page_message(run)):
+            fast = None if (
+                pending_shape
+                or writer_owns_evolution
+                or dest_proc_plan is not None
+                or run.cfg.fk_orphan_guard is not None
+                or bool(risk_contract_columns)
+            ) else _try_copy_fast_path(
+                source=run.cfg.source,
+                destination=run.cfg.destination,
+                mappings=run.cfg.mappings,
+                schema=run.cfg.schema,
+                src_type=run.cfg.src_read_type,
+                dest_type=run.cfg.dest_type,
+                src_cfg=run.cfg.src_cfg,
+                dest_cfg=run.cfg.dest_cfg,
+                effective_sync=run.cfg.effective_sync,
+                incremental=run.cfg.incremental,
+                source_filter=run.cfg.source_filter,
+                limit=run.cfg.limit,
+                checkpoint=checkpoint,
+                incremental_cursor=run.cfg.cursor_source_col if run.cfg.incremental else "",
+                incremental_watermark=pre_copy_watermark,
+                incremental_pk=(run.cfg.cursor_pk_source or "") if run.cfg.incremental else "",
+                incremental_key=(
+                    (run.cfg.pk_source_cols[0] if run.cfg.pk_source_cols else "")
+                    if run.cfg.incremental else ""
+                ),
+                job_id=run.cfg.job_id,
+            )
     finally:
         if fast is None:
             progress_rewind(_progress_mark)
@@ -1335,18 +1352,24 @@ def _stream_database_transfer_impl(
     if run.cfg.sdk_source and initial_batch is not None:
         probe, run.cur.ddb_cursor = initial_batch, None
     else:
-        probe, run.cur.ddb_cursor = _unwrap_read(
-            _read_batch(
-                run.cfg.src_read_type, run.cfg.src_cfg, run.cfg.table, None, 0, _batch_limit(run, 0), database=run.cfg.src_db,
-                **_probe_cursor_kw,
-                **run.cfg._scan_kw,
-                **(
-                    {"sdk_state": run.cfg.initial_sdk_state}
-                    if run.cfg.sdk_source and run.cfg.initial_sdk_state
-                    else {}
-                ),
+        from services.cancel_check import blocking_step
+
+        # D19: the first page can take minutes (the source runs its query);
+        # the job says so, and keeps pulsing, instead of a frozen
+        # "Connecting to destination..." that blamed the wrong system.
+        with blocking_step(_first_page_message(run)):
+            probe, run.cur.ddb_cursor = _unwrap_read(
+                _read_batch(
+                    run.cfg.src_read_type, run.cfg.src_cfg, run.cfg.table, None, 0, _batch_limit(run, 0), database=run.cfg.src_db,
+                    **_probe_cursor_kw,
+                    **run.cfg._scan_kw,
+                    **(
+                        {"sdk_state": run.cfg.initial_sdk_state}
+                        if run.cfg.sdk_source and run.cfg.initial_sdk_state
+                        else {}
+                    ),
+                )
             )
-        )
     # This page is not thrown away — it becomes the first written batch.
     run.cfg.phase_profile.add(
         PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
