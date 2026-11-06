@@ -48,7 +48,8 @@ def _schedule(src: str, table: str, name: str) -> dict:
         "interval": "hourly",
         "timezone": "UTC",
         "procedure_params": PARAMS,
-        "mappings": [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        # Validate-approved rows: a row without confidence is refused (QA C10).
+        "mappings": [{"source": c, "target": c, "confidence": 0.99} for c in ("id", "name")],
     }
 
 

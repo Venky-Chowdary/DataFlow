@@ -923,7 +923,7 @@ async def copilot_confirm(
 
             # The store owns cadence, sync-mode and signed-contract validation —
             # chat supplies the payload, it does not get its own rule set.
-            sched = store_create_schedule(schedule_payload)
+            sched = store_create_schedule(schedule_payload, refuse_unrunnable_mappings=True)
         except ValueError as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=str(exc)) from exc

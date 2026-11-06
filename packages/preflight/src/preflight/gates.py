@@ -1860,6 +1860,119 @@ def _is_structural_review_mapping(m: Any) -> bool:
     return mapping_is_structural_review(m)
 
 
+def _mapping_field(m: Any, name: str, default: Any) -> Any:
+    """A ColumnMapping attribute or a stored mapping row's key, typed like the model."""
+    raw = m.get(name, default) if isinstance(m, dict) else getattr(m, name, default)
+    if isinstance(default, bool):
+        return bool(raw)
+    if isinstance(default, float):
+        try:
+            return float(raw if raw is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+    return raw if raw not in (None, "") else default
+
+
+def _pair(m: Any) -> str:
+    return f"{_mapping_field(m, 'source', '?')}→{_mapping_field(m, 'target', '?')}"
+
+
+def mapping_confidence_layers(
+    active: list[Any], confidence_floor: float
+) -> list[tuple[str, str, list[str]]]:
+    """G4's mapping findings, as ``(layer, message, names)``; empty means pass.
+
+    One owner for the confidence floor and its clearances: the G4 gate judges a
+    plan's ColumnMappings with it, and a schedule save judges the mapping rows
+    it stores with it (QA C10), so a schedule cannot be saved that every run
+    would refuse here. ``active`` excludes intentional omissions.
+    """
+    # Every layer is judged on every run and reported together. Returning on
+    # the first one made the operator sign a contract for ``d`` only to be
+    # refused next on ``amt``/``qty`` below the floor (D26).
+    layers: list[tuple[str, str, list[str]]] = []
+
+    # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
+    risk_unacked = [
+        m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
+    ]
+    if risk_unacked:
+        names = [_pair(m) for m in risk_unacked]
+        layers.append((
+            "risk_unacknowledged",
+            f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
+            "with a continue execution policy (lossy/narrowing/mutate)",
+            names,
+        ))
+
+    # STRUCT flatten / specialty — boolean ack alone is insufficient.
+    structural_unacked = [
+        m
+        for m in active
+        if (
+            (_mapping_field(m, "requires_review", False) or _is_structural_review_mapping(m))
+            and _is_structural_review_mapping(m)
+            and not _risk_cleared(m)
+        )
+    ]
+    if structural_unacked:
+        names = [_pair(m) for m in structural_unacked]
+        layers.append((
+            "structural_unacknowledged",
+            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
+            "signed Migration Risk Contract",
+            names,
+        ))
+
+    # A verified continue-policy contract names this exact source → target
+    # pair with an approver and a reason: an operator approval at least as
+    # strong as ``user_override``. The plan signs one on any flagged mapping;
+    # ignoring it here left a signed approval unable to clear (D197).
+    low_confidence = [
+        m
+        for m in active
+        if _mapping_field(m, "confidence", 0.0) < confidence_floor
+        and not _mapping_field(m, "user_override", False)
+        and not _requires_risk_ack(m)
+        and not _risk_cleared(m)
+    ]
+    if low_confidence:
+        names = [f"{_pair(m)} ({_mapping_field(m, 'confidence', 0.0):.2f})" for m in low_confidence]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+        layers.append((
+            "low_confidence",
+            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
+            names,
+        ))
+
+    flagged = {id(m) for m in low_confidence}
+    ambiguous = [
+        m
+        for m in active
+        if _mapping_field(m, "requires_review", False)
+        and id(m) not in flagged
+        and not _mapping_field(m, "user_override", False)
+        and not _requires_risk_ack(m)
+        and not _is_structural_review_mapping(m)
+        and not _risk_cleared(m)
+    ]
+    if ambiguous:
+        names = [
+            f"{_pair(m)} (gap {_mapping_field(m, 'score_gap', 1.0):.2f})"
+            for m in ambiguous
+        ]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+        layers.append((
+            "ambiguous_mappings",
+            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
+            names,
+        ))
+
+    return layers
+
+
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     threshold = ctx.plan.confidence_threshold
@@ -1885,88 +1998,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
-    # Every layer is judged on every run and reported together. Returning on
-    # the first one made the operator sign a contract for ``d`` only to be
-    # refused next on ``amt``/``qty`` below the floor (D26).
-    layers: list[tuple[str, str, list[str]]] = []
-
-    # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
-    risk_unacked = [
-        m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
-    ]
-    if risk_unacked:
-        names = [f"{m.source}→{m.target}" for m in risk_unacked]
-        layers.append((
-            "risk_unacknowledged",
-            f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
-            "with a continue execution policy (lossy/narrowing/mutate)",
-            names,
-        ))
-
-    # STRUCT flatten / specialty — boolean ack alone is insufficient.
-    structural_unacked = [
-        m
-        for m in active
-        if (
-            (m.requires_review or _is_structural_review_mapping(m))
-            and _is_structural_review_mapping(m)
-            and not _risk_cleared(m)
-        )
-    ]
-    if structural_unacked:
-        names = [f"{m.source}→{m.target}" for m in structural_unacked]
-        layers.append((
-            "structural_unacknowledged",
-            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
-            "signed Migration Risk Contract",
-            names,
-        ))
-
-    # A verified continue-policy contract names this exact source → target
-    # pair with an approver and a reason: an operator approval at least as
-    # strong as ``user_override``. The plan signs one on any flagged mapping;
-    # ignoring it here left a signed approval unable to clear (D197).
-    low_confidence = [
-        m
-        for m in active
-        if m.confidence < confidence_floor
-        and not m.user_override
-        and not _requires_risk_ack(m)
-        and not _risk_cleared(m)
-    ]
-    if low_confidence:
-        names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
-        shown = ", ".join(names[:8])
-        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
-        layers.append((
-            "low_confidence",
-            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
-            names,
-        ))
-
-    flagged = {id(m) for m in low_confidence}
-    ambiguous = [
-        m
-        for m in active
-        if m.requires_review
-        and id(m) not in flagged
-        and not m.user_override
-        and not _requires_risk_ack(m)
-        and not _is_structural_review_mapping(m)
-        and not _risk_cleared(m)
-    ]
-    if ambiguous:
-        names = [
-            f"{m.source}→{m.target} (gap {m.score_gap:.2f})"
-            for m in ambiguous
-        ]
-        shown = ", ".join(names[:8])
-        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
-        layers.append((
-            "ambiguous_mappings",
-            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
-            names,
-        ))
+    layers = mapping_confidence_layers(active, confidence_floor)
 
     if layers:
         head = layers[0][1]

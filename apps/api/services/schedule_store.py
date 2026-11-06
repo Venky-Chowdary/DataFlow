@@ -1445,9 +1445,15 @@ def create_schedule(
     data: dict[str, Any],
     *,
     refuse_empty_enable: bool = False,
+    refuse_unrunnable_mappings: bool = False,
     warnings: list[str] | None = None,
 ) -> PipelineSchedule:
     """Create one schedule.
+
+    ``refuse_unrunnable_mappings`` — a user-facing save (REST, GitOps/import,
+    chat Confirm): mapping rows every run would refuse (G4 floor, Execute
+    review gate) are a 422 naming them, not a schedule that fails on its first
+    beat (QA C10).
 
     ``refuse_empty_enable`` — the caller asked for ``enabled: true`` in so many
     words (REST create). A schedule without mappings cannot be armed, so that
@@ -1551,8 +1557,13 @@ def create_schedule(
         enabled_note = ""
     if enabled_note and warnings is not None:
         warnings.append(enabled_note)
+    from services.schedule_mapping_contract import assert_schedule_mappings_executable
     from services.schedule_source_probe import assert_schedule_source
 
+    if refuse_unrunnable_mappings:
+        # A mapping every run would refuse is refused now, by the same G4 floor
+        # and Execute review gate (QA C10), not on the first unattended run.
+        assert_schedule_mappings_executable(rows, str(payload.get("validation_mode") or "strict"))
     # Outside the name lock: a catalog round trip must not serialise saves.
     assert_schedule_source(payload, armed=enabled, warnings=warnings)
     with _NAME_LOCK:
@@ -1677,6 +1688,7 @@ def update_schedule(
     data: dict[str, Any],
     *,
     warnings: list[str] | None = None,
+    refuse_unrunnable_mappings: bool = False,
 ) -> PipelineSchedule | None:
     """Update one schedule. The name lock covers the uniqueness check and the write.
 
@@ -1699,6 +1711,18 @@ def update_schedule(
             from services.schedule_source_probe import assert_schedule_source
 
             assert_schedule_source(merged, armed=armed, warnings=warnings)
+        plan_changed = any(
+            key in data and data[key] != getattr(current, key, None)
+            for key in ("mappings", "validation_mode")
+        )
+        if refuse_unrunnable_mappings and (enabling or plan_changed):
+            from services.schedule_mapping_contract import (
+                assert_schedule_mappings_executable,
+            )
+
+            assert_schedule_mappings_executable(
+                merged.get("mappings"), str(merged.get("validation_mode") or "strict")
+            )
     with _NAME_LOCK:
         return _update_schedule_locked(schedule_id, data)
 

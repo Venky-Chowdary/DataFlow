@@ -760,6 +760,7 @@ async def create_pipeline_schedule(
             # Only an explicit enabled:true is a request to arm (QA SC7); an
             # omitted flag saves an unmapped schedule as a draft and says so.
             refuse_empty_enable="enabled" in body.model_fields_set and body.enabled,
+            refuse_unrunnable_mappings=True,
             warnings=warnings,
         )
     except ApiError:
@@ -805,7 +806,9 @@ async def patch_pipeline_schedule(
         else:
             data.pop("acknowledgment_actor", None)
             data.pop("acknowledgment_reason", None)
-        updated = update_schedule(schedule_id, data, warnings=warnings)
+        updated = update_schedule(
+            schedule_id, data, warnings=warnings, refuse_unrunnable_mappings=True
+        )
     except ApiError:
         raise
     except PermissionError as exc:
