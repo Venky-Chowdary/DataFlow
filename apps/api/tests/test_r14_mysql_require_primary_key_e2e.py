@@ -20,7 +20,6 @@ the server answer stubbed, so the rule is exercised without that privilege.
 
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
