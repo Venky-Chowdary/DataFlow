@@ -155,6 +155,7 @@ def run_non_cdc_multi_stream_sequential(
     from services.rule_compiler.normalize import fold
 
     stream_names = [(c.name or "").strip() for c in selected_list]
+    last_stream_mappings: list[dict] | None = None
     procedure_refusal = review_stream_procedures(
         source,
         destination,
@@ -364,6 +365,7 @@ def run_non_cdc_multi_stream_sequential(
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
+                last_stream_mappings = list(use_mappings or [])
                 _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
                 if limit > 0:
@@ -381,6 +383,9 @@ def run_non_cdc_multi_stream_sequential(
                     sync_mode=sync_mode,
                     source=source,
                     destination=destination,
+                    # A stream that ran its own CALL/SELECT read that result,
+                    # not the table its name matches (QA C3 per-stream queries).
+                    count_source=source_patch is None,
                 )
                 raise
             record_stream_health(
@@ -406,6 +411,7 @@ def run_non_cdc_multi_stream_sequential(
                 sync_mode=sync_mode,
                 source=source,
                 destination=destination,
+                count_source=source_patch is None,
             )
         streams_ok = True
     finally:
@@ -440,6 +446,11 @@ def run_non_cdc_multi_stream_sequential(
 
     last_summary = dict(last_summary or {})
     last_summary["streams"] = stream_health
+    # Job-level Gate-8 checks the last table (reconcile_coverage names it so),
+    # so it must use that stream's own mappings; the schema is re-read like the
+    # stream's own run (an empty schema), never the first stream's.
+    if last_stream_mappings is not None:
+        last_summary["last_stream_mappings"] = last_stream_mappings
     last_summary["multi_stream"] = True
     last_summary["multi_stream_mode"] = "sequential"
     if shaped_out:
@@ -461,3 +472,20 @@ def run_non_cdc_multi_stream_sequential(
 
     annotate_last_stream_checksum_note(last_summary)
     return total_rows, ddl_log, last_summary, headers
+
+
+def last_stream_reconcile_inputs(
+    dest_summary: Any, mappings: list[dict], schema: dict[str, str]
+) -> tuple[list[dict], dict[str, str]]:
+    """(mappings, source_schema) for the job-level Gate-8 of a multi-stream job.
+
+    That Gate-8 reads the last table, so a job whose streams carry their own
+    mappings (or their own query) must be checked with the last stream's
+    mappings and a re-read schema — the first stream's made the digest of a
+    column only the last table has disagree with itself.
+    """
+    if isinstance(dest_summary, dict) and dest_summary.get("multi_stream"):
+        last = dest_summary.get("last_stream_mappings")
+        if isinstance(last, list) and last and last != list(mappings or []):
+            return list(last), {}
+    return mappings, schema

@@ -85,9 +85,6 @@ def test_unhonourable_placements_are_422_and_nothing_runs(client, query_source):
     bad = {
         "disagree": {"source_query": q, "source_extra_json": json.dumps(
             {"source_query": f"SELECT id, v FROM {query_source['src']}"})},
-        "two_streams": {"stream_contracts_json": json.dumps(
-            [{"name": "a", "source_query": q}, {"name": "b", "source_query": q}])},
-        "bad_mode": {"source_read_mode": "sql"},
         "query_mode_no_query": {"source_read_mode": "query"},
         "contracts_not_json": {"stream_contracts_json": "[{"},
     }
@@ -130,3 +127,121 @@ def test_resolver_lifts_a_single_contract_query_and_keeps_the_rest():
     with pytest.raises(CallablePlacementError):
         resolve_callable_placements(form={"procedure_params": "[1]", "procedure_call": "CALL p()"},
                                     source_extra={}, stream_contracts=None)
+
+
+# ------------------------------------------------ several streams (Studio shape)
+
+
+def _multi_form(src: str, dst: str, kind: str, contracts: list[dict], **extra: str) -> dict:
+    return {
+        "source_kind": "database", "source_format": kind, "source_connector_id": src,
+        "source_table": "", "dest_kind": "database", "dest_format": "postgresql",
+        "dest_connector_id": dst, "dest_schema": "public", "dest_table": "",
+        "stream_contracts_json": json.dumps(contracts), "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict", "async_mode": "false", **extra,
+    }
+
+
+def _contract(name: str, **extra) -> dict:
+    return {"name": name, "selected": True, "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id", **extra}
+
+
+@pytest.fixture
+def two_tables():
+    import uuid
+
+    from tests.test_r11_mysql_pg_fk_ddl_e2e import _my, _sql
+
+    tag = uuid.uuid4().hex[:6]
+    names = [f"r14ms_a_{tag}", f"r14ms_b_{tag}"]
+    for t in names:
+        _my("mysql", f"CREATE TABLE {t} (id INT UNSIGNED PRIMARY KEY, v VARCHAR(20), hidden INT)"
+                     " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            f"INSERT INTO {t} VALUES (1,'x',0),(2,NULL,0),(3,'',1),(4,' 日本 ',0)")
+    try:
+        yield names
+    finally:
+        for t in names:
+            _my("mysql", f"DROP TABLE IF EXISTS {t}")
+            _sql(f"DROP TABLE IF EXISTS {t}")
+
+
+def _pg_rows(table: str) -> list[tuple]:
+    return sorted(h.query("postgresql", f'SELECT id, v FROM "{table}"'))
+
+
+_ALL = [(1, "x"), (2, None), (3, ""), (4, " 日本 ")]
+_VISIBLE = [(1, "x"), (2, None), (4, " 日本 ")]
+
+
+def _run_ok(client, form: dict) -> dict:
+    resp = client.post("/api/v1/transfer/run", data=form)
+    assert resp.status_code == 200, resp.text
+    job = _wait(str(resp.json().get("job_id") or ""))
+    assert job.get("status") == "completed", {k: job.get(k) for k in ("status", "error", "message")}
+    return job
+
+
+def test_each_stream_runs_its_own_query(client, two_tables):
+    a, b = two_tables
+    src, dst = _connector("mysql", "source"), _connector("postgresql", "destination")
+    contracts = [
+        _contract(a, source_read_mode="query", source_query=f"SELECT id, v FROM {a} WHERE hidden = 0"),
+        _contract(b, source_read_mode="query", source_query=f"SELECT id, v FROM {b} WHERE id <= 2"),
+    ]
+    for _run in (1, 2):
+        job = _run_ok(client, _multi_form(src, dst, "mysql", contracts))
+        assert _pg_rows(a) == _VISIBLE and _pg_rows(b) == [(1, "x"), (2, None)]
+        streams = (job.get("destination_summary") or {}).get("streams") or job.get("streams") or []
+        assert streams and all((s.get("row_accounting") or {}).get("balanced") for s in streams), streams
+
+
+def test_one_query_stream_beside_a_table_stream(client, two_tables):
+    a, b = two_tables
+    src, dst = _connector("mysql", "source"), _connector("postgresql", "destination")
+    maps = [{"source": c, "target": c, "confidence": 1.0} for c in ("id", "v", "hidden")]
+    contracts = [_contract(a, source_read_mode="query",
+                           source_query=f"SELECT id, v FROM {a} WHERE hidden = 0",
+                           mappings=maps[:2]),
+                 _contract(b, mappings=maps)]
+    _run_ok(client, _multi_form(src, dst, "mysql", contracts))
+    assert _pg_rows(a) == _VISIBLE
+    assert sorted(r[:2] for r in h.query("postgresql", f'SELECT id, v FROM "{b}"')) == _ALL
+
+
+@pytest.mark.parametrize("query_source", ["mysql"], indirect=True)
+def test_table_mode_contracts_params_and_legacy_modes_are_not_refused(client, query_source):
+    src = _connector("mysql", "source")
+    dst = _connector("postgresql", "destination")
+    q = query_source["query"]
+    # A contract that only says "table" is a table copy, not a placement.
+    resp = client.post("/api/v1/transfer/run", data=_form(src, dst, query_source, **{
+        "dest_table": query_source["dst"] + "_t",
+        "mappings_json": json.dumps([{"source": c, "target": c, "confidence": 1.0}
+                                     for c in ("id", "v", "hidden")]),
+        "stream_contracts_json": json.dumps([{"name": query_source["src"],
+                                              "source_read_mode": "table",
+                                              "primary_key": ["id"]}])}))
+    assert resp.status_code == 200, resp.text
+    assert _wait(str(resp.json()["job_id"])).get("status") == "completed"
+    assert len(h.query("postgresql", f'SELECT 1 FROM "{query_source["dst"]}_t"')) == 5
+    h.drop_table("postgresql", query_source["dst"] + "_t")
+    # An unrecognised mode word is inferred as before: the query runs.
+    resp = client.post("/api/v1/transfer/run", data=_form(
+        src, dst, query_source, source_read_mode="sql", source_query=q))
+    assert resp.status_code == 200, resp.text
+    assert _wait(str(resp.json()["job_id"])).get("status") == "completed"
+    assert _rows(query_source["dst"]) == EXPECTED
+
+
+def test_procedure_params_compare_as_objects():
+    extra, _ = resolve_callable_placements(
+        form={"procedure_call": "CALL p(:n)", "procedure_params": '{"n": 3}'},
+        source_extra={"procedure_call": "CALL p(:n)", "procedure_params": {"n": 3}},
+        stream_contracts=None,
+    )
+    assert extra["procedure_params"] == {"n": 3}
+    two = [{"name": "a", "source_query": "SELECT 1"}, {"name": "b", "source_query": "SELECT 2"}]
+    extra, contracts = resolve_callable_placements(form={}, source_extra={}, stream_contracts=two)
+    assert "source_query" not in extra and contracts == two  # left for stream_multi

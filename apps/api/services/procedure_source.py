@@ -398,23 +398,34 @@ def resolve_callable_placements(
 ) -> tuple[dict[str, Any], list[Any] | None]:
     """One answer for "is this a query/procedure source, and which one?".
 
-    QA C3 / MySQL D9: ``source_read_mode``/``source_query`` sent as form
-    fields (which the route did not declare, so FastAPI dropped them) or inside
-    ``stream_contracts_json`` (stored, never read) were silently ignored: the
-    whole table was copied and reported "Row fidelity verified". Every accepted
-    placement is resolved here into the source ``extra`` Execute reads, and a
-    placement that cannot be honoured — two placements that disagree, a query
-    on more than one stream, a query on a file source, an unknown read mode —
-    raises :class:`CallablePlacementError` instead of running a different
-    transfer.
+    QA C3 / MySQL D9: ``source_read_mode``/``source_query`` sent as form fields
+    (which the route did not declare, so FastAPI dropped them) were silently
+    ignored and the whole table was copied. Form fields and
+    ``source_extra_json`` are resolved here into the source ``extra`` Execute
+    reads.
 
-    Returns ``(source_extra, stream_contracts)`` with the callable keys lifted
-    out of the contract that carried them.
+    Stream contracts are read too: with several selected streams each
+    contract's CALL/SELECT is that stream's own statement
+    (``multi_stream_plan.patches_for_stream`` via ``stream_multi``), so they are
+    left exactly as sent. Only a single selected stream's contract placement is
+    lifted onto the endpoint (one stream *is* the endpoint).
+    ``source_read_mode: "table"`` is not a placement. An unrecognised mode word
+    is inferred as before (``source_read_mode_of``).
+
+    Refused (:class:`CallablePlacementError`, HTTP 422): two endpoint-level
+    placements that disagree (``procedure_params`` compared as parsed
+    objects), a query/procedure on a file source, a query mode with no query.
+
+    Returns ``(source_extra, stream_contracts)``.
     """
     extra = dict(source_extra or {})
     found: dict[str, list[tuple[str, Any]]] = {}
 
     def _note(where: str, key: str, value: Any) -> None:
+        if key == "procedure_params":
+            value = _parsed_params(value)
+        if key == "source_read_mode" and str(value or "").strip().lower() == MODE_TABLE:
+            return
         if value in (None, "", {}, []):
             return
         found.setdefault(key, []).append((where, value))
@@ -423,20 +434,19 @@ def resolve_callable_placements(
         _note("form field", key, (form or {}).get(key))
         _note("source_extra_json", key, extra.get(key))
     contracts = None if stream_contracts is None else list(stream_contracts)
-    carriers = [
+    selected = [
         i for i, c in enumerate(contracts or [])
-        if isinstance(c, Mapping) and any(c.get(k) not in (None, "", {}, []) for k in _PLACEMENT_KEYS)
+        if isinstance(c, Mapping) and c.get("selected", True) is not False
     ]
-    if len(carriers) > 1:
-        raise CallablePlacementError(
-            "source_query / procedure_call is one per transfer, but "
-            f"{len(carriers)} stream contracts carry one. Send the query once, as the "
-            "source_query form field or in source_extra_json, and run one stream."
-        )
-    for i in carriers:
+    if len(selected) == 1:
+        i = selected[0]
         contract = dict(contracts[i])  # type: ignore[index]
         for key in _PLACEMENT_KEYS:
-            _note("stream_contracts_json", key, contract.pop(key, None))
+            value = contract.get(key)
+            if key == "source_read_mode" and str(value or "").strip().lower() == MODE_TABLE:
+                continue
+            if value not in (None, "", {}, []):
+                _note("stream_contracts_json", key, contract.pop(key))
         contracts[i] = contract  # type: ignore[index]
     for key, values in found.items():
         distinct = {json.dumps(v, sort_keys=True, default=str) for _w, v in values}
@@ -447,21 +457,6 @@ def resolve_callable_placements(
                 "Send it once."
             )
         extra[key] = values[0][1]
-    params = extra.get("procedure_params")
-    if isinstance(params, str):
-        try:
-            extra["procedure_params"] = json.loads(params) if params.strip() else {}
-        except ValueError as exc:
-            raise CallablePlacementError("procedure_params must be a JSON object.") from exc
-        if not isinstance(extra["procedure_params"], dict):
-            raise CallablePlacementError("procedure_params must be a JSON object.")
-    mode = str(extra.get("source_read_mode") or "").strip().lower()
-    if mode and mode not in {MODE_TABLE, MODE_QUERY, MODE_PROCEDURE}:
-        raise CallablePlacementError(
-            f"source_read_mode '{mode}' is not one of table, query, procedure."
-        )
-    if mode:
-        extra["source_read_mode"] = mode
     callable_mode = source_read_mode_of({"extra": extra})
     if callable_mode != MODE_TABLE:
         if str(source_kind or "").strip().lower() in {"file", "file_export", "upload", "object_store"}:
@@ -480,6 +475,21 @@ def resolve_callable_placements(
                 "source_read_mode is 'procedure' but no procedure_call was sent."
             )
     return extra, contracts
+
+
+def _parsed_params(value: Any) -> Any:
+    """``procedure_params`` as an object, whether it arrived as JSON text or a dict."""
+    if not isinstance(value, str):
+        return value
+    if not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise CallablePlacementError("procedure_params must be a JSON object.") from exc
+    if not isinstance(parsed, dict):
+        raise CallablePlacementError("procedure_params must be a JSON object.")
+    return parsed
 
 
 def callable_identity_token(source: Any) -> str:

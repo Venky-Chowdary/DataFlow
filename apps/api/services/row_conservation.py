@@ -2935,6 +2935,11 @@ def stamp_stream_populations(
         src_n = count_endpoint_rows(source)
         if src_n is not None:
             recon["source_rows"] = src_n
+    elif not count_source and type(summary.get("source_row_count")) is int:
+        # A stream that ran its own CALL/SELECT: its population is the result
+        # set the reader committed, not COUNT(*) of the table its name matches.
+        recon["source_rows"] = int(summary["source_row_count"])
+        recon["source_rows_basis"] = str(summary.get("source_row_count_source") or "reader")
     if destination is not None:
         dest_n = count_endpoint_rows(destination, table_name=dest_table)
         if dest_n is not None:

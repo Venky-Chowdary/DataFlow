@@ -137,6 +137,7 @@ from .models import (
 )
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
+from .stream_multi import last_stream_reconcile_inputs
 from .stream import (
     _discard_unconsumed_pin_ledgers,
     _kafka_accumulate_offsets,
@@ -3999,8 +4000,8 @@ class UniversalTransferEngine:
                     writer_checksum=dest_summary.get("checksum")
                     or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
-                    mappings=mappings,
-                    source_schema=schema,
+                    mappings=last_stream_reconcile_inputs(dest_summary, mappings, schema)[0],
+                    source_schema=last_stream_reconcile_inputs(dest_summary, mappings, schema)[1],
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                     shape_recipe=getattr(request, "shape_recipe", None),
@@ -4951,8 +4952,8 @@ class UniversalTransferEngine:
                     writer_checksum=dest_summary.get("checksum")
                     or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
-                    mappings=mappings,
-                    source_schema=schema,
+                    mappings=last_stream_reconcile_inputs(dest_summary, mappings, schema)[0],
+                    source_schema=last_stream_reconcile_inputs(dest_summary, mappings, schema)[1],
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                     shape_recipe=getattr(request, "shape_recipe", None),
