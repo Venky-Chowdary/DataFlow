@@ -997,7 +997,15 @@ def snowflake_converter_class() -> type:
     return _converter_class
 
 
-def _open_connection(
+def _open_connection(**kwargs: Any) -> Any:
+    """Log in to Snowflake; a tool deadline passing meanwhile names this account (D187)."""
+    from src.ai.copilot.tool_deadline import waiting_on
+
+    with waiting_on({"host": str(kwargs.get("account") or ""), "port": 443}):
+        return _login(**kwargs)
+
+
+def _login(
     *,
     account: str,
     username: str,

@@ -85,6 +85,10 @@ class _Slot:
     target: str = ""
     #: ``(role, host:port)`` of every other system the same step also reaches.
     also: tuple[tuple[str, str], ...] = ()
+    #: The endpoint this thread is talking to right now (:func:`waiting_on`).
+    waiting: str = ""
+    #: True for a slot :func:`waiting_on` opened on a thread that had none.
+    opened_by_wait: bool = False
 
 
 @dataclass
@@ -268,6 +272,69 @@ def note_step(
         progress.slots[threading.get_ident()] = slot
 
 
+def _host_of(target: str) -> str:
+    text = (target or "").strip().lower()
+    if "://" in text:
+        text = urlparse(text).hostname or text
+    if text.count(":") == 1:
+        text = text.split(":", 1)[0]
+    return text
+
+
+def _same_system(a: str, b: str) -> bool:
+    """``acme-xy123`` (a Snowflake account) is ``acme-xy123.snowflakecomputing.com:443``."""
+    ha, hb = _host_of(a), _host_of(b)
+    if not ha or not hb:
+        return False
+    return ha == hb or ha.startswith(hb + ".") or hb.startswith(ha + ".")
+
+
+@contextlib.contextmanager
+def waiting_on(conn: Any):
+    """Mark the system this thread is talking to for the duration of the block.
+
+    A step such as the preflight reaches the source *and* the destination; a
+    timeout used to say only "one of them is slow" or blame the source while a
+    Snowflake destination login held the call (D187). The connection layers
+    (the connector dial scope and the Snowflake login) wrap their work in this,
+    so a timeout names the endpoint that was actually waited on.
+    """
+    progress = _progress.get()
+    target = _system_label(conn) if conn is not None and not isinstance(conn, str) else str(conn or "")
+    if progress is None or not target:
+        yield
+        return
+    ident = threading.get_ident()
+    with progress.lock:
+        slot = progress.slots.get(ident)
+        opened = slot is None
+        if opened:
+            slot = _Slot(step=f"talking to {target}", opened_by_wait=True)
+            progress.slots[ident] = slot
+        previous = slot.waiting
+        slot.waiting = target
+    try:
+        yield
+    finally:
+        with progress.lock:
+            if opened and progress.slots.get(ident) is slot:
+                progress.slots.pop(ident, None)
+            else:
+                slot.waiting = previous
+
+
+def _waited(slot: _Slot) -> tuple[str, str]:
+    """``(role, host:port)`` of the step's system the slot is talking to.
+
+    A dial scope may know only the host; the step's own record of that system
+    carries its port, so the message names the full endpoint.
+    """
+    for role, target in ((slot.role, slot.target), *slot.also):
+        if target and _same_system(slot.waiting, target):
+            return role or "source", target
+    return (slot.role if not slot.also else ""), slot.waiting
+
+
 def _clear_step() -> None:
     progress = _progress.get()
     if progress is None:
@@ -384,6 +451,20 @@ def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
         return _parallel_timeout_message(tool, waited, slots)
     slot = slots[0] if slots else _Slot()
     step, role, target, also = slot.step, slot.role, slot.target, slot.also
+    if slot.waiting:
+        # The connection layer said which endpoint it was talking to (D187).
+        waited_role, endpoint = _waited(slot)
+        subject = (
+            f"{waited_role} unreachable/slow: {endpoint}"
+            if waited_role
+            else f"unreachable/slow: {endpoint}"
+        )
+        where = f" (step: {step})" if step and not slot.opened_by_wait else ""
+        return (
+            f"{subject} did not answer within {waited}{where}. Check the host and "
+            "port, the firewall or VPN, and that the system is healthy (and its "
+            "warehouse or server is running), then try again."
+        )
     if target and also:
         # The step reads more than one system and cannot tell which one held it:
         # blaming the first would send the operator to a healthy database.
@@ -431,6 +512,9 @@ def _parallel_timeout_message(tool: str, waited: str, slots: list[_Slot]) -> str
     systems: dict[str, set[str]] = {}
     for slot in slots:
         reads = [(slot.role, slot.target), *slot.also] if slot.target else []
+        if slot.waiting:
+            # Narrowed by the connection layer to the endpoint it was on (D187).
+            reads = [_waited(slot)]
         for r, t in reads:
             systems.setdefault(r or "source", set()).add(t)
         where = ", ".join(f"the {r or 'source'} ({t})" for r, t in reads)
