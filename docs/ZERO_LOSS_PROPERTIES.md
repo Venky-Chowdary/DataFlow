@@ -261,8 +261,10 @@ A keyed run into an occupied destination is graded on the keys it wrote
 where the source side came from:
 
 * **Buffered route** (the ladder gets the written records): the source side
-  *is* what was written. L2 grades those cells, and any difference vetoes,
-  localized to key and column by L4/L5.
+  *is* what was written. L2 and L3 both grade those cells (L3 is recomputed on
+  the scoped populations, not skipped as `whole_table_not_comparable`), and any
+  difference vetoes, localized to key and column by L4/L5. That includes a
+  value swapped between two written rows, which keeps every column aggregate.
 * **Re-read route** (streaming SQL, `records == []`): the source side is a scan
   taken *after* the write. A concurrent writer that updates the source between
   the write and that scan makes source and destination differ on a key the

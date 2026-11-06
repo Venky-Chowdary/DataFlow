@@ -14,6 +14,10 @@ destination equals what was written is concurrent drift: disclosed by name,
 never a veto. A destination that differs from what was written still fails,
 localized to key and column, on the re-read route and on the buffered route.
 
+SHOULD-FIX: on those scoped populations L3 was still forced green as
+``whole_table_not_comparable``. L2 compares count/min/max/sum and a value
+multiset, so two written rows that swap a value keep every column aggregate
+and passed. L3 now hashes the scoped populations.
 """
 
 from __future__ import annotations
@@ -125,6 +129,26 @@ def test_a_tampered_destination_still_fails_on_the_reread_route_beside_drift(wor
     assert (res.reconciliation or {}).get("concurrent_source_drift", {}).get("count") == 1
 
 
+def test_two_written_rows_that_swap_a_value_fail_naming_both(world):
+    """Column aggregates are identical after a swap; only L3 sees it."""
+    fake, conn, src, dst = world
+    assert _run(fake, src, dst).success
+    _trigger(
+        conn, dst,
+        "IF NEW.region = 'ap' AND NEW.id = 3 THEN NEW.amount := 4.50; END IF;\n"
+        "          IF NEW.region = 'ap' AND NEW.id = 4 THEN NEW.amount := 3.50; END IF;",
+    )
+    conn.cursor().execute(f"UPDATE \"{src}\" SET note = 'changed' WHERE region = 'eu' AND id = 1")
+    res = _run(fake, src, dst)
+    assert not res.success, "a swapped pair of cells must not complete green"
+    ladder = _ladder(res)
+    assert ladder["layers"]["L2"]["passed"] is True  # the swap keeps every aggregate
+    assert ladder["layers"]["L3"]["passed"] is False and ladder["passed"] is False
+    rows = (ladder.get("localization") or {}).get("rows") or []
+    named = {str(r.get("pk")) for r in rows if r.get("column") == "amount"}
+    assert any("3" in k and "ap" in k for k in named) and any("4" in k and "ap" in k for k in named), rows
+
+
 # --------------------------------------------------------------------------- #
 # Buffered route: the ladder is given the written records (no source re-read).
 # --------------------------------------------------------------------------- #
@@ -173,7 +197,8 @@ def _records():
 @pytest.mark.parametrize("tamper", [
     "",
     "UPDATE \"{dst}\" SET amount = 0 WHERE region = 'ap' AND id = 2",
-], ids=["correct", "rewritten_cell"])
+    "UPDATE \"{dst}\" SET amount = CASE id WHEN 3 THEN 4.50 ELSE 3.50 END WHERE region = 'ap' AND id IN (3, 4)",
+], ids=["correct", "rewritten_cell", "swapped_pair"])
 def test_the_buffered_route_grades_the_written_records(world, tamper):
     _fake, conn, _src, dst = world
     out = _buffered(conn, dst, _records(), tamper_sql=tamper)

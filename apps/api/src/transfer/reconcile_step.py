@@ -3559,6 +3559,11 @@ def _maybe_attach_verification_ladder(
             dest_db_type=dest_type, dest_types=dest_types,
         )
         scoped_written = bool(drift_record.get("attributed"))
+    if scoped_written:
+        # The whole-table digests are not comparable, but these populations
+        # are: L3 hashes the written keys on both sides, so a value swapped
+        # between two written rows (equal column aggregates) still fails.
+        ladder_scope = ""
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
