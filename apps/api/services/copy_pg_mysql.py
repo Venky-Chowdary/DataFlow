@@ -50,6 +50,7 @@ from services.copy_fast_path import (
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
 from services.copy_range_proof import range_keys_match
+from services.tracing import thread_in_context
 from services.copy_sql_pairs import (
     integer_pk_cuts,
     key_ranges_from_cuts,
@@ -521,8 +522,9 @@ def _launch_copy_shards(
         batch = copy_sqls[offset:offset + parallel]
         threads: list[threading.Thread] = []
         for sql in batch:
-            t = threading.Thread(
-                target=_shard_thread,
+            # Each shard's FIFO producer polls the job's cancel probe (D168).
+            t = thread_in_context(
+                _shard_thread,
                 kwargs={
                     "source_cfg": source_cfg,
                     "dest_cfg": dest_cfg,
