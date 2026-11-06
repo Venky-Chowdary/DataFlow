@@ -66,7 +66,8 @@ def _mysql_exists(t: str) -> bool:
 def test_append_create_new_is_refused_at_validate_naming_the_variable(client, monkeypatch, mode):
     from services import dest_require_primary_key as rpk
 
-    monkeypatch.setattr(rpk, "server_requires_primary_key", lambda cfg: "sql_require_primary_key")
+    monkeypatch.setattr(rpk, "server_requires_primary_key",
+                        lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
     t = _source_table()
     try:
         ok, out = _stage(client, t, mode)
@@ -83,7 +84,8 @@ def test_append_create_new_is_refused_at_validate_naming_the_variable(client, mo
 def test_keyed_modes_are_not_refused(client, monkeypatch, mode):
     from services import dest_require_primary_key as rpk
 
-    monkeypatch.setattr(rpk, "server_requires_primary_key", lambda cfg: "sql_require_primary_key")
+    monkeypatch.setattr(rpk, "server_requires_primary_key",
+                        lambda cfg: rpk.PrimaryKeyRequirement(variable="sql_require_primary_key"))
     t = _source_table()
     try:
         ok, out = _stage(client, t, mode)
@@ -112,7 +114,7 @@ def test_live_server_variable_on_refuses_append_and_lets_upsert_run(client):
     try:
         from services.dest_require_primary_key import server_requires_primary_key
 
-        assert server_requires_primary_key(_cfg("mysql")) == "sql_require_primary_key"
+        assert server_requires_primary_key(_cfg("mysql")).variable == "sql_require_primary_key"
         for mode in ("full_refresh_append", "incremental_append"):
             ok, out = _stage(client, t, mode)
             assert not ok and "sql_require_primary_key=ON" in str(out), out
@@ -142,5 +144,143 @@ def test_probe_reads_off_on_this_server():
     with h.mysql_conn().cursor() as cur:
         cur.execute("SELECT @@sql_require_primary_key")
         on = str(cur.fetchone()[0]) in {"1", "ON"}
-    assert server_requires_primary_key(_cfg("mysql")) == ("sql_require_primary_key" if on else "")
-    assert server_requires_primary_key(None) == ""
+    got = server_requires_primary_key(_cfg("mysql"))
+    assert got.variable == ("sql_require_primary_key" if on else "") and not got.unreadable
+    # MariaDB has only innodb_force_primary_key; the MySQL name is 1193 there, not a failure.
+    from tests.test_r14_mysql_latin1_cp1252_strict_e2e import _cfg as cfg_of
+
+    maria = server_requires_primary_key(cfg_of("mariadb"))
+    assert not maria.unreadable, maria
+    assert server_requires_primary_key(None).unreadable
+
+
+def test_an_unreadable_variable_is_a_finding_not_a_pass(client, monkeypatch):
+    from services import dest_require_primary_key as rpk
+
+    monkeypatch.setattr(rpk, "server_requires_primary_key",
+                        lambda cfg: rpk.PrimaryKeyRequirement(unreadable="sql_require_primary_key unreadable (1227)"))
+    t = _source_table()
+    try:
+        ok, out = _stage(client, t, "full_refresh_append")
+        assert not ok and "Could not read whether the destination forces" in str(out), out
+        ok, out = _stage(client, t, "upsert")  # keyed create: the question does not arise
+        assert ok, out
+    finally:
+        h.drop_table("postgresql", t)
+        h.drop_table("mysql", t)
+
+
+# ---------------------------------------------------- every mode that CREATEs
+
+
+def _keyless_source_table() -> str:
+    t = f"r14d2k_{uuid.uuid4().hex[:8]}"
+    h.execute("postgresql", f'CREATE TABLE "{t}" (id int NOT NULL, name text, amt numeric(8,2))')
+    h.execute("postgresql", f"INSERT INTO \"{t}\" VALUES (1, 'a', 1.50), (2, NULL, 0), "
+                            f"(3, '', NULL), (4, ' 東京 ', 2.25)")
+    return t
+
+
+def _stage_args(client, t: str, mode: str, **extra):
+    src = _connector("postgresql", _pg_cfg(), "source")
+    dst = _connector("mysql", _cfg("mysql"), "destination")
+    args = {"source_connector_id": src, "dest_connector_id": dst, "source_table": t,
+            "dest_table": f"{t}_d", "sync_mode": mode, "primary_key": "id",
+            "validation_mode": "strict", **extra}
+    if mode in {"incremental_append", "incremental_upsert", "scd2"}:
+        args.setdefault("cursor_column", "id")
+    return h.mcp_call(client, "start_transfer", args)
+
+
+@pytest.fixture
+def require_pk_on():
+    root = _root()
+    with root.cursor() as cur:
+        cur.execute("SELECT @@GLOBAL.sql_require_primary_key")
+        before = int(cur.fetchone()[0])
+        cur.execute("SET GLOBAL sql_require_primary_key = ON")
+    try:
+        yield
+    finally:
+        with root.cursor() as cur:
+            cur.execute(f"SET GLOBAL sql_require_primary_key = {before}")
+            cur.execute("SELECT @@GLOBAL.sql_require_primary_key")
+            assert int(cur.fetchone()[0]) == before
+        root.close()
+
+
+# (source has a PK?, mode, extra args, refused?)
+_MODES = [
+    (False, "full_refresh_overwrite", {}, True),     # keyless source: no key to carry
+    (True, "full_refresh_overwrite", {}, False),     # source PK carried
+    (False, "upsert", {}, False),                    # operator key is the PK
+    (False, "incremental_upsert", {"cursor_semantics": "monotonic_sequence"}, False),
+    (True, "full_refresh_append", {}, True),         # append withholds keys
+    (True, "scd2", {"cursor_semantics": "modification_timestamp"}, True),  # history table
+]
+
+
+@pytest.mark.parametrize("keyed, mode, extra, refused", _MODES)
+def test_live_every_create_mode_is_judged_at_validate(client, require_pk_on, keyed, mode, extra,
+                                                      refused):
+    t = _source_table() if keyed else _keyless_source_table()
+    try:
+        ok, out = _stage_args(client, t, mode, **extra)
+        if refused:
+            assert not ok and "sql_require_primary_key=ON" in str(out), out
+            assert not _mysql_exists(f"{t}_d")
+            return
+        assert ok, out
+        job = h.confirm(client, out["ack_id"], reason=f"r14-d2-{mode}")
+        assert job.get("status") == "completed", job
+        pk = h.query("mysql", "SELECT column_name FROM information_schema.key_column_usage "
+                              f"WHERE table_schema = DATABASE() AND table_name = '{t}_d' "
+                              "AND constraint_name = 'PRIMARY'")
+        assert [r[0] for r in pk] == ["id"], pk
+    finally:
+        h.drop_table("postgresql", t)
+        h.drop_table("mysql", f"{t}_d")
+
+
+def test_live_query_source_overwrite_is_refused(client, require_pk_on):
+    t = _keyless_source_table()
+    try:
+        ok, out = _stage_args(client, "", "full_refresh_overwrite",
+                              source_query=f'SELECT id, name FROM "{t}"')
+        assert not ok and "sql_require_primary_key=ON" in str(out), out
+    finally:
+        h.drop_table("postgresql", t)
+
+
+def test_planned_key_is_the_writers_planner_answer():
+    from services.dest_require_primary_key import planned_create_primary_key
+    from services.schema_fidelity import build_catalog_from_introspect, catalog_to_payload
+
+    maps = [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}]
+
+    def catalog(pk):
+        return catalog_to_payload(build_catalog_from_introspect(
+            dialect="postgresql", columns=["id", "name"],
+            column_types={"id": "integer", "name": "text"},
+            nullable={"id": False, "name": True},
+            keys={"primary_key_columns": pk, "unique_keys": []}))
+
+    keyed, keyless = catalog(["id"]), catalog([])
+    cases = {
+        ("full_refresh_overwrite", "keyed"): ["id"],
+        ("full_refresh_overwrite", "keyless"): [],
+        ("full_refresh_overwrite", None): [],
+        ("upsert", "keyless"): ["id"],
+        ("upsert", None): ["id"],
+        ("incremental_deduped", "keyless"): ["id"],
+        ("full_refresh_append", "keyed"): [],
+        ("incremental_append", "keyed"): [],
+        ("scd2", "keyed"): [],
+        ("cdc", None): ["id"],
+    }
+    cats = {"keyed": keyed, "keyless": keyless, None: None}
+    for (mode, cat), want in cases.items():
+        got = planned_create_primary_key(sync_mode=mode, mappings=maps,
+                                         operator_key_columns=["id"],
+                                         source_schema_catalog=cats[cat])
+        assert got == want, (mode, cat, got)

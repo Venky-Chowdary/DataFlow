@@ -212,6 +212,7 @@ def evaluate_ddl_compatibility(
     population_fit_report: Any = None,
     destination_config: Any = None,
     validation_mode: str | None = None,
+    create_source: Any = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -579,7 +580,7 @@ def evaluate_ddl_compatibility(
     if not dest_connected:
         return len(issues) == 0, issues
 
-    # QA MySQL D2: a server that forces a PRIMARY KEY refuses an append create-new.
+    # QA MySQL D2: a server that forces a PRIMARY KEY refuses a keyless CREATE (any mode).
     from services.dest_require_primary_key import keyless_create_refusal
 
     refusal = keyless_create_refusal(
@@ -589,6 +590,8 @@ def evaluate_ddl_compatibility(
         sync_mode=sync_mode,
         destination_table=destination_table,
         key_hint=contract_primary_key or ",".join(destination_pk_columns or []),
+        mappings=mappings,
+        source=create_source,
     )
     if refusal:
         issues.append(refusal)

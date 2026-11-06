@@ -1160,7 +1160,14 @@ def run_file_preflight(
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
         proven_width_narrowings=proven_string_narrowings,
-        population_fit_report=pre_gate_fit_report, destination_config=destination_config, validation_mode=validation_mode,
+        population_fit_report=pre_gate_fit_report,
+        destination_config=destination_config,
+        validation_mode=validation_mode,
+        create_source={
+            "config": source_config,
+            "connector_id": source_connector_id,
+            "table": source_table,
+        },
     )
 
     # Two questions, two truths, and an approved pre-load transform separates
