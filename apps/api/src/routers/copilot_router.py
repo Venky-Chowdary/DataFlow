@@ -620,6 +620,7 @@ async def copilot_confirm(
     a write by being unlisted.
     """
     from services.connector_store import create_connector
+    from services.workspace_access import tenant_scope
     from src.transfer.engine import DuplicateTransferSubmission
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
