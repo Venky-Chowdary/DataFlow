@@ -115,3 +115,32 @@ def test_random_sixteen_digit_values_stay_below_the_threshold():
     share = sum(1 for v in values if _luhn(str(v)) and _card_iin(str(v))) / len(values)
     assert share < NUMERIC_PAN_SHARE / 4, share
     assert _risk("value", values[:200], "BIGINT") == {}
+
+
+# --- second review: a minimum sample before the share rule applies ----------
+
+
+@pytest.mark.parametrize("values", [
+    [4111111111111111],                      # one row
+    [4111111111111111, None, None],          # one hit among blanks
+    [5555555555554444, 4111111111111111, None, 6011111111111117],  # 3 hits
+])
+def test_too_few_card_hits_are_judged_by_the_name_alone(values):
+    from services.compliance_guard import NUMERIC_PAN_MIN_HITS
+
+    hits = [v for v in values if v is not None]
+    assert len(hits) < NUMERIC_PAN_MIN_HITS
+    assert _risk("id", values, "BIGINT") == {}
+    assert "pci_pan" in _risk("card_number", values, "BIGINT")["card_number"]
+
+
+def test_a_one_message_kafka_sample_with_an_int_key_is_not_a_card():
+    # A Kafka sample of one message: the key arrives as a native int cell and
+    # no declared type; one Luhn-valid key is not a card column.
+    risk = detect_pii_fields(["order_key", "amount"],
+                             [{"order_key": 4111111111111111, "amount": 12}], column_types={})
+    assert risk.get("field_risk", {}) == {}
+
+
+def test_five_card_hits_meet_the_minimum():
+    assert "pci_pan" in _risk("value", _PANS[:5], "BIGINT")["value"]

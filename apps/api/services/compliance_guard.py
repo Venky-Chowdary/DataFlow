@@ -298,6 +298,12 @@ _BARE_PHONE_SHARE = 0.8
 #: (QA MySQL D7's ids measured 0.1005); a real card column passes ~100%.
 NUMERIC_PAN_SHARE = 0.8
 
+#: The share rule needs evidence, not one lucky value: below this many card
+#: hits a numeric column is judged by its name alone. A 1-row sample (or one
+#: Kafka message, or ``[hit, None, None]``) is 100% by arithmetic and proves
+#: nothing about a column of ids.
+NUMERIC_PAN_MIN_HITS = 5
+
 _INTEGRAL_DECIMAL = re.compile(r"^(\d+)\.0+$")
 
 
@@ -342,7 +348,7 @@ def _numeric_column_holds_pans(values: list[str]) -> bool:
         1 for d in digits
         if _is_bare_digits(d) and 13 <= len(d) <= 19 and luhn_valid(d) and _card_iin(d)
     )
-    return cards / len(digits) >= NUMERIC_PAN_SHARE
+    return cards >= NUMERIC_PAN_MIN_HITS and cards / len(digits) >= NUMERIC_PAN_SHARE
 
 _NUMERIC_TYPE_RE = re.compile(
     r"^(?:big|small|tiny|medium)?int(?:eger)?\d*\b|^(?:numeric|decimal|number|"
