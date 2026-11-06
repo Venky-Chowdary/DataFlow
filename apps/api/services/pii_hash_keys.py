@@ -198,9 +198,24 @@ def _workspace_key_and_version(workspace_id: str) -> tuple[str, str]:
     return secret, str(int(doc.get("active_version") or 1))
 
 
+class _VersionedKey(str):
+    """A key secret that remembers the version it was read with (one read)."""
+
+    version = ""
+
+
 def workspace_key(workspace_id: str) -> str:
-    """The active key for ``workspace_id``, created on first use."""
-    return _workspace_key_and_version(workspace_id)[0]
+    """The active key for ``workspace_id``, created on first use.
+
+    The ONE entry point to a workspace's key: ``active_key`` and every job
+    snapshot read through it, so a key store that cannot answer here refuses
+    every digest (the insecure-default refusal). The returned string carries
+    the version it was read with, so key and version still come from one read.
+    """
+    secret, version = _workspace_key_and_version(workspace_id)
+    key = _VersionedKey(secret)
+    key.version = version
+    return key
 
 
 def _add_version(workspace_id: str, *, actor: str, secret: str | None) -> dict[str, Any]:
@@ -410,7 +425,13 @@ def active_key(workspace_id: str) -> tuple[str, str]:
     pinned = pinned_key()
     if pinned:
         return pinned, pinned_version(pinned)
-    return _workspace_key_and_version(workspace_id)
+    key = workspace_key(workspace_id)
+    if not key:
+        raise PiiHashKeyUnavailable(_UNAVAILABLE)
+    version = str(getattr(key, "version", "") or "")
+    if not version:  # a key from another source: name the version it is now
+        version = str(int(_active_doc(workspace_id).get("active_version") or 1))
+    return str(key), version
 
 
 def secret_for_version(workspace_id: str, version: str) -> str:

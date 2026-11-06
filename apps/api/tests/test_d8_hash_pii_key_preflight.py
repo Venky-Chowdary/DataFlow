@@ -29,10 +29,9 @@ def no_key(monkeypatch):
     from services import pii_hash_keys
 
     def unavailable(_workspace_id):
-        raise RuntimeError("store down")
+        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
 
-    # The key document cannot be read (one read serves secret and version).
-    monkeypatch.setattr(pii_hash_keys, "_active_doc", unavailable)
+    monkeypatch.setattr(pii_hash_keys, "workspace_key", unavailable)
 
 
 def _preflight(sample_rows, *, transform="hash_pii", shape_recipe=None):
