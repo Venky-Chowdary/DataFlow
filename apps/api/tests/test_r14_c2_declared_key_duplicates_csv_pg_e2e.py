@@ -120,7 +120,7 @@ def test_repeated_declared_key_refuses_and_writes_nothing(client, mode):
         assert resp.status_code == 422, resp.text[:800]
         text = json.dumps(resp.json(), ensure_ascii=False)
         assert "SKU-00007×2" in text, text
-        assert "in_file_dedupe=keep_last" in text and "duplicate_policy=upsert" in text, text
+        assert "in_file_dedupe=keep_last" in text and "sync_mode=upsert" in text, text
         job = client.memory.get_job(_job_id(resp)) or {}
         assert job.get("status") == "failed", job.get("status")
         # Never written twice: the run wrote nothing at all.

@@ -1239,10 +1239,12 @@ def _in_file_collapse_message(
     )
 
 
+#: Each route is followed end to end in
+#: tests/test_r14_c2_review_duplicate_routes_and_probe.py.
 DUPLICATE_KEY_ROUTES = (
     "Choose a duplicate route: in_file_dedupe=keep_last (one row per key, the "
-    "last copy wins), duplicate_policy=upsert, or duplicate_policy=append to "
-    "load every copy."
+    "last copy wins), sync_mode=upsert (merge on the key), or "
+    "duplicate_policy=append to load every copy."
 )
 LENIENT_DUPLICATE_KEY_NOTE = (
     "Lenient quarantines bad cells, not repeated primary keys: the second copy "
@@ -1747,6 +1749,9 @@ def _check_duplicate_keys(
             "check": "duplicate_keys",
             "passed": False,
             "blocks_transfer": True,
+            # No duplicate was found: the probe did not finish. Lenient keeps
+            # its own handling of an unproven probe (not the C2 carve-out).
+            "probe_unavailable": True,
             "issues": issues[:15],
             "warnings": advisory_warnings,
             "primary_key": primary_key,
@@ -2475,10 +2480,15 @@ def run_integrity_audit(
         for check in checks:
             if check.get("check") in structural:
                 continue
-            if check.get("check") == "duplicate_keys" and check.get("blocks_transfer"):
+            if (
+                check.get("check") == "duplicate_keys"
+                and check.get("blocks_transfer")
+                and not check.get("probe_unavailable")
+            ):
                 # A repeated declared key is not a bad cell: no writer holds
                 # the second copy out, so "will quarantine" would land it
                 # twice (QA C2). The duplicate policy decides, not leniency.
+                # Only a key actually found repeated stays blocked here.
                 check["note"] = LENIENT_DUPLICATE_KEY_NOTE
                 continue
             if check.get("blocks_transfer"):

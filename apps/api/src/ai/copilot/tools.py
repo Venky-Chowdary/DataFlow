@@ -2678,8 +2678,9 @@ class DataPilotTools:
         quarantine = merge_job_quarantine(job)
         # Skipped and NULL-coerced rows are audit findings, not held-out rows.
         held_out = replay_quarantine_details(quarantine)
-        row_ids = {d.get("row") for d in held_out if d.get("row") is not None}
-        quarantine_row_count = len(row_ids) if row_ids else len(held_out)
+        from services.quarantine_dlq import count_finding_rows
+
+        quarantine_row_count = count_finding_rows(held_out) or len(held_out)
         from services.quarantine_from_preflight import drop_phantom_identity_rows
 
         stored_rejected = int(job.get("rejected_rows") or 0)

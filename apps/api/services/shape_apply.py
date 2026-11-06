@@ -33,6 +33,23 @@ __all__ = [
 ]
 
 
+def _divert_input_column(step: Any, record: Mapping[str, Any]) -> str:
+    """The input column a diverting step failed on, when the row names one.
+
+    ``record`` is the row as it reached the step. A column step reads its
+    ``column``; a derive/rename whose ``column`` is an output, or an
+    expression step, is named by the one input it read, else by none.
+    """
+    if step is None:
+        return ""
+    column = str(getattr(step, "column", "") or "")
+    if column and column in record:
+        return column
+    expression = getattr(step, "expression", None)
+    reads = sorted(c for c in getattr(expression, "columns", ()) or () if c in record)
+    return reads[0] if len(reads) == 1 else ""
+
+
 class ShapeRunner:
     """A live recipe plus the accounting for the rows it has seen.
 
@@ -183,7 +200,7 @@ class ShapeRunner:
         for d in diverted or []:
             record = dict(getattr(d, "record", None) or {})
             step = steps[d.step] if 0 <= int(d.step) < len(steps) else None
-            column = str(getattr(step, "column", "") or "") if step is not None else ""
+            column = _divert_input_column(step, record)
             detail: dict[str, Any] = {
                 "row": record,
                 "reason": f"transform divert — step {d.step} '{d.op}': {d.reason}",
@@ -195,8 +212,10 @@ class ShapeRunner:
                 "source_row_index": d.row_index + 1,
             }
             if column:
+                # The value the step read and could not transform — never a
+                # NULL for an output column the row did not have yet.
                 detail["column"] = column
-                detail["value"] = record.get(column)
+                detail["value"] = record[column]
             if getattr(d, "dedupe_key", None) is not None and getattr(
                 d, "winner_row_index", None
             ) is not None:

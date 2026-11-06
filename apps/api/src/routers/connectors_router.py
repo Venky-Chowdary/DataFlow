@@ -1545,16 +1545,9 @@ async def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    from services.quarantine_dlq import _hashable_row_key
+    from services.quarantine_dlq import count_finding_rows
 
-    # A shape-divert finding carries its record in ``row`` (a dict): count it by
-    # its canonical image, never hash the dict (QA MySQL-D4: HTTP 500).
-    row_ids = {
-        _hashable_row_key(d.get("row"))
-        for d in details
-        if isinstance(d, dict) and d.get("row") is not None
-    }
-    finding_rows = len(row_ids) if row_ids else len(details)
+    finding_rows = count_finding_rows(details) or len(details)
     rejected_rows = int(
         job.get("rejected_details_total")
         or job.get("rejected_rows")
@@ -2276,10 +2269,16 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     if not parent_appends and dest.kind == "database" and dest.table:
         # A keyed replay merges on a UNIQUE index; over a table that already
         # repeats the key the engine cannot build it (QA C2: a raw 500).
+        from starlette.concurrency import run_in_threadpool
+
         from services.quarantine_dlq import replay_destination_duplicate_keys
 
-        dup_refusal = replay_destination_duplicate_keys(
-            dest_cfg, table=str(dest.table), key_columns=list(conflict_columns)
+        dup_refusal = await run_in_threadpool(
+            replay_destination_duplicate_keys,
+            dest_cfg,
+            dest_kind=resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+            table=str(dest.table),
+            key_columns=list(conflict_columns),
         )
         if dup_refusal:
             raise HTTPException(status_code=409, detail=dup_refusal)

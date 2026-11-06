@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from src.transfer.engine import (
     TransferRequest,
@@ -137,7 +138,21 @@ def _execute_preflight_parity_kwargs(
         extra["table_exists"] = table_exists
     if privilege_probe:
         extra["privilege_probe"] = privilege_probe
+    from services.duplicate_policy import route_duplicate_options
+
+    # One duplicate choice for Validate and the writer (QA C2 remedies).
+    duplicate_options = route_duplicate_options(
+        dict(getattr(request.source, "extra", None) or {}), dict(extra)
+    )
+    extra.update(duplicate_options)
     dest.extra = extra
+    probe_cfg = with_fk_route_option(dest_meta.get("_probe_cfg"), extra.get("foreign_keys_mode"))
+    if duplicate_options and isinstance(probe_cfg, Mapping):
+        from services.secret_config import RedactedConfig
+
+        # Same type back: a RedactedConfig keeps its secrets out of logs.
+        merged = {**dict(probe_cfg), **duplicate_options}
+        probe_cfg = RedactedConfig(merged) if isinstance(probe_cfg, RedactedConfig) else merged
 
     return {
         "destination_pk_columns": pk_cols,
@@ -146,9 +161,7 @@ def _execute_preflight_parity_kwargs(
         # D112 — the live CHECK constraints, so Execute names offending rows
         # before the write instead of surfacing the driver's raw violation.
         "destination_check_constraints": list(dest_meta.get("check_constraints") or []),
-        "destination_config": with_fk_route_option(
-            dest_meta.get("_probe_cfg"), extra.get("foreign_keys_mode")
-        ),
+        "destination_config": probe_cfg,
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,

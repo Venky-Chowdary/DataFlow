@@ -92,21 +92,25 @@ def _lift_in_file_collapse_advisories(out: dict[str, Any]) -> None:
                 },
             )
 
-def _plan_in_file_dedupe(source_config: dict[str, Any] | None) -> str:
-    """``keep_last`` or ``block`` from the source config the schedule stamped."""
-    cfg = source_config if isinstance(source_config, dict) else {}
-    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    raw = cfg.get("in_file_dedupe")
-    if raw in (None, "") and isinstance(extra, dict):
-        raw = extra.get("in_file_dedupe")
-    token = str(raw or "").strip().lower().replace("-", "_")
-    # Unset follows the sync mode. Upsert collapses in-file copies. An explicit
-    # block still refuses them. Only keep_last used to be recognized, so a
-    # missing value was stored as block and stopped dedup.
-    if token == "keep_last":
-        return "keep_last"
-    if token == "block":
-        return "block"
+def _plan_in_file_dedupe(*configs: Mapping[str, Any] | None) -> str:
+    """``keep_last`` or ``block`` from the source, then the destination, config.
+
+    The same precedence as :func:`_plan_duplicate_policy`, and the value
+    ``duplicate_policy.route_duplicate_options`` stamps for the writer.
+    """
+    for cfg in configs:
+        if not isinstance(cfg, Mapping):
+            continue
+        extra = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
+        raw = cfg.get("in_file_dedupe")
+        if raw in (None, ""):
+            raw = extra.get("in_file_dedupe")
+        token = str(raw or "").strip().lower().replace("-", "_")
+        # Unset follows the sync mode. Upsert collapses in-file copies. An explicit
+        # block still refuses them. Only keep_last used to be recognized, so a
+        # missing value was stored as block and stopped dedup.
+        if token in {"keep_last", "block"}:
+            return token
     return ""
 
 def _plan_duplicate_policy(*configs: Mapping[str, Any] | None) -> str:

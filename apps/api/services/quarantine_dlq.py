@@ -384,6 +384,32 @@ def _hashable_row_key(row: Any) -> Any:
         return repr(row)
 
 
+def finding_row_key(detail: Any) -> Any:
+    """Which source row a finding belongs to — hashable, or None when unnamed.
+
+    A transform divert carries its record in ``row`` (a dict) and its position
+    in ``source_row_index``; a write reject carries the row number in ``row``.
+    The position wins, so two diverted rows with identical records are two
+    rows, and a record image is never hashed as a dict (QA MySQL-D4 500).
+    """
+    if not isinstance(detail, dict):
+        return None
+    index = detail.get("source_row_index")
+    if index is not None and not isinstance(index, (dict, list)):
+        return ("source_row", index)
+    row = detail.get("row")
+    if row is None:
+        return None
+    return ("row", _hashable_row_key(row))
+
+
+def count_finding_rows(details: Any) -> int:
+    """Distinct source rows the findings name (0 when none names a row)."""
+    keys = {finding_row_key(d) for d in details or []}
+    keys.discard(None)
+    return len(keys)
+
+
 def quarantine_details_from_dlq(
     job_id: str,
     *,
@@ -1324,8 +1350,8 @@ def replay_duplicate_keys_refusal(
         "duplicate_key_count": count,
         "next_action": (
             "Dedupe the destination first: re-run the parent job as "
-            "full_refresh_overwrite with in_file_dedupe=keep_last (or "
-            "duplicate_policy=upsert), or delete the extra copies of those keys. "
+            "full_refresh_overwrite with in_file_dedupe=keep_last (or as "
+            "sync_mode=upsert), or delete the extra copies of those keys. "
             "Then replay the quarantine."
         ),
         "engine_error": engine_error[:300],
@@ -1335,22 +1361,35 @@ def replay_duplicate_keys_refusal(
 def replay_destination_duplicate_keys(
     dest_cfg: dict[str, Any],
     *,
+    dest_kind: str,
     table: str,
     key_columns: list[str],
 ) -> dict[str, Any] | None:
-    """Probe the destination for repeated replay keys; the refusal when found.
+    """The 409 a keyed replay returns when its merge index cannot be built.
 
-    A probe that cannot run returns None: the writer still guards, and its
-    failure is mapped by :func:`replay_unique_index_failure`.
+    Only an engine whose upsert fires on a UNIQUE index (PostgreSQL ON
+    CONFLICT, MySQL/MariaDB ON DUPLICATE KEY — ``dest_upsert_needs_unique_index``)
+    builds one; MERGE engines (Snowflake, SQL Server, Oracle, BigQuery,
+    Databricks) key the write themselves and replay over repeated keys there.
+    A key an existing unique constraint already covers cannot repeat. The
+    count is the plan's own bounded probe (``probe_dest_duplicate_keys``); one
+    that does not finish returns None and the writer's own failure is mapped
+    by :func:`replay_unique_index_failure`.
     """
-    from services.upsert_ddl_gate import count_dest_duplicate_keys
+    from services.dest_dialect_facts import dest_upsert_needs_unique_index
+    from services.upsert_ddl_gate import (
+        destination_unique_covering,
+        probe_dest_duplicate_keys,
+    )
 
-    try:
-        probe = count_dest_duplicate_keys(dest_cfg, table, list(key_columns))
-    except Exception as exc:  # noqa: BLE001 — a probe never decides alone
-        logger.info("replay duplicate-key probe skipped for %s: %s", table, exc)
+    if not key_columns or not dest_upsert_needs_unique_index(dest_kind):
         return None
+    if destination_unique_covering(dest_cfg, table, list(key_columns), dest_kind) is True:
+        return None
+    probe = probe_dest_duplicate_keys(dest_cfg, table, list(key_columns))
     if not probe.get("ran") or not int(probe.get("duplicate_keys") or 0):
+        if not probe.get("ran"):
+            logger.info("replay duplicate-key probe for %s: %s", table, probe.get("message"))
         return None
     return replay_duplicate_keys_refusal(
         table=table,
@@ -1361,11 +1400,8 @@ def replay_destination_duplicate_keys(
 
 
 # The engine refusing to BUILD the merge index, not a row colliding on insert.
-_UNIQUE_BUILD_FAILURE = (
-    "could not create unique index",  # PostgreSQL
-    "create unique index statement terminated",  # SQL Server
-    "ora-01452",  # Oracle
-)
+# Only the index engines build one (``dest_upsert_needs_unique_index``).
+_UNIQUE_BUILD_FAILURE = ("could not create unique index",)  # PostgreSQL
 
 
 def _unique_build_failed(text: str) -> bool:
@@ -1388,16 +1424,15 @@ def replay_unique_index_failure(
         return None
     import re
 
+    # A value may itself hold ", " — only a one-column key names its value;
+    # a composite key is named by its columns.
     samples: list[dict[str, Any]] = []
-    match = re.search(r"Key \(([^)]*)\)=\(([^)]*)\)", text)
-    if match:
-        names = [n.strip().strip('"') for n in match.group(1).split(",")]
-        values = [v.strip() for v in match.group(2).split(",")]
-        samples.append({"values": dict(zip(names, values)), "count": 2})
-    else:
-        entry = re.search(r"Duplicate entry '([^']*)'", text)
-        if entry and len(key_columns) == 1:
-            samples.append({"values": {key_columns[0]: entry.group(1)}, "count": 2})
+    if len(key_columns) == 1:
+        match = re.search(r"Key \(([^)]*)\)=\((.*)\) is duplicated", text, re.S)
+        entry = re.search(r"Duplicate entry '(.*)' for key", text, re.S)
+        value = match.group(2) if match else (entry.group(1) if entry else None)
+        if value is not None:
+            samples.append({"values": {key_columns[0]: value}, "count": 2})
     return replay_duplicate_keys_refusal(
         table=table,
         key_columns=key_columns,

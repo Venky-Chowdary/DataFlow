@@ -215,9 +215,11 @@ def preflight_quarantine_row_count(rows: list[dict[str, Any]]) -> int:
     and no cell; counting its sentence as a rejected row reported 1 quarantined
     row on a run that read nothing (D255).
     """
-    row_ids = {d.get("row") for d in rows if d.get("row") is not None}
-    if row_ids:
-        return len(row_ids)
+    from services.quarantine_dlq import count_finding_rows
+
+    named = count_finding_rows(rows)
+    if named:
+        return named
     return sum(1 for d in rows if d.get("column"))
 
 

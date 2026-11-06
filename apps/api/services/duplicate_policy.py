@@ -80,6 +80,28 @@ def validate_schedule_file_policy(
     return policy, dedupe
 
 
+def route_duplicate_options(*extras: Any) -> dict[str, str]:
+    """``in_file_dedupe`` / ``duplicate_policy`` the route chose, from the first
+    extra (source, then destination) that names each.
+
+    Validate reads them through ``preflight_file_plan`` and the file writer
+    reads ``destination.extra``; the engine stamps this answer on the
+    destination so both see one choice. A ``keep_last`` set on the source alone
+    used to clear Validate while the writer loaded every copy.
+    """
+    from services.preflight_file_plan import _plan_duplicate_policy, _plan_in_file_dedupe
+
+    configs = [e for e in extras if isinstance(e, dict)]
+    out: dict[str, str] = {}
+    dedupe = _plan_in_file_dedupe(*configs)
+    if dedupe:
+        out["in_file_dedupe"] = dedupe
+    policy = _plan_duplicate_policy(*configs)
+    if policy:
+        out["duplicate_policy"] = policy
+    return out
+
+
 def normalize_duplicate_policy(raw: str | None) -> str:
     text = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {

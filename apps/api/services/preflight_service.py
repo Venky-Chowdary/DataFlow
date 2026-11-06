@@ -11,9 +11,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-#: Longest a planning tool spends proving an existing destination's upsert
-#: keys unique (D187). Unfinished warns; it is never reported clean.
-DEST_DUPLICATE_KEY_STEP_SECONDS = 8.0
+from services.upsert_ddl_gate import DEST_DUPLICATE_KEY_STEP_SECONDS  # noqa: E402,F401 - D187 budget
 
 _ps = sys.modules[__name__]
 
@@ -1315,7 +1313,7 @@ def run_file_preflight(
         destination_foreign_keys=list(destination_foreign_keys or []),
         fk_risk_acknowledged=bool(fk_risk_acknowledged),
         stream_contracts=list(stream_contracts or []),
-        in_file_dedupe=_plan_in_file_dedupe(source_config),
+        in_file_dedupe=_plan_in_file_dedupe(source_config, destination_config),
         duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
     )
 
@@ -1497,10 +1495,7 @@ def run_file_preflight(
         ):
             from services.dest_dialect_facts import dest_upsert_needs_unique_index
             from services.destination_key_collision_probe import _identity_pairs
-            from services.upsert_ddl_gate import (
-                count_dest_duplicate_keys,
-                dest_unique_covering_columns,
-            )
+            from services.upsert_ddl_gate import dest_unique_covering_columns
 
             _uk_pairs = _identity_pairs(
                 mappings=mappings,
@@ -1552,50 +1547,12 @@ def run_file_preflight(
                     _identity_plan
                     and _identity_plan.mode == UPSERT_IDENTITY_IMPOSSIBLE
                 )
-                _dup = {"ran": False, "duplicate_keys": 0, "duplicate_rows": 0,
-                        "samples": [], "message": "destination probe skipped"}
-                try:
-                    # Optional proof, bounded inside a tool call (D187): on a
-                    # Snowflake destination the reflection + GROUP BY ran 25s
-                    # and killed a second-run upsert plan. Unfinished is a
-                    # labelled ``ran=False`` (the gate warns), never a clean 0.
-                    from src.ai.copilot.tool_deadline import bounded_step
+                from services.upsert_ddl_gate import probe_dest_duplicate_keys
 
-                    _dup_run = bounded_step(
-                        f"counting duplicate upsert keys on destination {destination_table}",
-                        lambda: count_dest_duplicate_keys(
-                            dict(destination_config or {}),
-                            destination_table,
-                            _uk_cols,
-                        ),
-                        seconds=DEST_DUPLICATE_KEY_STEP_SECONDS,
-                        conn=destination_config,
-                        role="destination",
-                    )
-                    if _dup_run.error is not None:
-                        raise _dup_run.error
-                    if _dup_run.timed_out:
-                        _dup = {
-                            "ran": False,
-                            "duplicate_keys": 0,
-                            "duplicate_rows": 0,
-                            "samples": [],
-                            "message": (
-                                "duplicate-key probe did not finish within the plan's "
-                                f"step budget ({DEST_DUPLICATE_KEY_STEP_SECONDS:g}s at most); "
-                                "Execute's keyed write still enforces the key"
-                            ),
-                        }
-                    else:
-                        _dup = _dup_run.value
-                except Exception as _dexc:  # noqa: BLE001
-                    _dup = {
-                        "ran": False,
-                        "duplicate_keys": 0,
-                        "duplicate_rows": 0,
-                        "samples": [],
-                        "message": f"duplicate-key probe failed: {_dexc}"[:300],
-                    }
+                _dup = probe_dest_duplicate_keys(
+                    dict(destination_config or {}), destination_table, _uk_cols,
+                    seconds=DEST_DUPLICATE_KEY_STEP_SECONDS,
+                )
                 _details = {
                     "rule_id": "g_upsert_dest_key",
                     "remediation_kind": "approve_ddl_or_dedupe",

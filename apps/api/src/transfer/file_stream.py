@@ -1210,6 +1210,7 @@ def fingerprint_parsed_file(
     dest_extra: dict[str, Any] | None = None,
     duplicate_policy: str = "",
     workspace_id: str = "",
+    keep_last_key: list[str] | None = None,
 ) -> tuple[FingerprintAccumulator, int]:
     """Second parse of a file the writer already consumed.
 
@@ -1221,6 +1222,11 @@ def fingerprint_parsed_file(
     )
     if source_filter:
         full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
+    if keep_last_key:
+        # The write collapsed in-file copies to the last per key; so does the re-read.
+        from services.duplicate_policy import iter_keep_last
+
+        full_iter = iter_keep_last(full_iter, list(keep_last_key))
     if incremental and cursor_source_col:
         from services.sync_cursor import records_after_watermark
 
@@ -2116,10 +2122,12 @@ def stream_file_to_database(
         _stamp_reconcile_sample_locale(dest_summary, number_locale)
         return rows_copied, copy_ddl, dest_summary, columns
 
+    keep_last_key: list[str] = []
     if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
         from services.duplicate_policy import iter_keep_last
 
-        batch_iter = iter_keep_last(batch_iter, list(contract.primary_key_columns()))
+        keep_last_key = list(contract.primary_key_columns())
+        batch_iter = iter_keep_last(batch_iter, keep_last_key)
         dest_summary["in_file_dedupe"] = "keep_last"
 
     if incremental and cursor_source_col:
@@ -2812,6 +2820,9 @@ def stream_file_to_database(
             dest_summary.pop("reconcile_sample", None)
             dest_summary["duplicate_policy"] = decision.policy
             dest_summary["duplicate_policy_reason"] = decision.reason
+            if keep_last_key:
+                # Gate-8 collapses its digest on this stamp; a batch summary drops it.
+                dest_summary["in_file_dedupe"] = "keep_last"
             dest_summary["rows_skipped"] = prior_skipped + int(
                 batch_summary.get("rows_skipped") or 0
             )
@@ -3208,6 +3219,7 @@ def stream_file_to_database(
                 dest_extra=dest_extra,
                 duplicate_policy=decision.policy,
                 workspace_id=getattr(shape_runner, "workspace_id", ""),
+                keep_last_key=keep_last_key,
             )
         except Exception:
             if partial_write_pass:

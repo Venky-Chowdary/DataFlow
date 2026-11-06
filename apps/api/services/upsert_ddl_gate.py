@@ -10,6 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
+#: Longest a plan or a replay spends proving an existing destination's upsert
+#: keys unique (D187: a Snowflake reflection + GROUP BY ran 25 s and killed a
+#: second-run upsert plan). Unfinished is ``ran=False``, never a clean 0.
+DEST_DUPLICATE_KEY_STEP_SECONDS = 8.0
+
 
 def dest_unique_covering_columns(
     destination_pk_columns: list[str] | None,
@@ -26,6 +31,64 @@ def dest_unique_covering_columns(
         destination_pk_columns=destination_pk_columns,
         destination_unique_keys=destination_unique_keys,
     )
+
+
+def _rows_a_unique_index_compares(dialect: str, cols: list[Any]) -> Any:
+    """The rows a UNIQUE index on ``cols`` would make collide, per engine.
+
+    PostgreSQL, MySQL/MariaDB and SQLite never compare a key that holds a NULL,
+    so many NULL keys are legal and are not duplicates. Oracle skips only the
+    rows whose key is NULL in every column. SQL Server compares NULL as a value
+    (one NULL per unique index), so every row counts there.
+    """
+    import sqlalchemy as sa
+
+    name = dialect.lower()
+    if name.startswith("mssql"):
+        return None
+    if name.startswith("oracle"):
+        return sa.or_(*[c.is_not(None) for c in cols])
+    return sa.and_(*[c.is_not(None) for c in cols])
+
+
+def probe_dest_duplicate_keys(
+    cfg: dict[str, Any],
+    table: str,
+    columns: list[str],
+    *,
+    seconds: float = DEST_DUPLICATE_KEY_STEP_SECONDS,
+) -> dict[str, Any]:
+    """:func:`count_dest_duplicate_keys`, bounded — the one probe plan and replay run.
+
+    A probe that times out or fails answers ``ran=False`` with the reason; the
+    keyed write still enforces the key.
+    """
+    from src.ai.copilot.tool_deadline import bounded_step
+
+    try:
+        run = bounded_step(
+            f"counting duplicate upsert keys on destination {table}",
+            lambda: count_dest_duplicate_keys(dict(cfg or {}), table, list(columns)),
+            seconds=seconds,
+            conn=cfg,
+            role="destination",
+        )
+        if run.error is not None:
+            raise run.error
+    except Exception as exc:  # noqa: BLE001 — an optional proof never decides alone
+        return {
+            "ran": False, "duplicate_keys": 0, "duplicate_rows": 0, "samples": [],
+            "message": f"duplicate-key probe failed: {exc}"[:300],
+        }
+    if run.timed_out:
+        return {
+            "ran": False, "duplicate_keys": 0, "duplicate_rows": 0, "samples": [],
+            "message": (
+                "duplicate-key probe did not finish within the plan's step budget "
+                f"({seconds:g}s at most); Execute's keyed write still enforces the key"
+            ),
+        }
+    return run.value
 
 
 def count_dest_duplicate_keys(
@@ -86,6 +149,9 @@ def count_dest_duplicate_keys(
         .group_by(*cols)
         .having(cnt > 1)
     )
+    keyed = _rows_a_unique_index_compares(str(engine.dialect.name or ""), cols)
+    if keyed is not None:
+        stmt = stmt.where(keyed)
     with engine.connect() as conn:
         rows = conn.execute(stmt).fetchall()
     dup_keys = len(rows)
