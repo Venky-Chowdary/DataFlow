@@ -10,9 +10,10 @@ cancel stops further writes instead of being noticed at the end.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from services.error_handling import TransferCancelled
 
@@ -105,6 +106,58 @@ _meter: contextvars.ContextVar["ProgressMeter | None"] = contextvars.ContextVar(
 _last_written: contextvars.ContextVar[int] = contextvars.ContextVar(
     "df_last_written", default=0
 )
+
+
+class _CancelKeepingFile:
+    """File proxy for a COPY callback that remembers a cancel raised inside it."""
+
+    def __init__(self, inner: Any, poll: bool) -> None:
+        self._inner = inner
+        self._poll = poll
+        self.cancelled: TransferCancelled | None = None
+
+    def _call(self, name: str, *args: Any) -> Any:
+        try:
+            if self._poll:
+                cancel_checkpoint()
+            return getattr(self._inner, name)(*args)
+        except TransferCancelled as exc:
+            self.cancelled = exc
+            raise
+
+    def read(self, *args: Any) -> Any:
+        return self._call("read", *args)
+
+    def readline(self, *args: Any) -> Any:
+        return self._call("readline", *args)
+
+    def write(self, *args: Any) -> Any:
+        return self._call("write", *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def copy_expert_keeping_cancel(cur: Any, sql: str, file: Any, *, poll: bool = False) -> None:
+    """``cursor.copy_expert`` that lets a job cancel out as ``TransferCancelled``.
+
+    A cancel probe that fires inside the COPY's ``read()`` / ``write()``
+    callback is caught by psycopg and re-raised as a driver error ("error in
+    .read() call: TransferCancelled ..."). The route then saw a COPY failure,
+    not a cancel: the job's record kept the progress meter's row count with no
+    cancel outcome, and the operator read "1,024 rows retained" for a COPY
+    that had rolled back (QA C16). ``poll`` also polls the probe on every
+    callback (the reader/writer does not poll itself).
+    """
+    proxy = _CancelKeepingFile(file, poll)
+    try:
+        cur.copy_expert(sql, proxy)
+    except TransferCancelled:
+        raise
+    except Exception as exc:
+        if proxy.cancelled is not None:
+            raise proxy.cancelled from exc
+        raise
 
 
 class ProgressMeter:
@@ -202,6 +255,71 @@ class ProgressMeter:
             )
         except Exception as exc:  # noqa: BLE001 - progress must never fail a write
             logger.debug("progress heartbeat skipped for %s: %s", self._job_id, exc)
+
+
+#: Seconds between pulses while a run waits on one blocking step (D19).
+BLOCKING_STEP_PULSE_SECONDS = 15.0
+
+
+def _blocking_step_bound_seconds() -> float:
+    """How long a wait may claim "has not stalled": the existing readiness
+    bound for the oldest in-flight connector call (default 300 s)."""
+    from services.connector_executor import (
+        DEFAULT_READY_MAX_AGE_SECONDS,
+        _float_setting,
+    )
+
+    return _float_setting(
+        "DATAFLOW_CONNECTOR_READY_MAX_AGE_SECONDS", DEFAULT_READY_MAX_AGE_SECONDS
+    )
+
+
+@contextlib.contextmanager
+def blocking_step(message: str, *, phase: str = "reading") -> Iterator[None]:
+    """Say what the run is waiting on, and keep the job's heartbeat moving.
+
+    Between the engine's last phase message and the first committed batch the
+    run can wait minutes on one call (the source executing its query, a first
+    page over a slow link). Nothing reached the job row in that window: it read
+    "Connecting to destination and creating table..." with ``updated_at``
+    frozen while the wait was the *source* (D19). Inside this scope the message
+    names the real wait at once and the existing phase pulse
+    (``job_phase_heartbeat``) stamps ``heartbeat_at`` until rows start
+    arriving; from then on the per-batch meter is the heartbeat. The pulse
+    never moves ``updated_at`` (the operator's stall signal) and past the
+    readiness bound it says the source has not answered. A no-op outside a
+    run, for a cancelled job (the status fence refuses it) and for a
+    superseded attempt; it also stops as soon as the attempt is superseded.
+    """
+    meter = _meter.get()
+    if meter is None:
+        yield
+        return
+    mongo, job_id = meter._mongo, meter._job_id
+    rows_at_entry = meter.mark()
+    try:
+        job = _read_job(mongo, job_id) or {}
+        live = str(job.get("status") or "") == "running" and not _is_superseded(job)
+        if live:
+            mongo.update_job_status(job_id, "running", phase=phase, message=message)
+    except Exception as exc:  # noqa: BLE001 - a status line must never fail the read
+        logger.debug("blocking-step message skipped for %s: %s", job_id, exc)
+        live = False
+    if not live:
+        yield
+        return
+    from src.transfer.reconcile_heartbeat import job_phase_heartbeat
+
+    with job_phase_heartbeat(
+        mongo,
+        job_id,
+        phase=phase,
+        message=message,
+        interval_s=BLOCKING_STEP_PULSE_SECONDS,
+        until=lambda: meter.mark() > rows_at_entry or attempt_superseded(mongo, job_id),
+        bound_seconds=_blocking_step_bound_seconds(),
+    ):
+        yield
 
 
 def set_progress_meter(meter: "ProgressMeter | None") -> None:

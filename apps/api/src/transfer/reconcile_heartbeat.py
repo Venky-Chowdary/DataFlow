@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextvars
 import threading
 import time
 from contextlib import contextmanager
@@ -45,6 +44,28 @@ def reconcile_heartbeat_scope(dest_summary: Any) -> dict[str, Any]:
     scope["checksum_table"] = table
     scope["stream_count"] = len(names)
     return scope
+
+
+def _first_row_wait_phrase(elapsed: int, bound: int) -> str:
+    """What the checksum is waiting on before its first destination row.
+
+    The pulse used to promise "a metadata lock fails within 120s" for as long
+    as the scan sat at 0%: at 467s on 30 rows, with no query on either
+    database, the promise was false and pointed at a lock that did not exist
+    (D280). The bound is the configured lock wait; past it the sentence says
+    the destination has not answered instead of repeating the promise.
+    """
+    if elapsed <= bound:
+        return (
+            " No destination row has been read yet; a lock wait on the "
+            f"destination ends within {bound}s."
+        )
+    return (
+        f" No destination row has been read after {elapsed}s, longer than the "
+        f"{bound}s lock-wait bound: the destination has not answered the "
+        "checksum read. Check the destination's sessions and the connection "
+        "to it; cancelling the job stops the scan."
+    )
 
 
 @contextmanager
@@ -115,8 +136,13 @@ def reconcile_phase_heartbeat(
             total_rows=total,
             message=enter_msg,
         )
+        from connectors.write_resilience import destination_lock_wait_seconds
+
+        # Resolved here, not in the pulse thread: the bound the sentence names.
+        lock_bound = destination_lock_wait_seconds()
         stop = threading.Event()
         started = time.monotonic()
+        last_hashed = [0]
 
         def _pulse() -> None:
             while not stop.wait(interval_s):
@@ -142,37 +168,47 @@ def reconcile_phase_heartbeat(
                         f"not the whole job…{hashed_phrase}{checksum_phrase}"
                     )
                 else:
-                    waiting = ""
-                    if hashed <= 0:
-                        waiting = (
-                            " No destination row has been read yet; a metadata "
-                            "lock fails within 120s."
-                        )
+                    waiting = _first_row_wait_phrase(elapsed, lock_bound) if hashed <= 0 else ""
                     pulse = (
                         f"Reconciling data ({elapsed}s) — checksum scan still "
                         f"running for {processed:,} rows.{hashed_phrase}{waiting} "
                         "The job has not stalled."
                         f"{checksum_phrase}"
                     )
-                mongo.update_job_status(
-                    job_id,
-                    "running",
-                    phase="reconcile",
-                    progress_pct=reconcile_display_pct(hashed, total),
-                    reconcile_pct=scan_pct,
-                    records_processed=processed,
-                    total_rows=total,
-                    message=pulse,
-                )
+                if hashed > last_hashed[0]:
+                    # Rows hashed since the last pulse: real progress.
+                    last_hashed[0] = hashed
+                    mongo.update_job_status(
+                        job_id,
+                        "running",
+                        phase="reconcile",
+                        progress_pct=reconcile_display_pct(hashed, total),
+                        reconcile_pct=scan_pct,
+                        records_processed=processed,
+                        total_rows=total,
+                        message=pulse,
+                    )
+                else:
+                    # Nothing hashed since the last pulse: the worker is alive,
+                    # but updated_at (the stall signal) must not move (D280).
+                    _stamp_heartbeat(
+                        mongo,
+                        job_id,
+                        {
+                            "phase": "reconcile",
+                            "progress_pct": reconcile_display_pct(hashed, total),
+                            "reconcile_pct": scan_pct,
+                            "records_processed": processed,
+                            "total_rows": total,
+                            "message": pulse,
+                        },
+                    )
 
         # Run under a copy of the caller's context so the pulse's logs keep the
         # job_id/correlation_id bound by the engine; raw threads start empty.
-        thread = threading.Thread(
-            target=contextvars.copy_context().run,
-            args=(_pulse,),
-            name=f"reconcile-heartbeat-{job_id[:8]}",
-            daemon=True,
-        )
+        from services.tracing import thread_in_context
+
+        thread = thread_in_context(_pulse, name=f"reconcile-heartbeat-{job_id[:8]}")
         thread.start()
         try:
             yield
@@ -181,6 +217,39 @@ def reconcile_phase_heartbeat(
             thread.join(timeout=1.0)
     finally:
         reset_reconcile_scan(token)
+
+
+def _stamp_heartbeat(mongo: Any, job_id: str, fields: dict[str, Any]) -> None:
+    """Write a liveness stamp and message without moving ``updated_at``.
+
+    ``updated_at`` is the operator's silence signal (``job_stall_seconds`` in
+    get_job and the job list). A pulse that refreshed it hid a worker blocked
+    for good behind a silent source: the job looked alive forever. The pulse
+    writes ``heartbeat_at`` instead; ``updated_at`` moves on real progress.
+    """
+    from datetime import datetime, timezone
+
+    fields = {**fields, "heartbeat_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        mongo.update_job_fields(job_id, fields, touch_updated_at=False)
+    except TypeError:
+        # A store without the flag (tests' doubles): the stamp still lands.
+        mongo.update_job_fields(job_id, fields)
+
+
+def _phase_pulse_message(
+    message: str, elapsed: float, bound: float | None, overdue: str | None
+) -> str:
+    shown = int(elapsed)
+    if bound is not None and elapsed > bound:
+        # Past the bound the pulse stops asserting liveness: the worker is
+        # alive, but the system it waits on has not answered.
+        return overdue or (
+            f"{message} — no answer after {shown}s (longer than {bound:g}s). "
+            "The system this step waits on has not answered; check it, or "
+            "cancel the job."
+        )
+    return f"{message} ({shown}s elapsed — the job has not stalled)"
 
 
 @contextmanager
@@ -194,42 +263,61 @@ def job_phase_heartbeat(
     progress_pct: Any = None,
     records_processed: int | None = None,
     total_rows: int | None = None,
+    until: Any = None,
+    bound_seconds: float | None = None,
+    overdue_message: str | None = None,
 ) -> Iterator[None]:
     """Pulse a long phase so the job does not look stalled (D19).
+
+    The first write sets the phase and message through ``update_job_status``
+    (real progress: the run reached this step). Every later pulse stamps
+    ``heartbeat_at`` and the elapsed-time message *without* touching
+    ``updated_at``, so ``job_stall_seconds`` keeps counting a worker that is
+    blocked for good (a silent source) while the stamp shows the worker is
+    alive. Past ``bound_seconds`` the message says the system has not answered
+    (``overdue_message`` or a default) instead of "has not stalled".
+
+    ``until`` (optional, no arguments) ends the pulse early once it returns
+    true, e.g. when committed batches start reporting their own progress or
+    the attempt was superseded.
 
     ``reconcile_phase_heartbeat`` owns the 98–99 band; this is the same
     contract for any other phase — connect, destination create, slow source
     reads — whose progress_pct/records_processed must not regress or claim
-    work it cannot measure. The pulse keeps the phase and stamps elapsed
-    seconds; the stored heartbeat timestamp itself proves liveness.
+    work it cannot measure.
     """
+    from services.tracing import thread_in_context
+
     stop = threading.Event()
     started = time.monotonic()
+    fixed: dict[str, Any] = {"phase": phase}
+    if progress_pct is not None:
+        fixed["progress_pct"] = progress_pct
+    if records_processed is not None:
+        fixed["records_processed"] = records_processed
+    if total_rows is not None:
+        fixed["total_rows"] = total_rows
 
     def _pulse() -> None:
         while not stop.wait(interval_s):
-            elapsed = int(time.monotonic() - started)
-            kwargs: dict[str, Any] = {
-                "phase": phase,
-                "message": f"{message} ({elapsed}s elapsed — the job has not stalled)",
-            }
-            if progress_pct is not None:
-                kwargs["progress_pct"] = progress_pct
-            if records_processed is not None:
-                kwargs["records_processed"] = records_processed
-            if total_rows is not None:
-                kwargs["total_rows"] = total_rows
+            if until is not None and until():
+                return
+            elapsed = time.monotonic() - started
             try:
-                mongo.update_job_status(job_id, "running", **kwargs)
+                _stamp_heartbeat(
+                    mongo,
+                    job_id,
+                    {
+                        **fixed,
+                        "message": _phase_pulse_message(
+                            message, elapsed, bound_seconds, overdue_message
+                        ),
+                    },
+                )
             except Exception:
                 return
 
-    thread = threading.Thread(
-        target=contextvars.copy_context().run,
-        args=(_pulse,),
-        name=f"job-heartbeat-{job_id[:8]}",
-        daemon=True,
-    )
+    thread = thread_in_context(_pulse, name=f"job-heartbeat-{job_id[:8]}")
     thread.start()
     try:
         yield

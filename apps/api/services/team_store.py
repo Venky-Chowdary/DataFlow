@@ -261,12 +261,19 @@ def _authority(
 def _authorize_change(
     authority: _Authority, *, current: str, requested: str | None
 ) -> None:
-    """The membership rules every route shares.
+    """The membership rules every route shares (C6, Security 1/2 — QA r14).
 
-    - Bringing someone in needs ``member.invite`` and never grants a role above
-      the actor's own; granting admin needs workspace administration.
-    - Changing an existing member's role is role management: admin only.
-    - Removing a member needs ``member.invite``; removing an admin needs admin.
+    Member administration belongs to the workspace admin (the role older
+    builds called ``owner``). An editor, operator or viewer — a session or an
+    API key, judged by the key's own role — can neither add, remove nor re-role
+    anyone.
+
+    - Bringing someone in needs ``member.invite`` (admin only) and never grants
+      a role above the actor's own; granting admin needs workspace.manage.
+    - Changing an existing member's role is role management: workspace.manage.
+    - Removing a member needs ``member.invite``; removing an admin needs
+      workspace.manage, and never the last admin who can sign in
+      (``_assert_not_last_admin``).
     """
     from services.rbac import Permission
 
@@ -276,7 +283,7 @@ def _authorize_change(
     if current == "admin" and not manage:
         raise PermissionDenied("Only a workspace admin can change or remove another admin")
     if not authority.has(Permission.MEMBER_INVITE) and not manage:
-        raise PermissionDenied("Adding or removing members requires the workspace admin or editor role")
+        raise PermissionDenied("Adding or removing members requires the workspace admin role")
     if requested is not None:
         if _RANK.get(requested, 0) > _RANK.get(authority.role, -1):
             raise PermissionDenied(
@@ -329,6 +336,23 @@ class Workspace:
     created_at: str = field(default_factory=_now)
     created_by: str = ""
     org_id: str = ""  # owning organization (signup-created orgs; "" = pre-org era)
+    #: Set only on a throwaway security-test workspace (C18,
+    #: ``services.sandbox_workspaces``): when it is deleted automatically.
+    sandbox_expires_at: str = ""
+    #: The synthetic tester login the sandbox created; removed with it.
+    sandbox_tester: str = ""
+    #: ``created_at`` of the tester login this sandbox minted. The teardown
+    #: deletes that login only while the stored record still carries it, so
+    #: a real account (a lost create race, or one re-created later under the
+    #: same email) is never touched. Empty = this sandbox minted no login.
+    sandbox_tester_created_at: str = ""
+    #: Set when deletion starts (``services.workspace_teardown``): a closing
+    #: workspace accepts no write, no new job and no schedule claim (S3).
+    deleting_at: str = ""
+    #: The member emails at the moment the teardown closed the workspace: a
+    #: resumed teardown (memberships already gone) still knows whose logins
+    #: it may remove (review 4 L4).
+    deleting_members: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -341,6 +365,11 @@ class Workspace:
             created_at=data.get("created_at", _now()),
             created_by=data.get("created_by", ""),
             org_id=data.get("org_id", ""),
+            sandbox_expires_at=str(data.get("sandbox_expires_at") or ""),
+            sandbox_tester=str(data.get("sandbox_tester") or ""),
+            sandbox_tester_created_at=str(data.get("sandbox_tester_created_at") or ""),
+            deleting_at=str(data.get("deleting_at") or ""),
+            deleting_members=[str(e) for e in (data.get("deleting_members") or []) if e],
         )
 
 
@@ -518,6 +547,80 @@ def _delete_membership(workspace_id: str, email: str) -> bool:
     return removed
 
 
+def mark_workspace_closing(workspace_id: str, *, members: list[str] | None = None) -> Workspace | None:
+    """Tombstone a workspace before its teardown (idempotent; keeps the first stamp).
+
+    ``members`` is recorded once, with the first stamp, and grows on a resume
+    (a member added before the tombstone landed is not lost).
+    """
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        return None
+    known = list(ws.deleting_members)
+    merged = known + [e for e in (members or []) if e and e not in known]
+    if not ws.deleting_at or merged != known:
+        ws.deleting_at = ws.deleting_at or _now()
+        ws.deleting_members = merged
+        _write_workspace(ws)
+    return ws
+
+
+class WorkspaceStateUnavailable(TeamStoreError):
+    """The workspace store could not be read to decide whether work may start (503)."""
+
+    reason = "store_unavailable"
+    kind = "store_unavailable"
+
+
+def workspace_closing(workspace_id: str, *, fail_closed: bool = False) -> bool:
+    """True while a teardown of ``workspace_id`` is under way (or was interrupted).
+
+    ``fail_closed`` (job creation, the beat's schedule claim): a store that
+    cannot be read raises :class:`WorkspaceStateUnavailable` — starting work in
+    a workspace whose state is unknown is the unsafe choice (review 4 L3), and
+    it is reported as a store outage, not as "being deleted" (review 6).
+    Request gates keep the default; the authority check after them reads the
+    same store.
+    """
+    if not workspace_id:
+        return False
+    try:
+        ws = get_workspace(workspace_id)
+    except Exception as exc:  # noqa: BLE001
+        if fail_closed:
+            raise WorkspaceStateUnavailable("The workspace store is unavailable; try again") from exc
+        return False
+    return bool(ws is not None and ws.deleting_at)
+
+
+class WorkspaceClosing(TeamStoreError, PermissionError):
+    """A write, job, schedule claim or membership change aimed at a workspace being deleted."""
+
+    reason = "workspace_closing"
+
+    def __init__(self, workspace_id: str):
+        super().__init__(f"Workspace {workspace_id} is being deleted")
+        self.workspace_id = workspace_id
+
+
+def assert_workspace_open(workspace_id: str) -> None:
+    if workspace_closing(workspace_id, fail_closed=True):
+        raise WorkspaceClosing(workspace_id)
+
+
+def delete_workspace_memberships(workspace_id: str) -> int:
+    """Remove every membership of a workspace (teardown, before the workspace row)."""
+    db = _database()
+    if db is not None:
+        return int(db[MEMBERS_COLLECTION].delete_many({"workspace_id": workspace_id}).deleted_count)
+    with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
+        before = len(data.get("memberships", []))
+        data["memberships"] = [
+            m for m in data.get("memberships", []) if m.get("workspace_id") != workspace_id
+        ]
+        return before - len(data["memberships"])
+
+
 def _delete_workspace_rows(workspace_id: str) -> bool:
     """Delete a workspace and its memberships — never leave members without a workspace."""
     db = _database()
@@ -540,7 +643,14 @@ def _delete_workspace_rows(workspace_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def create_workspace(*, name: str, created_by: str, org_id: str = "") -> Workspace:
+def create_workspace(
+    *,
+    name: str,
+    created_by: str,
+    org_id: str = "",
+    sandbox_expires_at: str = "",
+    sandbox_tester: str = "",
+) -> Workspace:
     """Create a workspace and make its creator the first admin, as one unit.
 
     The workspace row and its first membership are two documents, so writing them
@@ -554,6 +664,10 @@ def create_workspace(*, name: str, created_by: str, org_id: str = "") -> Workspa
         name=name.strip()[:128] or "Workspace",
         created_by=normalize_email(created_by),
         org_id=org_id,
+        # Born marked: a sandbox whose set-up fails half-way is still
+        # recognisable — and deletable — as a sandbox (C18).
+        sandbox_expires_at=sandbox_expires_at,
+        sandbox_tester=normalize_email(sandbox_tester),
     )
     first_admin = Membership(
         workspace_id=ws.id,
@@ -602,15 +716,29 @@ def rename_workspace(*, workspace_id: str, name: str) -> Workspace | None:
     return ws
 
 
-def delete_workspace(*, workspace_id: str) -> bool:
+def delete_workspace(*, workspace_id: str, actor: str = "system") -> bool:
+    """Delete the workspace and everything scoped to it (``services.workspace_teardown``).
+
+    Raises ``workspace_teardown.WorkspaceBusy`` while a job of it is active.
+    """
     if not workspace_id:
         return False
-    return _delete_workspace_rows(workspace_id)
+    from services.workspace_teardown import teardown_workspace
+
+    return bool(teardown_workspace(workspace_id, actor=actor)["workspace_removed"])
 
 
 def get_workspace(workspace_id: str) -> Workspace | None:
+    """One workspace — an indexed read of that row, never the whole collection."""
     if not workspace_id:
         return None
+    db = _database()
+    if db is not None:
+        row = db[WORKSPACES_COLLECTION].find_one({"_id": workspace_id}, {"_id": False})
+        if row is None:
+            # Rows written before _id carried the workspace id.
+            row = db[WORKSPACES_COLLECTION].find_one({"id": workspace_id}, {"_id": False})
+        return Workspace.from_dict(dict(row)) if row and row.get("id") else None
     for ws in _read_workspaces():
         if ws.id == workspace_id:
             return ws
@@ -676,8 +804,13 @@ def _add_workspace_member(
     A platform administrator may seed the first member of any workspace: without
     that, a workspace created by one admin could never be handed to anyone else.
     """
-    if not workspace_id or not get_workspace(workspace_id):
+    ws_row = get_workspace(workspace_id) if workspace_id else None
+    if ws_row is None:
         raise WorkspaceNotFound("Workspace not found")
+    if ws_row.deleting_at:
+        # Closing (teardown under way): no member is added or re-roled — SCIM
+        # group sync included (review 4 L2).
+        raise WorkspaceClosing(workspace_id)
     role = normalize_role(role)
     authority = _authority(workspace_id, added_by, actor_is_platform_admin, principal)
     existing = next(

@@ -38,6 +38,108 @@ notification channels (per workspace), API keys / service accounts / SCIM
 tokens (`iam.manage`; governed by `DATAFLOW_WORKSPACE_ADMIN_IAM`), and the MCP
 tool policy (`PUT /api/v1/mcp/policy`, `workspace.manage`).
 
+## Round 14 security defaults (owner decisions taken as secure defaults)
+
+**Member administration (C6).** Only a workspace admin (the role older builds
+called `owner`) adds, removes or re-roles members — signed in or with an API
+key, judged by the key's own role (capped at its creator's), never the
+creator's. Editors, operators and viewers get `403 "Adding or removing members
+requires the workspace admin role"`, audited as `team.member.denied`. Granting
+or removing admin needs `workspace.manage`; the last admin who can sign in can
+be neither demoted nor removed (`409`); break-glass restores one.
+
+**Scheduled job retention (Security 23).** General -> *Purge automatically*
+(`retention_auto_purge`, **off by default**, platform admin only) runs the
+existing dry-run-then-apply job purge once a day for every workspace: finished
+jobs (completed / failed / cancelled) older than `retention_days` in
+`transfer_jobs`. Running/queued jobs, jobs with no workspace, audit records
+(audit retention) and quarantine rows (quarantine TTL) are never touched. One
+run per deployment per day (Mongo claim `maintenance_runs/job_retention`), on
+the scheduler beat; each run files `workspace.jobs.retention.purge` with
+`mode: "scheduled"`, actor `system:retention`, per workspace.
+`GET /settings` -> `retention_enforcement` reports `scheduled`, `mode`,
+`last_run_at`, `next_run_at`. It needs the shared metadata database (MongoDB): without
+one, turning it on is refused (422), and a run that finds none skips with one
+warning (also shown as `retention_enforcement.warning`).
+
+**API-key ids in audit reads (Browser 20).** `GET /api/v1/audit/events` and
+`GET /api/v1/audit/export` (csv/json/ndjson/cef) return API-key /
+service-account / SCIM-token ids whole only to a workspace admin or a platform
+admin. Every other reader gets `…` + the last four characters, wherever the id
+appears (actor, `actor_id`, resource, details), `key_ids_masked: true` and the
+header `X-Datawrap-Key-Ids-Masked: 1`. Stored records are never rewritten; a
+masked export does not re-hash to `event_hash` (verify with an admin export or
+`/audit/verify`).
+
+### Throwaway workspaces for security retests (C18)
+
+Platform admins only (signed in, or a platform-wide admin key):
+
+```
+POST   /api/v1/team/sandbox-workspaces
+       {"tester_email": "...", "reason": "...", "name": "...",
+        "ttl_hours": 24 (1..168), "create_account": false}
+GET    /api/v1/team/sandbox-workspaces
+DELETE /api/v1/team/sandbox-workspaces/{workspace_id}   {"reason": "..."}
+```
+
+Creates `[sandbox] <name>` (marked as a sandbox from its first write, so a
+failed set-up is rolled back or still deletable as one) with a **new
+synthetic tester login** as its only admin; its one-time password is
+returned once. An existing account is refused: the sandbox's IP allowlist
+would also govern that person's header-less requests in their real
+workspaces. The platform admin is not a member. The tester then sets MFA /
+session timeout / IP allowlist on that workspace's tenant
+(`POST /api/v1/workspace/tenant`) and retests without touching any real owner
+or workspace. `DELETE` (or expiry: swept on the scheduler beat once per 15
+minutes per deployment, actor `system:sandbox-expiry`) runs the workspace
+cascade below and then deletes the synthetic login and revokes its sessions;
+it refuses any workspace that is not a sandbox, and waits (409) while a job of
+it is active. Audited as `team.sandbox.create` /
+`team.sandbox.delete`. Pytest fixture: `apps/api/tests/r14_sandbox_world.py`.
+
+### Deleting a workspace (one cascade)
+
+`DELETE /api/v1/team/workspaces/{id}`, the sandbox teardown and the expiry
+sweep share `services/workspace_teardown.py` (`team_store.delete_workspace`
+delegates to it). It is irreversible, so:
+
+- `?dry_run=true` returns what would be removed (counts per store, active
+  jobs, what is retained) and changes nothing;
+- the real delete needs `?confirm=<workspace name>` (422 otherwise; a
+  workspace with a blank name is renamed first); `?reason=<text>` is recorded
+  with it, never instead of it; both are audited on `team.workspace.delete`.
+
+The cascade runs in system scope and names the target workspace on every
+store, matching it exactly (another workspace's or an unscoped legacy row is
+never touched). It refuses (409) while any job of the workspace is active or
+when the job store cannot say, then **tombstones** the workspace — writes to it
+answer 409, no job can be created in it and the beat claims none of its
+schedules, and no id-addressed update, delete or SCIM role change reaches it
+(job creation and the beat's claim fail closed when the store cannot be read);
+the member list is kept on the tombstone so a resumed delete still knows it —
+revokes its API keys, removes its memberships, releases each
+schedule's CDC capture and deletes the schedules, deletes saved connectors and
+credentials, finished jobs with their checkpoints, the incremental watermarks
+and quality-profile runs only its jobs produced, quarantine rows (Mongo and
+the JSONL fallback), uploads (file, staged object, registry row), transforms,
+tenant policy, notification channels, SCIM group mappings and "last used"
+pointers, the sandbox's own tester login (unless it became a real account —
+then it is kept and `team.sandbox.tester_login_kept` is audited) and logins
+that tester created; it re-checks active jobs and only then deletes the
+workspace row. Retained on purpose: the audit trail, usage metering and data
+contracts (evidence). A session token whose account no longer exists is
+refused by the auth middleware.
+
+**Legacy schedule zones (Sec-15).** A schedule row stored before zones were
+validated (e.g. `Mars/Olympus`) stays writable — pause, rename, back-off —
+because the zone is checked only when a write sets it or changes the
+cadence. At start-up (throttled to once per 10 minutes) the scheduler
+normalises such zones to UTC — only when the host's zone database is complete
+(`tzdata` is in requirements.txt), each write conditional on the stored value —
+pauses a repaired enabled schedule (no next run, a note in its history),
+notifies the workspace's channels, and audits `schedule.timezone.normalized`.
+
 ## Who is a platform admin
 
 Platform admin is the **account** role, not a workspace membership role:

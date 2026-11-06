@@ -114,9 +114,12 @@ def test_snowflake_timestamps_load_to_postgres_without_a_contract(env):
         assert types["ts_ntz"] == "timestamp without time zone"
         assert types["ts_tz"] == "timestamp with time zone"
         assert types["ts_ltz"] == "timestamp with time zone"
+        # A Snowflake-folded name lands as PostgreSQL's folded name on a new
+        # table (QA r12 SF D3): the columns are id / ts_ntz / ts_tz, reachable
+        # unquoted, not quoted "ID" copies of the source spelling.
         landed = _pg(
-            f'SELECT "ID", "TS_NTZ"::text, ("TS_TZ" AT TIME ZONE \'UTC\')::text '
-            f'FROM public."{dst}" ORDER BY "ID"'
+            f"SELECT id, ts_ntz::text, (ts_tz AT TIME ZONE 'UTC')::text "
+            f'FROM public."{dst}" ORDER BY id'
         )
         assert landed == [
             (1, "2024-03-01 10:15:00", "2024-03-01 10:15:00"),

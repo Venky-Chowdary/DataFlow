@@ -210,6 +210,18 @@ def _hkdf_32(ikm: bytes, *, info: bytes) -> bytes:
         return hashlib.pbkdf2_hmac("sha256", ikm, info, 100_000, dklen=32)
 
 
+def derive_subkey(info: bytes) -> bytes:
+    """A 32-byte key for one purpose, HKDF-derived from the vault master key.
+
+    Domain-separated by ``info`` (e.g. ``b"audit-key-history/v1"``): a MAC key
+    for integrity, never usable to decrypt a stored secret and never equal to
+    the connector-secret key. Raises ``SecretVaultError`` where the vault has
+    no local key material (production without ``DATAFLOW_SECRETS_KEY``).
+    """
+    master = base64.urlsafe_b64decode(_fernet_key_material())
+    return _hkdf_32(master, info=info)
+
+
 def _fernet_key_material() -> bytes:
     """Return Fernet urlsafe-b64 key bytes (32-byte key, urlsafe-b64 encoded)."""
     raw = getenv_brand("SECRETS_KEY", "").strip()

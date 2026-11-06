@@ -21,7 +21,9 @@ import {
   type WorkspaceRole,
 } from "../../lib/api";
 import {
+  concreteWorkspaceId,
   getActiveWorkspaceId,
+  isKnownWorkspaceChoice,
   landingWorkspaceId,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
@@ -74,13 +76,15 @@ function relativeTime(iso?: string): string {
 export function TeamSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  // Two authorities, because the API has two: creating a workspace is workspace
-  // administration, while bringing a peer into the workspace you already work in
-  // is member.invite — which an editor holds. Gating both on workspace.manage
-  // disabled a control the API would have honoured for an editor.
+  // Two authorities, because the API has two: creating a workspace and granting
+  // admin is workspace.manage, adding or removing a non-admin member is
+  // member.invite. Both are the workspace admin's (C6): an editor manages no
+  // members, so the member tools read as read-only for one.
   const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const membership = useWriteGate(PERMISSIONS.memberInvite);
-  const activeWorkspace = useActiveWorkspaceId();
+  // Members belong to a workspace; a platform admin's All / Unassigned view is
+  // not one, so the member tools ask for a workspace there (D218).
+  const activeWorkspace = concreteWorkspaceId(useActiveWorkspaceId());
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
@@ -103,12 +107,12 @@ export function TeamSettings() {
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
-    const { workspaces: rows, platformAdmin: isAdmin, defaultWorkspaceId } = await fetchWorkspaces();
+    const { workspaces: rows, platformAdmin: isAdmin, defaultWorkspaceId, views } = await fetchWorkspaces();
     setWorkspaces(rows);
     setPlatformAdmin(isAdmin);
     const current = getActiveWorkspaceId();
-    if (rows.length && (!current || !rows.some((w) => w.id === current))) {
-      setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId));
+    if (rows.length && !isKnownWorkspaceChoice(current, rows, views)) {
+      setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId, views));
     }
     return isAdmin;
   }, []);
@@ -140,7 +144,7 @@ export function TeamSettings() {
   const refreshAll = useCallback(async () => {
     try {
       const isAdmin = await loadWorkspaces();
-      await Promise.all([loadUsers(isAdmin), refreshMembers(getActiveWorkspaceId())]);
+      await Promise.all([loadUsers(isAdmin), refreshMembers(concreteWorkspaceId(getActiveWorkspaceId()))]);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Could not load team settings.");
     }
@@ -166,8 +170,8 @@ export function TeamSettings() {
     toast({ title: "Last admin protected", message: LAST_ADMIN_PROTECTED, tone: "warning" });
     return false;
   };
-  // Granting admin is the one membership change an editor may not make, and the
-  // store refuses it — so the option says why instead of failing on submit.
+  // Granting admin needs workspace.manage; a principal scoped to member.invite
+  // alone may add non-admins only, so the option says why instead of failing.
   const canGrantAdmin = manage.allowed;
 
   const addWorkspace = async () => {
@@ -392,6 +396,11 @@ export function TeamSettings() {
                 disabled={workspaces.length === 0}
               >
                 {workspaces.length === 0 && <option value="">No workspace yet</option>}
+                {workspaces.length > 0 && !activeWorkspace && (
+                  <option value="" disabled>
+                    Choose a workspace
+                  </option>
+                )}
                 {workspaces.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}
@@ -488,7 +497,7 @@ export function TeamSettings() {
                     onChange={(e) => setInviteRole(e.target.value as WorkspaceRole)}
                   >
                     <option value="viewer">Viewer — read jobs, connectors and proofs</option>
-                    <option value="editor">Editor — run transfers, edit connectors, add non-admin members</option>
+                    <option value="editor">Editor — run transfers, edit connectors and schedules</option>
                     <option value="admin" disabled={!canGrantAdmin}>
                       Admin — full workspace access incl. roles{canGrantAdmin ? "" : " (workspace admin only)"}
                     </option>

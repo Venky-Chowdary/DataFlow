@@ -36,6 +36,8 @@ platform label. `test_connector` additionally refuses connector types that run
 executables on the API host (`singer_tap`) unless the caller is the platform
 administrator, exactly as `POST /connectors/saved/{id}/test` does.
 
+`list_cdc_captures` and `cleanup_cdc_captures` are the MCP twins of `GET /api/v1/ops/cdc-captures` and `POST /api/v1/ops/cdc-captures/cleanup`: the replication slots and publications Datawrap created on a PostgreSQL source, scoped to the caller's workspace (other workspaces' and non-Datawrap slots are counted, never shown or dropped). Cleanup is staged and runs on Confirm; it never drops a slot a CDC schedule uses or a running job holds.
+
 | Tool | Required permission scope | Effect |
 | --- | --- | --- |
 | `aggregate_data` | `query.use` | `read` |
@@ -43,6 +45,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `analyze_result` | `query.use` | `read` |
 | `brief_workspace` | `workspace.read` | `read` |
 | `cancel_job` | `job.manage` | `mutate` |
+| `cleanup_cdc_captures` | `workspace.manage` | `mutate` |
 | `clear_cursor_resnapshot` | `workspace.manage` | `mutate` |
 | `compare_connectors` | `connector.read` | `read` |
 | `compare_datasets` | `workspace.read` | `read` |
@@ -64,6 +67,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `get_transfer_capabilities` | `workspace.read` | `read` |
 | `inspect_schema_policy` | `connector.read` | `read` |
 | `introspect_connector_schema` | `connector.read` | `read` |
+| `list_cdc_captures` | `workspace.manage` | `read` |
 | `list_connector_objects` | `connector.read` | `read` |
 | `list_connectors` | `connector.read` | `read` |
 | `list_contracts` | `job.read` | `read` |
@@ -81,6 +85,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `rank_connector_tables` | `query.use` | `read` |
 | `rebaseline_transfer` | `job.manage` | `mutate` |
 | `recommend_sync_mode` | `workspace.read` | `read` |
+| `recover_schedule_destination` | `schedule.manage` | `mutate` |
 | `remediate_validation` | `job.plan` | `plan` |
 | `repair_cdc_drift` | `job.manage` | `mutate` |
 | `replay_quarantine` | `job.manage` | `mutate` |
@@ -106,6 +111,25 @@ the job's recorded CDC drift evidence; the fenced re-copy of the selected keys
 runs only after `confirm_action`, which re-checks `job.manage`, the workspace and
 that the evidence belongs to the job and table. This is state convergence /
 reconciliation, not log replay.
+
+`recover_schedule_destination` (`schedule_id` or `name`, `action`, `reason`)
+answers a schedule parked on a `DESTINATION_CONTINUITY` finding — its
+incremental-append destination was dropped or changed outside the pipeline.
+`action: "rebaseline"` accepts the destination as it is now (or its removal);
+nothing is written, and the next run appends rows after the stored cursor — a
+removed table is recreated with those rows only, earlier history is not
+reloaded. `action: "rebuild"` reloads the destination with one full re-sync:
+with a key it upserts every source row and keeps rows only the destination
+holds; **with no key it replaces the table** (every row it holds is dropped).
+The staged preview says which (`destructive`, `effect` naming the table), and
+confirming it is the consent to that replace; `POST /api/v1/schedules/{id}/recover`
+answers the same plan to `dry_run: true` and refuses a replacing rebuild
+without `confirm_replace: true`. `confirm_action` runs that handler, which
+re-checks `schedule.manage` and the workspace and refuses a schedule parked on
+a different finding. A rebuild whose run cannot start (already running, a
+refused start, a key that may not use the endpoints) leaves the finding open
+and is audited as failed; otherwise `schedule.destination.recovered` records
+the reason, the finding closes, and the cadence resumes at its next slot.
 
 Unknown tools are denied. `confirm_action` is not implicitly enabled when
 another mutating tool is allowed; it is governed independently.
@@ -141,3 +165,11 @@ DataFlow CORS settings and optional `CORS_ORIGIN_REGEX`.
   permission scope; this is not a connector failure.
 * Invocation log `error_kind` is one of `ok`, `permission_denied`,
   `rate_limited`, `auth`, `policy_denied`, or `tool_error`.
+* `Unexpected token '<' <!DOCTYPE` in the client: something answered an HTML
+  page where the client expected JSON. Through the web origin, every
+  `/api/...` path is proxied to the API, `/.well-known/oauth-protected-resource`
+  (the discovery a client runs after a 401) is proxied to the API root, and any
+  other `/.well-known/...` document, `/api`, and nginx's own 502/504 answer
+  JSON (`deploy/nginx.conf.template`). If the error persists,
+  check that the client URL ends in `/api/v1/mcp` (not `/mcp`) and that the web
+  service's `DATAWRAP_API_BASE` points at the API.

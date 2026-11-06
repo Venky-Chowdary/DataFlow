@@ -16,12 +16,12 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_default,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
 from services.vectorization import vectorize_records
+from services.connector_auth import resolve_api_key
 
 from connectors.writer_common import WriteResult as _WriteResult
 
@@ -68,7 +68,7 @@ def _headers(api_key: str) -> dict[str, str]:
 def qdrant_rest(cfg: Mapping[str, Any]) -> tuple[Any, str, dict[str, str]]:
     """Session, base URL, and headers for one Qdrant REST call."""
     session = _requests_session()
-    api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+    api_key = resolve_api_key(cfg)
     connection_string = str(cfg.get("connection_string") or "").strip()
     base_url = (
         connection_string.rstrip("/")
@@ -253,7 +253,7 @@ def _ensure_collection(
     }
     resp = session.put(
         f"{base_url}/collections/{collection}",
-        data=json.dumps(create_payload, default=json_default),
+        data=json_dumps_exact_text(create_payload),
         headers=headers,
         timeout=10,
     )
@@ -407,7 +407,7 @@ def scan_source_ids(
         return "unmeasured", []
     try:
         session = _requests_session()
-        api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        api_key = resolve_api_key(cfg)
         connection_string = str(cfg.get("connection_string") or "").strip()
         base_url = connection_string.rstrip("/") if connection_string else _base_url(
             str(cfg.get("host") or ""),
@@ -447,7 +447,7 @@ def scan_source_ids(
                 body["offset"] = offset
             resp = session.post(
                 f"{base_url}/collections/{collection}/points/scroll",
-                data=json.dumps(body, default=json_default),
+                data=json_dumps_exact_text(body),
                 headers=hdrs,
                 timeout=30,
             )
@@ -574,7 +574,14 @@ def write_mapped_rows(
         or []
     ) or None
     collection = table_name or "dataflow_vectors"
-    api_key = password or username or ""
+    api_key = resolve_api_key(
+        {
+            "api_key": _kwargs.get("api_key", ""),
+            "password": password,
+            "username": username,
+            "auth_mode": _kwargs.get("auth_mode", ""),
+        }
+    )
     base_url = connection_string if connection_string else _base_url(host, port, ssl)
 
     studio_live = _kwargs.get("destination_column_types")
@@ -1303,7 +1310,7 @@ def write_mapped_rows(
             batch = points[i : i + batch_size]
             resp = session.put(
                 f"{base_url}/collections/{collection}/points?wait=true",
-                data=json_dumps_exact_numbers({"points": batch}),
+                data=json_dumps_exact_text({"points": batch}),
                 headers=hdrs,
                 timeout=30,
             )

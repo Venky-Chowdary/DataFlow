@@ -171,6 +171,22 @@ _BATCH_SAMPLE_DRIVERS = frozenset({
 })
 
 
+def _samples_through_reader(driver: str) -> bool:
+    """A sample of a non-SQL source is one bounded page from its engine reader.
+
+    SaaS and SDK sources (HubSpot, Stripe, Airtable ...) have no SQL dialect.
+    Their sample went through the query console's extract, which pages the
+    whole object (up to 50,000 rows with every described property) before
+    keeping ``limit`` rows, so a HubSpot contacts sample ran past the tool's
+    45 s deadline and blamed the host (D270). The reader takes the limit.
+    """
+    if driver in _BATCH_SAMPLE_DRIVERS:
+        return True
+    from services.query_extract import connector_queryable_via_extract
+
+    return connector_queryable_via_extract(driver)
+
+
 def _object_name_ok(table: str, *, batch: bool) -> bool:
     """SQL idents stay strict. Object keys may contain ``-`` and ``/``."""
     if not table or len(table) > 1024:
@@ -509,7 +525,7 @@ def sample_connector_object(
                 f'{conn.get("name") or "this connector"}".'
             ),
         )
-    batch_source = driver in _BATCH_SAMPLE_DRIVERS
+    batch_source = _samples_through_reader(driver)
     if not _object_name_ok(table, batch=batch_source):
         return _tool_result(
             tool,

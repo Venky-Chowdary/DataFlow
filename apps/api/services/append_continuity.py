@@ -49,6 +49,14 @@ MISSING_RECOVERY_HINT = (
     "rebuild it from the source."
 )
 
+#: Stable code on every continuity refusal (error_details.error_code, and the
+#: job's error_code): the retry policy and the schedule park read this, never
+#: the refusal's wording (QA C9 review).
+CONTINUITY_ERROR_CODE = "DESTINATION_CONTINUITY"
+#: The one mismatch a later attempt can change: the catalog did not answer
+#: (a blip is not a drop, D266). Every other mismatch is deterministic.
+TRANSIENT_CONTINUITY_MISMATCHES = frozenset({"unreadable"})
+
 _FILE_ENGINES = frozenset({"sqlite", "duckdb"})
 #: Engines whose catalog the shared SQLAlchemy object-identity probe can read.
 _SQL_PROBE_ENGINES = frozenset({"sqlite", "postgresql", "mysql", "mariadb", "sqlserver", "mssql"})
@@ -86,6 +94,15 @@ class ContinuityTarget:
     table: str
     key: str
     path: str = ""
+    #: The same physical table under its other identity spelling. A job
+    #: started from a saved connector keys on ``id:<connector_id>``; an
+    #: endpoint rebuilt from that connector's host keys on ``host:<h>:<p>``.
+    #: Both name one table, so an audited rebaseline covers both (D204).
+    alt_keys: tuple[str, ...] = ()
+
+    @property
+    def all_keys(self) -> tuple[str, ...]:
+        return (self.key, *self.alt_keys)
 
 
 class ContinuityStoreCorrupt(RuntimeError):
@@ -160,18 +177,30 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
     # File engines are identified by their path alone: the engine fills a
     # placeholder host during a run, which must not change the key.
     ident = "" if db_type in _FILE_ENGINES else route_endpoint_identity(endpoint)
-    key = "|".join(
-        [
-            db_type,
-            ident,
-            _dsn_identity(str(cfg.get("connection_string") or "")),
-            database,
-            schema,
-            table,
-        ]
-    )
+    dsn = _dsn_identity(str(cfg.get("connection_string") or ""))
+
+    def _key(identity: str) -> str:
+        return "|".join([db_type, identity, dsn, database, schema, table])
+
+    alt_keys: tuple[str, ...] = ()
+    if ident.startswith("id:") and cfg.get("host"):
+        host_ident = route_endpoint_identity(
+            {
+                "host": cfg.get("host"),
+                "port": cfg.get("port"),
+                "format": getattr(endpoint, "format", "") or cfg.get("type"),
+            }
+        )
+        if host_ident and host_ident != ident:
+            alt_keys = (_key(host_ident),)
     return ContinuityTarget(
-        db_type, cfg, schema, table, key, database if db_type in _FILE_ENGINES else ""
+        db_type,
+        cfg,
+        schema,
+        table,
+        _key(ident),
+        database if db_type in _FILE_ENGINES else "",
+        alt_keys,
     )
 
 
@@ -354,6 +383,7 @@ def compare(
     exp_chk = str(baseline.get("checksum") or "")
     details: dict[str, Any] = {
         "reason": "destination_continuity_mismatch",
+        "error_code": CONTINUITY_ERROR_CODE,
         "verification_status": "failed",
         "table": table,
         "expected_rows": exp_rows,
@@ -590,6 +620,7 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     target = resolve_target(getattr(request, "destination", None))
     if target is None:
         return
+    _clear_accepted_reset(target)
     mode = effective_sync_mode(request)
     if mode is None or not (
         is_append_sync(mode) or is_overwrite_sync(mode) or requires_upsert(mode)
@@ -619,15 +650,122 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     save_baseline(target.key, fp, job_id)
 
 
+#: An audited rebaseline that accepted a dropped or emptied destination. The
+#: incremental cursor still claims its history is at rest there, so the cursor
+#: reset gate (D100) reads this marker as the operator's decision and lets the
+#: next append start a new history from the watermark. One-shot: the next
+#: verified run's baseline clears it (QA C9).
+ACCEPTED_RESET_PREFIX = "accepted_reset:"
+
+
+def _accepted_reset_key(target: ContinuityTarget) -> str:
+    """The marker's key: the saved connector's own identity, never a shared one.
+
+    Two workspaces' connectors can name one physical table, and both then
+    carry the same ``host:<h>:<p>`` alt key. Acceptance is one workspace's
+    decision about its own route, so it is keyed only on ``id:<connector>``
+    (or a file engine's own path). An inline host endpoint records none.
+    """
+    if target.db_type in _FILE_ENGINES or "|id:" in target.key:
+        return ACCEPTED_RESET_PREFIX + target.key
+    return ""
+
+
+def destination_reset_accepted(endpoint: Any) -> bool:
+    """True when an audited rebaseline accepted this destination's removal or emptying."""
+    try:
+        target = resolve_target(endpoint)
+        if target is None:
+            return False
+        key = _accepted_reset_key(target)
+        return bool(key) and bool(load_baseline(key))
+    except Exception:  # noqa: BLE001 - an unreadable marker accepts nothing
+        return False
+
+
+def _clear_accepted_reset(target: ContinuityTarget) -> None:
+    for key in [k for k in (_accepted_reset_key(target),) if k]:
+        try:
+            if load_baseline(key):
+                clear_baseline(key)
+        except Exception:  # noqa: BLE001
+            logger.warning("accepted-reset marker not cleared for %s", key, exc_info=True)
+
+
+def _keys_this_rebaseline_owns(target: ContinuityTarget, endpoint: Any) -> tuple[str, ...]:
+    """The keys an audited rebaseline may move (QA C9 review 2).
+
+    The connector's own ``id:<connector>`` key always. The ``host:<h>:<p>`` alt
+    key (D204: a job rebuilt from the host reads it) only when no other
+    workspace's connector resolves to the same physical table — otherwise
+    workspace A's rebaseline would move workspace B's baseline. When that
+    cannot be decided, the alt key is treated as shared and left alone.
+    """
+    if not target.alt_keys:
+        return (target.key,)
+    connector_id = str(getattr(endpoint, "connector_id", "") or "").strip()
+    try:
+        from services.connector_store import _load_all
+        from src.transfer.models import EndpointConfig
+
+        connectors = list(_load_all())
+    except Exception:  # noqa: BLE001
+        return (target.key,)
+    owner = next((c for c in connectors if c.id == connector_id), None)
+    if owner is None:
+        try:
+            from services.connector_store import get_connector
+
+            owner = get_connector(connector_id)  # the caller's own connector
+        except Exception:  # noqa: BLE001
+            owner = None
+    if owner is None:
+        return (target.key,)
+    owner_ws = str(getattr(owner, "workspace_id", "") or "")
+    host = str(target.cfg.get("host") or "").strip().lower()
+    shared: set[str] = set()
+    for other in connectors:
+        if other.id == connector_id or str(getattr(other, "workspace_id", "") or "") == owner_ws:
+            continue
+        if str(getattr(other, "host", "") or "").strip().lower() != host:
+            continue
+        try:
+            other_target = resolve_target(
+                EndpointConfig(kind="database", format=other.type, connector_id=other.id,
+                               table=target.table)
+            )
+        except Exception as exc:  # noqa: BLE001 - undecidable: every alt key stays shared
+            logger.warning(
+                "append continuity: cannot resolve connector %s against %s (%s); "
+                "its host keys are treated as shared and left alone",
+                other.id, target.key, type(exc).__name__,
+            )
+            return (target.key,)
+        if other_target is not None:
+            shared.update(set(other_target.all_keys) & set(target.alt_keys))
+    return (target.key, *(k for k in target.alt_keys if k not in shared))
+
+
 class RebaselineError(ValueError):
     """The destination cannot be accepted as a new baseline."""
 
 
-def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
+def rebaseline(
+    endpoint: Any,
+    *,
+    actor: str,
+    reason: str,
+    release_schedules: bool = True,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     """Operator accepts the current destination as the verified baseline.
 
     Explicit and audited: the audit event is written before the baseline
-    moves, so an audit failure leaves the old baseline in force.
+    moves, so an audit failure leaves the old baseline in force. With
+    ``release_schedules`` the caller's own schedules (``workspace_id``) parked
+    on a continuity finding for this connector's table are re-armed too (QA
+    C9): accepting the destination at the route is the decision they were
+    waiting for. Another workspace's schedule is never touched.
     """
     reason = (reason or "").strip()
     if not reason:
@@ -652,9 +790,15 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         # starts a new history. Same audit path; the baseline is cleared, not
         # replaced with an invented fingerprint.
         removal = True
+    # Only keys this rebaseline owns are read and moved: a host key another
+    # workspace's connector also resolves to is that workspace's baseline.
+    owned_keys = _keys_this_rebaseline_owns(target, endpoint)
+    skipped_shared_keys = [k for k in target.all_keys if k not in owned_keys]
     store_error = ""
     try:
-        previous = load_baseline(target.key)
+        previous = next(
+            (b for b in (load_baseline(k) for k in owned_keys) if b), None
+        )
     except ContinuityStoreCorrupt as exc:
         # The whole point of rebaseline is recovery — a corrupt store is not a
         # reason to refuse it. The audit record must carry that the previous
@@ -689,6 +833,9 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             "store_error": store_error,
             "current": dict(current) if current else None,
             "destination_missing": removal,
+            # Shared keys left alone: runs that key on them (an endpoint built
+            # from the inline host) keep the old baseline.
+            "skipped_shared_keys": skipped_shared_keys,
         },
     )
     if store_error:
@@ -701,10 +848,18 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             raise RebaselineError(
                 f"Continuity store could not be reset after audit: {exc}"
             ) from exc
-    if removal:
-        clear_baseline(target.key)
-    else:
-        save_baseline(target.key, current, rebaseline_id)
+    # Every spelling of this table's key moves together: the next append reads
+    # whichever one its door builds, and must find the accepted state (D204).
+    for key in owned_keys:
+        if removal:
+            clear_baseline(key)
+        else:
+            save_baseline(key, current, rebaseline_id)
+    reset_key = _accepted_reset_key(target)
+    if reset_key and (removal or int((current or {}).get("rows") or 0) == 0):
+        # The entry's presence is the marker; job_id names the audited
+        # rebaseline that accepted the reset.
+        save_baseline(reset_key, {"rows": 0, "checksum": "accepted-reset"}, rebaseline_id)
     logger.warning(
         "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
         target.db_type,
@@ -714,12 +869,21 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         prev_view and prev_view.get("rows"),
         "table removed" if removal else current.get("rows"),
     )
+    released: list[str] = []
+    if release_schedules:
+        from services.schedule_recovery import release_continuity_parks
+
+        released = release_continuity_parks(
+            endpoint, actor=actor, reason=reason, workspace_id=workspace_id
+        )
     return {
         "rebaseline_id": rebaseline_id,
+        "released_schedules": released,
         "table": target.table,
         "previous": prev_view,
         "current": dict(current) if current else None,
         "destination_missing": removal,
+        "skipped_shared_keys": skipped_shared_keys,
     }
 
 

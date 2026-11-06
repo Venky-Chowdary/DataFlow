@@ -11,9 +11,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-#: Longest a planning tool spends proving an existing destination's upsert
-#: keys unique (D187). Unfinished warns; it is never reported clean.
-DEST_DUPLICATE_KEY_STEP_SECONDS = 8.0
+from services.upsert_ddl_gate import DEST_DUPLICATE_KEY_STEP_SECONDS  # noqa: E402,F401 - D187 budget
 
 _ps = sys.modules[__name__]
 
@@ -46,6 +44,7 @@ from services.db_type_utils import (
 )
 from services.append_delta_probe import probe_append_key_collisions_over_delta
 from services.destination_key_collision_probe import probe_append_key_collisions
+from services.source_schema_authority import append_identity_source_key
 from services.preflight_file_plan import (
     _fit_scan_deadline,
     _lift_in_file_collapse_advisories,
@@ -351,6 +350,8 @@ def run_file_preflight(
     destination_dynamo_key_schema: list[dict[str, Any]] | None = None,
     destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
+    destination_indexes_meta: dict[str, Any] | None = None,
+    source_key_groups: list[list[str]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
     destination_check_constraints: list[Any] | None = None,
     destination_config: Mapping[str, Any] | None = None,
@@ -803,7 +804,9 @@ def run_file_preflight(
             schema_policy, acknowledged=schema_drift_acknowledged
         )
     ):
-        from services.schema_drift import plan_destination_evolution
+        from services.schema_drift import (
+            dest_key_charsets, dest_key_groups, dest_key_limit, plan_destination_evolution,
+        )
 
         mappings, destination_column_types, destination_evolution = (
             plan_destination_evolution(
@@ -813,6 +816,11 @@ def run_file_preflight(
                 dest_types=destination_column_types,
                 dest_db=str(destination_db_type or ""),
                 adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
+                key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
+                                           contract_primary_key, destination_indexes_meta),
+                max_part_bytes=dest_key_limit(destination_indexes_meta),
+                key_charsets=dest_key_charsets(destination_indexes_meta),
+                key_widens_approved=bool(schema_drift_acknowledged),
             )
         )
 
@@ -922,6 +930,7 @@ def run_file_preflight(
                 column_types=column_types,
                 dest_types=dest_types,
                 destination_table_exists=destination_table_exists,
+                dest_kind=destination_db_type,
             ),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),
@@ -978,7 +987,9 @@ def run_file_preflight(
     dest_table_exists = destination_table_exists
 
     from services.ddl_compatibility import evaluate_ddl_compatibility
-    from services.schema_drift import detect_schema_drift
+    from services.schema_drift import (
+        dest_key_charsets, dest_key_groups, dest_key_limit, detect_schema_drift,
+    )
 
     dest_kind = normalize_dest_kind(destination_db_type, default="postgresql")
     # Document/KV stores and object-store prefixes alike declare no column
@@ -1145,6 +1156,8 @@ def run_file_preflight(
             mappings = _waived_maps
 
     target_cols = list(drift_dest_types.keys())
+    from services.preflight_source_kind import source_is_record_batch
+
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=write_maps,
         source_schema=column_types,
@@ -1162,6 +1175,14 @@ def run_file_preflight(
         contract_primary_key=contract_primary_key,
         proven_width_narrowings=proven_string_narrowings,
         population_fit_report=pre_gate_fit_report,
+        destination_config=destination_config,
+        validation_mode=validation_mode,
+        record_batch=source_is_record_batch(source_kind, source_format),
+        create_source={
+            "config": source_config,
+            "connector_id": source_connector_id,
+            "table": source_table,
+        },
     )
 
     # Two questions, two truths, and an approved pre-load transform separates
@@ -1191,7 +1212,12 @@ def run_file_preflight(
         cursor_fields=cursor_fields,
         schema_policy=schema_policy,
         table_exists=dest_table_exists,
-        dest_recreated=dest_recreated,
+        dest_recreated=dest_recreated, validation_mode=validation_mode,
+        record_batch=source_is_record_batch(source_kind, source_format),
+        dest_key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
+                                        contract_primary_key, destination_indexes_meta),
+        dest_key_part_bytes=dest_key_limit(destination_indexes_meta),
+        dest_key_charsets=dest_key_charsets(destination_indexes_meta),
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.
@@ -1314,7 +1340,7 @@ def run_file_preflight(
         destination_foreign_keys=list(destination_foreign_keys or []),
         fk_risk_acknowledged=bool(fk_risk_acknowledged),
         stream_contracts=list(stream_contracts or []),
-        in_file_dedupe=_plan_in_file_dedupe(source_config),
+        in_file_dedupe=_plan_in_file_dedupe(source_config, destination_config),
         duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
     )
 
@@ -1456,6 +1482,12 @@ def run_file_preflight(
         source_table=source_table,
         resume=resume,
         resume_write_complete=resume_write_complete,
+        source_key_columns=append_identity_source_key(
+            sync_mode=sync_mode, stream_contracts=stream_contracts,
+            contract_primary_key=contract_primary_key, source_key_groups=source_key_groups,
+            source_connector_id=source_connector_id, source_table=source_table,
+            source_config=source_config,
+        ),
         incremental_cursor_column=read_scope.cursor_column,
         incremental_watermark=read_scope.watermark,
         incremental_tiebreak_column=read_scope.primary_key,
@@ -1496,10 +1528,7 @@ def run_file_preflight(
         ):
             from services.dest_dialect_facts import dest_upsert_needs_unique_index
             from services.destination_key_collision_probe import _identity_pairs
-            from services.upsert_ddl_gate import (
-                count_dest_duplicate_keys,
-                dest_unique_covering_columns,
-            )
+            from services.upsert_ddl_gate import dest_unique_covering_columns
 
             _uk_pairs = _identity_pairs(
                 mappings=mappings,
@@ -1551,50 +1580,12 @@ def run_file_preflight(
                     _identity_plan
                     and _identity_plan.mode == UPSERT_IDENTITY_IMPOSSIBLE
                 )
-                _dup = {"ran": False, "duplicate_keys": 0, "duplicate_rows": 0,
-                        "samples": [], "message": "destination probe skipped"}
-                try:
-                    # Optional proof, bounded inside a tool call (D187): on a
-                    # Snowflake destination the reflection + GROUP BY ran 25s
-                    # and killed a second-run upsert plan. Unfinished is a
-                    # labelled ``ran=False`` (the gate warns), never a clean 0.
-                    from src.ai.copilot.tool_deadline import bounded_step
+                from services.upsert_ddl_gate import probe_dest_duplicate_keys
 
-                    _dup_run = bounded_step(
-                        f"counting duplicate upsert keys on destination {destination_table}",
-                        lambda: count_dest_duplicate_keys(
-                            dict(destination_config or {}),
-                            destination_table,
-                            _uk_cols,
-                        ),
-                        seconds=DEST_DUPLICATE_KEY_STEP_SECONDS,
-                        conn=destination_config,
-                        role="destination",
-                    )
-                    if _dup_run.error is not None:
-                        raise _dup_run.error
-                    if _dup_run.timed_out:
-                        _dup = {
-                            "ran": False,
-                            "duplicate_keys": 0,
-                            "duplicate_rows": 0,
-                            "samples": [],
-                            "message": (
-                                "duplicate-key probe did not finish within the plan's "
-                                f"step budget ({DEST_DUPLICATE_KEY_STEP_SECONDS:g}s at most); "
-                                "Execute's keyed write still enforces the key"
-                            ),
-                        }
-                    else:
-                        _dup = _dup_run.value
-                except Exception as _dexc:  # noqa: BLE001
-                    _dup = {
-                        "ran": False,
-                        "duplicate_keys": 0,
-                        "duplicate_rows": 0,
-                        "samples": [],
-                        "message": f"duplicate-key probe failed: {_dexc}"[:300],
-                    }
+                _dup = probe_dest_duplicate_keys(
+                    dict(destination_config or {}), destination_table, _uk_cols,
+                    seconds=DEST_DUPLICATE_KEY_STEP_SECONDS,
+                )
                 _details = {
                     "rule_id": "g_upsert_dest_key",
                     "remediation_kind": "approve_ddl_or_dedupe",
@@ -1757,14 +1748,16 @@ def run_file_preflight(
         try:
             from services.schedule_store import (
                 conflicting_dest_writers,
-                describe_dest_conflict,
+                describe_dest_conflicts,
             )
 
             _owners = conflicting_dest_writers(
                 destination_connector_id, destination_table
             )
             if _owners:
-                _names = [describe_dest_conflict(s) for s in _owners]
+                # QA Snowflake D12: a writer outside the caller's workspace is
+                # counted, not named.
+                _names = [describe_dest_conflicts([s]) for s in _owners]
                 for _b in result.blockers or []:
                     _d = (
                         _b.get("details")
@@ -1980,40 +1973,10 @@ def run_file_preflight(
         )
         additive_stamp_blocked = True
 
-    # D8: hash_pii fails closed without its HMAC key. Refuse from the plan, not
-    # the sample — an all-NULL sample never runs the digest and a shape-recipe
-    # step is not in the mapping replay — so the run cannot be the first to say.
-    from services.transform_engine import PII_HASH_KEY_SETUP, pii_hash_key
+    # D8: hash_pii fails closed without its HMAC key (services.pii_hash_gate).
+    from services.pii_hash_gate import pii_hash_key_gate
 
-    hashed_columns = [pm.source for pm in plan_mappings if pm.transform == "hash_pii"]
-    for step in (shape_recipe or {}).get("steps") or []:
-        if (
-            isinstance(step, dict)
-            and step.get("enabled") is not False
-            and step.get("op") == "hash_pii"
-        ):
-            hashed_columns.append(str(step.get("column") or ""))
-    hashed_columns = list(dict.fromkeys(c for c in hashed_columns if c))
-    pii_hash_gate: dict[str, Any] | None = None
-    if hashed_columns:
-        key_missing = not pii_hash_key()
-        pii_hash_gate = {
-            "id": "g_pii_hash_key",
-            "status": "block" if key_missing else "pass",
-            "message": (
-                PII_HASH_KEY_SETUP if key_missing else "hash_pii HMAC key is configured"
-            ),
-            "duration_ms": 0,
-            "details": {"columns": hashed_columns[:20], "kind": "pii_hash_key"},
-        }
-        if key_missing:
-            blockers.append(
-                {
-                    "id": pii_hash_gate["id"],
-                    "message": PII_HASH_KEY_SETUP,
-                    "details": dict(pii_hash_gate["details"]),
-                }
-            )
+    pii_hash_gate = pii_hash_key_gate(plan_mappings, shape_recipe, blockers)
     pii_hash_blocked = bool(pii_hash_gate and pii_hash_gate["status"] == "block")
 
     # D243: execute refuses a pre-load recipe on a route that merges against
@@ -2325,6 +2288,8 @@ def run_file_preflight(
         + extra_gates,
         "blockers": enriched_blockers,
         "population_fit": fit_report_payload,
+        # Which hold-out policy applies (validation_mode_contract record_batch).
+        "source_record_batch": bool(is_file_source or source_is_record_batch(source_kind, source_format)),
         # Echo Kernel-stamped additive types so Map/Execute share Validate authority.
         "stamped_mappings": [
             {
@@ -2678,6 +2643,7 @@ def run_file_preflight(
         logger.debug("snowflake warehouse advice skipped: %s", sf_exc, exc_info=sf_exc)
 
     # Multi-load intelligence: compare sample to last N loads of this route.
+    src_ep = dst_ep = None
     try:
         from services.data_quality_history import compare_route_to_history
 
@@ -2740,6 +2706,15 @@ def run_file_preflight(
         except Exception:
             pass
 
+    if src_ep is not None and dst_ep is not None:
+        # Its own guard (review S4): a failed history compare above must not
+        # drop the hash_pii key-change warning, and this must not drop that.
+        try:
+            from services.pii_hash_gate import apply_key_change_warning
+
+            apply_key_change_warning(out, src_ep, dst_ep)
+        except Exception:  # noqa: BLE001
+            logger.warning("hash_pii key-change check failed during preflight", exc_info=True)
     if destination_evolution:
         out["destination_evolution"] = destination_evolution
         out["effective_mappings"] = mappings
@@ -2975,15 +2950,14 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    from services.oracle_empty_string import attach_oracle_empty_string_warning
+    from services.preflight_notices import attach_plan_notices
 
-    attach_oracle_empty_string_warning(out, dest_kind, plan_mappings)
-    from services.file_pickup import attach_direct_dated_file_warning
-
-    attach_direct_dated_file_warning(out, source_table or source_filename)
-    from services.mirror_delete_notice import attach_mirror_delete_notice
-
-    attach_mirror_delete_notice(out, sync_mode, stream_contracts)
+    attach_plan_notices(
+        out, dest_kind=dest_kind, plan_mappings=plan_mappings,
+        source_object=source_table or source_filename, sync_mode=sync_mode,
+        stream_contracts=stream_contracts, source_format=source_format,
+        destination_db_type=destination_db_type,
+    )
     _lift_in_file_collapse_advisories(out)
     out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))

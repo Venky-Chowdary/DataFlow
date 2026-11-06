@@ -136,9 +136,30 @@ def _default_code(entry: dict[str, Any]) -> str:
     return "job_failed" if entry.get("job_id") else "start_failed"
 
 
+#: The run record's row counts, read off the job's ``row_accounting`` — the one
+#: ledger Gate-8 and the job page report from (QA C17: history said
+#: ``rows_written: null`` on a completed run).
+LEDGER_ROW_COUNTS = ("rows_read", "rows_written", "rows_quarantined")
+
+
+def ledger_row_counts(row_accounting: Any) -> dict[str, int | None]:
+    ledger = row_accounting if isinstance(row_accounting, dict) else {}
+    out: dict[str, int | None] = {}
+    for key in LEDGER_ROW_COUNTS:
+        value = ledger.get(key)
+        try:
+            out[key] = None if value is None or value == "" else int(value)
+        except (TypeError, ValueError):
+            out[key] = None
+    return out
+
+
 def run_view(entry: dict[str, Any], index: int = 0) -> dict[str, Any]:
     """A record as readers see it; legacy rows get an id, a reason and a code."""
     row = dict(entry)
+    for key, value in ledger_row_counts(row.get("row_accounting")).items():
+        if row.get(key) is None:
+            row[key] = value
     row.setdefault("job_id", "")
     row["run_id"] = str(row.get("run_id") or "") or (
         f"legacy-{row['job_id']}" if row["job_id"] else f"legacy-{index}"
@@ -498,7 +519,8 @@ def _brief(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
     keys = ("run_id", "status", "trigger", "attempt", "job_id", "started_at",
-            "finished_at", "reason", "reason_code", "occurrences", "last_seen_at")
+            "finished_at", "reason", "reason_code", "occurrences", "last_seen_at",
+            *LEDGER_ROW_COUNTS)
     return {k: row.get(k) for k in keys if k in row}
 
 

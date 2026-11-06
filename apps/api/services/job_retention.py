@@ -12,8 +12,9 @@ that many days from the job store, for their own workspace only:
   — a running, queued or paused job is never touched;
 * both steps are audited (``workspace.jobs.retention.purge``).
 
-Nothing runs on a schedule: jobs are removed only when an admin applies a
-purge. Only the ``transfer_jobs`` documents are removed.
+The same two steps run daily for every workspace when a platform admin turns
+on ``retention_auto_purge`` (``services.job_retention_schedule``); off by
+default. Only the ``transfer_jobs`` documents are removed.
 """
 
 from __future__ import annotations

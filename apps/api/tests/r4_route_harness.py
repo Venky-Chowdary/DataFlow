@@ -196,13 +196,17 @@ def blockers_of(payload: Any) -> list[str]:
 
 
 def wait_job(job_id: str, timeout_s: float = 180.0) -> dict:
+    from services.job_status import is_terminal
     from services.mongodb_service import get_mongodb_service
 
     deadline = time.monotonic() + timeout_s
     job: dict = {}
     while time.monotonic() < deadline:
         job = get_mongodb_service().get_job(job_id) or {}
-        if str(job.get("status") or "") in {"completed", "failed", "partial", "cancelled"}:
+        status = str(job.get("status") or "")
+        # completed_with_quarantine / _with_warnings are terminal too: waiting
+        # them out cost every quarantine test the whole timeout.
+        if is_terminal(status) or status == "partial":
             return job
         time.sleep(0.25)
     return job
@@ -241,3 +245,33 @@ def use_upload_dir(monkeypatch, uploads) -> None:
     analyst = data_analyst.CopilotDataAnalyst()
     analyst.feeder = UniversalDataFeeder([str(uploads)])
     monkeypatch.setattr(data_analyst, "_analyst", analyst)
+
+
+# --- a PRIVATE MySQL for tests that flip server-global variables ---------------
+# The default :3306 is shared by every suite on the host; SET GLOBAL there
+# breaks them. Tests that need sql_require_primary_key / require_secure_transport
+# / local_infile point at DATAFLOW_TEST_MYSQL_GLOBALS_HOST/_PORT (a throwaway
+# server), log in as _USER/_PASSWORD, flip as root with _ROOT_PASSWORD, and
+# restore in a finally block.
+
+
+def globals_mysql_server() -> dict[str, Any]:
+    import pytest
+
+    host = os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_HOST", "")
+    port = int(os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_PORT", "0") or 0)
+    if (not host or not port or not os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_ROOT_PASSWORD")
+            or not port_up(port, host)):
+        pytest.skip("needs a private MySQL for SET GLOBAL (DATAFLOW_TEST_MYSQL_GLOBALS_*)")
+    return dict(host=host, port=port, database="dataflow",
+                username=os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_USER", "dataflow"),
+                password=os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_PASSWORD", ""))
+
+
+def globals_mysql_root():
+    import pymysql
+
+    srv = globals_mysql_server()
+    return pymysql.connect(host=srv["host"], port=srv["port"], user="root",
+                           password=os.environ["DATAFLOW_TEST_MYSQL_GLOBALS_ROOT_PASSWORD"],
+                           autocommit=True, connect_timeout=5)

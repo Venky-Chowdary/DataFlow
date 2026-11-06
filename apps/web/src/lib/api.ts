@@ -1,3 +1,4 @@
+import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
@@ -1784,6 +1785,7 @@ export function streamJobProgress(
       destination_collection: String(raw.destination_collection ?? ""),
       status: String(raw.status ?? "pending"),
       records_processed: Number(raw.records_processed ?? raw.rows_processed ?? 0),
+      records_processed_unknown: rowsProcessedUnknown(raw),
       total_rows: Number(raw.total_rows ?? 0),
       progress_pct: Number(raw.progress_pct ?? 0),
       progress_indeterminate: Boolean(raw.progress_indeterminate),
@@ -2292,6 +2294,37 @@ export async function deleteSchedule(id: string): Promise<void> {
 export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}/run`, { method: "POST" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to run schedule"));
+  return res.json();
+}
+
+/** What a destination recovery will do (POST /schedules/{id}/recover dry_run). */
+export interface DestinationRecoveryPlan {
+  action: "rebaseline" | "rebuild";
+  /** True when it replaces the table (a rebuild with no key to upsert on). */
+  destructive: boolean;
+  /** The disclosure, naming the table. */
+  effect: string;
+  destination_missing?: boolean;
+}
+
+/** QA C9: rebaseline or rebuild a schedule's destination after it changed, then re-arm it. */
+export async function recoverScheduleDestination(
+  id: string,
+  action: "rebaseline" | "rebuild",
+  reason: string,
+  options: { dryRun?: boolean; confirmReplace?: boolean } = {},
+): Promise<{ success: boolean; action: string; job_id: string; plan: DestinationRecoveryPlan }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/recover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action,
+      reason,
+      dry_run: Boolean(options.dryRun),
+      confirm_replace: Boolean(options.confirmReplace),
+    }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not recover the destination"));
   return res.json();
 }
 
@@ -3506,6 +3539,7 @@ export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   org_name: string;
   timezone: string;
   retention_days: number;
+  retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
   updated_at?: string | null;
@@ -3525,12 +3559,14 @@ export async function updateWorkspaceSettings(body: {
   org_name?: string;
   timezone?: string;
   retention_days?: number;
+  retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
 }): Promise<{
   org_name: string;
   timezone: string;
   retention_days: number;
+  retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
 }> {
@@ -3600,22 +3636,35 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   level: string;
   details?: Record<string, unknown>;
 }>> {
+  return (await fetchAuditEventPage(limit, level)).events;
+}
+
+/** Audit events plus whether the API masked key ids for this reader (QA browser 20). */
+export async function fetchAuditEventPage(limit = 50, level?: string): Promise<{
+  events: Awaited<ReturnType<typeof fetchAuditEvents>>;
+  keyIdsMasked: boolean;
+}> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (level && level !== "all") params.set("level", level);
   const res = await apiFetch(`${API_BASE}/audit/events?${params}`);
-  if (!res.ok) return [];
+  if (!res.ok) return { events: [], keyIdsMasked: true };
   const data = await res.json();
-  return data.events ?? [];
+  return {
+    events: data.events ?? [],
+    keyIdsMasked: data.key_ids_masked === true || res.headers.get("X-Datawrap-Key-Ids-Masked") === "1",
+  };
 }
 
 export type AuditExportFormat = "csv" | "json" | "ndjson" | "cef";
 
 /** Server-side tenant-scoped audit download (not the last 100 table rows). */
-export async function exportAuditLog(format: AuditExportFormat = "csv"): Promise<Blob> {
+export async function exportAuditLog(
+  format: AuditExportFormat = "csv",
+): Promise<{ blob: Blob; keyIdsMasked: boolean }> {
   const params = new URLSearchParams({ format, limit: "5000" });
   const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
-  return res.blob();
+  return { blob: await res.blob(), keyIdsMasked: res.headers.get("X-Datawrap-Key-Ids-Masked") === "1" };
 }
 
 export type AuditChainFinding = {
@@ -3943,6 +3992,13 @@ export type Workspace = {
   member_count?: number;
 };
 
+export type WorkspaceView = {
+  id: string;
+  name: string;
+  kind?: string;
+  legacy_jobs?: number | null;
+};
+
 export type WorkspaceMember = {
   workspace_id: string;
   email: string;
@@ -3974,6 +4030,8 @@ export async function fetchWorkspaces(): Promise<{
   actor: string;
   /** Where this account lands when the browser names no workspace (D218). */
   defaultWorkspaceId: string;
+  /** A platform admin's All-workspaces / Unassigned views; [] for anyone else (D218). */
+  views: WorkspaceView[];
 }> {
   const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
@@ -3983,6 +4041,7 @@ export async function fetchWorkspaces(): Promise<{
     platformAdmin: !!data.platform_admin,
     actor: data.actor ?? "",
     defaultWorkspaceId: typeof data.default_workspace_id === "string" ? data.default_workspace_id : "",
+    views: Array.isArray(data.views) ? data.views : [],
   };
 }
 
@@ -4006,8 +4065,31 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
   return (await res.json()).workspace;
 }
 
-export async function deleteWorkspace(workspaceId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, { method: "DELETE" });
+/** What deleting a workspace would remove (nothing is changed). */
+export type WorkspaceDeletePreview = Record<string, number | boolean | string | string[] | null> & {
+  retained?: string[];
+  active_jobs?: number;
+};
+
+export async function previewWorkspaceDelete(workspaceId: string): Promise<WorkspaceDeletePreview> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}?dry_run=true`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to preview the workspace delete"));
+  return res.json();
+}
+
+/**
+ * Irreversible: the API removes the workspace's connectors, schedules, jobs,
+ * uploads and keys. It requires the workspace name typed back (`confirm`); a
+ * `reason` is recorded with it. Preview first with {@link previewWorkspaceDelete}.
+ */
+export async function deleteWorkspace(
+  workspaceId: string,
+  confirmation: { confirm: string; reason?: string },
+): Promise<void> {
+  const params = new URLSearchParams();
+  params.set("confirm", confirmation.confirm);
+  if (confirmation.reason) params.set("reason", confirmation.reason);
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}?${params.toString()}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete workspace"));
 }
 

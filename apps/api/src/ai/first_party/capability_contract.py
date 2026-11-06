@@ -871,6 +871,7 @@ def mirror_versus_upsert_card() -> CapabilityCard | None:
         return None
     try:
         from services.sync_cursor import CANONICAL_SYNC_MODES
+        from services.mirror_delete_notice import MIRROR_EXPLAIN_TEXT
     except Exception:
         return None
     if "mirror" not in CANONICAL_SYNC_MODES:
@@ -878,10 +879,8 @@ def mirror_versus_upsert_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="What is the difference between mirror and upsert",
         text=(
-            "Mirror is upsert plus deletion — destination rows whose key the "
-            "source no longer has are removed. "
-            "Upsert leaves those destination-only rows alone. "
-            "Mirror deletes data, so nothing aliases onto it implicitly."
+            f"Mirror {MIRROR_EXPLAIN_TEXT}. "
+            "Upsert leaves those destination-only rows alone."
         ),
         source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
         category="transfer",
@@ -1821,8 +1820,17 @@ def pause_cdc_card() -> CapabilityCard | None:
             "route resumes from the log and applies deletes made while it was "
             "stopped; the cancel response names the slot "
             "(cdc_slot_release.reason=resume_keeps_slot). An abandoned route "
-            "holds WAL until an operator runs "
-            "SELECT pg_drop_replication_slot('<name>') on the source. "
+            "holds WAL until it is cleaned up: Operations lists every slot "
+            "Datawrap created on a source with its owner, state and retained "
+            "WAL (GET /api/v1/ops/cdc-captures, MCP list_cdc_captures), and "
+            "an admin drops the orphaned ones (POST "
+            "/api/v1/ops/cdc-captures/cleanup, MCP cleanup_cdc_captures). The "
+            "scheduler warns and alerts the workspace's notification channels "
+            "about every orphaned slot and the WAL it holds, but drops nothing "
+            "by itself unless a platform admin turns on the setting "
+            "cdc_orphan_auto_drop (off by default, audited): then a slot whose "
+            "source tables stayed gone past the grace period is dropped. Slots "
+            "Datawrap did not create are never touched. "
             "Deleting the CDC schedule also runs "
             "pg_drop_replication_slot. A failed one-shot CDC job drops the "
             "slot when the failure is not retriable and the worker has "
@@ -1831,7 +1839,8 @@ def pause_cdc_card() -> CapabilityCard | None:
         ),
         source_module=(
             "services/schedule_runner.py · _dispatch_transfer · "
-            "services/cdc_capture_release.py · services/cdc_catchup.py"
+            "services/cdc_capture_release.py · services/cdc_catchup.py · "
+            "services/cdc_capture_inventory.py"
         ),
         category="transfer",
     )

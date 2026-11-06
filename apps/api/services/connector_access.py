@@ -150,7 +150,7 @@ def bind_connector_caller(caller: ConnectorCaller | None) -> Iterator[None]:
     try:
         with bound_workspace_filter(
             combined,
-            stamp=current_workspace_stamp() or caller.authorized_workspace_id(),
+            stamp=current_workspace_stamp(for_write=False) or caller.authorized_workspace_id(),
             actor=current_actor() or caller.actor,
         ):
             yield
@@ -234,8 +234,11 @@ def caller_from_request(request: Any) -> ConnectorCaller | None:
         return None
     user = user if isinstance(user, dict) else {}
     actor = str(email or user.get("email") or "anonymous")
+    from services.workspace_filter import stored_workspace_id
+
     try:
-        requested = str(request.headers.get("x-workspace-id") or "").strip()
+        # A platform admin's view names no workspace (D218).
+        requested = stored_workspace_id(request.headers.get("x-workspace-id"))
     except Exception:
         requested = ""
     return ConnectorCaller(

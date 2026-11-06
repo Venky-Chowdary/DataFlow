@@ -759,6 +759,14 @@ def resolve_schema_evolution(
             # An identical schema is not a change and must not demand review.
             action = "review"
             reasons.append("type_locked_review_required")
+    elif policy in PROPAGATE_POLICIES and any(
+        str(a.get("kind")) == "widen_type" and a.get("key") for a in additive
+    ):
+        # "PK ... still pause" (SCHEMA_POLICY_HONESTY): widening a key column
+        # rewrites the table under an exclusive lock, so the run waits for an
+        # explicit acknowledgement (which this pause yields to).
+        action = "pause"
+        reasons.append("key_widen_needs_acknowledgement")
     elif policy in PROPAGATE_POLICIES and (additive or soft or unmapped):
         action = "propagate"
         reasons.append(f"auto_propagate under {policy}")
@@ -888,6 +896,9 @@ def propose_dest_widens(
     source_schema: dict[str, str],
     target_schema: dict[str, str],
     dest_db: str = "",
+    key_groups: list[list[str]] | None = None,
+    max_part_bytes: int = 3072,
+    key_charsets: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """D107: destination-side widen proposals for a live destination table.
 
@@ -899,10 +910,10 @@ def propose_dest_widens(
     """
     if not target_schema:
         return []
-    from connectors.schema_drift import is_wider_type
-    from connectors.writer_common import stamp_is_operator_ceiling
-
     out: list[dict[str, Any]] = []
+    growing = growing_dest_carriers(
+        mappings, source_schema=source_schema, target_schema=target_schema, dest_db=dest_db
+    )
     for m in mappings or []:
         src = str(m.get("source") or "")
         tgt = str(m.get("target") or "")
@@ -912,24 +923,209 @@ def propose_dest_widens(
         tgt_type = str(ci_get(target_schema, tgt) or "")
         if not src_type or not tgt_type:
             continue
-        # Same logical family only: TEXT is a universal carrier the lattice
-        # calls "wider" than NUMERIC, but retiping a numeric column to text
-        # is a family change — a true narrow stays fail-closed (D107).
-        if normalize_logical_type(src_type) != normalize_logical_type(tgt_type):
-            continue
-        if (
-            is_wider_type(tgt_type, src_type, dest_db=dest_db)
-            and not stamp_is_operator_ceiling(m)
-        ):
-            out.append({
-                "kind": "widen_type",
-                "column": src,
-                "target": tgt,
-                "old_type": tgt_type.upper(),
-                "new_type": widened_dest_carrier(tgt_type, src_type),
-                "reason": "dest_widen_available",
-            })
+        widen = dest_widen_proposal(
+            m, src, tgt, src_type, tgt_type, dest_db=dest_db,
+            key_groups=key_groups, live_types=target_schema, growing=growing,
+            max_part_bytes=max_part_bytes, key_charsets=key_charsets,
+        )
+        if widen:
+            out.append(widen)
     return out
+
+
+def key_widen_approval_message(widens: list[dict[str, Any]]) -> str:
+    """The refusal for an unapproved widen of a key column: what the ALTER costs."""
+    keyed = [w for w in widens if w.get("key")]
+    pairs = ", ".join(
+        f"{w.get('column') or w.get('target')} {w.get('old_type')} → {w.get('new_type')}"
+        for w in keyed[:6]
+    )
+    return (
+        f"Widening key column(s) {pairs} rewrites the whole table: PostgreSQL holds an "
+        "ACCESS EXCLUSIVE lock for the rewrite and MySQL copies the table "
+        "(ALGORITHM=COPY) — reads and writes wait until it finishes. A key widen needs "
+        "this run's explicit approval (schema_drift_acknowledged=true); "
+        "schema_policy=propagate_* alone never ALTERs a key."
+    )
+
+
+def strip_client_widen_stamps(mappings: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Request mappings without the approved-widen stamps only planning may set.
+
+    ``dest_widen`` and ``target_type_origin="drift_widen"`` are written by
+    ``stamp_approved_widens`` for this run's approved widens; a client that
+    sends them would approve an ALTER (a key's included) nobody approved.
+    """
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        clean = {k: v for k, v in m.items() if k != "dest_widen"}
+        if str(clean.get("target_type_origin") or "").strip().lower() == "drift_widen":
+            clean.pop("target_type_origin", None)
+        out.append(clean)
+    return out
+
+
+def dest_key_charsets(indexes_meta: dict[str, Any] | None) -> dict[str, str]:
+    """``column -> charset`` of every indexed column, from the destination index catalog."""
+    out: dict[str, str] = {}
+    for ix in (indexes_meta or {}).get("items") or []:
+        for c in (ix or {}).get("columns") or [] if isinstance(ix, dict) else []:
+            if isinstance(c, dict) and c.get("name") and c.get("charset"):
+                out[str(c["name"])] = str(c["charset"])
+    return out
+
+
+def dest_key_limit(indexes_meta: dict[str, Any] | None) -> int:
+    """The destination's index key byte limit, from its index catalog's row format."""
+    from services.schema_fidelity import mysql_key_part_limit
+
+    return mysql_key_part_limit(str((indexes_meta or {}).get("row_format") or ""))
+
+
+def growing_dest_carriers(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
+    dest_db: str = "",
+) -> dict[str, str]:
+    """``target -> carrier`` for every column this run would widen (same family, wider).
+
+    The keyed rule budgets the growing parts of one key together, so the
+    proposal and the writer must both know which parts grow.
+    """
+    from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
+
+    out: dict[str, str] = {}
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        src, tgt = str(m.get("source") or ""), str(m.get("target") or "")
+        src_type = str(ci_get(source_schema or {}, src) or "") if src else ""
+        tgt_type = str(ci_get(target_schema or {}, tgt) or "") if tgt else ""
+        if (
+            src_type and tgt_type
+            and widen_keeps_logical_family(tgt_type, src_type)
+            and is_wider_type(tgt_type, src_type, dest_db=dest_db)
+        ):
+            out[tgt] = widened_dest_carrier(tgt_type, src_type)
+    return out
+
+
+def dest_key_groups(
+    pk_columns: list[str] | None = None,
+    unique_keys: list[dict[str, Any]] | None = None,
+    contract_key: str | list[str] | None = None,
+    indexes_meta: dict[str, Any] | None = None,
+) -> list[list[str]]:
+    """The column sets this run holds in an index on the destination.
+
+    The catalog's primary key, unique keys and every other index
+    (``services.secondary_indexes`` payload, plain indexes included: MySQL's
+    key length limit binds those too, and the writer's widen pass reads the
+    same set from ``information_schema.statistics``), plus the stream
+    contract's identity key (single column or comma-separated composite),
+    which the writer enforces with a unique index.
+    """
+    from connectors.schema_drift import key_part
+
+    groups: list[list[str]] = []
+    if isinstance(contract_key, str):
+        contract_cols = [c.strip() for c in contract_key.split(",") if c.strip()]
+    else:
+        contract_cols = [str(c).strip() for c in contract_key or [] if str(c).strip()]
+    candidates = [
+        [str(c) for c in pk_columns or [] if str(c or "").strip()],
+        *([str(c) for c in (uk or {}).get("columns") or []] for uk in unique_keys or []),
+        *(
+            [
+                key_part(str((c or {}).get("name") or ""), (c or {}).get("prefix_length"))
+                for c in (ix or {}).get("columns") or []
+            ]
+            for ix in ((indexes_meta or {}).get("items") or [])
+            if isinstance(ix, dict) and not ix.get("expression")
+        ),
+        contract_cols,
+    ]
+    for cols in candidates:
+        if cols and sorted(c.casefold() for c in cols) not in [
+            sorted(c.casefold() for c in g) for g in groups
+        ]:
+            groups.append(cols)
+    return groups
+
+
+def dest_widen_proposal(
+    mapping: dict[str, Any],
+    src: str,
+    tgt: str,
+    src_type: str,
+    tgt_type: str,
+    *,
+    dest_db: str = "",
+    key_groups: list[list[str]] | None = None,
+    live_types: dict[str, str] | None = None,
+    growing: dict[str, str] | None = None,
+    max_part_bytes: int = 3072,
+    key_charsets: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """The additive ``widen_type`` entry for one pair, or None: the one rule.
+
+    Both widen lanes (the live-contract loop in ``detect_schema_drift`` and
+    the engine's ``propose_dest_widens``) ask this. A proposal needs the same
+    logical family (``widen_keeps_logical_family``: retyping a numeric column
+    to text is a family change - a true narrow stays fail-closed, D107), a
+    strictly wider source carrier and a stamp that is not an operator ceiling.
+
+    A column held in a key (``key_groups``) widens only by the keyed rule
+    (``connectors.schema_drift.keyed_widen_carrier``): a TEXT source onto the
+    full-value string DataFlow sized for that key (MySQL VARCHAR(768), SQL
+    Server NVARCHAR(450), whatever its collation) is the key's planned spelling
+    of TEXT, not source growth, so nothing is proposed. On MySQL a key with
+    budget left is offered the budgeted VARCHAR, as the writer would ALTER.
+    """
+    from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
+    from connectors.writer_common import stamp_is_operator_ceiling
+
+    if not widen_keeps_logical_family(tgt_type, src_type):
+        return None
+    if not is_wider_type(tgt_type, src_type, dest_db=dest_db):
+        return None
+    if stamp_is_operator_ceiling(mapping):
+        return None
+    new_type = widened_dest_carrier(tgt_type, src_type)
+    if key_groups:
+        from connectors.schema_drift import keyed_widen_carrier, with_key_charsets
+
+        new_type, keep = keyed_widen_carrier(
+            key_groups, tgt, new_type,
+            with_key_charsets({**(live_types or {}), tgt: tgt_type}, key_charsets),
+            dialect=dest_db, growing=growing, max_part_bytes=max_part_bytes,
+        )
+        if keep:
+            return None
+    from connectors.schema_drift import split_key_part
+
+    # SQLite cannot retype a column in place (the writer skips the widen), so
+    # there is no table rewrite there to approve.
+    keyed = str(dest_db or "").strip().lower() != "sqlite" and any(
+        split_key_part(c)[1] is None and split_key_part(c)[0].casefold() == tgt.casefold()
+        for g in key_groups or [] for c in g
+    )
+    return {
+        "kind": "widen_type",
+        "column": src,
+        "target": tgt,
+        "old_type": tgt_type.upper(),
+        "new_type": new_type.upper(),
+        "reason": "dest_widen_available",
+        # A key column's widen rewrites the table under a lock: it needs this
+        # run's explicit acknowledgement, never a propagate policy alone.
+        **({"key": True} if keyed else {}),
+    }
 
 
 def stamp_approved_widens(
@@ -1014,6 +1210,10 @@ def plan_destination_evolution(
     dest_types: dict[str, str],
     dest_db: str = "",
     adopt_unmapped: bool = False,
+    key_groups: list[list[str]] | None = None,
+    max_part_bytes: int = 3072,
+    key_widens_approved: bool = False,
+    key_charsets: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     """Apply approved destination evolution to the plan, once.
 
@@ -1040,8 +1240,11 @@ def plan_destination_evolution(
     applied: list[dict[str, Any]] = []
 
     widens = propose_dest_widens(
-        active, source_schema=source_schema, target_schema=types, dest_db=dest_db
+        active, source_schema=source_schema, target_schema=types, dest_db=dest_db,
+        key_groups=key_groups, max_part_bytes=max_part_bytes, key_charsets=key_charsets,
     )
+    # A key widen is applied only on this run's explicit acknowledgement.
+    widens = [w for w in widens if key_widens_approved or not w.get("key")]
     applied.extend(stamp_approved_widens(planned, widens))
     by_target = {str(k).lower(): k for k in types}
     for change in widens:
@@ -1267,6 +1470,14 @@ def schema_review_copy(drift: dict[str, Any], *, policy: str, column_phrase: str
         for item in items
         if item not in widens
     ]
+    if widens and any(w.get("key") for w in widens) and not any(additive):
+        return {
+            "gate_id": "schema_mismatch",
+            "message": key_widen_approval_message(widens) + column_phrase,
+            "remediation_kind": "approve_type_widening",
+            "ack_required": True,
+            "rule_id": "schema_mismatch.key_widening",
+        }
     if widens and not any(additive):
         # A column the source widened is not a missing column (D191): name the
         # change and the one parameter that approves the ALTER.
@@ -1334,8 +1545,17 @@ def detect_schema_drift(
     declared_source_columns: list[str] | None = None,
     declared_source_schema: dict[str, str] | None = None,
     dest_recreated: bool = False,
+    dest_key_groups: list[list[str]] | None = None,
+    validation_mode: str | None = None,
+    record_batch: bool = False,
+    dest_key_part_bytes: int = 3072,
+    dest_key_charsets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan.
+
+    ``validation_mode``: a text source whose sampled cells parse into the live
+    typed column is not a type change under a mode that holds the refused
+    cells out — the same verdict create-new reaches (G6 ``_held_out_text_parse``).
 
     Two different questions are asked of the source here, and an approved
     pre-load transform separates them:
@@ -1446,10 +1666,17 @@ def detect_schema_drift(
     widen_proposals: list[dict[str, Any]] = []
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
+        from services.validation_mode_contract import mode_may_hold_out
+
+        hold_out_text_cells = mode_may_hold_out(validation_mode, record_batch=record_batch)
         from services.migration_risk_contract import (
             mapping_has_clearing_risk_contract,
         )
 
+        _growing = growing_dest_carriers(
+            active_mappings, source_schema=source_schema, target_schema=target_schema,
+            dest_db=str(destination_db_type or dest_kind or ""),
+        )
         for m in active_mappings:
             src = str(m.get("source") or "")
             tgt = str(m.get("target") or "")
@@ -1529,23 +1756,14 @@ def detect_schema_drift(
             # policy can approve it and the writer's widen path carries it.
             # An explicit operator Map stamp is a ceiling — that pair stays a
             # real fidelity finding.
-            from connectors.schema_drift import is_wider_type
-            from connectors.writer_common import stamp_is_operator_ceiling
-
-            if (
-                is_wider_type(tgt_type, str(src_type), dest_db=dest_db)
-                and normalize_logical_type(str(src_type))
-                == normalize_logical_type(str(tgt_type))
-                and not stamp_is_operator_ceiling(m)
-            ):
-                widen_proposals.append({
-                    "kind": "widen_type",
-                    "column": src,
-                    "target": tgt,
-                    "old_type": str(tgt_type).upper(),
-                    "new_type": widened_dest_carrier(str(tgt_type), str(src_type)),
-                    "reason": "dest_widen_available",
-                })
+            widen = dest_widen_proposal(
+                m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db,
+                key_groups=dest_key_groups, live_types=target_schema,
+                growing=_growing, max_part_bytes=dest_key_part_bytes,
+                key_charsets=dest_key_charsets,
+            )
+            if widen:
+                widen_proposals.append(widen)
                 continue
 
             if is_precision_collapse_coercion(
@@ -1564,6 +1782,15 @@ def detect_schema_drift(
                 source_types=source_schema,
                 target_types=target_schema,
                 rows=sample_rows,
+                # Text cells the mode holds out (one policy) are per-row
+                # quarantine, not a type change; other sources stay strict.
+                validation_mode=(
+                    validation_mode
+                    if hold_out_text_cells
+                    and normalize_logical_type(str(src_type)) in {"string", "text"}
+                    else None
+                ),
+                record_batch=record_batch,
             ):
                 continue
             type_mismatches.append({

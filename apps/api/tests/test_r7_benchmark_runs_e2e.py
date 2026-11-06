@@ -16,6 +16,7 @@ that process's peak RSS; the comparison is computed from the two numbers.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import pytest
@@ -87,7 +88,11 @@ def test_benchmark_runs_in_the_background_with_progress_and_real_memory(client):
     md = client.get(f"/api/v1/workspace/benchmark/runs/{run['id']}?format=md")
     assert md.status_code == 200
     assert "Datawrap vs this" in md.text
-    assert "0 MB" not in md.text, [l for l in md.text.splitlines() if "MB" in l]
+    # A zero peak memory means the measurement failed. Match the number as a
+    # whole: a real reading such as "1878.0 MB" ends in "0 MB" too.
+    assert not re.search(r"(?<![\d.])0(?:\.0+)? MB", md.text), [
+        l for l in md.text.splitlines() if "MB" in l
+    ]
 
 
 def test_comparison_label_names_datawrap_and_follows_the_ratio():

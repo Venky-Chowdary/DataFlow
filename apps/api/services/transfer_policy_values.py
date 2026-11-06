@@ -1,4 +1,4 @@
-"""One validator for the two transfer policy enums: ``validation_mode`` and ``schema_policy``.
+"""One validator for the transfer policy enums: ``validation_mode``, ``schema_policy``, ``sync_mode``.
 
 QA round 12 (bugs 6 and 7): an unknown value was queued. ``validation_mode``
 silently ran as ``strict`` (``normalize_validation_mode`` fails closed) and an
@@ -28,7 +28,24 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationInfo, field_validator
 
-POLICY_FIELDS = ("validation_mode", "schema_policy")
+POLICY_FIELDS = ("validation_mode", "schema_policy", "delete_mode")
+
+#: Stream-contract ``delete_mode``: what a run does with destination keys the
+#: source no longer has. One registry for every consumer:
+#:   mirror  — hard | soft; default ``soft`` (the documented product promise:
+#:             ``_deleted`` tombstones, physical COUNT(*) stays). A mirror has
+#:             no ``off``: a mirror that never deletes is an upsert, so ``off``
+#:             is refused at declaration with this list.
+#:   cdc     — hard | soft | off; default ``hard`` when the snapshot sweep is
+#:             provably safe (CDC applies DELETE events as hard deletes), and
+#:             disclose-only otherwise. ``off`` keeps the rows and reports them.
+#: The defaults differ on purpose and are stated wherever the mode is shown.
+DELETE_MODES = frozenset({"hard", "soft", "off"})
+DELETE_MODE_CONSUMERS: dict[str, frozenset[str]] = {
+    "mirror": frozenset({"hard", "soft"}),
+    "cdc": DELETE_MODES,
+}
+DELETE_MODE_DEFAULTS: dict[str, str] = {"mirror": "soft", "cdc": "hard"}
 
 
 def _vocabulary(field: str) -> tuple[frozenset[str], dict[str, str]]:
@@ -43,6 +60,14 @@ def _vocabulary(field: str) -> tuple[frozenset[str], dict[str, str]]:
         from services.schema_drift import SCHEMA_POLICIES, SCHEMA_POLICY_ALIASES
 
         return SCHEMA_POLICIES, SCHEMA_POLICY_ALIASES
+    if field == "delete_mode":
+        return DELETE_MODES, {}
+    if field == "sync_mode":
+        # The engine's canonical modes and the spellings other layers use
+        # (schedule ``incremental``, Pilot ``incremental_upsert``, ``merge``).
+        from services.sync_cursor import _SYNC_MODE_ALIASES, CANONICAL_SYNC_MODES
+
+        return CANONICAL_SYNC_MODES, _SYNC_MODE_ALIASES
     raise KeyError(field)
 
 
@@ -81,6 +106,8 @@ def canonical_policy_value(field: str, value: Any) -> str:
     if not isinstance(value, str):
         raise PolicyValueError(field, value)
     key = value.strip().lower()
+    if field == "sync_mode":
+        key = key.replace("-", "_").replace(" ", "_")
     if not key:
         return ""
     values, aliases = _vocabulary(field)
@@ -96,6 +123,51 @@ def canonical_validation_mode(value: Any) -> str:
 
 def canonical_schema_policy(value: Any) -> str:
     return canonical_policy_value("schema_policy", value)
+
+
+def canonical_sync_mode(value: Any) -> str:
+    """One sync-mode vocabulary for a one-off transfer and a schedule (QA MySQL D13).
+
+    ``upsert`` was accepted by ``/transfer/execute`` and refused with 422 by
+    ``POST /schedules``, whose model restated the modes as a Literal without it.
+    """
+    return canonical_policy_value("sync_mode", value)
+
+
+class DeleteModeNotAllowed(ValueError):
+    """A known ``delete_mode`` that this sync mode does not offer."""
+
+    def __init__(self, value: Any, consumer: str) -> None:
+        self.field = "delete_mode"
+        self.value = value
+        self.consumer = consumer
+        self.allowed = sorted(DELETE_MODE_CONSUMERS[consumer])
+        super().__init__(
+            f"delete_mode {value!r} is not available for {consumer} sync. "
+            f"Allowed: {', '.join(self.allowed)} (default {DELETE_MODE_DEFAULTS[consumer]})."
+        )
+
+
+def delete_mode_consumer(sync_mode: Any) -> str:
+    """``mirror`` or ``cdc`` — the consumer a stream contract's delete_mode belongs to."""
+    from services.sync_cursor import normalize_sync_mode
+
+    return "mirror" if normalize_sync_mode(str(sync_mode or ""), default="") == "mirror" else "cdc"
+
+
+def delete_mode_for(value: Any, sync_mode: Any) -> str:
+    """Canonical ``delete_mode`` for this sync mode, ``""`` when undeclared.
+
+    Raises :class:`PolicyValueError` for an unknown spelling and
+    :class:`DeleteModeNotAllowed` for a known one the consumer does not offer.
+    """
+    canonical = canonical_policy_value("delete_mode", value)
+    if not canonical:
+        return ""
+    consumer = delete_mode_consumer(sync_mode)
+    if canonical not in DELETE_MODE_CONSUMERS[consumer]:
+        raise DeleteModeNotAllowed(canonical, consumer)
+    return canonical
 
 
 def canonicalize_policy_fields(

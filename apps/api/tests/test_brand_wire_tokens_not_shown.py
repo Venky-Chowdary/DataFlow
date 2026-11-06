@@ -124,3 +124,33 @@ def test_mcp_get_job_quarantine_samples_show_null_not_the_token(monkeypatch):
     assert samples[1] is None
     assert samples[2] == LITERAL
     assert samples[3] == ""
+
+
+def test_job_api_projects_the_checkpoint_reconcile_sample_too():
+    """D263 saves the reconcile sample on the checkpoint so a restart resumes at
+    reconcile; the job API shows that copy like the summary's: NULL as null, the
+    user's colliding literal as the literal, '', whitespace and unicode as is."""
+    from src.transfer.models import sanitize_job_for_api
+
+    wire_rows = [
+        {"id": 1, "note": "__DF_SQL_NULL__", "amt": "__DF_SQL_NULL__"},
+        {"id": 2, "note": "__DF_ESC__" + LITERAL, "amt": "1.50"},
+        {"id": 3, "note": "", "amt": "0.00"},
+        {"id": 4, "note": "  ", "amt": "2.00"},
+        {"id": 5, "note": "é中\U0001f600", "amt": "3.00"},
+    ]
+    stored = {
+        "job_id": "brandwire-ckpt",
+        "destination_summary": {"reconcile_sample": [dict(r) for r in wire_rows]},
+        "checkpoint": {"phase": "reconcile", "rows_processed": 5, "reconcile_sample": [dict(r) for r in wire_rows]},
+    }
+    shown = sanitize_job_for_api(stored)
+    for where in (shown["destination_summary"]["reconcile_sample"], shown["checkpoint"]["reconcile_sample"]):
+        rows = {str(r["id"]): r for r in where}
+        assert rows["1"]["note"] is None and rows["1"]["amt"] is None
+        assert rows["2"]["note"] == LITERAL
+        assert rows["3"]["note"] == "" and rows["4"]["note"] == "  "
+        assert rows["5"]["note"] == "é中\U0001f600"
+    assert "__DF_ESC__" not in repr(shown)  # the literal itself is the user's own text
+    # The stored job keeps the wire for the resume path and Gate-8.
+    assert stored["checkpoint"]["reconcile_sample"][0]["note"] == "__DF_SQL_NULL__"

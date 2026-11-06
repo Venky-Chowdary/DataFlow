@@ -80,7 +80,7 @@ def run_plan_mapping(
         for c in plan.target_columns
     ]
 
-    from services.data_profiler import source_types_are_authoritative
+    from services.data_profiler import source_types_are_authoritative_for
 
     policies = getattr(plan, "policies", None) or {}
     dest = plan.destination if isinstance(plan.destination, dict) else {}
@@ -106,9 +106,10 @@ def run_plan_mapping(
         schema_policy=policies.get("schema_policy", "manual_review"),
         sync_mode=str(policies.get("sync_mode") or ""),
         destination_table_exists=table_exists,
-        source_types_authoritative=source_types_are_authoritative(
+        source_types_authoritative=source_types_are_authoritative_for(
             str(src.get("kind") or ""),
             str(src.get("format") or ""),
+            src,
         ),
         job_id=str(plan_id or "").strip(),
     )
@@ -417,11 +418,14 @@ def run_plan_preflight(
         dict(live_target_schema) if dest_recreated and live_target_schema else None
     )
 
+    from services.schema_drift import strip_client_widen_stamps
+
     pf = run_file_preflight(
         columns=shaped_image.columns,
         column_types=shaped_image.column_types,
         row_count=plan.row_count_estimate,
-        mappings=plan_mappings,
+        # Approved-widen stamps are planning's to set, never a client's.
+        mappings=strip_client_widen_stamps(plan_mappings),
         destination_connected=bool(dest_meta.get("connected")),
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
@@ -468,6 +472,7 @@ def run_plan_preflight(
         destination_dynamo_key_schema=dest_meta.get("dynamo_key_schema") or [],
         destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
         destination_unique_keys=dest_meta.get("unique_keys") or [],
+        destination_indexes_meta=dest_meta.get("indexes_meta"),
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
         destination_check_constraints=dest_meta.get("check_constraints") or [],
         # Without the destination connection the append key-collision probe cannot

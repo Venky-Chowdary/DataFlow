@@ -258,7 +258,9 @@ def _fifo_mysql_into_pg(
 
     def _consume(path: str) -> None:
         with open(path, "rb", buffering=_PIPE_CHUNK) as reader:
-            dst_cur.copy_expert(copy_sql, reader)
+            from services.cancel_check import copy_expert_keeping_cancel
+
+            copy_expert_keeping_cancel(dst_cur, copy_sql, reader)
 
     stream_between_cursors(
         prefix="df_mysql_pg_", producer=_produce, consumer=_consume
@@ -384,6 +386,7 @@ def copy_mysql_to_postgres(
     source_conn = _mysql_connect(source_cfg)
     dest_conn = _pg_connect(dest_cfg)
     created_here = False
+    data_committed = False
     existed_before = False
     reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
@@ -531,6 +534,7 @@ def copy_mysql_to_postgres(
                             )
                             part["action"] = "reload"
                             to_copy.append(str(part.get("predicate") or ""))
+                            data_committed = True
                     dest_conn.commit()
                     if not to_copy:
                         select_sql = ""
@@ -555,6 +559,7 @@ def copy_mysql_to_postgres(
                     columns=target_cols,
                 )
                 dest_conn.commit()
+                data_committed = True
 
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
             dest_count = int(dst_cur.fetchone()[0])
@@ -626,12 +631,19 @@ def copy_mysql_to_postgres(
                     else "dest_count_equals_source_snapshot_count"
                 ),
             )
-    except Exception:
+    except Exception as failure:
         # The failed COPY leaves the connection in an aborted transaction —
         # without this rollback the cleanup statement errors inside it and the
         # table this run created is left behind (X-35/X-36).
         try:
             dest_conn.rollback()
+            from services.error_handling import TransferCancelled
+
+            if isinstance(failure, TransferCancelled) and not data_committed:
+                # C16: the rows went into one uncommitted transaction.
+                from services.job_status import mark_write_rolled_back
+
+                mark_write_rolled_back(failure)
         except Exception:
             logger.debug("PostgreSQL dest rollback skipped", exc_info=True)
         if created_here:

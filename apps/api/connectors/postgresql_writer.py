@@ -60,6 +60,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import widen_skip_key_columns
 from services.transform_resolver import LiveDestTypes
 from services.brand import PRODUCT_NAME
 
@@ -2226,7 +2227,8 @@ def write_mapped_rows(
                 target_cols,
                 desired_types,
                 backfill=backfill_new_fields,
-                skip_cols=conflict_columns or [],
+                skip_cols=widen_skip_key_columns(conflict_columns, mappings),
+                key_columns=list(conflict_columns or []),
                 source_types=source_type_by_col,
                 suppressed_out=suppressed_widens,
             )

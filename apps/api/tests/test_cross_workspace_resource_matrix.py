@@ -355,6 +355,10 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             values = {"workspace_id": workspace_b}
         elif template == "/api/v1/team/workspaces/{workspace_id}/break-glass/restore-admin":
             values = {"workspace_id": workspace_b}
+        elif template == "/api/v1/team/sandbox-workspaces/{workspace_id}":
+            # Platform-admin-only sandbox teardown (C18), probed against B like
+            # break-glass: the A-only editor must neither delete B nor learn it.
+            values = {"workspace_id": workspace_b}
         elif template.startswith("/api/v1/team/workspaces/{workspace_id}/members"):
             values = {
                 "workspace_id": workspace_b,
@@ -416,6 +420,7 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
         covered += 1
 
     assert journal_dir.is_dir(), "a cross-workspace journal DELETE removed workspace B's journal"
+    assert team_store.get_workspace(workspace_b) is not None, "an A-only editor deleted workspace B"
     assert covered > 0
     print(
         f"resource routes: {len(rows)} discovered; {covered} exercised; "

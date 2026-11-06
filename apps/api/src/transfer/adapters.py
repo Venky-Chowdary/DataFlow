@@ -230,7 +230,7 @@ def parse_file_content(
     schema = (
         dict(writer_schema)
         if writer_schema
-        else FileParser.infer_schema(result.data)
+        else FileParser.infer_schema(result.data, invalid_calendar_votes=True)
     )
     from services.value_serializer import payload_record_wire
 
@@ -268,7 +268,7 @@ def parse_file_route_sample(
             for row in rows[:preview_rows]
         ]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {h: "string" for h in headers}
         )
@@ -283,7 +283,7 @@ def parse_file_route_sample(
         dict(writer_schema)
         if writer_schema
         else (
-            FileParser.infer_schema(sample)
+            FileParser.infer_schema(sample, invalid_calendar_votes=True)
             if sample
             else {c: "string" for c in result.columns}
         )
@@ -580,6 +580,16 @@ def resolve_connector_config(
         merged_cfg["destination_identity"] = identity.as_dict()
         sync_credentials_into_connection_string(merged_cfg)
         cfg = merged_cfg
+    # One TLS plan input for every MySQL dial (PyMySQL, SQLAlchemy, binlog): the
+    # endpoint's TLS options (form / extra: CA, client certificate, verify,
+    # ssl_mode) ride in the DSN every path reads (QA MySQL D10). Idempotent.
+    from services.connector_store import dial_connection_string
+
+    tls_extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    cfg["connection_string"] = dial_connection_string(
+        str(cfg.get("type") or fmt or ""), str(cfg.get("ssl_mode") or ""),
+        str(cfg.get("connection_string") or ""), {**tls_extra, **cfg},
+    )
     # Stamp connector_id so CDC fingerprints / incremental snapshots match adapters.
     if connector_id:
         cfg["connector_id"] = connector_id
@@ -623,6 +633,11 @@ def resolve_connector_config(
     cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
     if cfg.get("auth_role"):
         cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
+    # A key the operator declared (auth_mode=api_key) and pasted in the password
+    # field reaches every reader, writer and probe as the key (D274/D277).
+    from services.connector_auth import resolve_api_key
+
+    cfg["api_key"] = resolve_api_key(cfg, password_is_key=False)
     # OpenShift is a hosting plane — resolve Service DNS onto the real store.
     # Never a Kubernetes API write. See services.openshift_dest.
     from services.openshift_dest import apply_openshift_hosting
@@ -735,6 +750,7 @@ def _lookup_saved_connector(
 ) -> dict[str, Any] | None:
     """Find a saved connector in the file-backed store, falling back to MongoDB."""
     try:
+        from services.connector_store import dial_connection_string
         from services.connector_store import get_connector as fs_get
 
         conn = fs_get(connector_id, workspace_id=workspace_id)
@@ -746,9 +762,15 @@ def _lookup_saved_connector(
                 "schema": conn.schema,
                 "username": conn.username,
                 "password": conn.password,
-                "connection_string": conn.connection_string,
+                # An explicit ssl_mode "disable" rides to every MySQL dial as the
+                # DSN's ssl-mode option (connector_store.dial_connection_string).
+                "connection_string": dial_connection_string(
+                    conn.type, getattr(conn, "ssl_mode", ""), conn.connection_string,
+                    dict(getattr(conn, "extra", None) or {}),
+                ),
                 "warehouse": conn.warehouse,
                 "ssl": conn.ssl,
+                "ssl_mode": getattr(conn, "ssl_mode", ""),
                 "type": conn.type,
                 "auth_mode": getattr(conn, "auth_mode", ""),
                 "auth_role": getattr(conn, "auth_role", ""),
@@ -767,10 +789,19 @@ def _lookup_saved_connector(
         logger.debug("connector store lookup failed: %s", exc, exc_info=exc)
     try:
         mongo = get_mongodb_service()
-        return mongo.get_connector(connector_id)
+        doc = mongo.get_connector(connector_id)
     except Exception as exc:
         logger.debug("mongodb connector lookup failed: %s", exc, exc_info=exc)
         return None
+    if isinstance(doc, dict) and (doc.get("ssl_mode") == "disable" or any(
+            (doc.get("extra") or {}).get(k) for k in ("ssl_ca", "ssl_cert", "ssl_key"))):
+        from services.connector_store import dial_connection_string
+
+        doc = {**doc, "connection_string": dial_connection_string(
+            str(doc.get("type") or ""), str(doc.get("ssl_mode") or ""),
+            str(doc.get("connection_string") or ""),
+            dict(doc.get("extra") or {}))}
+    return doc
 
 
 
@@ -1040,7 +1071,7 @@ def read_source_database(
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {c: "string" for c in batch.headers}
         )
@@ -1062,7 +1093,7 @@ def read_source_database(
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {c: "string" for c in batch.headers}
         )
@@ -1084,7 +1115,7 @@ def read_source_database(
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {c: "string" for c in batch.headers}
         )
@@ -1496,6 +1527,11 @@ def write_destination_database(
         write_mode = decided.write_mode
         options["write_mode"] = decided.write_mode
     match_token = set_match_action(decided.match_action)
+    # The population handed to the writer, counted before it can release the
+    # list. A writer stamps ``source_row_count`` as the rows it *accepted*;
+    # Gate-8 then subtracted the quarantined rows a second time ("source 29,
+    # rejected 1 ... expected target 28 vs target 29", D269).
+    records_in = None if spill is not None else len(records or [])
     try:
         # The Map governs holdouts for the whole write, including the bind and
         # salvage paths that stamp their own details.
@@ -1519,6 +1555,12 @@ def write_destination_database(
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
     if census_payload is not None and isinstance(summary, dict):
         summary[CENSUS_KEY] = census_payload
+    if isinstance(summary, dict) and "source_row_count_source" not in summary:
+        # Reader-side count: STRUCT explode is added back via rows_expanded below.
+        population = spill.unexpanded_row_count if spill is not None else records_in
+        if isinstance(population, int) and population >= 0:
+            summary["source_row_count"] = int(population)
+            summary["source_row_count_source"] = "engine_write_population"
     if spill is not None and isinstance(summary, dict):
         summary["engine_record_spill"] = {
             "spilled": spill.spilled,
@@ -1610,8 +1652,14 @@ def _write_destination_database(
     protect_landed_object: bool = False,
     empty_cells_as_null: bool = False,
     upsert_ddl_approved: bool = False,
+    source_endpoint: EndpointConfig | None = None,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
+
+    ``source_endpoint`` is the run's source. The source facts a writer needs
+    are derived from it here, once: file blanks are SQL NULL (D1), and the
+    create-new catalog (keys, nullability, collation) reaches CREATE TABLE
+    exactly as on the streaming path (D275).
 
     ``error_policy`` overrides the policy normally derived from
     ``validation_mode``. It exists for write targets whose contract differs from
@@ -1621,6 +1669,9 @@ def _write_destination_database(
     """
     from .connector_capabilities import effective_port, resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
+
+    from services.preflight_source_kind import source_is_record_batch
+    from src.transfer.adapters_introspect import source_schema_catalog_for_endpoint
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
@@ -1700,7 +1751,10 @@ def _write_destination_database(
         "protect_landed_object": protect_landed_object,
         # File/object-store blanks into typed columns are SQL NULL (D1): the
         # buffered engine path dropped the flag before writers ever saw it.
-        "empty_cells_as_null": empty_cells_as_null,
+        "empty_cells_as_null": empty_cells_as_null
+        or (source_endpoint is not None and source_is_record_batch(
+            getattr(source_endpoint, "kind", "") or "database", source_endpoint.format
+        )),
         # D101: writers may not create undisclosed DDL (upsert unique index)
         # on an operator's existing table unless Validate disclosed + approved.
         "upsert_ddl_approved": upsert_ddl_approved,
@@ -1719,7 +1773,12 @@ def _write_destination_database(
             or (getattr(endpoint, "extra", None) or {}).get("destination_column_types")
             or {}
         ),
-        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
+        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog")
+        or (
+            source_schema_catalog_for_endpoint(source_endpoint, list(columns), fallback_types=schema)
+            if source_endpoint is not None
+            else None
+        ),
     }
     if allow_equal_lsn:
         common["allow_equal_lsn"] = True

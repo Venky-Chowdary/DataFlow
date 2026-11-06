@@ -209,7 +209,9 @@ def test_uuid_mysql_create_new_still_solid_with_real_uuids():
     )
     assert coerce_blocks_transfer(issues) is False
     stamped_risks = mappings[0].get("create_new_risks") or []
-    assert any((r.get("kind") == "uuid_domain") for r in stamped_risks)
+    # MySQL has no native UUID type: CHAR(36) is the equivalent carrier, so the
+    # stamp is the informational uuid_carrier_equivalent note (mysql-D6, 86df26e22).
+    assert any((r.get("kind") == "uuid_carrier_equivalent") for r in stamped_risks)
 
 
 def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():

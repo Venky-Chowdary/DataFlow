@@ -402,29 +402,7 @@ def _persist_shape_diverts(run) -> int:
         return len(diverted or [])
     from services.quarantine_dlq import persist_rejected_rows
 
-    details = [
-        {
-            "row": d.record,
-            "reason": (
-                f"transform divert — step {d.step} '{d.op}': {d.reason}"
-            ),
-            "failure_reason": d.reason,
-            "transform_attempted": f"shape step {d.step} '{d.op}'",
-            "shape_step": d.step,
-            "shape_op": d.op,
-            "source_row_index": d.row_index + 1,
-            **(
-                {
-                    "dedupe_key": list(d.dedupe_key),
-                    "winner_row": d.winner_row_index + 1,
-                }
-                if getattr(d, "dedupe_key", None) is not None
-                and getattr(d, "winner_row_index", None) is not None
-                else {}
-            ),
-        }
-        for d in diverted
-    ]
+    details = cfg.shape_runner.divert_details(diverted)
     persist_rejected_rows(
         job_id=str(cfg.job_id),
         rejected_details=details,

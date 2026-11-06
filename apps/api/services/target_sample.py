@@ -14,6 +14,7 @@ lost write.
 from __future__ import annotations
 
 from services.brand import bigquery_default_dataset
+from services.connector_auth import resolve_api_key
 import json
 import logging
 from typing import Any
@@ -413,17 +414,27 @@ def _read_destination_sample(
             db_type == "generic_sql"
             and (dest.get("connection_string") or "").lower().startswith("oracle")
         ):
-            from services.reconciliation_oracle import read_oracle_target_sample
-
-            return read_oracle_target_sample(
-                dest,
-                schema=schema,
-                table_name=table_name,
-                cols=list(cols),
-                keys=list(keys),
-                sort_key=sort_key,
-                limit=limit,
+            from services.reconciliation_oracle import (
+                OracleCatalogUnreadable,
+                read_oracle_target_sample,
             )
+
+            try:
+                return read_oracle_target_sample(
+                    dest,
+                    schema=schema,
+                    table_name=table_name,
+                    cols=list(cols),
+                    keys=list(keys),
+                    sort_key=sort_key,
+                    limit=limit,
+                )
+            except OracleCatalogUnreadable as exc:
+                # The ladder reads this as "sample unavailable, keep the rows,
+                # re-verify" — never as a missing object (D266).
+                unavailable = TargetSampleUnavailable(str(exc))
+                unavailable.transient = True  # the retrying reader's flag
+                raise unavailable from exc
 
         if db_type == "duckdb" or (
             db_type == "generic_sql"
@@ -620,7 +631,6 @@ def _read_destination_sample(
 
         if db_type == "redis":
             from connectors.redis_reader import _decode, _redis_client, redis_json_row
-            from connectors.sql_identifiers import sanitize_identifier
 
             prefix = table_name or "dataflow"
             cfg = {
@@ -637,10 +647,9 @@ def _read_destination_sample(
                 rows_out: list[dict[str, Any]] = []
                 if keys and sort_key:
                     # Writer stores keys as ``prefix:<sanitized_id>``.
-                    key_names = [
-                        f"{prefix}:{sanitize_identifier(str(k), preserve_case=True)}"
-                        for k in keys
-                    ]
+                    from src.transfer.writer_column_spelling import physical_column
+
+                    key_names = [f"{prefix}:{physical_column(str(k))}" for k in keys]
                     for raw in client.mget(key_names):
                         text = _decode(raw)
                         if not text:
@@ -1228,9 +1237,7 @@ def _read_destination_sample(
             from connectors.pinecone_writer import _headers, _index_url, _requests_session
 
             index_url = _index_url(dest.get("host", ""), dest.get("connection_string", ""))
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
+            key = resolve_api_key(dest)
             if not index_url or not key:
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
@@ -1273,7 +1280,7 @@ def _read_destination_sample(
         if db_type == "qdrant":
             from connectors.qdrant_writer import _base_url, _headers, _requests_session
 
-            api_key = dest.get("password") or dest.get("username") or ""
+            api_key = resolve_api_key(dest)
             base_url = (
                 dest.get("connection_string", "").rstrip("/")
                 if dest.get("connection_string")
@@ -1339,9 +1346,7 @@ def _read_destination_sample(
                 _requests_session,
             )
 
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
+            key = resolve_api_key(dest)
             base_url = _base_url(
                 dest.get("host", ""),
                 int(dest.get("port") or 8080),
@@ -1421,6 +1426,7 @@ def _read_destination_sample(
                 api_key=str(dest.get("api_key") or ""),
                 username=dest.get("username", ""),
                 password=dest.get("password", ""),
+                auth_mode=str(dest.get("auth_mode") or ""),
             )
             base_url = _base_url(
                 dest.get("host", ""),

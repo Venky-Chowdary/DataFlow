@@ -347,8 +347,11 @@ def test_confirm_creates_the_schedule_once_through_the_store(monkeypatch):
         sync_mode = "full_refresh_append"
         enabled = True
         next_run_at = "2026-08-18T02:00:00+00:00"
+        # A stored schedule always has a workspace; Confirm reports where it
+        # landed (5d708f9c8), so the stub carries it like PipelineSchedule.
+        workspace_id = ""
 
-    def _create(data: dict[str, Any]):
+    def _create(data: dict[str, Any], **_kw: Any):
         created.append(data)
         return _Sched()
 
@@ -392,7 +395,7 @@ def test_a_store_refusal_is_surfaced_and_the_approval_stays_spendable(monkeypatc
     from src.routers import copilot_router
     import services.schedule_store as store
 
-    def _refuse(data: dict[str, Any]):
+    def _refuse(data: dict[str, Any], **_kw: Any):
         raise ValueError("Unsupported interval: fortnightly")
 
     monkeypatch.setattr(store, "create_schedule", _refuse)

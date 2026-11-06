@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
@@ -10,11 +12,18 @@ from pydantic import BaseModel, Field, field_validator
 from services.acknowledgment_contract import MIN_ACTOR_LEN
 from services.transfer_policy_values import PolicyFieldsModel
 from services.api_errors import ApiError
+from services.procedure_source import ProcedureSourceError
 from services.audit_coverage import record_security_event
 from services.brand import PRODUCT_SLUG
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.gitops_yaml import dump_artifact_yaml
 from services.schedule_approvals import STATUS_OPEN
+from services.schedule_audit import (
+    audit_schedule_acknowledgment,
+    record_schedule_created,
+    record_schedule_deleted,
+    schedule_acknowledgment_fields,
+)
 from services.schedule_store import (
     INTERVALS,
     SYNC_MODES,
@@ -36,6 +45,45 @@ from services.workspace_access import (
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
 
 
+def _acknowledgment_fields(
+    request: Request, payload: dict[str, Any], *, previous: Any = None
+) -> dict[str, Any]:
+    """Validate and stamp a schedule's PII acknowledgement (QA Snowflake D10).
+
+    The actor defaults to the authenticated caller, as on ``/transfer/run``.
+    """
+    from services.workspace_access import actor_email
+
+    return schedule_acknowledgment_fields(
+        payload, default_actor=actor_email(request), previous=previous
+    )
+
+
+def _assert_upsert_key(plan: dict[str, Any]) -> None:
+    """``sync_mode=upsert`` with no resolvable key is a 422 here, as on /transfer/execute."""
+    from services.connector_store import get_connector
+    from services.schedule_source_probe import _callable_source
+    from services.upsert_key_door import assert_upsert_key_resolvable
+
+    source_type = ""
+    connector_id = str(plan.get("source_connector_id") or "")
+    if connector_id:
+        try:
+            conn = get_connector(connector_id, workspace_id=str(plan.get("workspace_id") or "") or None)
+            source_type = str(getattr(conn, "type", "") or "") if conn else ""
+        except Exception:  # noqa: BLE001 - an unread connector is judged without its type
+            source_type = ""
+    assert_upsert_key_resolvable(
+        sync_mode=plan.get("sync_mode"),
+        primary_key=plan.get("primary_key") or "",
+        stream_contracts=plan.get("stream_contracts") or [],
+        source_connector_id=connector_id,
+        source_table=str(plan.get("source_table") or ""),
+        source_type=source_type,
+        callable_source=_callable_source(plan),
+    )
+
+
 def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
     sched = get_schedule(schedule_id)
     if not sched:
@@ -49,17 +97,29 @@ def _bound_schedule(request: Request, schedule_id: str, *, write: bool = False) 
     assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=write)
     return sched
 
-SyncMode = Literal[
-    "full_refresh_overwrite",
-    "full_refresh_append",
-    "incremental",
-    "incremental_append",
-    "incremental_deduped",
-    "cdc",
-    "scd2",
-    "mirror",
-    "reverse_etl",
-]
+#: What a create that names no sync mode gets (the model's declared default).
+DEFAULT_SCHEDULE_SYNC_MODE = "full_refresh_overwrite"
+
+
+def _schedule_sync_mode(value: Any, *, blank: Any) -> Any:
+    """The one sync-mode vocabulary (services.transfer_policy_values), schedule spelling.
+
+    A Literal copy of the modes here omitted ``upsert``, so a mode the one-off
+    route and the store accept was a 422 on schedule create (QA MySQL D13).
+    Blank means "not given" (transfer_policy_values' rule): a create takes
+    ``blank`` (the documented default), a PATCH ``None`` — no change, never a
+    silent switch to a truncating overwrite.
+    """
+    if value is None:
+        return None
+    from services.schedule_store import accepted_schedule_sync_mode
+    from services.transfer_policy_values import canonical_sync_mode
+
+    if not canonical_sync_mode(value):
+        return blank
+    return accepted_schedule_sync_mode(str(value))
+
+
 IntervalPreset = Literal["hourly", "daily", "weekly"]
 
 
@@ -69,10 +129,23 @@ class ScheduleCreate(PolicyFieldsModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
+    #: Destination namespace; empty is the connector's default (QA Snowflake D11).
+    dest_schema: str = Field(default="", max_length=255)
+    dest_database: str = Field(default="", max_length=255)
+    #: PII/compliance acknowledgement carried by every run, exactly as a
+    #: one-off ``/transfer/run`` accepts it (QA Snowflake D10).
+    compliance_acknowledged: bool = False
+    acknowledgment_actor: str = Field(default="", max_length=320)
+    acknowledgment_reason: str = Field(default="", max_length=2000)
     interval: str = "daily"
     cron: str = ""
     timezone: str = "UTC"
-    sync_mode: SyncMode = "full_refresh_overwrite"
+    sync_mode: str = DEFAULT_SCHEDULE_SYNC_MODE
+
+    @field_validator("sync_mode", mode="before")
+    @classmethod
+    def _sync_mode_vocabulary(cls, value: Any) -> Any:
+        return _schedule_sync_mode(value, blank=DEFAULT_SCHEDULE_SYNC_MODE)
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
@@ -143,12 +216,22 @@ class ScheduleUpdate(PolicyFieldsModel):
     source_table: Optional[str] = None
     dest_connector_id: Optional[str] = None
     dest_table: Optional[str] = None
+    dest_schema: Optional[str] = Field(default=None, max_length=255)
+    dest_database: Optional[str] = Field(default=None, max_length=255)
+    compliance_acknowledged: Optional[bool] = None
+    acknowledgment_actor: Optional[str] = Field(default=None, max_length=320)
+    acknowledgment_reason: Optional[str] = Field(default=None, max_length=2000)
     interval: Optional[str] = None
     #: Runner token when ``interval`` is the displayed cadence label.
     interval_preset: Optional[str] = None
     cron: Optional[str] = None
     timezone: Optional[str] = None
-    sync_mode: Optional[SyncMode] = None
+    sync_mode: Optional[str] = None
+
+    @field_validator("sync_mode", mode="before")
+    @classmethod
+    def _sync_mode_vocabulary(cls, value: Any) -> Any:
+        return _schedule_sync_mode(value, blank=None)
     validation_mode: Optional[str] = None
     schema_policy: Optional[str] = None
     backfill_new_fields: Optional[bool] = None
@@ -201,6 +284,12 @@ class ScheduleResponse(BaseModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
+    dest_schema: str = ""
+    dest_database: str = ""
+    compliance_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    acknowledgment_at: str = ""
     interval: str
     #: hourly | daily | weekly | cron | every_Nm. Present even when
     #: ``interval`` is a label; ``cron`` whenever a cron expression is set.
@@ -335,6 +424,9 @@ class ScheduleSummaryResponse(BaseModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
+    dest_schema: str = ""
+    dest_database: str = ""
+    compliance_acknowledged: bool = False
     interval: str
     interval_preset: str = ""
     cadence_label: str = ""
@@ -585,6 +677,74 @@ async def gitops_apply_manifest(
     return result
 
 
+class OrphanReconcileRequest(BaseModel):
+    #: Dry run is the default: report what an apply would do, change nothing.
+    dry_run: bool = True
+    #: schedule id -> "adopt" | "disable" | "delete" | "none", or
+    #: {"action": "adopt", "workspace_id": "<ws>"}.
+    actions: dict[str, Any] = Field(default_factory=dict)
+    #: Limit the run to these schedule ids (default: every orphan).
+    schedule_ids: Optional[list[str]] = None
+
+
+def _require_platform_admin(request: Request) -> str:
+    """Orphans belong to no workspace: platform admins only, the denial audited."""
+    from services.rbac import Permission
+    from services.tenant_scope import resolve_tenant_scope
+    from services.workspace_access import actor_email, require_platform_admin
+
+    require_platform_admin(
+        request,
+        resolve_tenant_scope(request, ""),
+        Permission.WORKSPACE_MANAGE,
+        detail="Platform administrator role required",
+    )
+    return actor_email(request)
+
+
+@router.get("/admin/orphans")
+async def list_orphaned_schedules(request: Request):
+    """Pipeline registrations no workspace can see (QA Snowflake D12). Platform admin."""
+    import asyncio
+
+    from services.schedule_orphans import find_orphans
+
+    actor = _require_platform_admin(request)
+    orphans = await asyncio.to_thread(find_orphans)
+    record_security_event(
+        "schedule.orphan.list",
+        outcome="succeeded",
+        request=request,
+        actor=actor,
+        resource="schedules:orphans",
+        status=200,
+        workspace_id="",
+        details={"orphan_count": len(orphans), "ids": [o.id for o in orphans]},
+    )
+    return {"orphans": [o.to_dict() for o in orphans], "count": len(orphans)}
+
+
+@router.post("/admin/orphans/reconcile")
+async def reconcile_orphaned_schedules(body: OrphanReconcileRequest, request: Request):
+    """Adopt, disable or delete orphaned registrations. Dry run unless asked."""
+    import asyncio
+
+    from services.schedule_orphans import reconcile_orphans
+
+    actor = _require_platform_admin(request)
+    try:
+        return await asyncio.to_thread(
+            reconcile_orphans,
+            dry_run=body.dry_run,
+            actions=body.actions,
+            only_ids=body.schedule_ids,
+            actor=actor,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/", response_model=list[ScheduleSummaryResponse])
 async def list_pipeline_schedules(
     request: Request,
@@ -625,37 +785,33 @@ async def create_pipeline_schedule(
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):
         assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
+    for key in ("dest_schema", "dest_database"):
+        payload[key] = str(payload.get(key) or "").strip()
     warnings: list[str] = []
+    # The key probe may read the source catalog (bounded 8 s): off the event loop.
+    await asyncio.to_thread(_assert_upsert_key, payload)
     try:
+        payload.update(_acknowledgment_fields(request, payload))
         sched = create_schedule(
             payload,
             # Only an explicit enabled:true is a request to arm (QA SC7); an
             # omitted flag saves an unmapped schedule as a draft and says so.
             refuse_empty_enable="enabled" in body.model_fields_set and body.enabled,
+            refuse_unrunnable_mappings=True,
             warnings=warnings,
         )
     except ApiError:
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ProcedureSourceError as exc:
+        # QA C3: a query/procedure the schedule cannot honour (unknown mode
+        # word, callable word with no statement) is the request's fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    record_security_event(
-        "schedule.definition.create",
-        outcome="succeeded",
-        request=request,
-        resource=f"schedule:{sched.id}",
-        status=201,
-        details={
-            "id": sched.id,
-            "source_connector_id": sched.source_connector_id,
-            "source_table": sched.source_table,
-            "dest_connector_id": sched.dest_connector_id,
-            "dest_table": sched.dest_table,
-            "sync_mode": sched.sync_mode,
-            "enabled": bool(sched.enabled),
-        },
-    )
+    record_schedule_created(sched, request=request)
+    audit_schedule_acknowledgment(sched, request=request, via="rest")
     return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
 
@@ -675,15 +831,35 @@ async def patch_pipeline_schedule(
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     # A PATCH must not re-home a schedule into another workspace.
     data.pop("workspace_id", None)
+    for key in ("dest_schema", "dest_database"):
+        if key in data:
+            data[key] = str(data[key] or "").strip()
     if not data:
         return ScheduleResponse.from_schedule(existing)
+    if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
+        await asyncio.to_thread(_assert_upsert_key, {**existing.to_dict(), **data})
     warnings: list[str] = []
     try:
-        updated = update_schedule(schedule_id, data, warnings=warnings)
+        if "compliance_acknowledged" in data or (
+            {"acknowledgment_actor", "acknowledgment_reason"} & set(data)
+            and existing.compliance_acknowledged
+        ):
+            data.setdefault("compliance_acknowledged", bool(existing.compliance_acknowledged))
+            data.update(_acknowledgment_fields(request, data, previous=existing))
+        else:
+            data.pop("acknowledgment_actor", None)
+            data.pop("acknowledgment_reason", None)
+        updated = update_schedule(
+            schedule_id, data, warnings=warnings, refuse_unrunnable_mappings=True
+        )
     except ApiError:
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ProcedureSourceError as exc:
+        # QA C3: a query/procedure the schedule cannot honour (unknown mode
+        # word, callable word with no statement) is the request's fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
@@ -702,8 +878,14 @@ async def patch_pipeline_schedule(
             "dest_table": updated.dest_table,
             "sync_mode": updated.sync_mode,
             "enabled": bool(updated.enabled),
+            "dest_schema": updated.dest_schema,
+            "dest_database": updated.dest_database,
         },
     )
+    if updated.compliance_acknowledged and (
+        updated.acknowledgment_at != existing.acknowledgment_at
+    ):
+        audit_schedule_acknowledgment(updated, request=request, via="rest")
     return ScheduleResponse.from_schedule(updated, warnings=warnings)
 
 
@@ -816,22 +998,7 @@ async def remove_pipeline_schedule(
     capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
-    record_security_event(
-        "schedule.definition.delete",
-        outcome="succeeded",
-        request=request,
-        resource=f"schedule:{schedule_id}",
-        status=200,
-        details={
-            "id": sched.id,
-            "source_connector_id": sched.source_connector_id,
-            "source_table": sched.source_table,
-            "dest_connector_id": sched.dest_connector_id,
-            "dest_table": sched.dest_table,
-            "sync_mode": sched.sync_mode,
-            "enabled": bool(sched.enabled),
-        },
-    )
+    record_schedule_deleted(sched, request=request)
     return {"success": True, "capture_release": capture}
 
 
@@ -1248,6 +1415,81 @@ async def run_pipeline_now(
         )
     updated = get_schedule(schedule_id)
     return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+
+
+class RecoverDestinationRequest(BaseModel):
+    #: ``rebaseline`` accepts the destination as it is now (or its removal);
+    #: ``rebuild`` reloads it from the source with a full re-sync. Both are
+    #: required, and checked after the schedule's workspace: another
+    #: workspace's caller is refused 403/404 before the body is judged.
+    action: str = Field(default="", max_length=32)
+    reason: str = Field(default="", max_length=2000)
+    #: Return the plan (what it does to the destination) and change nothing.
+    dry_run: bool = False
+    #: Required when a rebuild replaces the table (no key to upsert on).
+    confirm_replace: bool = False
+
+
+@router.post("/{schedule_id}/recover")
+async def recover_schedule_destination_route(
+    schedule_id: str,
+    body: RecoverDestinationRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Recover a destination that changed under this schedule, then re-arm it (QA C9).
+
+    The finding a dropped / externally changed append destination parks on is
+    answered here, audited with the operator and reason. MCP
+    ``recover_schedule_destination`` confirms through this same handler.
+    """
+    import asyncio
+
+    from services.schedule_recovery import (
+        ScheduleRecoveryRefused,
+        recover_schedule_destination,
+    )
+
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id, write=True)
+    required = ("action",) if body.dry_run else ("action", "reason")
+    missing = [k for k in required if not str(getattr(body, k) or "").strip()]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{' and '.join(missing)} required: action is rebaseline or rebuild; "
+            "the reason is audited.",
+        )
+    from ..services.schedule_runner import ScheduleStartError
+
+    actor = "" if body.dry_run else _decider(request)
+    try:
+        result = await asyncio.to_thread(
+            recover_schedule_destination,
+            schedule_id,
+            action=body.action,
+            actor=actor,
+            reason=body.reason,
+            dry_run=body.dry_run,
+            confirm_replace=body.confirm_replace,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ScheduleRecoveryRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ScheduleStartError as exc:
+        # The rebuild could not start; the finding stays open (audited as failed).
+        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ApiError:
+        raise
+    sched = result.pop("schedule", None) or get_schedule(schedule_id)
+    return {
+        "success": True,
+        **result,
+        "schedule": ScheduleResponse.from_schedule(sched) if sched else None,
+    }
 
 
 class CatchUpRequest(BaseModel):

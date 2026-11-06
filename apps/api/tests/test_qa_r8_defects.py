@@ -10,6 +10,8 @@ HTTPS. Unauthenticated routes are rate limited when that limiter is on.
 
 from __future__ import annotations
 
+import pytest
+
 import time
 
 from cryptography.fernet import Fernet
@@ -177,10 +179,14 @@ def test_counted_empty_table_is_not_blocked_for_a_missing_sample():
     assert "without sample" not in g8["message"]
 
 
-def test_s3_to_s3_mixed_cast_is_a_holdout_not_a_block():
+@pytest.mark.parametrize("validation_mode", ["balanced", "strict"])
+def test_s3_to_s3_mixed_cast_is_a_holdout_not_a_block(validation_mode):
+    """Balanced holds the bad cell of an object-store file out (R4-D02 class);
+    strict holds nothing out, so it refuses at Validate as Execute would."""
     from services.preflight_service import run_file_preflight
 
     result = run_file_preflight(
+        validation_mode=validation_mode,
         columns=["amt"],
         column_types={"amt": "INTEGER"},
         row_count=2,
@@ -204,6 +210,9 @@ def test_s3_to_s3_mixed_cast_is_a_holdout_not_a_block():
         skip_population_fit=True,
     )
     decision = (result.get("proof_bundle") or {}).get("transfer_decision") or {}
+    if validation_mode == "strict":
+        assert decision.get("decision") == "block", decision
+        return
     assert decision.get("decision") != "block", decision
     kinds = [
         str((b.get("details") or {}).get("kind") or "")

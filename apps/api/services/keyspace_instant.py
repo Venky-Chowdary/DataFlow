@@ -26,10 +26,16 @@ from typing import Final
 #: DynamoDB ``S`` writes the same ``isoformat`` string — AttributeValue has
 #: no datetime type, and ``TypeSerializer`` rejects a ``datetime`` object.
 #: Kafka JSON produce uses that same ``json_default`` (aware ``datetime`` →
-#: RFC 3339 with the offset). A typed PostgreSQL ``TEXT`` column is not in
-#: this set: there the offset contract really is dropped.
+#: RFC 3339 with the offset). Qdrant, Weaviate, Milvus and Pinecone carry a
+#: row's non-vector columns as payload/metadata through
+#: ``connectors.writer_common.vector_prepare_metadata``, which renders an aware
+#: ``datetime`` the same way (``2024-01-01T10:00:00.123456+05:30``); their
+#: create-new stamp is that text, not a column type. Reading it as an open-text
+#: collapse refused every timestamp column into a vector store DataFlow created
+#: itself (D141). A typed PostgreSQL ``TEXT`` column is not in this set: there
+#: the offset contract really is dropped.
 INSTANT_TEXT_WIRE_ENGINES: Final[frozenset[str]] = frozenset(
-    {"redis", "dynamodb", "kafka"}
+    {"redis", "dynamodb", "kafka", "qdrant", "weaviate", "milvus", "pinecone"}
 )
 
 _INSTANT_TEXT_ENGINE_ALIASES: Final[dict[str, str]] = {

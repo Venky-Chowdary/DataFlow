@@ -303,6 +303,18 @@ def execute_load_data_local(
         cursor.execute(sql)
 
 
+def fetch_load_data_warnings(cursor: Any) -> list[str]:
+    """``SHOW WARNINGS`` right after a LOAD DATA, read before anything else runs.
+
+    The one place every LOAD DATA consumer reads its warnings. The rows are
+    fetched immediately: any later statement on the cursor (a session restore,
+    a COUNT) replaces the result set, and a truncation that was never read
+    committed silently (E1-018). Returns the blocking Warning/Error texts.
+    """
+    cursor.execute("SHOW WARNINGS")
+    return blocking_load_data_warnings(list(cursor.fetchall() or []))
+
+
 def blocking_load_data_warnings(warning_rows: list[tuple[Any, ...]]) -> list[str]:
     """Warning/Error SHOW WARNINGS must not be committed. Notes may pass."""
     blocked: list[str] = []
@@ -356,14 +368,12 @@ def try_mysql_load_data_local(
                 raise
             return LoadDataAttempt(ok=False, reason=str(exc)[:300])
         try:
-            cursor.execute("SHOW WARNINGS")
-            warning_rows = list(cursor.fetchall() or [])
+            blocked = fetch_load_data_warnings(cursor)
         except Exception as exc:
             return LoadDataAttempt(
                 ok=False,
                 reason=f"SHOW WARNINGS failed after LOAD DATA: {exc}"[:300],
             )
-        blocked = blocking_load_data_warnings(warning_rows)
         if blocked:
             return LoadDataAttempt(
                 ok=False,

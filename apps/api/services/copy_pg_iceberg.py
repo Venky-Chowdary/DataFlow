@@ -299,7 +299,9 @@ def copy_postgres_to_iceberg(
         handle, tmp_path = tempfile.mkstemp(prefix="df_pg_iceberg_", suffix=".csv")
         os.close(handle)
         with open(tmp_path, "wb") as writer:
-            src_cur.copy_expert(copy_sql, writer)
+            from services.cancel_check import copy_expert_keeping_cancel
+
+            copy_expert_keeping_cancel(src_cur, copy_sql, writer)
         pa_table = _arrow_from_csv(tmp_path, arrow_schema)
         if len(pa_table) != source_count:
             raise ValueError(

@@ -23,6 +23,7 @@ import { useToast } from "../components/Toast";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { useConfirm } from "../components/ui/ConfirmDialog";
+import { recoveryConfirmOptions } from "../lib/scheduleRecovery";
 import {
   applyGitopsManifest,
   createSchedule,
@@ -37,6 +38,7 @@ import {
   planGitopsManifest,
   resetContractBreaker,
   confirmCopilotAction,
+  recoverScheduleDestination,
   runScheduleNow,
   stageScheduleSync,
   SyncAlreadyRunningError,
@@ -453,6 +455,41 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     }
   };
 
+  const handleRecoverDestination = async (
+    id: string,
+    action: "rebaseline" | "rebuild",
+    reason: string,
+  ) => {
+    if (!allowOrExplain(scheduleManage)) return;
+    try {
+      // Ask the server what this will do, say it (naming the table), then act.
+      const dry = await recoverScheduleDestination(id, action, reason, { dryRun: true });
+      const sched = schedules.find((row) => row.id === id);
+      const accepted = await confirm(
+        recoveryConfirmOptions(dry.plan, { name: sched?.name ?? "", dest_table: sched?.dest_table ?? "" }),
+      );
+      if (!accepted) return;
+      const out = await recoverScheduleDestination(id, action, reason, {
+        confirmReplace: dry.plan.destructive,
+      });
+      await load();
+      toast({
+        title: action === "rebuild" ? "Destination rebuild started" : "Destination rebaselined",
+        message: out.job_id
+          ? `The schedule is armed again. Rebuild job ${out.job_id.slice(0, 8)}…`
+          : "The schedule is armed again; the next run appends from the cursor.",
+        tone: "success",
+      });
+      if (out.job_id) onOpenJob?.(out.job_id);
+    } catch (e) {
+      toast({
+        title: "Could not recover the destination",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    }
+  };
+
   const handleRunNow = async (id: string) => {
     if (!allowOrExplain(jobRun)) return;
     const sched = schedules.find((s) => s.id === id);
@@ -864,6 +901,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }
         onClose={closeDrawer}
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+        onRecoverDestination={(action, reason) =>
+          selectedSchedule ? handleRecoverDestination(selectedSchedule.id, action, reason) : undefined}
         onSync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "sync")}
         onFullResync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "full")}
         onEdit={() => {

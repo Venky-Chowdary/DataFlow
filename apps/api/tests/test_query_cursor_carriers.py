@@ -37,7 +37,9 @@ def test_mariadb_display_widths_stay_their_carriers():
         "is_active": "INTEGER",
         "d": "DATE",
         "ts": "DATETIME",
-        "updated_at": "TIMESTAMP",
+        # FIELD_TYPE 7 is MySQL TIMESTAMP: an instant, declared like the
+        # catalog does (TIMESTAMPTZ), never the zoneless carrier.
+        "updated_at": "TIMESTAMPTZ",
     }
     assert "DECIMAL" not in cursor_declared_numeric_types(headers, description).values()
 

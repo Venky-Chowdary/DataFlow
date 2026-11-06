@@ -348,3 +348,27 @@ def set_adopted_memberships(adopted: dict[tuple[str, str], str]) -> None:
             for (workspace_id, email), role in sorted(adopted.items())
         ]
         _write_state(state)
+
+
+def forget_workspace(workspace_id: str, *, dry_run: bool = False) -> int:
+    """Drop SCIM group mappings and managed / adopted memberships that target ``workspace_id``."""
+    ws = (workspace_id or "").strip()
+    if not ws:
+        raise ValueError("a workspace is required")
+    with _LOCK:
+        state = _read_state()
+        mappings = dict(state.get("group_mappings") or {})
+        drop_maps = [g for g, m in mappings.items() if isinstance(m, dict) and m.get("workspace_id") == ws]
+        managed = [r for r in state.get("managed_memberships") or [] if isinstance(r, dict)]
+        adopted = [r for r in state.get("adopted_memberships") or [] if isinstance(r, dict)]
+        managed_hit = [r for r in managed if r.get("workspace_id") == ws]
+        adopted_hit = [r for r in adopted if r.get("workspace_id") == ws]
+        count = len(drop_maps) + len(managed_hit) + len(adopted_hit)
+        if count and not dry_run:
+            for g in drop_maps:
+                mappings.pop(g, None)
+            state["group_mappings"] = mappings
+            state["managed_memberships"] = [r for r in managed if r.get("workspace_id") != ws]
+            state["adopted_memberships"] = [r for r in adopted if r.get("workspace_id") != ws]
+            _write_state(state)
+        return count

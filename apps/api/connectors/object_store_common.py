@@ -518,7 +518,7 @@ def inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str
 
         return {
             str(col["name"]): str(col.get("inferred_type") or "VARCHAR")
-            for col in infer_columns_from_rows(list(headers), list(rows))
+            for col in infer_columns_from_rows(list(headers), list(rows), invalid_calendar_votes=True)
             if col.get("name")
         }
     except Exception as exc:  # noqa: BLE001 — types are an enrichment, not a gate

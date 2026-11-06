@@ -64,7 +64,9 @@ def request_context(tmp_path, monkeypatch):
                 "email": "context-member@example.test",
                 "platform_role": "member",
                 "workspace_id": ws1,
-                "workspace_role": "editor",
+                # Member administration is the workspace admin's (C6): the
+                # legacy-header audit test below adds a member as this user.
+                "workspace_role": "admin",
             },
         )
         assert created.status_code == 200, created.text

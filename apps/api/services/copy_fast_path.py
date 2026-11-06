@@ -47,12 +47,12 @@ import logging
 import os
 import re
 import tempfile
-import threading
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
 from services.brand_env import getenv_brand
+from services.tracing import thread_in_context
 
 from services.copy_range_proof import range_keys_match  # noqa: E402
 
@@ -591,7 +591,8 @@ def text_cell_copy_safe(
     quarantined. The census therefore runs over every cell before the
     destination is touched, and a cell the carrier cannot hold declines the
     fast path so the row path validates and quarantines it. Text carriers hold
-    anything; unknown logical types are left to the row path's own contract.
+    anything up to a bounded width; unknown logical types are left to the row
+    path's own contract.
 
     Syntax alone is not the carrier: ``99999999999999999999`` is an integer the
     engine's BIGINT parser rejects at load, and ``0.016666668`` is a decimal
@@ -629,6 +630,20 @@ def text_cell_copy_safe(
         return fits_decimal(value, params[0], params[1], dest_db=dest_db)
     if kind == "boolean":
         return value in _COPY_BOOLEAN_TEXT
+    if kind in {"string", "text"}:
+        # A bounded character carrier does not hold anything: a bulk load
+        # into VARCHAR(3) either fails the whole load on 'abcdef' or (MySQL
+        # non-strict) truncates it. The row path owns the holdout.
+        if not physical:
+            return True
+        from services.ddl_compatibility import parse_varchar_width
+
+        width = parse_varchar_width(physical)
+        if width is None:
+            return True
+        from connectors.writer_common import fits_varchar
+
+        return fits_varchar(value, width, physical, dialect_label=dest_db)
     if kind in {"date", "datetime", "time"}:
         shape = {"date": _ISO_DATE_TEXT, "datetime": _ISO_DATETIME_TEXT}.get(kind, _ISO_TIME_TEXT)
         if not shape.match(value):
@@ -713,7 +728,9 @@ def stream_between_cursors(
         except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
             failure.append(exc)
 
-    pump = threading.Thread(target=_pump, name=f"{prefix}fifo", daemon=True)
+    # The producer polls the job's cancel probe and feeds its progress meter
+    # (ContextVars): it must run in the job's context (D168).
+    pump = thread_in_context(_pump, name=f"{prefix}fifo")
     pump.start()
     try:
         consumer(path)
@@ -1199,35 +1216,25 @@ def _stream_copy(
     rather than accumulating rows. Both ends are closed on every exit path: an
     unclosed write end leaves the reader waiting for EOF that never comes.
     """
+    from services.cancel_check import copy_expert_keeping_cancel
+
     read_fd, write_fd = os.pipe()
     failure: list[BaseException] = []
 
     def _pump() -> None:
         try:
             with os.fdopen(write_fd, "wb", _PIPE_CHUNK) as writer:
-                source_cur.copy_expert(source_sql, writer)
+                copy_expert_keeping_cancel(source_cur, source_sql, writer)
         except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
             failure.append(exc)
 
-    pump = threading.Thread(target=_pump, name="copy-fast-path", daemon=True)
+    pump = thread_in_context(_pump, name="copy-fast-path")
     pump.start()
-    class _CancelAwareReader:
-        """D102: poll the job's cancel probe on every COPY read block."""
-
-        __slots__ = ("_reader",)
-
-        def __init__(self, reader: Any) -> None:
-            self._reader = reader
-
-        def read(self, size: int = -1) -> bytes:
-            from services.cancel_check import cancel_checkpoint
-
-            cancel_checkpoint()
-            return self._reader.read(size)
-
     try:
         with os.fdopen(read_fd, "rb", _PIPE_CHUNK) as reader:
-            dest_cur.copy_expert(dest_sql, _CancelAwareReader(reader))
+            # D102: poll the job's cancel probe on every COPY read block; C16:
+            # a cancel raised there leaves as TransferCancelled.
+            copy_expert_keeping_cancel(dest_cur, dest_sql, reader, poll=True)
     except BaseException:
         # Drain so the writer's blocked write() returns and the thread can exit
         # instead of holding the source transaction open.
@@ -1774,12 +1781,22 @@ def copy_between_postgres(
         dest_conn.commit()
         source_conn.commit()
         return result
-    except Exception:
+    except Exception as failure:
+        rolled_back = True
         for conn in (dest_conn, source_conn):
             try:
                 conn.rollback()
             except Exception as exc:
+                rolled_back = False
                 logger.debug("rollback after fast-path failure: %s", exc)
+        from services.error_handling import TransferCancelled
+
+        if isinstance(failure, TransferCancelled) and rolled_back:
+            # C16: the whole copy (DDL, clear and rows) was one transaction and
+            # it rolled back — the route's evidence, not a row-count guess.
+            from services.job_status import mark_write_rolled_back
+
+            mark_write_rolled_back(failure)
         raise
     finally:
         for conn in (dest_conn, source_conn):

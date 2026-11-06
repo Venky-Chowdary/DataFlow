@@ -180,6 +180,7 @@ class RuntimePreflightContext(PreflightContext):
             sample_size=min(sample_size, len(rows)),
             empty_cells_as_null=bool(self.file_id),
             file_row_quarantine=bool(self.file_id),
+            validation_mode=str(getattr(getattr(self, "plan", None), "validation_mode", "") or "strict"),
         )
 
     def run_integrity_audit(self, sample_size: int = 1000) -> dict[str, Any]:

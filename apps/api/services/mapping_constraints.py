@@ -38,8 +38,13 @@ def known_target(name: str, target_columns: list[str]) -> bool:
     """True when name matches a declared destination column (case/underscore insensitive)."""
     if not target_columns:
         return True
+    from services.semantic_mapper import name_identical
+
     needle = _norm(name)
-    return any(_norm(col) == needle for col in target_columns)
+    # ``name_identical`` is the one owner of "same column" (case, separators,
+    # transliteration, sanitiser spellings); ``_norm`` keeps the whitespace /
+    # dash fold this module always had.
+    return any(name_identical(name, col) or _norm(col) == needle for col in target_columns)
 
 
 def _is_create_new_mapping(m: dict) -> bool:
@@ -92,7 +97,9 @@ def enforce_destination_constraints(
         # Resolve canonical target spelling from the destination schema.
         # Prefer an exact (case-insensitive) match so columns like `id` and
         # `_id` do not collapse to the first normalized hit.
-        exact = next((c for c in target_columns if c.lower() == tgt.lower()), None)
+        from services.semantic_mapper import name_identical
+
+        exact = next((c for c in target_columns if name_identical(tgt, c)), None)
         canon = exact or next((c for c in target_columns if _norm(c) == _norm(tgt)), tgt)
         out["target"] = canon
         kept.append(out)

@@ -168,12 +168,20 @@ def signing_key() -> tuple[str, bytes, str]:
 
     ``source`` is ``env``, ``persisted`` (the shared keyring) or ``generated_local``.
     """
+    from services import audit_chain_keystore as store
+
+    # The key history's epoch is looked up before the append lock
+    # (audit_log._key_history_position), never here on the signing path.
     configured = _env(KEY_ENV)
     if configured:
         key = configured.encode("utf-8")
+        store.note_key_id(key_id_for(key), origin="configured")
         return key_id_for(key), key, "env"
     persisted = _persisted_current()
     if persisted is not None:
+        # A keyring key on the sealed history: missing from the keyring later
+        # reads as a removed key (tampering), never as a lost one.
+        store.note_key_id(persisted[0], origin="keyring")
         return persisted[0], persisted[1], "persisted"
     try:
         key = _generated_key(create=True)
@@ -184,6 +192,9 @@ def signing_key() -> tuple[str, bytes, str]:
         # Process-local last resort; its records verify only in this process
         # and show elsewhere as unverifiable — still never the login secret.
         key = _generated.setdefault("<process>", secrets.token_urlsafe(48).encode("utf-8"))
+    # A node-local / per-process key is still this deployment's key: record it,
+    # so its records read as a lost key later, never as a relabel (third review).
+    store.note_key_id(key_id_for(key), origin="generated_local")
     path = str(_generated_key_path(create=False))
     if path not in _warned:
         _warned.add(path)
@@ -277,6 +288,17 @@ def check_signature(record: dict[str, Any], hmac_of: Any = None) -> tuple[str, s
         if compute(record, key) == stored:
             return "ok", None
     return "mismatch", None
+
+
+def known_key_history() -> dict[str, dict[str, Any]]:
+    """Sealed history of every key id this deployment signed with or verified.
+
+    Rows a database-level writer adds or edits fail their vault seal and are
+    ignored (``audit_chain_keystore.key_history``).
+    """
+    from services import audit_chain_keystore as store
+
+    return store.key_history()
 
 
 def sign(payload: dict[str, Any], *, field: str) -> dict[str, Any]:

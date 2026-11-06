@@ -51,6 +51,10 @@ def is_oracle_destination(db_type: str, dest: dict[str, Any]) -> bool:
     ).lower().startswith("oracle")
 
 
+class OracleCatalogUnreadable(RuntimeError):
+    """The Oracle catalog did not answer; the object's spelling is unknown."""
+
+
 def oracle_catalog_identity(
     conn: Any,
     table_name: str,
@@ -69,8 +73,17 @@ def oracle_catalog_identity(
     """
     from services.sql_object_identity import resolve_object_identity
 
-    ident = resolve_object_identity(conn, table_name, schema, columns=columns)
-    if not ident.exists:
+    # The caller knows this is Oracle: ask Oracle's catalog directly rather
+    # than sniffing the connection (a proxy without ``.dialect`` fell to the
+    # generic inspector and read as unreadable on a healthy catalog).
+    ident = resolve_object_identity(conn, table_name, schema, columns=columns, dialect="oracle")
+    if ident.catalog_unreadable:
+        # "Could not ask" is not "not there": a read-back that folded the name
+        # on a blip would verify the wrong object or report it missing (D266).
+        raise OracleCatalogUnreadable(
+            f"Oracle catalog could not be read for {schema + '.' if schema else ''}{table_name}"
+        )
+    if ident.known_missing:
         return None, None, {}
     return ident.schema, ident.table, dict(ident.columns)
 

@@ -23,6 +23,8 @@ Everything here is grounded in the destination's **real** schema:
 
 from __future__ import annotations
 
+
+from services.connector_auth import resolve_api_key
 import json
 import logging
 import re
@@ -1878,7 +1880,7 @@ def _native_object_count(conn: dict[str, Any], name: str) -> int | None:
             bool(cfg.get("ssl", False)),
             str(cfg.get("connection_string") or ""),
         )
-        hdrs = ww._headers(str(cfg.get("api_key") or cfg.get("password") or ""))
+        hdrs = ww._headers(resolve_api_key(cfg))
         count = ww._weaviate_aggregate_count(
             ww._requests_session(), base_url, hdrs, ww._class_name(name)
         )

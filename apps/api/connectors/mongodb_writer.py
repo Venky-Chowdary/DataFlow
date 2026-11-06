@@ -242,6 +242,41 @@ def _fetch_mongo_physical_types(
     return physical, None
 
 
+def _absent_field_map_stamps(
+    mapped_data_cols: list[str],
+    physical: dict[str, str],
+    live_dest: Any,
+    target_cols: list[str],
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+) -> dict[str, str]:
+    """Map stamps for mapped fields no live probe or BSON sample carries."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live = live_dest if isinstance(live_dest, dict) else {}
+
+    def _known(col: str, types: dict) -> bool:
+        return any(
+            str(types.get(k) or "").strip() for k in (col, col.lower(), col.upper())
+        )
+
+    absent = [
+        c for c in mapped_data_cols if not _known(c, physical) and not _known(c, live)
+    ]
+    if not absent:
+        return {}
+    stamped = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types or {},
+        logical_types=logical_types,
+        live_types=None,
+        default="VARCHAR",
+    )
+    return {c: str(stamped.get(c) or "").strip() for c in absent if str(stamped.get(c) or "").strip()}
+
+
 def _mongo_rematerialize_if_physical_differs(
     *,
     physical: dict[str, str],
@@ -358,6 +393,37 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
             raise
         # All errors were duplicate keys; those rows are already present.
         return len(docs)
+
+
+def _mongo_cancel_checkpoint(
+    rows_written: int,
+    *,
+    source_rows_consumed: int,
+    rejected_details: list[dict[str, Any]],
+) -> None:
+    """Poll the cancel flag between ``insert_many`` batches (QA r12 D5).
+
+    MongoDB commits every batch on its own, so a cancelled chunk is a committed
+    prefix nothing can roll back. The cancel therefore carries what that prefix
+    covers — the source rows consumed through the last committed batch and the
+    quarantine rows among them — for the engine to checkpoint, so Resume
+    continues after the committed documents instead of refusing for want of a
+    durable checkpoint (``services.job_status.checkpoint_partial_chunk_on_cancel``).
+    """
+    from services.cancel_check import cancel_checkpoint
+    from services.error_handling import TransferCancelled
+
+    try:
+        cancel_checkpoint(rows_written)
+    except TransferCancelled as exc:
+        consumed = int(source_rows_consumed or 0)
+        exc.chunk_source_rows_consumed = consumed  # type: ignore[attr-defined]
+        exc.chunk_rejected_details = [  # type: ignore[attr-defined]
+            d
+            for d in rejected_details
+            if isinstance(d, dict) and 0 < int(d.get("row") or 0) <= consumed
+        ]
+        raise
 
 
 def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
@@ -584,6 +650,31 @@ def write_mapped_rows(
                     ),
                 )
             mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+            if sample_exc is None and studio_err:
+                # A field neither the live probe nor the BSON sample holds is a
+                # new field (additive drift under propagate_columns): Map's
+                # stamp is its only carrier, there is no physical one to
+                # contradict. Treating it as a partial-Studio gap refused the
+                # run (QA r12 D10).
+                stamps = _absent_field_map_stamps(
+                    mapped_data_cols, physical, live_dest, target_cols,
+                    mappings, column_types, logical_types,
+                )
+                if stamps:
+                    physical = {**physical, **stamps}
+                    live_dest = {**dict(live_dest or {}), **stamps}
+                    dest_types, studio_err = resolve_studio_or_map_dest_types(
+                        target_cols,
+                        mappings,
+                        column_types,
+                        logical_types=logical_types,
+                        studio_types=live_dest,
+                        product="MongoDB",
+                    )
+                    dest_types = _widen_sampled_mongo_decimals(dest_types, mappings, _kwargs)
+                    row_column_types = _row_projection_column_types(
+                        mappings, column_types, dest_types
+                    )
             try:
                 doc_count = int(coll.estimated_document_count())
             except Exception:
@@ -623,6 +714,8 @@ def write_mapped_rows(
                     physical=effective_physical,
                     dialect_label="MongoDB",
                     target_cols=mapped_data_cols,
+                    destination_kind="mongodb",
+                    physical_sampled=sample_exc is None,
                 )
                 if phys_err:
                     return WriteResult(
@@ -736,8 +829,18 @@ def write_mapped_rows(
 
         from bson.decimal128 import Decimal128
 
+        # The write's own resolver, with the destination known: on BSON the
+        # ``date`` token is the instant carrier, so a calendar-day cast stamped
+        # before the destination was known must not pick the midnight branch
+        # below (D232, D278). Same SSOT build_mapped_rows binds through.
+        from services.transform_resolver import resolve_transform
+
         transform_by_col = {
-            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (m.get("transform") or "")
+            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (
+                resolve_transform(m, column_types=column_types, dest_kind="mongodb")
+                if m.get("transform")
+                else ""
+            )
             for m in mappings
         }
         # Columns whose operator accepted the UTC-normalize risk. BSON date is an
@@ -1089,6 +1192,9 @@ def write_mapped_rows(
                 )
 
         typed_rows: list[tuple] = []
+        # 1-based source row of each typed row: hold-outs leave gaps, and a
+        # cancel reports the source rows its committed batches covered.
+        typed_src_rows: list[int] = []
         for row_idx, row in enumerate(mapped_rows):
             cells: list[Any] = []
             hold_out = False
@@ -1124,6 +1230,7 @@ def write_mapped_rows(
             if hold_out:
                 continue
             typed_rows.append(tuple(cells))
+            typed_src_rows.append(row_idx + 1)
 
         _bson_abort = reject_on_strict_policy(
             policy, rejected_details, "MongoDB", transform_errors=None
@@ -1150,6 +1257,9 @@ def write_mapped_rows(
         chunks = max(1, (total + mongo_batch_size - 1) // mongo_batch_size)
         written = 0
         skipped_total = 0
+        # Older images of a key this upsert kept the latest of (E2-023): Gate-8
+        # expects one row per key, not every version read.
+        collapsed_total = 0
         key_index_ready = False
 
         for chunk_idx in range(chunks):
@@ -1157,6 +1267,17 @@ def write_mapped_rows(
             batch = typed_rows[start : start + mongo_batch_size]
             if not batch:
                 break
+            # QA r12 D5: stop the NEXT insert_many when the job was cancelled,
+            # as the SQL writers do (D102 / D168). One engine chunk is twenty
+            # 1,000-document batches; without this a cancelled job kept
+            # writing to the end of the chunk. ``written`` is what this call
+            # already committed, so the cancel reports it (D199 then counts
+            # the collection itself).
+            _mongo_cancel_checkpoint(
+                written + skipped_total,
+                source_rows_consumed=typed_src_rows[start - 1] if start else 0,
+                rejected_details=rejected_details,
+            )
 
             # Convert row tuples to documents; omit Missing, bind reader-null
             # as None (shared present_field_bindings). Track sparse rows so
@@ -1257,6 +1378,8 @@ def write_mapped_rows(
                         key = _mongo_conflict_key(doc, pk_cols)
                         seen_docs[key] = (doc, sparse)
                     paired = list(seen_docs.values())
+                if write_mode == "upsert" and pk_cols:
+                    collapsed_total += max(0, len(docs) - len(paired))
                 docs = [p[0] for p in paired]
                 sparse_flags = [p[1] for p in paired]
 
@@ -1400,7 +1523,10 @@ def write_mapped_rows(
                     for col in sorted(ms_truncated_cols)
                 ),
             ],
-            meta=gate8_writer_meta(mapped_rows, target_cols),
+            meta={
+                **gate8_writer_meta(mapped_rows, target_cols),
+                **({"collapsed_duplicate_rows": collapsed_total} if collapsed_total else {}),
+            },
         )
     except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(

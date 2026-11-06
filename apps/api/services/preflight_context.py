@@ -218,6 +218,7 @@ class FilePreflightContext(PreflightContext):
                 dest_nullability=self._dest_nullability(),
                 database_extract=database_extract,
                 file_row_quarantine=_source_is_record_batch(self),
+                validation_mode=str(getattr(self.plan, "validation_mode", "") or "strict"),
             )
         except Exception as exc:
             _ps.logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -475,6 +476,7 @@ class FilePreflightContext(PreflightContext):
             ),
             in_file_dedupe=str(getattr(self.plan, "in_file_dedupe", "") or ""),
             duplicate_policy=str(getattr(self.plan, "duplicate_policy", "") or ""),
+            stream_name=str(getattr(self.plan.source, "name", "") or ""),
             proven_width_narrowings=self.proven_width_narrowings,
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.

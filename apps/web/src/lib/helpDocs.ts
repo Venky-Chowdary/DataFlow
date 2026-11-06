@@ -273,7 +273,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Receive your tenant URL and role",
             pin: "IT / Datawrap admin → invite email",
-            body: "A workspace **admin** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, add non-admin members, and open **Job Theater**.\n\n**Admin** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team** roles, and API keys. There is no Owner role in the product.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
+            body: "A workspace **admin** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, and open **Job Theater**. Only an Admin adds, removes or re-roles members.\n\n**Admin** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team** roles, and API keys. There is no Owner role in the product.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
           },
           {
             title: "Sign in with SSO",
@@ -301,7 +301,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
                 { n: 2, label: "New connection", x: "90%", y: "28%" },
               ],
             },
-            tip: "**Viewer** — inspect Jobs and proof only. **Editor** — run transfers, manage connectors, and invite non-admin members. **Admin** — SSO, BYOK, Team roles, and enterprise controls under **Settings**. Switching workspace in the top bar (or on Team) is live for every Settings tab.",
+            tip: "**Viewer** — inspect Jobs and proof only. **Editor** — run transfers and manage connectors (members are managed by an Admin). **Admin** — SSO, BYOK, Team roles, and enterprise controls under **Settings**. Switching workspace in the top bar (or on Team) is live for every Settings tab.",
           },
         ],
       },
@@ -1244,7 +1244,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         body: "Open **Settings → Team** to invite members by email and assign roles. The workspace picker on this tab is the same live workspace as the top bar — member lists refresh while the tab is open.",
         steps: [
           "Viewer — inspect Jobs, proof, and connectors (no execute)",
-          "Editor — create connectors, run Transfer Studio and Pipelines, invite non-admin members",
+          "Editor — create connectors, run Transfer Studio and Pipelines (an Admin manages members)",
           "Admin — SSO, BYOK, Enterprise tab, API keys, grant Admin roles",
         ],
         figure: {

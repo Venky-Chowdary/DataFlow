@@ -33,6 +33,23 @@ __all__ = [
 ]
 
 
+def _divert_input_column(step: Any, record: Mapping[str, Any]) -> str:
+    """The input column a diverting step failed on, when the row names one.
+
+    ``record`` is the row as it reached the step. A column step reads its
+    ``column``; a derive/rename whose ``column`` is an output, or an
+    expression step, is named by the one input it read, else by none.
+    """
+    if step is None:
+        return ""
+    column = str(getattr(step, "column", "") or "")
+    if column and column in record:
+        return column
+    expression = getattr(step, "expression", None)
+    reads = sorted(c for c in getattr(expression, "columns", ()) or () if c in record)
+    return reads[0] if len(reads) == 1 else ""
+
+
 class ShapeRunner:
     """A live recipe plus the accounting for the rows it has seen.
 
@@ -170,6 +187,42 @@ class ShapeRunner:
         ledger counter.
         """
         return self._engine.take_diverted()
+
+    def divert_details(self, diverted: Sequence[Any]) -> list[dict[str, Any]]:
+        """Quarantine findings for diverted rows — one shape for every route.
+
+        ``row`` carries the record as it reached the step (replay rebuilds the
+        row from it). A column step also names its column and the value it
+        could not transform, so Inspect shows the cell like any write reject.
+        """
+        steps = list(self.recipe.enabled_steps)
+        out: list[dict[str, Any]] = []
+        for d in diverted or []:
+            record = dict(getattr(d, "record", None) or {})
+            step = steps[d.step] if 0 <= int(d.step) < len(steps) else None
+            column = _divert_input_column(step, record)
+            detail: dict[str, Any] = {
+                "row": record,
+                "reason": f"transform divert — step {d.step} '{d.op}': {d.reason}",
+                "failure_reason": d.reason,
+                "policy": "quarantine",
+                "transform_attempted": f"shape step {d.step} '{d.op}'",
+                "shape_step": d.step,
+                "shape_op": d.op,
+                "source_row_index": d.row_index + 1,
+            }
+            if column:
+                # The value the step read and could not transform — never a
+                # NULL for an output column the row did not have yet.
+                detail["column"] = column
+                detail["value"] = record[column]
+            if getattr(d, "dedupe_key", None) is not None and getattr(
+                d, "winner_row_index", None
+            ) is not None:
+                detail["dedupe_key"] = list(d.dedupe_key)
+                detail["winner_row"] = d.winner_row_index + 1
+            out.append(detail)
+        return out
 
     def drain_matrix(self) -> tuple[list[str], list[list[Any]]]:
         """Rows buffering steps held until end-of-stream, as a matrix page.
@@ -428,6 +481,7 @@ def recipe_output_schema(
     from services.shape_type_propagation import propagated_derive_types
 
     propagated = propagated_derive_types(recipe, prior)
+    cast_steps = _final_cast_steps(recipe)
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -439,11 +493,87 @@ def recipe_output_schema(
             out[column] = prior[origin]
             continue
         declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
+        cast = cast_steps.get(column)
+        if cast is not None:
+            declared = _cast_carrier(
+                cast, declared, prior.get(column, "") or prior.get(str(cast.column or ""), "")
+            )
         ceiling = ceilings.get(column)
         if ceiling is not None:
             declared = _capped_decimal(declared, ceiling)
         out[column] = declared
     return out
+
+
+def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
+    """Columns whose last writing step is ``cast_column``, with that step.
+
+    ``cast_column`` declares the column's logical type. The values it leaves
+    can still read as another type (``1`` cast to text is the string "1"), so
+    re-inferring the carrier from them undid the cast: PG -> MongoDB stored the
+    id as an int and PG -> PG created BIGINT (QA r12 D3).
+
+    A ``rename_column`` after the cast carries it to the new name (the
+    renamed column is "touched", so the plain rename carry-over does not
+    apply); the step is keyed by the output column (QA r12 Snowflake D7).
+    """
+    last: dict[str, Any] = {}
+    for step in recipe.enabled_steps:
+        if step.op == "rename_column":
+            to = str(step.options.get("to") or "")
+            moved = last.pop(step.column, None)
+            last.pop(to, None)
+            if moved is not None and to:
+                last[to] = moved
+            continue
+        for column in step.writes:
+            if column:
+                last[column] = step
+    return {c: st for c, st in last.items() if st.op == "cast_column"}
+
+
+_CAST_FAMILIES: dict[str, frozenset[str]] = {
+    "text": frozenset({"string", "text"}),
+    "integer": frozenset({"integer"}),
+    "decimal": frozenset({"decimal"}),
+    "boolean": frozenset({"boolean"}),
+    "date": frozenset({"date"}),
+    "timestamp": frozenset({"datetime"}),
+}
+_CAST_DEFAULT_CARRIER: dict[str, str] = {
+    "integer": "BIGINT",
+    "decimal": "DECIMAL",
+    "boolean": "BOOLEAN",
+    "date": "DATE",
+    "timestamp": "TIMESTAMP",
+}
+
+
+def _cast_carrier(step: Any, declared: str, prior: str) -> str:
+    """The carrier a ``cast_column`` step declares.
+
+    An inferred carrier of the declared family is kept (it is the more precise
+    one: ``DECIMAL(7,2)``, ``TIMESTAMPTZ``); any other family yields the cast's.
+    """
+    from services.type_system import normalize_logical_type
+
+    options = getattr(step, "options", None) or {}
+    to_type = str(options.get("to_type") or "").strip().casefold()
+    if to_type == "decimal" and options.get("precision") is not None:
+        scale = options.get("scale")
+        return f"DECIMAL({int(options['precision'])},{int(scale or 0)})"
+    family = _CAST_FAMILIES.get(to_type)
+    if family is None:
+        return declared
+    try:
+        logical = normalize_logical_type(declared)
+    except (TypeError, ValueError):
+        logical = ""
+    if logical in family:
+        return declared
+    if to_type == "text":
+        return _text_carrier(prior)
+    return _CAST_DEFAULT_CARRIER[to_type]
 
 
 def _text_carrier(prior: str) -> str:

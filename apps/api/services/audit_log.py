@@ -16,7 +16,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from services.audit_chain_keys import hmac_hex, keyring, legacy_login_secret, signing_key
 from services.audit_chain_link import (
@@ -229,8 +229,15 @@ def append_audit_event(
     session_id: str | None = None,
     trace_id: str | None = None,
     route_template: str | None = None,
+    key_history_anchor: str | None = None,
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
+
+    Every record signs the key history's position (``kh_seq``, ``kh_epoch``;
+    ``audit_chain_keystore.current_position``, looked up before the append
+    lock and cached), so the verifier can tell from VERIFIED records alone
+    where the history began. ``key_history_anchor`` (an epoch id; keystore
+    only) marks the anchor record itself: its ``kh_seq`` is its own position.
 
     Events are hash-chained with HMAC-SHA256 under the chain's own key
     (``DATAFLOW_AUDIT_HMAC_KEY``; each record names it in ``key_id``), never the
@@ -291,6 +298,7 @@ def append_audit_event(
             if actor == created_by or actor == "api-key":
                 actor = f"{actor_type}:{actor_id}"
 
+    key_history = None if key_history_anchor else _key_history_position()
     with _APPEND_LOCK:
         state: dict[str, Any] = {"stage": "chain_read", "event": None}
         try:
@@ -340,6 +348,12 @@ def append_audit_event(
                     "key_id": key_id,
                     "hash_alg": "HMAC-SHA256",
                 }
+                if key_history_anchor:
+                    event["kh_seq"] = event["chain_seq"]
+                    event["kh_epoch"] = key_history_anchor
+                elif key_history:
+                    event["kh_seq"] = key_history["kh_seq"]
+                    event["kh_epoch"] = key_history["kh_epoch"]
                 # The position is the _id: unique in every Mongo collection, so
                 # two processes can never both take it (D221).
                 event["_id"] = position_id(event["chain_seq"])
@@ -375,7 +389,27 @@ def append_audit_event(
             raise
         if tracker is not None and not action.startswith("http."):
             tracker["named"] = int(tracker.get("named", 0)) + 1
-        return persisted
+    _after_append(persisted)
+    return persisted
+
+
+def _after_append(persisted: dict[str, Any]) -> None:
+    """Keyring seal records and the chain's high-water mark, outside the append lock."""
+    try:
+        from services import audit_chain_keystore as store
+
+        store.flush_seal_record()
+    except Exception:  # noqa: BLE001 - bookkeeping never fails the write
+        logging.getLogger(__name__).debug("audit keyring seal not flushed", exc_info=True)
+
+
+def _key_history_position() -> dict[str, Any] | None:
+    try:
+        from services.audit_chain_keystore import current_position
+
+        return current_position()
+    except Exception:  # noqa: BLE001 - an unanchored record is still written
+        return None
 
 
 def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -542,6 +576,29 @@ def _action_matches(action: str | None, value: str) -> bool:
     return value in exact or any(value.startswith(p) for p in prefixes)
 
 
+#: Records a projected search walks before it answers (newest first).
+SEARCH_SCAN_LIMIT = 20000
+
+
+class AuditEventPage(list):
+    """Events, plus whether a projected search stopped at ``SEARCH_SCAN_LIMIT``.
+
+    ``search_truncated`` is True when the window was full and more records lay
+    beyond it (probed with one extra record) while the page is not full: older
+    matches may exist, so "no more results" would be a claim the search did not
+    check. ``search_resume_before_seq`` is the chain_seq of the last record the
+    search SCANNED; pass it back as ``before_seq`` to continue.
+    """
+
+    search_truncated: bool = False
+    search_resume_before_seq: int | None = None
+
+
+def _search_matches(search: str, ev: dict[str, Any]) -> bool:
+    needle = search.strip().lower()
+    return any(needle in str(ev.get(field) or "").lower() for field in ("action", "resource", "actor"))
+
+
 def list_audit_events(
     *,
     limit: int = 100,
@@ -552,11 +609,19 @@ def list_audit_events(
     since: str | None = None,
     until: str | None = None,
     after_seq: int | None = None,
+    before_seq: int | None = None,
     workspace_filter: WorkspaceFilter | None = None,
     action: str | None = None,
     search: str | None = None,
+    search_projection: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent events, or an ascending chain-sequence cursor page.
+
+    ``search_projection`` is the view the reader is shown (Browser 20: key ids
+    masked). When given, ``search`` matches that projection, never the stored
+    record, so a reader cannot probe hidden characters with ``q``; the match
+    then runs here instead of in the store, over at most ``SEARCH_SCAN_LIMIT``
+    records of the scope.
 
     ``action`` is a comma-separated list of exact action names; an entry
     ending in ``*`` (``team.member.*``) matches that prefix. ``search`` is a
@@ -585,7 +650,7 @@ def list_audit_events(
             action_query = _action_mongo_query(action)
             if action_query is not None:
                 query["action"] = action_query
-            if search and search.strip():
+            if search and search.strip() and search_projection is None:
                 needle = {"$regex": re.escape(search.strip()), "$options": "i"}
                 # Under $and: the workspace filter below may bring its own $or.
                 query["$and"] = [
@@ -603,11 +668,35 @@ def list_audit_events(
                     query["time"]["$gte"] = since
                 if until:
                     query["time"]["$lte"] = until
+            if before_seq is not None:
+                # Resume a newest-first search below the last record it scanned.
+                query["chain_seq"] = {"$lt": before_seq}
             if after_seq is not None:
                 query["chain_seq"] = {"$gt": after_seq}
                 sort_order = [("chain_seq", 1)]
             else:
                 sort_order = [(key, -direction) for key, direction in CHAIN_ORDER]
+            if search and search.strip() and search_projection is not None:
+                found = AuditEventPage()
+                scanned = 0
+                last_scanned: dict[str, Any] | None = None
+                more_beyond = False
+                # One extra record proves there is more beyond the window.
+                for doc in coll.find(query).sort(sort_order).limit(SEARCH_SCAN_LIMIT + 1):
+                    if scanned >= SEARCH_SCAN_LIMIT:
+                        more_beyond = True
+                        break
+                    scanned += 1
+                    ev = {k: v for k, v in doc.items() if k != "_id"}
+                    last_scanned = ev
+                    if _search_matches(search, search_projection(ev)):
+                        found.append(ev)
+                        if len(found) >= limit:
+                            break
+                found.search_truncated = more_beyond and len(found) < limit
+                if found.search_truncated and last_scanned is not None:
+                    found.search_resume_before_seq = chain_seq_of(last_scanned)
+                return found
             cursor = (
                 coll.find(query)
                 .sort(sort_order)
@@ -635,12 +724,13 @@ def list_audit_events(
             continue
         if not _action_matches(action, str(ev.get("action") or "")):
             continue
-        if search and search.strip() and not any(
-            search.strip().lower() in str(ev.get(field) or "").lower()
-            for field in ("action", "resource", "actor")
+        if search and search.strip() and not _search_matches(
+            search, search_projection(ev) if search_projection is not None else ev
         ):
             continue
         if after_seq is not None and chain_seq_of(ev) <= after_seq:
+            continue
+        if before_seq is not None and chain_seq_of(ev) >= before_seq:
             continue
         if not _event_in_scope(
             ev, workspace_id=ws, tenant_id=tid, since=since, until=until,

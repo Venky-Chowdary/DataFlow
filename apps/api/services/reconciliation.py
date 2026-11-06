@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from services.brand_env import getenv_brand
+from services.connector_auth import resolve_api_key
 import re
 import uuid
 import sys
@@ -1856,6 +1857,63 @@ def keyed_readback_sa_clause(
     return where, params
 
 
+from contextvars import ContextVar as _ContextVar
+
+#: Why the last full-table read-back returned ``-1`` (D284). The verify_*
+#: helpers swallow the driver error so a failed read never raises out of
+#: Gate-8; without this the reconcile could only say "verifier unavailable"
+#: for an engine that has a verifier.
+_READBACK_FAILURE: _ContextVar[str] = _ContextVar("df_readback_failure", default="")
+
+
+def note_readback_failure(exc: BaseException) -> None:
+    _READBACK_FAILURE.set(f"{type(exc).__name__}: {exc}"[:300])
+
+
+def readback_with_retry(read: Any, *args: Any, **kwargs: Any) -> tuple[Any, str, bool]:
+    """Run one destination read-back, retrying a transient failure.
+
+    ``read`` is any verify_* function whose first result element is the row
+    count (``-1`` on a swallowed failure). Returns ``(result, failure_reason,
+    transient)``; the reason is ``""`` when the read succeeded or the engine has
+    no read-back at all. Deterministic failures (grants, missing objects) are
+    not retried. The one seam for every Gate-8 read-back (D284): the full
+    table, each route table and the keyed batch proof.
+    """
+    from services.error_handling import RetryBudget, classify_error
+
+    budget = RetryBudget()
+    while True:
+        _READBACK_FAILURE.set("")
+        result = read(*args, **kwargs)
+        reason = _READBACK_FAILURE.get()
+        rows = result[0] if isinstance(result, tuple) and result else -1
+        if (isinstance(rows, int) and rows >= 0) or not reason:
+            return result, "", False
+        transient = bool(classify_error(reason).get("retriable"))
+        if not transient or budget.attempts_made + 1 >= budget.max_attempts:
+            return result, reason, transient
+        delay = budget.next_delay()
+        logger.warning(
+            "Gate-8 read-back failed transiently (attempt %d/%d); retrying in %.1fs: %s",
+            budget.attempts_made, budget.max_attempts, delay, reason,
+        )
+        import time as _t
+
+        _t.sleep(delay)
+
+
+def verify_target_with_retry(
+    *args: Any, verify: Any = None, **kwargs: Any
+) -> tuple[int, str, str, bool]:
+    """:func:`verify_target` through :func:`readback_with_retry`:
+    ``(rows, checksum, failure_reason, transient)``."""
+    (rows, checksum), reason, transient = readback_with_retry(
+        verify or verify_target, *args, **kwargs
+    )
+    return rows, checksum, reason, transient
+
+
 def verify_postgres_table(
     *,
     host: str,
@@ -1923,6 +1981,7 @@ def verify_postgres_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -1990,6 +2049,7 @@ def verify_postgres_route_table(
         return count, canonical, additive
     except Exception as exc:
         logger.warning("Route read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, "", ""
 
 
@@ -2125,6 +2185,7 @@ def verify_pgvector_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2219,6 +2280,7 @@ def verify_mysql_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2289,6 +2351,7 @@ def verify_sqlserver_table(
         return count, checksum
     except Exception as exc:
         logger.warning("SQL Server reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2370,6 +2433,7 @@ def _verify_saas_read_object(
         )
     except Exception as exc:
         logger.warning("%s reconciliation read-back failed: %s", driver, exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2438,6 +2502,7 @@ def verify_sqlite_table(
         return -1, ""
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2535,6 +2600,7 @@ def verify_snowflake_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2983,7 +3049,7 @@ def verify_target(
             username=dest.get("username", ""),
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             object_name=table_name or dest.get("table") or "Account",
             target_columns=target_columns,
             limit=limit,
@@ -2995,7 +3061,7 @@ def verify_target(
             username=dest.get("username", ""),
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             base_id=str(dest.get("database") or schema or ""),
             table_name=table_name or dest.get("table") or "",
             target_columns=target_columns,
@@ -3008,7 +3074,7 @@ def verify_target(
             username=dest.get("username", ""),
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             object_name=table_name or dest.get("table") or "customers",
             target_columns=target_columns,
             limit=limit,
@@ -3020,7 +3086,7 @@ def verify_target(
             username=dest.get("username", ""),
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             object_name=table_name or dest.get("table") or "customers",
             target_columns=target_columns,
             limit=limit,
@@ -3032,7 +3098,7 @@ def verify_target(
             username=dest.get("username", ""),
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             object_name=table_name or dest.get("table") or "tickets",
             target_columns=target_columns,
             limit=limit,
@@ -3044,7 +3110,7 @@ def verify_target(
             username=dest.get("username", ""),
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             object_name=table_name or dest.get("table") or "",
             database_id=str(dest.get("database") or schema or ""),
             target_columns=target_columns,
@@ -3075,7 +3141,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             username=dest.get("username", ""),
             password=dest.get("password", ""),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             namespace=table_name or dest.get("schema") or "",
             target_columns=target_columns,
             limit=limit,
@@ -3090,6 +3156,7 @@ def verify_target(
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
             ssl=bool(dest.get("ssl", False)),
+            api_key=resolve_api_key(dest, password_is_key=False),
             collection=table_name or dest.get("database") or "dataflow_vectors",
             target_columns=target_columns,
             limit=limit,
@@ -3104,7 +3171,7 @@ def verify_target(
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
             ssl=bool(dest.get("ssl", False)),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             class_name=table_name or dest.get("database") or "DataflowChunk",
             target_columns=target_columns,
             limit=limit,
@@ -3119,7 +3186,7 @@ def verify_target(
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
             ssl=bool(dest.get("ssl", False)),
-            api_key=str(dest.get("api_key") or ""),
+            api_key=resolve_api_key(dest, password_is_key=False),
             database=dest.get("database", "") or schema or "",
             collection=table_name or "dataflow_chunks",
             target_columns=target_columns,
@@ -3899,6 +3966,11 @@ def _canonicalize_number(value: Any) -> str | None:
                         pass
         if d.is_nan():
             return None
+        if d.is_finite() and d.is_zero():
+            # Zero has one canonical spelling. The float path already folded
+            # -0.0 to "0" while the text "-0.0" kept its sign, so a Mongo
+            # -0.0 (read as text) never matched SQL Server's 0.0 (D262).
+            d = d.copy_abs()
         from services.value_serializer import safe_decimal_text
 
         s = safe_decimal_text(_normalize_exact(d) if d.is_finite() else d)

@@ -144,9 +144,13 @@ def create_session(email: str, *, expires_at: int, amr: list[str] | None = None)
     ``recovery``, ``sso``) for the workspace MFA policy (services.mfa_enforcement).
     """
     jti = uuid.uuid4().hex
+    issued = time.time()
     row: dict[str, Any] = {
         "email": email.strip().lower(),
-        "created_at": int(time.time()),
+        "created_at": int(issued),
+        # Sub-second issue time: compared with a deleted-account marker, so a
+        # session of an account re-created in the same second is not refused.
+        "created_at_f": issued,
         "expires_at": int(expires_at),
         "revoked_at": None,
     }
@@ -156,6 +160,13 @@ def create_session(email: str, *, expires_at: int, amr: list[str] | None = None)
     _mongo(lambda c: c.insert_one({"_id": jti, **row, "expires_dt": expires_dt}))
     _file_put(jti, row)
     return jti
+
+
+def session_created_at(jti: str) -> float | None:
+    """When the session was issued (epoch seconds), or ``None`` when unknown."""
+    row = _session_row(jti) or {}
+    value = row.get("created_at_f") or row.get("created_at")
+    return float(value) if value else None
 
 
 def session_amr(jti: str) -> list[str]:

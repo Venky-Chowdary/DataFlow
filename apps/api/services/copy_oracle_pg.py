@@ -130,7 +130,9 @@ def _select_into_pg(
             cur.execute(select_sql, params)
         else:
             cur.execute(select_sql)
-        dst_cur.copy_expert(copy_sql, _SelectCopyReader(cur))
+        from services.cancel_check import copy_expert_keeping_cancel
+
+        copy_expert_keeping_cancel(dst_cur, copy_sql, _SelectCopyReader(cur))
     finally:
         try:
             cur.close()

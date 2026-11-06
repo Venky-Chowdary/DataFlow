@@ -1017,8 +1017,13 @@ def connector_dial_scope(
     cfg_map = cfg if isinstance(cfg, dict) else {}
     assert_cfg_dial_allowed(cfg_map, *extra, db_type=db_type, point=point)
     token = _AUDIT_CONNECTOR.set(_cfg_connector_name(cfg_map))
+    from src.ai.copilot.tool_deadline import waiting_on
+
     try:
-        with pinned_egress(workspace_id=str(cfg_map.get("workspace_id") or ""), point=point):
+        # A tool deadline that passes in here names this endpoint (D187).
+        with waiting_on(cfg_map), pinned_egress(
+            workspace_id=str(cfg_map.get("workspace_id") or ""), point=point
+        ):
             yield
     finally:
         _AUDIT_CONNECTOR.reset(token)

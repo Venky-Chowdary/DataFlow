@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 from services.brand_env import getenv_brand
+from services.workspace_filter import WORKSPACE_VIEWS
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -156,6 +157,11 @@ def create_tenant(
         raise ValueError(f"Custom domain '{custom_domain}' is already in use")
 
     data = _load_raw()
+    if workspace_id in WORKSPACE_VIEWS:
+        # A platform admin's view names no workspace a tenant could belong to
+        # (D218). Whether a real workspace exists is the route's check: the
+        # store stays usable on its own.
+        raise ValueError(f"Workspace {workspace_id} does not exist")
     if workspace_id and any(t.workspace_id == workspace_id for t in _tenants(data)):
         raise ValueError(f"Workspace {workspace_id} already has a tenant")
 

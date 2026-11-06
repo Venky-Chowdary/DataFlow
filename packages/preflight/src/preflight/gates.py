@@ -118,16 +118,80 @@ def _risk_cleared(m: Any) -> bool:
     return mapping_risk_cleared(m)
 
 
-def _numeric_cast_failure(err: str) -> bool:
-    """A bad literal (``Invalid integer``), not a policy or carrier refusal.
+def _holds_out(mode: str, reason: str | None = None, *, record_batch: bool) -> bool:
+    """The validation mode's holdout policy (``services.validation_mode_contract``).
 
-    Timezone invent, NOT NULL, and ``does not fit`` stay hard blocks. A mixed
-    file sample of those is not a quarantine holdout.
+    ``record_batch`` is required: balanced holds a numeric-cast or calendar
+    refusal out only on a file. Without the policy module nothing is held out
+    (fail closed).
     """
-    text = str(err or "").casefold()
-    return text.startswith(
-        ("invalid integer", "invalid decimal", "invalid number")
-    )
+    try:
+        from services.validation_mode_contract import mode_holds_out_refusal
+    except ImportError:
+        return False
+    return mode_holds_out_refusal(mode, reason, record_batch=record_batch)
+
+
+def _record_batch_source(ctx: Any) -> bool:
+    try:
+        from services.preflight_source_kind import source_is_record_batch
+    except ImportError:
+        return False
+    return bool(source_is_record_batch(
+        getattr(ctx.plan.source, "kind", ""), getattr(ctx.plan.source, "db_type", "")
+    ))
+
+
+def _probe_columns(ctx: Any) -> dict[str, dict]:
+    try:
+        return dict((ctx.coercion_report() or {}).get("by_source") or {})
+    except Exception:  # noqa: BLE001 - no probe: no per-column verdict
+        return {}
+
+
+def _column_holdout(by_source: dict[str, dict], source: str, mode: str, *, record_batch: bool) -> str:
+    """The probe's one per-column verdict (``holdout_kind``) — G3, G5 and G8 read it.
+
+    A column the probe did not grade (no row in ``by_source``) falls back to the
+    mode alone, as before: lenient holds its refusals out, nothing else does.
+    """
+    entry = by_source.get(source)
+    if isinstance(entry, dict):
+        return str(entry.get("holdout_kind") or "")
+    return "cast_failure" if _holds_out(mode, record_batch=record_batch) else ""
+
+
+def _probe_refused_columns(by_source: dict[str, dict]) -> set[str]:
+    """Columns whose refused cells the mode's policy does NOT hold out (wrong mapping)."""
+    return {
+        str(source)
+        for source, col in (by_source or {}).items()
+        if isinstance(col, dict)
+        and int(col.get("failed") or 0) > 0
+        and col.get("severity") == "block"
+        and not col.get("holdout_kind")
+    }
+
+
+def _line_names_column(line: Any, columns: set[str]) -> bool:
+    """A dry-run / reconcile line about one of ``columns`` ("[row N ][holdout ]src→tgt: …")."""
+    import re
+
+    text = str(line)
+    return any(re.search(rf"(?:^|\s){re.escape(col)}\s*(?:→|->)", text) for col in columns)
+
+
+def _lines_name_columns(lines: list[Any], columns: set[str]) -> bool:
+    return bool(columns) and any(_line_names_column(line, columns) for line in lines)
+
+
+def _split_refused(lines: list[Any], refused: set[str]) -> tuple[list[Any], list[Any]]:
+    """``(still_held, refused_lines)``: a holdout line about a probe-refused column
+    is a refusal — a gate never says "will quarantine" for it (review)."""
+    if not refused:
+        return list(lines), []
+    held = [line for line in lines if not _line_names_column(line, refused)]
+    return held, [line for line in lines if _line_names_column(line, refused)]
 
 
 def _mapping_contract_present(m: Any) -> bool:
@@ -1471,6 +1535,12 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # out (warn) — do not re-lock Validate after the operator signed.
             if risk_ack and severity == "block":
                 severity = "warn"
+            # The probe decides an invalid-calendar holdout once, from each
+            # failure's refusal reason (services.coercion_probe, QA browser 3);
+            # the gate only words it.
+            calendar_holdout = bool(
+                probe.get("holdout_kind") == "invalid_calendar" and not force_block
+            )
             json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
                 "source": m.source,
@@ -1500,6 +1570,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "contracted_holdout": bool(
                     risk_ack and int(probe.get("failed") or 0) > 0
                 ),
+                "calendar_holdout": calendar_holdout,
                 "declared_lossy": bool(declared_lossy),
                 "probe_cast_only": bool(probe_only and not declared_lossy),
                 "fidelity_collapse": bool(
@@ -1531,6 +1602,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                         "Accept risk on Map if wrapping bare scalars as JSON "
                         "strings is intentional, or emit real JSON objects/arrays upstream."
                     )
+            elif calendar_holdout:
+                warnings.append(
+                    label
+                    + f" — {int(probe.get('failed') or 0)} of {int(probe.get('sampled') or 0)} "
+                    "sampled row(s) name no real calendar date (under one in five) and "
+                    "will quarantine with that reason; the rest load"
+                )
             else:
                 warnings.append(label)
         elif value_aware:
@@ -1709,7 +1787,10 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     if issues:
         # Lenient quarantines the bad cells and still loads the good rows.
         # A missing destination stamp (examined == 0) already returned above.
-        if mode == "lenient":
+        refused_by_probe = _probe_refused_columns(by_source) & {
+            str(d.get("source") or "") for d in issues_detail if isinstance(d, dict)
+        }
+        if _holds_out(mode, record_batch=_record_batch_source(ctx)) and not refused_by_probe:
             return _pass(
                 GateId.G3_SCHEMA_CONTRACT,
                 (
@@ -1808,12 +1889,131 @@ def _is_structural_review_mapping(m: Any) -> bool:
     return mapping_is_structural_review(m)
 
 
+def _mapping_field(m: Any, name: str, default: Any) -> Any:
+    """A ColumnMapping attribute or a stored mapping row's key, typed like the model."""
+    raw = m.get(name, default) if isinstance(m, dict) else getattr(m, name, default)
+    if isinstance(default, bool):
+        return bool(raw)
+    if isinstance(default, float):
+        try:
+            return float(raw if raw is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+    return raw if raw not in (None, "") else default
+
+
+def g4_confidence_floor(threshold: Any) -> float:
+    """G4's confidence floor for a plan's threshold. Client fail-closed: the Map
+    threshold is the floor; never below 0.55, 0.85 when unset. One owner for the
+    gate and for a schedule save (QA C10)."""
+    return max(0.55, float(threshold or 0.85))
+
+
+def _pair(m: Any) -> str:
+    return f"{_mapping_field(m, 'source', '?')}→{_mapping_field(m, 'target', '?')}"
+
+
+def mapping_confidence_layers(
+    active: list[Any], confidence_floor: float
+) -> list[tuple[str, str, list[str]]]:
+    """G4's mapping findings, as ``(layer, message, names)``; empty means pass.
+
+    One owner for the confidence floor and its clearances: the G4 gate judges a
+    plan's ColumnMappings with it, and a schedule save judges the mapping rows
+    it stores with it (QA C10), so a schedule cannot be saved that every run
+    would refuse here. ``active`` excludes intentional omissions.
+    """
+    # Every layer is judged on every run and reported together. Returning on
+    # the first one made the operator sign a contract for ``d`` only to be
+    # refused next on ``amt``/``qty`` below the floor (D26).
+    layers: list[tuple[str, str, list[str]]] = []
+
+    # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
+    risk_unacked = [
+        m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
+    ]
+    if risk_unacked:
+        names = [_pair(m) for m in risk_unacked]
+        layers.append((
+            "risk_unacknowledged",
+            f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
+            "with a continue execution policy (lossy/narrowing/mutate)",
+            names,
+        ))
+
+    # STRUCT flatten / specialty — boolean ack alone is insufficient.
+    structural_unacked = [
+        m
+        for m in active
+        if (
+            (_mapping_field(m, "requires_review", False) or _is_structural_review_mapping(m))
+            and _is_structural_review_mapping(m)
+            and not _risk_cleared(m)
+        )
+    ]
+    if structural_unacked:
+        names = [_pair(m) for m in structural_unacked]
+        layers.append((
+            "structural_unacknowledged",
+            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
+            "signed Migration Risk Contract",
+            names,
+        ))
+
+    # A verified continue-policy contract names this exact source → target
+    # pair with an approver and a reason: an operator approval at least as
+    # strong as ``user_override``. The plan signs one on any flagged mapping;
+    # ignoring it here left a signed approval unable to clear (D197).
+    low_confidence = [
+        m
+        for m in active
+        if _mapping_field(m, "confidence", 0.0) < confidence_floor
+        and not _mapping_field(m, "user_override", False)
+        and not _requires_risk_ack(m)
+        and not _risk_cleared(m)
+    ]
+    if low_confidence:
+        names = [f"{_pair(m)} ({_mapping_field(m, 'confidence', 0.0):.2f})" for m in low_confidence]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+        layers.append((
+            "low_confidence",
+            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
+            names,
+        ))
+
+    flagged = {id(m) for m in low_confidence}
+    ambiguous = [
+        m
+        for m in active
+        if _mapping_field(m, "requires_review", False)
+        and id(m) not in flagged
+        and not _mapping_field(m, "user_override", False)
+        and not _requires_risk_ack(m)
+        and not _is_structural_review_mapping(m)
+        and not _risk_cleared(m)
+    ]
+    if ambiguous:
+        names = [
+            f"{_pair(m)} (gap {_mapping_field(m, 'score_gap', 1.0):.2f})"
+            for m in ambiguous
+        ]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+        layers.append((
+            "ambiguous_mappings",
+            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
+            names,
+        ))
+
+    return layers
+
+
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
-    threshold = ctx.plan.confidence_threshold
     # Client fail-closed: Map threshold is the G4 floor. Soft band (threshold−0.3)
     # previously let low-confidence exact-name remaps pass into Execute.
-    confidence_floor = max(0.55, float(threshold or 0.85))
+    confidence_floor = g4_confidence_floor(ctx.plan.confidence_threshold)
     active = [m for m in ctx.plan.mappings if not _is_intentional_omit_mapping(m)]
     g4_scope = evidence_scope(
         kind="mapping_confidence",
@@ -1833,84 +2033,16 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
-    # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
-    risk_unacked = [
-        m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
-    ]
-    if risk_unacked:
-        names = [f"{m.source}→{m.target}" for m in risk_unacked]
-        return _block(
-            GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
-            "with a continue execution policy (lossy/narrowing/mutate)",
-            start,
-            _with_scope({"risk_unacknowledged": names}, g4_scope),
-        )
+    layers = mapping_confidence_layers(active, confidence_floor)
 
-    # STRUCT flatten / specialty — boolean ack alone is insufficient.
-    structural_unacked = [
-        m
-        for m in active
-        if (
-            (m.requires_review or _is_structural_review_mapping(m))
-            and _is_structural_review_mapping(m)
-            and not _risk_cleared(m)
-        )
-    ]
-    if structural_unacked:
-        names = [f"{m.source}→{m.target}" for m in structural_unacked]
+    if layers:
+        head = layers[0][1]
+        rest = "; ".join(msg for _key, msg, _names in layers[1:])
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
-            "signed Migration Risk Contract",
+            head + (f" · also: {rest}" if rest else ""),
             start,
-            _with_scope({"structural_unacknowledged": names}, g4_scope),
-        )
-
-    # A verified continue-policy contract names this exact source → target
-    # pair with an approver and a reason: an operator approval at least as
-    # strong as ``user_override``. The plan signs one on any flagged mapping;
-    # ignoring it here left a signed approval unable to clear (D197).
-    low_confidence = [
-        m
-        for m in active
-        if m.confidence < confidence_floor
-        and not m.user_override
-        and not _requires_risk_ack(m)
-        and not _risk_cleared(m)
-    ]
-    if low_confidence:
-        names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
-        shown = ", ".join(names[:8])
-        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
-        return _block(
-            GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
-            start,
-            _with_scope({"low_confidence": names}, g4_scope),
-        )
-
-    ambiguous = [
-        m
-        for m in active
-        if m.requires_review
-        and not m.user_override
-        and not _requires_risk_ack(m)
-        and not _is_structural_review_mapping(m)
-        and not _risk_cleared(m)
-    ]
-    if ambiguous:
-        names = [
-            f"{m.source}→{m.target} (gap {m.score_gap:.2f})"
-            for m in ambiguous
-        ]
-        shown = ", ".join(names[:8])
-        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
-        return _block(
-            GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
-            start,
-            _with_scope({"ambiguous_mappings": names}, g4_scope),
+            _with_scope({key: names for key, _msg, names in layers}, g4_scope),
         )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
@@ -1955,6 +2087,10 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
         list(errors or []),
         list(ctx.plan.mappings or []),
     )
+    # The engine routes its own holdout lines ("holdout src→tgt") to
+    # ``contracted``; a column the probe refused is never one of them.
+    contracted, refused_lines = _split_refused(contracted, _probe_refused_columns(_probe_columns(ctx)))
+    hard_errors = [*hard_errors, *refused_lines]
     details: dict[str, Any] = {
         "errors": list(hard_errors[:20]),
         "contracted_holdouts": list(contracted[:20]),
@@ -1986,7 +2122,12 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             if str(line).lower().startswith("source column missing")
             or "no sample" in str(line).lower()
         ]
-        if mode == "lenient" and not structural:
+        refused_by_probe = _probe_refused_columns(_probe_columns(ctx))
+        if (
+            _holds_out(mode, record_batch=_record_batch_source(ctx))
+            and not structural
+            and not _lines_name_columns(hard_errors, refused_by_probe)
+        ):
             # Mixed or bad cells are holdouts. The writer quarantines them.
             # The gate must not refuse the load before that write runs.
             details["contracted_holdouts"] = list(hard_errors[:20])
@@ -2459,16 +2600,28 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     collision_evidence: dict[str, Any] = {}
     if collision is not None:
         collision_evidence = {
+            "identity_basis": str(getattr(collision, "identity_basis", "") or ""),
             "status": str(getattr(collision, "status", "") or ""),
             "key_column": getattr(collision, "key_column", "") or "",
             "values_probed": int(getattr(collision, "values_probed", 0) or 0),
         }
         if not getattr(collision, "findings", None):
             key = collision_evidence["key_column"] or "identity key"
-            if collision_evidence["status"] == "ran":
+            if collision_evidence["status"] == "ran" and (
+                getattr(collision, "identity_basis", "") == "full_row"
+            ):
+                # No key is declared anywhere: a repeated identity is not
+                # detectable, only a byte-identical row. Never "no collision".
+                collision_proven = (
+                    "Target DDL compatible — no declared key; checked for exact "
+                    "duplicate rows only"
+                )
+            elif collision_evidence["status"] == "ran":
+                probed = [k for k in (getattr(collision, "probed_keys", None) or []) if k]
+                keys = ", ".join(dict.fromkeys(probed)) if probed else key
                 collision_proven = (
                     f"Target DDL compatible — append batch probed against stored "
-                    f"{key} values, no collision"
+                    f"{keys} values, no collision"
                 )
             elif getattr(collision, "key_enforced", True):
                 collision_unproven = (
@@ -3086,38 +3239,48 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         getattr(ctx.plan.source, "db_type", ""),
     )
     file_holdout_targets: set[str] = set()
-    if file_load:
-        for probe in ctx.plan.mappings:
-            if _is_intentional_omit_mapping(probe) or not probe.target:
-                continue
-            if _risk_cleared(probe) or _mapping_contract_present(probe):
-                continue
-            if _skips_fingerprint(probe.transform):
-                continue
-            ok_cells = 0
-            cast_bad = 0
-            other_bad = 0
-            for probe_row in sample_rows:
-                probe_raw = _serialize_for_write(_row_cell(probe_row, probe.source, ""))
-                _probe_val, probe_err = _apply_write_path_transform(
-                    probe_raw, probe.transform
-                )
-                if probe_err and _spreadsheet_blank_is_sql_null(
-                    ctx, probe_raw, probe_err, probe
-                ):
-                    ok_cells += 1
-                elif probe_err and _numeric_cast_failure(probe_err):
-                    cast_bad += 1
-                elif probe_err:
-                    other_bad += 1
-                else:
-                    ok_cells += 1
-            dest_col = dest_by_name.get(str(probe.target or "").lower())
-            not_null = dest_col is not None and not bool(
-                getattr(dest_col, "nullable", True)
-            )
-            if ok_cells > 0 and cast_bad > 0 and other_bad == 0 and not not_null:
-                file_holdout_targets.add(str(probe.target))
+    g8_mode = str(getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
+    # The coercion probe's per-column decision (invalid-calendar holdout),
+    # read here instead of re-deciding on the cell's value.
+    probe_by_source = _probe_columns(ctx)
+    g8_refused = _probe_refused_columns(probe_by_source)
+    # Each column's ONE verdict (validation_mode_contract.mode_holdout_kind,
+    # share-bounded; strict holds nothing out) decides the pre-write holdout
+    # targets — the any-mode "one cell casts" file rule held a strict 1-of-40
+    # INTEGER column out and passed 40 rows (QA C2 review 3 #6).
+    from connectors.sql_temporal import is_invalid_calendar_refusal
+    from services.validation_mode_contract import mode_holdout_kind
+
+    for probe in ctx.plan.mappings:
+        if _is_intentional_omit_mapping(probe) or not probe.target:
+            continue
+        if _risk_cleared(probe) or _mapping_contract_present(probe):
+            continue
+        if _skips_fingerprint(probe.transform):
+            continue
+        ok_cells = 0
+        failed_cells = 0
+        held_cells = 0
+        calendar_cells = 0
+        for probe_row in sample_rows:
+            probe_raw = _serialize_for_write(_row_cell(probe_row, probe.source, ""))
+            _probe_val, probe_err = _apply_write_path_transform(probe_raw, probe.transform)
+            if probe_err and _spreadsheet_blank_is_sql_null(ctx, probe_raw, probe_err, probe):
+                ok_cells += 1
+            elif probe_err:
+                failed_cells += 1
+                if _holds_out(g8_mode, probe_err, record_batch=file_load):
+                    held_cells += 1
+                    calendar_cells += int(is_invalid_calendar_refusal(probe_err))
+            else:
+                ok_cells += 1
+        dest_col = dest_by_name.get(str(probe.target or "").lower())
+        not_null = dest_col is not None and not bool(getattr(dest_col, "nullable", True))
+        if not not_null and mode_holdout_kind(
+            g8_mode, failed=failed_cells, held=held_cells, cast_ok=ok_cells,
+            record_batch=file_load, calendar=calendar_cells,
+        ):
+            file_holdout_targets.add(str(probe.target))
     mapped_rows: list[dict[str, Any]] = []
     # Parallel to mapped_rows: source rows that survive quarantine holdouts.
     # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
@@ -3169,10 +3332,12 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     else:
                         contracted_holdouts.append(line)
                         row_holdout = True
-                elif str(m.target) in file_holdout_targets:
+                elif str(m.target) in file_holdout_targets and m.source not in g8_refused:
                     contracted_holdouts.append(line)
                     row_holdout = True
-                elif str(getattr(ctx.plan, "validation_mode", "") or "").strip().lower() == "lenient":
+                elif _holds_out(g8_mode, err, record_batch=file_load) and _column_holdout(
+                    probe_by_source, m.source, g8_mode, record_batch=file_load
+                ):
                     # A bad cast is a quarantine holdout. The good rows stay
                     # in the write set and the gate does not block the load.
                     contracted_holdouts.append(line)
@@ -3445,7 +3610,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 # when transform is explicit; block when transform missing but types lossy.
         if mismatches:
             mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
-            if mode == "lenient":
+            if _holds_out(mode, record_batch=file_load) and not _lines_name_columns(
+                mismatches, _probe_refused_columns(probe_by_source)
+            ):
                 return _pass(
                     GateId.G8_RECONCILIATION,
                     (
@@ -3516,8 +3683,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                                 "good rows still load"
                             )
                             if contracted_holdouts
-                            and str(getattr(ctx.plan, "validation_mode", "") or "").strip().lower()
-                            == "lenient"
+                            and _holds_out(g8_mode, record_batch=file_load)
                             else (
                                 f"; {len(contracted_holdouts)} row(s) held out under "
                                 "quarantine/skip continue-policy"

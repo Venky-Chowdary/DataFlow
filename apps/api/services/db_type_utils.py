@@ -142,6 +142,15 @@ def dest_schema_is_recreated_on_overwrite(dest_db_type: str | None) -> bool:
         return False
     if kind in DESTS_WITHOUT_SCHEMA_RECREATE:
         return False
+    from connectors.table_manager import overwrite_clear_kind
+
+    if overwrite_clear_kind(driver or kind) == "rename_collection":
+        # The overwrite parks the live collection aside and creates it again
+        # (MongoDB and its tiles), so the replaced documents' sampled profile
+        # is not a bound on the load. Binding it typed a retry from the partial
+        # documents a cancelled run had left: DECIMAL(6,4) measured on them
+        # refused the source's NUMERIC(12,4) rows (QA r12 Mongo D5).
+        return True
     if kind in SCHEMALESS_DESTS or kind in NO_RELATIONAL_DDL_DESTS:
         return False
     return True

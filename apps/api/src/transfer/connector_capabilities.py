@@ -52,7 +52,7 @@ _DRIVER_CAPS: dict[str, dict[str, Any]] = {
     # PRODUCTION_SKU dest — certified_dest stays False until execute + dest
     # COUNT on a named Stripe object.
     "stripe": {
-        "test": True, "read": True, "write": True, "introspect": False, "preflight": True,
+        "test": True, "read": True, "write": True, "introspect": True, "preflight": True,
         "certified_dest": False,
     },
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
@@ -220,6 +220,11 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "json_documents": "json",
     "parquet_lake": "parquet",
     "jsonl_stream": "jsonl",
+    # Zilliz Cloud is managed Milvus (REST v2, Bearer API key). The copy fast
+    # path already folds it onto Milvus (services.copy_milvus_common); the
+    # driver resolver answered "type=zilliz unsupported" (D274).
+    "zilliz": "milvus",
+    "zilliz_cloud": "milvus",
 }
 
 # Suggested lists — only connectors users can configure today
@@ -1197,6 +1202,33 @@ def source_only_destination_refusal(dest_type: str) -> str | None:
         f"it cannot be a transfer destination. Use {label} as the source, or "
         "choose a destination such as PostgreSQL, MySQL, SQL Server, Snowflake "
         "or DynamoDB."
+    )
+
+
+def destination_only_source_refusal(source_type: str) -> str | None:
+    """The one sentence for "this connector cannot be a source" (D273).
+
+    Pinecone, Milvus, Weaviate and the other writer-only drivers have no
+    reader. Planning a transfer out of one reached introspection and failed
+    "Schema introspection not implemented for pinecone" — true, but it named
+    an implementation gap instead of the connector's role.
+    """
+    raw = (source_type or "").strip().lower()
+    if not raw:
+        return None
+    driver = resolve_driver_type(raw)
+    if driver not in _DRIVER_CAPS:
+        return None
+    caps = get_capabilities(driver)
+    if caps.get("read") or not caps.get("dest_only"):
+        return None
+    label = {"pinecone": "Pinecone", "milvus": "Milvus", "weaviate": "Weaviate"}.get(
+        driver, driver.replace("_", " ").title()
+    )
+    return (
+        f"{label} is a destination-only connector: {PRODUCT_NAME} has no {label} "
+        "reader, so it cannot be a transfer source. Use it as the destination, or "
+        "choose a source such as PostgreSQL, MySQL, MongoDB or S3."
     )
 
 

@@ -76,6 +76,13 @@ def job_store(monkeypatch):
             self.writes.append((time.monotonic(), {"status": status, **kwargs}))
             return super().update_job_status(job_id, status, **kwargs)
 
+        def update_job_fields(self, job_id, fields, *, touch_updated_at=True):
+            # A pulse is a heartbeat stamp (updated_at untouched), recorded
+            # like a status write so the cadence below can be measured.
+            if "heartbeat_at" in fields:
+                self.writes.append((time.monotonic(), {"status": "running", **fields}))
+            return super().update_job_fields(job_id, fields)
+
     fake = _Recording()
     monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
     monkeypatch.setenv("DATAFLOW_DESTINATION_CONNECT_DEADLINE_SECONDS", "2")

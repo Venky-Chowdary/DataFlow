@@ -133,6 +133,7 @@ def _milvus_session(cfg: dict[str, Any]) -> tuple[Any, str, dict[str, str], str]
         api_key=str(cfg.get("api_key") or ""),
         username=str(cfg.get("username") or ""),
         password=str(cfg.get("password") or ""),
+        auth_mode=str(cfg.get("auth_mode") or ""),
     )
     base_url = _base_url(
         str(cfg.get("host") or ""),

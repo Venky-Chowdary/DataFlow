@@ -19,6 +19,8 @@ from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.instant_text import parse_iso_instant
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,18 +84,52 @@ def _canon_numeric(value: Any) -> str:
     return _canon(dec) if dec.is_finite() else _canon(value)
 
 
-def _canon_instant(value: Any) -> str:
-    """An instant compared as UTC to the microsecond (Weaviate ``date`` stores RFC 3339 'Z')."""
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value.strip())
-        except ValueError:
-            return _canon(value)
-    if isinstance(value, datetime) and value.tzinfo is not None:
-        from datetime import timezone
+def _parse_instant(value: Any) -> datetime | None:
+    """The shared ISO parser, zone kept as written (naive stays naive)."""
+    if not isinstance(value, (str, datetime)):
+        return None
+    return parse_iso_instant(value)
 
-        return "i:" + value.astimezone(timezone.utc).isoformat()
-    return _canon(value)
+
+def _canon_instant(value: Any) -> str:
+    """An instant compared as UTC to the microsecond (Weaviate ``date`` stores RFC 3339 'Z').
+
+    A zone-less source value under an instant field is the UTC wall clock the
+    writer stamped (it wrote ``03:04:05`` as ``03:04:05Z``), so it is read as UTC.
+    """
+    from datetime import timezone
+
+    parsed = _parse_instant(value)
+    if parsed is None:
+        return _canon(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return "i:" + parsed.astimezone(timezone.utc).isoformat()
+
+
+def stored_instant_keys(
+    documents: list[Mapping[str, Any]], fields: list[tuple[str, str]]
+) -> set[str]:
+    """Metadata keys every stored (non-null) value of which is a zoned instant (D216).
+
+    The document layout has no declared property types to read; the writer's
+    own output says which fields it stored as instants (RFC 3339 with a zone).
+    """
+    out: set[str] = set()
+    for source, key in fields:
+        seen = False
+        for meta in documents:
+            value = meta.get(key, meta.get(source))
+            if value is None:
+                continue
+            parsed = _parse_instant(value) if isinstance(value, str) else None
+            if parsed is None or parsed.tzinfo is None:
+                break
+            seen = True
+        else:
+            if seen:
+                out.add(key)
+    return out
 
 
 def _canon_text_or_temporal(value: Any, numeric: bool = False) -> set[str]:
@@ -318,7 +354,12 @@ def verify_document_values(
         logger.warning("pgvector document value proof unavailable: %s", type(exc).__name__)
         return None
     return compare_documents(
-        src, docs, fields, numeric_keys(mappings, source_schema), boolean_keys(mappings)
+        src,
+        docs,
+        fields,
+        numeric_keys(mappings, source_schema),
+        boolean_keys(mappings),
+        stored_instant_keys(docs, fields),
     )
 
 

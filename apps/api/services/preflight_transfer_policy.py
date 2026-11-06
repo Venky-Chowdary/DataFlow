@@ -353,6 +353,20 @@ def run_transfer_policy_gates(
     )
     if snap_gate:
         gates.append(snap_gate)
+        from services.cdc_snapshot_sweep import build_snapshot_leftover_preflight_gate
+
+        leftover_gate = build_snapshot_leftover_preflight_gate(
+            snapshot_gate=snap_gate,
+            stream_contracts=contracts,
+            source_endpoint=source_endpoint,
+            destination_endpoint=destination_endpoint,
+            source_config=source_config,
+            mappings=mappings,
+            dest_type=str(dest or ""),
+            catalog_primary_key_columns=catalog_primary_key_columns,
+        )
+        if leftover_gate:
+            gates.append(leftover_gate)
     src_key = str(product or src or "").strip().lower().replace("-", "_")
     from services.cdc_log_capture_probe import is_postgres_log_source
 

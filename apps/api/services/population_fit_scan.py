@@ -155,6 +155,26 @@ class BoundedTarget:
         }
 
 
+def is_transform_failure_finding(finding: dict[str, Any]) -> bool:
+    """A declared transform could not parse the value (``cast_integer`` on '3O7',
+    an impossible date) — not a value too wide/large for the carrier.
+
+    The remedy differs: a bad value is held out (or corrected) row by row; a
+    carrier overflow is fixed by widening the column. One classifier for the
+    G3f headline and the explain remedies.
+    """
+    transform = str(finding.get("transform") or "")
+    return bool(transform) and str(finding.get("unfit_reason") or "").startswith(f"{transform}:")
+
+
+def _transform_refusal(target: BoundedTarget, why: str) -> str:
+    """The declared transform's own refusal inside a g3f reason, or ''."""
+    prefix = f"{target.transform}: " if target.transform else ""
+    if not prefix or not str(why or "").startswith(prefix):
+        return ""
+    return str(why)[len(prefix):]
+
+
 @dataclass(frozen=True)
 class ColumnFitFinding:
     """Values that the destination carrier provably cannot hold."""
@@ -173,10 +193,28 @@ class ColumnFitFinding:
     apply_proven: bool = False
     #: ``file`` = envelope walk finished; ``scanned`` = proven on prefix only.
     apply_proven_scope: str = ""
+    #: The validation mode's ONE column verdict
+    #: (``validation_mode_contract.mode_holdout_kind``) refused this column's
+    #: declared-transform failures: the write's continue policy does not make
+    #: them a holdout, so g3f never calls them "held out" (G3/G5 block too).
+    mode_refused: bool = False
+    #: Why, in the mode's own words (the cast-share rule for lenient).
+    mode_refusal: str = ""
+    #: The verdict when the mode holds the column's transform refusals out
+    #: (``cast_failure`` / ``invalid_calendar``) with no contract signed.
+    holdout_kind: str = ""
+
+    @property
+    def aborts_job(self) -> bool:
+        return self.target.aborts_job or self.mode_refused
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **self.target.to_dict(),
+            "aborts_job": self.aborts_job,
+            "mode_refused": self.mode_refused,
+            "mode_refusal": self.mode_refusal,
+            "holdout_kind": self.holdout_kind,
             "unfit_rows": self.unfit_rows,
             "example_rows": list(self.example_rows),
             "example_values": list(self.example_values),
@@ -240,11 +278,11 @@ class FitScanReport:
 
     @property
     def aborting_findings(self) -> tuple[ColumnFitFinding, ...]:
-        return tuple(f for f in self.findings if f.target.aborts_job)
+        return tuple(f for f in self.findings if f.aborts_job)
 
     @property
     def held_out_findings(self) -> tuple[ColumnFitFinding, ...]:
-        return tuple(f for f in self.findings if not f.target.aborts_job)
+        return tuple(f for f in self.findings if not f.aborts_job)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -404,6 +442,7 @@ def _scannable_transform(
     *,
     source_types: Mapping[str, str],
     dest_types: Mapping[str, str],
+    dest_db: str = "",
 ) -> str:
     """The write's own transform for this column, when its parse is decidable.
 
@@ -419,6 +458,7 @@ def _scannable_transform(
             dict(mapping),
             column_types=dict(source_types),
             dest_types=dict(dest_types),
+            dest_kind=str(dest_db or ""),
         )
         or ""
     ).strip()
@@ -616,7 +656,7 @@ def bounded_targets(
             dest_db=dest_db,
         )
         carrier = _carrier_for(target_type, dest_db=dest_db)
-        transform = _scannable_transform(m, source_types=src_types, dest_types=types)
+        transform = _scannable_transform(m, source_types=src_types, dest_types=types, dest_db=dest_db)
         if not carrier:
             if not transform:
                 if target_type:
@@ -1054,8 +1094,14 @@ def scan_rows(
     deadline_monotonic: float | None = None,
     deadline_floor_rows: int = 0,
     on_progress: Callable[[int], None] | None = None,
+    validation_mode: str | None = None,
+    record_batch: bool = False,
 ) -> FitScanReport:
     """Scan ``rows`` against the writer's own fit predicates.
+
+    ``validation_mode`` (with ``record_batch``: the source is a file) asks the
+    mode's ONE column verdict for declared-transform failures, so a column the
+    coercion probe refuses is never forecast as held out.
 
     ``rows_are_population`` is the caller's claim that ``rows`` is every source
     row (the file/batch it is about to write, not a preview). The scan downgrades
@@ -1086,6 +1132,12 @@ def scan_rows(
     example_rows: dict[int, list[int]] = {}
     example_values: dict[int, list[str]] = {}
     reasons: dict[int, str] = {}
+    #: Present cells per column and the transform refusals the mode holds out
+    #: (``mode_holds_out_refusal``) — the inputs of ``mode_holdout_kind``.
+    present: dict[int, int] = {}
+    mode_held: dict[int, int] = {}
+    mode_calendar: dict[int, int] = {}
+    tally_mode = validation_mode is not None
     env_int: dict[int, int] = {}
     env_scale: dict[int, int] = {}
     env_str_len: dict[int, int] = {}
@@ -1101,6 +1153,13 @@ def scan_rows(
     envelope_truncated = False
 
     from services.decimal_observe import write_int_digits_and_scale
+    from connectors.sql_temporal import is_date_holdout_refusal
+    from services.validation_mode_contract import (
+        CAST_SHARE_RULE,
+        cast_share_holds_out,
+        mode_holdout_kind,
+        mode_holds_out_refusal,
+    )
     from services.value_serializer import cell_to_string, is_missing_sentinel, present_cell_text
 
     # Bound once per column, then applied per value — see _fit_predicate.
@@ -1116,6 +1175,14 @@ def scan_rows(
     def _record_unfit(idx: int, value: Any, why: str, row_no: int) -> None:
         counts[idx] = counts.get(idx, 0) + 1
         reasons.setdefault(idx, why)
+        if tally_mode:
+            refusal = _transform_refusal(bounded[idx], why)
+            if refusal and mode_holds_out_refusal(
+                validation_mode, refusal, record_batch=record_batch
+            ):
+                mode_held[idx] = mode_held.get(idx, 0) + 1
+                if is_date_holdout_refusal(refusal):
+                    mode_calendar[idx] = mode_calendar.get(idx, 0) + 1
         carrier = bounded[idx].carrier
         grew = False
         if carrier == CARRIER_DECIMAL:
@@ -1187,6 +1254,8 @@ def scan_rows(
                 and bounded[idx].blank_is_null
             ):
                 continue
+            if tally_mode:
+                present[idx] = present.get(idx, 0) + 1
             if bounded[idx].carrier == CARRIER_STRING:
                 text = present_cell_text(value)
                 if text is None:
@@ -1587,10 +1656,42 @@ def scan_rows(
                     "or fix the source label → re-Validate. "
                     "Do not silently store '' / drop SET members."
                 )
+        mode_refused, mode_refusal, holdout_kind = False, "", ""
+        if (
+            tally_mode
+            and not target.aborts_job
+            and not target.risk_id
+            and _transform_refusal(target, reasons.get(idx, ""))
+        ):
+            failed = counts[idx]
+            held = mode_held.get(idx, 0)
+            cast_ok = max(0, present.get(idx, 0) - failed)
+            holdout_kind = mode_holdout_kind(
+                validation_mode,
+                failed=failed,
+                held=held,
+                cast_ok=cast_ok,
+                record_batch=record_batch,
+                calendar=mode_calendar.get(idx, 0),
+            )
+            if not holdout_kind:
+                mode_refused = True
+                if held == failed and cast_ok > 0 and not cast_share_holds_out(failed, cast_ok):
+                    mode_refusal = (
+                        f"{failed} of {failed + cast_ok} cells fail — {CAST_SHARE_RULE}"
+                    )
+                else:
+                    mode_refusal = (
+                        f"validation mode {validation_mode!r} does not hold these "
+                        "refusals out — the mapping itself is refused"
+                    )
         findings_list.append(
             ColumnFitFinding(
                 target=target,
                 unfit_rows=counts[idx],
+                mode_refused=mode_refused,
+                mode_refusal=mode_refusal,
+                holdout_kind=holdout_kind,
                 example_rows=tuple(example_rows.get(idx, ())),
                 example_values=examples,
                 unfit_reason=reasons.get(idx, ""),
@@ -1658,8 +1759,15 @@ def scan_population_fit(
     deadline_monotonic: float | None = None,
     deadline_floor_rows: int = 0,
     on_progress: Callable[[int], None] | None = None,
+    validation_mode: str | None = None,
 ) -> FitScanReport:
-    """Resolve bounded targets from the mappings, then scan the rows."""
+    """Resolve bounded targets from the mappings, then scan the rows.
+
+    ``validation_mode`` asks the mode's ONE column verdict for transform
+    failures (``scan_rows``); a file source is the record batch it grades.
+    """
+    from services.preflight_source_kind import source_is_record_batch
+
     targets, undecidable, safe = bounded_targets(
         mappings,
         dest_types=dest_types,
@@ -1684,6 +1792,8 @@ def scan_population_fit(
         deadline_monotonic=deadline_monotonic,
         deadline_floor_rows=deadline_floor_rows,
         on_progress=on_progress,
+        validation_mode=validation_mode,
+        record_batch=source_is_record_batch(source_kind, source_format),
     )
 
 
@@ -1740,8 +1850,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         # from a value that does not fit the carrier — the old lumped wording
         # blamed the carrier for transform failures.
         def _is_transform_failure(f: ColumnFitFinding) -> bool:
-            t = f.target.transform
-            return bool(t) and f.unfit_reason.startswith(f"{t}:")
+            return is_transform_failure_finding(f.to_dict())
 
         transform_failures = [f for f in aborting if _is_transform_failure(f)]
         carrier_failures = [f for f in aborting if not _is_transform_failure(f)]
@@ -1796,10 +1905,12 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             # 5,000" is only actionable with it.
             first_rows = ", ".join(str(r) for r in first.example_rows[:3])
             where = f" at data row {first_rows}" if first_rows else ""
+            refused = next((f.mode_refusal for f in transform_failures if f.mode_refusal), "")
             message = (
                 f"{tf_rows} value(s) in {scope} fail the declared transform "
-                f"({tf_cols}){where} — {first.unfit_reason} — the load aborts on "
-                f"these values{cf_suffix}; Execute would commit nothing"
+                f"({tf_cols}){where} — {first.unfit_reason} — "
+                + (f"{refused}; " if refused else "")
+                + f"the load aborts on these values{cf_suffix}; Execute would commit nothing"
             )
             corrective = (
                 "Fix the source values, change or remove the declared "
@@ -1867,13 +1978,29 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             )
         else:
             count = f"{rows} row(s) will be held out in quarantine on write"
+        by_mode = [f for f in held_out if f.holdout_kind]
+        carrier = [f for f in held_out if not f.holdout_kind]
+        why = []
+        for signed, policy in (
+            (True, "under a signed continue-policy contract"),
+            (False, "under the job's continue write policy"),
+        ):
+            group = [f for f in carrier if bool(f.target.risk_id) is signed]
+            if group:
+                why.append(
+                    ", ".join(f"{f.target.source} → {f.target.target_type}" for f in group)
+                    + f" exceeds the destination carrier {policy}"
+                )
+        if by_mode:
+            why.append(
+                ", ".join(f"{f.target.source} ({f.target.transform})" for f in by_mode)
+                + " fails the declared transform on those cells; the validation mode "
+                "holds them out per row (" + ", ".join(sorted({f.holdout_kind for f in by_mode})) + ")"
+            )
         return {
             "id": GATE_ID,
             "status": "warn",
-            "message": (
-                f"{count} — {cols} exceeds the destination carrier under a signed "
-                "continue-policy contract"
-            ),
+            "message": f"{count} — {'; '.join(why) or cols}",
             "duration_ms": duration_ms,
             "details": details,
         }

@@ -218,14 +218,21 @@ def _resolve_connector_for_schedule(connector_id: str, sched: Any) -> dict | Non
 
 def _apply_callable_schedule_source(source, sched) -> None:
     """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
-    mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
+    from services.procedure_source import MODE_TABLE, source_read_mode_of
+
     call = str(getattr(sched, "procedure_call", "") or "").strip()
     query = str(getattr(sched, "source_query", "") or "").strip()
     params = getattr(sched, "procedure_params", None) or {}
-    if mode not in {"procedure", "query"} and not call and not query:
+    # One vocabulary (procedure_source.READ_MODE_ALIASES): "sql" is a query and
+    # "call" is a procedure. An explicit "table" is a table read even next to a
+    # leftover CALL. An unknown word raises UnknownReadModeError, a ValueError
+    # the fire path parks with, instead of being guessed from the statement.
+    mode = source_read_mode_of({"extra": {
+        "source_read_mode": str(getattr(sched, "source_read_mode", "") or "").strip(),
+        "procedure_call": call, "source_query": query,
+    }})
+    if mode == MODE_TABLE:
         return
-    if mode not in {"procedure", "query"}:
-        mode = "procedure" if call else "query"
     extra = dict(getattr(source, "extra", None) or {})
     extra["source_read_mode"] = mode
     if call:
@@ -306,6 +313,35 @@ def _endpoint_from_connector(conn: dict, table: str):
     )
 
 
+def _apply_schedule_dest_location(destination: Any, sched: Any) -> Any:
+    """Write where the schedule says, not where the connector defaults to.
+
+    ``dest_schema`` / ``dest_database`` are the schedule's own destination
+    namespace (empty = the saved connector's). An explicit value is inline on
+    the endpoint, and inline values win over the saved connector when the
+    engine resolves it (``adapters.resolve_connector_config``) — the same rule
+    a one-off ``/transfer/run`` with ``dest_schema`` follows. Without this the
+    runs of a REST schedule aimed at ``DST`` landed in the connector's default
+    schema (QA Snowflake D11).
+    """
+    import dataclasses
+
+    from services.dialect_profiles import schema_from_cfg
+
+    schema = str(getattr(sched, "dest_schema", "") or "").strip()
+    database = str(getattr(sched, "dest_database", "") or "").strip()
+    changes: dict[str, Any] = {}
+    if schema:
+        # The dialect's own spelling (Snowflake folds ``dst`` to ``DST``); a
+        # dialect with no schema layer (MySQL, SQLite) keeps none.
+        folded = schema_from_cfg(destination.format, None, schema=schema)
+        if folded:
+            changes["schema"] = folded
+    if database:
+        changes["database"] = database
+    return dataclasses.replace(destination, **changes) if changes else destination
+
+
 def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     """Map the schedule's coarse sync_mode onto the engine's contract vocabulary."""
     mode = (sync_mode or "full_refresh_overwrite").strip().lower().replace("-", "_").replace(" ", "_")
@@ -332,7 +368,9 @@ def build_schedule_request(
     from src.transfer.models import TransferRequest
 
     source = _endpoint_from_connector(src, sched.source_table)
-    destination = _endpoint_from_connector(dst, sched.dest_table)
+    destination = _apply_schedule_dest_location(
+        _endpoint_from_connector(dst, sched.dest_table), sched
+    )
     src_extra = dict(getattr(source, "extra", None) or {})
     src_extra["file_wait_seconds"] = int(getattr(sched, "file_wait_seconds", 0) or 0)
     from services.duplicate_policy import normalize_duplicate_policy
@@ -429,6 +467,18 @@ def build_schedule_request(
                 row["primary_key"] = schedule_pk
             stamped.append(row)
         stream_contracts = stamped
+    from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
+
+    # A schedule saved before keep_last was refused on a table read with no
+    # order: park it once on a decision (ValueError -> _park_on_decision)
+    # instead of failing the same Validate refusal on every beat.
+    keep_last_refusal = schedule_keep_last_refusal({
+        "in_file_dedupe": in_file, "source_type": str((src or {}).get("type") or ""),
+        "sync_mode": effective_mode, "stream_contracts": stream_contracts,
+        "source_table": sched.source_table, "cursor_column": getattr(sched, "cursor_column", ""),
+    })
+    if keep_last_refusal:
+        raise DuplicatePolicyError(f"Schedule cannot run as saved — {keep_last_refusal}")
     if policy in {"upsert", "dedupe_skip"} and not (
         schedule_pk or any(_declared_key(row) for row in stream_contracts)
     ):
@@ -593,6 +643,13 @@ def build_schedule_request(
         from services.sync_now import apply_resync_to_request
 
         apply_resync_to_request(request, resync_mode)
+    # QA C3: the same callable intake as every other route. A saved one-contract
+    # query runs that query, not source_table. A schedule stored with a mode it
+    # cannot honour raises CallablePlacementError (a ValueError), and the fire
+    # path parks it with that message instead of copying the table.
+    from services.callable_intake import apply_callable_intake
+
+    apply_callable_intake(request)
     return request
 
 
@@ -863,12 +920,17 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "started_at": started_at.isoformat(),
         "finished_at": finished.isoformat(),
         "duration_seconds": round((finished - started_at).total_seconds(), 3),
-        "records_transferred": int(doc.get("records_processed", 0) or 0),
+        # None when the cancel could not attribute the destination to this run
+        # (C16): unknown is not zero.
+        "records_transferred": _records_or_unknown(doc),
         "rejected_rows": int(doc.get("rejected_rows", 0) or 0),
         "coerced_null_rows": int(doc.get("coerced_null_rows", 0) or 0),
         "error": (doc.get("error") or "")[:500],
         "row_accounting": dict(ledger),
     }
+    from services.schedule_run_lifecycle import ledger_row_counts
+
+    entry.update(ledger_row_counts(ledger))
     if doc.get("catch_up"):
         entry["catch_up"] = True
     if doc.get("_run_reason_code"):
@@ -961,6 +1023,13 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
         log_job_notifications(job_id, results)
     except Exception:
         logger.exception("Failed to send schedule notification for %s", sched.id)
+
+
+def _records_or_unknown(doc: dict) -> int | None:
+    """``records_processed`` as recorded; None when the job says it is unknown."""
+    if "records_processed" in doc and doc.get("records_processed") is None:
+        return None
+    return int(doc.get("records_processed", 0) or 0)
 
 
 def _is_success(status: str | None) -> bool:
@@ -1303,6 +1372,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
         get_schedule,
+        has_open_approval,
         mark_schedule_run,
         schedule_retry,
     )
@@ -1334,6 +1404,20 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
     from services.execution_engine_contract import committed_rows_of
 
+    # A failed run that was the operator's destination rebuild: record the
+    # outcome on its finding and audit it BEFORE any retry decision, and carry
+    # the recovery into any finding that replaces it below (QA C9 review 3).
+    recovery_context = None
+    if not _is_success(status):
+        try:
+            from services.schedule_recovery import note_rebuild_failure
+
+            recovery_context = note_rebuild_failure(
+                schedule_id, job_id, str((job_doc or {}).get("error") or "")
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping never changes the verdict
+            logger.exception("Schedule %s rebuild failure was not recorded", schedule_id)
+
     rows_committed, rows_known = committed_rows_of(job_doc)
     decision = _retry_decision(
         status,
@@ -1344,6 +1428,16 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         rows_committed_known=rows_known,
         job_doc=job_doc,
     )
+    if decision["retry"] and (recovery_context is not None or has_open_approval(sched)):
+        # A schedule parked on a finding is never due (due_schedules skips it),
+        # so a retry scheduled now would never run and its retry_at would
+        # dangle. The run is final; the open finding carries what happens next.
+        decision = {
+            **decision,
+            "retry": False,
+            "reason": "The schedule is parked on an open finding, so this run is not retried; "
+            "resolve the finding to run again.",
+        }
     if not decision["retry"] and decision["reason"] and not _is_success(status):
         entry["retry_refused"] = decision["reason"]
     failure_class = decision.get("failure_class")
@@ -1444,6 +1538,10 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     "park_reason": park,
                     "gate_codes": gate_codes_from_job(job_doc),
                     "unmapped_columns": unaccounted_sources_from_job(job_doc),
+                    # The refusal's stable code (e.g. DESTINATION_CONTINUITY),
+                    # so the park never classifies on wording.
+                    "error_code": str((job_doc or {}).get("error_code") or ""),
+                    **({"recovery_context": recovery_context} if recovery_context else {}),
                 },
             )
     from services.schedule_run_lifecycle import default_reason
@@ -1595,10 +1693,26 @@ def _open_finding(
 
             unmapped_sentence = message_is_unmapped_column_drift(message)
             missing_table = _missing_source_table(sched, message)
+            from services.append_continuity import CONTINUITY_GATE_ID
+            from services.schedule_recovery import (
+                DESTINATION_CONTINUITY_CODE,
+                continuity_corrective,
+            )
+
             if is_empty_mapping_refusal(message):
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
+            elif (
+                str((evidence or {}).get("error_code") or "") == DESTINATION_CONTINUITY_CODE
+                # Refused by the Validate-time gate instead of the Execute check.
+                or CONTINUITY_GATE_ID in list((evidence or {}).get("gate_codes") or [])
+            ):
+                # No signature makes a dropped table hold its history again: the
+                # finding names the schedule's own recovery (QA C9).
+                code = DESTINATION_CONTINUITY_CODE
+                scopes = ()
+                corrective = continuity_corrective(schedule_id)
             elif missing_table:
                 # No signature can create a table: name it and the fix (QA SC5).
                 code = SOURCE_TABLE_MISSING_CODE
@@ -2270,6 +2384,14 @@ def _run_due_schedules() -> int:
             retry_pending_capture_releases()
         except Exception:  # noqa: BLE001 — cleanup must never stop the beat
             logger.exception("Pending CDC capture release retry failed")
+        try:
+            from services.cdc_capture_inventory import start_source_gone_sweep
+
+            # C11: a slot whose source table was dropped retains WAL for a
+            # table nothing can read; owned ones are dropped after a grace.
+            start_source_gone_sweep()
+        except Exception:  # noqa: BLE001 — cleanup must never stop the beat
+            logger.exception("CDC source-gone capture sweep failed to start")
         from services.schedule_store import unstick_completion_pinned_schedules
 
         unstick_completion_pinned_schedules()
@@ -2365,6 +2487,26 @@ def _clear_stale_running_schedules() -> None:
             _save_all(schedules)
 
 
+async def _run_maintenance() -> None:
+    """Housekeeping on the beat: scheduled job retention, expired sandboxes.
+
+    The beat can tick every second on every replica; each step first claims
+    its period in Mongo (``services.maintenance_claim``: retention once a day,
+    the sandbox sweep every 15 minutes, one replica per period) and returns at
+    once when off or not due. A failure is logged, never raised into the beat.
+    """
+    from services.job_retention_schedule import run_due_retention
+    from services.sandbox_workspaces import sweep_expired_sandboxes
+
+    for step in (run_due_retention, sweep_expired_sandboxes):
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                _executor, functools.partial(contextvars.copy_context().run, step)
+            )
+        except Exception:  # noqa: BLE001 — housekeeping must not stop the beat
+            logger.exception("Scheduler maintenance step %s failed", step.__name__)
+
+
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
@@ -2377,6 +2519,17 @@ async def run_schedule_loop() -> None:
         logger.exception(
             "Startup schedule reclaim failed; the beat will continue"
         )
+    try:
+        from services.schedule_store import normalize_invalid_timezones
+
+        repaired = await asyncio.get_running_loop().run_in_executor(
+            _executor,
+            functools.partial(contextvars.copy_context().run, normalize_invalid_timezones),
+        )
+        if repaired:
+            logger.warning("Normalised %s schedule zone(s) that were not IANA zones to UTC", len(repaired))
+    except Exception:  # noqa: BLE001 — a bad document must not kill the loop
+        logger.exception("Schedule time-zone normalisation failed; the beat will continue")
     try:
         from services.schedule_store import import_file_schedules_into_mongo
 
@@ -2398,6 +2551,7 @@ async def run_schedule_loop() -> None:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:
             logger.exception("Schedule loop error")
+        await _run_maintenance()
         wait = float(CHECK_INTERVAL_SECONDS)
         try:
             from services.schedule_store import seconds_until_next_schedule

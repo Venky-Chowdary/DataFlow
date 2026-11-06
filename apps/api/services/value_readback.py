@@ -15,7 +15,10 @@ verdict with no value compare still passed.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 
 def oracle_census_connection(cfg: dict[str, Any]) -> Any:
@@ -117,6 +120,14 @@ def count_only_text_risk_verdict(
     dest_db = str(getattr(endpoint, "format", "") or "")
     live = _live_dest_types(endpoint, [t for _s, t in pairs])
     dest_types.update({k: v for k, v in live.items() if v})
+    # Mappings posted without types (REST {source, target, confidence}) still
+    # name a source the catalog describes: a latin1 MySQL column is the same
+    # code page as the latin1 table it lands in, not "any character".
+    untyped = [s for s, _t in pairs if not source_types.get(s)]
+    if untyped:
+        source_types.update(
+            {k: v for k, v in _live_source_types(source_endpoint, untyped).items() if v}
+        )
     risky = text_round_trip_risks(
         source_db=str(getattr(source_endpoint, "format", "") or ""),
         dest_db=dest_db,
@@ -145,6 +156,26 @@ def count_only_text_risk_verdict(
             "(or UTF-8 collation) destination column."
         ),
     }
+
+
+def _live_source_types(source_endpoint: Any, columns: list[str]) -> dict[str, str]:
+    """Catalog column types of a SQL source table (with charset/collation) — best effort."""
+    table = str(getattr(source_endpoint, "table", "") or "").strip()
+    if source_endpoint is None or not table or not columns:
+        return {}
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.adapters_introspect import _CATALOG_SOURCE_TYPES, _introspect_table_schema
+    from src.transfer.connector_capabilities import resolve_driver_type, source_read_driver
+
+    read_type = source_read_driver(resolve_driver_type(str(getattr(source_endpoint, "format", "") or "")))
+    if read_type not in _CATALOG_SOURCE_TYPES:
+        return {}
+    try:
+        cfg = resolve_connector_config(source_endpoint)
+        return dict(_introspect_table_schema(read_type, cfg, table, list(columns)) or {})
+    except (ValueError, RuntimeError, OSError) as exc:
+        logger.warning("source column types for the code-page verdict unavailable: %s", exc)
+        return {}
 
 
 def _live_dest_types(endpoint: Any, columns: list[str]) -> dict[str, str]:

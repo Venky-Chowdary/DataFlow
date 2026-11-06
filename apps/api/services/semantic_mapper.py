@@ -156,10 +156,63 @@ def _exact_name_unambiguous(
     ambiguous forever. Name equality is only genuinely ambiguous when a second
     destination column folds to the same identifier (``UserID`` vs ``userid``).
     """
-    src_fold = _folded_ident(source)
-    if not src_fold or _folded_ident(target) != src_fold:
+    # ``name_identical`` is the one owner of "this is the same column": case,
+    # separators (the pre-existing ``_folded_ident`` rule), transliteration
+    # and the sanitiser's spellings. Ambiguity is a second destination column
+    # that also carries the name.
+    if not name_identical(source, target):
         return False
-    return sum(1 for t in target_columns if _folded_ident(t) == src_fold) == 1
+    return sum(1 for t in target_columns if name_identical(source, t)) == 1
+
+
+def name_identical(source: str, target: str) -> bool:
+    """True when ``target`` is ``source``'s own name on the destination.
+
+    Case and separators fold (``Order ID`` ≡ ``Order_ID``), an accented letter
+    is its transliteration (``naïve`` ≡ ``naive``), and every spelling the
+    identifier sanitiser has produced counts, including the pre-transliteration
+    one (``café`` -> ``caf_``). A table DataFlow created holds exactly these
+    names, so a mapping onto one is the identity, never a rename (D55).
+    """
+    from connectors.sql_identifiers import sanitized_spellings, transliterate_identifier
+
+    src = (source or "").strip()
+    tgt = (target or "").strip()
+    if not src or not tgt:
+        return False
+    if _folded_ident(transliterate_identifier(src)) == _folded_ident(
+        transliterate_identifier(tgt)
+    ):
+        return True
+    return tgt.lower() in sanitized_spellings(src)
+
+
+def _pin_exact_name_pairs(
+    source_columns: list[str], target_columns: list[str]
+) -> dict[str, str]:
+    """Source -> destination pairs that carry the same name, one to one.
+
+    A literal name equality is the strongest evidence the mapper has. Letting
+    the bipartite solver trade it away for a better *type* fit crossed
+    ``ssn_masked`` onto ``ssn_sha256`` and back at 0.82 (E2-005): the type
+    risk of the same-name pair belongs to the fidelity grade (widen, contract,
+    quarantine), not to the choice of column. Only unambiguous equalities pin:
+    a name two destination (or two source) columns share stays with the solver.
+    """
+    by_target: dict[str, list[str]] = {}
+    for src in source_columns:
+        for tgt in target_columns:
+            if name_identical(src, tgt):
+                by_target.setdefault(tgt, []).append(src)
+    by_source: dict[str, list[str]] = {}
+    for tgt, sources in by_target.items():
+        for src in sources:
+            by_source.setdefault(src, []).append(tgt)
+    return {
+        src: tgts[0]
+        for src, tgts in by_source.items()
+        if len(tgts) == 1 and len(by_target[tgts[0]]) == 1
+    }
 
 
 def _expand_abbrev(token: str) -> str:
@@ -1404,7 +1457,15 @@ def map_columns(
 
     assigned_sources: set[str] = set()
     dest_collisions = _dest_fold_collisions(target_columns)
-    optimal = _optimal_assignment(source_columns, target_columns, pair_scores)
+    pinned = _pin_exact_name_pairs(source_columns, target_columns)
+    optimal = {src: (tgt, *pair_scores[(src, tgt)]) for src, tgt in pinned.items()}
+    optimal.update(
+        _optimal_assignment(
+            [s for s in source_columns if s not in pinned],
+            [t for t in target_columns if t not in set(pinned.values())],
+            pair_scores,
+        )
+    )
     for source in source_columns:
         assigned = optimal.get(source)
         if not assigned:
@@ -1659,7 +1720,7 @@ def map_columns(
                 (
                     t
                     for t in target_columns
-                    if t not in used_targets and t.strip().lower() == source.strip().lower()
+                    if t not in used_targets and name_identical(source, t)
                 ),
                 "",
             )

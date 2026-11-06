@@ -1107,10 +1107,28 @@ def run_five_layer_verification(
     keyed_cardinality: bool = False,
     keyed_expected_delta: int | None = None,
     l2_skip_reason: str = "",
+    scoped_to_written_keys: bool = False,
 ) -> dict[str, Any]:
     """Execute L1–L5 on two in-memory populations (SQL-loaded or buffered).
 
     L4/L5 run when L3 fails, or when ``always_localize`` is True (maximum mode).
+
+    ``scoped_to_written_keys``: BOTH populations are this run's written
+    cells — restricted to the keys it wrote (X-OW1 batch scope) AND the source
+    side is what was written: the buffered batch, or a source re-read checked
+    key by key against the run's write witness with concurrent source drift
+    removed (``services.keyed_write_witness``). A batch-scoped re-read alone
+    is NOT this: it is the source *after* the write, so a concurrent UPDATE
+    there differs from a destination that holds exactly what was written.
+    When the flag holds, the whole-table-not-comparable exemption ("aggregates
+    cover rows this job did not write") no longer applies: an L2 value
+    discrepancy is a concrete cell difference on this run's rows, so it fails
+    the ladder and L4/L5 run to name the key and column (the X-22 contract in
+    ``signed_proof_pack``: a keyed cell mismatch vetoes even on a
+    row_count-assurance route). reconcile_step also clears ``checksum_scope``
+    for such populations so L3 hashes them (a value swapped between two
+    written rows keeps every column aggregate). An unscoped dest-before append,
+    or a re-read without a witness, stays advisory (ZERO_LOSS_PROPERTIES P5).
     """
     cols = [c for c in columns if c]
     pk = (pk_column or "").strip()
@@ -1268,7 +1286,15 @@ def run_five_layer_verification(
     }
     localization: dict[str, Any] = {}
 
-    run_localize = ((not l3.passed) or always_localize) and not incomparable
+    scoped_l2_miss = bool(
+        incomparable
+        and scoped_to_written_keys
+        and (not l2.passed)
+        and not bool((l2.details or {}).get("skipped"))
+    )
+    run_localize = (
+        ((not l3.passed) or always_localize) and not incomparable
+    ) or scoped_l2_miss
     if run_localize and key_cols and cols:
         src_col = column_typed_checksums(
             source_rows, cols, dest_db_type=dest_db_type, dest_types=dest_types
@@ -1320,9 +1346,12 @@ def run_five_layer_verification(
     l2_failed = (not l2.passed) and not bool((l2.details or {}).get("skipped"))
     if empty_population:
         passed = bool(l1.passed and not l2_failed)
-    elif incomparable:
+    elif incomparable and not scoped_to_written_keys:
         # Whole-table aggregates cover rows this job did not write.
         passed = bool(l1.passed and l3.passed)
+    elif incomparable:
+        # Both sides are this run's written cells: L2 compares those cells.
+        passed = bool(l1.passed and l3.passed and not l2_failed)
     else:
         passed = bool(l1.passed and l3.passed and not l2_failed)
     expected = int((l1.details or {}).get("expected_rows") or 0)

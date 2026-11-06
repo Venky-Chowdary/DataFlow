@@ -264,6 +264,7 @@ def _check_transform_dry_run(
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -300,6 +301,7 @@ def _check_transform_dry_run(
         dest_nullability=dest_nullability,
         database_extract=database_extract,
         file_row_quarantine=file_row_quarantine,
+        validation_mode=validation_mode,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -375,10 +377,63 @@ def _column_has_numeric_value(rows: list[dict[str, Any]], column: str) -> bool:
     return False
 
 
+def _mixed_numeric_column_held(
+    rows: list[dict[str, Any]], column: str, validation_mode: str | None
+) -> bool:
+    """The column's ONE verdict for a mixed numeric file column (mode_holdout_kind)."""
+    from services.transform_engine import decimal_wire_value
+    from services.validation_mode_contract import (
+        mode_holdout_kind,
+        mode_holds_out_numeric_casts,
+    )
+
+    ok = bad = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cell = lookup_row_value(row, column, None)
+        if cell is None or str(cell).strip() == "":
+            continue
+        if decimal_wire_value(cell) is None:
+            bad += 1
+        else:
+            ok += 1
+    # A mixed numeric FILE column (the callers' scope): an unparseable amount
+    # is a numeric cast refusal, which lenient and balanced hold out (R4-D02).
+    held = bad if mode_holds_out_numeric_casts(validation_mode, record_batch=True) else 0
+    return bool(mode_holdout_kind(validation_mode, failed=bad, held=held, cast_ok=ok, record_batch=True))
+
+
+def _share_refused_columns(checks: list[dict[str, Any]]) -> set[str]:
+    """Source columns the dry run refused under the cast share (CAST_SHARE_RULE)."""
+    from services.validation_mode_contract import CAST_SHARE_RULE
+
+    out: set[str] = set()
+    for check in checks:
+        for issue in check.get("issues") or []:
+            text = str(issue)
+            if CAST_SHARE_RULE in text and "→" in text:
+                out.add(text.split("→", 1)[0].split(":", 1)[0].strip())
+    return out
+
+
+def _check_names_any(check: dict[str, Any], columns: set[str]) -> bool:
+    """True when one of the check's findings is about one of ``columns``."""
+    for issue in list(check.get("issues") or []) + [
+        str(f.get("column") or "") for f in check.get("blocking_failures") or [] if isinstance(f, dict)
+    ]:
+        text = str(issue)
+        head = re.split(r"[\s:→(]", text.strip(), maxsplit=1)[0] if text.strip() else ""
+        if head in columns or any(text.startswith(f"{c}→") or text.startswith(f"{c} ") for c in columns):
+            return True
+    return False
+
+
 def _demote_mixed_file_numeric_expectations(
     exp: dict[str, Any],
     rows: list[dict[str, Any]],
     mappings: list[dict],
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     """A minority non-numeric cell in a file is a quarantine, not a failed load.
 
@@ -397,8 +452,8 @@ def _demote_mixed_file_numeric_expectations(
             continue
         source = str(mapping.get("source") or "")
         target = str(mapping.get("target") or "")
-        if _column_has_numeric_value(rows, source) or (
-            target and _column_has_numeric_value(rows, target)
+        if _mixed_numeric_column_held(rows, source, validation_mode) or (
+            target and _mixed_numeric_column_held(rows, target, validation_mode)
         ):
             if source:
                 quarantine_columns.add(source)
@@ -431,6 +486,7 @@ def _check_financial_precision(
     rows: list[dict[str, Any]],
     *,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     """Detect values that could silently lose magnitude (e.g. comma/currency parsing failures)."""
     from services.migration_risk_contract import mapping_has_clearing_risk_contract
@@ -504,12 +560,35 @@ def _check_financial_precision(
         # No contract + a file + at least one good amount: quarantine the bad
         # cells. A present contract (FAIL_JOB, tampered) stays fail-closed.
         # Magnitude shifts above stay in ``issues`` either way.
+        from services.validation_mode_contract import (
+            CAST_SHARE_RULE,
+            cast_share_holds_out,
+            mode_holdout_kind,
+            mode_holds_out_numeric_casts,
+        )
+
+        # The column's ONE verdict: an unparseable amount is a numeric cast
+        # refusal, held out per row within the share by lenient, and by
+        # balanced on a file (R4-D02); strict never holds it out.
+        held = (
+            len(unparseable)
+            if mode_holds_out_numeric_casts(validation_mode, record_batch=file_row_quarantine)
+            else 0
+        )
         if holdouts_contracted:
             contracted.extend(unparseable)
-        elif file_row_quarantine and parsed_ok > 0 and not contract_present:
+        elif not contract_present and unparseable and mode_holdout_kind(
+            validation_mode, failed=len(unparseable), held=held, cast_ok=parsed_ok,
+            record_batch=file_row_quarantine,
+        ):
             file_notes.extend(unparseable)
         else:
             issues.extend(unparseable)
+            if held and parsed_ok > 0 and not cast_share_holds_out(len(unparseable), parsed_ok):
+                issues.append(
+                    f"{src}: {len(unparseable)} of {len(unparseable) + parsed_ok} sampled "
+                    f"amounts fail — {CAST_SHARE_RULE}"
+                )
     blocks = len(issues) > 0
     report: dict[str, Any] = {
         "check": "financial_precision",
@@ -729,6 +808,41 @@ def _unique_key_column_list(uk: dict[str, Any]) -> list[str]:
         if name and name.lower() not in {x.lower() for x in cols}:
             cols.append(name)
     return cols
+
+
+def _identity_cell(row: dict[str, Any], col: str) -> Any:
+    """A key cell by column name; the sample row may carry another case.
+
+    Oracle reports ``ID`` while the sample rows of an Oracle -> Mongo route are
+    keyed by the mapped field, so ``row.get("ID")`` missed every row and the
+    preflight warned that 30 unique keys collapsed into one (D279).
+    """
+    if not isinstance(row, dict):
+        return None
+    if col in row:
+        return row[col]
+    from services.db_type_utils import ci_get
+
+    return ci_get(row, str(col))
+
+
+def _first_repeated_key(
+    rows: list[dict[str, Any]], identity_cols: list[str], identity: Any
+) -> str:
+    """``(k1, k2)`` of the first key that really repeats, for the operator text.
+
+    The example used to be the last row of the file, which named a key that
+    had no duplicate at all (D279).
+    """
+    seen: set[tuple] = set()
+    for row in rows:
+        key = identity(row)
+        if any(part is None for part in key):
+            continue
+        if key in seen:
+            return "(" + ", ".join(str(_identity_cell(row, col)) for col in identity_cols) + ")"
+        seen.add(key)
+    return ""
 
 
 def _lookup_target_ddl(target_col: str, target_types: dict[str, str] | None) -> str:
@@ -1204,6 +1318,150 @@ def _in_file_collapse_message(
     )
 
 
+#: Each route is followed end to end in
+#: tests/test_r14_c2_review_duplicate_routes_and_probe.py (file sources) and
+#: tests/test_r14_c2_review2_keep_last_db_and_replay_bounds_e2e.py (tables).
+DUPLICATE_KEY_ROUTES = (
+    "Choose a duplicate route: in_file_dedupe=keep_last (one row per key, the "
+    "last copy wins), sync_mode=upsert (merge on the key), or "
+    "duplicate_policy=append to load every copy."
+)
+#: A table source: no read order picks a "last" copy, and an upsert over a
+#: source whose key repeats is refused by the source probe.
+DUPLICATE_KEY_ROUTES_TABLE = (
+    "A table has no read order that picks one copy: remove the repeated keys "
+    "at the source, or choose duplicate_policy=append to load every copy."
+)
+#: A keyed sync (upsert / incremental_deduped) over a table: the latest version
+#: of a key is defined by the stream's cursor; append is not this sync's route.
+DUPLICATE_KEY_ROUTES_TABLE_KEYED = (
+    "A table has no read order that picks one copy: declare the stream's "
+    "cursor_field (the latest version of each key wins), or remove the repeated "
+    "keys at the source."
+)
+
+
+#: A keyed sync whose read already defines the latest copy (a declared cursor):
+#: the block is the operator's explicit ``in_file_dedupe=block``.
+DUPLICATE_KEY_ROUTES_TABLE_CURSOR = (
+    "The stream's cursor already orders this read: set in_file_dedupe=keep_last "
+    "(or leave it unset) so the latest version of each key wins, or remove the "
+    "repeated keys at the source."
+)
+#: The same on a changelog topic, whose offset order picks the last message.
+DUPLICATE_KEY_ROUTES_LOG_ORDERED = (
+    "The topic's offset order already picks the last message per key: set "
+    "in_file_dedupe=keep_last (or leave it unset), or remove the repeated keys "
+    "at the source."
+)
+#: An append sync over a table or topic: append is the sync already chosen.
+DUPLICATE_KEY_ROUTES_APPEND = (
+    "This append sync writes every copy it reads: remove the repeated keys at "
+    "the source, or switch to a keyed sync (upsert / incremental_deduped) with "
+    "the stream's cursor_field so the latest version of each key wins."
+)
+DUPLICATE_KEY_ROUTES_LOG_APPEND = (
+    "This append sync writes every message it reads: remove the repeated keys "
+    "at the source, or switch to a keyed sync (upsert / incremental_deduped) "
+    "so the topic's offset order keeps the last message per key."
+)
+#: Every table/topic route text, most specific first, for the root-cause lookup.
+TABLE_DUPLICATE_ROUTE_TEXTS = (
+    DUPLICATE_KEY_ROUTES_TABLE_CURSOR,
+    DUPLICATE_KEY_ROUTES_LOG_ORDERED,
+    DUPLICATE_KEY_ROUTES_LOG_APPEND,
+    DUPLICATE_KEY_ROUTES_APPEND,
+    DUPLICATE_KEY_ROUTES_TABLE_KEYED,
+    DUPLICATE_KEY_ROUTES_TABLE,
+)
+
+
+def _ordered_log_source(source_type: str) -> bool:
+    from services.primary_key import ORDERED_LOG_SOURCES
+    from src.transfer.engine_family import engine_family
+
+    return engine_family(source_type) in ORDERED_LOG_SOURCES
+
+
+def table_duplicate_routes(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> str:
+    """The duplicate routes that work on a table (or topic) for this sync."""
+    from services.primary_key import (
+        sync_collapses_in_file_duplicates,
+        table_reads_latest_wins,
+    )
+    from services.sync_cursor import is_append_sync
+
+    log = _ordered_log_source(source_type)
+    if table_reads_latest_wins(
+        sync_mode, stream_contracts=stream_contracts,
+        source_type=source_type, stream_name=stream_name,
+    ):
+        return DUPLICATE_KEY_ROUTES_LOG_ORDERED if log else DUPLICATE_KEY_ROUTES_TABLE_CURSOR
+    if sync_collapses_in_file_duplicates(sync_mode):
+        return DUPLICATE_KEY_ROUTES_TABLE_KEYED
+    if is_append_sync(sync_mode):
+        return DUPLICATE_KEY_ROUTES_LOG_APPEND if log else DUPLICATE_KEY_ROUTES_APPEND
+    return DUPLICATE_KEY_ROUTES_TABLE
+
+
+def keep_last_table_refusal(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> str:
+    """Why keep_last cannot run on this table read, or "" when it is honoured.
+
+    One rule for Validate and schedule save: keep_last is honoured on a table
+    exactly where the read itself defines the last copy
+    (``primary_key.table_reads_latest_wins``: a cursor-ordered keyed sync, an
+    ordered log). Elsewhere a table has no read order and no route writes it
+    collapsed — refused, never silently ignored (QA C2 review: 21 rows).
+    """
+    from services.primary_key import table_reads_latest_wins
+
+    if table_reads_latest_wins(
+        sync_mode, stream_contracts=stream_contracts,
+        source_type=source_type, stream_name=stream_name,
+    ):
+        return ""
+    routes = table_duplicate_routes(
+        sync_mode, stream_contracts=stream_contracts,
+        source_type=source_type, stream_name=stream_name,
+    )
+    if _ordered_log_source(source_type):
+        return (
+            "in_file_dedupe=keep_last keeps the last message per key only on a "
+            "keyed sync (upsert / incremental_deduped); this sync writes every "
+            "message, so it is not applied. " + routes
+        )
+    return (
+        "in_file_dedupe=keep_last keeps a file's last copy of a key in read order; "
+        "this table read has no order that defines it, so it is not applied. "
+        + routes
+    )
+
+
+#: Back-compat spelling of the overwrite/append refusal.
+KEEP_LAST_TABLE_REFUSAL = keep_last_table_refusal("full_refresh_overwrite")
+def lenient_duplicate_key_note(routes: str) -> str:
+    """Lenient's note on a repeated declared key, with the routes for this source."""
+    return (
+        "Lenient quarantines bad cells, not repeated primary keys: the second copy "
+        "of a declared key would be written twice. " + routes
+    )
+
+
+LENIENT_DUPLICATE_KEY_NOTE = lenient_duplicate_key_note(DUPLICATE_KEY_ROUTES)
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -1223,6 +1481,7 @@ def _check_duplicate_keys(
     identity_declared: bool | None = None,
     in_file_dedupe: str = "",
     duplicate_policy: str = "",
+    dedupe_note: str = "",
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
@@ -1317,18 +1576,20 @@ def _check_duplicate_keys(
         if identity_cols:
             from services.duplicate_policy import collapse_keep_last
             from services.type_system import unique_equality_key
+            from services.value_serializer import is_reader_null_cell
 
             def _equality_identity(row: dict[str, Any]) -> tuple:
-                parts = []
+                parts: list[Any] = []
                 for col in identity_cols:
+                    cell = _identity_cell(row, col)
+                    if cell is None or is_reader_null_cell(cell):
+                        # No key on this row: ``collapse_keep_last`` keeps it.
+                        # ``unique_equality_key(None)`` is ``''``, which made
+                        # every keyless row one key (D279 "(None)").
+                        parts.append(None)
+                        continue
                     ddl = _lookup_target_ddl(col, target_types) if target_types else ""
-                    parts.append(
-                        unique_equality_key(
-                            row.get(col),
-                            ddl or "",
-                            dest_kind=dest_kind,
-                        )
-                    )
+                    parts.append(unique_equality_key(cell, ddl or "", dest_kind=dest_kind))
                 return tuple(parts)
 
             collapsed_groups = []
@@ -1338,9 +1599,8 @@ def _check_duplicate_keys(
                 )
                 collapsed_extra += int(dropped or 0)
                 if dropped and not collapse_example and group:
-                    sample = group[-1]
-                    collapse_example = (
-                        "(" + ", ".join(str(sample.get(col)) for col in identity_cols) + ")"
+                    collapse_example = _first_repeated_key(
+                        group, identity_cols, _equality_identity
                     )
                 collapsed_groups.append(kept)
             rows = [row for group in collapsed_groups for row in group]
@@ -1394,6 +1654,12 @@ def _check_duplicate_keys(
                 probe_example,
             )
         )
+
+    if dedupe_note and (
+        population_extra or collapsed_extra or probe_collapsed_extra or sample_extra
+    ):
+        # The collapse rests on read order; say what that assumes (item 5).
+        advisory_warnings.append(dedupe_note)
 
     dest_has_enforced_key = bool(destination_pk_columns) or any(
         _unique_constraint_enforced(uk, dest_kind=dest_kind)
@@ -1577,7 +1843,7 @@ def _check_duplicate_keys(
             key = composite_unique_equality_key(
                 [
                     (
-                        row.get(col),
+                        _identity_cell(row, col),
                         comp_ddls[i],
                         comp_casefold[i],
                         None,
@@ -1639,7 +1905,7 @@ def _check_duplicate_keys(
             ):
                 continue
             # An absent cell is Missing (no key), never the '' key value (D53).
-            raw_cell = row.get(primary_key)
+            raw_cell = _identity_cell(row, primary_key)
             raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key = unique_equality_key(
                 None if raw_cell is None else raw,
@@ -1693,6 +1959,9 @@ def _check_duplicate_keys(
             "check": "duplicate_keys",
             "passed": False,
             "blocks_transfer": True,
+            # No duplicate was found: the probe did not finish. Lenient keeps
+            # its own handling of an unproven probe (not the C2 carve-out).
+            "probe_unavailable": True,
             "issues": issues[:15],
             "warnings": advisory_warnings,
             "primary_key": primary_key,
@@ -1878,21 +2147,28 @@ def _check_mapping_confidence(
     }
 
 
-def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
+def _format_control_chars(
+    text: str, exempt: frozenset[str] = frozenset()
+) -> tuple[list[str], list[str]]:
     """U+XXXX codes of ``(control, format)`` characters in ``text``.
 
-    Controls (Cc, minus tab/newline/CR — NUL, BEL, ESC …) are rejected or
-    corrupted by destinations. Format characters (Cf — U+200B, ZWJ/ZWNJ,
-    soft hyphen, BOM, bidi marks) are valid Unicode every UTF-8 destination
-    stores verbatim; they only make visually equal text compare unequal.
+    Controls (Cc, minus tab/newline/CR — NUL, BEL, ESC, and C1 U+0080–U+009F,
+    the classic mojibake residue) are rejected or corrupted by destinations
+    and block strict Validate. Format characters (Cf — U+200B, ZWJ/ZWNJ, soft
+    hyphen, BOM, bidi marks) are valid Unicode every UTF-8 destination stores
+    verbatim; they only make visually equal text compare unequal.
+
+    ``exempt`` controls are reported with the format characters (a warning):
+    only MySQL ``latin1``'s own five undefined-byte decodings in a column that
+    holds that page (:func:`mysql_latin1_exempt_controls`, QA MySQL D1).
     """
     controls: list[str] = []
     formats: list[str] = []
     for ch in text:
         cat = unicodedata.category(ch)
-        if cat == "Cc" and ch not in "\t\n\r":
+        if cat == "Cc" and ch not in "\t\n\r" and ch not in exempt:
             bucket = controls
-        elif cat == "Cf":
+        elif cat == "Cf" or (cat == "Cc" and ch in exempt):
             bucket = formats
         else:
             continue
@@ -1904,11 +2180,41 @@ def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
     return controls, formats
 
 
+def mysql_latin1_exempt_controls(
+    source_db_type: str, source_types: dict[str, str] | None
+) -> dict[str, frozenset[str]]:
+    """Per source column, the C1 controls that are data, not damage.
+
+    MySQL ``latin1`` stores bytes 0x81/0x8D/0x8F/0x90/0x9D and returns
+    U+0081/U+008D/U+008F/U+0090/U+009D — the server's own decoding, which every
+    Unicode destination keeps byte for byte. Only those five, only on a
+    MySQL-family source, and only in a column that declares latin1 — or that
+    declares no charset at all (a query result carries none). Every other C1
+    control (mojibake such as 'Itâ\x80\x99s', an ESC-less CSI 0x9B) still blocks.
+    """
+    from services.encoding_capacity import (
+        MYSQL_LATIN1_UNDEFINED_CP1252_BYTES,
+        parse_declared_charset,
+    )
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(source_db_type or "") != "mysql":
+        return {}
+    five = frozenset(chr(b) for b in MYSQL_LATIN1_UNDEFINED_CP1252_BYTES)
+    out: dict[str, frozenset[str]] = {}
+    for col, declared in (source_types or {}).items():
+        charset = parse_declared_charset(str(declared or "")).strip().lower()
+        if charset in {"", "latin1"}:
+            out[str(col).lower()] = five
+    return out
+
+
 def _check_encoding_anomalies(
     rows: list[dict[str, Any]],
     *,
     validation_mode: str = "strict",
     mappings: list[dict] | None = None,
+    exempt_controls: dict[str, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
@@ -1951,7 +2257,9 @@ def _check_encoding_anomalies(
                     "blocking": True,
                 })
                 continue
-            controls, formats = _format_control_chars(text)
+            controls, formats = _format_control_chars(
+                text, (exempt_controls or {}).get(str(col).lower(), frozenset())
+            )
             bad = controls + formats
             if bad:
                 findings.append({
@@ -2136,6 +2444,7 @@ def run_integrity_audit(
     proven_width_narrowings: dict | None = None,
     in_file_dedupe: str = "",
     duplicate_policy: str = "",
+    stream_name: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -2210,8 +2519,54 @@ def run_integrity_audit(
         or destination_pk_columns
         or _stream_contracts_declare_identity(stream_contracts)
     )
+    from services.primary_key import latest_wins_dedupe, latest_wins_note
+
+    dedupe_note = ""
+    # keep_last keeps a file's last copy of a key in read order. A table has
+    # no read order and no route writes it collapsed, so asking for it there
+    # is refused, not silently ignored (QA C2 review: 21 rows "verified").
+    keep_last_refusal = ""
+    if bool(database_extract) and (
+        str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
+    ):
+        keep_last_refusal = keep_last_table_refusal(
+            sync_mode, stream_contracts=stream_contracts,
+            source_type=source_db_type, stream_name=stream_name,
+        )
+    elif str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last":
+        from services.duplicate_policy import multi_stream_keep_last_refusal
+
+        keep_last_refusal = multi_stream_keep_last_refusal(source_db_type, stream_contracts)
+    keep_last_on_table = bool(keep_last_refusal)
+    if keep_last_on_table:
+        in_file_dedupe = "block"
+    table_routes = (
+        table_duplicate_routes(
+            sync_mode, stream_contracts=stream_contracts,
+            source_type=source_db_type, stream_name=stream_name,
+        )
+        if database_extract
+        else ""
+    )
+    if not str(in_file_dedupe or "").strip():
+        in_file_dedupe = latest_wins_dedupe(
+            in_file_dedupe,
+            sync_mode,
+            stream_contracts=stream_contracts,
+            source_type=source_db_type,
+            stream_name=stream_name,
+        )
+        if in_file_dedupe:
+            dedupe_note = latest_wins_note(source_db_type)
 
     checks: list[dict[str, Any]] = []
+    if keep_last_on_table:
+        checks.append({
+            "check": "in_file_dedupe_unsupported",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": [keep_last_refusal],
+        })
 
     # Validation without a schema or a representative sample proves nothing.
     # Fail closed instead of returning a green "No integrity checks run" report.
@@ -2265,6 +2620,7 @@ def run_integrity_audit(
                 database_extract=database_extract,
                 dest_nullability=dest_nullability,
                 file_row_quarantine=file_row_quarantine,
+                validation_mode=validation_mode,
             )
         )
         checks.append(
@@ -2273,6 +2629,7 @@ def run_integrity_audit(
                 source_types,
                 rows,
                 file_row_quarantine=file_row_quarantine,
+                validation_mode=validation_mode,
             )
         )
         checks.append(
@@ -2310,8 +2667,16 @@ def run_integrity_audit(
                 source_duplicate_probe_expected=source_duplicate_probe_expected,
                 in_file_dedupe=in_file_dedupe,
                 duplicate_policy=duplicate_policy,
+                dedupe_note=dedupe_note,
             )
         )
+        if (
+            database_extract
+            and checks[-1].get("blocks_transfer")
+            and not checks[-1].get("probe_unavailable")
+        ):
+            # The routes that work on a table travel with the finding.
+            checks[-1]["issues"] = [*checks[-1].get("issues", []), table_routes]
         if source_null_key_rows:
             checks.append(
                 _check_null_keys(
@@ -2355,7 +2720,10 @@ def run_integrity_audit(
 
     if rows:
         checks.append(
-            _check_encoding_anomalies(rows, validation_mode=validation_mode, mappings=mappings)
+            _check_encoding_anomalies(
+                rows, validation_mode=validation_mode, mappings=mappings,
+                exempt_controls=mysql_latin1_exempt_controls(source_db_type, source_types),
+            )
         )
 
     # Industry-standard expectation suite (dbt/GX patterns)
@@ -2374,7 +2742,7 @@ def run_integrity_audit(
             in_file_dedupe=in_file_dedupe,
         )
         if file_row_quarantine:
-            exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings)
+            exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings, validation_mode)
         checks.append({
             "check": "expectations_suite",
             "passed": exp.get("passed", True),
@@ -2392,13 +2760,40 @@ def run_integrity_audit(
     # Module 3: mapping_confidence never blocks_transfer (G4 is SSOT), so the
     # former balanced-mode "downgrade confidence blockers" path is gone.
 
-    if mode == "lenient":
+    from services.validation_mode_contract import mode_holds_out_refusal
+
+    if mode_holds_out_refusal(mode, record_batch=False):
         # Cell and sample findings quarantine at write. They must not refuse
         # the load. A missing schema or an unreadable sample still blocks:
-        # there is nothing to quarantine against.
+        # there is nothing to quarantine against. Neither does a column whose
+        # ONE verdict (mode_holdout_kind, the cast share) refuses it: the dry
+        # run names those columns, and every check about them keeps blocking.
         structural = {"source_columns_available", "sample_available"}
+        share_refused = _share_refused_columns(checks)
         for check in checks:
             if check.get("check") in structural:
+                continue
+            if check.get("check") == "in_file_dedupe_unsupported":
+                continue
+            if share_refused and check.get("blocks_transfer") and _check_names_any(check, share_refused):
+                from services.validation_mode_contract import CAST_SHARE_RULE
+
+                check["note"] = f"Not held out: {CAST_SHARE_RULE}"
+                continue
+            if (
+                check.get("check") == "duplicate_keys"
+                and check.get("blocks_transfer")
+                and not check.get("probe_unavailable")
+            ):
+                # A repeated declared key is not a bad cell: no writer holds
+                # the second copy out, so "will quarantine" would land it
+                # twice (QA C2). The duplicate policy decides, not leniency.
+                # Only a key actually found repeated stays blocked here.
+                check["note"] = (
+                    lenient_duplicate_key_note(table_routes)
+                    if table_routes
+                    else LENIENT_DUPLICATE_KEY_NOTE
+                )
                 continue
             if check.get("blocks_transfer"):
                 check["blocks_transfer"] = False

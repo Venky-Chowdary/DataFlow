@@ -51,7 +51,6 @@ from services.type_system import (
     generated_always_overwrite_risk,
     geography_contract_would_collapse,
     identity_domain_would_invent,
-    identity_polarity_would_collapse,
     integer_width_would_narrow,
     interval_family_would_collapse,
     interval_precision_would_narrow,
@@ -247,7 +246,7 @@ def is_precision_collapse_coercion(
         return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
-    if enum_domain_would_collapse(source_type, target_type):
+    if enum_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -300,9 +299,13 @@ def is_precision_collapse_coercion(
         return True
     if objectid_would_collapse(source_type, target_type):
         return True
+    # A GENERATED ALWAYS / IDENTITY source landing on a plain column is a DDL
+    # difference (the destination accepts client writes the source refused),
+    # reported by identity carry (``services.identity_carry``). Every value
+    # arrives exactly, so it is not a fidelity collapse: grading it as one put
+    # a Risk Contract on every identity primary key and computed column (D93).
+    # Writing *into* a GENERATED ALWAYS target still fails, so that stays.
     if generated_always_overwrite_risk(target_type):
-        return True
-    if identity_polarity_would_collapse(source_type, target_type):
         return True
     if identity_domain_would_invent(source_type, target_type):
         return True
@@ -911,7 +914,7 @@ def is_lossy_coercion(
             return True
         if enum_set_domain_would_reject(source_type, target_type):
             return True
-        if enum_domain_would_collapse(source_type, target_type):
+        if enum_domain_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
@@ -957,8 +960,6 @@ def is_lossy_coercion(
         if objectid_would_collapse(source_type, target_type):
             return True
         if generated_always_overwrite_risk(target_type):
-            return True
-        if identity_polarity_would_collapse(source_type, target_type):
             return True
         if identity_domain_would_invent(source_type, target_type):
             return True
@@ -1112,7 +1113,7 @@ def is_lossy_coercion(
         return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
-    if enum_domain_would_collapse(source_type, target_type):
+    if enum_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -1160,8 +1161,6 @@ def is_lossy_coercion(
     if objectid_would_collapse(source_type, target_type):
         return True
     if generated_always_overwrite_risk(target_type):
-        return True
-    if identity_polarity_would_collapse(source_type, target_type):
         return True
     if identity_domain_would_invent(source_type, target_type):
         return True

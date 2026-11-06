@@ -78,6 +78,10 @@ _SCHEDULE_DECLARATIVE_KEYS = frozenset(
         "source_table",
         "dest_connector_id",
         "dest_table",
+        # Where the table lives (QA Snowflake D11): a manifest without it
+        # re-applies the pipeline into the connector's default schema.
+        "dest_schema",
+        "dest_database",
         "interval",
         "enabled",
         "cron",
@@ -559,7 +563,7 @@ def apply_manifest(
                 ):
                     raise WorkspaceScopeError("Schedule belongs to another workspace")
                 if sid and existing:
-                    updated = update_schedule(sid, apply_spec)
+                    updated = update_schedule(sid, apply_spec, refuse_unrunnable_mappings=True)
                     results.append({
                         "kind": kind,
                         "action": "update",
@@ -568,7 +572,7 @@ def apply_manifest(
                         "name": str(apply_spec.get("name") or ""),
                     })
                 else:
-                    created = create_schedule(apply_spec)
+                    created = create_schedule(apply_spec, refuse_unrunnable_mappings=True)
                     results.append({
                         "kind": kind,
                         "action": "create",

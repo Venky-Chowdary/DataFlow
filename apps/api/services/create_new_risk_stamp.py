@@ -74,7 +74,7 @@ def apply_create_new_risk_stamps(
         is_precision_collapse_coercion,
         normalize_logical_type as _nlt,
     )
-    from services.data_profiler import source_numbers_are_typed
+    from services.data_profiler import source_numbers_are_typed, source_types_are_authoritative
     from services.type_system import (
         assess_create_new_type_risk,
         ddl_type,
@@ -115,9 +115,19 @@ def apply_create_new_risk_stamps(
             else ""
         )
         if db and stamped:
-            physical_from_stamp = create_new_mapping_target_type(
-                stamped, db, samples=col_samples, source_db=source_db_type
-            )
+            if physical_from_src and stamped.casefold() == physical_from_src.casefold():
+                # The stamp is the carrier the kernel invents for this source,
+                # i.e. a destination token. Re-reading it under the *source*
+                # dialect turned MongoDB's integer carrier ``long`` into Oracle's
+                # text LOB ``LONG``: every Oracle NUMBER(p,0) landed in Mongo as
+                # a string and run 2 blocked below the floor (D279). The kernel's
+                # own spelling is kept, so a stamp that only differs in case
+                # (``DATE`` vs ``date``) still re-derives its verdict below.
+                physical_from_stamp = physical_from_src
+            else:
+                physical_from_stamp = create_new_mapping_target_type(
+                    stamped, db, samples=col_samples, source_db=source_db_type
+                )
             if reinvent_would_drop_dest_instant_carrier(
                 stamped, physical_from_stamp, dest_db=db
             ):
@@ -140,13 +150,17 @@ def apply_create_new_risk_stamps(
                 tgt = physical_from_src
             elif (
                 physical_from_src
+                and not source_types_are_authoritative("database", source_db_type)
                 and is_timezone_polarity_loss(src, physical_from_stamp or stamped, dest_db=db)
                 and not is_timezone_polarity_loss(src, physical_from_src, dest_db=db)
             ):
-                # The stamp was read off naive samples, but the source column is
-                # an instant (a declared source zone makes it one). Keeping the
-                # stamp created a wall-clock column that refuses every zoned
-                # value as "timezone-aware into NTZ" (D259).
+                # A schemaless source (Kafka, a file) had its stamp read off
+                # naive samples, but the source column is an instant (a declared
+                # source zone makes it one). Keeping the stamp created a
+                # wall-clock column that refuses every zoned value as
+                # "timezone-aware into NTZ" (D259). A source that declares its
+                # own types never has a sample-read stamp: its naive stamp is a
+                # chosen narrowing, kept and graded as the loss it is.
                 tgt = physical_from_src
             # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
             # Never erase that with source-derived TEXT create-new.

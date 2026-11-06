@@ -47,7 +47,8 @@ def test_oracle_utf8_is_cesu8_al32utf8_is_utf8():
 def test_mysql_latin1_is_cp1252_so_euro_fits():
     cap = classify_capacity("mysql", "VARCHAR(10) CHARACTER SET latin1")
     assert cap.form == "cp1252"
-    assert cap.codec == "cp1252"
+    # MySQL latin1 is cp1252 plus five bytes cp1252 leaves undefined (QA D1).
+    assert cap.codec == "mysql_latin1"
     assert bind_unicode_text("€", engine="mysql", dest_type="VARCHAR CHARACTER SET latin1") == "€"
 
 

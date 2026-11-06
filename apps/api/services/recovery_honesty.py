@@ -96,7 +96,7 @@ def honesty_dict() -> dict[str, Any]:
         "operator_runbook": "docs/MIGRATION_ROLLBACK.md",
         "notes": [
             "Prefer create-new or staging schema before cutover.",
-            "DISCARD_STAGING is the only executable DataWrap rollback today.",
+            "DISCARD_STAGING is the only executable Datawrap rollback today.",
             "If production already swapped — restore from your warehouse backup / time-travel.",
             "Never claim Datawrap replaces DBA restore tooling.",
         ],

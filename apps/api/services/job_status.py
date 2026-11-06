@@ -8,6 +8,11 @@ values coerced to NULL, so dashboards, polling, and reconciliation stay honest.
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
 COMPLETED = "completed"
 COMPLETED_WITH_QUARANTINE = "completed_with_quarantine"
 # The load wrote nothing because today's file has not arrived. The job
@@ -91,6 +96,33 @@ def _count(value: object) -> int | None:
         return None
 
 
+def keyed_landing(sync_mode: str | None, write_mode: str | None = "") -> bool:
+    """Whether a write addresses rows by key (so COUNT growth is new keys only).
+
+    The one predicate every cancel measurement uses: an upsert/merge write
+    mode, or a convergent keyed sync mode (upsert, incremental_deduped,
+    ``*_mirror``, SCD2) or CDC — overwrite is handled on its own branch.
+    """
+    from services.execution_engine_contract import is_idempotent_sync
+    from services.sync_cursor import is_overwrite_sync
+
+    if str(write_mode or "").strip().lower() in {"upsert", "merge"}:
+        return True
+    sync = str(sync_mode or "").strip().lower()
+    if sync.startswith("cdc"):
+        return True
+    return is_idempotent_sync(sync) and not is_overwrite_sync(sync)
+
+
+def mark_write_rolled_back(exc: BaseException) -> None:
+    """A route's own evidence: its transaction (or staged swap) never committed.
+
+    Set by a COPY route that rolled its write back on the cancel before any
+    data commit; :func:`measure_cancel_landing` claims a rollback only on it.
+    """
+    exc.write_rolled_back = True  # type: ignore[attr-defined]
+
+
 def measure_cancel_landing(
     exc: BaseException,
     *,
@@ -100,21 +132,39 @@ def measure_cancel_landing(
     sync_mode: str,
     rows_before: object,
     table_existed_before: object,
-    keyed: bool,
     atomic_overwrite: bool,
+    keyed: bool | None = None,
+    write_mode: str = "",
+    overwrite_applied: bool | None = None,
 ) -> None:
-    """D199 — stamp what the destination holds once a cancelled run stopped.
+    """D199 / C16 — stamp what the destination holds once a cancelled run stopped.
 
-    The committed-batch tally under-counts a pooled load: a chunk writer that
-    was already inside its commit when the cancel landed adds rows the
-    progress reporter never applied (QA: "23,552 left behind", MySQL held
-    25,120). By the time the cancel reaches here every writer has stopped, so
-    a COUNT is the real number. It is attributed to *this run* only when the
-    arithmetic is exact: an append (rows before known) or an overwrite that
-    cleared or created the table, or a keyed upsert into a table that did not
-    exist or was empty before the job. A keyed upsert into a populated table
-    grows by new keys only, and an atomic overwrite rolls back, so those keep
+    The committed-batch tally is the writer's acknowledgement, not the
+    destination. It under-counts a pooled load (a chunk writer already inside
+    its commit when the cancel landed: QA "23,552 left behind", MySQL held
+    25,120) and over-counts a write that was rolled back: a COPY inside one
+    transaction, or a run-created table dropped by the copy's undo, reported
+    "1,024 rows retained" / "2,048 rows written and retained" for a table that
+    no longer existed (QA C16, MySQL D11). By the time the cancel reaches here
+    every writer has stopped, so the destination is measured, and a number is
+    attributed to this run only on evidence:
+
+    * the table does not exist → nothing of this run is there (0, exact);
+    * the run created it → every row there is this run's;
+    * a keyless append with the rows before known → the growth;
+    * an overwrite whose route reports its write rolled back
+      (:func:`mark_write_rolled_back`) and that holds exactly its pre-run
+      count → 0; an overwrite that clears first and whose first batch was
+      written (``overwrite_applied``) → every row now there; an overwrite that
+      wrote nothing (``overwrite_applied`` false) and holds its pre-run count
+      → 0. A row count alone never proves a rollback: a committed same-size
+      replacement holds the same count. Anything else is unattributed;
+    * a keyed write into a table that was empty before → every row there.
+
+    A keyed write into a populated table grows by new keys only, so it keeps
     the tally, labelled as a lower bound, beside the destination's own count.
+    ``destination_rows_before`` is stamped so the message never says "as it
+    did before" unless the count is the pre-run count.
     """
     try:
         from services.dest_precount import precount_table
@@ -124,26 +174,164 @@ def measure_cancel_landing(
         now = None
     if now is None:
         return
+    exists_now: bool | None = None
+    if int(now) == 0:
+        # ``precount_table`` answers 0 for a missing table: tell the two apart,
+        # the record says which one the operator is looking at.
+        try:
+            from services.dest_precount import destination_table_exists
+            from services.dialect_profiles import schema_from_cfg
+
+            exists_now = destination_table_exists(
+                dest_type, dest_cfg, schema=schema_from_cfg(dest_type, dest_cfg),
+                table_name=table,
+            )
+        except Exception:  # noqa: BLE001 - unknown existence stays unknown
+            exists_now = None
     exc.destination_rows_now = int(now)  # type: ignore[attr-defined]
+    before = _count(rows_before)
+    if before is not None:
+        exc.destination_rows_before = before  # type: ignore[attr-defined]
+    if exists_now is False:
+        exc.destination_table_exists = False  # type: ignore[attr-defined]
+        exc.destination_rows_by_run = 0  # type: ignore[attr-defined]
+        return
     from services.sync_cursor import is_overwrite_sync
 
+    if keyed is None:
+        keyed = keyed_landing(sync_mode, write_mode)
+    rolled_back = getattr(exc, "write_rolled_back", None) is True
+    unchanged = before is not None and int(now) == before
     by_run: int | None = None
-    if is_overwrite_sync(sync_mode):
-        if not atomic_overwrite or table_existed_before is False:
+    if table_existed_before is False:
+        # Created by this run: no older row can be there.
+        by_run = int(now)
+    elif is_overwrite_sync(sync_mode):
+        if rolled_back or overwrite_applied is False:
+            by_run = 0 if unchanged else None
+        elif not atomic_overwrite and overwrite_applied is True:
+            by_run = int(now)
+        elif not atomic_overwrite and overwrite_applied is None and not unchanged:
+            # A clear-first overwrite that changed the table cleared it.
             by_run = int(now)
     elif not keyed:
-        before = _count(rows_before)
         if before is not None and now >= before:
             by_run = int(now) - before
-    elif table_existed_before is False or _count(rows_before) == 0:
-        # A keyed upsert into a table this job created, or that was empty
-        # before its first pass, has no older key a write could have replaced:
-        # every row there is this job's. On a resumed pass ``rows_before`` is
-        # the first pass's pre-write count, so the number covers every pass
-        # (QA: "121,856 committed" while MySQL held 151,744).
+    elif before == 0:
+        # A keyed write into a table that was empty before its first pass has
+        # no older key a write could have replaced: every row there is this
+        # job's. On a resumed pass ``rows_before`` is the first pass's
+        # pre-write count, so the number covers every pass (QA: "121,856
+        # committed" while MySQL held 151,744).
         by_run = int(now)
     if by_run is not None:
         exc.destination_rows_by_run = by_run  # type: ignore[attr-defined]
+
+
+def checkpoint_partial_chunk_on_cancel(
+    exc: BaseException,
+    *,
+    checkpoint: Any,
+    checkpoint_service: Any,
+    committed_offset: int,
+    rows_applied: int,
+    rejected_applied: int,
+    write_mode: str,
+    sync_mode: str,
+    dest_type: str,
+    job_id: str,
+    connector: str = "",
+    next_chunk_idx: int | None = None,
+    use_keyset: bool = False,
+    keyset_col: str = "",
+    incremental: bool = False,
+) -> bool:
+    """Make the committed prefix of a cancelled chunk a durable checkpoint.
+
+    A transactional writer rolls its chunk back on cancel, so the last saved
+    checkpoint already matches the destination. A schemaless destination
+    (MongoDB) commits every batch on its own: the documents a cancelled chunk
+    had written stay, while no checkpoint covered them. Retry was refused as
+    a duplicate and Resume as "No durable checkpoint" — the operator had no
+    way on (QA r12 Mongo D5).
+
+    The writer reports the source rows its committed batches covered
+    (``chunk_source_rows_consumed``) and the quarantine rows among them. The
+    checkpoint is advanced only when D199's destination count proves that
+    prefix is exactly what landed (``destination_rows_by_run`` equals the
+    applied tally plus this chunk's writes): a later chunk that also committed
+    out of order, a keyed upsert (no row offset), or an overwrite (the resumed
+    run re-parks the collection) leave the checkpoint as it was.
+
+    The writer counts rows of the page it was handed, so the offset it implies
+    is a source-row offset only when the chunk is the next one to apply
+    (``next_chunk_idx``; a pool may have finished a later chunk first) and the
+    page was not shaped (a recipe that filters or expands rows breaks the
+    one-to-one mapping). Under keyset pagination the resume bookmark must be
+    the key after the consumed prefix, which the chunk stamps on the cancel;
+    an incremental run keeps its per-page watermark semantics and is left to
+    the existing resume. Returns True when a checkpoint was saved.
+    """
+    consumed = getattr(exc, "chunk_source_rows_consumed", None)
+    rows_written = getattr(exc, "rows_written", None)
+    by_run = getattr(exc, "destination_rows_by_run", None)
+    if (
+        checkpoint is None
+        or checkpoint_service is None
+        or not consumed
+        or rows_written is None
+        or by_run is None
+    ):
+        return False
+    from services.sync_cursor import is_overwrite_sync
+    from src.transfer.engine_family import is_schemaless_family
+
+    if str(write_mode or "").lower() == "upsert" or is_overwrite_sync(sync_mode):
+        return False
+    if incremental or not is_schemaless_family(dest_type):
+        return False
+    if int(by_run) != int(rows_applied) + int(rows_written):
+        return False
+    if next_chunk_idx is None or getattr(exc, "chunk_idx", None) != int(next_chunk_idx):
+        return False
+    if getattr(exc, "chunk_shaped", True):
+        return False
+    bookmark = getattr(exc, "chunk_keyset_bookmark", None)
+    if use_keyset and not bookmark:
+        return False
+    details = [
+        d for d in (getattr(exc, "chunk_rejected_details", None) or []) if isinstance(d, dict)
+    ]
+    if details and job_id:
+        from services.quarantine_dlq import persist_rejected_rows
+
+        # The chunk never finished, so its quarantine rows were not persisted
+        # with it; the resumed pass starts after them and would not see them.
+        persist_rejected_rows(
+            job_id=str(job_id),
+            rejected_details=details,
+            source="stream_batch_cancel",
+            connector=str(connector or ""),
+        )
+    checkpoint.offset = int(committed_offset) + int(consumed)
+    checkpoint.rows_processed = int(rows_applied) + int(rows_written)
+    if use_keyset:
+        checkpoint.cursor_value = bookmark
+        checkpoint.cursor_column = str(keyset_col or "") or checkpoint.cursor_column
+    checkpoint.rejected_rows = int(rejected_applied) + len(details)
+    checkpoint.phase = "writing"
+    checkpoint.status = "cancelled"
+    record = getattr(checkpoint_service, "record_cancelled_progress", None)
+    if not callable(record):
+        return False
+    try:
+        saved = bool(record(checkpoint))
+    except Exception as save_exc:  # noqa: BLE001 - the cancel itself still stands
+        logger.warning("partial-chunk checkpoint not saved on cancel: %s", save_exc)
+        return False
+    if saved:
+        exc.partial_chunk_checkpointed = True  # type: ignore[attr-defined]
+    return saved
 
 
 def cancel_outcome_for(
@@ -151,29 +339,57 @@ def cancel_outcome_for(
     *,
     destination_rows_by_run: int | None = None,
     destination_rows_now: int | None = None,
+    destination_table_exists: bool | None = None,
+    destination_rows_before: int | None = None,
+    write_rolled_back: bool = False,
+    tally_is_commit_evidence: bool = True,
     tally_is_exact: bool = False,
 ) -> dict:
-    """What a cancel left behind: committed rows are never rolled back.
+    """What a cancel left behind, stated as the destination holds it.
 
     Cancel is honoured at the next checkpoint, so a chunk (or the whole load)
-    can already be committed when the job turns ``cancelled``. The job must
-    say so instead of reading as a clean stop (QA MXD10).
+    can already be committed when the job turns ``cancelled``; committed rows
+    are not rolled back and the job must say so (QA MXD10).
 
-    D199: the number comes from the destination when it was re-counted after
-    the writers stopped; otherwise it is the committed-batch tally and says
-    it is a lower bound.
+    D199 / C16: the number comes from the destination when it was re-counted
+    after the writers stopped. ``rows_committed`` (the writer's tally) is only
+    the fallback, labelled a lower bound — and only where the tally counts
+    committed batches. A COPY route's tally is a progress meter of rows sent
+    into one transaction (``tally_is_commit_evidence=False``): without the
+    destination's attribution the outcome says the number is unknown, never
+    the meter. A rollback is claimed only on the route's evidence
+    (``write_rolled_back``) or a destination table that no longer exists, and
+    "as it did before the run" only when the count is the pre-run count.
     """
     tally = _count(rows_committed) or 0
     by_run = _count(destination_rows_by_run)
     now = _count(destination_rows_now)
+    before = _count(destination_rows_before)
     if by_run is not None:
         rows, source = by_run, "destination_count"
     elif tally_is_exact:
         # The run finished and Gate-8 counted it before the cancel landed.
         rows, source = tally, "completed_run"
+    elif not tally_is_commit_evidence and (tally or now):
+        rows, source = None, "unknown"
     else:
         rows, source = tally, "committed_batches"
-    if rows and source == "completed_run":
+    rolled_back = (
+        source == "destination_count"
+        and rows == 0
+        and (bool(write_rolled_back) or destination_table_exists is False)
+    )
+    if source == "unknown":
+        held = f"the destination table now holds {now:,} row(s)" if now is not None else (
+            "the destination could not be counted"
+        )
+        message = (
+            f"Transfer cancelled by user. {held[0].upper()}{held[1:]}; how many of them "
+            "this run wrote could not be established (the route did not report "
+            "whether its write was committed or undone). Count the destination "
+            "before re-running an append."
+        )
+    elif rows and source == "completed_run":
         message = (
             f"Cancelled after {rows:,} row(s) were already committed to the "
             "destination — the load had finished when the cancel landed; they "
@@ -198,19 +414,48 @@ def cancel_outcome_for(
             "not rolled back. Re-run with full_refresh_overwrite or clear the "
             "destination table to undo them."
         )
+    elif source == "destination_count" and destination_table_exists is False:
+        message = (
+            "Transfer cancelled by user. No row of this run was kept: the "
+            "destination table does not exist (counted on the destination "
+            "after the writers stopped"
+            + ("; the rows the writer had sent were rolled back with the table"
+               if tally else "")
+            + "). A retry starts from zero."
+        )
+    elif source == "destination_count":
+        if before is not None and now == before:
+            held = f"holds {now:,} row(s), as it did before the run"
+        elif before is not None:
+            held = f"now holds {now or 0:,} row(s) (it held {before:,} before the run)"
+        else:
+            held = f"now holds {now or 0:,} row(s)"
+        message = (
+            "Transfer cancelled by user. No row of this run was kept"
+            + (": the write was rolled back" if write_rolled_back else "")
+            + f" — the destination table {held} (counted on the destination "
+            "after the writers stopped). A retry starts from zero."
+        )
     else:
         message = "Transfer cancelled by user"
-    out = {
-        "partial_write": bool(rows),
+    out: dict[str, Any] = {
+        "partial_write": bool(rows) if rows is not None else None,
         "rows_committed": rows,
         "rows_committed_source": source,
-        "rolled_back": False,
+        "rolled_back": rolled_back,
         "message": message,
     }
+    if source == "unknown":
+        out["rows_committed_known"] = False
+        out["progress_tally"] = tally
     if source == "committed_batches" and rows:
         out["rows_committed_is_lower_bound"] = True
     if now is not None:
         out["destination_rows_now"] = now
+    if before is not None:
+        out["destination_rows_before"] = before
+    if destination_table_exists is not None:
+        out["destination_table_exists"] = bool(destination_table_exists)
     if by_run is not None and tally != by_run:
         out["committed_batches_tally"] = tally
     return out

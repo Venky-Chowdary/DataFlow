@@ -403,10 +403,22 @@ def _build_scd_table(
     column_types: dict[str, str],
     db_type: str,
     cols: dict[str, Any] | None = None,
+    *,
+    mappings: list[dict[str, Any]] | None = None,
+    source_schema_catalog: dict[str, Any] | None = None,
 ) -> Any:
-    """Build or reflect the destination table with SCD2 audit columns."""
+    """Build or reflect the destination table with SCD2 audit columns.
+
+    ``source_schema_catalog`` is the source's create-new fidelity catalog. A
+    CREATE that never saw it took the server default collation, so a MySQL
+    ``utf8mb4_0900_ai_ci`` history table on SQL Server came back as
+    ``SQL_Latin1_General_CP1_CI_AS`` and run 2 refused DataFlow's own table
+    as a fidelity collapse (D275). The planner stamps the destination-native
+    equality the way the buffered and streaming CREATE paths do; keys are
+    never carried onto a versioned table (one business key, many rows).
+    """
     import sqlalchemy as sa
-    from connectors.generic_sql import _build_table_for_write
+    from connectors.generic_sql import _build_table_for_write, _fidelity_dialect
 
     cols = resolve_scd2_cols(cols)
     all_cols = list(dict.fromkeys(list(target_cols) + list(_stamp_set(cols))))
@@ -423,6 +435,29 @@ def _build_scd_table(
         if scd_col not in all_types:
             all_types[scd_col] = logical
 
+    dialect_name = engine.dialect.name if engine.dialect else ""
+    inspector = sa.inspect(engine)
+    table_exists = inspector.has_table(table_name, schema=schema_name)
+    fidelity_plan = None
+    if not table_exists and source_schema_catalog:
+        try:
+            from services.schema_fidelity import resolve_create_fidelity_plan
+
+            fidelity_plan = resolve_create_fidelity_plan(
+                source_schema_catalog=source_schema_catalog,
+                mappings=mappings,
+                target_columns=list(target_cols),
+                target_types=[str(column_types.get(c) or "") for c in target_cols],
+                dest_dialect=_fidelity_dialect(db_type, dialect_name),
+                table_already_exists=False,
+                dest_table=table_name,
+                dest_schema=schema_name or "",
+                carry_keys=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - a types-only CREATE still runs
+            logging.getLogger(__name__).warning(
+                "SCD2 schema fidelity plan failed; CREATE carries types only: %s", exc
+            )
     table_obj = _build_table_for_write(
         engine,
         table_name,
@@ -431,11 +466,9 @@ def _build_scd_table(
         all_types,
         db_type=db_type,
         conflict_columns=None,
+        fidelity_plan=fidelity_plan,
+        declare_key=False,
     )
-
-    dialect_name = engine.dialect.name if engine.dialect else ""
-    inspector = sa.inspect(engine)
-    table_exists = inspector.has_table(table_name, schema=schema_name)
     if table_exists:
         _ensure_scd_columns(engine, table_obj, dialect_name, cols)
     else:
@@ -760,7 +793,6 @@ def _scd2_map_context(
 ) -> dict[str, Any]:
     """Shared Map / dest-type / policy facts for prepare and apply."""
     from connectors.writer_common import (
-        sanitize_identifier,
         transform_error_policy_for_validation_mode,
     )
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -781,7 +813,9 @@ def _scd2_map_context(
         stamped = str(m.get("target_type") or m.get("dest_type") or "").strip()
         if not tgt_raw or not stamped:
             continue
-        tgt = sanitize_identifier(tgt_raw, preserve_case=True)
+        from src.transfer.writer_column_spelling import physical_column
+
+        tgt = physical_column(tgt_raw)
         dest_types[tgt] = stamped
         if tgt_raw != tgt:
             dest_types.pop(tgt_raw, None)
@@ -1263,8 +1297,13 @@ def apply_scd2(
     clear_records: bool = False,
     complete_snapshot: bool = False,
     scd2_opts: dict[str, Any] | None = None,
+    source_endpoint: Any = None,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
+
+    ``source_endpoint`` is the run's source; its create-new catalog (keys,
+    nullability, collation) reaches the history table's CREATE exactly as on
+    the mirror and streaming paths (D275).
 
     ``conflict_columns`` is the destination primary key (one or more columns).
     Returns a summary dict with ``rows_written`` (new current versions),
@@ -1360,10 +1399,19 @@ def apply_scd2(
             for c in target_cols
         }
 
+        source_schema_catalog = None
+        if source_endpoint is not None:
+            from src.transfer.adapters_introspect import source_schema_catalog_for_endpoint
+
+            source_schema_catalog = source_schema_catalog_for_endpoint(
+                source_endpoint, list(columns or []), fallback_types=dict(schema or {})
+            )
         try:
             table_obj = _build_scd_table(
                 engine, table, schema_name, target_cols, column_types,
                 db_type, cols,
+                mappings=mappings,
+                source_schema_catalog=source_schema_catalog,
             )
             # Window start for the Gate-8 version recount: every stamp this
             # call writes is >= this instant. Callers that split the run

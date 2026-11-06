@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -168,23 +169,71 @@ def _session_idled_out(token: str, email: str) -> bool:
     return False
 
 
+def _issued_before_deletion(email: str, issued_at: Any) -> bool:
+    """A session issued at or before its account was deleted (explicit marker).
+
+    Only a stored account that was *deleted* leaves a marker
+    (``user_store.mark_account_deleted``). An identity that never had a stored
+    record — SSO (domain allowlist / auto-provision), SCIM-provisioned users —
+    has none and is never refused for "no record" (B1, review 4).
+
+    During a MongoDB outage (L1): the session itself is verified from this
+    node's file copy only, so a session issued on another node is refused —
+    stored users fail closed; the marker is read from Mongo and this node's
+    mirror, whichever answers.
+    """
+    from services.user_store import account_deleted_since
+
+    # DeletionMarkerUnavailable propagates: the caller answers 503 (review 5).
+    deleted_at = account_deleted_since(email)
+    if deleted_at is None:
+        return False
+    try:
+        issued = float(issued_at) if issued_at is not None else 0.0
+    except (TypeError, ValueError):
+        issued = 0.0
+    # Unknown issue time on a deleted account: refuse (fail closed).
+    return issued <= deleted_at
+
+
+def _deletion_reason(email: str, issued_at: Any) -> str | None:
+    from services.user_store import DeletionMarkerUnavailable
+
+    try:
+        return "account_deleted" if _issued_before_deletion(email, issued_at) else None
+    except DeletionMarkerUnavailable:
+        logger.warning("deleted-account marker unreadable; session refused with 503")
+        return "auth_store_unavailable"
+
+
 def _attach_user_reason(request: Request, token: str) -> str | None:
     email = verify_token(token)
     if email:
         from services.user_store import get_user_record as get_stored_user
 
         stored = get_stored_user(email)
-        if stored and stored.get("status") == "disabled":
+        # Same statuses as the cookie path (review 5): disabled and banned.
+        if stored and stored.get("status") in ("disabled", "banned"):
             return "disabled_user"
         if _session_idled_out(token, email):
             return "session_idle_timeout"
         _heal_rekey_if_pending(stored, email)
-        request.state.user_email = email
         user = lookup_user(email)
+        from services.auth_sessions import session_created_at
+        from src.services.auth_service import token_jti
+
+        # Even when the email has an account again: a session issued before
+        # the old account's deletion belongs to that deleted account.
+        jti = token_jti(token)
+        if jti:
+            refused = _deletion_reason(email, session_created_at(jti))
+            if refused:
+                return refused
+        request.state.user_email = email
         if user:
             request.state.user = user
         else:
-            # Valid token for a user not in the static user list: default to viewer.
+            # Valid legacy token for a user not in the static user list: viewer.
             request.state.user = {"email": email, "role": "viewer"}
         return None
 
@@ -290,8 +339,13 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     # request: retry the membership/org move; the flag stays set if the
     # retry fails again, so this never swallows the failure.
     _heal_rekey_if_pending(stored, email)
-    request.state.user_email = email
+    refused = _deletion_reason(email, doc.get("created_at_f") or doc.get("created_at"))
+    if refused:
+        return refused
     user = lookup_user(email)
+    request.state.user_email = email
+    # Never None: an identity with no static/stored entry (SSO, SCIM) is a viewer
+    # at the gate, exactly as on the bearer path (M1).
     request.state.user = user if user else {"email": email, "role": "viewer"}
     from services.auth_state import get_auth_state
     from services.session_policy import enforce_idle
@@ -467,6 +521,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         status_code=401,
                         content={"detail": "Authentication required"},
                         headers={"WWW-Authenticate": bearer_challenge()},
+                    )
+                if reason_code == "auth_store_unavailable":
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "detail": "Sign-in state cannot be verified right now. Try again shortly.",
+                            "reason": "auth_store_unavailable",
+                        },
                     )
                 if reason_code == "session_idle_timeout":
                     return JSONResponse(

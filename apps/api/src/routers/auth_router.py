@@ -1109,7 +1109,15 @@ async def me(request: Request):
     # is resolved in that same workspace: a response whose permissions were
     # decided somewhere other than the workspace it reports is not an answer.
     workspace_id = resolved_workspace_id(user, named_workspace_id)
-    default_workspace_id = _landing_workspace(request, user, email, named_workspace_id)
+    # What to remember as last used: the workspace, or a platform admin's view
+    # (All / Unassigned), which the stored id above never is (D218).
+    remembered = named_workspace_id
+    if not header_rejected and not named_workspace_id:
+        try:
+            remembered = tenant_scope(request).requested_workspace_id
+        except HTTPException:
+            remembered = ""
+    default_workspace_id = _landing_workspace(request, user, email, remembered)
     summary = permission_summary(user, workspace_id)
     account = get_stored_user(email)
     workspace_role = ""

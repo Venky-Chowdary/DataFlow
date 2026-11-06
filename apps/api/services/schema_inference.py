@@ -514,6 +514,78 @@ def _refuses_numeric_inference(text: str) -> bool:
     return _CURRENCY_RE.search(text) is not None
 
 
+def _invalid_calendar_family(text: str) -> str:
+    """``DATE`` / ``TIMESTAMP`` / ``TIMESTAMPTZ`` for a day or clock overflow, else ``""``.
+
+    Only an ISO value whose month is real and whose day runs past that month's
+    length (``2024-02-30``, ``2025-04-31``: day <= 31), or whose date is real and
+    clock is not (``2024-02-10 25:61:00``), re-votes. Month 00 or over 12, day 00
+    or over 31 and year 0000 are not a date with an impossible day — they are
+    another layout (a YYYY-DD-MM file) or not a date at all, and voting DATE for
+    them would load swapped rows silently wrong. ``classify_value`` keeps all of
+    these text; only the file inference (``infer_column(...,
+    invalid_calendar_votes=True)``) counts the vote. A zone suffix keeps a
+    zoned stamp zoned.
+    """
+    import calendar
+
+    from connectors.sql_temporal import _CLOCK_RE, _ISO_CIVIL_RE, invalid_calendar_reason
+
+    if _CLOCK_RE.match(text) is not None or not invalid_calendar_reason(text):
+        return ""
+    m = _ISO_CIVIL_RE.match(text)
+    if m is None:
+        return ""
+    year, month, day = int(m.group("y")), int(m.group("m")), int(m.group("d"))
+    if year == 0 or not 1 <= month <= 12 or not 1 <= day <= 31:
+        return ""
+    day_overflow = day > calendar.monthrange(year, month)[1]
+    if not day_overflow and not m.group("clock"):
+        return ""
+    if not m.group("clock"):
+        return "DATE"
+    return "TIMESTAMPTZ" if _has_explicit_timezone_suffix(text) or text.upper().endswith("UTC") else "TIMESTAMP"
+
+
+_TEMPORAL_VOTES = ("DATE", "TIMESTAMP", "TIMESTAMPTZ")
+
+
+def _count_invalid_calendar_votes(
+    counts: "Counter[str]", non_empty: list[str], notes: list[str]
+) -> None:
+    """Re-vote a minority of impossible days in a real date column (QA browser 3).
+
+    One ``2024-02-30`` among real dates inside a file's plan sample demoted the
+    whole column to text, and the plan then refused it as VARCHAR -> DATE; the
+    same cell beyond the sample is held out alone by the write path. Here such
+    a cell votes for its temporal family only when every other non-blank
+    sample is a real date/time, at least one is, and the impossible ones stay
+    below ``INVALID_CALENDAR_MAX_SHARE`` of the samples. The cell itself is
+    still refused and quarantined at write.
+    """
+    from connectors.sql_temporal import INVALID_CALENDAR_MAX_SHARE
+
+    bad = [f for f in (_invalid_calendar_family(v.strip()) for v in non_empty) if f]
+    real = sum(counts.get(t, 0) for t in _TEMPORAL_VOTES)
+    # Explicit: every other sample is a real date/time (the non-text votes are
+    # temporal only) and the text votes are exactly these overflows.
+    if not bad or real == 0 or counts.get("VARCHAR", 0) != len(bad):
+        return
+    if not (set(counts) - {"VARCHAR"}) <= set(_TEMPORAL_VOTES):
+        return
+    if len(bad) >= INVALID_CALENDAR_MAX_SHARE * (len(bad) + real):
+        return
+    counts["VARCHAR"] -= len(bad)
+    if counts["VARCHAR"] <= 0:
+        del counts["VARCHAR"]
+    for family in bad:
+        counts[family] += 1
+    notes.append(
+        f"{len(bad)} sample value(s) name no real calendar day — counted as "
+        "dates; each is held out at write with its reason"
+    )
+
+
 def classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -670,18 +742,21 @@ def infer_type(
 
 def infer_schema_map(
     samples_by_field: dict[str, list[str]],
+    *,
+    invalid_calendar_votes: bool = False,
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     """Canonical choke point: field → logical type + full intelligence records.
 
     All introspect paths (Mongo, SQL sample refine, files) should call this
     instead of ad-hoc ``infer_type`` loops so semantic_role / notes stay attached.
+    ``invalid_calendar_votes`` only from a file's own rows (see infer_column).
     """
     schema: dict[str, str] = {}
     intel: dict[str, dict[str, Any]] = {}
     token = _settled_number_locale(samples_by_field)
     try:
         for field, samples in samples_by_field.items():
-            rec = infer_column(samples, field_name=field)
+            rec = infer_column(samples, field_name=field, invalid_calendar_votes=invalid_calendar_votes)
             schema[field] = str(rec["logical_type"])
             intel[field] = rec
     finally:
@@ -953,7 +1028,7 @@ def safe_ddl_logical_type(
 
 
 def infer_column(
-    samples: list[str], *, field_name: str | None = None
+    samples: list[str], *, field_name: str | None = None, invalid_calendar_votes: bool = False
 ) -> dict[str, Any]:
     """Full schema-intelligence record for one column.
 
@@ -1032,6 +1107,8 @@ def infer_column(
         counts: Counter[str] = Counter(
             _classify_value(sample, field_name=field_name) for sample in non_empty
         )
+    if invalid_calendar_votes:
+        _count_invalid_calendar_votes(counts, non_empty, notes)
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:
@@ -1305,7 +1382,10 @@ def declared_string_logical_type(
 # Engines whose every sampled value carries its own type, so a textual carrier
 # is the source's declaration rather than a header placeholder. Files / CSV
 # are absent on purpose: a header declares nothing.
-_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb"})
+# Stripe / Airtable / Notion answer JSON: a metadata value "3" arrives as a
+# JSON string because the API only stores strings there (D272). Their
+# readers keep the JSON scalar type (connectors.saas_typed_schema).
+_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb", "stripe", "airtable", "notion"})
 _UNTYPED_TEXT_TOKENS = frozenset({"TEXT", "VARCHAR", "STRING", "S"})
 
 
@@ -1331,24 +1411,37 @@ def honor_declared_strings(
         return dict(schema)
     out = dict(schema)
     for col, decl in declared.items():
-        if col not in out or str(decl or "").strip().upper() not in _UNTYPED_TEXT_TOKENS:
+        decl_text = str(decl or "").strip()
+        decl_base = decl_text.split("(", 1)[0].strip().upper()
+        if col not in out or decl_base not in _UNTYPED_TEXT_TOKENS:
             continue
         current = str(out.get(col) or "").split("(", 1)[0].strip().upper()
         if current in _UNTYPED_TEXT_TOKENS:
             continue
         samples = [str(v) for v in ((samples_by_field or {}).get(col) or []) if v is not None]
         out[col] = declared_string_logical_type(samples, field_name=col)
-        if out[col] == "VARCHAR" and str(decl).strip().upper() == "TEXT":
-            out[col] = "TEXT"
+        if out[col] == "VARCHAR" and decl_base in {"TEXT", "VARCHAR"}:
+            # Keep the source's own text carrier: TEXT, or a documented
+            # bound such as Stripe metadata's VARCHAR(500).
+            out[col] = decl_text.upper() if decl_base == "TEXT" else decl_text
     return out
 
 
-def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_samples: int = 50) -> list[dict]:
+def infer_columns_from_rows(
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    max_samples: int = 50,
+    invalid_calendar_votes: bool = False,
+) -> list[dict]:
+    """Column records from rows. ``invalid_calendar_votes`` only for a file's own
+    rows (uploads, object stores, SFTP) — never a database's sampled documents
+    (Neo4j, Couchbase, InfluxDB), whose catalog text stays text."""
     columns = []
     sample_rows = rows[:max_samples]
     for i, name in enumerate(headers):
         samples = [str(row[i]) if i < len(row) else "" for row in sample_rows]
-        intel = infer_column(samples, field_name=name)
+        intel = infer_column(samples, field_name=name, invalid_calendar_votes=invalid_calendar_votes)
         columns.append(
             {
                 "name": name.strip() or f"column_{i + 1}",

@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
+from services.connector_auth import resolve_api_key
 from services.value_serializer import json_default, sanitize_json_value
 
 from connectors.weaviate_writer import iter_weaviate_objects_after
@@ -113,7 +114,7 @@ def _weaviate_session(cfg: dict[str, Any]) -> tuple[Any, str, dict[str, str]]:
     from connectors.weaviate_writer import _base_url, _headers, _requests_session
 
     session = _requests_session()
-    api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+    api_key = resolve_api_key(cfg)
     base_url = _base_url(
         str(cfg.get("host") or ""),
         int(cfg.get("port") or 8080),

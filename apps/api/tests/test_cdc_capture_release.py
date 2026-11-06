@@ -101,10 +101,12 @@ def test_route_shared_by_another_cdc_schedule_keeps_slot(monkeypatch) -> None:
     out = mod.release_schedule_cdc_capture(_sched())
     assert out == {"released": False, "reason": "route_shared"}
 
+    # The capture (cursor key, slot) is global: another workspace on the same
+    # route shares it, so releasing one would wipe the other's (C11 follow-up).
     other_ws = _sched(id="s3", workspace_id="tenant-b")
     monkeypatch.setattr(mod, "list_schedules", lambda: [_sched(), other_ws])
+    assert mod.route_still_in_use(_sched()) is True
     non_cdc = _sched(id="s4", sync_mode="full_refresh_append")
-    assert mod.route_still_in_use(_sched()) is False
     monkeypatch.setattr(mod, "list_schedules", lambda: [_sched(), non_cdc])
     assert mod.route_still_in_use(_sched()) is False
 
@@ -133,9 +135,23 @@ def _wire(
 
     by_id = dict(jobs or {})
 
+    class _NoLiveJobs:
+        def find(self, *_a, **_k):
+            return self
+
+        def limit(self, _n):
+            return []
+
+        def __iter__(self):
+            return iter(())
+
     class _Svc:
         def get_job(self, _id):
             return by_id.get(_id, job) if jobs is not None else job
+
+        def get_database(self):
+            # The release now checks for a live run of the route (C11 follow-up).
+            return {"transfer_jobs": _NoLiveJobs()}
 
     monkeypatch.setattr(ms, "get_mongodb_service", lambda: _Svc())
     monkeypatch.setattr(cs, "get_connector", lambda _id, _ws=None: _Connector())

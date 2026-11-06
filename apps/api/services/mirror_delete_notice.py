@@ -35,6 +35,16 @@ MIRROR_LEDGER_SOFT_TEXT = (
     "Keys missing from the source stay as _deleted rows; physical COUNT(*) does not drop."
 )
 WARNING_ID = "mirror_hard_delete"
+#: How the product explains mirror (explain_product, capability cards). Mirror
+#: soft-deletes by default; saying it "removes" rows contradicted the run (D38).
+MIRROR_EXPLAIN_TEXT = (
+    "is upsert plus deletion handling — destination rows whose key the source no "
+    "longer has are soft-deleted by default: kept and flagged _deleted (with "
+    "_deleted_at), so the active rows (WHERE NOT _deleted) match the source while "
+    "physical COUNT(*) does not drop. delete_mode=hard physically deletes them "
+    "instead, announced before the run. It changes destination data, so nothing "
+    "aliases onto it implicitly"
+)
 
 
 def _mode_of(contract: Mapping[str, Any]) -> str:
@@ -119,21 +129,35 @@ def declare_contract_delete_mode(
 ) -> tuple[list[dict[str, Any]], str]:
     """Put an explicit ``delete_mode`` on the run's stream contracts (MCP route).
 
-    Returns ``(contracts, error)``. Only ``soft`` and ``hard`` exist, and only a
-    mirror run deletes anything.
+    Returns ``(contracts, error)``. The vocabulary and the per-sync subsets are
+    ``transfer_policy_values`` (mirror: soft|hard; cdc: hard|soft|off — the CDC
+    snapshot sweep's switch); any other sync mode has nothing to delete.
     """
-    out = [dict(c) for c in contracts or []]
-    declared = str(delete_mode or "").strip().lower()
-    if not declared:
-        return out, ""
-    if declared not in {"soft", "hard"}:
-        return out, f"delete_mode {delete_mode!r} is not one of 'soft' or 'hard'."
     from services.sync_cursor import normalize_sync_mode
+    from services.transfer_policy_values import (
+        DeleteModeNotAllowed,
+        PolicyValueError,
+        delete_mode_for,
+    )
 
-    if normalize_sync_mode(str(sync_mode or ""), default="") != "mirror":
-        return out, "delete_mode applies to mirror sync only."
+    out = [dict(c) for c in contracts or []]
+    if not str(delete_mode or "").strip():
+        return out, ""
+    normalized = normalize_sync_mode(str(sync_mode or ""), default="")
+    if normalized not in {"mirror", "cdc"}:
+        # Keep the established phrase: Studio, the r8 flow and operators look
+        # for "mirror sync only"; cdc (the snapshot sweep) is the other taker.
+        return out, (
+            "delete_mode applies to mirror sync only (and to cdc, whose snapshot "
+            f"sweep uses it); {normalized or sync_mode or 'this sync mode'} has "
+            "nothing to delete."
+        )
+    try:
+        declared = delete_mode_for(delete_mode, normalized)
+    except (PolicyValueError, DeleteModeNotAllowed) as exc:
+        return out, str(exc)
     if not out:
-        return out, "A mirror run needs a primary key before a delete_mode can apply."
+        return out, f"A {normalized} run needs a primary key before a delete_mode can apply."
     for contract in out:
         contract["delete_mode"] = declared
     return out, ""

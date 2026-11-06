@@ -1354,6 +1354,19 @@ def _catalog_declared_columns(
         if len(tables) != 1:
             return {}
         table = tables[0]
+        # Output name -> the base column it passes through unchanged. An
+        # expression aliased to a column's name (``count(distinct name) AS
+        # name``) is not that column: it was labelled TEXT (D17).
+        passthrough: dict[str, str] = {}
+        star = False
+        for proj in getattr(tree, "selects", None) or []:
+            inner = proj.this if isinstance(proj, exp.Alias) else proj
+            if isinstance(inner, exp.Star) or (
+                isinstance(inner, exp.Column) and isinstance(inner.this, exp.Star)
+            ):
+                star = True
+            elif isinstance(inner, exp.Column) and inner.name:
+                passthrough[str(proj.alias_or_name).lower()] = str(inner.name).lower()
         db = (dialect or "").lower()
         declared: dict[str, str] = {}
         from sqlalchemy import text as _text
@@ -1377,9 +1390,14 @@ def _catalog_declared_columns(
         else:
             return {}
         lower = {k.lower(): v for k, v in declared.items()}
-        return {
-            c: lower[c.lower()] for c in columns if c.lower() in lower
-        }
+        out: dict[str, str] = {}
+        for c in columns:
+            source = passthrough.get(c.lower())
+            if source is None and star and c.lower() not in passthrough:
+                source = c.lower()
+            if source is not None and source in lower:
+                out[c] = lower[source]
+        return out
     except Exception:
         return {}
 
@@ -1680,13 +1698,18 @@ def _run_snowflake_query(connector, body):
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
         schema = _column_schema(columns, rows)
         # Snowflake's cursor description carries declared result types
-        # (VARCHAR for TO_VARCHAR, NUMBER for a SUM) — prefer it over
-        # value inference (M11/M20).
-        declared = {
-            columns[i]: str(desc[1])
-            for i, desc in enumerate(description)
-            if len(desc) > 1 and desc[1] is not None
-        }
+        # (VARCHAR for TO_VARCHAR, NUMBER(p,s) for a SUM) — prefer it over
+        # value inference (M11/M20). Its integer type codes are Snowflake's
+        # own: the driver names them (named_cursor_description) and the shared
+        # reader honours the name; a raw code is never read (D17, MX2-07).
+        from connectors.snowflake_conn import named_cursor_description
+        from services.decimal_observe import cursor_declared_carriers
+
+        declared = cursor_declared_carriers(
+            columns,
+            named_cursor_description(description),
+            dialect="snowflake",
+        )
         if declared:
             schema = {**schema, **declared}
         return rows, columns, schema, bool(withheld)

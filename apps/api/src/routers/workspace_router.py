@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from services.effective_role import workspace_id_from_request_headers
 from services.brand import PRODUCT_SLUG
 
 from services.byok_key_manager import (
@@ -41,6 +42,11 @@ class WorkspaceSettingsBody(BaseModel):
     org_name: str | None = Field(default=None, max_length=128)
     timezone: str | None = Field(default=None, max_length=64)
     retention_days: int | None = Field(default=None, ge=1, le=3650)
+    # Purge finished jobs older than retention_days daily (off by default).
+    retention_auto_purge: bool | None = None
+    # Drop orphaned Datawrap CDC slots whose source tables stayed gone (off by
+    # default; services.cdc_capture_inventory).
+    cdc_orphan_auto_drop: bool | None = None
     studio_schema_browser: bool | None = None
     studio_canvas: bool | None = None
 
@@ -183,45 +189,128 @@ def _require_tenant_admin(request: Request, workspace_id: str) -> None:
 
 
 def _named_workspace_id(request: Request) -> str:
-    return (request.headers.get("x-workspace-id") or "").strip()
+    return workspace_id_from_request_headers(request.headers)
+
+
+def _store_down_types() -> tuple[type[BaseException], ...]:
+    from services.control_plane_store import ControlPlaneUnavailable
+    from services.workspace_store import SettingsUnavailable
+
+    return (SettingsUnavailable, ControlPlaneUnavailable)
+
+
+_STORE_DOWN = _store_down_types()
+
+
+def _store_down(exc: BaseException) -> HTTPException:
+    """503: the shared settings store is configured but unreachable (fails closed)."""
+    return HTTPException(
+        status_code=503,
+        # No driver text: pymongo errors name hosts and the replica topology.
+        detail=(
+            "The deployment settings store is unreachable; nothing was read from or "
+            "written to a node-local copy. Try again shortly."
+        ),
+    )
 
 
 @router.get("/settings")
 async def get_settings(request: Request):
     from services.workspace_store import get_workspace_settings
 
+    try:
+        settings = get_workspace_settings()
+    except _STORE_DOWN as exc:
+        raise _store_down(exc) from exc
     return {
-        **get_workspace_settings(),
+        **settings,
         # One document for the whole deployment: only a platform admin changes it.
         **editability(request),
         # What retention_days does, stated by the API itself (QA enterprise #4).
-        "retention_enforcement": {
-            "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
-            "mode": "admin_purge",
-            "scheduled": False,
-            "purge_route": "POST /api/v1/workspace/jobs/retention/purge (dry run first)",
-        },
+        "retention_enforcement": _retention_enforcement(),
     }
+
+
+def _retention_enforcement() -> dict[str, Any]:
+    from services.job_retention_schedule import retention_schedule_status
+
+    schedule = retention_schedule_status()
+    return {
+        "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
+        "mode": "scheduled_purge" if schedule["scheduled"] else "admin_purge",
+        **schedule,
+        "purge_route": "POST /api/v1/workspace/jobs/retention/purge (dry run first)",
+        "not_covered": "audit records (audit retention) and quarantine rows (quarantine TTL)",
+    }
+
+
+#: Settings whose from/to the update audit records (cdc_orphan_auto_drop has
+#: its own event, cdc.capture.auto_drop.changed).
+_AUDITED_SETTINGS = (
+    "org_name", "timezone", "retention_days", "retention_auto_purge",
+    "studio_schema_browser", "studio_canvas",
+)
 
 
 @router.patch("/settings", dependencies=[Depends(platform_settings_guard("general", "update"))])
 async def patch_settings(body: WorkspaceSettingsBody, request: Request):
-    from services.workspace_store import update_workspace_settings
+    from services.workspace_store import update_workspace_settings_with_before
 
     from services.workspace_store import InvalidTimezone
 
     actor = _actor(request)
+    if body.retention_auto_purge:
+        from services.job_retention_schedule import RetentionNeedsDurableStore, assert_can_enable
+
+        try:
+            assert_can_enable()
+        except RetentionNeedsDurableStore as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    toggle: tuple[dict[str, Any], dict[str, Any]] | None = None
     try:
-        updated = update_workspace_settings(
+        before, updated = update_workspace_settings_with_before(
             org_name=body.org_name,
             timezone=body.timezone,
             retention_days=body.retention_days,
             studio_schema_browser=body.studio_schema_browser,
             studio_canvas=body.studio_canvas,
             actor=actor,
+            retention_auto_purge=body.retention_auto_purge,
         )
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except _STORE_DOWN as exc:
+        raise _store_down(exc) from exc
+    # The general settings are written: audit them before anything else can
+    # fail, so a 503 on the auto-drop switch never leaves a change unaudited.
+    _audit_settings_update(request, before, updated)
+    if body.cdc_orphan_auto_drop is not None:
+        from services.cdc_capture_inventory import set_auto_drop
+
+        try:
+            # Shared control-plane setting; the store returns the value it
+            # replaced atomically, so the audit's from/to holds across replicas.
+            toggle = set_auto_drop(bool(body.cdc_orphan_auto_drop), actor=actor)
+        except _STORE_DOWN as exc:
+            raise _store_down(exc) from exc
+        updated = {**updated, "cdc_orphan_auto_drop": toggle[1]["enabled"]}
+        if toggle[0]["enabled"] != toggle[1]["enabled"]:
+            # A destructive automation on client databases: its own audit entry.
+            record_admin_change(
+                request,
+                "cdc.capture.auto_drop.changed",
+                target="cdc_orphan_auto_drop",
+                details={
+                    "from": toggle[0]["enabled"],
+                    "to": toggle[1]["enabled"],
+                    "enabled_at": toggle[1].get("enabled_at"),
+                    "actor": actor,
+                },
+            )
+    return updated
+
+
+def _audit_settings_update(request: Request, before: dict[str, Any], updated: dict[str, Any]) -> None:
     record_admin_change(
         request,
         "workspace.settings.update",
@@ -230,11 +319,18 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             "org_name": updated["org_name"],
             "timezone": updated["timezone"],
             "retention_days": updated["retention_days"],
+            "retention_auto_purge": updated["retention_auto_purge"],
             "studio_schema_browser": updated["studio_schema_browser"],
             "studio_canvas": updated["studio_canvas"],
+            "cdc_orphan_auto_drop": updated["cdc_orphan_auto_drop"],
+            # From the shared store's own pre-image: what this write changed.
+            "changes": {
+                k: {"from": before.get(k), "to": updated.get(k)}
+                for k in _AUDITED_SETTINGS
+                if before.get(k) != updated.get(k)
+            },
         },
     )
-    return updated
 
 
 @router.get("/sso")
@@ -583,7 +679,8 @@ def purge_job_retention(body: JobRetentionPurgeBody, request: Request):
 
     Dry run first (default): returns the count and a ``confirm_token``; apply
     with ``dry_run: false`` and that token. Never touches unfinished jobs or
-    another workspace. Nothing runs on a schedule. See services.job_retention.
+    another workspace. The same purge runs daily for every workspace when
+    ``retention_auto_purge`` is on (services.job_retention_schedule).
     """
     from services.job_retention import RetentionTokenInvalid, purge_expired_jobs
     from services.workspace_store import get_workspace_settings
@@ -594,7 +691,10 @@ def purge_job_retention(body: JobRetentionPurgeBody, request: Request):
         raise HTTPException(status_code=400, detail="Name the workspace (X-Workspace-Id) to purge its jobs")
     if not _can_admin_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
-    retention_days = int(get_workspace_settings()["retention_days"])
+    try:
+        retention_days = int(get_workspace_settings()["retention_days"])
+    except _STORE_DOWN as exc:
+        raise _store_down(exc) from exc
     try:
         result = purge_expired_jobs(
             workspace_id=workspace_id,
@@ -634,6 +734,55 @@ async def rotate_pii_hash_key(request: Request):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     append_audit_event(
         action="workspace.pii_hash_key.rotate",
+        resource="/workspace/pii-hash-key",
+        actor=_actor(request),
+        level="warn",
+        details={"workspace_id": workspace_id, "active_version": status["active_version"]},
+    )
+    return status
+
+
+@router.put("/pii-hash-key")
+async def set_pii_hash_key(request: Request):
+    """Set this workspace's hash_pii key (a new active version; changes future digests).
+
+    Admin only (RBAC ``workspace.manage``). The key goes through the secret
+    vault and is never returned, logged or written to the audit record.
+    """
+    from services.audit_log import append_audit_event
+    from services.pii_hash_keys import (
+        PiiHashKeyRejected,
+        PiiHashKeyUnavailable,
+        key_status,
+        set_workspace_key,
+    )
+
+    # The body is read by hand, not through a pydantic model: FastAPI's 422
+    # echoes the submitted value, and here that value is the secret.
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON never echoes the body
+        payload = None
+    key = payload.get("key") if isinstance(payload, dict) else None
+    if not isinstance(key, str):
+        raise HTTPException(status_code=422, detail='Send {"key": "<hashing key>"} as JSON.')
+    workspace_id = tenant_scope(request).workspace_id
+    if key_status(workspace_id).get("managed_by_deployment"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This deployment uses one hashing key for every workspace, so a "
+                "workspace key would not be used. Ask your platform administrator."
+            ),
+        )
+    try:
+        status = set_workspace_key(workspace_id, key, actor=_actor(request))
+    except PiiHashKeyRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PiiHashKeyUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    append_audit_event(
+        action="workspace.pii_hash_key.set",
         resource="/workspace/pii-hash-key",
         actor=_actor(request),
         level="warn",
@@ -888,7 +1037,7 @@ def _resolve_request_tenant(request: Request, workspace_id: str | None = None):
     tenant_id = getattr(request.state, "tenant_id", None)
     if tenant_id:
         return get_tenant(tenant_id)
-    ws = workspace_id or request.headers.get("x-workspace-id", "") or getattr(request.state, "tenant_workspace_id", "")
+    ws = workspace_id or workspace_id_from_request_headers(request.headers) or getattr(request.state, "tenant_workspace_id", "")
     return get_tenant_for_workspace(ws) if ws else None
 
 
@@ -953,7 +1102,7 @@ async def get_all_tenants(request: Request):
     """
     from src.services import auth_service
 
-    named = (request.headers.get("x-workspace-id") or "").strip()
+    named = workspace_id_from_request_headers(request.headers)
     tenants = list_tenants()
     if auth_service.auth_required() and not _is_platform_admin(request):
         tenants = [
@@ -974,7 +1123,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
     # A tenant is read back by the workspace the request is scoped to, so it must
     # be created against one. An unnamed workspace produced a tenant no GET could
     # ever resolve — saved, invisible, and never authorized against a workspace.
-    named = (request.headers.get("x-workspace-id") or "").strip()
+    named = workspace_id_from_request_headers(request.headers)
     workspace_id = (body.workspace_id or "").strip() or named
     if not workspace_id:
         raise HTTPException(
@@ -985,6 +1134,12 @@ async def post_tenant(body: TenantCreateBody, request: Request):
     # scope to write into someone else's workspace is the stronger refusal.
     if not _can_admin_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required to create a tenant")
+    from services.team_store import get_workspace
+
+    # A tenant bound to a workspace that does not exist (a platform admin's
+    # view id, a typo) could never be read back by any request (D218).
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=400, detail=f"Workspace {workspace_id} does not exist")
     if body.workspace_id and named and body.workspace_id.strip() != named:
         raise HTTPException(
             status_code=403,
@@ -1304,7 +1459,7 @@ def _posture_scope_workspace(request: Request, tenant: Tenant | None) -> str:
     one, else the caller's own workspace (single membership / bound key)."""
     if tenant and tenant.workspace_id:
         return tenant.workspace_id
-    named = (request.headers.get("x-workspace-id") or "").strip() or str(
+    named = workspace_id_from_request_headers(request.headers) or str(
         getattr(request.state, "tenant_workspace_id", "") or ""
     )
     if named:

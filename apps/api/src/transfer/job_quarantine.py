@@ -9,8 +9,6 @@ plan for what already landed.
 
 from __future__ import annotations
 
-import json
-
 import logging
 from typing import Any
 
@@ -37,7 +35,10 @@ def rebase_batch_rejects(
         if not isinstance(raw, dict):
             continue
         detail = dict(raw)
-        local_row = int(detail.get("row") or 0)
+        raw_row = detail.get("row")
+        # A record-valued finding (shape divert, Kafka poison message) names
+        # its record, not a batch line: there is no number to rebase (D286).
+        local_row = 0 if isinstance(raw_row, (dict, list)) else int(raw_row or 0)
         if local_row > 0:
             detail["batch_row"] = local_row
             detail["batch_offset"] = int(batch_start)
@@ -50,41 +51,31 @@ def rebase_batch_rejects(
 
 def rows_with_findings(details: list[dict[str, Any]]) -> int:
     """Distinct source rows that carry a finding of their own."""
-    return len(
-        {
-            d.get("row")
-            for d in details
-            if isinstance(d, dict) and d.get("row") is not None
-        }
-    )
+    from services.quarantine_dlq import count_finding_rows
+
+    return count_finding_rows(details)
 
 
 def quarantined_row_count(details: list[dict[str, Any]]) -> int:
     """Source rows the findings quarantine: one row, however many bad cells.
 
     A writer records one finding per refused cell, so a row with five bad
-    cells carries five details. A finding without a row number stands alone.
+    cells carries five details. A finding that names no row stands alone.
+    The row key is the shared one (``quarantine_dlq.finding_row_key``).
     """
+    from services.quarantine_dlq import finding_row_key
+
     rows: set[Any] = set()
     anonymous = 0
     for d in details:
         if not isinstance(d, dict):
             continue
-        row = d.get("row")
-        if row is None:
+        key = finding_row_key(d)
+        if key is None:
             anonymous += 1
         else:
-            rows.add(_row_identity(row))
+            rows.add(key)
     return len(rows) + anonymous
-
-
-def _row_identity(row: Any) -> Any:
-    """Hashable identity for a finding's row: its number, or the record itself."""
-    try:
-        hash(row)
-        return row
-    except TypeError:
-        return json.dumps(row, sort_keys=True, default=str)
 
 
 def align_reported_rejects(summary: dict[str, Any]) -> int:

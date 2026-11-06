@@ -490,16 +490,48 @@ class MySqlChangeStreamCdc:
             )
             return False
 
+    def _binlog_connection_settings(self) -> dict[str, Any]:
+        return self._binlog_dial()[0]
+
+    def _binlog_dial(self) -> tuple[dict[str, Any], Any]:
+        """Dial settings for the binlog reader, under the one MySQL TLS plan.
+
+        The binlog carries row data, so it gets the same TLS contract as every
+        other MySQL dial (QA MySQL D10): ssl=True and public proxies require
+        TLS, VERIFY_* verifies, DISABLED is plaintext only where allowed. It
+        used to set no TLS option at all, and to ignore a DSN's host.
+        """
+        from connectors.mysql_tls import mysql_tls_plan, resolved_kwargs_for_external_dial
+        from connectors.sql_dsn import resolve_sql_endpoint
+
+        dsn = str(self.cfg.get("connection_string") or "")
+        ep = resolve_sql_endpoint(
+            family="mysql", host=str(self.cfg.get("host") or ""),
+            port=int(self.cfg.get("port") or 0), database=str(self.cfg.get("database") or ""),
+            username=str(self.cfg.get("username") or ""),
+            password=str(self.cfg.get("password") or ""), connection_string=dsn,
+            default_port=3306,
+        )
+        base = {"host": ep["host"] or "localhost", "port": int(ep["port"] or 3306),
+                "user": ep["username"] or "", "password": ep["password"] or ""}
+        from connectors.generic_sql import connection_options
+
+        plan = mysql_tls_plan(ssl=bool(self.cfg.get("ssl")), connection_string=dsn,
+                              host=base["host"], options=connection_options(self.cfg))
+        return resolved_kwargs_for_external_dial(base, plan, host=base["host"]), (plan, base["host"])
+
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:
         # Unique server_id per connector/table so multi-stream CDC does not collide.
         server_id = self._mysql_server_id()
+        from connectors.mysql_tls import checked_external_connect
+
+        settings, (plan, host) = self._binlog_dial()
         kwargs: dict[str, Any] = {
-            "connection_settings": {
-                "host": self.cfg.get("host") or "localhost",
-                "port": self.cfg.get("port") or 3306,
-                "user": self.cfg.get("username") or "",
-                "password": self.cfg.get("password") or "",
-            },
+            "connection_settings": settings,
+            # The reader dials its control and stream connections itself; each
+            # one is checked like dial_pymysql checks ours (REQUIRED / VERIFY_*
+            # never streams row data in plaintext).
+            "pymysql_wrapper": checked_external_connect(plan, host),
             "server_id": server_id,
             "resume_stream": True,
             "blocking": blocking,

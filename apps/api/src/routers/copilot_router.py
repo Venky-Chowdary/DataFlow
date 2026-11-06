@@ -7,7 +7,7 @@ Customer-facing chat + separate training agent endpoints.
 import asyncio
 import logging
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -29,6 +29,30 @@ def _confirm_failure(action: str, exc: BaseException) -> str:
         "so you can press Confirm again. The cause is in the API log."
     )
 
+
+
+def _saved_connector_endpoint(conn: Any, table: str = "") -> Any:
+    """The destination a saved connector names, keyed exactly as a job keys it.
+
+    D204 — the rebaseline Confirm rebuilt the endpoint from the connector's
+    fields but dropped its id, so the continuity key fell back to ``host:port``
+    while every job started from that connector keys on ``id:<connector_id>``.
+    The rebaseline then landed under a key no append ever reads ("previous":
+    null) and the route stayed stuck on the old baseline.
+    """
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
+
+    # The connector id is the whole identity; resolve_endpoint expands it the
+    # way a job's own destination is expanded (adapters._lookup_saved_connector
+    # owns the field list).
+    return resolve_endpoint(
+        EndpointConfig(
+            kind="database",
+            connector_id=str(getattr(conn, "id", "") or ""),
+            table=str(table or "").strip(),
+        )
+    )
 
 def _caller(request: Request) -> tuple[str, str]:
     """Return ``(role, actor)`` for the authenticated caller.
@@ -178,7 +202,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         data_context = dict(request.data_context or {})
         # The workspace the turn works in is the actor's, never a bare header:
         # a workspace they do not belong to is a 403 (D162).
-        ws = tenant_scope(http_request).requested_workspace_id
+        ws = tenant_scope(http_request).header_workspace_id
         if ws:
             data_context["workspace_id"] = ws
         else:
@@ -219,11 +243,21 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         ) from e
 
 
-def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) -> None:
+def _stamp_confirmation(
+    job_id: str,
+    *,
+    ack_id: str,
+    actor: str,
+    reason: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
     """Record who confirmed the job and why on the job itself (QA MX3-19).
 
     The ack ledger kept the actor and reason, but get_job and audit readers
-    only see the job document.
+    only see the job document. Every confirmed job gets the same record —
+    start_transfer, a confirmed rerun, a schedule run-now (D6) — merged over
+    what the owning route already wrote (a rerun's ``action``/``of``), so
+    ``governance.approval`` never reads null on an approved job.
     """
     if not job_id:
         return
@@ -231,16 +265,23 @@ def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) ->
 
     from services.mongodb_service import get_mongodb_service
 
+    mongo = get_mongodb_service()
+    try:
+        existing = (mongo.get_job(job_id) or {}).get("confirmation")
+    except Exception:  # noqa: BLE001 - the stamp below still carries the approval
+        existing = None
+    # The owning route's record wins (a rerun's ``action``/``of``); ``extra``
+    # fills what it did not write; the ack's identity is always current.
     confirmation = {
+        **(dict(extra) if extra else {}),
+        **(dict(existing) if isinstance(existing, dict) else {}),
         "approved_by": actor,
         "reason": reason,
         "ack_id": ack_id,
         "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
-        stamped = get_mongodb_service().update_job_fields(
-            job_id, {"confirmation": confirmation}
-        )
+        stamped = mongo.update_job_fields(job_id, {"confirmation": confirmation})
     except Exception as exc:  # noqa: BLE001 - the job runs; the audit gap is logged
         _logger.error(
             "Job %s: confirmation by %s could not be recorded: %s",
@@ -274,8 +315,14 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     src = dict(payload.get("source") or {})
     dst = dict(payload.get("destination") or {})
     require_admin_for_endpoints(None, src.get("workspace_id") or dst.get("workspace_id"), src, dst)
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
     try:
         request_obj = transfer_request_from_ack(payload)
+        apply_callable_intake(request_obj)
+    except ProcedureSourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     from ..transfer.contract_engine import stamp_bound_contract
@@ -341,7 +388,14 @@ async def _run_lifecycle_confirm(
         return dict(await connectors_router.cancel_transfer_job(job_id, http_request))
     if kind == "retry_job":
         return dict(
-            await connectors_router.retry_transfer_job(job_id, background_tasks, http_request)
+            await connectors_router.retry_transfer_job(
+                job_id,
+                background_tasks,
+                http_request,
+                body=connectors_router.RetryRequest(
+                    risk_acceptance=payload.get("risk_acceptance") or None
+                ),
+            )
         )
     if kind == "rerun_job":
         return dict(
@@ -376,15 +430,36 @@ async def _run_lifecycle_confirm(
     if kind == "repair_cdc_drift":
         from services.cdc_drift_repair import run_fenced_drift_repair
         from services.cdc_lease import CdcLeaseConflict
+        from services.workspace_access import resolve_tenant_scope
 
         role, actor = _caller(http_request)
+        # The repair checks the job against the caller's workspace exactly. A
+        # platform admin in the All view names none; the job's own workspace
+        # stands in when the scope may read it (D218).
+        scope = resolve_tenant_scope(http_request)
+        repair_workspace_id = scope.header_workspace_id
+        if not repair_workspace_id:
+            from services.mongodb_service import get_mongodb_service
+
+            job_doc = get_mongodb_service().get_job(job_id) or {}
+            if scope.allows(job_doc.get("workspace_id")):
+                repair_workspace_id = str(job_doc.get("workspace_id") or "")
+        from services.team_store import WorkspaceStateUnavailable, workspace_closing
+
+        try:
+            closing = workspace_closing(repair_workspace_id, fail_closed=True)
+        except WorkspaceStateUnavailable as exc:
+            raise HTTPException(status_code=503, detail={"kind": "store_unavailable", "message": str(exc)}) from exc
+        if closing:
+            # A repair writes to the workspace's destination (review 6).
+            raise HTTPException(status_code=409, detail="This workspace is being deleted")
         try:
             return await asyncio.to_thread(
                 run_fenced_drift_repair,
                 job_id,
                 list(payload.get("key_ids") or []),
                 actor=actor,
-                workspace_id=workspace_id,
+                workspace_id=repair_workspace_id,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -464,11 +539,21 @@ async def _run_lifecycle_confirm(
         if result.get("reason") == "missing_cursor_key":
             raise HTTPException(status_code=400, detail="cursor_key is required")
         return result
+    if kind == "cleanup_cdc_captures":
+        from .ops_router import CdcCaptureCleanupBody, post_cdc_captures_cleanup
+
+        body = CdcCaptureCleanupBody(
+            connector_id=str(payload.get("connector_id") or ""),
+            slot_names=list(payload.get("slot_names") or []),
+            publication_names=list(payload.get("publication_names") or []),
+            include_unregistered=bool(payload.get("include_unregistered")),
+            dry_run=False,
+            reason=str(payload.get("reason") or ""),
+        )
+        return await post_cdc_captures_cleanup(body, http_request, workspace_id)
     if kind == "rebaseline_transfer":
         from services.append_continuity import RebaselineError, rebaseline
         from services.connector_store import get_connector, list_connectors
-        from ..transfer.adapters import resolve_endpoint
-        from ..transfer.models import EndpointConfig
 
         reason = str(payload.get("reason") or "").strip()
         if not reason:
@@ -493,27 +578,36 @@ async def _run_lifecycle_confirm(
             raise HTTPException(
                 status_code=404, detail="Destination connector not found"
             )
-        cfg = {
-            key: getattr(conn, key)
-            for key in (
-                "type", "host", "port", "database", "username", "password",
-                "schema", "connection_string", "ssl", "warehouse", "auth_mode",
-                "auth_role", "api_key", "service_account", "private_key",
-                "endpoint_url", "path_style", "auth_source",
-            )
-        }
-        cfg.update(conn.extra or {})
-        table = str(payload.get("table") or "").strip()
-        if table:
-            cfg["table"] = table
         role, actor = _caller(http_request)
-        dst = resolve_endpoint(EndpointConfig.from_dict("database", cfg))
+        dst = _saved_connector_endpoint(conn, str(payload.get("table") or ""))
         try:
             return await asyncio.to_thread(
-                rebaseline, dst, actor=actor or "", reason=reason
+                rebaseline, dst, actor=actor or "", reason=reason,
+                # The caller's workspace first; the connector's only when the
+                # caller named none (QA C9 review 2).
+                workspace_id=str(workspace_id or getattr(conn, "workspace_id", "") or ""),
             )
         except RebaselineError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if kind == "recover_schedule_destination":
+        # The REST handler owns the recovery, its audit and the re-arm (QA C9).
+        sid = str(payload.get("schedule_id") or "").strip()
+        body = schedules_router.RecoverDestinationRequest(
+            action=str(payload.get("action") or ""),
+            reason=str(payload.get("reason") or ""),
+            confirm_replace=bool(payload.get("confirm_replace")),
+        )
+        result = await schedules_router.recover_schedule_destination_route(
+            sid, body, http_request, workspace_id
+        )
+        sched = result.get("schedule")
+        return {
+            "schedule_id": sid,
+            "action": result.get("action"),
+            "job_id": result.get("job_id") or "",
+            "state": getattr(sched, "state", "") if sched is not None else "",
+            "next_run_at": getattr(sched, "next_run_at", "") if sched is not None else "",
+        }
     if kind == "update_schedule":
         # Cadence and name only. Connectors, tables, mappings, and sync mode
         # stay on the stored schedule — this patch must not re-plan the route.
@@ -570,6 +664,7 @@ async def copilot_confirm(
     a write by being unlisted.
     """
     from services.connector_store import create_connector
+    from services.workspace_access import tenant_scope
     from src.transfer.engine import DuplicateTransferSubmission
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
@@ -613,8 +708,9 @@ async def copilot_confirm(
         if studio_payload is None:
             raise HTTPException(status_code=404, detail=payload_error or "Approval not found")
         staged_workspace_id = str(studio_payload.get("workspace_id") or "").strip()
-        caller_workspace_id = workspace_id_from_request_headers(http_request.headers)
-        if staged_workspace_id and staged_workspace_id != caller_workspace_id:
+        # The caller's tenant scope, not a raw header: a platform admin's All
+        # view names no workspace yet may confirm in every one (D218).
+        if staged_workspace_id and not tenant_scope(http_request).allows(staged_workspace_id):
             raise HTTPException(
                 status_code=403,
                 detail="This Studio approval belongs to a different workspace.",
@@ -622,6 +718,27 @@ async def copilot_confirm(
     # The audit actor is the authenticated identity when there is one; the
     # client-supplied name is only a fallback for open deployments.
     actor = session_actor or request.actor or "pilot-ui"
+
+    def _finalize(result: dict[str, Any], *, extra: dict[str, Any] | None = None) -> None:
+        """Close the ack and, when the mutation created a job, record the
+        approval on it. One seam for every confirm kind (D6): a kind that
+        acts on an existing job (cancel, resume) names it in its payload and
+        keeps that job's original approval."""
+        new_job_id = str(result.get("job_id") or "").strip()
+        if new_job_id and new_job_id != str(payload.get("job_id") or "").strip():
+            _stamp_confirmation(
+                new_job_id,
+                ack_id=ack_id,
+                actor=actor,
+                reason=request.reason or "confirmed",
+                extra=extra,
+            )
+        ledger.finalize(
+            ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
 
     payload, err = ledger.claim(
         ack_id,
@@ -646,7 +763,6 @@ async def copilot_confirm(
             raise HTTPException(status_code=400, detail="Unsupported Studio remediation kind")
 
         run_id = str(payload.get("run_id") or "").strip()
-        caller_workspace_id = workspace_id_from_request_headers(http_request.headers)
         if run_id:
             from services.preflight_run_store import get_preflight_run
 
@@ -658,7 +774,7 @@ async def copilot_confirm(
                 run_workspace_id = str(preflight_run.get("workspace_id") or "").strip()
             else:
                 run_workspace_id = str(getattr(preflight_run, "workspace_id", "") or "").strip()
-            if run_workspace_id and run_workspace_id != caller_workspace_id:
+            if run_workspace_id and not tenant_scope(http_request).allows(run_workspace_id):
                 ledger.release_claim(ack_id)
                 raise HTTPException(
                     status_code=403,
@@ -672,12 +788,7 @@ async def copilot_confirm(
             "label": str(preview.get("label") or ""),
             "destructive": remediation_kind == "quarantine_and_rerun",
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "start_transfer":
@@ -692,18 +803,7 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("start transfer", exc)) from exc
-        _stamp_confirmation(
-            str(result.get("job_id") or ""),
-            ack_id=ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-        )
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "sync_now":
@@ -735,12 +835,7 @@ async def copilot_confirm(
                 transfer_request,
                 resume=False,
             )
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_connector":
@@ -780,22 +875,25 @@ async def copilot_confirm(
             "name": conn.name,
             "type": conn.type,
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_transform_recipe":
-        from services.effective_role import workspace_id_from_request_headers
         from services.transform_library import get_transform_library
         from services.transform_recipe_templates import clone_template
+        from services.workspace_access import resolve_tenant_scope
 
+        # The recipe lands where a create lands: the header workspace, else the
+        # actor's own; a platform admin's view or no workspace is a 400, never
+        # a recipe saved under "__all__" or in the legacy bucket (D218).
+        try:
+            recipe_workspace_id = resolve_tenant_scope(http_request).target_workspace_id(write=True)
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
         recipe = clone_template(
             str(payload.get("template_key") or ""),
-            workspace_id=workspace_id_from_request_headers(http_request.headers) or "",
+            workspace_id=recipe_workspace_id,
         )
         if recipe is None:
             ledger.release_claim(ack_id)
@@ -806,12 +904,7 @@ async def copilot_confirm(
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure("save transform", exc)) from exc
         result = {"recipe_id": saved.id, "name": saved.name, "steps": len(saved.steps)}
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "run_schedule":
@@ -835,7 +928,9 @@ async def copilot_confirm(
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             try:
-                job_id = _run_schedule(schedule_id, manual=True)
+                # D6: the person who confirmed is the trigger, as on the REST
+                # Run now; a blank triggered_by erased the audit trail.
+                job_id = _run_schedule(schedule_id, manual=True, triggered_by=actor)
             except ScheduleStartError as exc:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
@@ -863,21 +958,21 @@ async def copilot_confirm(
             "name": str(payload.get("name") or getattr(sched, "name", "") or ""),
             "status": "queued",
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result, extra={"action": "run_schedule", "schedule_id": schedule_id})
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_schedule":
+        try:
+            schedule_payload = _confirm_schedule_workspace(dict(payload), http_request)
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
         try:
             from services.schedule_store import create_schedule as store_create_schedule
 
             # The store owns cadence, sync-mode and signed-contract validation —
             # chat supplies the payload, it does not get its own rule set.
-            sched = store_create_schedule(dict(payload))
+            sched = store_create_schedule(schedule_payload, refuse_unrunnable_mappings=True)
         except ValueError as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -895,13 +990,18 @@ async def copilot_confirm(
             "sync_mode": sched.sync_mode,
             "enabled": sched.enabled,
             "next_run_at": sched.next_run_at or "",
+            "workspace_id": sched.workspace_id or "",
         }
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
+        # Same audit trail as POST /schedules (QA Snowflake D12: an MCP-created
+        # schedule left no create event at all).
+        from services.schedule_audit import (
+            audit_schedule_acknowledgment,
+            record_schedule_created,
         )
+
+        record_schedule_created(sched, request=http_request)
+        audit_schedule_acknowledgment(sched, request=http_request, via="pilot_confirm")
+        _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     from ..ai.copilot.lifecycle_tools import ACK_KIND_BY_TOOL
@@ -915,12 +1015,7 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure(kind.replace('_', ' '), exc)) from exc
-        ledger.finalize(
-            ack_id,
-            actor=actor,
-            reason=request.reason or "confirmed",
-            result=result,
-        )
+        _finalize(result, extra={"action": kind})
         # Confirm itself succeeded, but a CDC prepare that changed nothing
         # (role is not superuser, wal_level stayed replica) is not "ok"
         # (R4-D11). Other lifecycle results omit ``applied``.
@@ -929,6 +1024,47 @@ async def copilot_confirm(
 
     ledger.release_claim(ack_id)
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
+
+
+def _confirm_schedule_workspace(payload: dict[str, Any], http_request: Request) -> dict[str, Any]:
+    """Bind a staged schedule to the workspace the confirming caller writes to.
+
+    QA Snowflake D12: the staged payload carried no ``workspace_id``, so the
+    confirmed schedule was stored unscoped — run by the scheduler and counted
+    by the destination-conflict check, but 404 on GET, list and DELETE for its
+    own workspace. The staging call now records its workspace; Confirm refuses
+    a caller who cannot write there, and stamps the caller's workspace on an
+    older approval that has none. Under workspace isolation an approval that
+    resolves to no workspace is refused rather than saved invisible.
+    """
+    from services.team_store import require_workspace_isolation
+    from services.tenant_scope import resolve_tenant_scope
+
+    staged = str(payload.get("workspace_id") or "").strip()
+    scope = resolve_tenant_scope(http_request)
+    if staged:
+        if not scope.can_write(staged):
+            raise HTTPException(
+                status_code=403,
+                detail="This schedule approval belongs to a workspace you cannot write to.",
+            )
+        return payload
+    try:
+        target = scope.target_workspace_id(write=True)
+    except HTTPException:
+        target = ""
+    if target:
+        return {**payload, "workspace_id": target}
+    if require_workspace_isolation():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This schedule would belong to no workspace, so nobody but a platform "
+                "admin could see or delete it. Confirm with X-Workspace-Id set to the "
+                "workspace that owns it."
+            ),
+        )
+    return payload
 
 
 @router.get("/datasets")

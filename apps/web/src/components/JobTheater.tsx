@@ -39,6 +39,7 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { THEATER_QUARANTINE_ID, scrollToTheaterQuarantine } from "../lib/quarantineTarget";
 import { jobEndpointLabels, presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
 import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
@@ -716,6 +717,14 @@ export function JobTheaterView({
   const rejectedRows = readRejectedRows(job);
   const coercedNullRows = readCoercedNullRows(job);
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
+  // One condition for the section and every "Open quarantine" that points at
+  // it. The Gate-8 card scrolled to the first `.df2-theater-v3-quarantine`,
+  // which is the "Compared to prior loads" panel when a load history exists,
+  // so its button appeared to do nothing (QA browser 4).
+  const showQuarantineSection = rejectedRows > 0 || isQuarantine;
+  const openQuarantine = showQuarantineSection
+    ? () => scrollToTheaterQuarantine()
+    : undefined;
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
   const writerWarnings = readWriterWarnings(job);
@@ -1054,9 +1063,7 @@ export function JobTheaterView({
           <EmbeddingUsageSummary destinationSummary={destinationSummary} />
           <JobTrustScoreCard
             job={job}
-            onOpenQuarantine={rejectedRows > 0 ? () => {
-              document.getElementById("df2-theater-quarantine")?.scrollIntoView({ behavior: "smooth", block: "start" });
-            } : undefined}
+            onOpenQuarantine={openQuarantine}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
@@ -1879,14 +1886,7 @@ export function JobTheaterView({
           jobId={jobId}
           className="df2-theater-gate8"
           onOpenValidate={onBackToValidate}
-          onOpenQuarantine={
-            rejectedRows > 0 || isQuarantine
-              ? () => {
-                  const el = document.querySelector(".df2-theater-v3-quarantine");
-                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-              : undefined
-          }
+          onOpenQuarantine={openQuarantine}
         />
       )}
 
@@ -2055,8 +2055,8 @@ export function JobTheaterView({
         );
       })()}
 
-      {(rejectedRows > 0 || isQuarantine) && (
-        <section id="df2-theater-quarantine" className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
+      {showQuarantineSection && (
+        <section id={THEATER_QUARANTINE_ID} className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
           <div className="df2-theater-v3-alert warn">
             <DtIcon name="alert" size={18} />
             <div>

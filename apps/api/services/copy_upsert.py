@@ -13,6 +13,15 @@ not touch. The conservation that does not lie:
    equal the source.
 
 CDC / mirror / SCD2 stay on the row path. This module is ``upsert`` only.
+
+No keyed write witness (``services.keyed_write_witness``) on this route. The
+staging table records what *landed*, not what the run read: a corruption in
+the COPY encoding or transport (escaping, '' -> NULL, numeric or timestamp
+rendering) is merged into dest too, so dest would equal such a witness while
+the source differs, and the corruption would be excused as concurrent drift.
+A sound COPY witness must hash what the run SENT (the COPY-OUT stream, or the
+source rows from the COPY's own snapshot); until then a batch-scoped re-read
+here stays unattributed and is disclosed as such.
 """
 
 from __future__ import annotations

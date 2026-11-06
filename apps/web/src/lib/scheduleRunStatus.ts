@@ -108,3 +108,46 @@ export function historyRefreshKey(sched: PipelineSchedule): string {
     current ? `${current.run_id}:${current.status}` : "",
   ].join("|");
 }
+
+/** The finding a dropped / externally changed append destination parks on (QA C9). */
+export const DESTINATION_CONTINUITY_CODE = "DESTINATION_CONTINUITY";
+
+export type DestinationRecoveryAction = "rebaseline" | "rebuild";
+
+/** Whether the schedule is parked on a destination change it can recover from. */
+export function destinationRecoveryOffered(sched: PipelineSchedule): boolean {
+  const request = sched.approval_request as { code?: string; status?: string } | undefined;
+  if (request && request.code === DESTINATION_CONTINUITY_CODE) {
+    return String(request.status || "open") === "open";
+  }
+  return Boolean(sched.needs_approval) && sched.approval_code === DESTINATION_CONTINUITY_CODE;
+}
+
+export interface NextRunView {
+  /** What the "Next run" fact says. `null` asks the caller to format `next_run_at`. */
+  label: string | null;
+  /** Hover / screen-reader detail. */
+  title: string;
+  stalled: boolean;
+}
+
+/**
+ * The "Next run" an operator reads (QA C9 / Mongo D9). An armed schedule with
+ * no next run is never shown as a bare "—": it is stalled (with the reason and
+ * the action that clears it) or due now.
+ */
+export function nextRunView(sched: PipelineSchedule): NextRunView {
+  if (!sched.enabled || sched.state === "paused") {
+    return { label: "Paused", title: "Paused: no scheduled runs until it is enabled.", stalled: false };
+  }
+  if (sched.state === "stalled") {
+    const reason = String(sched.stalled_reason || "").trim();
+    return {
+      label: "Held — action needed",
+      title: reason || "This schedule will not run until its finding is resolved.",
+      stalled: true,
+    };
+  }
+  if (sched.next_run_at) return { label: null, title: "", stalled: false };
+  return { label: "Due now", title: "The next beat starts this schedule.", stalled: false };
+}

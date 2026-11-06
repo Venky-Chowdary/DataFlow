@@ -3,7 +3,7 @@ import { useToast } from "../../components/Toast";
 import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
+import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, concreteWorkspaceId, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
 import { Button } from "../../components/ui/Button";
 import { tenantSaveFeedback, type SaveFeedback } from "../../lib/postureCopy";
 
@@ -56,9 +56,9 @@ export function TenantSettings() {
   // The workspace being viewed, re-read when the switcher moves: mounting before
   // the shell had named one read the tenant of no workspace and reported a saved
   // tenant as missing.
-  const [activeWorkspace, setActiveWorkspace] = useState(getActiveWorkspaceId());
+  const [activeWorkspace, setActiveWorkspace] = useState(() => concreteWorkspaceId(getActiveWorkspaceId()));
   useEffect(() => {
-    const onChanged = () => setActiveWorkspace(getActiveWorkspaceId());
+    const onChanged = () => setActiveWorkspace(concreteWorkspaceId(getActiveWorkspaceId()));
     window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
     return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
   }, []);

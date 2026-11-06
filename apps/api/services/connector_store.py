@@ -11,11 +11,18 @@ import json
 import logging
 import os
 from services.brand_env import getenv_brand
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
 
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
@@ -154,14 +161,21 @@ def listen_port_for_connector(conn_type: str, raw: Any, host: Any = "") -> int:
 #   "require" - the user turned SSL/TLS on. The connection is strictly
 #               encrypted and is never retried in plaintext.
 #   "prefer"  - negotiate TLS, plaintext allowed (explicit, API/import only).
-#   ""        - unset: the user never asked for TLS. Negotiates like "prefer".
+#   "disable" - MySQL family only: the user explicitly asked for a plaintext
+#               session. Honoured only where the server allows it; a server
+#               requiring secure transport is re-dialled with TLS and that is
+#               recorded (connectors.mysql_conn.dial_pymysql). Carried to the
+#               dial as the MySQL URI option ``ssl-mode=DISABLED``
+#               (:func:`dial_connection_string`).
+#   ""        - unset: the user never asked. Negotiates like "prefer"; a
+#               legacy non-PostgreSQL ``ssl=True`` still means "require".
 # Documents written before this field existed carry only the boolean ``ssl``,
 # which this store used to default to True when a caller omitted it - so a
 # legacy ``ssl=True`` cannot be told apart from an injected default. Such
 # documents are read as unset ("") until the connector is saved again.
 # For the PostgreSQL family ``SavedConnector.ssl`` is the derived strict flag
 # (``ssl_mode == "require"``), so every downstream ``ssl=True`` means required.
-SSL_MODES = ("", "prefer", "require")
+SSL_MODES = ("", "prefer", "require", "disable")
 _TLS_MODE_TYPES = frozenset({"postgresql", "redshift"})
 
 
@@ -204,13 +218,136 @@ def stamp_ssl_mode(doc: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, A
     return doc
 
 
+def _is_mysql_family(conn_type: str) -> bool:
+    try:
+        from src.transfer.engine_family import family_or_kind
+    except ImportError:  # pragma: no cover
+        from transfer.engine_family import family_or_kind
+    return family_or_kind(conn_type or "") == "mysql"
+
+
+def validate_ssl_mode(conn_type: str, data: Mapping[str, Any]) -> None:
+    """Refuse a TLS mode this connector cannot honour (raised as ValueError -> 4xx)."""
+    mode = data.get("ssl_mode")
+    if mode is None:
+        return
+    if mode not in SSL_MODES:
+        raise ValueError(
+            f"ssl_mode '{mode}' is not one of require, prefer, disable (or empty for unset)."
+        )
+    if mode == "disable" and not _is_mysql_family(conn_type):
+        raise ValueError(
+            "ssl_mode 'disable' is supported for MySQL-family connectors only; "
+            f"a {conn_type} connector cannot promise a plaintext session."
+        )
+    if mode == "disable":
+        # Raises ValueError (naming ssl_mode) on a DSN asking for REQUIRED / VERIFY_*.
+        dial_connection_string(conn_type, mode, str(data.get("connection_string") or ""),
+                               data.get("extra") if isinstance(data.get("extra"), Mapping)
+                               else {k: data.get(k) for k in _MYSQL_TLS_OPTION_KEYS})
+
+
+#: Update fields that change what a MySQL dial's TLS plan reads.
+_TLS_PLAN_FIELDS = frozenset({"ssl_mode", "ssl", "connection_string", "extra", "type"})
+
+
+def validate_merged_ssl_mode(patch: Mapping[str, Any], merged: Mapping[str, Any]) -> None:
+    """An edit's TLS choice, checked against the connector it produces.
+
+    A PATCH ``{"ssl_mode": "disable"}`` on a connector whose saved ``extra``
+    holds ``ssl_ca`` used to be checked against the patch alone, so it was
+    saved and every later dial failed. ``merged`` is the decrypted result of
+    the edit (saved fields plus the patch, extras merged).
+    """
+    if not (_TLS_PLAN_FIELDS & set(patch)):
+        return
+    validate_ssl_mode(str(merged.get("type") or ""), {
+        "ssl_mode": merged.get("ssl_mode") if merged.get("ssl_mode") in SSL_MODES else None,
+        "connection_string": str(merged.get("connection_string") or ""),
+        "extra": dict(merged.get("extra") or {}),
+    })
+
+
 def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
-    """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document."""
+    """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document.
+
+    Back-compat: a document with no mode keeps its boolean (non-PostgreSQL
+    ``ssl=True`` is "require", ``ssl=False`` is "prefer"); an explicit mode wins.
+    """
     mode = data.get("ssl_mode")
     mode = mode if mode in SSL_MODES else ""
     if _has_tls_mode(conn_type):
         return mode == "require", mode
+    if mode == "require":
+        return True, mode
+    if mode in {"prefer", "disable"}:
+        return False, mode
     return bool(data.get("ssl", True)), mode
+
+
+#: Form / saved-extra TLS options a MySQL dial reads from the DSN.
+_MYSQL_TLS_OPTION_KEYS = ("ssl_ca", "ssl_capath", "ssl_cert", "ssl_key",
+                          "ssl_verify_cert", "ssl_verify_identity")
+
+
+def dial_connection_string(
+    conn_type: str, ssl_mode: str, connection_string: str, options: Mapping[str, Any] | None = None
+) -> str:
+    """The connection string a MySQL dial uses: one TLS plan input for every path.
+
+    PyMySQL, SQLAlchemy and the binlog reader all read TLS from the DSN
+    (``connectors.mysql_tls.mysql_tls_plan``). The saved connector's TLS
+    choice — ``ssl_mode`` "disable", and the form's CA / client certificate /
+    verify options (``options``, the saved ``extra``) — rides there, so the
+    three paths cannot disagree. A saved "disable" next to a DSN that asks
+    for REQUIRED / VERIFY_* is a contradiction and raises (422 at save).
+    """
+    raw = connection_string or ""
+    if not _is_mysql_family(conn_type):
+        return raw
+    from urllib.parse import urlencode
+
+    from connectors.mysql_tls import TLS_DISABLED, TlsModeError, mysql_tls_plan, tls_request
+
+    have = tls_request(raw)
+    extra: list[tuple[str, str]] = []
+    for key in _MYSQL_TLS_OPTION_KEYS:
+        value = (options or {}).get(key)
+        if value in (None, "", False):
+            continue
+        slot = key.removeprefix("ssl_")
+        if slot in {"verify_cert", "verify_identity"}:
+            if not have[slot]:
+                extra.append((key, "true"))
+        elif not have.get(slot):
+            extra.append((key, str(value)))
+    if ssl_mode == "disable":
+        try:
+            current = mysql_tls_plan(ssl=False, connection_string=raw, options=dict(options or {}))
+            from_dsn = mysql_tls_plan(ssl=False, connection_string=raw, options={})
+        except TlsModeError as exc:
+            raise ValueError(f"ssl_mode 'disable' contradicts the connection's TLS settings: {exc}") from exc
+        if current.mode != TLS_DISABLED:
+            if from_dsn.must_encrypt:
+                raise ValueError(
+                    f"ssl_mode 'disable' contradicts ssl-mode={from_dsn.mode.upper()} in the "
+                    "connection string; keep one of them."
+                )
+            if current.must_encrypt:
+                # The DSN asks for nothing. The connector's own TLS options do:
+                # a CA means verify the server, and a client certificate means
+                # an encrypted session. Name those options, not the DSN.
+                named = ", ".join(k for k in _MYSQL_TLS_OPTION_KEYS
+                                  if (options or {}).get(k) not in (None, "", False))
+                raise ValueError(
+                    f"ssl_mode 'disable' contradicts this connector's TLS options ({named}); "
+                    f"they ask for an encrypted ({current.mode.upper()}) session. Remove them, "
+                    "or set ssl_mode to require."
+                )
+            extra.append(("ssl-mode", "DISABLED"))
+    if not extra:
+        return raw
+    return f"{raw}{'&' if '?' in raw else '?'}{urlencode(extra)}"
 
 
 @dataclass
@@ -570,6 +707,52 @@ def _load_all() -> list[SavedConnector]:
     return items
 
 
+_FILE_MUTATION_GUARD = threading.RLock()
+_FILE_MUTATION_STATE = threading.local()
+
+
+@contextmanager
+def _file_store_mutation() -> Iterator[None]:
+    """Serialize one read-modify-write cycle on the file-backed store.
+
+    Every mutation loads the whole list, changes one entry and writes the
+    list back. Two writers interleaving (a job's terminal stamp on its
+    connectors while a request saves a new one) each read the file, apply
+    their own change and write back, the later write silently dropping the
+    other's row: the connector a user had just saved was "not found" a
+    moment later (D195 run 2 in CI). The write itself stays the atomic
+    temp-file replace; this lock makes the cycle around it exclusive across
+    threads (RLock) and across worker processes sharing the file (``flock``
+    on a sidecar, POSIX only, as for the other JSON stores). Re-entrant, so
+    a mutation that calls another (``create_connector`` → ``update_connector``)
+    holds one lock.
+    """
+    depth = getattr(_FILE_MUTATION_STATE, "depth", 0)
+    if depth:
+        _FILE_MUTATION_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _FILE_MUTATION_STATE.depth = depth
+        return
+    with _FILE_MUTATION_GUARD:
+        _FILE_MUTATION_STATE.depth = 1
+        store_path = _store_path()
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = store_path.with_suffix(store_path.suffix + ".lock")
+        try:
+            with open(lock_path, "a+", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            _FILE_MUTATION_STATE.depth = 0
+
+
 def _save_all(connectors: list[SavedConnector]) -> None:
     store_path = _store_path()
     store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -795,6 +978,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
 
     data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
+    validate_ssl_mode(conn_type, data)
     ssl, ssl_mode = resolve_tls(conn_type, stamp_ssl_mode(dict(data), data))
     conn = SavedConnector(
         id=str(uuid.uuid4()),
@@ -849,9 +1033,10 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         except Exception as exc:
             raise _mongo_write_failed("create", conn.id, exc) from exc
 
-    connectors = _load_all()
-    connectors.append(conn)
-    _save_all(connectors)
+    with _file_store_mutation():
+        connectors = _load_all()
+        connectors.append(conn)
+        _save_all(connectors)
     return conn
 
 
@@ -898,6 +1083,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
         if before is not None:
             data = split_sftp_host_edit(data, data.get("type") or before.type, before.port)
     def _merge(existing: SavedConnector) -> SavedConnector:
+        validate_ssl_mode(str(data.get("type") or existing.type), data)
         merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
         merged["extra"] = _merged_extra(
             existing.extra, data,
@@ -913,6 +1099,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             str(merged.get("type") or existing.type),
             merged.get("role"),
         )
+        validate_merged_ssl_mode(data, merged)
         return SavedConnector.from_dict(merged, secrets_encrypted=False)
 
     if _use_mongo():
@@ -927,6 +1114,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # only a masked/empty placeholder, and a legacy plaintext secret is
             # re-encrypted by _encrypt_connector_doc — every successful update
             # heals the record instead of refusing it.
+            validate_ssl_mode(str(data.get("type") or raw.get("type") or ""), data)
             merged = stamp_ssl_mode({**raw, **data, "_id": raw.get("_id")}, data)
             merged["extra"] = _merged_extra(
                 raw.get("extra"), data,
@@ -941,6 +1129,9 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                 str(merged.get("type") or raw.get("type") or ""),
                 merged.get("role"),
             )
+            if _TLS_PLAN_FIELDS & set(data):
+                plain = SavedConnector.from_dict({**merged, "id": connector_id})
+                validate_merged_ssl_mode(data, {**merged, "connection_string": plain.connection_string})
             doc = _encrypt_connector_doc(merged)
             coll.replace_one(query, doc)
             try:
@@ -952,47 +1143,82 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                     {**doc, "id": str(doc.get("_id") or connector_id)},
                     secrets_encrypted=False,
                 )
+        except ValueError as exc:
+            # A refused TLS choice is the request's fault (422 at the routes),
+            # not a store failure. Nothing was written.
+            if "ssl_mode" in str(exc):
+                raise
+            raise _mongo_write_failed("update", connector_id, exc) from exc
         except Exception as exc:
             raise _mongo_write_failed("update", connector_id, exc) from exc
 
-    connectors = _load_all()
-    for i, c in enumerate(connectors):
-        if c.id != connector_id:
-            continue
-        if workspace_id is not None and c.workspace_id not in (workspace_id, ""):
-            continue
-        updated = _merge(c)
-        connectors[i] = updated
-        _save_all(connectors)
-        return updated
+    with _file_store_mutation():
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id != connector_id:
+                continue
+            if workspace_id is not None and c.workspace_id not in (workspace_id, ""):
+                continue
+            updated = _merge(c)
+            connectors[i] = updated
+            _save_all(connectors)
+            return updated
     return None
 
 
-def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
+def delete_connector(
+    connector_id: str, workspace_id: str | None = None, *, exact_workspace: bool = False
+) -> bool:
+    """Delete a saved connector. ``exact_workspace`` (workspace teardown) matches
+    ``workspace_id`` exactly — never an unscoped legacy row."""
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return False
+    if exact_workspace and not workspace_id:
+        raise ValueError("an exact-workspace delete needs a workspace")
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            result = coll.delete_one(_connector_id_query(connector_id, workspace_id))
+            query = (
+                {"$and": [{"$or": [{"_id": connector_id}, {"id": connector_id}]}, {"workspace_id": workspace_id}]}
+                if exact_workspace
+                else _connector_id_query(connector_id, workspace_id)
+            )
+            result = coll.delete_one(query)
             return result.deleted_count > 0
         except Exception as exc:
             raise _mongo_write_failed("delete", connector_id, exc) from exc
 
-    connectors = _load_all()
-    before = len(connectors)
-    filtered = [
-        c for c in connectors
-        if not (
-            c.id == connector_id
-            and (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
-        )
-    ]
-    if len(filtered) == before:
-        return False
-    _save_all(filtered)
+    with _file_store_mutation():
+        connectors = _load_all()
+        before = len(connectors)
+        filtered = [
+            c for c in connectors
+            if not (
+                c.id == connector_id
+                and (
+                    c.workspace_id == workspace_id
+                    if exact_workspace
+                    else (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
+                )
+            )
+        ]
+        if len(filtered) == before:
+            return False
+        _save_all(filtered)
     return True
+
+
+def _patch_file_connector(connector_id: str, patch: dict[str, Any]) -> bool:
+    """Merge ``patch`` into one stored connector of the file store; False when absent."""
+    with _file_store_mutation():
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id == connector_id:
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
+                _save_all(connectors)
+                return True
+    return False
 
 
 def mark_tested(connector_id: str, ok: bool, *, tested_at: str | None = None) -> None:
@@ -1010,24 +1236,14 @@ def mark_tested(connector_id: str, ok: bool, *, tested_at: str | None = None) ->
             # Keep file mirror in sync when present so dual-backend reads cannot
             # resurrect a stale failed badge after a green probe.
             try:
-                connectors = _load_all()
-                for i, c in enumerate(connectors):
-                    if c.id == connector_id:
-                        connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                        _save_all(connectors)
-                        break
+                _patch_file_connector(connector_id, patch)
             except Exception as mirror_exc:
                 logger.debug("File mirror mark_tested skipped: %s", mirror_exc)
             return
         except Exception as exc:
             logger.warning("MongoDB mark_tested failed, falling back to file: %s", exc)
 
-    connectors = _load_all()
-    for i, c in enumerate(connectors):
-        if c.id == connector_id:
-            connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-            _save_all(connectors)
-            return
+    _patch_file_connector(connector_id, patch)
 
 
 def note_transfer_succeeded(*connector_ids: str | None) -> int:
@@ -1054,27 +1270,15 @@ def note_transfer_succeeded(*connector_ids: str | None) -> int:
                     continue
             except Exception as exc:  # noqa: BLE001 - file store is the fallback
                 logger.warning("MongoDB note_transfer_succeeded failed, falling back to file: %s", exc)
-        connectors = _load_all()
-        for i, c in enumerate(connectors):
-            if c.id == cid:
-                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                _save_all(connectors)
-                stamped += 1
-                break
+        if _patch_file_connector(cid, patch):
+            stamped += 1
     return stamped
 
 
 def _parse_instant(raw: Any) -> datetime | None:
-    if isinstance(raw, datetime):
-        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    from services.instant_text import parse_iso_instant
+
+    return parse_iso_instant(raw, assume_utc=True)
 
 
 def connector_health(conn: Any) -> str:
@@ -1122,24 +1326,14 @@ def mark_used(*connector_ids: str | None) -> int:
                 if result.matched_count:
                     stamped += 1
                     try:
-                        connectors = _load_all()
-                        for i, c in enumerate(connectors):
-                            if c.id == cid:
-                                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                                _save_all(connectors)
-                                break
+                        _patch_file_connector(cid, patch)
                     except Exception as mirror_exc:
                         logger.debug("File mirror mark_used skipped: %s", mirror_exc)
                     continue
             except Exception as exc:
                 logger.warning("MongoDB mark_used failed, falling back to file: %s", exc)
-        connectors = _load_all()
-        for i, c in enumerate(connectors):
-            if c.id == cid:
-                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                _save_all(connectors)
-                stamped += 1
-                break
+        if _patch_file_connector(cid, patch):
+            stamped += 1
     return stamped
 
 

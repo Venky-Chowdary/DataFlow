@@ -800,10 +800,32 @@ def _name_protocol_mismatch(
     return (False, message) if message else result
 
 
+_MONGO_UNREACHABLE = re.compile(
+    r"timed out|timeout|serverselection|no servers|nodename|name or service|"
+    r"getaddrinfo|name resolution|connection refused|unreachable|dnspython|srv",
+    re.I,
+)
+
+
+def _mongodb_srv_form_hint(cfg: dict[str, Any], raw: Any) -> str:
+    """Name the mongodb+srv:// fix when a host/port form cannot reach a cluster.
+
+    QA r12 Mongo D6: an Atlas cluster name in the host field timed out with no
+    clue that Atlas is dialled through its SRV record.
+    """
+    if str(cfg.get("connection_string") or "").strip():
+        return ""
+    if not _MONGO_UNREACHABLE.search(str(raw or "")):
+        return ""
+    from connectors.mongodb_common import mongodb_srv_hint
+
+    return mongodb_srv_hint(str(cfg.get("host") or ""), int(cfg.get("port") or 0))
+
+
 def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
-    from services.connector_auth import engine_login_role
+    from services.connector_auth import engine_login_role, resolve_api_key
     from services.egress_guard import metadata_endpoint_refusal
 
     refusal = metadata_endpoint_refusal(
@@ -834,7 +856,9 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
             return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
         if ok:
             return True, raw
-        return False, humanize_connection_error(db_type, raw, auth_mode=_attempted_auth_mode)
+        message = humanize_connection_error(db_type, raw, auth_mode=_attempted_auth_mode)
+        hint = _mongodb_srv_form_hint(cfg, raw)
+        return False, (f"{message.rstrip()} {hint}" if hint else message)
 
     from services.dialect_profiles import default_schema_for, normalize_schema
 
@@ -857,7 +881,9 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "auth_mode": cfg.get("auth_mode", ""),
         "role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
         "auth_role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
-        "api_key": cfg.get("api_key", ""),
+        # A key declared by auth_mode and pasted in the password field is the key
+        # (one rule for every HTTP tile — D274/D277).
+        "api_key": resolve_api_key(cfg, password_is_key=False),
         "service_account": cfg.get("service_account", ""),
         "private_key": cfg.get("private_key", ""),
         "region": cfg.get("region", ""),

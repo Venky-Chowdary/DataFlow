@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/ops", tags=["Ops"])
@@ -211,6 +212,133 @@ async def post_clear_cdc_cursor(body: ClearCursorBody, request: Request) -> dict
     return result
 
 
+def _capture_connector(request: Request, connector_id: str, workspace_id: str, *, write: bool):
+    """The saved PostgreSQL source connector the caller may act on, or 404/422."""
+    from services.connector_store import get_connector
+    from services.workspace_access import resolve_read_workspace, resolve_write_workspace
+
+    from services.workspace_access import tenant_scope
+
+    # One scope for reading and cleaning (review): a platform admin who names
+    # no workspace acts unrestricted on both; anyone else, or an admin who
+    # names one, acts in that workspace on both.
+    scope = tenant_scope(request, workspace_id)
+    unrestricted = bool(scope.unrestricted) and not (workspace_id or "").strip()
+    if unrestricted:
+        ws = ""
+    else:
+        ws = (
+            resolve_write_workspace(request, workspace_id)
+            if write
+            else resolve_read_workspace(request, workspace_id)
+        )
+    connector = get_connector(connector_id, ws or None)
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if (connector.type or "").lower() not in {"postgresql", "postgres"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Only PostgreSQL CDC keeps a server-side replication slot; "
+                f"connector {connector_id} is {connector.type}."
+            ),
+        )
+    return connector, ws, unrestricted
+
+
+@router.get("/cdc-captures")
+async def get_cdc_captures(
+    request: Request,
+    connector_id: str = Query(..., min_length=1, max_length=128),
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
+    """Replication slots and publications on a PostgreSQL source, with owner and state.
+
+    C11: names the Datawrap-created slots no live CDC schedule uses, or whose
+    source table is gone, how much WAL each retains, and a warning per slot.
+    External slots are listed for visibility and never cleaned up.
+    ``auto_drop`` states the deployment setting ``cdc_orphan_auto_drop``
+    (off by default; PATCH /api/v1/workspace/settings, platform admin,
+    audited): only when it is on does the scheduler drop a source-table-gone
+    slot by itself after the grace period. Off, it warns and alerts.
+    """
+    import asyncio
+
+    from services.cdc_capture_inventory import inventory_pg_captures
+
+    connector, ws, unrestricted = _capture_connector(request, connector_id, workspace_id, write=False)
+    try:
+        return await asyncio.to_thread(
+            inventory_pg_captures, connector.to_dict(), connector_id=connector_id,
+            workspace_id=ws, unrestricted=unrestricted,
+        )
+    except Exception as exc:  # noqa: BLE001 - name the source failure, never a 500
+        raise HTTPException(
+            status_code=502, detail=f"Could not read the source's replication slots: {exc}"
+        ) from exc
+
+
+class CdcCaptureCleanupBody(BaseModel):
+    connector_id: str = Field(..., min_length=1, max_length=128)
+    slot_names: list[str] = Field(default_factory=list, max_length=100)
+    publication_names: list[str] = Field(default_factory=list, max_length=100)
+    include_unregistered: bool = False
+    dry_run: bool = True
+    reason: str = Field("", max_length=300)
+
+
+@router.post("/cdc-captures/cleanup")
+async def post_cdc_captures_cleanup(
+    body: CdcCaptureCleanupBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
+    """Drop orphaned Datawrap replication slots / publications on a PostgreSQL source.
+
+    ``dry_run`` defaults to true: the response names what would be dropped.
+    Only slots Datawrap created, with no reader attached, that no live CDC
+    schedule uses or whose source table is gone, are dropped. Audited.
+    """
+    import asyncio
+
+    from services.audit_coverage import record_security_event
+    from services.cdc_capture_inventory import cleanup_pg_captures
+
+    connector, ws, unrestricted = _capture_connector(
+        request, body.connector_id, workspace_id, write=True
+    )
+    try:
+        result = await asyncio.to_thread(
+            cleanup_pg_captures,
+            connector.to_dict(),
+            connector_id=body.connector_id,
+            workspace_id=ws,
+            unrestricted=unrestricted,
+            slot_names=body.slot_names,
+            publication_names=body.publication_names,
+            include_unregistered=body.include_unregistered,
+            dry_run=body.dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 - name the source failure, never a 500
+        raise HTTPException(
+            status_code=502, detail=f"Could not clean up the source's replication slots: {exc}"
+        ) from exc
+    if not body.dry_run:
+        record_security_event(
+            "cdc.capture.cleanup",
+            outcome="succeeded" if result["dropped"] else "skipped",
+            request=request,
+            resource=f"connector:{body.connector_id}",
+            details={
+                "connector_id": body.connector_id,
+                "dropped": result["dropped"],
+                "results": result["results"],
+                "reason": (body.reason or "").strip() or None,
+            },
+        )
+    return result
+
+
 class SourceHaProbeBody(BaseModel):
     type: str = Field(..., min_length=1, max_length=64)
     host: str = ""
@@ -302,3 +430,53 @@ async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any
         watermark=body.watermark,
     )
     return {"ok": True, "retention": probe.to_dict(), **probe.job_fields()}
+
+
+_MAIL_HEALTH_WINDOW_HOURS = 24
+
+
+@router.get("/mail")
+async def get_mail_outbox_health(
+    request: Request,
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    """The platform mail outbox as an operator sees it (D130).
+
+    Signup codes and reset links are queued here and sent by the API process;
+    a provider refusal (Cloudflare edge 403 "error code: 1010", a bad key,
+    an unverified domain) used to leave only a row marked ``failed`` and a
+    bare ``mail.send_failed`` audit event. This answers "is mail leaving,
+    and if not, why": the configured provider and User-Agent, the status
+    histogram, and the recent failures with their cause. Bodies are never
+    returned and recipients are masked. Platform-wide, so platform
+    administrators only.
+    """
+    from services import mail_outbox
+    from services.email_sender import email_provider_name
+    from services.notification_service import USER_AGENT
+    from services.workspace_access import require_platform_admin, tenant_scope
+
+    require_platform_admin(
+        request,
+        tenant_scope(request),
+        "ops.mail.read",
+        "The mail outbox is platform-wide: platform administrators only.",
+    )
+    counts = mail_outbox.counts()
+    failures = mail_outbox.recent_failures(limit=limit)
+    # "Healthy" is about now, not history: one refusal last month must not
+    # read as a broken mailer forever. The histogram keeps the history.
+    since = (datetime.now(timezone.utc) - timedelta(hours=_MAIL_HEALTH_WINDOW_HOURS)).isoformat()
+    recent = [
+        f for f in mail_outbox.recent_failures(limit=200)
+        if str(f.get("finished_at") or f.get("next_attempt_at") or f.get("created_at") or "") >= since
+    ]
+    return {
+        "provider": email_provider_name(),
+        "user_agent": USER_AGENT,
+        "counts": counts,
+        "recent_failures": failures,
+        "health_window_hours": _MAIL_HEALTH_WINDOW_HOURS,
+        "failures_in_window": len(recent),
+        "healthy": not recent,
+    }

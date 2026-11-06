@@ -16,12 +16,13 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
 
 from connectors.writer_common import WriteResult as _WriteResult
+from services.connector_auth import resolve_api_key
 
 
 def _requests_session() -> Any:
@@ -57,6 +58,54 @@ def _index_url(host: str, connection_string: str = "") -> str:
         url = f"https://{raw.rstrip('/')}"
     assert_connector_dial_allowed(url, point="http_client")
     return url
+
+
+#: Pinecone's control plane. It lists indexes; vectors live on each index host.
+PINECONE_CONTROL_PLANE_HOST = "api.pinecone.io"
+
+
+def _is_control_plane(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    return (urlparse(url).hostname or "").lower() == PINECONE_CONTROL_PLANE_HOST
+
+
+def _control_plane_answer(session: Any, url: str, key: str, index_name: str) -> str:
+    """Operator copy for a connector pointed at the control plane (D273).
+
+    ``describe_index_stats`` is an index-host API, so api.pinecone.io answered
+    404 and the probe said "Fix host/port/user/password". The control plane
+    can list the indexes this key sees and their hosts: name them.
+    """
+    resp = session.get(
+        f"{url}/indexes",
+        headers={**_headers(key), "X-Pinecone-API-Version": "2024-07"},
+        timeout=15,
+    )
+    if resp.status_code in {401, 403}:
+        return f"Pinecone auth failed ({resp.status_code})"
+    if resp.status_code != 200:
+        return f"Pinecone control plane returned {resp.status_code} listing indexes"
+    try:
+        indexes = [
+            (str(i.get("name") or ""), str(i.get("host") or ""))
+            for i in (resp.json() or {}).get("indexes") or []
+            if isinstance(i, dict)
+        ]
+    except ValueError:
+        indexes = []
+    head = (
+        f"{PINECONE_CONTROL_PLANE_HOST} is Pinecone's control plane, not an index. "
+        "Set the connector host to the index host"
+    )
+    wanted = (index_name or "").strip()
+    match = next((h for n, h in indexes if wanted and n == wanted and h), "")
+    if match:
+        return f"{head}: index '{wanted}' is at {match}."
+    if indexes:
+        listed = ", ".join(f"{n} ({h})" for n, h in indexes[:10] if h)
+        return f"{head}. Indexes on this key: {listed}."
+    return f"{head}. This key sees no indexes yet: create one, then use its host."
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -169,7 +218,7 @@ def scan_source_ids(
         return "unmeasured", []
     try:
         session = _requests_session()
-        key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        key = resolve_api_key(cfg)
         hdrs = _headers(key)
         stats = session.get(
             f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
@@ -289,13 +338,19 @@ def test_pinecone(
 ) -> tuple[bool, str]:
     """Quick connectivity check against a Pinecone index host."""
     url = _index_url(host, connection_string)
-    key = api_key or password or ""
+    key = resolve_api_key(
+        {"api_key": api_key, "password": password, "auth_mode": _kwargs.get("auth_mode", "")}
+    )
     if not url:
         return False, "Pinecone index host is required"
     if not key:
         return False, "Pinecone API key is required"
     try:
         session = _requests_session()
+        if _is_control_plane(url):
+            return False, _control_plane_answer(
+                session, url, key, str(_kwargs.get("database") or _kwargs.get("table") or "")
+            )
         resp = session.get(f"{url}/describe_index_stats", headers=_headers(key), timeout=15)
         if resp.status_code in {200, 401, 403}:
             # 401/403 prove the host is reachable; auth may still be wrong.
@@ -305,6 +360,24 @@ def test_pinecone(
         return False, f"Pinecone returned {resp.status_code}"
     except Exception as exc:
         return False, str(exc)
+
+
+def list_namespaces(cfg: dict[str, Any]) -> list[str]:
+    """Namespaces on the index (``describe_index_stats``); the default one is ``""``."""
+    url = _index_url(str(cfg.get("host") or ""), str(cfg.get("connection_string") or ""))
+    if not url:
+        raise ValueError("Pinecone index host is required")
+    if _is_control_plane(url):
+        raise ValueError(
+            f"{PINECONE_CONTROL_PLANE_HOST} is Pinecone's control plane, not an index: "
+            "set the connector host to the index host"
+        )
+    resp = _requests_session().get(
+        f"{url}/describe_index_stats", headers=_headers(resolve_api_key(cfg)), timeout=15
+    )
+    resp.raise_for_status()
+    namespaces = (resp.json() or {}).get("namespaces") or {}
+    return sorted(str(n) for n in namespaces) if isinstance(namespaces, dict) else []
 
 
 def _pinecone_metadata_value(value: Any) -> Any | None:
@@ -443,7 +516,14 @@ def write_mapped_rows(
         )
 
     index_url = _index_url(host, connection_string)
-    key = api_key or password or username or ""
+    key = resolve_api_key(
+        {
+            "api_key": api_key,
+            "password": password,
+            "username": username,
+            "auth_mode": _kwargs.get("auth_mode", ""),
+        }
+    )
     namespace = (table_name or schema or "").strip()
     if not index_url:
         return WriteResult(
@@ -902,7 +982,7 @@ def write_mapped_rows(
                 payload["namespace"] = namespace
             resp = session.post(
                 f"{index_url}/vectors/upsert",
-                data=json_dumps_exact_numbers(payload),
+                data=json_dumps_exact_text(payload),
                 headers=hdrs,
                 timeout=60,
             )

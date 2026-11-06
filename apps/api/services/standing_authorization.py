@@ -518,9 +518,12 @@ def grant_authorization(
     }
     for scope, ack_key in _SCOPE_REQUIRES_ACK.items():
         if scope in requested and not acks[ack_key]:
+            label = ack_key.replace("_", " ")
             raise AuthorizationRefused(
-                f"{scope} replays an attestation that was never made — accept the "
-                f"{ack_key.replace('_', ' ')} risk explicitly, or drop the scope."
+                f"This approval carries the {label} acknowledgement on to the run, "
+                f"but none was given. Review the {label} finding, then approve "
+                f'again with "{ack_key}": true and your reason (scope {scope}), '
+                "or approve without that scope."
             )
 
     days = int(expires_in_days or 0)

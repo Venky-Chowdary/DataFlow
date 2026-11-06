@@ -144,6 +144,17 @@ def _mapping_review_waits_for_evolution(request: Any) -> bool:
     )
 
 
+def destination_evolution_approved_for(request: Any) -> bool:
+    """Whether this request's policy alone would apply destination evolution (propagate_*)."""
+    from services.schema_drift import destination_evolution_approved, effective_schema_policy
+
+    policy = effective_schema_policy(
+        getattr(request, "schema_policy", None),
+        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+    )
+    return destination_evolution_approved(policy, acknowledged=False)
+
+
 def _apply_schema_auto_propagate(
     *,
     request: Any,
@@ -153,6 +164,10 @@ def _apply_schema_auto_propagate(
     dest_schema_types: dict[str, str] | None,
 ) -> list[dict[str, Any]]:
     """Validate≡Execute schema auto-propagate — pause on hard-break, extend maps."""
+    from services.schema_drift import strip_client_widen_stamps
+
+    # Approved-widen stamps are planning's to set for this run, never a client's.
+    mappings = strip_client_widen_stamps(mappings)
     planned = _plan_schema_auto_propagate(
         request=request,
         columns=columns,
@@ -212,17 +227,35 @@ def _plan_schema_auto_propagate(
         dest_recreated=dest_recreated,
     )
     evolution = drift.get("schema_evolution") or {}
-    from services.schema_drift import execute_must_pause, propose_dest_widens
+    from services.schema_drift import (
+        dest_key_charsets,
+        dest_key_groups,
+        dest_key_limit,
+        execute_must_pause,
+        propose_dest_widens,
+    )
 
     # D107: detect_schema_drift ran without table_exists above, so its
     # live-contract lane never emitted destination-widen proposals. Emit them
     # here against the introspected destination types — additive widen_type
     # entries propagate/acknowledgement flows already understand.
+    # One key-group source with Validate: the catalog PK, unique keys and
+    # every index engine_preflight stamped on the destination, plus the key.
+    _dest_extra = getattr(request.destination, "extra", None) or {}
+    _key_groups = dest_key_groups(
+        list(_dest_extra.get("primary_key_columns") or []),
+        list(_dest_extra.get("unique_keys") or []),
+        contract.primary_key if contract else None,
+        _dest_extra.get("indexes_meta"),
+    )
     _widen_props = propose_dest_widens(
         mappings,
         source_schema=schema,
         target_schema=dest_schema_types or {},
         dest_db=(getattr(request.destination, "format", "") or "").lower(),
+        key_groups=_key_groups,
+        max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
+        key_charsets=dest_key_charsets(_dest_extra.get("indexes_meta")),
     )
     if _widen_props:
         _additive = list(evolution.get("additive") or [])
@@ -238,6 +271,12 @@ def _plan_schema_auto_propagate(
         raise ValueError(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
         )
+    _key_props = [p for p in _widen_props or [] if p.get("key")]
+    if _key_props and not acknowledged and destination_evolution_approved_for(request):
+        # propagate_* approves additive evolution, never a key rewrite.
+        from services.schema_drift import key_widen_approval_message
+
+        raise ValueError(key_widen_approval_message(_key_props))
     from services.db_type_utils import dest_declares_column_ddl
     from services.schema_drift import (
         PROPAGATE_POLICIES,
@@ -263,6 +302,10 @@ def _plan_schema_auto_propagate(
             dest_types=dest_schema_types,
             dest_db=(getattr(request.destination, "format", "") or "").lower(),
             adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
+            key_groups=_key_groups,
+            max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
+            key_charsets=dest_key_charsets(_dest_extra.get("indexes_meta")),
+            key_widens_approved=acknowledged,
         )
     if not evolution.get("should_propagate"):
         return mappings

@@ -80,6 +80,143 @@ def validate_schedule_file_policy(
     return policy, dedupe
 
 
+def route_duplicate_options(*extras: Any) -> dict[str, str]:
+    """``in_file_dedupe`` / ``duplicate_policy`` the route chose, from the first
+    extra (source, then destination) that names each.
+
+    Validate reads them through ``preflight_file_plan`` and the file writer
+    reads ``destination.extra``; the engine stamps this answer on the
+    destination so both see one choice. A ``keep_last`` set on the source alone
+    used to clear Validate while the writer loaded every copy.
+    """
+    from services.preflight_file_plan import _plan_duplicate_policy, _plan_in_file_dedupe
+
+    configs = [e for e in extras if isinstance(e, dict)]
+    out: dict[str, str] = {}
+    dedupe = _plan_in_file_dedupe(*configs)
+    if dedupe:
+        out["in_file_dedupe"] = dedupe
+    policy = _plan_duplicate_policy(*configs)
+    if policy:
+        out["duplicate_policy"] = policy
+    return out
+
+
+def keep_last_reads_whole(request: Any) -> bool:
+    """A record-batch source (file, S3/GCS/ADLS/SFTP object) asked for keep_last.
+
+    Object-store sources are ``kind=database`` and record-batch
+    (``preflight_source_kind.source_is_record_batch``), so Validate accepts
+    keep_last for them; the table stream does not collapse, so such a run
+    reads the batch whole on the buffered route, where
+    :func:`keep_last_records` collapses it (QA C2 review 3).
+    """
+    from services.preflight_source_kind import source_is_record_batch
+
+    source = getattr(request, "source", None)
+    if not source_is_record_batch(
+        str(getattr(source, "kind", "") or ""), str(getattr(source, "format", "") or "")
+    ):
+        return False
+    if multi_stream_keep_last_refusal(
+        str(getattr(source, "format", "") or ""), getattr(request, "stream_contracts", None)
+    ):
+        return False  # the multi-stream runner refuses it (fail closed)
+    options = route_duplicate_options(
+        dict(getattr(source, "extra", None) or {}),
+        dict(getattr(getattr(request, "destination", None), "extra", None) or {}),
+    )
+    return options.get("in_file_dedupe") == "keep_last"
+
+
+def multi_stream_keep_last_refusal(source_format: str, stream_contracts: Any) -> str:
+    """Why keep_last cannot run on a multi-object record-batch read, or "".
+
+    keep_last on an object store collapses one object read whole (the
+    buffered route, :func:`keep_last_reads_whole`). A run that selects two or
+    more objects is streamed object by object without that collapse, and the
+    buffered route reads only one — so it is refused at Validate and at
+    schedule save, and the runner fails closed (QA C2 review 3, A2).
+    """
+    from services.preflight_source_kind import source_is_record_batch
+    from services.sync_cursor import resolve_selected_sync_contracts
+
+    if not source_is_record_batch("database", source_format):
+        return ""
+    contracts = [c for c in stream_contracts or [] if isinstance(c, dict)]
+    selected = resolve_selected_sync_contracts(contracts)
+    if len(selected) < 2:
+        return ""
+    return (
+        f"in_file_dedupe=keep_last collapses one object read whole; this run "
+        f"selects {len(selected)} objects, which are streamed one by one without "
+        "that collapse, so it is not applied. Run each object as its own transfer "
+        "(one selected stream) with keep_last, or remove the duplicate keys at the "
+        "source."
+    )
+
+
+def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
+    """The buffered route's keep_last: the same collapse the file stream runs.
+
+    ``file_stream`` collapses through :func:`iter_keep_last`; a file the engine
+    reads whole (priority/limit, staging, mirror) is collapsed here, before
+    the write and before Gate-8 hashes ``records``. A table is never collapsed
+    here — Validate refuses keep_last on one (``KEEP_LAST_TABLE_REFUSAL``).
+    """
+    if not records or not keep_last_reads_whole(request):
+        return records
+    from services.sync_cursor import resolve_sync_contract
+
+    contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+    keys = list(contract.primary_key_columns()) if contract else []
+    if not keys:
+        return records
+    collapsed, _dropped = collapse_keep_last(list(records), keys)
+    return collapsed
+
+
+def schedule_keep_last_refusal(payload: Any) -> str:
+    """Why a schedule's keep_last can never run, or "" — the same rule as Validate.
+
+    A schedule always stamps ``in_file_dedupe`` (``block`` / ``keep_last``) on
+    every run. keep_last on a table read that does not define a last copy
+    (``data_integrity.keep_last_table_refusal``) failed every beat; it is
+    refused at save instead (REST, MCP create_schedule and GitOps all save
+    through ``schedule_store``). A record-batch source, or one whose connector
+    cannot be resolved here, is left to Validate.
+    """
+    data = dict(payload or {})
+    dedupe = str(data.get("in_file_dedupe") or "").strip().lower().replace("-", "_")
+    if dedupe not in {"keep_last", "last", "last_wins"}:
+        return ""
+    from services.preflight_source_kind import source_is_record_batch
+
+    src_type = str(data.get("source_type") or "")
+    if not src_type and data.get("source_connector_id"):
+        try:
+            from services.connector_store import get_connector
+
+            found = get_connector(str(data["source_connector_id"]))
+            src_type = str(getattr(found, "type", "") or (found or {}).get("type", "") if found else "")
+        except Exception:  # noqa: BLE001 — unresolved: Validate decides
+            return ""
+    if not src_type:
+        return ""
+    if source_is_record_batch("database", src_type):
+        return multi_stream_keep_last_refusal(src_type, data.get("stream_contracts"))
+    table = str(data.get("source_table") or "")
+    contracts = [c for c in data.get("stream_contracts") or [] if isinstance(c, dict)] or [{
+        "name": table, "selected": True, "cursor_field": str(data.get("cursor_column") or ""),
+    }]
+    from services.data_integrity import keep_last_table_refusal
+
+    return keep_last_table_refusal(
+        str(data.get("sync_mode") or "full_refresh_overwrite"),
+        stream_contracts=contracts, source_type=src_type, stream_name=table,
+    )
+
+
 def normalize_duplicate_policy(raw: str | None) -> str:
     text = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -193,6 +330,54 @@ def reset_order_column(token) -> None:
 
 def current_order_column() -> str:
     return _ORDER.get()
+
+
+def latest_version_per_key(
+    rows: list[dict],
+    *,
+    cursor_column: str,
+    key_columns: list[str],
+) -> list[dict]:
+    """One row per key — the one an ordered upsert keeps.
+
+    The writer reads ``ORDER BY cursor, key`` and keeps the last copy of a key
+    it sees. Ranking a population the same way needs the watermark's typed
+    comparison (``services.sync_cursor.compare_cursor_values``: ``999`` before
+    ``1000``, instants by value, NULL lowest) with the key as the tie-break;
+    sorting the wire text ranked ``"999"`` above ``"1000"`` and let a NULL
+    cursor win. Equal ``(cursor, key)`` keep arrival order (stable sort): two
+    versions with the same cursor and key are not provably ordered on either
+    side, so the survivor here is the last one *this* read saw, which matches
+    the writer only when both reads returned them in the same order. Then
+    :func:`collapse_keep_last`.
+    """
+    from functools import cmp_to_key
+
+    from services.sync_cursor import compare_cursor_values
+    from services.value_serializer import is_reader_null_cell
+
+    keys = [str(c) for c in key_columns if str(c or "").strip()]
+    if not rows or not keys:
+        return list(rows)
+
+    def _typed(value: Any) -> str | None:
+        return None if value is None or is_reader_null_cell(value) else str(value)
+
+    ordered = list(rows)
+    if cursor_column:
+        def _writer_order(a: dict, b: dict) -> int:
+            by_cursor = compare_cursor_values(_typed(a.get(cursor_column)), _typed(b.get(cursor_column)))
+            if by_cursor:
+                return by_cursor
+            for col in keys:
+                by_key = compare_cursor_values(_typed(a.get(col)), _typed(b.get(col)))
+                if by_key:
+                    return by_key
+            return 0
+
+        ordered = sorted(ordered, key=cmp_to_key(_writer_order))
+    kept, _dropped = collapse_keep_last(ordered, keys)
+    return kept
 
 
 def collapse_keep_last(

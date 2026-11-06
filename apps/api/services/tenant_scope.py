@@ -33,6 +33,9 @@ from fastapi import HTTPException
 from services.workspace_filter import (
     WorkspaceFilter,
     bound_workspace_filter,
+    ALL_WORKSPACES,
+    UNASSIGNED_WORKSPACE,
+    WORKSPACE_VIEWS,
     norm_workspace_id as _norm,
 )
 from services.team_store import (
@@ -67,6 +70,9 @@ def legacy_admin_view_enabled() -> bool:
 
 
 def _audit_legacy_view(actor: str, workspace_id: str) -> None:
+    """One audit row per (actor, workspace) for a platform admin reading the
+    unscoped legacy rows: through the flag inside a named workspace, or
+    through the Unassigned view (``workspace_id`` = ``__unassigned__``)."""
     key = (actor, workspace_id)
     with _LEGACY_VIEW_LOCK:
         if key in _LEGACY_VIEW_AUDITED:
@@ -82,7 +88,8 @@ def _audit_legacy_view(actor: str, workspace_id: str) -> None:
             level="warn",
             workspace_id="",
             details={
-                "flag": LEGACY_ADMIN_VIEW_FLAG,
+                "flag": "" if workspace_id == UNASSIGNED_WORKSPACE else LEGACY_ADMIN_VIEW_FLAG,
+                "view": "unassigned" if workspace_id == UNASSIGNED_WORKSPACE else "workspace",
                 "workspace_id": workspace_id,
                 "effect": "platform admin reads include unscoped legacy rows",
             },
@@ -115,6 +122,19 @@ class TenantScope:
         return self.memberships[0][0] if self.memberships else ""
 
     @property
+    def views_unassigned(self) -> bool:
+        """A platform admin looking at the legacy rows that have no workspace."""
+        return self.requested_workspace_id == UNASSIGNED_WORKSPACE
+
+    @property
+    def header_workspace_id(self) -> str:
+        """The authorized header workspace as rows store it: "" for none and
+        for either view (All names every workspace, Unassigned names none).
+        Every "did the request name a workspace" check reads this, so a view
+        id is never filtered or stamped as if it were one."""
+        return "" if self.requested_workspace_id in WORKSPACE_VIEWS else self.requested_workspace_id
+
+    @property
     def workspace_id(self) -> str:
         """The single workspace this request acts in.
 
@@ -124,18 +144,25 @@ class TenantScope:
         :meth:`target_workspace_id`.
         """
         if self.requested_workspace_id:
-            return self.requested_workspace_id
+            return self.header_workspace_id
         return "" if self.unrestricted else self.default_workspace_id
+
+    def _requested_only(self) -> WorkspaceFilter:
+        if self.views_unassigned:
+            _audit_legacy_view(self.actor, UNASSIGNED_WORKSPACE)
+        return WorkspaceFilter.only(self.header_workspace_id)
 
     @property
     def filter(self) -> WorkspaceFilter:
         """Rows a list or count may return."""
         legacy = not self.enforced
-        if self.requested_workspace_id:
+        if self.views_unassigned:
+            return self._requested_only()
+        if self.header_workspace_id:
             if not legacy and self.unrestricted and legacy_admin_view_enabled():
-                _audit_legacy_view(self.actor, self.requested_workspace_id)
+                _audit_legacy_view(self.actor, self.header_workspace_id)
                 legacy = True
-            return WorkspaceFilter(frozenset({self.requested_workspace_id}), legacy)
+            return WorkspaceFilter(frozenset({self.header_workspace_id}), legacy)
         if self.unrestricted:
             return WorkspaceFilter.everything()
         return WorkspaceFilter(self.member_workspace_ids, legacy)
@@ -146,8 +173,8 @@ class TenantScope:
         For platform records that were never tenant data (the audit trail):
         an unscoped audit row is another account's login or admin action.
         """
-        if self.requested_workspace_id:
-            return WorkspaceFilter.only(self.requested_workspace_id)
+        if self.views_unassigned or self.header_workspace_id:
+            return self._requested_only()
         if self.unrestricted:
             return WorkspaceFilter.everything()
         return WorkspaceFilter(self.member_workspace_ids, False)
@@ -158,8 +185,8 @@ class TenantScope:
         Exact match, like those stores always were; a restricted actor with no
         workspace gets nothing rather than the platform-wide figure.
         """
-        if self.requested_workspace_id:
-            return WorkspaceFilter.only(self.requested_workspace_id)
+        if self.views_unassigned or self.header_workspace_id:
+            return self._requested_only()
         if self.unrestricted:
             return WorkspaceFilter.everything()
         ws = self.default_workspace_id
@@ -173,6 +200,13 @@ class TenantScope:
         if not self.allows(resource_workspace_id):
             return False
         ws = _norm(resource_workspace_id)
+        if ws:
+            from services.team_store import workspace_closing
+
+            if workspace_closing(ws):
+                # Tombstoned: id-addressed updates and deletes are refused too
+                # (review 4 L2), for every caller including platform admins.
+                return False
         if self.unrestricted or not ws:
             return True
         return dict(self.memberships).get(ws, "") in _WRITE_ROLES
@@ -186,7 +220,17 @@ class TenantScope:
         callers with no membership to prefer (a member's write must not become
         an unscoped row every legacy caller can see).
         """
-        ws = self.requested_workspace_id
+        if self.views_unassigned:
+            # Legacy rows stay where they are until the owner claims them
+            # (scripts/backfill_legacy_workspaces.py); nothing new lands there.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unassigned is a read-only view of data that predates "
+                    "workspaces. Choose a workspace to create or export in."
+                ),
+            )
+        ws = self.header_workspace_id
         if not ws and (self.enforced or not write or (self.memberships and not self.unrestricted)):
             ws = self.default_workspace_id
         if not ws:
@@ -195,6 +239,12 @@ class TenantScope:
             if self.unrestricted:
                 raise HTTPException(status_code=400, detail="X-Workspace-Id required")
             raise HTTPException(status_code=403, detail="No workspace membership")
+        if write:
+            from services.team_store import workspace_closing
+
+            if workspace_closing(ws):
+                # Tombstoned by a teardown in progress (S3): nothing new lands.
+                raise HTTPException(status_code=409, detail="This workspace is being deleted")
         if write and not self.can_write(ws):
             raise HTTPException(status_code=403, detail="Write access to workspace denied")
         return ws
@@ -203,6 +253,11 @@ class TenantScope:
         """This scope narrowed to ``workspace_id`` (403 when it is not readable)."""
         ws = _norm(workspace_id)
         if not ws:
+            return self
+        if ws in WORKSPACE_VIEWS and not self.unrestricted:
+            # Every workspace, or the rows of none: platform administrators only.
+            raise HTTPException(status_code=403, detail="Access to workspace denied")
+        if ws == ALL_WORKSPACES:
             return self
         if not self.unrestricted and ws not in self.member_workspace_ids:
             raise HTTPException(status_code=403, detail="Access to workspace denied")
@@ -215,6 +270,40 @@ class TenantScope:
             memberships=self.memberships,
             requested_workspace_id=ws,
         )
+
+
+def workspace_views(unrestricted: bool) -> list[dict[str, Any]]:
+    """The switcher entries beside the workspaces, for a platform admin only.
+
+    ``legacy_jobs`` counts the jobs with no workspace (best effort; ``None``
+    when the job store cannot answer), so the Unassigned entry says whether
+    there is anything to claim.
+    """
+    # The views exist to reach what isolation hides from a named workspace.
+    # With isolation off (the single operator, auth off) a request already
+    # sees every row, legacy ones included, and the switcher must render as
+    # it always did (the studio-ui pixel baselines).
+    if not unrestricted or not require_workspace_isolation():
+        return []
+    legacy_jobs: int | None
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        counts = get_mongodb_service().count_jobs(
+            workspace_filter=WorkspaceFilter.only("")
+        )
+        legacy_jobs = int((counts or {}).get("total") or 0)
+    except Exception:  # noqa: BLE001 - the directory must still answer
+        legacy_jobs = None
+    return [
+        {"id": ALL_WORKSPACES, "name": "All workspaces", "kind": "all"},
+        {
+            "id": UNASSIGNED_WORKSPACE,
+            "name": "Unassigned (legacy data)",
+            "kind": "unassigned",
+            "legacy_jobs": legacy_jobs,
+        },
+    ]
 
 
 def ordered_memberships(email: str) -> tuple[tuple[str, str], ...]:
@@ -312,15 +401,22 @@ def bind_tenant_scope(scope: TenantScope | None) -> Iterator[None]:
     """Bind ``scope`` for store-level reads in this request/turn (see
     ``services.workspace_filter.bound_workspace_filter``)."""
     stamp = ""
+    refusal: HTTPException | None = None
     if scope is not None:
         try:
             stamp = scope.target_workspace_id(write=True)
-        except HTTPException:
+        except HTTPException as exc:
+            # No workspace to write into (a platform admin's Unassigned or All
+            # view, a rejected header, no membership). Binding "" here let
+            # every stamping store write a legacy row (D218); the stores now
+            # get this refusal from current_workspace_stamp() instead.
             stamp = ""
+            refusal = exc
     with bound_workspace_filter(
         scope.filter if scope is not None else None,
         stamp,
         scope.actor if scope is not None else "",
+        stamp_refusal=refusal,
     ):
         yield
 

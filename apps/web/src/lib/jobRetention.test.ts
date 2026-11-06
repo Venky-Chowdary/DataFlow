@@ -3,12 +3,19 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { purgeConfirmCopy, RETENTION_HINT } from "./jobRetention.js";
+import { purgeConfirmCopy, RETENTION_HINT, retentionHint } from "./jobRetention.js";
 
 describe("job retention copy", () => {
   it("states that nothing runs on a schedule", () => {
     assert.match(RETENTION_HINT, /Nothing is deleted on a schedule/);
     assert.doesNotMatch(RETENTION_HINT, /not wired/);
+  });
+
+  it("says so when the scheduled purge is on (Security 23)", () => {
+    assert.equal(retentionHint(false), RETENTION_HINT);
+    assert.match(retentionHint(true), /once a day/);
+    assert.match(retentionHint(true), /audit records and quarantine are never touched/);
+    assert.doesNotMatch(retentionHint(true), /Nothing is deleted on a schedule/);
   });
 
   it("confirms with the dry-run count", () => {

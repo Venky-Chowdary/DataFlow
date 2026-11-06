@@ -911,7 +911,7 @@ def _iceberg_jsonl_payload(
                 f"Iceberg JSONL write refused residual DF_MISSING on column {key!r} "
                 "— would serialize the sentinel literally into the data file"
             )
-        out[key] = to_json_value(val, key, types)
+        out[key] = to_json_value(val, key, types, exact_decimal=True)
     return out
 
 

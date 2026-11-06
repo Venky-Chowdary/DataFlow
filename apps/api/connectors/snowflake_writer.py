@@ -24,10 +24,22 @@ from connectors.snowflake_conn import (
     get_connection,
     normalize_account,
     resolve_snowflake_table_name,
+    SnowflakeWarehouseError,
     snowflake_column_ref,
+    use_snowflake_warehouse,
     snowflake_physical_name_map,
 )
 from connectors.stub_writer import simulate_stub_write
+
+
+def _session_warehouse(cur: Any) -> str:
+    """The session's current warehouse, or ``""`` when none is active."""
+    try:
+        cur.execute("SELECT CURRENT_WAREHOUSE()")
+        row = cur.fetchone()
+    except Exception:
+        return ""
+    return str((row or [None])[0] or "")
 from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
@@ -1598,7 +1610,13 @@ def write_mapped_rows(
                         wh_q = quote_sql_identifier(
                             sanitize_identifier(warehouse, preserve_case=True)
                         )
-                        cur.execute(f"USE WAREHOUSE {wh_q}")
+                        use_snowflake_warehouse(cur, warehouse, wh_q)
+                    except SnowflakeWarehouseError:
+                        # D1: refused, and the login holds no other warehouse —
+                        # every load would fail later on "no active warehouse".
+                        if not _session_warehouse(cur):
+                            raise
+                        logger.info("USE WAREHOUSE refused; keeping the login's warehouse")
                     except Exception:
                         # fakesnow and some local mocks do not support USE WAREHOUSE.
                         logger.debug(
@@ -1740,7 +1758,11 @@ def write_mapped_rows(
                 tbl_q = quote_sql_identifier(table_name)
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:
-                        col_q = quote_sql_identifier(col)
+                        # D13: the writer's create-new rule — fold unless the
+                        # name is mixed-case. A quoted lowercase "extra_col"
+                        # made a column the MERGE's "EXTRA_COL" could not see
+                        # (000904 invalid identifier).
+                        col_q = snowflake_column_ref(col, {})
                         typ = require_safe_type_stamp(
                             typ, context="snowflake ALTER TABLE ADD COLUMN"
                         )
@@ -2000,7 +2022,10 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             load_method=load_method,
             rows_skipped=rows_skipped,
-            meta=writer_meta_with_source_rows(None, source_row_count),
+            meta=writer_meta_with_source_rows(
+                write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
+                source_row_count,
+            ),
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

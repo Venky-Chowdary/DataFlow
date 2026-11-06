@@ -710,6 +710,44 @@ def _select_ci_shard(config, items):
         items[:] = keep
 
 
+# Datawrap's own logger namespaces. Tests observe their WARNING/DEBUG records
+# through caplog, so no test module may re-level or detach them at import time.
+_OWN_LOGGER_NAMESPACES = ("services", "src", "connectors", "preflight")
+
+
+def pytest_collection_finish(session):
+    """Fail fast when importing the test modules re-configured logging.
+
+    Collection imports every test module (all shards collect everything), so a
+    module-level ``logging.getLogger("services").setLevel(...)`` or
+    ``propagate = False`` silences caplog for every later test in the session:
+    ``assert "..." in caplog.text`` fails with ``''``. Pin such quieting to a
+    test with ``caplog.set_level(level, logger=name)`` in a fixture instead.
+    """
+    offenders = []
+    root = logging.getLogger()
+    if root.level != logging.WARNING:
+        offenders.append(f"root logger level is {logging.getLevelName(root.level)} (expected WARNING)")
+    if logging.root.manager.disable:
+        offenders.append(f"logging.disable({logging.root.manager.disable}) is active")
+    for name, lg in logging.Logger.manager.loggerDict.items():
+        if not isinstance(lg, logging.Logger):
+            continue
+        if name.split(".", 1)[0] not in _OWN_LOGGER_NAMESPACES:
+            continue
+        if lg.level != logging.NOTSET or not lg.propagate or lg.disabled:
+            offenders.append(
+                f"logger {name!r}: level={logging.getLevelName(lg.level)} "
+                f"propagate={lg.propagate} disabled={lg.disabled}"
+            )
+    if offenders:
+        raise pytest.UsageError(
+            "a test module re-configured logging at import time, which empties caplog for "
+            "the rest of the session: " + "; ".join(offenders)
+            + ". Quiet a logger inside a fixture with caplog.set_level(level, logger=name)."
+        )
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip live-service tests when emulators are absent or unauthenticated."""
     _select_ci_shard(config, items)
@@ -841,3 +879,25 @@ def _guard_no_test_writes_dev_data_dir():
             "data_dir() (DATAWRAP_DATA_DIR is tmp_path in tests). "
             f"changed/created: {changed[:20]}; removed: {removed[:20]}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_console_outbox():
+    """Every test starts with an empty console outbox and no mail in flight.
+
+    The signup mail lane delivers asynchronously; a verification or reset
+    mail an earlier test queued could land in the next test's
+    ``ConsoleEmailSender.OUTBOX`` and break its counts (CI runs files
+    together). Drain the lane, then clear the outbox — only when those modules
+    are already loaded, so unrelated tests import nothing.
+    """
+    import sys
+
+    signup = sys.modules.get("services.signup_service")
+    if signup is not None and hasattr(signup, "drain_mail_lane"):
+        signup.drain_mail_lane()
+    sender = sys.modules.get("services.email_sender")
+    if sender is not None:
+        sender.ConsoleEmailSender.OUTBOX.clear()
+    yield
+

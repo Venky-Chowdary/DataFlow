@@ -548,13 +548,21 @@ def save_profile(
     rejected_details: list[dict[str, Any]] | None = None,
     rejected_rows: int = 0,
     row_count: int | None = None,
+    pii_hash_key_version: str | None = None,
 ) -> None:
     """Append a profile to the route ring buffer.
+
+    ``pii_hash_key_version`` defaults to the key the running job snapshotted
+    (``services.pii_hash_keys.snapshot_version``; empty outside a hashing job).
 
     Distinct ``job_id`` values stay as separate loads (last-N). The same
     ``job_id`` replaces its prior run — Execute retry / re-persist must not
     invent a second load and double ``rows_written_total``.
     """
+    if pii_hash_key_version is None:
+        from services.pii_hash_keys import snapshot_version
+
+        pii_hash_key_version = snapshot_version()
     store = _load_store(source, destination)
     runs = list(store.get("runs") or [])
     columns = _serialize_profile(profile)
@@ -571,8 +579,19 @@ def save_profile(
         "columns": columns,
         "quarantine_histogram": quarantine_histogram(rejected_details),
         "rejected_rows": int(rejected_rows or 0),
+        # The hash_pii key version this load digested with (QA review #7).
+        **({"pii_hash_key_version": str(pii_hash_key_version)} if pii_hash_key_version else {}),
     })
     _save_store(source, destination, {"runs": runs})
+
+
+def last_pii_hash_key_version(source: dict[str, Any], destination: dict[str, Any]) -> str:
+    """The hash_pii key version of this route's most recent load that recorded one."""
+    for run in reversed(load_run_history(source, destination)):
+        version = str((run or {}).get("pii_hash_key_version") or "")
+        if version:
+            return version
+    return ""
 
 
 def _median(values: list[Any]) -> Any:
@@ -906,3 +925,70 @@ def compare_route_to_history(
         current_row_count=int(current_row_count) if current_row_count is not None else None,
         compare_last_k=compare_last_k,
     )
+
+
+def forget_job_runs(job_ids: set[str], *, dry_run: bool = False) -> int:
+    """Remove the profile runs of ``job_ids`` (a workspace teardown); returns routes touched.
+
+    A route's profile is keyed by its endpoints, not by workspace, so another
+    workspace's runs on the same route are kept: only these jobs' runs go
+    (they hold real column values in ``top_values``). A profile left with no
+    run is deleted; otherwise its top-level fields follow the newest kept run.
+    """
+    ids = {str(j) for j in job_ids if j}
+    if not ids:
+        return 0
+
+    def _strip(doc: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+        runs = list(doc.get("runs") or [])
+        kept = [r for r in runs if str((r or {}).get("job_id") or "") not in ids]
+        top_hit = str(doc.get("job_id") or "") in ids
+        if len(kept) == len(runs) and not top_hit:
+            return False, doc
+        if not kept:
+            return True, None
+        last = kept[-1]
+        return True, {
+            **doc,
+            "runs": kept,
+            "captured_at": last.get("captured_at"),
+            "columns": last.get("columns") or {},
+            "row_count": last.get("row_count") or 0,
+            "quarantine_histogram": last.get("quarantine_histogram") or {},
+            "rejected_rows": last.get("rejected_rows") or 0,
+            "job_id": last.get("job_id"),
+        }
+
+    touched = 0
+    coll = _profile_collection()
+    if coll is not None:
+        for doc in list(coll.find({"$or": [{"runs.job_id": {"$in": sorted(ids)}}, {"job_id": {"$in": sorted(ids)}}]})):
+            hit, new = _strip(doc)
+            if not hit:
+                continue
+            touched += 1
+            if dry_run:
+                continue
+            if new is None:
+                coll.delete_one({"_id": doc["_id"]})
+            else:
+                coll.replace_one({"_id": doc["_id"]}, new)
+        return touched
+    for path in sorted(quality_profiles_dir().glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        hit, new = _strip(doc)
+        if not hit:
+            continue
+        touched += 1
+        if dry_run:
+            continue
+        if new is None:
+            path.unlink(missing_ok=True)
+        else:
+            write_json_atomic(path, new)
+    return touched

@@ -328,6 +328,17 @@ def _passthrough_identity_transform(
         same_family = tgt_logical in _TEXT_CARRIER_LOGICALS and bool(
             specialty_wire_preserves_value("OBJECTID", tgt_type)
         )
+    if not same_family and src_logical == "uuid":
+        # A UUID's defined text carrier is its canonical 36 characters
+        # (CHAR(36) on MySQL/MariaDB, VARCHAR2(36) on Oracle). The driver
+        # already renders that text, so the name-triggered ``uuid`` rewrite on
+        # a byte copy graded it ``mutate`` at 0.70 and held every PostgreSQL
+        # UUID -> MySQL create-new at G4 (QA MySQL D6).
+        from services.type_system import uuid_capacity_string_carrier
+
+        same_family = tgt_logical in _TEXT_CARRIER_LOGICALS and bool(
+            uuid_capacity_string_carrier(tgt_type)
+        )
     return "none" if same_family else transform
 
 
@@ -367,6 +378,33 @@ def _reported_source_carrier(declared: str, invent_carrier: str) -> str:
     return strip_identity_qualifier(declared).strip() or invent_carrier
 
 
+#: Parses that accept any scalar by wrapping it: a 100% sample parse rate
+#: through them proves nothing about fit (``json`` makes "alpha" the JSON
+#: string "alpha").
+_WRAPPING_PARSES = frozenset({"json"})
+
+
+def _parse_proves_the_pair(row: dict) -> bool:
+    """True when the measured values prove a same-name cross-type pair fits.
+
+    Either the quality class already reads the pair as exact / a safe
+    promotion (JSON documents onto JSONB), or the write goes through a strict
+    typed parse (``decimal``, ``integer``, ``date``, ...) that every sampled
+    value passed. Plain words onto an existing JSONB column pass the ``json``
+    parse only because it wraps them; that pair stays under the floor for the
+    operator to confirm (D159).
+    """
+    if str(row.get("confidence_class") or "") in {"exact_name_type", "safe_type_promotion"}:
+        return True
+    transform = str(row.get("transform") or "none").strip().lower()
+    if transform in _WRAPPING_PARSES or transform not in _TYPED_TRANSFORM_TARGET_TYPE:
+        return False
+    try:
+        return float(row.get("sample_parse_rate") or 0.0) >= 0.9
+    except (TypeError, ValueError):
+        return False
+
+
 def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
     """A preserve verdict is not a lossy type pair.
 
@@ -378,7 +416,11 @@ def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
     the leftover lossy review when the verdict says the write is lossless.
     False-friend / create-new / score-gap review kinds are untouched.
     """
-    from services.semantic_mapper import REVIEW_KIND_LOSSY, _stamp_review_kinds
+    from services.semantic_mapper import (
+        REVIEW_KIND_LOSSY,
+        _stamp_review_kinds,
+        name_identical,
+    )
 
     out: list[dict] = []
     for m in mappings:
@@ -401,6 +443,29 @@ def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
             )
             row["reasoning"] = cleaned
             row.pop("review_kind", None)
+            if name_identical(
+                str(row.get("source") or ""), str(row.get("target") or "")
+            ) and _parse_proves_the_pair(row):
+                # The lossy-pair demotion that capped this same-name mapping at
+                # 0.63 was graded on the declared types alone; the fidelity
+                # owner just measured the values and found the write lossless.
+                # Identity is not in doubt, so the demotion goes with the
+                # review. Leaving it parked TEXT -> NUMERIC amt/qty under the
+                # floor after every signed contract and in lenient mode (D26).
+                exact_type = normalize_logical_type(
+                    str(row.get("source_type") or "")
+                ) == normalize_logical_type(str(row.get("target_type") or ""))
+                row["confidence"] = max(
+                    float(row.get("confidence") or 0.0), 0.99 if exact_type else 0.97
+                )
+                from services.mapping_quality import CONFIDENCE_CLASS_LABELS
+
+                row["confidence_class"] = (
+                    "exact_name_type" if exact_type else "safe_type_promotion"
+                )
+                row["confidence_class_label"] = CONFIDENCE_CLASS_LABELS[
+                    row["confidence_class"]
+                ]
         out.append(row)
     return _stamp_review_kinds(out)
 
@@ -539,6 +604,8 @@ def _repair_unparseable_numeric_targets(
     lacked samples; Validate then correctly blocked. Even with a typed dest
     ``id``, non-numeric samples must never stay on that column.
     """
+    from services.semantic_mapper import name_identical
+
     from services.schema_inference import samples_fit_logical_type
 
     # Typed database extracts render numbers in wire form (``150.345``), which
@@ -616,7 +683,7 @@ def _repair_unparseable_numeric_targets(
                     and not _is_create_new_mapping(m)
                     and tgt.lower() in {t.lower() for t in tgt_by}
                 )
-                if existing_dest_column and src.lower() == tgt.lower():
+                if existing_dest_column and name_identical(src, tgt):
                     # The destination already has this column. A non-numeric
                     # sample is a row to quarantine, not a reason to ADD a
                     # ``qty_text`` twin beside ``qty INTEGER`` (R4-D08).
@@ -834,6 +901,45 @@ def _with_declared_zones(
                     {name: str(entry[key])}, prior_mappings
                 )[name]
         out.append(entry)
+    return out
+
+
+def fold_identity_targets_for_create_new(
+    mappings: list[dict],
+    *,
+    source_db_type: str,
+    destination_db_type: str,
+    destination_table_exists: bool | None,
+) -> list[dict]:
+    """A Snowflake-folded ``ID`` lands as PostgreSQL's ``id`` on a new table (QA r12 SF D3).
+
+    Snowflake stores an unquoted name UPPER; PostgreSQL stores it lower. Copied
+    verbatim, every new PostgreSQL table had quoted ``"ID"``/``"AMOUNT"``
+    columns no unquoted query can reach. On a table proven absent, an identity
+    mapping of an all-upper name targets the lower-case name; a mixed-case name
+    was quoted on purpose and keeps its case. An existing table keeps the live
+    spelling (its columns are the contract). One seam for the plan
+    (``plan_transfer`` / Validate) and Execute, so Validate ≡ Execute.
+    """
+    if destination_table_exists is not False:
+        return mappings
+    from services.dialect_profiles import dialect_profile
+
+    src = str(source_db_type or "").strip().lower()
+    if src != "snowflake" or dialect_profile(destination_db_type).fold != "lower":
+        return mappings
+    out: list[dict] = []
+    for m in mappings:
+        if isinstance(m, dict):
+            tgt = str(m.get("target") or "")
+            if (
+                tgt
+                and tgt == str(m.get("source") or "")
+                and tgt == tgt.upper()
+                and tgt != tgt.lower()
+            ):
+                m = {**m, "target": tgt.lower()}
+        out.append(m)
     return out
 
 
@@ -1241,6 +1347,11 @@ def run_mapping_pipeline(
         reasoning = m["reasoning"]
         if enrichment and enrichment not in reasoning.lower():
             reasoning = f"{reasoning} · enriched: {enrichment}"
+        destination_note = str(
+            target_by_name.get(m["target"], {}).get("collation_note") or ""
+        )
+        if destination_note and destination_note not in reasoning:
+            reasoning = f"{reasoning} · {destination_note}"
         # What the source *declared*, captured before canonicalization widened
         # ambiguous spellings for the CREATE question. Only the report reads it;
         # every invent below still uses the never-narrower carrier.
@@ -1582,6 +1693,7 @@ def run_mapping_pipeline(
                     else {}
                 ),
                 "reasoning": reasoning,
+                **({"destination_note": destination_note} if destination_note else {}),
                 "agent": "MappingReasonerAgent",
                 "format_class": classification["format"],
                 **(
@@ -1618,6 +1730,12 @@ def run_mapping_pipeline(
 
         if renders_typed_wire_values(source_db_type) and not _active_number_locale():
             wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+    enriched_mappings = fold_identity_targets_for_create_new(
+        enriched_mappings,
+        source_db_type=source_db_type,
+        destination_db_type=destination_db_type,
+        destination_table_exists=destination_table_exists,
+    )
     try:
         enriched_mappings = refine_mappings_with_samples(
             enriched_mappings,
@@ -1712,6 +1830,7 @@ def run_mapping_pipeline(
         # widening into a numeric destination changes nothing, so it is shown as
         # identity; the write path still validates that cell on the way in.
         for_write=False,
+        dest_kind=str(destination_db_type or ""),
     )
 
     from services.mapping_proof import stamp_mapping_fidelity

@@ -647,54 +647,42 @@ def _fail_runtime_job(
     if cancelled:
         from services.job_status import cancel_outcome_for
 
-        if getattr(exc, "destination_rows_now", None) is None and request is not None:
-            # A route that did not count its destination (COPY fast paths,
-            # adapters): at least show what the table holds beside the tally.
-            try:
-                from services.dest_precount import precount_table
-
-                from .adapters import resolve_connector_config, resolve_dest_table
-                from .connector_capabilities import resolve_driver_type
-
-                _dst = request.destination
-                if str(getattr(_dst, "kind", "") or "") == "database":
-                    _dtype = resolve_driver_type(str(_dst.format or ""))
-                    _src_name = str(
-                        getattr(request.source, "table", "")
-                        or getattr(request.source, "collection", "")
-                        or ""
-                    )
-                    _now = precount_table(
-                        _dtype,
-                        resolve_connector_config(_dst),
-                        resolve_dest_table(_dtype, _dst, _src_name),
-                    )
-                    if _now is not None:
-                        exc.destination_rows_now = int(_now)  # type: ignore[attr-defined]
-            except Exception as count_exc:  # noqa: BLE001 - the tally still stands
-                logger.debug("cancel destination count unavailable: %s", count_exc)
+        # A route that did not count its destination (COPY fast paths,
+        # adapters) reports a progress meter, not committed batches.
+        unmeasured = getattr(exc, "destination_rows_now", None) is None
+        if unmeasured and request is not None:
+            _measure_unmeasured_cancel(exc, request)
         outcome = cancel_outcome_for(
             status_kwargs.get("records_processed", prev.get("records_processed")),
             destination_rows_by_run=getattr(exc, "destination_rows_by_run", None),
             destination_rows_now=getattr(exc, "destination_rows_now", None),
+            destination_table_exists=getattr(exc, "destination_table_exists", None),
+            destination_rows_before=getattr(exc, "destination_rows_before", None),
+            write_rolled_back=getattr(exc, "write_rolled_back", None) is True,
+            tally_is_commit_evidence=not (unmeasured and request is not None),
         )
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch
             # tally wherever the job reports it.
             status_kwargs["records_processed"] = outcome["rows_committed"]
-        if outcome["partial_write"]:
-            # The error text is the cancel message too: the exception's own
-            # "N row(s) were already written" is the tally, not the count.
-            display = outcome["message"]
-            status_kwargs["error"] = display
+        elif outcome.get("rows_committed_source") == "unknown":
+            # Unknown is not zero: a retry must not read the meter's 0 (or
+            # its rolled-back rows) as a fact about the destination.
+            status_kwargs["records_processed"] = None
+        # The error text is the cancel message too: the exception's own
+        # "N row(s) were already written and were not removed" is the writer's
+        # tally, which a rollback (or a dropped run-created table) makes untrue
+        # (C16, MySQL D11). The record states the destination as measured.
+        display = outcome["message"]
+        status_kwargs["error"] = display
+        status_kwargs["message"] = display
         if outcome["partial_write"]:
             logger.warning(
                 "Job %s cancelled after %s row(s) committed; nothing was rolled back",
                 job_id,
                 outcome["rows_committed"],
             )
-            status_kwargs["message"] = outcome["message"]
     mongo.update_job_status(
         job_id,
         status,
@@ -713,6 +701,68 @@ def _fail_runtime_job(
             retriable=bool(error_details.get("retriable", False)),
         )
     return display, error_details
+
+
+def _measure_unmeasured_cancel(exc: BaseException, request: Any) -> None:
+    """Count the destination for a cancelled route that did not (C16, D11).
+
+    The row path measures its own landing (``stream.py``). A COPY fast path or
+    an adapter raises the cancel with only the writer's tally — the meter a
+    single-transaction COPY moved before it rolled back, or the rows of a
+    run-created table its undo dropped. The pre-run facts ride
+    ``destination.extra`` (``dest_table_existed_before``, and the pre-write
+    count ``cancel_rows_before``), so the same measurement applies here. A
+    COPY route's overwrite is one transaction or a staged swap on every SQL
+    destination (atomic); a schemaless sink clears first. A rollback is
+    claimed only when the route marked it (``mark_write_rolled_back``); keyed
+    modes use the shared ``keyed_landing`` predicate.
+    """
+    try:
+        from services.job_status import measure_cancel_landing
+        from services.sync_cursor import resolve_effective_sync_mode, resolve_sync_contract
+
+        from .adapters import resolve_connector_config, resolve_dest_table
+        from .connector_capabilities import resolve_driver_type
+        from .engine_family import is_schemaless_family
+
+        _dst = request.destination
+        if str(getattr(_dst, "kind", "") or "") != "database":
+            return
+        _dtype = resolve_driver_type(str(_dst.format or ""))
+        _src_name = str(
+            getattr(request.source, "table", "")
+            or getattr(request.source, "collection", "")
+            or ""
+        )
+        contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+        sync = str(
+            resolve_effective_sync_mode(
+                getattr(request, "sync_mode", ""), contract.sync_mode if contract else None
+            )
+            or ""
+        )
+        extra = getattr(_dst, "extra", None) or {}
+        before = next(
+            (
+                extra.get(k)
+                for k in ("dest_rows_before", "cancel_rows_before", "overwrite_rows_before")
+                if isinstance(extra.get(k), int)
+            ),
+            None,
+        )
+        measure_cancel_landing(
+            exc,
+            dest_type=_dtype,
+            dest_cfg=resolve_connector_config(_dst),
+            table=resolve_dest_table(_dtype, _dst, _src_name),
+            sync_mode=sync,
+            rows_before=before,
+            table_existed_before=extra.get("dest_table_existed_before"),
+            write_mode=str(getattr(request, "write_mode", "") or ""),
+            atomic_overwrite=not is_schemaless_family(_dtype),
+        )
+    except Exception as count_exc:  # noqa: BLE001 - the tally still stands
+        logger.debug("cancel destination count unavailable: %s", count_exc)
 
 
 def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -861,7 +911,7 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
-    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, QUARANTINE_REPLAN_FIX
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_fix
 
     if any(
         isinstance(b, dict)
@@ -870,8 +920,11 @@ def _fail_job_preflight(
         for b in pf.get("blockers", [])
     ):
         # D170: the run was refused whole; say how to load the valid rows.
-        error_message = f"{error_message.rstrip('. ')}. {QUARANTINE_REPLAN_FIX}."
-        error_details["remediation"] = QUARANTINE_REPLAN_FIX
+        # QA r12 D2: the job is failing, so the way out is a retry — name the
+        # tool and REST field that accept the acceptance for a failed job.
+        fix = quarantine_retry_fix(job_id)
+        error_message = f"{error_message.rstrip('. ')}. {fix}."
+        error_details["remediation"] = fix
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,
@@ -897,6 +950,23 @@ def _fail_job_preflight(
     if ledger_dict is not None:
         status_fields["row_accounting"] = ledger_dict
         status_fields["sync_mode"] = str(sync_mode or "")
+    # A blocking gate that states a stable refusal code (e.g. g24's
+    # DESTINATION_CONTINUITY) carries it to the job, exactly as the Execute-time
+    # check does, so the retry policy and the schedule park read one code
+    # whichever door refused the run (QA C9 review 2).
+    coded = next(
+        (
+            b.get("details") for b in pf.get("blockers", [])
+            if isinstance(b, dict) and isinstance(b.get("details"), dict)
+            and str((b.get("details") or {}).get("error_code") or "").strip()
+        ),
+        None,
+    )
+    if coded:
+        status_fields["error_code"] = str(coded["error_code"])
+        error_details["error_code"] = str(coded["error_code"])
+        if coded.get("mismatch"):
+            error_details["mismatch"] = coded["mismatch"]
     from services.drift_approval import (
         build_source_drift_approval,
         gate_codes_from_preflight,

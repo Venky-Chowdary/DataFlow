@@ -459,6 +459,50 @@ def resolve_writer_backfill(
     )
 
 
+def widen_skip_key_columns(
+    conflict_columns: list[str] | None, mappings: list[dict[str, Any]] | None
+) -> list[str]:
+    """Key columns the writer's widen pass must leave alone this run.
+
+    A key column is not widened on the writer's own initiative. One whose widen
+    the operator approved (``schema_drift.stamp_approved_widens`` stamps
+    ``dest_widen``) is: Validate told them "Execute ALTERs it before writing",
+    and skipping it left ``id VARCHAR(200)`` in place so the approved long key
+    failed at write.
+    """
+    approved = {
+        str(m.get("target") or "").casefold()
+        for m in mappings or []
+        if isinstance(m, dict) and m.get("dest_widen")
+    }
+    return [c for c in conflict_columns or [] if str(c).casefold() not in approved]
+
+
+def stamp_is_dataflow_projection(mapping: dict[str, Any] | None) -> bool:
+    """True when DataFlow projected this row's carrier for a column it creates.
+
+    The kernel stamps ``target_type_provenance="kernel_invent"``; a create-new
+    plan marks ``create_new`` or an identity / create-compatible strategy.
+    Such a stamp is the product's own projection, not an operator's limit.
+
+    A row the kernel re-bound to a live column (``bind_existing``: the table
+    was already there and its carrier won) is not a projection, whatever
+    invent provenance it still carries from the plan: ``f REAL`` on somebody
+    else's table is their column, and DOUBLE PRECISION into it stays the
+    fidelity collapse it is rather than an offer to ALTER it (D161).
+    """
+    if not mapping:
+        return False
+    if str(mapping.get("assignment_strategy") or "") == "bind_existing":
+        return False
+    return bool(
+        str(mapping.get("target_type_provenance") or "").strip().lower() == "kernel_invent"
+        or mapping.get("create_new")
+        or str(mapping.get("assignment_strategy") or "")
+        in {"identity_passthrough", "create_compatible_new"}
+    )
+
+
 def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
     """True when ``target_type`` is an approved ceiling, not a catalog echo.
 
@@ -472,6 +516,15 @@ def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
     if not mapping:
         return False
     if not str(mapping.get("target_type") or mapping.get("dest_type") or "").strip():
+        return False
+    if stamp_is_dataflow_projection(mapping):
+        # DataFlow projected this carrier for the column it created (the kernel
+        # stamps target_type_provenance="kernel_invent"); nobody drew it as a
+        # limit. Approve / Accept risk in Map sets user_override on that same
+        # row: that is approval of the plan, not authorship of the type. A
+        # schedule or rerun replays the stored mapping, and reading it as a
+        # ceiling refused the approved widen of the product's own table
+        # (VARCHAR(20) -> VARCHAR(200), D200).
         return False
     if mapping.get("user_override") or mapping.get("userOverride"):
         return True
@@ -539,10 +592,20 @@ def desired_types_honoring_map_stamps(
     ``target_type`` onto non-explicit widen proposals). When omitted, a column
     is explicit iff its mapping carries ``target_type``.
 
+    A candidate in another logical family is not a widen
+    (``connectors.schema_drift.widen_keeps_logical_family``, the rule D107
+    proposals apply too): TEXT is "wider" than every carrier on the lattice,
+    but retyping INTEGER to TEXT changes what the column means; VARCHAR(n) ->
+    TEXT stays one string family. An explicit stamp is judged first: it
+    refuses any wider candidate and records the refusal. Once a DataFlow-projected stamp stopped being a ceiling
+    (D200) a CSV ``age`` stamped INTEGER was MODIFIED to TEXT because its
+    source type was ``string``, ``not-a-number`` landed instead of being held
+    out, and the append failed its own checksum.
+
     Returns ``(desired_types, refusals)`` where each refusal is audit evidence:
     ``{column, mapped_type, refused_wider, reason}``.
     """
-    from connectors.schema_drift import is_wider_type
+    from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
     from services.mapping_constraints import write_mappings
 
     candidates = candidate_by_col or {}
@@ -576,7 +639,11 @@ def desired_types_honoring_map_stamps(
                 )
             desired.append(ceiling)
             continue
-        if candidate and is_wider_type(ceiling, candidate):
+        if (
+            candidate
+            and is_wider_type(ceiling, candidate)
+            and widen_keeps_logical_family(ceiling, candidate)
+        ):
             desired.append(candidate)
         else:
             desired.append(ceiling)
@@ -595,15 +662,15 @@ def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     ``to_json_value``; only an already-textual number keeps its own digits.
     """
     parsed = to_json_value(value, col, dest_types)
-    if (
-        isinstance(value, str)
-        and isinstance(parsed, (int, float, Decimal))
-        and not isinstance(parsed, bool)
-    ):
-        return value.strip()
-    if isinstance(value, Decimal) and isinstance(parsed, float):
-        # C26's JSON demote is right for the JSON wire (binary64 has no scale),
-        # but a Decimal input already states its scale — ``Decimal("10.50")``
+    if isinstance(value, str) and not isinstance(parsed, bool):
+        if isinstance(parsed, (int, float, Decimal)):
+            return value.strip()
+        if isinstance(parsed, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
+            # A DECIMAL column's JSON wire is the exact text (D203); the
+            # delimited cell keeps the source's own spelling (``1E+2`` stays).
+            return value.strip()
+    if isinstance(value, Decimal) and isinstance(parsed, (float, str)):
+        # A Decimal input already states its scale — ``Decimal("10.50")``
         # demoted to ``10.5`` loses the trailing digit on the delimited/excel
         # wire where the file itself is the deliverable. Keep the Decimal so
         # ``cell_to_string`` writes the stated digits.
@@ -612,6 +679,25 @@ def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
 
 
 _EXACT_DECIMAL_TEXT = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _exact_decimal_cell(value: Any) -> Decimal | int | None:
+    """The exact number a DECIMAL-declared cell states, or ``None`` to leave it.
+
+    Text goes through ``decimal_wire_value`` — the one parser the write path
+    binds (``Decimal(text)`` is a second algorithm and is forbidden); a cell it
+    refuses under the run's number locale is left to the caller as the text
+    it is.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and (value != value or value in {float("inf"), float("-inf")}):
+        return None
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(value)
 
 
 def to_json_value(
@@ -678,18 +764,33 @@ def to_json_value(
         if coerced is not value:
             return coerced
         return value
-    if exact_decimal and ctype in {"decimal", "numeric"} and not isinstance(value, bool):
-        # A JSON number has no binary64 limit. The file sinks dump with
-        # ``json_dumps_exact_numbers``, so a DECIMAL cell is written with the
-        # digits and scale the source stated: ``0.1000000000`` and ``1`` stay
-        # that, instead of ``0.1`` / ``1.0`` beside quoted text for the values
-        # binary64 could not hold (D144).
-        if isinstance(value, Decimal) and value.is_finite():
-            return value
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
-            return Decimal(value.strip())
+    if ctype in {"decimal", "numeric"} and not isinstance(value, bool):
+        exact = _exact_decimal_cell(value)
+        if exact is not None:
+            if exact_decimal:
+                # A JSON number has no binary64 limit. The file sinks dump with
+                # ``json_dumps_exact_numbers``, so a DECIMAL cell is written
+                # with the digits and scale the source stated: ``0.1000000000``
+                # and ``1`` stay that, instead of ``0.1`` / ``1.0`` beside
+                # quoted text for the values binary64 could not hold (D144).
+                return exact
+            # A JSON wire (Kafka, Redis, a document store) parses a JSON number
+            # as IEEE float64, so a declared DECIMAL field has one JSON type
+            # over the whole topic: its exact text. Demoting the values binary64
+            # happens to hold (``1.5``) to numbers beside ``"99999999999.999999"``
+            # as text mixed two types in one field and broke typed consumers
+            # (D203); the Registry JSON Schema already declares DECIMAL as
+            # string.
+            from services.value_serializer import safe_decimal_text
+
+            text = safe_decimal_text(exact)
+            if text is not None:
+                return text
+        elif isinstance(value, str) and value.strip() and not exact_decimal:
+            # The write path refused to read this text as a number (Auto
+            # ``1,234`` / a currency mark): it stays the string it is, so the
+            # field keeps one JSON type; the transform path owns the refusal.
+            return unescape_wire_text(value)
     if ctype in {
         "integer",
         "int",
@@ -1287,6 +1388,25 @@ def vector_payload_number(val: Any, declared_type: str) -> Any:
         return prepared
 
 
+def _vector_prepare_json_list(items: list[Any]) -> list[Any]:
+    """One JSON array for a JSONB metadata value: every element prepared in place."""
+    from services.value_serializer import is_reader_null_cell
+
+    out: list[Any] = []
+    for item in items:
+        if item is None or is_reader_null_cell(item):
+            out.append(None)
+        elif isinstance(item, dict):
+            out.append(vector_prepare_metadata(item, keep_null=True))
+        elif isinstance(item, list):
+            out.append(_vector_prepare_json_list(item))
+        elif isinstance(item, str):
+            out.append(item)
+        else:
+            out.append(vector_prepare_cell(item))
+    return out
+
+
 def vector_prepare_metadata(meta: Any, *, keep_null: bool = False) -> dict[str, Any]:
     """Walk a metadata mapping; omit reader-null. Always a dict.
 
@@ -1313,6 +1433,11 @@ def vector_prepare_metadata(meta: Any, *, keep_null: bool = False) -> dict[str, 
             continue
         if isinstance(val, list) and all(isinstance(item, str) for item in val):
             out[str(key)] = val
+            continue
+        if keep_null and isinstance(val, list):
+            # JSONB holds a nested array as an array (D216): [1, 2] stays a
+            # list of numbers, never the text "[1,2]".
+            out[str(key)] = _vector_prepare_json_list(val)
             continue
         prepared = vector_prepare_cell(val)
         if prepared is None:
@@ -1484,6 +1609,33 @@ def reject_on_strict_policy(
         rejected_details_require_job_abort,
     )
 
+    # A signed contract asked for this abort when a finding carries a
+    # fail-closed policy, or any signed policy whose resolved action aborts
+    # (CAST_AND_CONTINUE with quarantine_policy FAIL resolves to ``fail``).
+    contract_abort = any(
+        str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES
+        or (
+            str(d.get("execution_policy") or "").strip()
+            and str(d.get("policy") or "").lower()
+            in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+        )
+        for d in details
+    )
+    if rejected_details_require_job_abort(details) and not contract_abort:
+        # D267: no signed contract asked for this abort — the strict job posture
+        # refused a cell on an unsigned column. Say so; never blame a contract.
+        posture = [
+            d
+            for d in details
+            if str(d.get("policy") or "").lower()
+            in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+        ]
+        return (
+            f"{label} rejected {len(posture)} cell finding(s) across "
+            f"{_distinct_reject_rows(posture) or len(posture)} row(s) on column(s) no "
+            "signed Risk Contract covers; strict error policy blocks partial write"
+            f"{summarize_reject_findings(posture)}"
+        )
     if rejected_details_require_job_abort(details):
         n = sum(
             1
@@ -1973,6 +2125,7 @@ def build_mapped_rows_with_details(
             m,
             column_types=column_types,
             dest_types=dest_types if dest_types is not None else {},
+            dest_kind=dest_kind or "",
         )
         src_idx = source_indices.get(src)
         if src_idx is None:
@@ -2007,9 +2160,12 @@ def build_mapped_rows_with_details(
     _cell_memos: list[dict] = [dict() for _ in mapping_infos]
     _CELL_MEMO_CAP = 500_000
     _MEMO_MISS = object()
+    from connectors.contract_salvage import hold_row_under_signed_contract
+
     for row_number, raw in enumerate(data_rows, start=start_no):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
+        row_detail_start = len(rejected_details)
         # ok | fail | stop_table | abort_transaction | retry_then_fail |
         # quarantine | skip_row | stop_column | coerce_null
         row_action = "ok"
@@ -2250,6 +2406,12 @@ def build_mapped_rows_with_details(
                         converted = None
             if target_idx >= 0:
                 out[target_idx] = converted
+        if row_has_error and row_action == "fail":
+            # D267: a row a signed continue contract already holds out is not
+            # a partial write because another of its cells is unsigned.
+            held = hold_row_under_signed_contract(rejected_details[row_detail_start:])
+            if held:
+                row_action = held
         # Rows not written to primary: abort / quarantine / skip.
         if row_has_error and row_action in {
             "fail",
@@ -5016,6 +5178,8 @@ def require_physical_types_for_existing_table(
     physical: dict[str, str] | None,
     dialect_label: str = "destination",
     target_cols: list[str] | None = None,
+    destination_kind: str = "",
+    physical_sampled: bool = False,
 ) -> str | None:
     """Error when an existing table yields empty or incomplete physical DDL.
 
@@ -5023,8 +5187,19 @@ def require_physical_types_for_existing_table(
     Partial introspect (some cols missing) leaves Map stamps on those cols —
     refuse so overlay cannot soft-green empties into live DATE/INT.
     New / create-new tables may pass empty physical (Map stamps are physical).
+
+    A schemaless ``destination_kind`` (engine-family resolver) has no DDL: a
+    mapped field its sampled documents do not hold is a new field (additive
+    drift, or a field only ever NULL so far), not a missing carrier, so it is
+    not refused (QA r12 D10). An empty sample still refuses unless the caller
+    read it successfully (``physical_sampled``).
     """
     if not table_existed:
+        return None
+    from src.transfer.engine_family import is_schemaless_family
+
+    schemaless = bool(destination_kind) and is_schemaless_family(destination_kind)
+    if schemaless and (physical or physical_sampled):
         return None
     label = (dialect_label or "destination").strip() or "destination"
     if not physical:

@@ -36,7 +36,8 @@ from r11_live_world import drop_pg, live, pg_table  # noqa: F401
 
 pytestmark = pytest.mark.timeout(300)
 
-_MAPS = [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}]
+#: Validate-approved rows (a row without confidence is refused at save, QA C10).
+_MAPS = [{"source": c, "target": c, "confidence": 0.99} for c in ("id", "name")]
 
 
 def _body(src: str, table: str, **extra):

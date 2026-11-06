@@ -125,19 +125,30 @@ def test_dry_run_reports_multiple_errors_per_mapping():
 
 
 def test_file_dry_run_holds_out_a_mixed_column():
-    """A file load quarantines the bad rows instead of failing the sample."""
+    """A lenient file load quarantines the bad rows instead of failing the sample.
+
+    The column's ONE verdict (validation_mode_contract.mode_holdout_kind): strict
+    holds nothing out, so the same sample is a plain refusal there (QA C2 review 3).
+    """
     rows = [["1.00"], ["2.00"], ["bad-a"], ["3.00"], ["bad-b"], ["bad-c"], ["4.00"]]
+    mappings = [{"source": "AMT", "target": "payment_amount", "transform": "decimal"}]
     ok, errors = dry_run_sample(
         headers=["AMT"],
         sample_rows=rows,
-        mappings=[{"source": "AMT", "target": "payment_amount", "transform": "decimal"}],
+        mappings=mappings,
         column_types={"AMT": "DECIMAL"},
         file_row_quarantine=True,
+        validation_mode="lenient",
     )
     assert not ok
     assert len(errors) == 1
     assert errors[0].startswith("holdout AMT→payment_amount:")
     assert "3 sample row(s)" in errors[0]
+    ok, errors = dry_run_sample(
+        headers=["AMT"], sample_rows=rows, mappings=mappings,
+        column_types={"AMT": "DECIMAL"}, file_row_quarantine=True, validation_mode="strict",
+    )
+    assert not ok and not any(e.startswith("holdout ") for e in errors), errors
 
 
 def test_apply_hash_pii_is_deterministic(monkeypatch):

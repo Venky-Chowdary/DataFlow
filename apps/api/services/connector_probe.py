@@ -32,6 +32,7 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
     extra = get("extra") if isinstance(get("extra"), dict) else {}
     raw = conn if isinstance(conn, dict) else {"extra": extra}
     from connectors.sftp_common import host_key_settings
+    from services.connector_store import dial_connection_string
 
     trust = {k: v for k, v in host_key_settings({**extra, **raw}).items() if v}
     cfg = {
@@ -41,7 +42,10 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         "username": get("username") or "",
         "password": get("password") or "",
         "schema": get("schema") or "",
-        "connection_string": get("connection_string") or "",
+        "connection_string": dial_connection_string(
+            str(get("type") or ""), str(get("ssl_mode") or ""), get("connection_string") or "",
+            extra,
+        ),
         "warehouse": get("warehouse") or "",
         "ssl": bool(get("ssl")),
         "auth_mode": get("auth_mode") or "",

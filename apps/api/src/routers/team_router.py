@@ -24,11 +24,12 @@ from services.team_store import (
     PermissionDenied,
     TeamStoreBusy,
     TeamStoreError,
+    WorkspaceClosing,
     WorkspaceNotFound,
+    WorkspaceStateUnavailable,
     add_workspace_member,
     break_glass_set_admin,
     create_workspace,
-    delete_workspace,
     get_workspace,
     get_workspace_role,
     list_memberships_for_user,
@@ -175,6 +176,9 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     LastAdminProtected: 409,
     # Same class of answer: the membership this add would create is already there.
     MemberAlreadyExists: 409,
+    # A teardown of this workspace is under way.
+    WorkspaceClosing: 409,
+    WorkspaceStateUnavailable: 503,
 }
 
 
@@ -314,6 +318,18 @@ async def delete_user_route(email: str, request: Request):
     if not get_user(target):
         raise HTTPException(status_code=404, detail="Account not found")
     delete_user(email=target)
+    # Revocation does not rest on the deletion marker alone (review 5): bearer
+    # sessions and cookie sessions of the account end now.
+    from services import auth_sessions
+    from services.auth_state import get_auth_state
+
+    auth_sessions.revoke_all_for_email(target)
+    try:
+        get_auth_state().revoke_all_for_user(target)
+    except Exception:  # noqa: BLE001 — the marker and bearer revoke already stand
+        import logging
+
+        logging.getLogger(__name__).warning("cookie session revoke failed for a deleted account", exc_info=True)
     _audit(
         "team.user.delete",
         actor=actor,
@@ -351,7 +367,16 @@ async def get_workspaces(request: Request):
         "actor": actor,
         # The list is oldest-first; this is where the caller should land (D218).
         "default_workspace_id": _landing_workspace_id(request),
+        # A platform admin's other views: every workspace, and the legacy rows
+        # with no workspace, which had no entry at all (D218).
+        "views": _workspace_views(platform_admin),
     }
+
+
+def _workspace_views(platform_admin: bool) -> list[dict]:
+    from services.tenant_scope import workspace_views
+
+    return workspace_views(platform_admin)
 
 
 def _landing_workspace_id(request: Request) -> str:
@@ -394,20 +419,68 @@ async def patch_workspace(workspace_id: str, body: WorkspaceBody, request: Reque
     return {"workspace": ws.to_dict()}
 
 
+def _confirmed_delete(ws_name: str, confirm: str, reason: str) -> str:
+    """An irreversible wipe needs the workspace's name typed back (S6, review 4).
+
+    ``confirm`` must equal the workspace's name; ``reason`` is recorded with
+    it, never instead of it. A workspace with a blank name cannot be confirmed
+    and is renamed first.
+    """
+    name = (ws_name or "").strip()
+    if not name:
+        raise HTTPException(
+            status_code=422,
+            detail="This workspace has no name to confirm with — rename it, then delete it",
+        )
+    if (confirm or "").strip() != name:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Deleting a workspace removes its connectors, schedules, jobs, uploads and keys "
+                "and cannot be undone. Preview it with ?dry_run=true, then confirm with "
+                f"?confirm=<the workspace name, {name!r}> (a ?reason= is recorded with it)."
+            ),
+        )
+    return " ".join((reason or "").split())
+
+
 @router.delete("/workspaces/{workspace_id}")
-async def delete_workspace_route(workspace_id: str, request: Request):
+async def delete_workspace_route(
+    workspace_id: str,
+    request: Request,
+    dry_run: bool = False,
+    confirm: str = "",
+    reason: str = "",
+):
+    """Delete a workspace and everything scoped to it (``services.workspace_teardown``).
+
+    ``?dry_run=true`` returns the counts and changes nothing. The real delete
+    needs ``?confirm=<workspace name>`` or a ``?reason=``.
+    """
+    from services.workspace_teardown import WorkspaceBusy, teardown_workspace
+
     actor = _require_platform_admin(request)
-    members = list_workspace_members(workspace_id)
-    if not delete_workspace(workspace_id=workspace_id):
+    ws = get_workspace(workspace_id)
+    if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    if dry_run:
+        try:
+            return {"ok": True, **teardown_workspace(workspace_id, actor=actor, dry_run=True)}
+        except WorkspaceBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    why = _confirmed_delete(ws.name, confirm, reason)
+    try:
+        summary = teardown_workspace(workspace_id, actor=actor)
+    except WorkspaceBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit(
         "team.workspace.delete",
         actor=actor,
         resource=f"/team/workspaces/{workspace_id}",
         level="warn",
-        details={"workspace_id": workspace_id, "members_removed": len(members)},
+        details={**summary, "name": ws.name, "reason": why or None, "confirmed_by_name": True},
     )
-    return {"ok": True}
+    return {"ok": True, **summary}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -819,3 +892,93 @@ async def set_platform_role(email: str, body: PlatformRoleBody, request: Request
         },
     )
     return {"user": user, "from_role": previous}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sandbox workspaces for security retests (C18)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SandboxCreateBody(BaseModel):
+    name: str = Field(default="security test", max_length=100)
+    tester_email: str = Field(..., max_length=254)
+    reason: str = Field(..., min_length=1, max_length=500)
+    ttl_hours: int = Field(default=24, ge=1, le=168)
+    # The tester is always a new synthetic login (one-time password returned
+    # once); an existing account is refused. Accepted for older clients.
+    create_account: bool = Field(default=True)
+
+
+class SandboxDeleteBody(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
+def _sandbox_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=getattr(exc, "status", 400), detail=str(exc))
+
+
+@router.post("/sandbox-workspaces")
+async def post_sandbox_workspace(body: SandboxCreateBody, request: Request):
+    """An isolated, expiring workspace for one tester (platform administrators only).
+
+    See ``services.sandbox_workspaces``: the tester is its only admin, the
+    platform admin is not a member, and it is torn down at ``expires_at``.
+    """
+    from services.sandbox_workspaces import SandboxError, create_sandbox
+
+    actor = _require_platform_admin(request)
+    if not body.create_account:
+        raise HTTPException(
+            status_code=400,
+            detail="A sandbox tester is always a new synthetic login: create_account=false is not supported",
+        )
+    if not " ".join(body.reason.split()):
+        raise HTTPException(status_code=422, detail="A reason is required for a sandbox workspace")
+    try:
+        sandbox, issued = create_sandbox(
+            name=body.name,
+            tester_email=body.tester_email,
+            reason=body.reason,
+            actor=actor,
+            ttl_hours=body.ttl_hours,
+        )
+    except (SandboxError, UserStoreError) as exc:
+        raise _sandbox_error(exc) from exc
+    return {"workspace": sandbox, "temporary_password": issued}
+
+
+@router.get("/sandbox-workspaces")
+async def get_sandbox_workspaces(request: Request):
+    from services.sandbox_workspaces import list_sandboxes
+
+    _require_platform_admin(request)
+    return {"workspaces": list_sandboxes()}
+
+
+@router.delete("/sandbox-workspaces/{workspace_id}")
+async def delete_sandbox_workspace(
+    workspace_id: str,
+    request: Request,
+    body: SandboxDeleteBody | None = None,
+    dry_run: bool = False,
+    confirm: str = "",
+    reason: str = "",
+):
+    """Tear a sandbox down; ``?dry_run=true`` previews, the real delete needs a name or reason."""
+    from services.sandbox_workspaces import SandboxError, delete_sandbox, is_sandbox
+    from services.workspace_teardown import WorkspaceBusy, teardown_workspace
+
+    actor = _require_platform_admin(request)
+    ws = get_workspace(workspace_id)
+    if ws is None or not is_sandbox(ws):
+        raise HTTPException(status_code=404, detail="Sandbox workspace not found")
+    if dry_run:
+        try:
+            return teardown_workspace(workspace_id, actor=actor, dry_run=True)
+        except WorkspaceBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    why = _confirmed_delete(ws.name, confirm, reason or (body.reason if body else ""))
+    try:
+        return delete_sandbox(workspace_id, actor=actor, reason=why or "confirmed by name")
+    except SandboxError as exc:
+        raise _sandbox_error(exc) from exc

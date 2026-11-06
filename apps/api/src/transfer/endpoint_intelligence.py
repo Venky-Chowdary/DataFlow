@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.connector_auth import resolve_api_key
 import logging
 from typing import Any
 
@@ -18,7 +19,7 @@ from .adapters import (
     parse_file_content,
     resolve_connector_config,
 )
-from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
+from .connector_capabilities import CATALOG_ID_ALIASES, get_capabilities, resolve_driver_type
 from .engine_family import family_or_kind
 from .models import EndpointConfig
 from .type_mapper import ddl_type
@@ -270,7 +271,7 @@ def _specialty_object_list(
             names = list_collections(
                 host=str(cfg.get("host") or ""),
                 port=int(cfg.get("port") or 6333),
-                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                api_key=resolve_api_key(cfg),
                 ssl=bool(cfg.get("ssl")),
             )
             return (
@@ -279,13 +280,18 @@ def _specialty_object_list(
                 "collection",
                 f"Qdrant connected — {len(names)} collection(s)",
             )
+        if kind == "pinecone":
+            from connectors.pinecone_writer import list_namespaces
+
+            names = list_namespaces(cfg)
+            return True, names, "namespace", f"Pinecone connected — {len(names)} namespace(s)"
         if kind == "weaviate":
             from connectors.weaviate_writer import list_classes
 
             names = list_classes(
                 host=str(cfg.get("host") or ""),
                 port=int(cfg.get("port") or 8080),
-                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                api_key=resolve_api_key(cfg),
                 ssl=bool(cfg.get("ssl")),
                 connection_string=str(cfg.get("connection_string") or ""),
             )
@@ -296,6 +302,7 @@ def _specialty_object_list(
             "neo4j": "Neo4j label",
             "qdrant": "Qdrant collection",
             "weaviate": "Weaviate class",
+            "pinecone": "Pinecone namespace",
         }.get(kind, kind)
         return False, [], "object", f"{label} list failed: {exc}"
     return None
@@ -928,9 +935,6 @@ def _introspect_endpoint_impl(
     if _sdk_cls is not None:
         return _sdk_introspect(out, endpoint, cfg, fmt, _sdk_cls)
 
-    if fmt in _SAAS_INTROSPECT_DRIVERS:
-        return _saas_introspect(out, endpoint, cfg, fmt)
-
     if fmt == "rest_api":
         # Reachability + field names come from the canonical describe; typing
         # stays with the sampled read Map already uses. Stamping the describe's
@@ -947,6 +951,15 @@ def _introspect_endpoint_impl(
         out["objects"] = [{"name": name, "type": kind} for name in names]
         out["message"] = message
         return out
+
+    if get_capabilities(fmt).get("introspect"):
+        # The capability row is the one statement that a driver introspects:
+        # get_transfer_capabilities advertised InfluxDB / Couchbase as live
+        # sources while this dispatch still answered "not yet implemented",
+        # so list_connector_objects showed 0 objects and start_transfer had no
+        # source schema (D236). Every such driver reads through the canonical
+        # services.schema_introspect helper.
+        return _saas_introspect(out, endpoint, cfg, fmt)
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
@@ -1553,6 +1566,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 (schema_keys or {}).get("primary_key_columns") or []
             )
             out["unique_keys"] = list((schema_keys or {}).get("unique_keys") or [])
+            # Every index, plain ones included: a keyed column widens by the
+            # key budget (schema_drift.dest_key_groups).
+            out["indexes_meta"] = (schema_keys or {}).get("indexes_meta")
             out["unconstrained_decimals"] = list(
                 (schema_keys or {}).get("unconstrained_decimals") or []
             )
@@ -1639,14 +1655,6 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         )
 
 
-#: SaaS drivers whose Describe is already modelled in ``schema_introspect``.
-#: They declared ``introspect: True`` and answered "not yet implemented" here,
-#: so a Salesforce or HubSpot *destination* could never prove its object exists
-#: and every route into one failed G2 on unknown existence. The metadata was
-#: written and reachable; only this dispatch was missing.
-_SAAS_INTROSPECT_DRIVERS = frozenset({"salesforce", "hubspot"})
-
-
 def _saas_introspect(
     out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str
 ) -> dict:
@@ -1664,6 +1672,7 @@ def _saas_introspect(
             password=str(cfg.get("password") or ""),
             connection_string=str(cfg.get("connection_string") or ""),
             api_key=str(cfg.get("api_key") or ""),
+            ssl=bool(cfg.get("ssl")),
             table=obj,
         )
     except Exception as exc:
@@ -1693,6 +1702,12 @@ def _saas_introspect(
     out["connected"] = True
     out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
     out["message"] = f"{fmt.title()} connected — {len(objects)} object(s)"
+    if info.get("warning"):
+        # e.g. HubSpot custom objects unavailable without their scope (D270).
+        out["message"] += f". {info['warning']}"
+        out["warning"] = str(info["warning"])
+    if info.get("custom_objects_unavailable"):
+        out["custom_objects_unavailable"] = True
     if not obj:
         return out
 

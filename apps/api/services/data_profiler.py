@@ -20,7 +20,9 @@ from services.transform_engine import (
 )
 from services.value_serializer import wire_cell_text
 
-EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+# Email is read through the gate's classifier (D94): one definition of an
+# address across preflight, mapper and profiler (unicode local parts included).
+from services.compliance_guard import is_email_value
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{12}$"
 )
@@ -126,7 +128,7 @@ def _infer_pattern(values: list[str]) -> str | None:
         return None
     sample = values[:100]
     scores = {
-        "email": sum(1 for v in sample if EMAIL_RE.match(v)),
+        "email": sum(1 for v in sample if is_email_value(v)),
         "uuid": sum(1 for v in sample if UUID_RE.match(v)),
         "phone": sum(1 for v in sample if PHONE_RE.match(v)),
         "date": sum(1 for v in sample if DATE_PATTERN_RE.match(v) or _parse_date(v)),
@@ -197,7 +199,7 @@ def _type_scores(values: list[str]) -> dict[str, float]:
             scores["UUID"] += 1
         if raw.startswith("{") or raw.startswith("["):
             scores["JSON"] += 0.5
-        if EMAIL_RE.match(raw):
+        if is_email_value(raw):
             scores["VARCHAR"] += 0.3
     non_empty = sum(1 for v in values if v) or 1
     return {k: round(v / non_empty, 3) for k, v in scores.items()}
@@ -261,7 +263,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
 
     pattern = _infer_pattern(non_empty)
     pii = bool(re.search(r"email|phone|ssn|password|secret|name|address", name, re.I))
-    if pii and best_type in {"VARCHAR", "TEXT"} and any(bool(EMAIL_RE.match(s)) for s in non_empty[:8]):
+    if pii and best_type in {"VARCHAR", "TEXT"} and any(bool(is_email_value(s)) for s in non_empty[:8]):
         pii = True
 
     # Uniqueness estimate — high distinct ratio on id-like columns
@@ -356,6 +358,44 @@ def _is_weak_declared(declared: str) -> bool:
         # Parameterised types (DECIMAL(12,2), VARCHAR(50)) carry real precision.
         return False
     return t in _WEAK_DECLARED_TYPES
+
+
+#: Engines whose drivers declare a query result's column types in
+#: ``cursor.description`` (``decimal_observe.cursor_declared_carriers``: MySQL /
+#: PostgreSQL type codes, pymssql codes, oracledb DbType names). Other engines'
+#: query results are typed from samples.
+_CURSOR_TYPED_FAMILIES = frozenset({"mysql", "postgresql", "sqlserver", "oracle"})
+
+
+def source_types_are_authoritative_for(source_kind: str, source_format: str, source: Any) -> bool:
+    """The one plan-time decision, MCP and REST alike, given the source endpoint.
+
+    A table is decided by :func:`source_types_are_authoritative`. A SQL query
+    result is declared evidence when the driver types it (``_CURSOR_TYPED_FAMILIES``)
+    — profiling it instead re-typed ``JSON_UNQUOTE`` text BIGINT (QA MySQL D5).
+    A procedure result is declared only when the operator declared
+    ``procedure_result_schema``; otherwise it is a sample (a procedure may not
+    run before confirm, and its peek is not a catalog).
+    """
+    from services.procedure_source import (
+        MODE_PROCEDURE,
+        MODE_QUERY,
+        procedure_result_schema_of,
+        source_read_mode_of,
+    )
+
+    base = source_types_are_authoritative(source_kind, source_format)
+    mode = source_read_mode_of(source) if source is not None else ""
+    if not base or mode not in {MODE_QUERY, MODE_PROCEDURE}:
+        return base
+    if mode == MODE_PROCEDURE:
+        try:
+            return bool(procedure_result_schema_of(source))
+        except ValueError:
+            return False
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(source_format or "") in _CURSOR_TYPED_FAMILIES
 
 
 def source_types_are_authoritative(source_kind: str, source_format: str = "") -> bool:
@@ -517,6 +557,27 @@ def _inference_would_invent_fixed_point(declared: str, inferred: str) -> bool:
         return False
 
 
+def _inference_would_drop_zone(declared: str, inferred: str) -> bool:
+    """A zone-aware declaration must not be re-typed zoneless by its samples.
+
+    An instant renders without an offset (a MySQL ``DATETIME`` read under a
+    declared ``source_timezone``, a PostgreSQL ``timestamptz`` printed in the
+    session zone), so its samples always profile as a zoneless ``TIMESTAMP``.
+    Letting that win on a non-authoritative source (a query or procedure
+    extract) typed the destination column ``TIMESTAMP`` while the mapping kept
+    the declared ``TIMESTAMPTZ`` source, and preflight then blocked its own
+    plan as a lossy ``TIMESTAMPTZ -> TIMESTAMP`` collapse that table mode, with
+    the same declaration, never saw (QA round 12).
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    if not declared or not inferred:
+        return False
+    return datetime_timezone_polarity(declared) in {"tz", "ltz"} and (
+        datetime_timezone_polarity(inferred) == "ntz"
+    )
+
+
 def merge_profiler_schema(
     existing: dict[str, str],
     profiled: dict[str, str],
@@ -579,6 +640,8 @@ def merge_profiler_schema(
         if _inference_would_demote_to_text(declared, str(inferred)):
             continue
         if _inference_would_invent_fixed_point(declared, str(inferred)):
+            continue
+        if _inference_would_drop_zone(declared, str(inferred)):
             continue
         if _inference_would_narrow_numeric_domain(declared, str(inferred)):
             continue

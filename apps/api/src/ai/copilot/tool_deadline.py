@@ -21,8 +21,10 @@ import contextlib
 import contextvars
 import logging
 import os
+import socket
 import threading
 import time
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +86,10 @@ class _Slot:
     target: str = ""
     #: ``(role, host:port)`` of every other system the same step also reaches.
     also: tuple[tuple[str, str], ...] = ()
+    #: The endpoint this thread is talking to right now (:func:`waiting_on`).
+    waiting: str = ""
+    #: True for a slot :func:`waiting_on` opened on a thread that had none.
+    opened_by_wait: bool = False
 
 
 @dataclass
@@ -100,6 +106,17 @@ class _Progress:
     limit: float = 0.0
     slots: dict[int, _Slot] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    #: Driver connections opened for this call, per worker thread, so an
+    #: abandoned worker can be interrupted (D281). Never stores a socket or
+    #: file descriptor: those are read from the live connection at interrupt
+    #: time, so a closed connection whose descriptor was reused is left alone.
+    connections: dict[int, dict[int, Any]] = field(default_factory=dict)
+    #: The call was abandoned (``True``) or these worker threads were: a
+    #: connection they open afterwards is interrupted as soon as it registers,
+    #: so a worker that carries on (a retry, the next step) cannot start new
+    #: blocking I/O nobody will end.
+    interrupted: bool = False
+    interrupted_threads: set[int] = field(default_factory=set)
 
     # Read-only views of the call's own (first) step, kept for callers that
     # inspect a single step.
@@ -256,12 +273,253 @@ def note_step(
         progress.slots[threading.get_ident()] = slot
 
 
+def _host_of(target: str) -> str:
+    text = (target or "").strip().lower()
+    if "://" in text:
+        text = urlparse(text).hostname or text
+    if text.count(":") == 1:
+        text = text.split(":", 1)[0]
+    return text
+
+
+def _same_system(a: str, b: str) -> bool:
+    """``acme-xy123`` (a Snowflake account) is ``acme-xy123.snowflakecomputing.com:443``."""
+    ha, hb = _host_of(a), _host_of(b)
+    if not ha or not hb:
+        return False
+    return ha == hb or ha.startswith(hb + ".") or hb.startswith(ha + ".")
+
+
+@contextlib.contextmanager
+def waiting_on(conn: Any):
+    """Mark the system this thread is talking to for the duration of the block.
+
+    A step such as the preflight reaches the source *and* the destination; a
+    timeout used to say only "one of them is slow" or blame the source while a
+    Snowflake destination login held the call (D187). The connection layers
+    (the connector dial scope and the Snowflake login) wrap their work in this,
+    so a timeout names the endpoint that was actually waited on.
+    """
+    progress = _progress.get()
+    target = _system_label(conn) if conn is not None and not isinstance(conn, str) else str(conn or "")
+    if progress is None or not target:
+        yield
+        return
+    ident = threading.get_ident()
+    with progress.lock:
+        slot = progress.slots.get(ident)
+        opened = slot is None
+        if opened:
+            slot = _Slot(step=f"talking to {target}", opened_by_wait=True)
+            progress.slots[ident] = slot
+        previous = slot.waiting
+        slot.waiting = target
+    try:
+        yield
+    finally:
+        with progress.lock:
+            if opened and progress.slots.get(ident) is slot:
+                progress.slots.pop(ident, None)
+            else:
+                slot.waiting = previous
+
+
+def _waited(slot: _Slot) -> tuple[str, str]:
+    """``(role, host:port)`` of the step's system the slot is talking to.
+
+    A dial scope may know only the host; the step's own record of that system
+    carries its port, so the message names the full endpoint.
+    """
+    for role, target in ((slot.role, slot.target), *slot.also):
+        if target and _same_system(slot.waiting, target):
+            return role or "source", target
+    return (slot.role if not slot.also else ""), slot.waiting
+
+
 def _clear_step() -> None:
     progress = _progress.get()
     if progress is None:
         return
     with progress.lock:
         progress.slots.pop(threading.get_ident(), None)
+
+
+#: Which call currently owns a registered connection, by ``id(conn)``. A
+#: connection has one owner: registering it for a new call (a pooled session
+#: checked out again) takes it away from the previous one, so an abandoned
+#: call can never shut a session another call is using.
+_owners: "weakref.WeakValueDictionary[int, _Progress]" = weakref.WeakValueDictionary()
+_owners_lock = threading.Lock()
+
+
+def _socket_identity(conn: Any) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the connection's socket, or ``None``."""
+    fileno = getattr(conn, "fileno", None)
+    if not callable(fileno) or getattr(conn, "closed", False):
+        return None
+    try:
+        st = os.fstat(int(fileno()))
+    except (OSError, ValueError, TypeError):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+class _Registered:
+    """A registered connection and the identity of its socket at that time."""
+
+    __slots__ = ("conn", "identity")
+
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+        # psycopg2 exposes only a descriptor number; the kernel identity of
+        # the socket behind it is what proves, at interrupt time, that the
+        # number was not reused by another socket in between.
+        self.identity = _socket_identity(conn)
+
+
+def _drop_from(progress: _Progress, key: int) -> None:
+    with progress.lock:
+        for thread_conns in progress.connections.values():
+            thread_conns.pop(key, None)
+
+
+def register_connection(conn: Any) -> None:
+    """Remember a driver connection this thread uses for the current tool call.
+
+    A call abandoned at its deadline is interrupted through these: a worker
+    blocked on a connected socket that never answers (a tunnel that accepted
+    and went silent) has no server-side timeout that can reach it, and such
+    workers filled the connector pool for hours (D281). A no-op outside a tool
+    call, so transfer jobs' sessions are never touched.
+
+    Registration moves ownership: the connection leaves every other thread's
+    and every other call's bucket, so a probe that borrowed a session and
+    handed it back cannot shut it under the thread now using it.
+    """
+    progress = _progress.get()
+    if progress is None or conn is None:
+        return
+    key = id(conn)
+    thread = threading.get_ident()
+    with _owners_lock:
+        previous = _owners.get(key)
+        _owners[key] = progress
+    if previous is not None and previous is not progress:
+        _drop_from(previous, key)
+    with progress.lock:
+        late = progress.interrupted or thread in progress.interrupted_threads
+        if not late:
+            for other, thread_conns in progress.connections.items():
+                if other != thread:
+                    thread_conns.pop(key, None)
+            progress.connections.setdefault(thread, {})[key] = _Registered(conn)
+    if late:
+        try:
+            _interrupt_connection(_Registered(conn))
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.debug("late connection interrupt skipped: %s", exc)
+
+
+def unregister_connection(conn: Any) -> None:
+    """Forget a connection that is closed, invalidated or handed to another consumer.
+
+    Works from any thread and outside a tool call: the owner is looked up, not
+    the caller's context, so a session released back to an endpoint scope by
+    a probe thread leaves the probe's bucket at once.
+    """
+    if conn is None:
+        return
+    key = id(conn)
+    with _owners_lock:
+        owner = _owners.pop(key, None)
+    if owner is not None:
+        _drop_from(owner, key)
+
+
+def _shutdown_descriptor(fd: int, identity: tuple[int, int] | None) -> bool:
+    """Shut the socket behind ``fd`` if it is still the registered one.
+
+    ``shutdown`` acts on the kernel socket, so a duplicate descriptor ends the
+    recv the worker thread is blocked in without owning its object. The worker
+    may close the connection between our ``fileno()`` and the ``dup``, and the
+    number can then belong to a new socket: the duplicate is checked against
+    the identity recorded at registration before anything is shut.
+    """
+    try:
+        dup = socket.socket(fileno=os.dup(fd))
+    except OSError:
+        return False
+    try:
+        st = os.fstat(dup.fileno())
+        if identity is not None and (st.st_dev, st.st_ino) != identity:
+            return False
+        dup.shutdown(socket.SHUT_RDWR)
+        return True
+    finally:
+        dup.close()
+
+
+def _interrupt_connection(entry: Any) -> bool:
+    """End the blocking I/O of one registered driver connection from another thread."""
+    conn = entry.conn if isinstance(entry, _Registered) else entry
+    identity = entry.identity if isinstance(entry, _Registered) else None
+    # pymysql keeps the socket object; a closed connection has none.
+    sock = getattr(conn, "_sock", None)
+    if sock is not None and hasattr(sock, "shutdown"):
+        sock.shutdown(socket.SHUT_RDWR)
+        return True
+    # psycopg2 (and anything else with a live descriptor): closed ones raise.
+    fileno = getattr(conn, "fileno", None)
+    if callable(fileno) and not getattr(conn, "closed", False):
+        return _shutdown_descriptor(int(fileno()), identity)
+    # python-oracledb: break the call in flight on the connection.
+    cancel = getattr(conn, "cancel", None)
+    if callable(cancel):
+        cancel()
+        return True
+    return False
+
+
+def interrupt_connections(progress: _Progress, thread: int | None = None) -> int:
+    """Interrupt the connections a call (or one of its threads) still holds.
+
+    Returns how many were interrupted. Best effort: a connection that is
+    already closed, or a driver with no reachable socket (pyodbc carries the
+    call's budget as its own ``timeout`` instead), is skipped.
+    """
+    with progress.lock:
+        if thread is None:
+            progress.interrupted = True
+            entries = [e for bucket in progress.connections.values() for e in bucket.values()]
+            progress.connections.clear()
+        else:
+            progress.interrupted_threads.add(thread)
+            entries = list(progress.connections.pop(thread, {}).values())
+    done = 0
+    for entry in entries:
+        with _owners_lock:
+            # Only the current owner may shut it: a pooled session checked out
+            # again by another call since then belongs to that call.
+            if _owners.get(id(entry.conn)) is not progress:
+                continue
+            _owners.pop(id(entry.conn), None)
+        try:
+            if _interrupt_connection(entry):
+                done += 1
+        except Exception as exc:  # noqa: BLE001 - best effort, per connection
+            logger.debug("connection interrupt skipped: %s", exc)
+    return done
+
+
+def stuck_label(tool: str, progress: _Progress) -> str:
+    """``tool: step (role host:port)`` for the pool's own messages."""
+    with progress.lock:
+        slots = [s for s in progress.slots.values() if s.step]
+    if not slots:
+        return tool
+    slot = slots[0]
+    where = f" ({slot.role or 'source'} {slot.target})" if slot.target else ""
+    return f"{tool}: {slot.step}{where}"
 
 
 def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
@@ -272,6 +530,20 @@ def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
         return _parallel_timeout_message(tool, waited, slots)
     slot = slots[0] if slots else _Slot()
     step, role, target, also = slot.step, slot.role, slot.target, slot.also
+    if slot.waiting:
+        # The connection layer said which endpoint it was talking to (D187).
+        waited_role, endpoint = _waited(slot)
+        subject = (
+            f"{waited_role} unreachable/slow: {endpoint}"
+            if waited_role
+            else f"unreachable/slow: {endpoint}"
+        )
+        where = f" (step: {step})" if step and not slot.opened_by_wait else ""
+        return (
+            f"{subject} did not answer within {waited}{where}. Check the host and "
+            "port, the firewall or VPN, and that the system is healthy (and its "
+            "warehouse or server is running), then try again."
+        )
     if target and also:
         # The step reads more than one system and cannot tell which one held it:
         # blaming the first would send the operator to a healthy database.
@@ -319,6 +591,9 @@ def _parallel_timeout_message(tool: str, waited: str, slots: list[_Slot]) -> str
     systems: dict[str, set[str]] = {}
     for slot in slots:
         reads = [(slot.role, slot.target), *slot.also] if slot.target else []
+        if slot.waiting:
+            # Narrowed by the connection layer to the endpoint it was on (D187).
+            reads = [_waited(slot)]
         for r, t in reads:
             systems.setdefault(r or "source", set()).add(t)
         where = ", ".join(f"the {r or 'source'} ({t})" for r, t in reads)
@@ -381,9 +656,13 @@ def run_with_deadline(
         return get_executor().run(
             tool,
             work,
-            workspace=current_workspace_stamp(),
+            workspace=current_workspace_stamp(for_write=False),
             seconds=limit,
             describe_timeout=lambda: _timeout_message(tool, limit, progress),
+            label=lambda: stuck_label(tool, progress),
+            # The worker that outlives the deadline is blocked in a driver:
+            # end its I/O so it returns and frees its pool worker (D281).
+            interrupt=lambda: interrupt_connections(progress),
         )
     except (ConnectorCallTimeout, ConnectorCapacityExceeded) as exc:
         return on_timeout(str(exc))
@@ -466,8 +745,13 @@ def parallel_steps(
         own = progress.slots.get(threading.get_ident())
     futures: list[concurrent.futures.Future | None] = [None] * len(steps)
     results: list[StepResult | None] = [None] * len(steps)
+    threads: list[dict[str, int]] = [{} for _ in steps]
     for index, step in enumerate(steps[1:], start=1):
-        futures[index] = pool.spawn(f"step:{step.label}", lambda s=step: _run_step(s))
+        futures[index] = pool.spawn(
+            f"step:{step.label}",
+            _on_recorded_thread(lambda s=step: _run_step(s), threads[index]),
+            label=lambda s=step: _step_label(s),
+        )
     try:
         results[0] = _run_step(steps[0])
         for index in range(1, len(steps)):
@@ -481,6 +765,7 @@ def parallel_steps(
                 results[index] = future.result(timeout=max(0.0, deadline - time.monotonic()))
             except concurrent.futures.TimeoutError:
                 results[index] = StepResult(timed_out=True, seconds=budget or 0.0)
+                _abandon_step(pool, future, progress, threads[index])
     finally:
         with progress.lock:
             if own is not None:
@@ -488,6 +773,52 @@ def parallel_steps(
             else:
                 progress.slots.pop(threading.get_ident(), None)
     return [r if r is not None else StepResult(timed_out=True) for r in results]
+
+
+def _on_recorded_thread(fn: Callable[[], Any], cell: dict[str, int]) -> Callable[[], Any]:
+    """Run ``fn`` and record the worker thread it ran on in ``cell``."""
+
+    def run() -> Any:
+        thread = threading.get_ident()
+        cell["thread"] = thread
+        try:
+            return fn()
+        finally:
+            # This pool thread may serve another probe of the same call next:
+            # an interrupt meant for this probe must not follow it there.
+            progress = _progress.get()
+            if progress is not None:
+                with progress.lock:
+                    progress.interrupted_threads.discard(thread)
+                    progress.connections.pop(thread, None)
+
+    return run
+
+
+def _step_label(step: Step) -> str:
+    target = describe_target(step.conn) if step.conn is not None else ""
+    where = f" ({step.role or 'source'} {target})" if target else ""
+    return f"{step.label}{where}"
+
+
+def _abandon_step(
+    pool: Any,
+    future: concurrent.futures.Future,
+    progress: _Progress,
+    cell: dict[str, int],
+) -> None:
+    """A probe that outlived its budget: count it stuck and end its I/O.
+
+    Only that probe's own connections are interrupted; the call that started
+    it goes on with a partial answer on its other connections.
+    """
+    thread = cell.get("thread")
+    pool.abandon(
+        future,
+        interrupt=(
+            (lambda: interrupt_connections(progress, thread)) if thread is not None else None
+        ),
+    )
 
 
 def _under_step_deadline(fn: Callable[[], Any], deadline: float) -> Callable[[], Any]:
@@ -532,7 +863,13 @@ def bounded_step(
         finally:
             _step_deadline.reset(token)
 
-    future = get_executor().spawn(f"step:{label}", inner)
+    cell: dict[str, int] = {}
+    pool = get_executor()
+    future = pool.spawn(
+        f"step:{label}",
+        _on_recorded_thread(inner, cell),
+        label=lambda: _step_label(Step(label, fn, conn, role)),
+    )
     started_by = time.monotonic() + 0.25
     while not (future.running() or future.done()) and time.monotonic() < started_by:
         time.sleep(0.005)
@@ -543,6 +880,9 @@ def bounded_step(
     try:
         return future.result(timeout=budget)
     except concurrent.futures.TimeoutError:
+        progress = _progress.get()
+        if progress is not None:
+            _abandon_step(pool, future, progress, cell)
         return StepResult(timed_out=True, seconds=budget)
 
 

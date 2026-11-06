@@ -328,6 +328,40 @@ def _pgvector_typed_extras(
     return out
 
 
+def _nest_declared_json(
+    records: list[dict[str, Any]], value_types: dict[str, str]
+) -> None:
+    """Parse each declared-JSON cell's object/array text into the value itself.
+
+    JSON / JSONB columns never become typed extras (see above): they live in
+    ``metadata`` only, so the document should hold the nested value. Numbers
+    are decoded exactly (``json_loads_exact``); text that is not a JSON object
+    or array stays as it was.
+    """
+    from services.type_system import normalize_logical_type
+    from services.value_serializer import json_loads_exact
+
+    json_keys = {
+        key for key, declared in (value_types or {}).items()
+        if normalize_logical_type(str(declared or "")) == "json"
+    }
+    if not json_keys:
+        return
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        for key in json_keys & set(record):
+            value = record[key]
+            if not isinstance(value, str) or value.strip()[:1] not in {"{", "["}:
+                continue
+            try:
+                parsed = json_loads_exact(value)
+            except ValueError:
+                continue
+            if isinstance(parsed, (dict, list)):
+                record[key] = parsed
+
+
 def _pgvector_extra_cells(
     metadata: dict[str, Any] | None,
     extras: list[tuple[str, str]],
@@ -814,6 +848,9 @@ def write_mapped_rows(
             rejected_rows=len(map_rejected),
             meta=stale_cleanup_meta(0, skipped_docs),
         )
+    # D216: a JSON source column is a JSON value in the document, not its
+    # escaped text — ``{"k": 1}``, never ``"{\"k\":1}"``.
+    _nest_declared_json(records, mapped_value_types)
     # Document identity must come from the contract PK, not just a column
     # literally named ``id`` (QA MX2-17 — see vector_identity_columns).
     from services.vectorization import vector_identity_columns

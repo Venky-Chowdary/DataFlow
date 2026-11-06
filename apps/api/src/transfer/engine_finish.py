@@ -246,6 +246,11 @@ def _finish_verified_run(
 #: Backup kinds a failed overwrite restores and a committed one discards.
 RESTORABLE_BACKUP_ENGINES = frozenset({"mysql", "mongodb", ROW_COPY_BACKUP_ENGINE})
 
+#: What a failed overwrite reports once its pre-run backup is back in place.
+OVERWRITE_RESTORED_NOTE = (
+    "The previous destination table was restored. This run's replacement was removed."
+)
+
 
 def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) -> bool:
     """Settle the pre-run backup after a run ended on ``exc``.
@@ -259,9 +264,14 @@ def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) 
         TransferCancelled,
         _settle_overwrite_backup,
     )
-    return _settle_overwrite_backup(
-        destination, restore=not isinstance(exc, TransferCancelled)
-    )
+    restore = not isinstance(exc, TransferCancelled)
+    restored = _settle_overwrite_backup(destination, restore=restore)
+    if restore and restored:
+        # The stream's undo judged the live object before this restore ran
+        # ("already held N row(s) ... left in place"). The backup is the
+        # rollback, and it just put the pre-run object back (E1-025).
+        setattr(exc, "failed_batch_undo_note", OVERWRITE_RESTORED_NOTE)
+    return restored
 
 
 def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:

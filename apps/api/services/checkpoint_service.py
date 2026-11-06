@@ -410,6 +410,31 @@ class CheckpointService:
             )
         return False
 
+    def record_cancelled_progress(self, checkpoint: Checkpoint) -> bool:
+        """Persist a cancelled run's committed prefix without a status write.
+
+        By the time a cancel reaches the writer the job document is already
+        terminal (``cancelled``), so ``save`` — which writes the running status
+        beside the checkpoint — is refused by the sticky-terminal rule. The
+        resume token still goes to the sidecar, and the job document takes the
+        checkpoint field alone (``update_job_fields``). A refusal here is the
+        store's answer about a finished job, not a persistence fault, so it is
+        not counted as a failed save (QA r12 Mongo D5).
+        """
+        mongo = self._mongo()
+        token = durable_resume_token(checkpoint)
+        sidecar_ok = _persist_resume_token(mongo, checkpoint.job_id, token)
+        job_ok = False
+        patch = getattr(mongo, "update_job_fields", None)
+        if callable(patch):
+            try:
+                job_ok = bool(patch(checkpoint.job_id, {"checkpoint": checkpoint.to_dict()}))
+            except Exception:  # noqa: BLE001 — the sidecar may hold the token
+                logger.exception(
+                    "Job document checkpoint patch raised for %s", checkpoint.job_id
+                )
+        return sidecar_ok or job_ok
+
     def require_save(self, checkpoint: Checkpoint) -> None:
         """Persist the checkpoint or raise ``CheckpointPersistenceError``.
 

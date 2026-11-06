@@ -1756,3 +1756,42 @@ def declared_identity_columns(request: Any) -> list[str]:
             if cols:
                 return cols
     return []
+
+
+def forget_job_watermarks(
+    job_ids: set[str], *, keep_keys: set[str] = frozenset(), dry_run: bool = False  # type: ignore[assignment]
+) -> list[str]:
+    """Remove the incremental watermarks only ``job_ids`` advanced (workspace teardown).
+
+    A cursor key is a route identity, not a workspace: a key is removed only
+    when its last advancing run (``metadata.job_id``) or a job of this set names
+    it, and it is not in ``keep_keys`` — the keys any other workspace's job or
+    schedule still uses. Returns the keys removed (or that would be).
+    """
+    ids = {str(j) for j in job_ids if j}
+    if not ids:
+        return []
+    keep = {str(k) for k in keep_keys}
+    removed: list[str] = []
+    coll = _mongo_cursors()
+    if coll is not None:
+        for doc in coll.find({"metadata.job_id": {"$in": sorted(ids)}}, {"key": 1}):
+            key = str(doc.get("key") or "")
+            if key and key not in keep:
+                removed.append(key)
+        if removed and not dry_run:
+            coll.delete_many({"key": {"$in": removed}})
+        return removed
+    data = _load()
+    kept_entries = []
+    for entry in data.get("cursors", []):
+        key = str(entry.get("key") or "")
+        job = str((entry.get("metadata") or {}).get("job_id") or "")
+        if key and job in ids and key not in keep:
+            removed.append(key)
+            continue
+        kept_entries.append(entry)
+    if removed and not dry_run:
+        data["cursors"] = kept_entries
+        _save(data)
+    return removed

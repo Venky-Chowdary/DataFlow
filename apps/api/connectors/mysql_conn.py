@@ -124,6 +124,23 @@ def local_infile_allowed(conn: Any, path: str) -> Iterator[None]:
         allowed.discard(token)
 
 
+# --- TLS: one decision for every MySQL dial lives in connectors.mysql_tls -----
+from connectors.mysql_tls import (  # noqa: E402,F401 - re-exported for callers
+    TLS_DISABLED,
+    TLS_PREFERRED,
+    TLS_REQUIRED,
+    TLS_VERIFY_CA,
+    TLS_VERIFY_IDENTITY,
+    TlsModeError,
+    TlsPlan,
+    describe_session_encryption,
+    dial_pymysql,
+    mysql_tls_plan,
+    session_encryption,
+    strip_tls_params,
+)
+
+
 def get_connection(
     *,
     host: str,
@@ -147,8 +164,6 @@ def get_connection(
     even then the server may read only a file staged with
     :func:`local_infile_allowed`.
     """
-    import pymysql
-
     ep = resolve_sql_endpoint(
         family="mysql",
         host=host,
@@ -208,8 +223,12 @@ def get_connection(
         "local_infile": purpose_l in LOCAL_INFILE_PURPOSES
         and _install_local_infile_guard(),
     }
-    if ssl or public_proxy:
-        kwargs["ssl"] = {"ssl": {}}
+    # TLS comes from ``ssl`` and the DSN only. A saved or resolved endpoint
+    # carries its form CA / client certificate / verify options in the DSN
+    # (``connector_store.dial_connection_string``), so this dial, generic_sql
+    # and the binlog reader all read the same plan input.
+    tls_plan = mysql_tls_plan(ssl=bool(ssl), connection_string=connection_string,
+                              host=ep["host"])
     from src.ai.copilot.tool_deadline import remaining_seconds
 
     left = remaining_seconds()
@@ -225,7 +244,7 @@ def get_connection(
 
     assert_connector_dial_allowed(ep["host"], connection_string)
     try:
-        conn = pymysql.connect(**kwargs)
+        conn = dial_pymysql(kwargs, plan=tls_plan, host=ep["host"])
     except Exception as exc:
         hint = private_cloud_host_hint(ep["host"], connection_string)
         if hint:

@@ -279,6 +279,8 @@ def _schema_rows(
             "inferred_type": str(col.get("inferred_type") or "TEXT"),
             "nullable": bool(col.get("nullable", True)),
             "samples": list(col.get("samples") or samples.get(name) or [])[:20],
+            # A destination column at the database default collation (D275).
+            **({"collation_note": col["collation_note"]} if col.get("collation_note") else {}),
         })
     return rows
 
@@ -416,11 +418,15 @@ def _stored_as_text(mappings: list[dict[str, Any]], dest_db: str) -> list[dict[s
     if not dest_db or not destination_schema_is_sampled(dest_db):
         return []
     text = {"string", "text", "unknown", ""}
+    # A JSON document carries these natively; the VARCHAR stamp of a schemaless
+    # destination is not a choice to store them as text (D290: id/qty are
+    # stored as JSON integers, the plan must not say "text").
+    json_native = {"integer", "boolean", "float"}
     out: list[dict[str, Any]] = []
     for m in mappings:
         src_type = str(m.get("source_type") or m.get("inferred_type") or "")
         logical = normalize_logical_type(src_type) if src_type else ""
-        if logical in text:
+        if logical in text or logical in json_native:
             continue
         carrier = invent_dest_type(src_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
         if normalize_logical_type(str(carrier or "")) not in text:
@@ -503,6 +509,12 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _uncleared_coercion_blocks(mapping: dict[str, Any]) -> bool:
+    from services.type_coercion_validator import coercion_blocks_transfer
+
+    return coercion_blocks_transfer(list(mapping.get("coercion_issues") or []))
+
+
 # risk_acceptance.on_cast_failure → signed contract quarantine_policy.
 _ON_CAST_FAILURE_POLICIES = {
     "quarantine": "holdout_rejected_rows",
@@ -511,13 +523,47 @@ _ON_CAST_FAILURE_POLICIES = {
 
 
 def _regrade_signed_coercions(
-    mapping: dict[str, Any], mappings: list[dict[str, Any]]
+    mapping: dict[str, Any],
+    mappings: list[dict[str, Any]],
+    *,
+    dest_db_type: str = "",
+    dest_exists: bool | None = None,
+    samples: dict[str, list] | None = None,
+    validation_mode: str = "strict",
+    schema_policy: str = "manual_review",
 ) -> dict[str, Any]:
-    """Grade coercion issues against the contracts this plan just signed (D234)."""
-    from services.type_coercion_validator import regrade_coercion_issues_for_contracts
+    """Grade coercion issues on the mapping set this plan will execute (D234).
 
-    issues = regrade_coercion_issues_for_contracts(mapping.get("coercion_issues"), mappings)
-    cleared = {str(i.get("message") or "") for i in issues if i.get("cleared_by_risk_contract")}
+    The pipeline graded the columns before the plan applied column
+    transforms, the declared source zone and the contracts it signs, so a
+    stale ``severity="block"`` sat beside a preflight that judged the final
+    mappings and passed (``ts TIMESTAMPTZ -> DATE`` lossy/block next to the
+    identical ``tstz`` graded preserve). Re-grading the final set with the same
+    validator makes the plan's coercions and its preflight read one input.
+    """
+    from services.type_coercion_validator import (
+        regrade_coercion_issues_for_contracts,
+        validate_mapping_coercions,
+    )
+
+    final = [m for m in mappings if isinstance(m, dict)]
+    regraded = validate_mapping_coercions(
+        final,
+        source_types={str(m.get("source") or ""): str(m.get("source_type") or "") for m in final},
+        target_types={str(m.get("target") or ""): str(m.get("target_type") or "") for m in final},
+        schema_policy=schema_policy,
+        validation_mode=validation_mode,
+        dest_db_type=dest_db_type,
+        dest_table_exists=dest_exists,
+        samples_by_source=samples,
+    ) if final else list(mapping.get("coercion_issues") or [])
+    issues = regrade_coercion_issues_for_contracts(regraded, mappings)
+    still_blocking = {str(i.get("message") or "") for i in issues if i.get("severity") == "block"}
+    cleared = {
+        str(i.get("message") or "")
+        for i in (mapping.get("coercion_issues") or [])
+        if i.get("severity") == "block"
+    } - still_blocking
     return {
         **mapping,
         "coercion_issues": issues,
@@ -786,13 +832,11 @@ def _plan_source_types_authoritative(
 ) -> bool:
     """Whether Map may treat the peeked source types as declared DDL.
 
-    A procedure extract and an object store do not declare precision. Calling
-    them authoritative made the plan bind TEXT while the integrity check
-    expected the profiled DECIMAL. Warehouse catalogs stay authoritative.
+    The same decision REST makes (``data_profiler.source_types_are_authoritative_for``):
+    a table by its catalog, a query by whether its driver types the result,
+    a procedure only when its result schema was declared.
     """
-    if callable_plan:
-        return False
-    from services.data_profiler import source_types_are_authoritative
+    from services.data_profiler import source_types_are_authoritative_for
 
     kind = str(src_conn.get("kind") or "database")
     fmt = str(
@@ -801,7 +845,17 @@ def _plan_source_types_authoritative(
         or src_conn.get("db_type")
         or ""
     )
-    return source_types_are_authoritative(kind, fmt)
+    source = None
+    if callable_plan:
+        mode = str(callable_plan.get("mode") or "procedure")
+        source = {"extra": {
+            "source_read_mode": mode,
+            "source_query": callable_plan.get("text") if mode == "query" else "",
+            "procedure_call": callable_plan.get("text") if mode == "procedure" else "",
+            "procedure_result_schema": (src_conn.get("extra") or {}).get("procedure_result_schema")
+            or callable_plan.get("procedure_result_schema") or {},
+        }}
+    return source_types_are_authoritative_for(kind, fmt, source)
 
 
 def _engine_format(info: dict[str, Any]) -> str:
@@ -980,7 +1034,10 @@ def plan_transfer(
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
-    from src.transfer.connector_capabilities import source_only_destination_refusal
+    from src.transfer.connector_capabilities import (
+        destination_only_source_refusal,
+        source_only_destination_refusal,
+    )
 
     # D139: a source-only connector is not a destination; say so before any gate.
     not_a_destination = source_only_destination_refusal(
@@ -988,6 +1045,12 @@ def plan_transfer(
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)
+    # D273: nor is a destination-only connector a source.
+    not_a_source = destination_only_source_refusal(
+        str(src_conn.get("type") or src_conn.get("format") or "")
+    )
+    if not_a_source:
+        return _tool_result(tool, success=False, error=not_a_source)
 
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
@@ -1016,7 +1079,7 @@ def plan_transfer(
         try:
             from services.schedule_store import (
                 conflicting_dest_writers,
-                describe_dest_conflict,
+                describe_dest_conflicts,
             )
 
             _writers = conflicting_dest_writers(
@@ -1025,9 +1088,8 @@ def plan_transfer(
         except Exception:  # noqa: BLE001 — a store outage must not block plans
             _writers = []
         if _writers:
-            listed = "; ".join(
-                describe_dest_conflict(s) for s in _writers[:3]
-            )
+            # QA Snowflake D12: name what the caller can open; count the rest.
+            listed = describe_dest_conflicts(_writers)
             return _tool_result(
                 tool,
                 success=False,
@@ -1354,7 +1416,15 @@ def plan_transfer(
         if not blocked_for_contract:
             break
 
-    mapping = _regrade_signed_coercions(mapping, mappings)
+    mapping = _regrade_signed_coercions(
+        mapping,
+        mappings,
+        dest_db_type=_engine_format(dst_info),
+        dest_exists=map_dest_exists,
+        samples=samples,
+        validation_mode=validation_mode,
+        schema_policy=schema_policy,
+    )
 
     contract_refusal = _plan_contract_refusal(
         contract_id,
@@ -1492,9 +1562,23 @@ def plan_transfer(
             },
             "quality_issues": (mapping.get("quality_issues") or [])[:10],
             "coercion_issues": (mapping.get("coercion_issues") or [])[:10],
+            # What the source introspection could not see, as data: e.g. HubSpot
+            # custom objects unavailable without their scope (D270).
+            "source_notes": _source_notes(src_info),
+            # Disclosed, not refused: destination columns compared under the
+            # database default collation (a table DataFlow created before it
+            # stamped collations, or one created without a COLLATE clause).
+            "destination_notes": sorted({
+                str(m.get("destination_note") or "")
+                for m in mappings
+                if m.get("destination_note")
+            })[:20],
             "preflight": preflight,
-            # Align with Execute unlock — passed alone must not invent safe_to_start.
-            "safe_to_start": _is_execute_cleared(preflight),
+            # Align with Execute unlock — passed alone must not invent safe_to_start,
+            # and an uncleared block-severity coercion on the final mappings
+            # is never reported beside safe_to_start=true (D234).
+            "safe_to_start": _is_execute_cleared(preflight)
+            and not _uncleared_coercion_blocks(mapping),
             **_preview_bound_contract(contract_id, require_signed_contract),
             **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
@@ -1512,6 +1596,17 @@ _UNREACHABLE_MARKERS = (
     "name or service not known",
     "no route to host",
 )
+
+
+def _source_notes(src_info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Structured notes the source introspection attached (never only prose)."""
+    raw = src_info.get("raw") if isinstance(src_info.get("raw"), dict) else {}
+    notes: list[dict[str, Any]] = []
+    if raw.get("custom_objects_unavailable"):
+        notes.append({"code": "custom_objects_unavailable", "message": str(raw.get("warning") or "")})
+    elif raw.get("warning"):
+        notes.append({"code": "introspection_warning", "message": str(raw["warning"])})
+    return notes
 
 
 def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) -> str:
@@ -2073,13 +2168,16 @@ def _run_preflight(
         measured_exists = dest_probe.get("table_exists")
         table_exists = measured_exists if isinstance(measured_exists, bool) else dest_exists
 
+        from services.schema_drift import strip_client_widen_stamps
+
         result = run_file_preflight(
             destination_connector_id=str(dst_conn.get("id") or ""),
             columns=columns,
             column_types=column_types,
             column_nullability={r["name"]: bool(r.get("nullable", True)) for r in src_rows},
             row_count=row_count,
-            mappings=mappings,
+            # Approved-widen stamps are planning's to set, never a client's.
+            mappings=strip_client_widen_stamps(mappings),
             destination_connected=bool(dest_probe.get("connected")),
             # The probe's own reason (e.g. a TLS handshake against a plaintext
             # Redis) is the operator's fix; "not reachable" alone is not.
@@ -2122,6 +2220,7 @@ def _run_preflight(
                 dest_probe.get("primary_key_columns") or dest_probe.get("pk_columns")
             ),
             destination_unique_keys=list(dest_probe.get("unique_keys") or []),
+            destination_indexes_meta=dest_probe.get("indexes_meta"),
             destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
             destination_check_constraints=list(dest_probe.get("check_constraints") or []),
             # D139: an existing DynamoDB table's HASH/RANGE contract. Without

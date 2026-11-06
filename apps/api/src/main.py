@@ -20,6 +20,7 @@ from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
+from services.procedure_source import ProcedureSourceError
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -252,6 +253,15 @@ async def lifespan(app: FastAPI):
             imported = await asyncio.to_thread(import_file_schedules_into_mongo)
             if imported:
                 print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
+
+            # QA Snowflake D12: report schedules no workspace can see (dry run
+            # unless DATAFLOW_SCHEDULE_ORPHAN_REPAIR=apply). Never fatal.
+            try:
+                from services.schedule_orphans import startup_orphan_scan
+
+                await asyncio.to_thread(startup_orphan_scan)
+            except Exception as orphan_exc:  # noqa: BLE001
+                print(f"[!] Schedule orphan scan skipped: {orphan_exc}")
 
             if schedule_loop_enabled():
                 from .services.schedule_runner import run_schedule_loop
@@ -776,15 +786,18 @@ async def health_check():
     other route stays closed until they are fixed.
     """
     errors = list(getattr(app.state, "config_errors", None) or [])
+    # Cheap in-memory counters (D181): liveness stays liveness, but the
+    # numbers show a pool held by stuck connector calls, and ``ready`` says
+    # whether a connector call can start at all (D281: "healthy and ready"
+    # while every row read hung).
+    pool = connector_executor.readiness()
     return {
         "status": "misconfigured" if errors else "healthy",
         "liveness": True,
         "version": "1.0.0",
         "commit": _BUILD_COMMIT,
-        "ready": bool(getattr(app.state, "ready", False)) and not errors,
-        # Cheap in-memory counters (D181): liveness stays liveness, but the
-        # numbers show a pool held by stuck connector calls.
-        "connector_pool": connector_executor.snapshot(),
+        "ready": bool(getattr(app.state, "ready", False)) and not errors and pool["ok"],
+        "connector_pool": pool,
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
         "features": {
@@ -902,6 +915,21 @@ async def payload_too_large_handler(request: Request, exc: PayloadTooLarge):
     if exc.actual is not None:
         content["actual_bytes"] = exc.actual
     return JSONResponse(status_code=413, content=content)
+
+
+@app.exception_handler(ProcedureSourceError)
+async def procedure_source_error_handler(request: Request, exc: ProcedureSourceError):
+    """A query/procedure source the request cannot have is a 422, not a 500.
+
+    The callable intake (``services.callable_intake``) answers these on each route.
+    This handler catches one raised anywhere else in a handler, such as an
+    ``is_callable_source`` on a shape the intake never saw.
+    """
+    logger.info("Query/procedure source refused on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=422,
+        content={"error": "callable_source_refused", "detail": str(exc)},
+    )
 
 
 @app.exception_handler(Exception)

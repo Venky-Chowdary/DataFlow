@@ -87,6 +87,53 @@ def _issue_is_non_blocking_warn(issue: dict[str, Any]) -> bool:
     return False
 
 
+def _population_fit_cells(gate: dict[str, Any]) -> list[dict[str, Any]]:
+    """One finding per row G3f named (row, column, value, reason) — QA browser 3.
+
+    The population scan already knows ``'31/02/2025'`` sits at row 642; the
+    quarantine view showed only the gate sentence with no row or cell.
+    """
+    if str(gate.get("id") or "") != "g3f_population_fit":
+        return []
+    details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
+    out: list[dict[str, Any]] = []
+    for finding in details.get("findings") or []:
+        if not isinstance(finding, dict) or not finding.get("unfit_rows"):
+            continue
+        rows = list(finding.get("example_rows") or [])
+        values = list(finding.get("example_values") or [])
+        count = int(finding.get("unfit_rows") or 0)
+        group = f"g3f:{finding.get('source')}->{finding.get('target')}"
+        shown = [r for r in rows if r is not None]
+        for i, row in enumerate(rows):
+            if row is None:
+                continue
+            base = str(finding.get("unfit_reason") or finding.get("reason") or "")
+            # The scan lists a few examples of a finding that may cover
+            # thousands of rows: say so on every row it shows (review #8).
+            label = (
+                f" — example {shown.index(row) + 1} of {count} value(s) in "
+                f"'{finding.get('source')}' that do not fit"
+                if count > len(shown) else ""
+            )
+            issue: dict[str, Any] = {
+                "row": row,
+                "source": finding.get("source"),
+                "column": finding.get("source"),
+                "target": finding.get("target"),
+                "target_type": finding.get("target_type"),
+                "reason": base + label,
+                "suggested_fix": finding.get("suggested_fix"),
+                "suggested_target_type": finding.get("suggested_target_type"),
+                "example_of_rows": count,
+                "example_group": group,
+            }
+            if i < len(values):
+                issue["value"] = values[i]
+            out.append(issue)
+    return out
+
+
 def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not preflight:
         return []
@@ -118,6 +165,7 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
                 parsed = _as_issue_dict(item)
                 if parsed and not _issue_is_non_blocking_warn(parsed):
                     out.append(_enrich_from_message(parsed))
+        out.extend(_population_fit_cells(gate))
         # Nested integrity payload
         for nested_key in ("integrity_issues", "checks"):
             nested = details.get(nested_key)
@@ -180,9 +228,18 @@ def preflight_quarantine_row_count(rows: list[dict[str, Any]]) -> int:
     and no cell; counting its sentence as a rejected row reported 1 quarantined
     row on a run that read nothing (D255).
     """
-    row_ids = {d.get("row") for d in rows if d.get("row") is not None}
-    if row_ids:
-        return len(row_ids)
+    from services.quarantine_dlq import count_finding_rows
+
+    # A population-scan finding shows a few example rows of a count it knows
+    # (unfit_rows): count the finding, not its examples (review #8).
+    groups: dict[str, int] = {}
+    for d in rows:
+        if d.get("example_group"):
+            key = str(d["example_group"])
+            groups[key] = max(groups.get(key, 0), int(d.get("example_of_rows") or 0))
+    named = count_finding_rows([d for d in rows if not d.get("example_group")]) + sum(groups.values())
+    if named:
+        return named
     return sum(1 for d in rows if d.get("column"))
 
 
@@ -253,6 +310,9 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             "source_type": issue.get("source_type"),
             "target_type": issue.get("target_type"),
         }
+        if issue.get("example_group"):
+            detail["example_group"] = issue["example_group"]
+            detail["example_of_rows"] = issue.get("example_of_rows")
         if column:
             detail["values"] = {column: wired}
         rows.append(detail)
@@ -327,6 +387,10 @@ def quarantine_evidence_source(
     if rows and policies <= {"preflight_quarantine"}:
         return "preflight"
     if job.get("rejected_details"):
+        return "write"
+    if rows and any(d.get("shape_op") or d.get("policy") == "quarantine" for d in rows):
+        # Durable DLQ rows a run held out (shape diverts, write rejects) are
+        # write-time quarantine even when the job document carries no sample.
         return "write"
     return "preflight" if rows else "none"
 
@@ -406,3 +470,39 @@ def merge_job_quarantine(
         except Exception:
             return details
     return []
+
+
+def hydrate_job_quarantine_sample(job: dict[str, Any] | None) -> None:
+    """Give a finished job's record the findings its quarantine view reads.
+
+    Shape diverts (and any finding persisted only to the control-plane DLQ)
+    leave the job document with ``rejected_rows=2`` and an empty
+    ``rejected_details``; the job page then showed "no quarantined rows"
+    beside a quarantine that holds them (QA browser 4). One store answers
+    both: :func:`merge_job_quarantine`, the reader the quarantine view uses.
+    """
+    if not isinstance(job, dict):
+        return
+    from services.job_status import is_terminal
+
+    if not is_terminal(str(job.get("status") or "")):
+        return
+    summary = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    ledger = job.get("row_accounting") if isinstance(job.get("row_accounting"), dict) else {}
+    counted = 0
+    # A job root stamped 0 at creation must not hide the run's own count.
+    for raw in (
+        job.get("rejected_rows"),
+        (summary or {}).get("rejected_rows"),
+        (ledger or {}).get("rows_quarantined"),
+    ):
+        try:
+            counted = max(counted, int(raw or 0))
+        except (TypeError, ValueError):
+            continue
+    if counted <= 0 or job.get("rejected_details") or (summary or {}).get("rejected_details"):
+        return
+    details = merge_job_quarantine(job)
+    if details:
+        job["rejected_details"] = details[:2000]
+        job["rejected_rows"] = counted

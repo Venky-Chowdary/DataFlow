@@ -274,8 +274,10 @@ def regrade_coercion_issues_for_contracts(
     for issue in issues or []:
         item = dict(issue)
         pair = (str(item.get("source") or ""), str(item.get("target") or ""))
+        # A grader that already read the contract demoted the pair to warn;
+        # it was still cleared by that contract and says so.
         if (
-            item.get("severity") == "block"
+            (item.get("severity") == "block" or item.get("lossy"))
             and not item.get("type_locked_block")
             and mapping_has_clearing_risk_contract(by_pair.get(pair))
         ):

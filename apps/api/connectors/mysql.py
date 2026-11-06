@@ -81,14 +81,19 @@ def test_mysql(
                     total = int((cur.fetchone() or [len(tables)])[0])
             else:
                 db_name = "(default)"
+        from connectors.mysql_conn import describe_session_encryption, session_encryption
+
+        # QA D10: the test states the session's real encryption (Ssl_cipher),
+        # not what the ssl flag suggested.
+        encryption = describe_session_encryption(session_encryption(conn))
         conn.close()
         if truncated:
             message = (
                 f"MySQL connected — {total} tables in `{db_name}` "
-                f"(listing first {len(tables)})"
+                f"(listing first {len(tables)}) · {encryption}"
             )
         else:
-            message = f"MySQL connected — {total} tables in `{db_name}`"
+            message = f"MySQL connected — {total} tables in `{db_name}` · {encryption}"
         return ConnectResult(
             ok=True,
             tables=tables or ["(no tables in database)"],

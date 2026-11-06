@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+from services.connector_auth import resolve_api_key
 import hashlib
 import json
 import logging
@@ -807,9 +809,7 @@ def _enforce_pinecone(
     base_url = _index_url(
         str(cfg.get("host") or ""), str(cfg.get("connection_string") or "")
     )
-    headers = _headers(
-        str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
-    )
+    headers = _headers(resolve_api_key(cfg))
     vector_id = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
     try:
         stats = session.get(
@@ -933,6 +933,7 @@ def _enforce_milvus(
             api_key=str(cfg.get("api_key") or ""),
             username=str(cfg.get("username") or ""),
             password=str(cfg.get("password") or ""),
+            auth_mode=str(cfg.get("auth_mode") or ""),
         )
     )
     db_name = str(cfg.get("database") or "")

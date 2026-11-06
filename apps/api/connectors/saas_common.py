@@ -217,6 +217,39 @@ def base_url(host: str, default: str) -> str:
     return host.rstrip("/")
 
 
+def absolute_http_url(host: str, *, port: int | None = 0, ssl: bool | None = None) -> str:
+    """An absolute HTTP(S) URL for a connector host field, URL-form or bare.
+
+    A bare SaaS host (``api.airtable.com``) with the HTTPS port is the
+    ``https://`` origin an API manifest expects; the message "only absolute
+    HTTP(S) URLs are allowed" was the manifest parser refusing the form's own
+    host (D277). A URL-form host is kept as typed; ``ssl=False`` with a
+    non-443 port names a plain-HTTP endpoint (a local stub).
+    """
+    text = (host or "").strip().rstrip("/")
+    if not text:
+        return text
+    if "@" in text.split("://", 1)[-1].split("/", 1)[0]:
+        # A key never travels in the host field, where it would be logged,
+        # shown in briefs and sent in plaintext on a downgrade.
+        raise ValueError("host must not carry credentials (user:password@host)")
+    if "://" in text:
+        return text
+    try:
+        port_num = int(port or 0)
+    except (TypeError, ValueError):
+        port_num = 0
+    # A bare host is an https origin. The stored ssl flag is False by default
+    # on every MCP-created connector, so it cannot mean "send the bearer key
+    # in plaintext": only an explicit non-443 port with ssl=False names a
+    # plain-HTTP endpoint (a local stub). The operator types http:// otherwise.
+    plain = ssl is False and port_num not in (0, 443)
+    scheme = "http" if plain else "https"
+    if port_num and port_num != (80 if plain else 443) and ":" not in text:
+        text = f"{text}:{port_num}"
+    return f"{scheme}://{text}"
+
+
 def token(  # nosec B107
     api_key: str = "",
     connection_string: str = "",

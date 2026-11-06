@@ -744,7 +744,7 @@ def _mapping_risks(
                 "severity": "info",
                 "message": (
                     "CDC/incremental into lakehouse defaults to at-least-once upsert/MERGE; "
-                    "exactly-once is never claimed by DataWrap."
+                    "exactly-once is never claimed by Datawrap."
                 ),
             })
 

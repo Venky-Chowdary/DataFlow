@@ -278,6 +278,11 @@ def build_snapshot_mode_preflight_gate(
             "watermark_present": present,
             "snapshot_dump_open": bool(open_dump),
             "run_snapshot": bool(run_snap),
+            # The kernel's own verdict, so plan-time consumers (the g18b leftover
+            # gate) reason exactly as Execute will.
+            "snapshot_plan_reason": str(
+                classify_snapshot_plan(mode, watermark=wm).get("reason") or ""
+            ),
             "honesty": "at-least-once upsert. not dest-owned exactly-once.",
         },
     }

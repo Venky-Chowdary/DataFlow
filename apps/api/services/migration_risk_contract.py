@@ -809,6 +809,10 @@ def resolve_write_action_for_mapping(
 def rejected_details_require_job_abort(rejected_details: list[dict[str, Any]] | None) -> bool:
     """True when any rejected cell carries a job-abort Migration Risk Contract."""
     for d in rejected_details or []:
+        if d.get("held_with_row"):
+            # Held out with its row by a sibling cell's signed continue
+            # contract (D267): a row disposition, never a job abort.
+            continue
         pol = str(d.get("execution_policy") or "").strip().upper()
         if pol in JOB_ABORT_POLICIES:
             return True
@@ -826,6 +830,8 @@ def rejected_details_are_continue_contract_only(
     if not details:
         return False
     for d in details:
+        if d.get("held_with_row") and str(d.get("held_by_policy") or "").upper() in CONTINUE_POLICIES:
+            continue  # rides with a row a signed continue contract held out (D267)
         pol = str(d.get("execution_policy") or "").strip().upper()
         if pol not in CONTINUE_POLICIES:
             return False

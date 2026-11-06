@@ -17,13 +17,13 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_default,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
 
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
+from services.connector_auth import resolve_api_key
 
 
 _RESERVED_PROPERTIES = ("id", "_id", "vector", "_additional", "class")
@@ -297,31 +297,89 @@ def build_weaviate_objects(
     return objects, rejected
 
 
+# The payload stores an integer as a JSON int; every other cell is the exact
+# text the plan names (``DDL_TYPES["weaviate"]``), booleans and IEEE floats
+# included, so the class, the plan and the stored value agree.
+_WEAVIATE_DATA_TYPE_FOR_LOGICAL = {
+    "integer": "int",
+}
+
+
+def weaviate_mapped_property_types(
+    mappings: list[dict] | None,
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Weaviate ``dataType`` per mapped target, from the plan's carriers.
+
+    A class the writer creates used to declare only its own properties and let
+    Weaviate's auto-schema type every mapped column from the first object:
+    a DECIMAL the plan carried as TEXT became ``number`` (float64) and
+    ``99999999999.999999`` was stored as ``100000000000`` (D265/D285). The
+    declaration follows the same rule the payload follows
+    (``vector_payload_declared_type``): integer -> ``int``; decimal, IEEE
+    float, boolean, temporal, UUID, JSON and text are ``text``, the exact JSON
+    text the plan names (``DDL_TYPES["weaviate"]``).
+    """
+    from connectors.writer_common import vector_payload_declared_type
+    from services.type_system import normalize_logical_type
+
+    source_types = {
+        str(k).lower(): str(v) for k, v in (column_types or {}).items() if k and v
+    }
+    dest_type_map = {str(k).lower(): str(v) for k, v in (dest_types or {}).items() if k}
+    out: dict[str, str] = {}
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        target = str(m.get("target") or m.get("source") or "").strip()
+        source = str(m.get("source") or target).strip()
+        if not target or target in _RESERVED_PROPERTIES:
+            continue
+        declared = vector_payload_declared_type(
+            dest_type_map.get(target.lower(), "") or str(m.get("target_type") or ""),
+            source_types.get(source.lower(), "") or str(m.get("source_type") or ""),
+        )
+        logical = normalize_logical_type(declared) if declared else ""
+        out[target] = _WEAVIATE_DATA_TYPE_FOR_LOGICAL.get(logical, "text")
+    return out
+
+
 def _ensure_class(
     session: Any,
     base_url: str,
     class_name: str,
     headers: dict[str, str],
+    property_types: dict[str, str] | None = None,
 ) -> None:
     resp = session.get(f"{base_url}/v1/schema/{class_name}", headers=headers, timeout=10)
     if resp.status_code == 200:
         return
+    properties = [
+        {"name": "content", "dataType": ["text"]},
+        {"name": "source_id", "dataType": ["text"]},
+        {"name": "chunk_index", "dataType": ["int"]},
+        {"name": "filename", "dataType": ["text"]},
+        {"name": "page", "dataType": ["text"]},
+        {"name": "heading", "dataType": ["text"]},
+        {"name": "element_type", "dataType": ["text"]},
+    ]
+    declared = {str(p["name"]) for p in properties}
+    stored_names = _weaviate_property_keys(list(property_types or {}))
+    for key, data_type in (property_types or {}).items():
+        name = stored_names.get(key, key)
+        if name in declared or name in _WRITER_PROPERTIES:
+            continue
+        declared.add(name)
+        properties.append({"name": name, "dataType": [data_type]})
     payload = {
         "class": class_name,
         "vectorizer": "none",
-        "properties": [
-            {"name": "content", "dataType": ["text"]},
-            {"name": "source_id", "dataType": ["text"]},
-            {"name": "chunk_index", "dataType": ["int"]},
-            {"name": "filename", "dataType": ["text"]},
-            {"name": "page", "dataType": ["text"]},
-            {"name": "heading", "dataType": ["text"]},
-            {"name": "element_type", "dataType": ["text"]},
-        ],
+        "properties": properties,
     }
     resp = session.post(
         f"{base_url}/v1/schema",
-        data=json.dumps(payload, default=json_default),
+        data=json_dumps_exact_text(payload),
         headers=headers,
         timeout=15,
     )
@@ -539,7 +597,7 @@ def scan_source_ids(
         return "unmeasured", []
     try:
         session = _requests_session()
-        api_key = str(cfg.get("api_key") or cfg.get("password") or "")
+        api_key = resolve_api_key(cfg)
         base_url = _base_url(
             str(cfg.get("host") or ""),
             int(cfg.get("port") or 8080),
@@ -606,7 +664,7 @@ def read_document_properties(
     Weaviate ``dataType``. Raises when the class cannot be listed completely.
     """
     session = _requests_session()
-    api_key = str(cfg.get("api_key") or cfg.get("password") or "")
+    api_key = resolve_api_key(cfg)
     base_url = _base_url(
         str(cfg.get("host") or ""),
         int(cfg.get("port") or 8080),
@@ -703,7 +761,14 @@ def write_mapped_rows(
         or []
     ) or None
     class_name = _class_name(table_name or database or "DataflowChunk")
-    key = api_key or password or username or ""
+    key = resolve_api_key(
+        {
+            "api_key": api_key,
+            "password": password,
+            "username": username,
+            "auth_mode": _kwargs.get("auth_mode", ""),
+        }
+    )
     base_url = _base_url(host, port, ssl, connection_string)
 
     # Probe live class properties before Map bind so text≠int invent is closed.
@@ -1084,7 +1149,15 @@ def write_mapped_rows(
     stale_cleanup_skipped = 0
     try:
         if not class_existed:
-            _ensure_class(session, base_url, class_name, hdrs)
+            _ensure_class(
+                session,
+                base_url,
+                class_name,
+                hdrs,
+                property_types=weaviate_mapped_property_types(
+                    mappings, column_types, live_prop_types
+                ),
+            )
         incoming_fingerprint = sync_context["fingerprint"]
         if incoming_fingerprint is None:
             from services.vector_fingerprint import fingerprint_for_write
@@ -1122,7 +1195,7 @@ def write_mapped_rows(
             batch = objects[i : i + batch_size]
             resp = session.post(
                 f"{base_url}/v1/batch/objects",
-                data=json_dumps_exact_numbers({"objects": batch}),
+                data=json_dumps_exact_text({"objects": batch}),
                 headers=hdrs,
                 timeout=60,
             )

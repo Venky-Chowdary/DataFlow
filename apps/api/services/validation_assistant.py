@@ -57,6 +57,10 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
             "suggested_fix": raw.get("suggested_fix"),
             "reason": raw.get("reason") or raw.get("unfit_reason"),
             "unfit_reason": raw.get("unfit_reason"),
+            # The hold-out remedy needs the failure class and whether the rows
+            # still block (services.population_fit_scan.is_transform_failure_finding).
+            "transform": raw.get("transform"),
+            "aborts_job": raw.get("aborts_job"),
         })
     coercion = pf.get("coercion_report") if isinstance(pf.get("coercion_report"), dict) else {}
     coercion_cols: list[dict[str, Any]] = []
@@ -132,6 +136,7 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
     return {
         "passed": bool(pf.get("passed")),
         "run_id": pf.get("run_id"),
+        "source_record_batch": bool(pf.get("source_record_batch")),
         "blockers": blockers,
         "mapping_review_columns": sorted(mapping_review_columns),
         "coercion_report": {"columns": coercion_cols} if coercion_cols else {},
@@ -366,9 +371,110 @@ def _is_type_mismatch_blocker(text: str) -> bool:
     )
 
 
+#: Blockers a validation-mode switch can clear: the population-fit / sample
+#: cast findings it holds out, and their root-cause echoes. Any other blocker
+#: still holds Execute, so the switch is not offered beside it (review nit).
+_HOLDOUT_CLEARABLE = frozenset({"g3f_population_fit", "g3_schema_contract", "g5_dry_run", "g8_reconciliation"})
+
+
+def _refusal_reason(finding: dict[str, Any]) -> str:
+    """The cell refusal itself, without the transform prefix (``date_iso: Invalid date: …``)."""
+    reason = str(finding.get("unfit_reason") or "")
+    transform = str(finding.get("transform") or "")
+    return reason[len(transform) + 1:].strip() if transform and reason.startswith(f"{transform}:") else reason
+
+
+def holdout_modes_for(reason: str, *, record_batch: bool) -> dict[str, bool]:
+    """Which validation modes hold this refusal out — the API's one policy (review B4)."""
+    from services.validation_mode_contract import mode_holds_out_refusal
+
+    return {
+        mode: mode_holds_out_refusal(mode, reason, record_batch=record_batch)
+        for mode in ("balanced", "lenient")
+    }
+
+
+def _row_value_holdout_actions(
+    blockers: list[dict[str, Any]],
+    population_findings: list[dict[str, Any]] | None = None,
+    rows_scanned: int = 0,
+    *,
+    record_batch: bool = False,
+) -> list[dict[str, Any]]:
+    """Hold-out remedies for G3f values the declared transform cannot parse.
+
+    Only transform failures that still block, only with a known scan (S5) and
+    fewer unfit rows than scanned, and only for a mode that really holds the
+    refusal out (``validation_mode_contract.mode_holds_out_refusal``):
+    Balanced for an impossible date on a file, else Lenient — said so (B4).
+    Not offered beside a blocker the switch would not clear.
+    """
+    from services.population_fit_scan import is_transform_failure_finding
+
+    if any(
+        str(b.get("id") or b.get("gate") or "") not in _HOLDOUT_CLEARABLE
+        and not str(b.get("id") or "").startswith("rc-")
+        for b in blockers
+    ):
+        return []
+    actions: list[dict[str, Any]] = []
+    for blocker in blockers:
+        if (blocker.get("id") or blocker.get("gate")) != "g3f_population_fit":
+            continue
+        details = blocker.get("details") if isinstance(blocker.get("details"), dict) else {}
+        scanned = int(details.get("rows_scanned") or rows_scanned or 0)
+        if scanned <= 0:
+            continue  # an unknown scan proves nothing about the other rows
+        for finding in details.get("findings") or population_findings or []:
+            if not isinstance(finding, dict) or not finding.get("unfit_rows"):
+                continue
+            if not is_transform_failure_finding(finding) or finding.get("aborts_job") is False:
+                continue
+            count = int(finding.get("unfit_rows") or 0)
+            if count >= scanned:
+                continue
+            reason = _refusal_reason(finding)
+            modes = holdout_modes_for(reason, record_batch=record_batch)
+            mode = "balanced" if modes["balanced"] else "lenient" if modes["lenient"] else ""
+            if not mode:
+                continue
+            column = str(finding.get("source") or "")
+            rows = [r for r in finding.get("example_rows") or [] if r is not None][:5]
+            values = list(finding.get("example_values") or [])[:5]
+            where = ", ".join(
+                f"row {r}" + (f" {values[i]!r}" if i < len(values) else "")
+                for i, r in enumerate(rows)
+            )
+            label_mode = mode.capitalize()
+            actions.append({
+                "kind": "quarantine_and_rerun",
+                "column": column,
+                "target": finding.get("target"),
+                "rows": rows,
+                "values": values,
+                "row_count": count,
+                "rows_scanned": scanned,
+                "reason": str(finding.get("unfit_reason") or ""),
+                "balanced_holds_out": modes["balanced"],
+                # One remedy, worded and applied the same way in Studio
+                # (apps/web lib/fileSourceIssueHold.ts holdOutLabel).
+                "label": (
+                    f"Hold out {count} row(s) of '{column}' in quarantine (switches the whole "
+                    f"run to {label_mode} validation) and load the rest — e.g. {where}; "
+                    "correct and replay them from Inspect quarantine"
+                ),
+                "validation_mode": mode,
+                "mapping_applyable": False,
+            })
+    return actions
+
+
 def _suggested_actions(
     blockers: list[dict[str, Any]],
     column_fixes: list[dict[str, Any]],
+    population_findings: list[dict[str, Any]] | None = None,
+    rows_scanned: int = 0,
+    record_batch: bool = False,
 ) -> list[dict[str, Any]]:
     """Machine-readable next steps the UI can render as one-click actions."""
     actions: list[dict[str, Any]] = []
@@ -539,6 +645,18 @@ def _suggested_actions(
             "kind": "check_connection",
             "label": "Open Connectors — fix credentials / Auth source, then Test",
         })
+    holdouts = _row_value_holdout_actions(
+        blockers, population_findings, rows_scanned, record_batch=record_batch
+    )
+    if holdouts:
+        # A bad value in named rows (31/02/2025, 'abc') is not a type defect:
+        # hold those rows out and load the rest. "Review mappings" alone sent
+        # the operator back to Source in a loop (QA browser 3).
+        # Merged, not replacing: other quarantine routes (encoding, PII) stay.
+        named = {(h["kind"], h["column"]) for h in holdouts}
+        actions = holdouts + [
+            a for a in actions if (a.get("kind"), a.get("column")) not in named
+        ]
     if "g3f_population_fit" in gate_ids and any(
         a.get("kind") == "change_target_type"
         and a.get("to_type")
@@ -766,7 +884,14 @@ def explain_validation(
                 "detail_messages": [],
             })
 
-    actions = _suggested_actions(blockers, column_fixes)
+    population = preflight.get("population_fit") or {}
+    actions = _suggested_actions(
+        blockers,
+        column_fixes,
+        list(population.get("findings") or []),
+        int(population.get("rows_scanned") or 0),
+        record_batch=bool(preflight.get("source_record_batch")),
+    )
     deterministic = _deterministic_narrative(
         passed, issues, column_fixes, decision=decision,
     )

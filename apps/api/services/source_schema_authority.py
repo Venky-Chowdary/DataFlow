@@ -108,14 +108,10 @@ def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in schema.items() if str(v or "").strip()}
 
 
-def endpoint_primary_key_columns(endpoint: Any) -> list[str]:
-    """Source-catalog primary key. Empty when the catalog has none or cannot be read.
-
-    A failed introspect is empty on purpose: CDC must not be approved on a
-    guessed ``id`` when the catalog could not be read.
-    """
+def _endpoint_catalog_info(endpoint: Any) -> dict[str, Any]:
+    """The source endpoint's catalog read, or ``{}`` when it cannot be read."""
     if endpoint is None:
-        return []
+        return {}
     try:
         from src.transfer.endpoint_intelligence import introspect_endpoint
 
@@ -126,14 +122,92 @@ def endpoint_primary_key_columns(endpoint: Any) -> list[str]:
         info = introspect_endpoint(endpoint)
     except Exception:  # noqa: BLE001 — unread catalog blocks CDC; it does not approve it
         logger.debug("catalog primary key introspect failed", exc_info=True)
-        return []
-    if not isinstance(info, dict):
-        return []
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def endpoint_primary_key_columns(endpoint: Any) -> list[str]:
+    """Source-catalog primary key. Empty when the catalog has none or cannot be read.
+
+    A failed introspect is empty on purpose: CDC must not be approved on a
+    guessed ``id`` when the catalog could not be read.
+    """
+    info = _endpoint_catalog_info(endpoint)
     return [
         str(col).strip()
         for col in (info.get("primary_key_columns") or [])
         if str(col or "").strip()
     ]
+
+
+def endpoint_key_groups(endpoint: Any) -> list[list[str]]:
+    """Source-catalog primary key, then unique keys, as column groups (``[]``: none / unread).
+
+    The same normaliser the destination key groups use
+    (``services.schema_drift.dest_key_groups``).
+    """
+    from services.schema_drift import dest_key_groups
+
+    info = _endpoint_catalog_info(endpoint)
+    return dest_key_groups(info.get("primary_key_columns"), info.get("unique_keys"))
+
+
+def append_declares_no_key(
+    sync_mode: str,
+    stream_contracts: list[dict[str, Any]] | None,
+    contract_primary_key: str | None = None,
+) -> bool:
+    """True for an append whose contract names no identity key."""
+    from services.destination_key_collision_probe import (
+        sync_mode_appends_without_key_resolution,
+    )
+    from services.preflight_cursor_gate import contract_declares_primary_key
+
+    if not sync_mode_appends_without_key_resolution(sync_mode):
+        return False
+    selected = [c for c in stream_contracts or [] if isinstance(c, dict) and c.get("selected", True)]
+    return not (
+        str(contract_primary_key or "").strip()
+        or (selected and all(contract_declares_primary_key(c) for c in selected))
+    )
+
+
+def append_identity_source_key(
+    *,
+    sync_mode: str,
+    stream_contracts: list[dict[str, Any]] | None,
+    contract_primary_key: str | None = None,
+    source_key_groups: list[list[str]] | None = None,
+    source_endpoint: Any = None,
+    source_connector_id: str = "",
+    source_table: str = "",
+    source_config: dict[str, Any] | None = None,
+) -> list[str]:
+    """The source catalog key an append's collision probe keys on, or ``[]``.
+
+    An append declares no key of its own, so the probe used to fall back to a
+    column *named* ``id`` (Rfam ``clan``: ``id`` is a label, ``clan_acc`` is the
+    key) and refused a new row whose label repeated an old one. The real
+    identity is the contract key (the probe reads it itself), else the source
+    catalog's primary or unique key — this — else no key. ``source_key_groups``
+    is what Execute already read; otherwise ``source_endpoint`` (or the saved
+    source connector Validate names) is introspected.
+    """
+    if not append_declares_no_key(sync_mode, stream_contracts, contract_primary_key):
+        return []
+    groups = source_key_groups
+    if groups is None:
+        endpoint = source_endpoint
+        cfg = source_config if isinstance(source_config, dict) else {}
+        if endpoint is None and str(source_connector_id or "").strip() and source_table:
+            endpoint = _saved_source_endpoint(
+                str(source_connector_id).strip(), source_table=source_table,
+                source_collection=str(cfg.get("collection") or ""), stream=source_table,
+                source_schema=str(cfg.get("schema") or ""),
+                source_database=str(cfg.get("database") or ""), source_config=cfg or None,
+            )
+        groups = endpoint_key_groups(endpoint) if endpoint is not None else []
+    return list(groups[0]) if groups else []
 
 
 def live_source_primary_key_columns(

@@ -253,6 +253,16 @@ def _proof_source_batches(
             source_endpoint=source_endpoint, src_cfg=src_cfg, read_cols=read_cols
         )
         return
+    from .proof_api_source import is_api_source, iter_api_source_batches
+
+    if is_api_source(src_type):
+        yield from iter_api_source_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        )
+        return
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import quote_sql_identifier
@@ -276,12 +286,28 @@ def _proof_source_batches(
     qcols = ", ".join(quote_sql_identifier(c, q) for c in read_cols)
     with warehouse_sql_engine(src_type, src_cfg) as eng:
         with eng.connect() as conn:
+            if src_type == "snowflake":
+                qcols = _snowflake_projection(
+                    conn, source_endpoint, src_cfg, read_cols
+                )[0]
             for batch in iter_select_row_dicts(
                 conn,
                 sa.text(f"SELECT {qcols} FROM {table_ref}"),  # nosec B608
                 read_cols,
             ):
                 yield batch
+
+
+def _snowflake_projection(
+    sa_conn: Any, endpoint: EndpointConfig, cfg: dict[str, Any], cols: list[str]
+) -> tuple[str, Any]:
+    """Proof read-back projection over Snowflake's stored column names (D8)."""
+    from connectors.snowflake_conn import snowflake_sa_projection
+
+    schema = str(getattr(endpoint, "schema", "") or cfg.get("schema") or "")
+    return snowflake_sa_projection(
+        sa_conn, schema, str(endpoint.table or ""), list(cols)
+    )
 
 
 _PROOF_OBJECT_STORES = frozenset({"s3", "gcs", "adls", "azure_blob", "minio", "r2"})
@@ -350,27 +376,46 @@ def _proof_mongo_source_batches(
     src_cfg: dict[str, Any],
     read_cols: list[str],
     page: int = 5000,
+    absent_as_null: bool = False,
 ):
     """Raw Mongo collection pages, projected the way the transfer reader does.
 
     Used for both a Mongo source re-read and a Mongo destination read-back:
     one projection, so both sides of the proof see the same value shapes.
+    ``absent_as_null`` is the read-back's rule: a field the writer omitted
+    (Missing) and an explicit null both read back as NULL, the same as a SQL
+    destination's read-back.
     """
     from connectors.mongodb_common import _mongo_client
     from connectors.mongodb_reader import _connection_string, _page_docs_to_batch
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
-    database = str(src_cfg.get("database") or "")
-    coll = _mongo_client(_connection_string(src_cfg))[database][
-        str(source_endpoint.table or "")
-    ]
+    absent = {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL} if absent_as_null else set()
+
+    def _page(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+        if not absent:
+            return rows
+        return [{c: (None if v in absent else v) for c, v in row.items()} for row in rows]
+
+    # The stream reader's resolution (stream.py src_db / _source_table): a
+    # database named on the run wins over the connector's, and a collection
+    # named in ``collection`` is the same source as one named in ``table``.
+    database = str(
+        getattr(source_endpoint, "database", "") or src_cfg.get("database") or "test"
+    )
+    collection = str(
+        source_endpoint.table or getattr(source_endpoint, "collection", "") or ""
+    )
+    coll = _mongo_client(_connection_string(src_cfg))[database][collection]
     docs: list[dict[str, Any]] = []
     for doc in coll.find({}).sort("_id", 1).batch_size(page):
         docs.append(doc)
         if len(docs) >= page:
-            yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+            yield _page(docs)
             docs = []
     if docs:
-        yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+        yield _page(docs)
 
 
 def _mongo_page_dicts(docs, cfg, read_cols, to_batch) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
@@ -551,11 +596,15 @@ class _PinStore:
                 (lim,),
             )
         ]
+        # D262: a key the recipe's expected population holds is not "extra",
+        # even when this run's write did not consume it (a seed-inclusive
+        # window re-reads the cursor tie the previous run already landed).
         extra = [
             r[0]
             for r in self.db.execute(
                 "SELECT d.k FROM destk d LEFT JOIN pin p ON p.k = d.k "
-                "WHERE p.k IS NULL ORDER BY d.k LIMIT ?",
+                "LEFT JOIN exp e ON e.k = d.k "
+                "WHERE p.k IS NULL AND e.k IS NULL ORDER BY d.k LIMIT ?",
                 (lim,),
             )
         ]
@@ -1281,7 +1330,16 @@ def _transform_applied_proof_impl(
                 if not batch:
                     continue
             raw_count += len(batch)
-            outs = runner.records(batch)
+            # D9: shape row by row so each output keeps its own raw input. A
+            # cast with on_error=divert drops rows, and pairing outputs to
+            # inputs by batch position then judged row 3's output against
+            # row 2's raw value — the oracle "disagreed" and the job failed.
+            outs: list[dict[str, Any]] = []
+            origin: list[dict[str, Any] | None] = []
+            for row in batch:
+                produced = runner.records([row])
+                outs.extend(produced)
+                origin.extend([row if len(produced) == 1 else None] * len(produced))
             for row in batch:
                 trow = {
                     map_source_to_target(k, mappings): v
@@ -1339,11 +1397,11 @@ def _transform_applied_proof_impl(
                     _cv_buf.append(
                         (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
                     )
-                    if i < len(batch):
+                    if origin[i] is not None:
                         _eo_buf.append(
                             (
                                 tc,
-                                _vh(_key_norm(batch[i].get(sc))),
+                                _vh(_key_norm(origin[i].get(sc))),
                                 _vh(_val_norm(orow.get(tc), _val_ddl(tc))),
                             )
                         )
@@ -1438,7 +1496,9 @@ def _transform_applied_proof_impl(
         qs = "["
     else:
         qs = '"'
-    src_ref_sql = warehouse_sql_table_ref(
+    # A Mongo source has no SQL table: the SQL oracle and the tracked-equality
+    # join below are SQL-source only and already skip on an empty ref.
+    src_ref_sql = "" if src_type == "mongodb" else warehouse_sql_table_ref(
         src_type,
         src_cfg,
         str(
@@ -1648,9 +1708,9 @@ def _transform_applied_proof_impl(
             sel_cols0 = list(
                 dict.fromkeys(list(digest_cols) + list(scope_pk))
             )
-            qc0 = ", ".join(
-                quote_sql_identifier(c, dq0) for c in sel_cols0
-            )
+            from .writer_column_spelling import physical_select_list
+
+            qc0 = physical_select_list(sel_cols0, dq0)
 
             def _scoped_gen(batches):
                 nonlocal actual_rows
@@ -1700,14 +1760,16 @@ def _transform_applied_proof_impl(
                     dest_types=dest_types,
                 )
             elif dest_db_type == "mongodb":
-                # D228: a document store has no SQL dialect — read the
-                # written collection back through the Mongo reader.
+                # D228 / QA r12 D8: a document store has no SQL dialect — read
+                # the written collection back through the Mongo reader. A
+                # field the writer omitted reads back as NULL, as on SQL.
                 actual_checksum = canonical_checksum_from_iter(
                     _scoped_gen(
                         _proof_mongo_source_batches(
                             source_endpoint=endpoint,
                             src_cfg=dst_cfg0,
                             read_cols=sel_cols0,
+                            absent_as_null=True,
                         )
                     ),
                     digest_cols,
@@ -1767,6 +1829,11 @@ def _transform_applied_proof_impl(
                             c0 = c0.execution_options(
                                 isolation_level="READ COMMITTED"
                             )
+                        if dest_db_type == "snowflake":
+                            # D8: the writer's stored (folded) names.
+                            qc0 = _snowflake_projection(
+                                c0, endpoint, dst_cfg0, sel_cols0
+                            )[0]
                         actual_checksum = canonical_checksum_from_iter(
                             _scoped_gen(
                                 iter_select_row_dicts(
@@ -2107,7 +2174,9 @@ def _transform_applied_proof_impl(
             sel_cols = list(
                 dict.fromkeys(list(digest_cols) + list(scope_pk))
             )
-            qc = ", ".join(quote_sql_identifier(c, dq) for c in sel_cols)
+            from .writer_column_spelling import physical_select_list
+
+            qc = physical_select_list(sel_cols, dq)
             stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
             if scd2_opts:
                 from services.scd2_engine import scd2_is_current_predicate
@@ -2122,6 +2191,22 @@ def _transform_applied_proof_impl(
             dest_scanned = True
             with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
                 with deng.connect() as dconn:
+                    if dest_db_type == "snowflake":
+                        # D8: the writer's stored (folded) names.
+                        qc, _sf_ref = _snowflake_projection(
+                            dconn, endpoint, dst_cfg, sel_cols
+                        )
+                        stmt = sa.text(  # nosec B608
+                            f"SELECT {qc} FROM {dest_ref}"
+                            + (
+                                " WHERE " + scd2_is_current_predicate(
+                                    dest_db_type,
+                                    _sf_ref(str(scd2_opts["is_current"])),
+                                )
+                                if scd2_opts
+                                else ""
+                            )
+                        )
                     for batch in iter_select_row_dicts(
                         dconn, stmt, sel_cols
                     ):
@@ -3024,6 +3109,59 @@ def _covered_keyed_noop_verify(
     return None
 
 
+def _ladder_key(row: Any, key_cols: list[str]) -> tuple[str, ...] | None:
+    """The whole key of one ladder row, each part spelled as the ladder spells it.
+
+    A composite key is the tuple of every key column — the key the writer
+    upserts on (``ON CONFLICT (region, id)``). Keying by the first column
+    alone scoped, collapsed and quarantine-excluded by ``region`` (ACC-03).
+    ``None`` when any part is absent or NULL: such a row is not addressable.
+    """
+    from services.verification_ladder import _pk_key
+
+    if not isinstance(row, dict) or not key_cols:
+        return None
+    parts = tuple(_pk_key(row.get(c)) for c in key_cols)
+    return None if any(p is None for p in parts) else parts  # type: ignore[return-value]
+
+
+def _rejected_key(detail: dict[str, Any], key_cols: list[str]) -> tuple[str, ...] | None:
+    """The whole key a quarantine finding names, or ``None`` when it names none.
+
+    Writers record a composite ``source_pk`` as the value list (positional to
+    the key columns), a ``pk_value`` mapping, or the row's own values.
+    """
+    from services.verification_ladder import _pk_key
+
+    if not key_cols:
+        return None
+    for field in ("source_pk", "destination_pk"):
+        raw = detail.get(field)
+        if raw is None:
+            continue
+        if isinstance(raw, dict):
+            return _ladder_key(raw, key_cols)
+        if isinstance(raw, (list, tuple)):
+            if len(raw) != len(key_cols):
+                continue
+            parts = tuple(_pk_key(v) for v in raw)
+            return None if any(p is None for p in parts) else parts  # type: ignore[return-value]
+        if len(key_cols) == 1:
+            part = _pk_key(raw)
+            return (part,) if part is not None else None
+    for field in ("pk_value", "row", "source_values", "values"):
+        found = _ladder_key(detail.get(field), key_cols)
+        if found is not None:
+            return found
+    row = detail.get("row")
+    if len(key_cols) == 1 and isinstance(row, (str, int, float)):
+        # Only a bare payload: writers also put the 1-based row number here,
+        # so the named key values above take precedence.
+        part = _pk_key(row)
+        return (part,) if part is not None else None
+    return None
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -3036,6 +3174,10 @@ def _maybe_attach_verification_ladder(
     validation_mode: str,
 ) -> dict[str, Any]:
     """Property 5 — run L1–L5 when source+dest populations fit the row budget."""
+    from services.keyed_write_witness import take_keyed_write_witness
+
+    # Taken first so every exit drops it: the witness verifies one run once.
+    witness = take_keyed_write_witness((dest_summary or {}).get("job_id"))
     if is_no_op_report(report):
         # Nothing was read past the watermark, so there is no batch for the
         # ladder to verify: it would compare a zero-row write against a sink
@@ -3132,6 +3274,11 @@ def _maybe_attach_verification_ladder(
     # Identity maps often use `id` — accept when present on both sides.
     if not pk_column and "id" in {c.lower() for c in target_cols}:
         pk_column = next(c for c in target_cols if c.lower() == "id")
+    # The one key every row-addressing step below uses: the whole composite
+    # key, or the single resolved column. Never the first column of a
+    # composite (ACC-03: batch scope, survivor pick and quarantine exclusion
+    # all keyed by ``region`` alone).
+    key_cols: list[str] = [str(c) for c in (pk_cols or ([pk_column] if pk_column else [])) if str(c or "")]
 
     dest_cfg = resolve_connector_config(endpoint)
     source_rows: list[dict] = [r for r in (records or []) if isinstance(r, dict)]
@@ -3307,30 +3454,48 @@ def _maybe_attach_verification_ladder(
     if (
         census is not None
         and dest_before
-        and pk_column
+        and key_cols
         and source_rows
     ):
         key_rows = [r for r in (records or []) if isinstance(r, dict)] or source_rows
-        batch_keys = {
-            str(r.get(pk_column))
-            for r in key_rows
-            if isinstance(r, dict) and r.get(pk_column) is not None
-        }
+        batch_keys = {k for k in (_ladder_key(r, key_cols) for r in key_rows) if k is not None}
         if batch_keys:
-            target_rows = [
-                r
-                for r in target_rows
-                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
-            ]
+            target_rows = [r for r in target_rows if _ladder_key(r, key_cols) in batch_keys]
             # Same scope on the source side: an incremental re-read covers the
             # whole source table, and comparing it against the batch-keys-only
             # destination subset flags every legitimately-skipped source row.
-            source_rows = [
-                r
-                for r in source_rows
-                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
-            ]
+            source_rows = [r for r in source_rows if _ladder_key(r, key_cols) in batch_keys]
             batch_scoped = True
+    from services.primary_key import sync_collapses_in_file_duplicates
+
+    # The writer collapses on the WHOLE key (ON CONFLICT (region, id)); keying
+    # the survivor pick on pk_column — the first key column only — merged every
+    # row of one region into a single "survivor" (ACC-03 run 2). Use the full
+    # key, and only when every key column is on the rows.
+    _collapse_key = key_cols
+    if (
+        _collapse_key
+        and source_rows
+        and all(c in source_rows[0] for c in _collapse_key)
+        and sync_collapses_in_file_duplicates(sync_mode)
+    ):
+        # E2-023/D89: an upsert lands one row per key — the latest. The
+        # window re-read (seeded inclusive at the watermark's tie group) still
+        # holds the older versions, so compare the survivor only.
+        from services.duplicate_policy import latest_version_per_key
+
+        # The cursor as the rows spell it: the source name, or its mapped target.
+        _cur = ""
+        if window is not None:
+            _renamed = {
+                str(m.get("source") or ""): str(m.get("target") or "")
+                for m in mappings
+                if m.get("source") and m.get("target")
+            }.get(window.cursor, "")
+            _cur = next((c for c in (window.cursor, _renamed) if c and c in source_rows[0]), "")
+        source_rows = latest_version_per_key(
+            source_rows, cursor_column=_cur, key_columns=_collapse_key
+        )
     # D67/D95: rows the writer held out to quarantine are in the source
     # re-read but never entered the destination. Hashing them in the L3
     # source digest makes every correct quarantining run fail Gate-8 on its
@@ -3338,40 +3503,30 @@ def _maybe_attach_verification_ladder(
     # basis — the ladder then vetoed it and the job undid the 39 good rows).
     # Exclude the quarantined keys from the compared source population when
     # the pk resolves; residual detail stays honest via rejected_rows.
-    _rej_keys: set[str] | None = None
+    _rej_keys: set[tuple[str, ...]] | None = None
     if (
-        pk_column
+        key_cols
         and int(report.get("rejected_rows") or 0) > 0
         and source_rows
     ):
-        _rej_keys = set()
-        for _d in dest_summary.get("rejected_details") or []:
-            if not isinstance(_d, dict):
-                continue
-            _pk = _d.get("source_pk") or _d.get("destination_pk")
-            if _pk is not None:
-                _rej_keys.add(str(_pk))
-                continue
-            _row = _d.get("row")
-            _v = _row.get(pk_column) if isinstance(_row, dict) else None
-            if _v is None:
-                for _vals_key in ("source_values", "values"):
-                    _vals = _d.get(_vals_key)
-                    if isinstance(_vals, dict) and _vals.get(pk_column) is not None:
-                        _v = _vals.get(pk_column)
-                        break
-            if _v is None and isinstance(_row, (str, int, float)):
-                # Only a bare payload: writers also put the 1-based row number
-                # here, so the named key values above take precedence.
-                _v = _row
-            if _v is not None:
-                _rej_keys.add(str(_v))
+        # The whole key of each quarantined row: one held-out (ap, 1) must
+        # exclude (ap, 1) only — never every ``ap`` row (which hid a missing
+        # (ap, 2)) and never nothing (a composite source_pk list stringified
+        # matched no row, so a correct quarantining run failed L5).
+        _rej_keys = {
+            k
+            for k in (
+                _rejected_key(_d, key_cols)
+                for _d in dest_summary.get("rejected_details") or []
+                if isinstance(_d, dict)
+            )
+            if k is not None
+        }
         if _rej_keys:
             source_rows = [
                 r
                 for r in source_rows
-                if not isinstance(r, dict)
-                or str(r.get(pk_column)) not in _rej_keys
+                if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _rej_keys
             ]
     # D205 — an append into an occupied table: grade the written batch, not
     # the rows earlier runs wrote (see ladder_batch_scope).
@@ -3389,6 +3544,32 @@ def _maybe_attach_verification_ladder(
         )
         if _scoped is not None:
             target_rows = _scoped
+    # Both populations are "this run's written cells" only when the source
+    # side IS the written batch (buffered records) or when a re-read source
+    # was checked key by key against what this run wrote. A re-read alone is
+    # the source after the write: a concurrent UPDATE there is not a loss.
+    scoped_written = bool(batch_scoped and not source_reread)
+    drift_record: dict[str, Any] = {}
+    if batch_scoped and source_reread:
+        from services.keyed_write_witness import split_concurrent_source_drift
+
+        source_rows, target_rows, drift_record = split_concurrent_source_drift(
+            witness=witness, source_rows=source_rows, target_rows=target_rows,
+            key_columns=key_cols,
+            rows_written=_as_count(dest_summary.get("rows_written")),
+            full_target_rows=full_target_rows,
+            excluded_key_values=sorted(_rej_keys or ()),
+            out_of_window_rows=[*after_window_rows, *before_window_rows],
+            not_started_reason=str(
+                (dest_summary.get("keyed_write_witness") or {}).get("reason") or ""
+            ),
+        )
+        scoped_written = bool(drift_record.get("attributed"))
+    if scoped_written:
+        # The whole-table digests are not comparable, but these populations
+        # are: L3 hashes the written keys on both sides, so a value swapped
+        # between two written rows (equal column aggregates) still fails.
+        ladder_scope = ""
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -3434,8 +3615,22 @@ def _maybe_attach_verification_ladder(
         l2_skip_reason=(
             "source_reread_is_pre_transform" if source_reread and rewrites else ""
         ),
+        # Both populations are this run's written cells (see scoped_written).
+        scoped_to_written_keys=scoped_written,
     )
     out = attach_ladder_to_reconcile_report(report, ladder)
+    if batch_scoped and source_reread:
+        from services.keyed_write_witness import (
+            attach_concurrent_drift,
+            attach_unattributed_discrepancy,
+        )
+
+        if scoped_written:
+            out = attach_concurrent_drift(out, drift_record)
+        else:
+            out = attach_unattributed_discrepancy(
+                out, ladder, str(drift_record.get("reason") or "")
+            )
     if window_scoped_target:
         # Round 5 (D203 prov.) — the ladder allows the extra rows an append
         # table holds, so a window appended twice passed. Exactly-once is
@@ -5663,6 +5858,63 @@ def _dedupe_dest_winner_tuples(
             ]
 
 
+#: Refusals decided by the cell's value alone: every row holding that value in
+#: that column was refused the same way. A constraint rejection (UNIQUE, FK,
+#: CHECK, NOT NULL) is decided by the row and the table, not the value.
+_VALUE_DECIDED_REFUSALS = frozenset({
+    "TYPE_CAST_FAILURE", "INVALID_NUMERIC", "INVALID_TIMESTAMP", "INVALID_BOOLEAN",
+    "FRACTIONAL_PRECISION_LOSS", "OVERFLOW", "UNDERFLOW", "LENGTH_OVERFLOW",
+})
+_ROW_DECIDED_MARKERS = ("unique", "duplicate", "constraint", "foreign key", "not-null", "not null")
+
+
+def _value_decided_refusal(reason: str) -> bool:
+    text = str(reason or "").lower()
+    if any(marker in text for marker in _ROW_DECIDED_MARKERS):
+        return False
+    from services.decision_kernel.findings import classify_transform_failure
+
+    return classify_transform_failure(str(reason or "")).value in _VALUE_DECIDED_REFUSALS
+
+
+def _without_held_out_cells(
+    sample_records: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop sample rows carrying a cell the writer's CAST refused.
+
+    A row held out in quarantine never landed, so keying the read-back on it
+    asked a NUMERIC column for ``'abc'`` and failed Gate-8 after an overwrite
+    had replaced the table. Only a value-decided refusal (a cast, a width or
+    range overflow) may drop by (column, value): every row with that value was
+    refused. A UNIQUE / FK / CHECK rejection is about one row — dropping by
+    value took the landed first copy of a key out of the compare and of the
+    written-ids scope (QA C2 review 3), so those never drop here.
+    """
+    refused: set[tuple[str, str]] = set()
+    for detail in rejected:
+        if not isinstance(detail, dict) or not detail.get("column"):
+            continue
+        value = detail.get("value")
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        if not _value_decided_refusal(str(detail.get("reason") or detail.get("failure_reason") or "")):
+            continue
+        refused.add((str(detail["column"]), str(value)))
+    if not refused or not sample_records:
+        return sample_records
+    columns = {c for c, _ in refused}
+    return [
+        row
+        for row in sample_records
+        if not isinstance(row, dict)
+        or not any(
+            c in row and row[c] is not None and (c, str(row[c])) in refused
+            for c in columns
+        )
+    ]
+
+
 def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
@@ -6271,6 +6523,7 @@ def _run_reconciliation_impl(
                 mapping_dicts,
                 column_types=source_schema,
                 dest_types=dest_types,
+                dest_kind=str(db_type or ""),
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -6812,7 +7065,14 @@ def _run_reconciliation_impl(
             or []
         )
         if isinstance(stashed, list):
-            sample_records = [r for r in stashed if isinstance(r, dict)]
+            from .writer_column_spelling import rekey_writer_sample
+
+            sample_records = rekey_writer_sample(
+                [r for r in stashed if isinstance(r, dict)], mapping_dicts
+            )
+    sample_records = _without_held_out_cells(
+        sample_records, list(dest_summary.get("rejected_details") or [])
+    )
     pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
     # X-OW1: derive the batch key list from whichever row collection this path
     # actually holds — engine-copy runs may carry full `records` without a
@@ -6926,6 +7186,7 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
         )
 
+    readback_failure, readback_transient = "", False
     if routed_tables:
         # The router partitioned the run into per-route tables; the base table
         # name was never written to. Verify each route table independently —
@@ -6952,9 +7213,13 @@ def _run_reconciliation_impl(
                 # One scan yields both the canonical digest and the additive
                 # multiset digest — the additive form proves an append into an
                 # occupied route table (post − pre == this run's rows, RT-6).
-                from services.reconciliation import verify_postgres_route_table
+                from services.reconciliation import (
+                    readback_with_retry,
+                    verify_postgres_route_table,
+                )
 
-                _r_rows, _r_checksum, _r_additive = verify_postgres_route_table(
+                (_r_rows, _r_checksum, _r_additive), _r_failure, _r_transient = readback_with_retry(
+                    verify_postgres_route_table,
                     host=str(cfg.get("host") or ""),
                     port=int(cfg.get("port") or 5432),
                     database=str(cfg.get("database") or ""),
@@ -6976,8 +7241,11 @@ def _run_reconciliation_impl(
                     ) or None,
                 )
             else:
+                from services.reconciliation import readback_with_retry
+
                 _r_additive = ""
-                _r_rows, _r_checksum = verify_target(
+                (_r_rows, _r_checksum), _r_failure, _r_transient = readback_with_retry(
+                    verify_target,
                     db_type,
                     cfg,
                     schema=schema,
@@ -6995,6 +7263,12 @@ def _run_reconciliation_impl(
                 "verified_rows": _r_rows,
                 "checksum": _r_checksum,
             }
+            if _r_failure:
+                # D284: the route read failed; carry the reason (and whether
+                # it was transient) to the verdict instead of "unavailable".
+                route_readback[_rname]["readback_error"] = _r_failure
+                readback_failure = readback_failure or f"route {_rname}: {_r_failure}"
+                readback_transient = readback_transient or _r_transient
             if _r_additive:
                 route_readback[_rname]["additive_checksum"] = _r_additive
             if isinstance(_r_rows, int) and _r_rows >= 0:
@@ -7140,7 +7414,9 @@ def _run_reconciliation_impl(
         from services.column_digest import clear_readback, stamp_readback
 
         clear_readback()
-        target_rows, target_checksum = verify_target(
+        from services.reconciliation import verify_target_with_retry
+
+        target_rows, target_checksum, readback_failure, readback_transient = verify_target_with_retry(
             db_type,
             cfg,
             schema=schema,
@@ -7152,6 +7428,7 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
             written_ids=None,
             pk_column=None,
+            verify=verify_target,
         )
         if isinstance(dest_summary, dict):
             stamp_readback(dest_summary, target_checksum)
@@ -7643,6 +7920,32 @@ def _run_reconciliation_impl(
                 "sample_compare": sample_compare,
                 "assurance_level": "sample_screening",
             })
+        if strict_checksum and not dest_only and readback_failure:
+            # D284: the engine has a verifier; the read itself failed. Say what
+            # failed. A transient fault (retried) is not evidence the committed
+            # rows are wrong, so they are kept rather than undone.
+            return _finalize({
+                "passed": False,
+                "verification_unavailable": readback_transient,
+                "message": (
+                    f"Strict reconciliation could not read the {db_type} destination "
+                    f"back ({readback_failure})"
+                    + (
+                        ", after retrying. The committed rows were kept; re-run "
+                        "verification once the destination is reachable."
+                        if readback_transient
+                        else "."
+                    )
+                ),
+                "source_rows": source_rows,
+                "target_rows": -1,
+                "source_checksum": source_checksum,
+                "target_checksum": "",
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "sample_compare": sample_compare,
+            })
         if strict_checksum and not dest_only:
             return _finalize({
                 "passed": False,
@@ -7894,7 +8197,10 @@ def _run_reconciliation_impl(
         and target_checksum
         and str(db_type) in KEYED_READBACK_ENGINES
     ):
-        _keyed_rows, keyed_checksum = verify_target(
+        from services.reconciliation import readback_with_retry
+
+        (_keyed_rows, keyed_checksum), _keyed_failure, _keyed_transient = readback_with_retry(
+            verify_target,
             db_type,
             cfg,
             schema=schema,
@@ -7907,6 +8213,11 @@ def _run_reconciliation_impl(
             written_ids=written_ids,
             pk_column=pk_column,
         )
+        if _keyed_failure and isinstance(dest_summary, dict):
+            # D284: a keyed read-back that still failed after retry is named,
+            # never read as "no rows for this batch".
+            dest_summary["keyed_readback_error"] = _keyed_failure
+            dest_summary["keyed_readback_transient"] = bool(_keyed_transient)
         # A key-scoped digest is only comparable when the key identifies *one*
         # destination row. An append (no merge, no enforced constraint) can put
         # the same key in twice: appending one batch twice left two rows per key,

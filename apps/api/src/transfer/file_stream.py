@@ -445,7 +445,7 @@ def _peek_parsed_file_source(
                 if len(preview_rows) < 100:
                     preview_rows.append(list(row))
         sample = [dict(zip(headers, row)) for row in preview_rows]
-        schema = FileParser.infer_schema(sample)
+        schema = FileParser.infer_schema(sample, invalid_calendar_votes=True)
         return headers, schema, total, sample
 
     if file_type in ("jsonl", "ndjson"):
@@ -469,7 +469,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
@@ -482,7 +482,7 @@ def _peek_parsed_file_source(
         if not headers:
             raise ValueError("Excel file has no header row")
         sample = [dict(zip(headers, row)) for row in rows[:100]]
-        schema = FileParser.infer_schema(sample)
+        schema = FileParser.infer_schema(sample, invalid_calendar_votes=True)
         return headers, schema, total, sample
 
     if file_type == "parquet":
@@ -587,7 +587,7 @@ def _peek_parsed_file_source(
                 '[{...}], a wrapper like {"data":[{...}]}, or a single object record.'
             )
         headers = sorted(columns)
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "xml":
@@ -620,7 +620,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("XML file has no record rows")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, int(total), sample_objs[:100]
 
     if file_type == "yaml":
@@ -653,7 +653,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("YAML file has no record rows")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, int(total), sample_objs[:100]
 
     if file_type == "fixed_width":
@@ -691,7 +691,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("Fixed-width file has no record rows")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, int(total), sample_objs[:100]
 
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
@@ -1210,6 +1210,7 @@ def fingerprint_parsed_file(
     dest_extra: dict[str, Any] | None = None,
     duplicate_policy: str = "",
     workspace_id: str = "",
+    keep_last_key: list[str] | None = None,
 ) -> tuple[FingerprintAccumulator, int]:
     """Second parse of a file the writer already consumed.
 
@@ -1221,6 +1222,11 @@ def fingerprint_parsed_file(
     )
     if source_filter:
         full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
+    if keep_last_key:
+        # The write collapsed in-file copies to the last per key; so does the re-read.
+        from services.duplicate_policy import iter_keep_last
+
+        full_iter = iter_keep_last(full_iter, list(keep_last_key))
     if incremental and cursor_source_col:
         from services.sync_cursor import records_after_watermark
 
@@ -1411,6 +1417,40 @@ def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any)
 
 
 @date_locale_scoped
+def _kept_table_carriers(
+    live_dest_types: dict[str, str] | None,
+    target_cols: list[str],
+    dest_type: str,
+    sync_mode: str,
+    widened: set[str] | frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    """Live column types of a table the run writes into and keeps.
+
+    The writer binds every row against the column that is there (PostgreSQL
+    overwrite empties the table, it does not recreate it), so Gate-8 has to
+    hash on that carrier too. A plan type inferred from the file ('VARCHAR' for
+    a column with one 'abc') hashed '1' against the stored NUMERIC(10,2) '1.00'
+    and failed a correct load after the overwrite (QA C2-neighbour review).
+    A recreating engine's table is replaced, so its live types are not used,
+    and a column with an approved ``dest_widen`` stamp (``widened``) is ALTERed
+    to its stamped type before rows bind, so that type is the carrier.
+    """
+    if not live_dest_types:
+        return {}
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
+
+    if is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(dest_type):
+        return {}
+    lowered = {str(k).lower(): str(v) for k, v in live_dest_types.items() if v}
+    skip = {str(c).lower() for c in widened}
+    return {
+        c: lowered[c.lower()]
+        for c in target_cols
+        if c.lower() in lowered and c.lower() not in skip
+    }
+
+
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -1436,6 +1476,7 @@ def stream_file_to_database(
     duplicate_policy: str = "",
     file_identity: dict[str, Any] | None = None,
     fingerprint_sink: Any = None,
+    live_dest_types: dict[str, str] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -1587,10 +1628,13 @@ def stream_file_to_database(
     # TEXT): the destination stores the stamped type, so the source digest has
     # to hash on it, not on the sample-inferred DECIMAL(17,2).
     _stamped_targets: set[str] = set()
+    _widened_targets: set[str] = set()
     for _m in mappings or []:
         if not isinstance(_m, dict):
             continue
         _t = str(_m.get("target") or _m.get("source") or "")
+        if _t and _m.get("dest_widen"):
+            _widened_targets.add(_t)
         if _t and _m.get("target_type"):
             _stamped_targets.add(_t)
             continue
@@ -1616,6 +1660,11 @@ def stream_file_to_database(
             and (not _prior or _TEXT_FAMILY_DDL_RE.match(_prior.strip()))
         ):
             fingerprint_dest_types[_tc] = str(_st)
+    fingerprint_dest_types.update(
+        _kept_table_carriers(
+            live_dest_types, target_cols, dest_type, sync_mode, _widened_targets
+        )
+    )
 
     try:
         from services.sync_cursor import (
@@ -1932,6 +1981,7 @@ def stream_file_to_database(
                 scope,
                 precount_table(dest_type, dest_cfg, dest_table),
                 dest_missing=dest_object_missing(dest_type, dest_cfg, dest_table),
+                destination=destination,
             )
             if reset_issue:
                 raise ValueError(reset_issue)
@@ -2115,10 +2165,12 @@ def stream_file_to_database(
         _stamp_reconcile_sample_locale(dest_summary, number_locale)
         return rows_copied, copy_ddl, dest_summary, columns
 
+    keep_last_key: list[str] = []
     if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
         from services.duplicate_policy import iter_keep_last
 
-        batch_iter = iter_keep_last(batch_iter, list(contract.primary_key_columns()))
+        keep_last_key = list(contract.primary_key_columns())
+        batch_iter = iter_keep_last(batch_iter, keep_last_key)
         dest_summary["in_file_dedupe"] = "keep_last"
 
     if incremental and cursor_source_col:
@@ -2186,18 +2238,7 @@ def stream_file_to_database(
 
         persist_rejected_rows(
             job_id=str(job_id),
-            rejected_details=[
-                {
-                    "row": d.record,
-                    "reason": f"transform divert — step {d.step} '{d.op}': {d.reason}",
-                    "failure_reason": d.reason,
-                    "transform_attempted": f"shape step {d.step} '{d.op}'",
-                    "shape_step": d.step,
-                    "shape_op": d.op,
-                    "source_row_index": d.row_index + 1,
-                }
-                for d in diverted
-            ],
+            rejected_details=shape_runner.divert_details(diverted),
             source="shape_divert",
             connector=str(
                 getattr(destination, "format", None)
@@ -2822,6 +2863,9 @@ def stream_file_to_database(
             dest_summary.pop("reconcile_sample", None)
             dest_summary["duplicate_policy"] = decision.policy
             dest_summary["duplicate_policy_reason"] = decision.reason
+            if keep_last_key:
+                # Gate-8 collapses its digest on this stamp; a batch summary drops it.
+                dest_summary["in_file_dedupe"] = "keep_last"
             dest_summary["rows_skipped"] = prior_skipped + int(
                 batch_summary.get("rows_skipped") or 0
             )
@@ -3091,7 +3135,7 @@ def stream_file_to_database(
                 sync_mode=str(effective_sync or ""),
                 rows_before=dest_summary.get(PRECOUNT_KEY),
                 table_existed_before=dest_summary.get("dest_table_existed_before"),
-                keyed=bool(write_mode == "upsert" and pk_target_cols),
+                write_mode=str(write_mode or ""),
                 atomic_overwrite=bool(pg_overwrite_one_txn),
             )
         if not isinstance(_write_exc, TransferCancelled):
@@ -3218,6 +3262,7 @@ def stream_file_to_database(
                 dest_extra=dest_extra,
                 duplicate_policy=decision.policy,
                 workspace_id=getattr(shape_runner, "workspace_id", ""),
+                keep_last_key=keep_last_key,
             )
         except Exception:
             if partial_write_pass:

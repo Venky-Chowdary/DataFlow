@@ -252,7 +252,11 @@ def test_copy_route_cancel_shows_the_destination_count(monkeypatch):
     [
         ("append", False, False, True, 4, 6),  # 10 now - 4 before
         ("full_refresh_overwrite", False, False, True, 99, 10),  # cleared first
-        ("full_refresh_overwrite", False, True, True, 99, None),  # one txn: rolled back
+        # One transaction / staged swap with no word from the route on whether
+        # it committed: a count alone proves nothing (a committed same-size
+        # replacement holds the same count) — unattributed (C16 review).
+        ("full_refresh_overwrite", False, True, True, 10, None),
+        ("full_refresh_overwrite", False, True, True, 99, None),
         ("full_refresh_overwrite", False, True, False, None, 10),  # created this run
         ("upsert", True, False, True, 4, None),  # COUNT growth is new keys only
         ("append", False, False, True, None, None),  # before unknown
@@ -290,3 +294,62 @@ def test_landing_is_attributed_only_when_exact(tmp_path, sync, keyed, atomic, ex
         assert out["rows_committed"] == expect
         assert out["rows_committed_source"] == "destination_count"
         assert out["committed_batches_tally"] == 3
+
+
+@pytest.mark.parametrize("sync", ["full_refresh_overwrite", "full_refresh_append", "upsert"])
+def test_cancel_into_a_table_that_no_longer_exists_claims_no_rows(tmp_path, sync):
+    """C16 / MySQL D11: the run created the table and its undo dropped it (or
+    the COPY that created it rolled back). The writer had acknowledged rows;
+    the record must say the table does not exist and nothing was kept — never
+    "at least N row(s) were already committed"."""
+    import sqlite3
+
+    from services.error_handling import TransferCancelled
+    from services.job_status import cancel_outcome_for, measure_cancel_landing
+
+    db = tmp_path / "d.db"
+    sqlite3.connect(db).close()
+    exc = TransferCancelled("Transfer cancelled by user", rows_written=1024)
+    measure_cancel_landing(
+        exc, dest_type="sqlite", dest_cfg={"database": str(db)}, table="gone",
+        sync_mode=sync, rows_before=None, table_existed_before=None,
+        keyed=sync == "upsert", atomic_overwrite=True,
+    )
+    assert exc.destination_table_exists is False
+    assert exc.destination_rows_by_run == 0
+    out = cancel_outcome_for(
+        1024,
+        destination_rows_by_run=exc.destination_rows_by_run,
+        destination_rows_now=exc.destination_rows_now,
+        destination_table_exists=exc.destination_table_exists,
+    )
+    assert out["rows_committed"] == 0 and out["partial_write"] is False
+    assert out["rolled_back"] is True and out["destination_table_exists"] is False
+    assert "does not exist" in out["message"]
+    assert "1,024" not in out["message"] and "1024" not in out["message"]
+    assert "at least" not in out["message"]
+
+
+@pytest.mark.parametrize("before,expect", [(10, 0), (99, None)])
+def test_a_rollback_is_claimed_only_on_the_routes_evidence(tmp_path, before, expect):
+    """The route marked its transaction rolled back: holding the pre-run count
+    is then this run's zero; any other count is somebody else's change."""
+    import sqlite3
+
+    from services.error_handling import TransferCancelled
+    from services.job_status import mark_write_rolled_back, measure_cancel_landing
+
+    db = tmp_path / "d.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    con.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(10)])
+    con.commit()
+    con.close()
+    exc = TransferCancelled("Transfer cancelled by user", rows_written=3)
+    mark_write_rolled_back(exc)
+    measure_cancel_landing(
+        exc, dest_type="sqlite", dest_cfg={"database": str(db)}, table="t",
+        sync_mode="full_refresh_overwrite", rows_before=before, table_existed_before=True,
+        atomic_overwrite=True,
+    )
+    assert getattr(exc, "destination_rows_by_run", None) == expect

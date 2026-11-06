@@ -6,7 +6,7 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import (
     APIRouter,
@@ -118,7 +118,23 @@ class ConnectorConfig(BaseModel):
     password: Optional[str] = Field(default=None, description="Password")
     connection_string: Optional[str] = Field(default=None, description="Full connection string")
     warehouse: Optional[str] = Field(default=None, description="Snowflake warehouse")
-    ssl: bool = Field(default=False, description="Use SSL/TLS")
+    ssl: bool = Field(
+        default=False,
+        description=(
+            "Require SSL/TLS. Off means TLS is not required: the MySQL driver still "
+            "negotiates TLS whenever the server offers it (ssl-mode=DISABLED in the "
+            "connection string asks for plaintext). The connection test states the "
+            "session's actual encryption."
+        ),
+    )
+    ssl_mode: Optional[Literal["", "prefer", "require", "disable"]] = Field(
+        default=None,
+        description=(
+            "Explicit TLS mode: require (TLS or no connection), prefer (TLS when "
+            "offered), disable (MySQL family only: plaintext where the server allows "
+            "it). Unset keeps `ssl`: true = require, false = prefer."
+        ),
+    )
     auth_mode: Optional[str] = Field(default=None, description="Authentication mode")
     auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
     api_key: Optional[str] = Field(default=None, description="API key")
@@ -182,6 +198,7 @@ class TestConnectionRequest(BaseModel):
     connection_string: Optional[str] = None
     warehouse: Optional[str] = ""
     ssl: Optional[bool] = False
+    ssl_mode: Optional[Literal["", "prefer", "require", "disable"]] = None
     auth_mode: Optional[str] = ""
     auth_role: Optional[str] = ""
     api_key: Optional[str] = None
@@ -216,9 +233,31 @@ class TransferRequest(BaseModel):
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _refuse_unhonourable_ssl_mode(
+    conn_type: str,
+    ssl_mode: Optional[str],
+    connection_string: Optional[str] = "",
+    extra: Optional[dict] = None,
+) -> None:
+    """422 for a TLS mode the connector cannot honour: "disable" off MySQL, or
+    "disable" against a connection string or form TLS options (``extra``:
+    ssl_ca / ssl_cert / verify) that ask for REQUIRED / VERIFY_*."""
+    from services.connector_store import validate_ssl_mode
+
+    try:
+        validate_ssl_mode(conn_type, {"ssl_mode": ssl_mode,
+                                      "connection_string": connection_string or "",
+                                      "extra": dict(extra or {})})
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
     require_admin_connector_access(http_request, request.type)
+    _refuse_unhonourable_ssl_mode(
+        request.type, request.ssl_mode, request.connection_string, request.extra
+    )
     with connector_operation(
         "probe",
         driver_family="unknown",
@@ -295,6 +334,8 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
                 "auth_source": request.auth_source or "",
             }
 
+        from services.connector_store import dial_connection_string
+
         cfg = {
             "host": request.host or "",
             "port": request.port or 0,
@@ -302,8 +343,11 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "username": request.username or "",
             "password": request.password or "",
             "schema": request.db_schema or "",
-            "connection_string": request.connection_string or "",
-            "ssl": bool(request.ssl) if request.ssl is not None else False,
+            "connection_string": dial_connection_string(
+                request.type, request.ssl_mode or "", request.connection_string or "", extra_flat
+            ),
+            "ssl": (request.ssl_mode == "require") if request.ssl_mode
+            else (bool(request.ssl) if request.ssl is not None else False),
             "warehouse": request.warehouse or "",
             "type": request.type,
             "auth_mode": auth_mode,
@@ -373,6 +417,7 @@ async def create_connector(
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
+    _refuse_unhonourable_ssl_mode(config.type, config.ssl_mode, config.connection_string)
     connector_data = {
         "name": config.name,
         "type": config.type,
@@ -385,6 +430,7 @@ async def create_connector(
         "connection_string": config.connection_string,
         "warehouse": config.warehouse,
         "ssl": config.ssl,
+        **({"ssl_mode": config.ssl_mode} if config.ssl_mode is not None else {}),
         "auth_mode": config.auth_mode,
         "auth_role": config.auth_role,
         "auth_source": config.auth_source,
@@ -598,6 +644,9 @@ async def get_transfer_job(job_id: str, request: Request):
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if job.get(key) and hasattr(job[key], "isoformat"):
                 job[key] = job[key].isoformat()
+        from services.quarantine_from_preflight import hydrate_job_quarantine_sample
+
+        hydrate_job_quarantine_sample(job)
         safe = sanitize_job_for_api(job)
         safe["runtime_estimate"] = estimate_for_job_doc(job)
         return safe
@@ -702,12 +751,80 @@ async def sync_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RerunRequest(BaseModel):
+    """Optional body of a rerun or retry: what the operator accepts for this run."""
+
+    force: bool = False
+    #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
+    #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
+    #: Contract on the replayed mappings so rows that do not cast are
+    #: quarantined instead of refusing the run.
+    risk_acceptance: dict[str, Any] | None = None
+    #: Alias: the same object, or its JSON encoding (the form route's spelling).
+    risk_acceptance_json: dict[str, Any] | str | None = None
+
+    def acceptance(self) -> dict[str, Any] | None:
+        """The acceptance this body carries, shape-checked; ``ValueError`` if bad."""
+        from services.risk_acceptance import (
+            parse_risk_acceptance_form,
+            validate_risk_acceptance,
+        )
+
+        primary = validate_risk_acceptance(self.risk_acceptance)
+        alias_raw = self.risk_acceptance_json
+        alias = (
+            parse_risk_acceptance_form(alias_raw)
+            if isinstance(alias_raw, str)
+            else validate_risk_acceptance(alias_raw)
+        )
+        if primary and alias and primary != alias:
+            raise ValueError(
+                "Send risk_acceptance or risk_acceptance_json, not two different values."
+            )
+        return primary or alias
+
+
+#: Retry and rerun share one body model.
+RetryRequest = RerunRequest
+
+
+def _body_acceptance(body: RerunRequest | None) -> dict[str, Any] | None:
+    if body is None:
+        return None
+    try:
+        return body.acceptance()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> list[str]:
+    """Sign the operator's acceptance onto the replayed request's mappings (D170).
+
+    Returns the columns that gained a contract. Refuses (400) rather than
+    silently ignoring an acceptance that signs nothing.
+    """
+    from services.risk_acceptance import sign_request_risk_acceptance
+
+    try:
+        return sign_request_risk_acceptance(
+            xfer_req,
+            acceptance,
+            no_mappings_hint=(
+                "This job has no saved column mappings to attach a Risk Contract "
+                "to — re-plan with plan_transfer (risk_acceptance) instead."
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
     force: bool = False,
+    body: RetryRequest | None = None,
 ):
     """Re-run a failed transfer from the beginning as a new job (no checkpoint).
 
@@ -716,8 +833,13 @@ async def retry_transfer_job(
     failed attempt already committed rows under a sync mode that has no key to
     collapse a second copy. ``force=true`` is the operator's explicit
     acknowledgement that the duplicates are acceptable and is recorded on the
-    new job.
+    new job. An optional ``risk_acceptance`` body signs a continue-policy Risk
+    Contract on the replayed mappings, so the rows that failed to cast are
+    quarantined and the valid rows load (QA r12 D2) — the way out of a
+    cast-failure block for a job that failed.
     """
+    force = bool(force or (body is not None and body.force))
+    acceptance = _body_acceptance(body)
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -820,6 +942,9 @@ async def retry_transfer_job(
         # acknowledged — a blank triggered_by / null governance hides it.
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"retry of {job_id}"
+        risk_columns: list[str] = []
+        if acceptance:
+            risk_columns = _sign_rerun_risk_acceptance(xfer_req, acceptance)
         forced = bool(force and not retry_decision["allowed"])
         if forced:
             xfer_req.acknowledgment_actor = actor
@@ -843,6 +968,7 @@ async def retry_transfer_job(
             "action": "retry",
             "of": job_id,
             "forced": forced,
+            "risk_accepted_columns": risk_columns,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         mongo.update_job_status(
@@ -897,65 +1023,6 @@ async def retry_transfer_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class RerunRequest(BaseModel):
-    """Optional body of a rerun: what the operator accepts for this run."""
-
-    force: bool = False
-    #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
-    #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
-    #: Contract on the replayed mappings so rows that no longer cast (the source
-    #: changed since the first run) are quarantined instead of refusing the run.
-    risk_acceptance: dict[str, Any] | None = None
-
-
-def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> list[str]:
-    """Sign the operator's acceptance onto the replayed request's mappings (D170).
-
-    Returns the columns that gained a contract. Refuses (400) rather than
-    silently ignoring an acceptance that signs nothing.
-    """
-    from ..ai.copilot.transfer_tools import _sign_required_risk_contracts
-
-    mappings = [dict(m) for m in (xfer_req.mappings or []) if isinstance(m, dict)]
-    if not mappings:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This job has no saved column mappings to attach a Risk Contract "
-                "to — re-plan with plan_transfer (risk_acceptance) instead."
-            ),
-        )
-    named = {
-        str(c).strip() for c in (acceptance.get("columns") or []) if str(c or "").strip()
-    }
-    table = str(
-        getattr(xfer_req.destination, "table", "")
-        or getattr(xfer_req.destination, "collection", "")
-        or ""
-    )
-    try:
-        signed = _sign_required_risk_contracts(
-            mappings, acceptance, table=table, force_columns=named or None
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    gained = [
-        str(new.get("source") or new.get("target") or "")
-        for old, new in zip(mappings, signed)
-        if new.get("risk_contract") and not old.get("risk_contract")
-    ]
-    if not gained:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "risk_acceptance signed nothing: no mapped column needs a Risk "
-                "Contract (name the columns that fail in risk_acceptance.columns)."
-            ),
-        )
-    xfer_req.mappings = signed
-    return gained
-
-
 @router.post("/jobs/{job_id}/rerun")
 async def rerun_transfer_job(
     job_id: str,
@@ -974,6 +1041,7 @@ async def rerun_transfer_job(
     rows that no longer cast are quarantined instead of refusing the run (D170).
     """
     force = bool(force or (body is not None and body.force))
+    acceptance = _body_acceptance(body)
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -1037,8 +1105,8 @@ async def rerun_transfer_job(
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"rerun of {job_id}"
         risk_columns: list[str] = []
-        if body is not None and body.risk_acceptance:
-            risk_columns = _sign_rerun_risk_acceptance(xfer_req, body.risk_acceptance)
+        if acceptance:
+            risk_columns = _sign_rerun_risk_acceptance(xfer_req, acceptance)
         forced = bool(force and not decision["allowed"])
         if forced:
             xfer_req.acknowledgment_actor = actor
@@ -1515,8 +1583,9 @@ async def get_job_quarantine(job_id: str, request: Request):
             "migration_proven": False,
         }
     open_n = int(closure.get("open_count") or 0)
-    row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
-    finding_rows = len(row_ids) if row_ids else len(details)
+    from services.quarantine_dlq import count_finding_rows
+
+    finding_rows = count_finding_rows(details) or len(details)
     rejected_rows = int(
         job.get("rejected_details_total")
         or job.get("rejected_rows")
@@ -2235,6 +2304,23 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             ),
         )
 
+    if not parent_appends and dest.kind == "database" and dest.table:
+        # A keyed replay merges on a UNIQUE index; over a table that already
+        # repeats the key the engine cannot build it (QA C2: a raw 500).
+        from starlette.concurrency import run_in_threadpool
+
+        from services.quarantine_dlq import replay_destination_duplicate_keys
+
+        dup_refusal = await run_in_threadpool(
+            replay_destination_duplicate_keys,
+            dest_cfg,
+            dest_kind=resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+            table=str(dest.table),
+            key_columns=list(conflict_columns),
+        )
+        if dup_refusal:
+            raise HTTPException(status_code=409, detail=dup_refusal)
+
     engine = get_transfer_engine()
     # Child job: upsert remediations (never full-refresh overwrite).
     # sync_mode must match write_mode so Gate-8 allow_extra / sample proof
@@ -2274,22 +2360,33 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     )
 
     try:
-        rows_written, ddl_log, dest_summary = write_destination_database(
-            dest,
-            records,
-            columns,
-            schema,
-            mappings,
-            validation_mode=transfer_req.validation_mode or "balanced",
-            backfill_new_fields=bool(transfer_req.backfill_new_fields),
-            write_mode=write_mode,
-            conflict_columns=None if parent_appends else (conflict_columns or None),
-            # Replay is a keyed upsert of the remediated rows (an insert on an
-            # append route). It is never a full-refresh overwrite, and a
-            # failure must not replace an object that already landed (R11-001).
-            sync_mode=replay_sync_mode,
-            protect_landed_object=True,
-        )
+        from services.pii_hash_keys import transfer_job_scope
+
+        # The replay digests with the PARENT job's hash_pii key version (retired
+        # versions are kept), so remediated rows match the rows the parent
+        # wrote; the child job records that version (review B2).
+        with transfer_job_scope(
+            child_req,
+            child_job_id,
+            store=get_mongodb_service,
+            version=str((job or {}).get("pii_hash_key_version") or "") or None,
+        ):
+            rows_written, ddl_log, dest_summary = write_destination_database(
+                dest,
+                records,
+                columns,
+                schema,
+                mappings,
+                validation_mode=transfer_req.validation_mode or "balanced",
+                backfill_new_fields=bool(transfer_req.backfill_new_fields),
+                write_mode=write_mode,
+                conflict_columns=None if parent_appends else (conflict_columns or None),
+                # Replay is a keyed upsert of the remediated rows (an insert on an
+                # append route). It is never a full-refresh overwrite, and a
+                # failure must not replace an object that already landed (R11-001).
+                sync_mode=replay_sync_mode,
+                protect_landed_object=True,
+            )
         rejected = int(dest_summary.get("rejected_rows") or 0)
         # Gate-8 on the child job — Airbyte-class post-write integrity (count +
         # checksum / keyed sample). Upsert into a live table may have extras;
@@ -2550,6 +2647,11 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         raise
     except Exception as e:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message=str(e), error=str(e))
+        from services.quarantine_dlq import replay_unique_index_failure
+
+        typed_refusal = replay_unique_index_failure(
+            e, table=str(dest.table or ""), key_columns=list(conflict_columns)
+        )
         try:
             from services.audit_log import append_audit_event
             from services.quarantine_dlq import append_dlq_event
@@ -2572,6 +2674,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        if typed_refusal:
+            raise HTTPException(status_code=409, detail=typed_refusal) from e
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -2656,7 +2760,7 @@ def profile_file_upload(
             detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
         )
 
-    schema = FileParser.infer_schema(result.data)
+    schema = FileParser.infer_schema(result.data, invalid_calendar_votes=True)
     try:
         from services.data_profiler import merge_profiler_schema, profile_dataset
 
@@ -2883,6 +2987,15 @@ async def transfer_data(
                     request_obj.stream_contracts = parsed
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            # QA C3: a query/procedure key on a file transfer cannot run — refuse it
+            # rather than store it unread and copy the whole file.
+            from services.callable_intake import apply_callable_intake
+            from services.procedure_source import ProcedureSourceError
+
+            try:
+                apply_callable_intake(request_obj, source_kind="file")
+            except ProcedureSourceError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         if mappings_json.strip():
             try:
                 import json as _json

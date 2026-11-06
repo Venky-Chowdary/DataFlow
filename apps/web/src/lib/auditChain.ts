@@ -10,8 +10,8 @@ export type ChainVerdictReport = {
   /** null: nothing was walked (no records, or the store could not be read). */
   verified: boolean | null;
   /**
-   * verified | verified_with_exceptions | findings | nothing_checked |
-   * store_unavailable (older APIs omit it).
+   * verified | verified_with_exceptions | inconclusive | findings |
+   * nothing_checked | store_unavailable (older APIs omit it).
    */
   status?: string;
   /** Records whose signing key this deployment no longer holds (QA r12 #3). */
@@ -25,7 +25,37 @@ export type ChainVerdictReport = {
   withheld_findings?: number;
   reanchored?: Array<{ event_id?: string; kind?: string }>;
   scope?: "workspace" | "platform";
+  /** Tampering a key-history re-anchor recorded; it stays tampering (C4 review 4). */
+  prior_tampering?: Array<{ kind?: string; event_id?: string; problem?: string; reanchored_at?: number }>;
+  /** Why records naming an unheld key could not be judged (status "inconclusive"). */
+  key_history_unreadable?: string | null;
+  key_history_tampered?: string | null;
+  keyring_tampered?: string | null;
+  /** The vault secrets key changed: inconclusive until a platform admin re-anchors. */
+  secrets_key_changed?: boolean;
+  tail_truncated?: { witnessed_seq?: number; store_head_seq?: number; reason?: string } | null;
+  categories?: Record<string, number>;
 };
+
+/** Some records name a key whose status could not be judged: neither verified nor tampering. */
+export function chainInconclusive(report: ChainVerdictReport): boolean {
+  return report.status === "inconclusive";
+}
+
+function priorNote(report: ChainVerdictReport): string {
+  const n = report.prior_tampering?.length ?? 0;
+  return n ? `; ${n} earlier finding(s) recorded at a key-history re-anchor` : "";
+}
+
+/** Chain-level tampering with no per-record finding (history, keyring, tail, prior). */
+function chainLevelProblem(report: ChainVerdictReport): string {
+  if (report.tail_truncated) return report.tail_truncated.reason || "the newest records were removed";
+  if (report.keyring_tampered) return report.keyring_tampered;
+  if (report.key_history_tampered && !report.secrets_key_changed) return report.key_history_tampered;
+  const prior = report.prior_tampering?.length ?? 0;
+  if (prior) return `${prior} finding(s) recorded at a key-history re-anchor`;
+  return "";
+}
 
 function reanchoredNote(report: ChainVerdictReport): string {
   const n = report.reanchored?.length ?? 0;
@@ -45,12 +75,17 @@ export function chainVerifiedWithExceptions(report: ChainVerdictReport): boolean
   return report.status === "verified_with_exceptions";
 }
 
+function lostKeyIds(report: ChainVerdictReport): string {
+  const ids = Object.keys(report.unverifiable_key_lost?.by_key_id ?? {});
+  const shown = ids.slice(0, 3).join(", ");
+  return ids.length > 3 ? `${shown} and ${ids.length - 3} more` : shown;
+}
+
 function lostKeyNote(report: ChainVerdictReport): string {
-  const lost = report.unverifiable_key_lost;
-  const n = lost?.count ?? 0;
-  const ids = Object.keys(lost?.by_key_id ?? {});
-  const keys = ids.length === 1 ? `key ${ids[0]}` : `${ids.length} keys`;
-  return `${n} record(s) signed with ${keys} this deployment no longer holds could not be checked`;
+  const n = report.unverifiable_key_lost?.count ?? 0;
+  const ids = Object.keys(report.unverifiable_key_lost?.by_key_id ?? {});
+  const keys = ids.length === 1 ? "key" : "keys";
+  return `${n} record(s) whose key is not held (${keys} ${lostKeyIds(report)})`;
 }
 
 function windowNote(report: ChainVerdictReport): string {
@@ -64,30 +99,49 @@ export function chainVerdictTitle(report: ChainVerdictReport): string {
   if (chainNotChecked(report)) return "Nothing to verify — no audit records were checked";
   if (chainVerifiedWithExceptions(report)) {
     const ok = report.checked - (report.unverifiable_key_lost?.count ?? 0);
-    return `No tampering found — ${ok} of ${report.checked} records verified; ${lostKeyNote(report)}${windowNote(report)}`;
+    // Not "no tampering": those records could not be checked at all.
+    return `Verified except ${lostKeyNote(report)} — ${ok} of ${report.checked} records verified${windowNote(report)}`;
+  }
+  if (chainInconclusive(report)) {
+    const n = report.categories?.inconclusive ?? report.findings?.length ?? 0;
+    const why = report.secrets_key_changed
+      ? "the vault secrets key changed; a platform admin must re-anchor the key history"
+      : report.key_history_unreadable || "the key history could not be read";
+    return `Not judged — ${n} record(s) name a key whose status cannot be judged: ${why}${windowNote(report)}`;
   }
   if (report.verified) {
     const lead = workspace ? "This workspace's chain is intact" : "Chain intact";
     return `${lead} — ${report.checked} records re-walked${windowNote(report)}${reanchoredNote(report)}`;
   }
   const findings = report.findings ?? [];
-  if (!findings.length) return "Chain verification failed";
+  if (!findings.length) {
+    const problem = chainLevelProblem(report);
+    return problem ? `Chain verification failed — ${problem}` : "Chain verification failed";
+  }
   if (workspace) {
-    return `Chain verification failed — ${findings.length} record(s) in this workspace`;
+    return `Chain verification failed — ${findings.length} record(s) in this workspace${priorNote(report)}`;
   }
   const spaces = new Set(findings.map((f) => f.workspace_id || "(platform)"));
-  return `Chain verification failed — ${findings.length} record(s) across ${spaces.size} workspace(s)`;
+  return `Chain verification failed — ${findings.length} record(s) across ${spaces.size} workspace(s)${priorNote(report)}`;
 }
 
 export function chainVerdictToast(report: ChainVerdictReport): string {
   if (report.status === "store_unavailable") return "The audit store could not be read; nothing was verified. Try again.";
   if (chainNotChecked(report)) return "No audit records were found to check, so nothing was verified.";
-  if (chainVerifiedWithExceptions(report)) return `No tampering found; ${lostKeyNote(report)}.`;
+  if (chainVerifiedWithExceptions(report)) return `Verified except ${lostKeyNote(report)}.`;
+  if (chainInconclusive(report)) {
+    return report.secrets_key_changed
+      ? "Not judged: the vault secrets key changed. A platform admin must re-anchor the key history."
+      : "Not judged: some records name a key whose status could not be read. Try again.";
+  }
   if (report.verified) {
     return `${report.checked} records re-walked — none altered or missing.`;
   }
   const n = report.findings?.length ?? 0;
-  if (!n) return "The chain does not hold up.";
+  if (!n) {
+    const problem = chainLevelProblem(report);
+    return problem ? `The chain does not hold up: ${problem}.` : "The chain does not hold up.";
+  }
   return report.scope === "workspace"
     ? `${n} record(s) in this workspace do not hold up.`
     : `${n} record(s) do not hold up.`;

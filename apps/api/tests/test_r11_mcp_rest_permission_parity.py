@@ -53,6 +53,7 @@ REST_TWIN: dict[str, tuple[str, str]] = {
     "delete_connector": ("DELETE", "/api/v1/connectors/saved/c-1"),
     "test_connector": ("POST", "/api/v1/connectors/saved/c-1/test"),
     "run_schedule_now": ("POST", "/api/v1/schedules/s-1/run"),
+    "recover_schedule_destination": ("POST", "/api/v1/schedules/s-1/recover"),
     "create_schedule": ("POST", "/api/v1/schedules/"),
     "set_schedule_enabled": ("PATCH", "/api/v1/schedules/s-1"),
     "update_schedule": ("PATCH", "/api/v1/schedules/s-1"),
@@ -63,6 +64,8 @@ REST_TWIN: dict[str, tuple[str, str]] = {
     "resume_job": ("POST", "/api/v1/connectors/jobs/job-1/resume"),
     "replay_quarantine": ("POST", "/api/v1/connectors/jobs/job-1/quarantine/replay"),
     "clear_cursor_resnapshot": ("POST", "/api/v1/ops/cdc-cursors/clear"),
+    "list_cdc_captures": ("GET", "/api/v1/ops/cdc-captures"),
+    "cleanup_cdc_captures": ("POST", "/api/v1/ops/cdc-captures/cleanup"),
 }
 
 #: Tools deliberately stricter than their REST twin, and why.

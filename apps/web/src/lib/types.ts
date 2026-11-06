@@ -624,6 +624,8 @@ export interface OpenedJournal extends ParsedUpload {
 }
 
 export interface JobProgress extends TransferJob {
+  /** True when the API recorded the count as unknown (null), e.g. a cancel it could not attribute. */
+  records_processed_unknown?: boolean;
   progress_pct: number;
   /** Capture-once journal outcome (opt-in per run). */
   journal?: JobJournalOutcome | null;
@@ -670,6 +672,8 @@ export interface JobProgress extends TransferJob {
 
 export interface CsvValidationReport {
   ok: boolean;
+  /** Which validation mode holds EVERY listed issue out (the API's one policy). */
+  holdout_modes?: { balanced?: boolean; lenient?: boolean };
   rows_scanned: number;
   total_rows?: number;
   full_scan?: boolean;
@@ -796,6 +800,8 @@ export interface PreflightProofBundle {
     requires_review: boolean;
     tags: string[];
     details?: Record<string, unknown>;
+    /** Non-blocking notes, e.g. possible card numbers on too small a sample (QA D7). */
+    advisories?: ComplianceAdvisory[];
     acknowledged?: boolean;
     review_status?: string;
     acknowledgment?: {
@@ -1688,7 +1694,15 @@ export interface PipelineSchedule {
   in_file_dedupe?: string;
   file_wait_seconds?: number;
   last_run_at: string | null;
+  /** Null while paused or stalled (never silently null while armed: see `state`). */
   next_run_at: string | null;
+  /**
+   * What the schedule will do on its own (QA C9 / Mongo D9): `stalled` is armed
+   * but will not fire until someone acts on `stalled_reason`.
+   */
+  state?: "paused" | "running" | "scheduled" | "stalled";
+  /** Why a stalled schedule will not fire, and the action that clears it. */
+  stalled_reason?: string;
   last_job_id: string | null;
   /** Derived by the API from the latest run record (not a stored copy). */
   last_status: string | null;
@@ -1740,6 +1754,16 @@ export interface PipelineSchedule {
 }
 
 /** A single persisted run attempt from GET /schedules/{id}/history. */
+/** A compliance note that never holds a transfer (counted in no score). */
+export interface ComplianceAdvisory {
+  column: string;
+  category: string;
+  note: string;
+  card_values?: number;
+  sampled_values?: number;
+  blocking?: boolean;
+}
+
 export interface ScheduleRun {
   job_id: string;
   status: string;
@@ -1748,6 +1772,10 @@ export interface ScheduleRun {
   finished_at: string;
   duration_seconds: number;
   records_transferred: number;
+  /** From the job's row_accounting (QA C17); null when the ledger did not say. */
+  rows_read?: number | null;
+  rows_written?: number | null;
+  rows_quarantined?: number | null;
   rejected_rows: number;
   coerced_null_rows: number;
   error: string;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 from services.fingerprint_accumulator import fingerprint_checksum
+from services.connector_auth import resolve_api_key
 from services.readback_projection import project_readback
 from services.value_serializer import load_http_json, payload_record_wire
 from typing import Any
@@ -35,7 +36,7 @@ def verify_pinecone_namespace(
         from connectors.pinecone_writer import _headers, _index_url, _requests_session
 
         index_url = _index_url(host, connection_string)
-        key = api_key or password or username or ""
+        key = resolve_api_key({"api_key": api_key, "password": password, "username": username})
         if not index_url or not key:
             return -1, ""
         session = _requests_session()
@@ -103,6 +104,7 @@ def verify_qdrant_collection(
     password: str = "",
     connection_string: str = "",
     ssl: bool = False,
+    api_key: str = "",
     collection: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
@@ -118,7 +120,7 @@ def verify_qdrant_collection(
     try:
         from connectors.qdrant_writer import _base_url, _headers, _requests_session
 
-        api_key = password or username or ""
+        api_key = resolve_api_key({"api_key": api_key, "password": password, "username": username})
         base_url = connection_string.rstrip("/") if connection_string else _base_url(host, port, ssl)
         session = _requests_session()
         hdrs = _headers(api_key)

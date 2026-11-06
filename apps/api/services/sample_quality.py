@@ -16,7 +16,8 @@ from services.value_serializer import (
     is_reader_null_cell,
 )
 
-EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+# Email validity is the gate's classifier (D94): one definition of an address.
+from services.compliance_guard import is_email_value
 
 
 def _numeric_values(values: list[str]) -> list[Decimal]:
@@ -133,7 +134,7 @@ def analyze_column_quality(
             severity = "warning"
 
     if re.search(r"email", column, re.I):
-        invalid = sum(1 for v in non_empty[:100] if v and not EMAIL_RE.match(v))
+        invalid = sum(1 for v in non_empty[:100] if v and not is_email_value(v))
         if invalid > 0 and invalid / max(len(non_empty), 1) > 0.1:
             issues.append(f"{invalid} invalid email format(s)")
             severity = "warning"

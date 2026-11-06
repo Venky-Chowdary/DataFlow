@@ -102,3 +102,65 @@ def contract_row_detail(
     if risk_id and not out.get("risk_id"):
         out["risk_id"] = risk_id
     return out
+
+
+#: Holdout actions a signed continue contract can give a whole row.
+_ROW_HOLDOUT_ACTIONS: frozenset[str] = frozenset({"quarantine", "skip_row"})
+_POSTURE_ABORT_ACTIONS: frozenset[str] = frozenset({"fail", "retry_then_fail"})
+
+
+def hold_row_under_signed_contract(row_details: list[dict[str, Any]]) -> str:
+    """One row's findings: the row holdout a signed contract already decided (D267).
+
+    A row a signed QUARANTINE_ROW / SKIP_ROW / CAST_AND_CONTINUE contract holds
+    out is not written at all, so a second cell on that same row failing on an
+    unsigned column under the strict job posture is not a partial write — the
+    whole row is already out. Aborting there turned the operator's signed
+    holdout of row 30 into "abort policy blocks partial write (FAIL_JOB)".
+
+    The unsigned findings ride with the row. They keep their own (empty)
+    contract attribution — the signed contract covers *its* column, not theirs
+    — and record the holdout as ``held_with_row`` / ``held_by_risk_id`` /
+    ``held_by_policy``, which the abort / continue predicates read. Returns the
+    row action (``quarantine`` / ``skip_row``), or ``""`` when no signed holdout
+    covers the row or a finding carries a fail-closed contract of its own — then
+    the strict posture stands.
+    """
+    from services.migration_risk_contract import (
+        CONTINUE_POLICIES,
+        disposition_for_execution_policy,
+    )
+
+    governing: dict[str, Any] | None = None
+    for d in row_details:
+        pol = str(d.get("execution_policy") or "").strip().upper()
+        action = str(d.get("policy") or "").strip().lower()
+        if pol and pol not in CONTINUE_POLICIES:
+            return ""  # a signed (or unverifiable) fail-closed contract decides
+        if pol in CONTINUE_POLICIES and action in _ROW_HOLDOUT_ACTIONS:
+            if governing is None or action == "quarantine":
+                governing = d
+    if governing is None:
+        return ""
+    posture = [
+        d
+        for d in row_details
+        if not str(d.get("execution_policy") or "").strip()
+        and str(d.get("policy") or "").strip().lower() in _POSTURE_ABORT_ACTIONS
+    ]
+    if not posture:
+        return ""
+    action = str(governing.get("policy") or "quarantine").strip().lower()
+    pol = str(governing.get("execution_policy") or "").strip().upper()
+    for d in posture:
+        d["policy"] = action
+        # Row disposition, not contract attribution: execution_policy and
+        # risk_id stay empty — no contract was signed for this column.
+        d["disposition"] = disposition_for_execution_policy(pol)
+        d["held_with_row"] = True
+        d["held_by_policy"] = pol
+        d["held_by_column"] = str(governing.get("target") or governing.get("column") or "")
+        if governing.get("risk_id"):
+            d["held_by_risk_id"] = governing["risk_id"]
+        d["quarantine_required"] = action == "quarantine"
+    return action

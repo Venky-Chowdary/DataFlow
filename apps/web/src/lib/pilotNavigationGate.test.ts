@@ -69,3 +69,16 @@ test("public marketing and unknown targets are not navigable screens", () => {
   assert.equal(isNavigableScreen("docs"), true);
   assert.equal(isNavigableScreen("jobs"), true);
 });
+
+test("a destructive staged action is never auto-run, like a mutate one", () => {
+  const { seen, onNavigate } = record();
+  applyPilotSafeActions(
+    [
+      { risk: "destructive", screen: "schedules" },
+      { risk: "mutate", screen: "jobs" },
+    ],
+    onNavigate,
+    [{ name: "navigate", success: true }],
+  );
+  assert.deepEqual(seen, []);
+});

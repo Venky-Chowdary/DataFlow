@@ -40,6 +40,7 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
     if cfg.src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
         return
     _pad_schemaless_absent_attrs(cfg, batch)
+    _absent_field_is_null_in_relational_dest(cfg, batch)
 
     with cfg._schema_absorb_lock:
         known = set(cfg.columns)
@@ -73,6 +74,27 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
         if new_headers:
             cfg.backfill_new_fields = True
             cfg.target_cols, _ = resolve_target_columns(cfg.mappings, cfg.column_types, preserve_case=True)
+
+
+def _absent_field_is_null_in_relational_dest(cfg, batch) -> None:
+    """A field a full document does not carry is NULL in a relational table (D262).
+
+    The rule and its plan-time disclosure live in ``services.schemaless_absence``.
+    """
+    from services.schemaless_absence import absent_attribute_nulls_column
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
+    if not absent_attribute_nulls_column(
+        str(cfg.src_type or ""), str(cfg.dest_type or ""), str(cfg.effective_sync or "")
+    ):
+        return
+    rows = batch.rows
+    if not rows or not all(isinstance(r, list) for r in rows):
+        return
+    for row in rows:
+        for i, cell in enumerate(row):
+            if cell == DF_MISSING_SENTINEL:
+                row[i] = SQL_NULL_SENTINEL
 
 
 def _pad_schemaless_absent_attrs(cfg, batch) -> None:
@@ -187,9 +209,42 @@ def _process_db_chunk(run, idx: int, batch: Any) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         return _process_db_chunk_inner(run, idx, batch)
+    except BaseException as exc:
+        _stamp_cancelled_chunk(run, idx, batch, exc)
+        raise
     finally:
         cfg.phase_profile.add(
             PHASE_TRANSFORM_WRITE, time.perf_counter() - started, rows=rows
+        )
+
+
+def _stamp_cancelled_chunk(run, idx: int, batch: Any, exc: BaseException) -> None:
+    """Record, on a cancel, which chunk raised and what its page was.
+
+    The partial-chunk checkpoint (``job_status.checkpoint_partial_chunk_on_cancel``)
+    may only advance the offset when the writer's consumed-row count maps one
+    to one onto source rows: the raising chunk must be the next one to apply
+    (a pool runs several chunks at once), the page must be unshaped (a recipe
+    that removes or expands rows breaks the mapping), and under keyset
+    pagination the resume bookmark must be the key after the consumed prefix,
+    not the previous chunk's. Those facts live here, with the page.
+    """
+    from services.error_handling import TransferCancelled
+
+    if not isinstance(exc, TransferCancelled):
+        return
+    rows = list(getattr(batch, "rows", None) or [])
+    raw_rows = _raw_page_rows(batch)
+    exc.chunk_idx = int(idx)  # type: ignore[attr-defined]
+    exc.chunk_shaped = bool(  # type: ignore[attr-defined]
+        run.cfg.shape_runner is not None or raw_rows != len(rows)
+    )
+    consumed = int(getattr(exc, "chunk_source_rows_consumed", 0) or 0)
+    if run.cfg.use_keyset and not exc.chunk_shaped and 0 < consumed <= len(rows):
+        from services.keyset_pagination import max_keyset_bookmark
+
+        exc.chunk_keyset_bookmark = max_keyset_bookmark(  # type: ignore[attr-defined]
+            rows[:consumed], list(getattr(batch, "headers", None) or []), run.cfg.keyset_order_cols
         )
 
 
@@ -771,7 +826,10 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
     # Tombstones are already stripped: hashing deleted keys as writes would
     # fail Gate-8 after a correct hard DELETE.
     inline_fps: list[Any] = []
-    if tally.inline_fingerprints_used and router_step is None:
+    witness = getattr(tally, "keyed_write_witness", None)
+    if witness is not None and router_step is not None:
+        witness._give_up("routed_write_not_witnessed")
+    if (tally.inline_fingerprints_used or witness is not None) and router_step is None:
         try:
             mapped_fp, _ = map_rows_for_fingerprint(
                 headers=batch.headers,
@@ -795,7 +853,10 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                     mapped_fp = dedupe_rows(
                         list(mapped_fp), list(cfg.pk_target_cols), list(cfg.target_cols)
                     )
-            if mapped_fp:
+            if mapped_fp and witness is not None:
+                # The witness renders with its own encoder (the same parameters).
+                witness.add_rows(list(mapped_fp))
+            elif mapped_fp:
                 inline_fps = row_fingerprints(
                     mapped_fp,
                     cfg.target_cols,
@@ -803,6 +864,9 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                     dest_types=cfg.digest_dest_types,
                 )
         except Exception as exc:
+            if witness is not None:
+                # A chunk the witness did not see must not look witnessed.
+                witness._give_up("chunk_not_witnessed")
             _stream.logger.warning(
                 "Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc
             )

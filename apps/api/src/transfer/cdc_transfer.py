@@ -990,27 +990,100 @@ def _max_cursor_value(records: list[dict[str, Any]], cursor_field: str, wm_type:
     return max_watermark(values, wm_type)
 
 
-def _dest_table_absent(dest_type: str, dest_cfg: dict[str, Any], table: str) -> bool:
+def _shared_snapshot_censuses(
+    plan: dict[str, Any], dest_type: str, dest_cfg: dict[str, Any], src_cfg: dict[str, Any],
+    stream_cfg: dict[str, dict[str, Any]], selected: list[Any],
+) -> dict[str, Any]:
+    """One snapshot key census per stream whose destination table already existed (E3-006)."""
+    from services.cdc_snapshot_sweep import SnapshotKeyCensus, plan_snapshot_sweep
+    from services.cdc_snapshot_window import _pk_columns
+
+    delete_modes = {
+        str(getattr(c, "name", "") or ""): str(getattr(c, "delete_mode", "") or "")
+        for c in (selected or [])
+    }
+    out: dict[str, Any] = {}
+    for name, cfg in stream_cfg.items():
+        absent = _dest_table_absent(dest_type, dest_cfg, str(name))
+        pk_source = _pk_columns(cfg["primary_key"])
+        sweep = plan_snapshot_sweep(
+            plan, dest_type=dest_type, dest_absent_before=absent, source_cfg=src_cfg,
+            mappings=list(cfg.get("mappings") or []), pk_sources=pk_source,
+            delete_mode=delete_modes.get(name, ""),
+        )
+        if sweep is not None:
+            out[name] = SnapshotKeyCensus(pk_source, sweep)
+    return out
+
+
+def _sweep_shared_snapshot(
+    censuses: dict[str, Any], destination: Any, stream_cfg: dict[str, dict[str, Any]],
+    ddl_log: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Settle each stream's destination keys its complete snapshot did not present.
+
+    Returns the per-stream findings; the caller stamps them on the summary it
+    returns (the stream phase rebinds its running summary per batch).
+    """
+    if not censuses:
+        return {}
+    from services.cdc_snapshot_window import _pk_columns
+
+    saved = getattr(destination, "table", None)
+    findings: dict[str, dict[str, Any]] = {}
+    try:
+        for name, census in censuses.items():
+            cfg = stream_cfg[name]
+            maps = list(cfg.get("mappings") or [])
+            pk_source = _pk_columns(cfg["primary_key"])
+            # Inherited mappings are identity; the stream's own key columns only
+            # (never another stream's headers) reach the kernel.
+            pk_target = (
+                list(pk_source)
+                if cfg.get("mappings_inherited")
+                else [map_source_to_target(c, maps) or c for c in pk_source]
+            )
+            destination.table = name
+            result = census.settle(destination, mappings=maps, pk_target_cols=pk_target)
+            findings[name] = result
+            ddl_log.append(f"{name}: {result['finding']}")
+    finally:
+        destination.table = saved
+    return findings
+
+
+def _stamp_snapshot_leftover(summary: dict[str, Any], findings: dict[str, dict[str, Any]]) -> None:
+    if not findings:
+        return
+    summary["snapshot_leftover"] = findings
+    removed = {n: r["removed"] for n, r in findings.items() if r.get("removed")}
+    if removed:
+        summary["snapshot_leftover_deleted"] = removed
+
+
+def _dest_table_absent(dest_type: str, dest_cfg: dict[str, Any], table: str) -> bool | None:
     """True only when the destination table is provably absent before this run.
 
-    Unknown (a driver without a metadata probe, a probe that errored) is not
-    absent: a missed probe must never turn a failed run into a drop.
+    ``None`` when the probe could not answer (a driver without a metadata
+    probe, a probe that errored): unknown is neither "absent" (a missed probe
+    must never turn a failed run into a drop) nor "populated" (the snapshot
+    sweep must not take an unanswerable probe for an existing table).
     """
     from services.dest_precount import destination_table_exists
     from services.dialect_profiles import schema_from_cfg
 
     try:
-        return (
-            destination_table_exists(
-                dest_type,
-                dest_cfg,
-                schema=schema_from_cfg(dest_type, dest_cfg),
-                table_name=str(table or ""),
-            )
-            is False
+        exists = destination_table_exists(
+            dest_type,
+            dest_cfg,
+            schema=schema_from_cfg(dest_type, dest_cfg),
+            table_name=str(table or ""),
         )
-    except Exception:  # noqa: BLE001 - an unanswerable probe means "do not drop"
-        return False
+    except Exception:  # noqa: BLE001 - an unanswerable probe is unknown
+        return None
+    if exists is None:
+        return None
+    return exists is False
 
 
 def _drop_created_table_left_empty(
@@ -2546,14 +2619,27 @@ def _run_cdc_shared_multi_table(
             )
         return bool(change.total_changes)
 
+    snapshot_censuses = _shared_snapshot_censuses(
+        snapshot_plan, dest_type, dest_cfg, src_cfg, stream_cfg, selected
+    )
+    snapshot_cut_short = False
+    sweep_findings: dict[str, dict[str, Any]] = {}
     try:
         with cdc_destination_hooks(destination, ddl_log):
             if run_snapshot:
                 with _cdc_span("cdc.snapshot", job_id=str(job_id or ""), shared_reader=True):
                     for change in cdc.snapshot():
                         _apply_tagged(change)
+                        census = snapshot_censuses.get(_resolve_stream(change))
+                        if census is not None:
+                            census.add(change)
                         if limit and total_rows >= limit:
+                            snapshot_cut_short = True
                             break
+                if not snapshot_cut_short:
+                    sweep_findings = _sweep_shared_snapshot(
+                        snapshot_censuses, destination, stream_cfg, ddl_log
+                    )
             if run_stream and not (limit and total_rows >= limit):
                 max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
                 max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
@@ -2581,6 +2667,8 @@ def _run_cdc_shared_multi_table(
         raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
+        for census in snapshot_censuses.values():
+            census.close()
         if original_dest_table is not None:
             destination.table = original_dest_table
         if original_dest_collection is not None:
@@ -2656,6 +2744,7 @@ def _run_cdc_shared_multi_table(
     )
     last_summary["cdc_shared_reader"] = True
     last_summary["snapshot_mode"] = snapshot_mode.value
+    _stamp_snapshot_leftover(last_summary, sweep_findings)
     stamp = snapshot_plan_stamp(snapshot_plan)
     if stamp:
         last_summary["snapshot_plan"] = stamp
@@ -2700,6 +2789,7 @@ def _run_cdc_multi_stream_sequential(
     stream_health: list[dict[str, Any]] = []
     worst_lag: float | None = None
     last_summary: dict[str, Any] = {}
+    leftover_by_stream: dict[str, dict[str, Any]] = {}
 
     original_table = getattr(source, "table", None)
     original_collection = getattr(source, "collection", None)
@@ -2773,6 +2863,10 @@ def _run_cdc_multi_stream_sequential(
                     ddl_log.extend(stream_ddl)
                     total_rows += rows
                     last_summary = summary
+                    # Each stream's leftover finding stays visible by name (the
+                    # last stream's summary becomes the run's summary below).
+                    if isinstance(summary.get("snapshot_leftover"), dict) and "finding" in summary["snapshot_leftover"]:
+                        leftover_by_stream[str(stream_name)] = summary["snapshot_leftover"]
                     lag = summary.get("cdc_lag_seconds")
                     if isinstance(lag, (int, float)):
                         worst_lag = lag if worst_lag is None else max(worst_lag, float(lag))
@@ -2825,6 +2919,9 @@ def _run_cdc_multi_stream_sequential(
 
     last_summary = dict(last_summary or {})
     last_summary["streams"] = stream_health
+    if leftover_by_stream:
+        last_summary.pop("snapshot_leftover_deleted", None)
+        _stamp_snapshot_leftover(last_summary, leftover_by_stream)
     if worst_lag is not None:
         last_summary["cdc_lag_seconds"] = worst_lag
     return total_rows, ddl_log, last_summary, headers
@@ -2858,25 +2955,11 @@ def _cdc_source_schema_catalog(
     None when the source is not a SQL catalog or cannot be introspected; the
     writer then reports a types-only CREATE rather than claiming a carry.
     """
-    from .stream import _PK_INTROSPECT_TYPES
+    from .adapters_introspect import source_schema_catalog_for_table
 
-    if src_type not in _PK_INTROSPECT_TYPES or not (table_name or "").strip():
-        return None
-    try:
-        from .adapters import (
-            _introspect_table_schema_rich,
-            source_schema_catalog_payload,
-        )
-
-        rich = _introspect_table_schema_rich(
-            src_type, src_cfg, table_name, list(columns or [])
-        )
-        return source_schema_catalog_payload(
-            src_type, list(columns or []), rich, fallback_types=fallback_types
-        )
-    except Exception as exc:  # noqa: BLE001 - writer certifies types-only
-        logger.debug("CDC source schema catalog failed: %s", exc, exc_info=exc)
-        return None
+    return source_schema_catalog_for_table(
+        src_type, src_cfg, table_name, list(columns or []), fallback_types=fallback_types
+    )
 
 
 def _catalog_cdc_primary_key(
@@ -3513,6 +3596,11 @@ def _run_cdc_single_stream(
         acked when the dump finishes.
         """
         nonlocal chunk_idx, total_chunks, eos_active
+        # A long CDC drain adopts a rotated hash_pii key between batches and
+        # records each version it used (review S6); a batch never mixes keys.
+        from services.pii_hash_keys import renew_job_key_at_boundary
+
+        renew_job_key_at_boundary()
         from services.cdc_resume_tokens import (
             is_durable_log_resume_token,
             is_side_channel_resume_token,
@@ -3781,6 +3869,19 @@ def _run_cdc_single_stream(
         )
 
     dest_absent_before = _dest_table_absent(dest_type, dest_cfg, str(dest_table or ""))
+    from services.cdc_snapshot_sweep import SnapshotKeyCensus, plan_snapshot_sweep
+
+    sweep_plan = plan_snapshot_sweep(
+        snapshot_plan,
+        dest_type=dest_type,
+        dest_absent_before=dest_absent_before,
+        source_cfg=src_cfg,
+        mappings=list(mappings or []),
+        pk_sources=list(pk_source_cols),
+        delete_mode=str(getattr(contract, "delete_mode", "") or "") if contract else "",
+    )
+    snapshot_census = SnapshotKeyCensus(pk_source_cols, sweep_plan) if sweep_plan else None
+    snapshot_sweep: dict[str, Any] | None = None
     try:
         with cdc_destination_hooks(destination, ddl_log):
             snapshot_resume = None
@@ -3790,6 +3891,8 @@ def _run_cdc_single_stream(
                         if change.resume_token is not None:
                             snapshot_resume = change.resume_token
                         _apply_and_checkpoint(change, publish_resume=False)
+                        if snapshot_census is not None:
+                            snapshot_census.add(change)
                 # The dump finished. This cursor is the handoff: every snapshot
                 # row was applied, so a later poll may seek past it.
                 if state.running_cursor:
@@ -3814,6 +3917,24 @@ def _run_cdc_single_stream(
                             "CDC snapshot ack failed (at-least-once redelivery): %s",
                             ack_exc,
                         )
+                # E3-006: the snapshot is the source image at the handoff; a key
+                # the destination holds that it did not present was deleted
+                # while no stream ran. Remove it before streaming resumes.
+                from services.cdc_snapshot_mode import (
+                    snapshot_dump_open as _dump_still_open,
+                )
+
+                if snapshot_census is not None and not _dump_still_open(
+                    state.running_cursor
+                ):
+                    snapshot_sweep = snapshot_census.settle(
+                        destination, mappings=mappings, pk_target_cols=pk_target_cols
+                    )
+                if snapshot_census is not None:
+                    snapshot_census.close()
+                    snapshot_census = None
+                if snapshot_sweep is not None:
+                    ddl_log.append(snapshot_sweep["finding"])
 
             # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
             # continuously poll until idle so a single job drains the slot/binlog/CT stream.
@@ -4237,6 +4358,10 @@ def _run_cdc_single_stream(
             if lag_fields.get(ha_key) is not None:
                 summary[ha_key] = lag_fields.get(ha_key)
         summary["snapshot_mode"] = snapshot_mode.value
+        if snapshot_sweep is not None:
+            summary["snapshot_leftover"] = snapshot_sweep
+            if snapshot_sweep.get("removed"):
+                summary["snapshot_leftover_deleted"] = snapshot_sweep["removed"]
         stamp = snapshot_plan_stamp(snapshot_plan)
         if stamp:
             summary["snapshot_plan"] = stamp
@@ -4322,6 +4447,8 @@ def _run_cdc_single_stream(
         raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
+        if snapshot_census is not None:
+            snapshot_census.close()
         if hasattr(cdc, "close"):
             try:
                 cdc.close()

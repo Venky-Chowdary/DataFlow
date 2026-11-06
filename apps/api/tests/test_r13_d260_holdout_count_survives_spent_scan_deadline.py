@@ -15,10 +15,30 @@ import pytest
 from services.population_fit_scan import GATE_ID
 from services.preflight_service import run_file_preflight
 
+def _signed_cast_and_continue() -> dict:
+    """The production run's signed contract for qty: without it the column has
+    no holdout under balanced (validation_mode_contract.mode_holdout_kind)."""
+    from services.migration_risk_contract import sign_risk_contract
+
+    body: dict = {
+        "risk_id": "sample_transform", "severity": "high", "root_cause": "sample_transform",
+        "column": "qty", "source_type": "TEXT", "destination_type": "INTEGER",
+        "transform": "integer", "rows_sampled": 3, "estimated_rows": 3,
+        "expected_failure_pct": 1.0, "expected_precision_loss": False,
+        "expected_truncation": False, "expected_nulls": False,
+        "execution_policy": "CAST_AND_CONTINUE", "quarantine_policy": "DLQ",
+        "retry_policy": "NONE", "rollback_strategy": "DOCUMENT_ONLY",
+        "approved_by": "admin@dataflow.app", "approved_at": "2026-08-17T00:00:00Z",
+        "reason": "Bad qty values are held out for this load", "target": "qty",
+    }
+    body["signature"] = sign_risk_contract(body)
+    return body
+
+
 _MAPPINGS = [
     {"source": "id", "target": "id", "confidence": 0.99, "target_type": "INTEGER"},
     {"source": "qty", "target": "qty", "confidence": 0.99, "target_type": "INTEGER",
-     "transform": "integer"},
+     "transform": "integer", "risk_contract": _signed_cast_and_continue()},
 ]
 
 

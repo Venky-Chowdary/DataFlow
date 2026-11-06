@@ -28,6 +28,7 @@ not Python ``len(s.encode('utf-8'))`` after a second decode.
 
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -101,6 +102,46 @@ _UTF8_DESTS = frozenset(
         "spark",
     }
 )
+
+
+# MySQL/MariaDB ``latin1`` is Windows-1252 with five extra mappings: the bytes
+# cp1252 leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) are U+0081, U+008D,
+# U+008F, U+0090 and U+009D (MySQL ``strings/ctype-latin1.cc``). Python's
+# ``cp1252`` refuses those five, so a value the server stores and returns
+# (``'A' U+009D 'B'``) was judged unencodable and the cell refused, while the
+# same value read in query mode (no declared charset) passed. One codec, named
+# here and registered with :mod:`codecs`, is the only spelling of that page.
+MYSQL_LATIN1_CODEC = "mysql_latin1"
+MYSQL_LATIN1_UNDEFINED_CP1252_BYTES: frozenset[int] = frozenset({0x81, 0x8D, 0x8F, 0x90, 0x9D})
+_MYSQL_LATIN1_DECODING_TABLE = "".join(
+    chr(b) if b in MYSQL_LATIN1_UNDEFINED_CP1252_BYTES else bytes([b]).decode("cp1252")
+    for b in range(256)
+)
+_MYSQL_LATIN1_ENCODING_TABLE = codecs.charmap_build(_MYSQL_LATIN1_DECODING_TABLE)
+
+
+def _mysql_latin1_encode(text: str, errors: str = "strict") -> tuple[bytes, int]:
+    return codecs.charmap_encode(text, errors, _MYSQL_LATIN1_ENCODING_TABLE)
+
+
+def _mysql_latin1_decode(data: bytes, errors: str = "strict") -> tuple[str, int]:
+    return codecs.charmap_decode(data, errors, _MYSQL_LATIN1_DECODING_TABLE)
+
+
+def _mysql_latin1_search(name: str) -> codecs.CodecInfo | None:
+    if name.replace("-", "_") != MYSQL_LATIN1_CODEC:
+        return None
+    return codecs.CodecInfo(
+        name=MYSQL_LATIN1_CODEC, encode=_mysql_latin1_encode, decode=_mysql_latin1_decode
+    )
+
+
+codecs.register(_mysql_latin1_search)
+
+
+def decode_mysql_latin1(data: bytes) -> str:
+    """Bytes of a MySQL ``latin1`` column, decoded exactly as the server does."""
+    return bytes(data).decode(MYSQL_LATIN1_CODEC)
 
 
 @dataclass(frozen=True)
@@ -234,7 +275,16 @@ def classify_capacity(
 ) -> EncodingCapacity:
     """Physical encoding capacity. Name-copy is not capacity."""
     eng = _normalize_dest_db(engine)
-    declared = parse_declared_charset(type_str, charset).strip()
+    # A PostgreSQL column's encoding is the database's, never its collation:
+    # ``COLLATE "latin1_swedish_ci"`` (a MySQL name copied onto PG DDL) read as
+    # ISO-8859-1 refused '’' that a UTF8 database stores. Only an explicit
+    # charset argument (the server encoding) narrows a PG-family column.
+    if eng in _PG_FAMILY and not (charset or "").strip():
+        declared = (
+            m.group(1) if (m := _CHARSET_RE.search(type_str or "")) else ""
+        ).strip()
+    else:
+        declared = parse_declared_charset(type_str, charset).strip()
     token = declared.lower().replace("-", "")
     upper_type = (type_str or "").upper()
 
@@ -267,12 +317,13 @@ def classify_capacity(
     if token in {"gb18030"}:
         return EncodingCapacity(form="gb18030", name="GB18030")
     if token in {"latin1", "iso88591", "iso8859p1", "we8iso8859p1"}:
-        # MySQL latin1 is cp1252; ISO-8859-1 engines are latin-1.
+        # MySQL latin1 is cp1252 plus the five bytes cp1252 leaves undefined;
+        # ISO-8859-1 engines are latin-1.
         if eng in _MYSQL_FAMILY:
             return EncodingCapacity(
                 form="cp1252",
                 name="latin1",
-                codec="cp1252",
+                codec=MYSQL_LATIN1_CODEC,
                 max_code_point=0xFF,
             )
         return EncodingCapacity(

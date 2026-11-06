@@ -144,7 +144,7 @@ def plan_rollback(
             "Operators receive an explicit restore runbook pointer.",
         ]
         non_guarantees = [
-            "DataWrap does not execute warehouse restore.",
+            "Datawrap does not execute warehouse restore.",
             "TRUNCATE of primary is not auto-executed (refuse silent destructive undo).",
             "Population undo is NOT claimed.",
         ]
@@ -220,7 +220,7 @@ def execute_rollback(
 
     if strategy not in EXECUTABLE_STRATEGIES or not raw.get("executable"):
         raise RollbackRefuseError(
-            f"Strategy {strategy} is not executable by DataWrap — "
+            f"Strategy {strategy} is not executable by Datawrap — "
             "follow docs/MIGRATION_ROLLBACK.md (warehouse restore / staging re-land). "
             "Population undo is not claimed."
         )

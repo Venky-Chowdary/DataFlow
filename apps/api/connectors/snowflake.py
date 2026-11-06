@@ -7,6 +7,7 @@ import logging
 from connectors.base import ConnectResult
 from connectors.snowflake_conn import (
     classify_snowflake_connect_error,
+    use_snowflake_warehouse,
     get_connection,
     normalize_account,
     parse_snowflake_url,
@@ -97,7 +98,7 @@ def test_snowflake(
         )
         with conn.cursor() as cur:
             if wh:
-                cur.execute(f'USE WAREHOUSE "{wh}"')
+                use_snowflake_warehouse(cur, wh, f'"{wh}"')
             if list_tables:
                 tables = _list_tables_metadata_only(cur, schema or "PUBLIC")
             else:

@@ -46,9 +46,18 @@ def _rank(role: str) -> int:
 
 
 def workspace_id_from_request_headers(headers: Any) -> str:
-    """The workspace the request addresses, or ``""`` when it names none."""
+    """The workspace the request addresses, or ``""`` when it names none.
+
+    A platform admin's view (``__all__`` / ``__unassigned__``) is not a
+    workspace a row can be stamped with or looked up by, so it reads as
+    ``""`` here (D218). Every raw header read goes through this function;
+    ``tenant_scope(request).requested_workspace_id`` is the one place that
+    still sees the view.
+    """
+    from services.workspace_filter import stored_workspace_id
+
     try:
-        return str(headers.get("x-workspace-id", "") or "").strip()
+        return stored_workspace_id(headers.get("x-workspace-id", ""))
     except AttributeError:
         return ""
 

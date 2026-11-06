@@ -50,6 +50,52 @@ server {
         client_max_body_size 256m;
         # Default 8k/16k spills POST /preflight/explain to client_temp (warn, not 413).
         client_body_buffer_size 2m;
+        # An API client (the web app, an MCP client) parses JSON: when nginx
+        # itself answers (API down or slow), answer JSON, never an HTML page.
+        error_page 502 503 504 = @api_unavailable;
+    }
+
+    # /api and /api/v1 without the trailing path are API paths too: JSON 404,
+    # never the SPA shell (QA r12 Mongo D11).
+    location = /api {
+        default_type application/json;
+        return 404 '{"detail":"Not Found"}';
+    }
+
+    # MCP OAuth discovery (RFC 9728) is served by the API at its root, not
+    # under /api/. MCP clients (Claude, Cursor, the TS SDK) fetch it from the
+    # origin they were given — this web origin — after a 401 from /api/v1/mcp.
+    # The SPA catch-all answered 200 index.html, and the client failed with
+    # "Unexpected token '<' <!DOCTYPE" (QA r12 Mongo D11).
+    location ^~ /.well-known/oauth-protected-resource {
+        proxy_pass ${API_ORIGIN};
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host ${API_PROXY_HOST};
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $dw_forwarded_proto;
+        proxy_set_header X-Real-IP "";
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        error_page 502 503 504 = @api_unavailable;
+    }
+
+    # Any other discovery document (oauth-authorization-server,
+    # openid-configuration, ...): a static file if one ships, else JSON 404 so
+    # the client falls back instead of choking on HTML.
+    location ^~ /.well-known/ {
+        try_files $uri @json_not_found;
+    }
+
+    location @json_not_found {
+        default_type application/json;
+        return 404 '{"detail":"Not Found"}';
+    }
+
+    location @api_unavailable {
+        default_type application/json;
+        return 502 '{"detail":"The Datawrap API is unreachable from the web service. Check DATAWRAP_API_BASE and the API service health."}';
     }
 
     # Real API liveness (not the static web /health stub).

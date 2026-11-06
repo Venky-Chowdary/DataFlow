@@ -320,7 +320,7 @@ def _non_narrowing_decimal_cast(details: dict[str, Any] | None) -> bool:
 _MISSING_VALUE_RE = re.compile(
     r"null/empty|null upsert key|null (?:primary |upsert |merge )?key|empty "
     r"(?:string )?(?:primary |upsert |merge )?key|expect_column_not_null|"
-    r"expect_column_values_to_not_be_null",
+    r"expect_column_values_to_not_be_null|not null contract|rejects null",
     re.I,
 )
 
@@ -418,6 +418,14 @@ def _is_fidelity_signal(
     # fidelity collapse" on a first MySQL → SQL Server load. A real narrowing
     # stays a fidelity signal.
     if _non_narrowing_decimal_cast(details):
+        return False
+    # A NULL bound for a NOT NULL column is a finding on one source row, on any
+    # gate (G3's "NOT NULL contract ... rejects NULL" as much as G9's). Titling
+    # it "fidelity collapse ... cust TEXT -> TEXT" named a type path that loses
+    # nothing and hid the row the operator can quarantine (D25).
+    if details.get("fidelity_collapse") is not True and _is_missing_value_signal(
+        message, details
+    ):
         return False
     if details.get("fidelity_collapse") is True:
         return True
@@ -602,6 +610,44 @@ def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
     )
 
 
+_REPEATED_KEY_RE = re.compile(
+    r"([^\s:\"']+(?: \+ [^\s:\"']+)*): duplicate (?:composite )?key values "
+    r"(?:from source probe )?\(((?:[^()]|\([^()]*\))*)\)"
+)
+_ONE_PART = re.compile(r"\(([^(),]*)\)")
+
+
+def _repeated_key_summary(signals: list[dict[str, Any]]) -> str:
+    """Name the repeated key values a duplicate gate found (QA C2, D205).
+
+    "sku: duplicate key values (SKU-00007×2)" becomes the finding's summary,
+    and the routes that resolve it.
+    """
+    import json as _json
+
+    texts: list[str] = []
+    for sig in signals:
+        texts.append(str(sig.get("message") or ""))
+        try:
+            texts.append(_json.dumps(sig.get("details") or {}, default=str, ensure_ascii=False))
+        except (TypeError, ValueError):
+            continue
+    blob = "\n".join(texts)
+    match = _REPEATED_KEY_RE.search(blob)
+    if not match:
+        return ""
+    from services.data_integrity import DUPLICATE_KEY_ROUTES, TABLE_DUPLICATE_ROUTE_TEXTS
+
+    # A one-column destination key is spelled as a tuple: "(sku)", "(A)×2".
+    label = _ONE_PART.sub(r"\1", match.group(1))
+    values = _ONE_PART.sub(r"\1", match.group(2))
+    routes = next(
+        (r for r in TABLE_DUPLICATE_ROUTE_TEXTS if r in blob),
+        DUPLICATE_KEY_ROUTES,
+    )
+    return f"Key {label} repeats in the source ({values}). " + routes
+
+
 def _is_duplicate_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -631,6 +677,10 @@ def _is_duplicate_signal(
     # without any duplicate row. Those are capture failures (R3-H1).
     blob_early = _blob(message, details)
     if re.search(r"wal_level|logical decoding", blob_early, re.I):
+        return False
+    # A server that forces a PRIMARY KEY on CREATE (MySQL D2) is a target-DDL
+    # requirement; no duplicate row is involved.
+    if re.search(r"sql_require_primary_key|innodb_force_primary_key", blob_early, re.I):
         return False
     if re.search(r"poll cursor .+ is the primary key", blob_early, re.I):
         return False
@@ -690,6 +740,17 @@ def _source_from_pair_label(label: str) -> str:
     if re.fullmatch(r"[\w.]+", head):
         return head
     return ""
+
+
+def _first_cell_refusal(sources: list[dict[str, Any]]) -> str:
+    """The first per-cell refusal text in transform gates (a row-numbered one wins)."""
+    texts: list[str] = []
+    for src in sources:
+        details = src.get("details") or {}
+        for key in ("errors", "issue_texts"):
+            texts.extend(str(t).strip() for t in (details.get(key) or [])[:12] if str(t).strip())
+    with_row = next((t for t in texts if re.match(r"row \d+\b", t, re.I)), "")
+    return (with_row or (texts[0] if texts else ""))[:240]
 
 
 def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
@@ -887,14 +948,38 @@ def _root_id(kind: str, columns: list[str], gate_ids: list[str]) -> str:
 #: Title of the root cause the engine raises for sample cast / transform failures.
 CAST_FAILURE_ROOT_TITLE = "Sample transform / cast failures"
 
-#: The way out that keeps the valid rows: load them and hold the failing ones out
-#: in quarantine instead of refusing the whole run (D170).
-QUARANTINE_REPLAN_FIX = (
-    "Re-plan with quarantine: pass risk_acceptance {execution_policy: "
-    "CAST_AND_CONTINUE, on_cast_failure: quarantine, approved_by, reason} to "
-    "plan_transfer / start_transfer, or to rerun_job, so the failing rows are held "
-    "out for review and the valid rows load"
+#: The acceptance object every surface takes (QA r12 D2).
+_QUARANTINE_ACCEPTANCE = (
+    "risk_acceptance {execution_policy: CAST_AND_CONTINUE, on_cast_failure: "
+    "quarantine, approved_by, reason}"
 )
+
+#: The way out that keeps the valid rows: load them and hold the failing ones out
+#: in quarantine instead of refusing the whole run (D170). Named per surface so
+#: every field it cites exists (QA r12 D2: REST had no such input).
+QUARANTINE_REPLAN_FIX = (
+    f"Re-plan with quarantine: pass {_QUARANTINE_ACCEPTANCE} to MCP plan_transfer "
+    "/ start_transfer, or as the risk_acceptance form field (JSON-encoded) on REST "
+    "POST /api/v1/transfer/run, so the failing rows are held out for review and "
+    "the valid rows load"
+)
+
+
+def quarantine_retry_fix(job_id: str) -> str:
+    """The same way out for a job that already *failed* on cast failures.
+
+    A failed job is retried, not re-run: ``rerun_job`` / ``/rerun`` refuse a
+    failed job, so naming them sent the operator to a dead end (QA r12 D2,
+    Snowflake D6). ``retry_job`` and ``/retry`` take the acceptance.
+    """
+    jid = str(job_id or "").strip() or "{job_id}"
+    return (
+        f"Retry with quarantine: pass {_QUARANTINE_ACCEPTANCE} to MCP retry_job, "
+        f"or in the JSON body of REST POST /api/v1/connectors/jobs/{jid}/retry "
+        '({"risk_acceptance": {...}}), so the failing rows are held out for review '
+        "and the valid rows load (a new run takes it as the risk_acceptance form "
+        "field on POST /api/v1/transfer/run)"
+    )
 
 
 def _pending_widen_paths(preflight: dict[str, Any]) -> dict[str, str]:
@@ -1591,6 +1676,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             if unknown_name
             else ""
         )
+        # The class alone ("INVALID_TIMESTAMP") left the operator to dig the
+        # value and the reason out of gate details (D52). Lead with the first
+        # concrete cell refusal, preferring one that names its row.
+        first_refusal = _first_cell_refusal(xf_gates + xf_blockers)
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("sample_transform", cols, absorbed),
@@ -1610,6 +1699,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         if failure_classes
                         else ""
                     )
+                    + (f" · first: {first_refusal}" if first_refusal else "")
                 ),
                 business_impact=biz,
                 affected_columns=cols,
@@ -2060,6 +2150,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 ),
                 "",
             )
+            _dup_msg = "" if _eq_msg else _repeated_key_summary([*dup_gates, *dup_blockers])
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
@@ -2070,7 +2161,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         if _eq_msg
                         else "Duplicate identity keys"
                     ),
-                    summary=_eq_msg or (
+                    summary=_eq_msg or _dup_msg or (
                         "Identity / uniqueness checks failed on the Validate sample "
                         f"— impacts {len(absorbed)} gate check(s)"
                     ),

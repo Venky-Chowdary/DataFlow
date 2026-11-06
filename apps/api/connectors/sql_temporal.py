@@ -114,6 +114,56 @@ def invalid_calendar_reason(value: Any) -> str:
     return _clock_reason(text, clock) if clock else ""
 
 
+#: Largest share of a column's sampled non-blank values that may name no real
+#: calendar day while Validate still treats them as row holdouts (QA browser 3).
+#: Below it the column is a date column with a few impossible days: each such
+#: row is quarantined with its reason and the rest load. At or above it the
+#: column itself is in doubt, so Validate blocks. Execute holds the same cells
+#: out beyond the sample either way; this bound only governs the plan.
+INVALID_CALENDAR_MAX_SHARE = 0.2
+
+
+def is_invalid_calendar_refusal(reason: Any) -> bool:
+    """Is ``reason`` this module's own invalid-calendar refusal (date or clock)?
+
+    Decisions about a refused cell read the refusal, not the value: a
+    ``2024-02-30`` refused for another rule (boolean target, time-zone invent)
+    is not an invalid-calendar holdout.
+    """
+    text = str(reason or "")
+    return (
+        text.startswith("Invalid date: ") and "is not a real calendar date" in text
+    ) or (text.startswith("Invalid time: ") and "is not a real time of day" in text)
+
+
+def is_ambiguous_date_order_refusal(reason: Any) -> bool:
+    """Is ``reason`` the mixed-format refusal of a slash date valid under DMY and MDY?
+
+    ``transform_engine`` refuses ``01/02/2024`` in a date or datetime column whose
+    dates are ISO:
+    it is a different day under each order, so the read cannot pin one (QA R5).
+    """
+    text = str(reason or "")
+    return text.startswith(("Invalid date: ", "Invalid datetime: ")) and (
+        "is a different day under DMY and MDY" in text
+    )
+
+
+def is_date_holdout_refusal(reason: Any) -> bool:
+    """Is ``reason`` a date the read cannot pin to one real day?
+
+    The one date class balanced holds out on a file (``validation_mode_contract``):
+    an invalid calendar day (QA browser 3) or an ambiguous day/month order
+    (QA R5). Both are counted under the same share bound.
+    """
+    return is_invalid_calendar_refusal(reason) or is_ambiguous_date_order_refusal(reason)
+
+
+def invalid_calendar_share_holds_out(bad: int, total: int) -> bool:
+    """``bad`` invalid-calendar cells out of ``total`` sampled are row holdouts."""
+    return 0 < bad < total and bad < INVALID_CALENDAR_MAX_SHARE * total
+
+
 def temporal_text_unfit_reason(value: Any, ddl_type: str, *, engine: str = "") -> str:
     """The bind's own verdict on one temporal text cell, without binding it.
 
@@ -400,10 +450,16 @@ def parse_sql_date(value: Any) -> date | None:
             return None
     else:
         return None
-    from services.transform_engine import apply_transform
+    # The same parser the ``date`` transform uses. The transform itself refuses
+    # a time of day (a planned DATE must not drop a clock silently, D291); a
+    # bind into a column the catalog declares DATE keeps the calendar day, as
+    # ``coerce_sql_temporal`` always has for a typed ``datetime``.
+    from services.transform_engine import _parse_date, mixed_date_format_reason
 
-    iso, err = apply_transform(text, "date")
-    if err or iso is None:
+    if mixed_date_format_reason(text):
+        return None
+    iso = _parse_date(text, with_time=True)
+    if iso is None:
         return None
     try:
         return date.fromisoformat(str(iso)[:10])
@@ -1139,6 +1195,8 @@ def extract_column_from_sql_error(exc: BaseException | str) -> str | None:
 
     text = str(exc)
     for pattern in (
+        # MariaDB column CHECK (4025): CONSTRAINT `table.column` failed for ...
+        r"CONSTRAINT `[^`.]+\.([^`.]+)` failed for",
         r"for column ['`]([^'`]+)['`]",
         r'for column ["“]([^"”]+)["”]',
         r"column ['`]([^'`]+)['`]",
@@ -1182,6 +1240,9 @@ _ROW_CONTRACT_ERROR_SIGNATURES = (
     "violates foreign key constraint",
     "check constraint",
     "foreign key constraint",
+    # MariaDB ER_CONSTRAINT_FAILED (4025): "CONSTRAINT `t.amount` failed for
+    # `db`.`t`" — a CHECK refusal PyMySQL raises as OperationalError (E1-021).
+    "(4025, ",
     # Oracle: 01400 NULL insert, 01438/12899 too large, 02290 check, 02291 FK
     "ora-01400",
     "ora-01438",

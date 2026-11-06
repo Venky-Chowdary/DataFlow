@@ -137,6 +137,7 @@ from .models import (
 )
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
+from .stream_multi import last_stream_reconcile_inputs
 from .stream import (
     _discard_unconsumed_pin_ledgers,
     _kafka_accumulate_offsets,
@@ -706,7 +707,8 @@ def takes_streaming_route(request: Any) -> bool:
 
     if not supports_streaming(request.source, request.destination):
         return False
-    if request.priority_column or getattr(request, "write_via_staging", False):
+    from services.duplicate_policy import keep_last_reads_whole
+    if request.priority_column or getattr(request, "write_via_staging", False) or keep_last_reads_whole(request):
         return False
     contract = resolve_sync_contract(request.stream_contracts)
     sync = resolve_effective_sync_mode(
@@ -765,15 +767,11 @@ class UniversalTransferEngine:
         self, request: TransferRequest, job_id: str, resume: bool = False
     ) -> TransferResult:
         """Run a tracked transfer under the workspace's connector egress policy."""
-        from services.egress_guard import egress_workspace
+        from .job_scope import tracked_job_scope
 
-        from services.endpoint_session import endpoint_session_scope
-
-        # One SFTP login per endpoint for the whole job (D189): listing, stat,
-        # spill, preview and probes share it. Database sessions stay the job's.
-        with egress_workspace(str(request.workspace_id or "")), endpoint_session_scope(
-            engines=("sftp",)
-        ):
+        # Egress policy, one SFTP login per endpoint (D189), the hash_pii key and
+        # the keyed write witness: all held for the job, all left on any outcome.
+        with tracked_job_scope(request, job_id, store=_job_store):
             from services import transfer_journal
 
             if request.source.kind == "file":
@@ -908,6 +906,7 @@ class UniversalTransferEngine:
                     error=violation.message,
                     message=violation.message,
                     error_details=violation.details,
+                    error_code=str(violation.details.get("error_code") or ""),
                 )
             except Exception:
                 logger.exception("Could not record continuity failure on %s", job_id)
@@ -950,6 +949,9 @@ class UniversalTransferEngine:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
             ):
+                from services.destination_write_lock import hold_destination_write_lock
+
+                hold_destination_write_lock(request, job_id)  # released by tracked_job_scope
                 result = self._execute_tracked_inner(request, job_id, resume=resume)
         except BaseException as exc:
             lifecycle_events.emit_run_exception(logger, fields, started, exc)
@@ -1716,6 +1718,8 @@ class UniversalTransferEngine:
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
+            from services.duplicate_policy import keep_last_records
+            records = keep_last_records(request, records)
             # The batch path reads the source whole, so an incremental mode has
             # to be bounded here or it re-delivers rows already at rest.
             try:
@@ -2386,10 +2390,6 @@ class UniversalTransferEngine:
                             phase="writing",
                             message="Connecting to destination and creating table…",
                         )
-                    from services.preflight_source_kind import (
-                        source_is_record_batch,
-                    )
-
                     with _job_phase_heartbeat(
                         mongo,
                         job_id,
@@ -2410,13 +2410,10 @@ class UniversalTransferEngine:
                             job_id=job_id,
                             skip_preflight=request.skip_preflight,
                             sync_mode=request.sync_mode,
-                            # File/object-store blanks into typed columns are SQL
-                            # NULL (D1): the buffered path dropped the flag, so
-                            # Execute rejected blanks preflight accepted.
-                            empty_cells_as_null=source_is_record_batch(
-                                getattr(request.source, "kind", "") or "database",
-                                request.source.format,
-                            ),
+                            # Source facts (file blanks are NULL, D1; the
+                            # create-new catalog and collation, D275) are
+                            # derived by the writer from the source itself.
+                            source_endpoint=request.source,
                             upsert_ddl_approved=bool(
                                 getattr(
                                     request, "ddl_changes_acknowledged", False
@@ -2516,6 +2513,7 @@ class UniversalTransferEngine:
                                 # so an unlimited read is the whole source population.
                                 complete_snapshot=not int(request.limit or 0),
                                 scd2_opts=_scd2_opts,
+                                source_endpoint=request.source,
                             ),
                             budget=RetryBudget(
                                 max_attempts=3,
@@ -4002,8 +4000,8 @@ class UniversalTransferEngine:
                     writer_checksum=dest_summary.get("checksum")
                     or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
-                    mappings=mappings,
-                    source_schema=schema,
+                    mappings=last_stream_reconcile_inputs(dest_summary, mappings, schema)[0],
+                    source_schema=last_stream_reconcile_inputs(dest_summary, mappings, schema)[1],
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                     shape_recipe=getattr(request, "shape_recipe", None),
@@ -4919,6 +4917,7 @@ class UniversalTransferEngine:
                 read_options=read_options,
                 shape_runner=shape_runner,
                 duplicate_policy=str(getattr(request, "duplicate_policy", "") or ""),
+                live_dest_types=dest_schema_types if dest_table_exists_flag else None,
             )
 
             with _reconcile_phase_heartbeat(
@@ -4953,8 +4952,8 @@ class UniversalTransferEngine:
                     writer_checksum=dest_summary.get("checksum")
                     or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
-                    mappings=mappings,
-                    source_schema=schema,
+                    mappings=last_stream_reconcile_inputs(dest_summary, mappings, schema)[0],
+                    source_schema=last_stream_reconcile_inputs(dest_summary, mappings, schema)[1],
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                     shape_recipe=getattr(request, "shape_recipe", None),

@@ -190,6 +190,10 @@ KIND_JOB = "job_rollup"
 # with a refused write — not KIND_UNMEASURED, and not a balance failure.
 KIND_WRITE_REFUSED = "write_refused"
 READ_MEASURED = "measured_read"
+# A stream that ran its own CALL/SELECT: rows_read is the reader's own count of
+# that result set. No independent source COUNT(*) backs it, so a balance proves
+# the write side only — the label must not read as gate8_source_count.
+READ_SELF_COUNTED = "reader_self_count"
 DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
 DEST_CURRENT_READBACK = "current_readback"
 DEST_PER_STREAM = "per_stream"
@@ -2765,6 +2769,7 @@ def _compact_stream_ledger(
         "rows_source_filtered": _first_present_int(raw.get("rows_source_filtered")),
         "shape_recipe_hash": str(raw.get("shape_recipe_hash") or ""),
         "writer_ack": _as_optional_int(raw.get("writer_ack")),
+        "rows_read_source": str(raw.get("rows_read_source") or "") or None,
         "unaccounted": _as_optional_int(raw.get("unaccounted")),
     }
 
@@ -2935,6 +2940,11 @@ def stamp_stream_populations(
         src_n = count_endpoint_rows(source)
         if src_n is not None:
             recon["source_rows"] = src_n
+    elif not count_source and type(summary.get("source_row_count")) is int:
+        # A stream that ran its own CALL/SELECT: its population is the result
+        # set the reader committed, not COUNT(*) of the table its name matches.
+        recon["source_rows"] = int(summary["source_row_count"])
+        recon["source_rows_basis"] = str(summary.get("source_row_count_source") or "reader")
     if destination is not None:
         dest_n = count_endpoint_rows(destination, table_name=dest_table)
         if dest_n is not None:
@@ -2977,6 +2987,19 @@ def stamp_stream_conservation(
             "coerced_null_rows": payload.get("coerced_null_rows"),
         }
     ).to_dict()
+    recon = payload.get("reconciliation") or {}
+    if recon.get("source_rows_basis") and isinstance(health["row_accounting"], dict):
+        ledger = health["row_accounting"]
+        ledger["rows_read_source"] = READ_SELF_COUNTED
+        ledger["note"] = " ".join(
+            part
+            for part in (
+                str(ledger.get("note") or ""),
+                "rows_read is the reader's own count of this stream's CALL/SELECT "
+                "result set; no independent source COUNT(*) was taken.",
+            )
+            if part
+        )
     return health
 
 

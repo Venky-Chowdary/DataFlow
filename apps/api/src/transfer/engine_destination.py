@@ -52,9 +52,18 @@ def _connect_destination(
         get_executor,
     )
     from services.workspace_filter import current_workspace_stamp
-    from src.ai.copilot.tool_deadline import describe_target
+    from src.ai.copilot.tool_deadline import (
+        _Progress,
+        deadline_scope,
+        describe_target,
+        interrupt_connections,
+    )
 
     seconds = _destination_connect_deadline()
+    # The probe's sessions carry the deadline (statement budget) and are
+    # interrupted if the probe is abandoned, so a destination that accepted
+    # and went silent cannot hold a pool worker for good (D281/D287).
+    progress = _Progress(limit=seconds)
     try:
         cfg = _engine.resolve_connector_config(destination)
     except Exception:  # noqa: BLE001 - only names the target in the message
@@ -84,14 +93,20 @@ def _connect_destination(
             message="Connecting to destination…",
             interval_s=max(0.25, min(15.0, seconds / 4)),
         ):
+            def _probe() -> tuple[dict[str, str], bool | None]:
+                with deadline_scope(seconds, progress):
+                    return _engine._destination_schema_probe(
+                        destination, sync_mode=sync_mode
+                    )
+
             return get_executor().run(
                 "destination_connect",
-                lambda: _engine._destination_schema_probe(
-                    destination, sync_mode=sync_mode
-                ),
-                workspace=current_workspace_stamp(),
+                _probe,
+                workspace=current_workspace_stamp(for_write=False),
                 seconds=seconds,
                 describe_timeout=_timeout_message,
+                label=lambda: f"destination_connect: reading the destination schema ({target})",
+                interrupt=lambda: interrupt_connections(progress),
             )
     except (ConnectorCallTimeout, ConnectorCapacityExceeded) as exc:
         raise DestinationConnectTimeout(str(exc)) from None
@@ -315,7 +330,9 @@ def _note_failed_batch_undo(
             f"Rejected row(s) were preserved in the destination table {qt} "
             "for review and replay."
         )
-    elif dest_summary.get("partial_batch_undo") == "cleared":
+    elif dest_summary.get("partial_batch_undo") == "cleared" and (
+        dest_summary.get("rejected_details") or int(dest_summary.get("rejected_rows") or 0)
+    ):
         note = (
             "Rejected-row evidence is retained in this job's quarantine "
             "record for inspection and replay."
@@ -367,10 +384,9 @@ def _failed_batch_undo_note_impl(
         backup_name = str(extra.get("overwrite_backup") or "")
         restored = _engine._settle_overwrite_backup(destination, restore=True)
         if restored:
-            note = (
-                "The previous destination table was restored. "
-                "This run's replacement was removed."
-            )
+            from src.transfer.engine_finish import OVERWRITE_RESTORED_NOTE
+
+            note = OVERWRITE_RESTORED_NOTE
             dest_summary["partial_batch_undo"] = "restored"
         else:
             note = (

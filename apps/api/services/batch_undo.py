@@ -136,6 +136,30 @@ def undo_failed_batch_if_dest_was_empty(
         return note
 
 
+def _local_file_location(db_type: str, cfg: dict[str, Any]) -> dict[str, str] | None:
+    """``{file, host}`` for a file-local engine (SQLite/DuckDB), else ``None``."""
+    if db_type not in {"sqlite", "duckdb"}:
+        return None
+    try:
+        import os
+        import socket
+
+        from connectors.sqlite_common import duckdb_unconfined_path, sqlite_file_path
+
+        database = str(cfg.get("database") or "")
+        dsn = str(cfg.get("connection_string") or "")
+        path = (
+            sqlite_file_path(database, dsn, str(cfg.get("host") or ""))
+            if db_type == "sqlite"
+            else duckdb_unconfined_path(database, dsn)
+        )
+        if not path or path == ":memory:":
+            return None
+        return {"file": os.path.abspath(path), "host": socket.gethostname()}
+    except Exception:  # noqa: BLE001 — the note must not hide the failure
+        return None
+
+
 def keep_failed_validation_for_inspection(
     *,
     destination: Any,
@@ -193,9 +217,18 @@ def keep_failed_validation_for_inspection(
         rows = precount_table(db_type, cfg, table)
     except Exception:  # noqa: BLE001 — the note must not hide the failure
         rows = None
+    local = _local_file_location(db_type, cfg)
     dest_summary["partial_batch_undo"] = "retained_for_inspection"
-    dest_summary["validation_failed_data_kept"] = {"table": where, "rows": rows}
+    dest_summary["validation_failed_data_kept"] = {
+        "table": where, "rows": rows, **(local or {}),
+    }
     held = f" ({rows:,} row(s))" if isinstance(rows, int) else ""
+    if local:
+        # D276: a SQLite/DuckDB file lives on the disk of the process that
+        # wrote it. Name the file and the host that counted the rows, so the
+        # claim can be checked where it is true — another replica opening a
+        # same-named relative path sees a different (empty) file.
+        held += f" in {local['file']} on host {local['host']}"
     created = dest_summary.get("dest_table_existed_before") is False
     note = (
         f"Data kept at {where}{held} for inspection: "

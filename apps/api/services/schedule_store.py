@@ -48,20 +48,16 @@ INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly":
 # :00, four minutes after :56 (R12-002). A step that does not divide 60 is
 # this token, measured from the previous run, not a clock cron.
 _ROLLING_MINUTE = re.compile(r"^every_(\d+)m$")
-SYNC_MODES = {
-    "full_refresh_overwrite",
-    "full_refresh_append",
-    "incremental",
-    "incremental_append",
-    "incremental_deduped",
-    # D208: full-source upsert on every beat (no watermark). Before this a
-    # schedule could only say upsert as incremental_deduped.
-    "upsert",
-    "cdc",
-    "scd2",
-    "mirror",
-    "reverse_etl",
-}
+def _schedule_sync_modes() -> frozenset[str]:
+    from services.sync_cursor import CANONICAL_SYNC_MODES
+
+    # The engine's one vocabulary (services.transfer_policy_values / sync_cursor,
+    # QA MySQL D13) plus the stored schedule spelling ``incremental``, which
+    # keeps its token (it runs as incremental_append).
+    return frozenset(CANONICAL_SYNC_MODES | {"incremental"})
+
+
+SYNC_MODES = _schedule_sync_modes()
 
 
 def _first_contract_snapshot(contracts: Any) -> str:
@@ -177,6 +173,13 @@ class PipelineSchedule:
     dest_table: str
     interval: str  # hourly | daily | weekly (preset cadence)
     enabled: bool = True
+    #: Destination namespace the runs write into. Empty is the destination
+    #: connector's own default (its saved schema / database). A REST schedule
+    #: used to drop these, so a pipeline aimed at ``DST`` wrote into the
+    #: connector's default schema instead (QA Snowflake D11). ``dest_database``
+    #: is also the catalog for engines that name it so (Databricks, Trino).
+    dest_schema: str = ""
+    dest_database: str = ""
     #: Why the schedule sits disabled when the caller asked for enabled — e.g.
     #: a create with ``enabled:true`` but no persisted mappings is stored
     #: disabled rather than silently downgraded. Empty means no downgrade
@@ -311,6 +314,9 @@ class PipelineSchedule:
     in_file_dedupe: str = "block"
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
+    #: When the stored acknowledgement was given (ISO-8601 UTC); empty when
+    #: nothing is acknowledged (QA Snowflake D10).
+    acknowledgment_at: str = ""
     #: A pending retry is durable state, not an in-process timer: a redeploy
     #: between attempt 1 and attempt 2 must not drop the retry on the floor.
     retry_at: str | None = None
@@ -349,6 +355,8 @@ class PipelineSchedule:
             dest_table=data["dest_table"],
             interval=data.get("interval", "daily"),
             enabled=bool(data.get("enabled", True)),
+            dest_schema=str(data.get("dest_schema") or "").strip(),
+            dest_database=str(data.get("dest_database") or "").strip(),
             enabled_note=str(data.get("enabled_note") or ""),
             cron=(data.get("cron") or "").strip(),
             timezone=(data.get("timezone") or "UTC").strip() or "UTC",
@@ -466,6 +474,7 @@ class PipelineSchedule:
             ),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
+            acknowledgment_at=str(data.get("acknowledgment_at") or ""),
             retry_at=data.get("retry_at"),
             retry_attempt=max(0, int(data.get("retry_attempt", 0) or 0)),
             running=bool(data.get("running", False)),
@@ -561,6 +570,15 @@ def uneven_minute_step(cron: str) -> int | None:
     if not 1 <= count <= 59 or 60 % count == 0:
         return None
     return count
+
+
+def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
+    """Save-time twin of Validate's keep_last rule for a table (QA C2 review 3)."""
+    from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
+
+    refusal = schedule_keep_last_refusal(payload)
+    if refusal:
+        raise DuplicatePolicyError(refusal)
 
 
 def canonicalize_cadence(interval: str, cron: str) -> tuple[str, str]:
@@ -996,15 +1014,22 @@ def accepted_schedule_sync_mode(sync_mode: str) -> str:
     token = (sync_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in SYNC_MODES:
         return token
-    from services.sync_cursor import normalize_sync_mode
+    from services.transfer_policy_values import canonical_sync_mode
 
-    resolved = normalize_sync_mode(token, default="")
+    resolved = canonical_sync_mode(token)
     if resolved in SYNC_MODES:
         return resolved
     raise ValueError(f"Invalid sync_mode: {sync_mode}")
 
 
-def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
+def _validate_cadence(
+    interval: str, cron: str, tz: str, sync_mode: str, *, check_zone: bool = True
+) -> str:
+    """Refuse an unusable cadence. ``check_zone=False`` is an update that sets
+    neither the zone nor the cadence: a legacy row whose stored zone predates
+    validation stays writable (pause, back-off, baseline), and its cron horizon
+    is checked in UTC — the zone the scheduler normalises it to
+    (``normalize_invalid_timezones``)."""
     cron = (cron or "").strip()
     if interval == "cron":
         # The cadence *is* the expression — a stored preset would contradict
@@ -1014,6 +1039,18 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
     elif interval not in INTERVALS and rolling_minutes(interval) is None:
         raise ValueError(f"Invalid interval: {interval}")
     sync_mode = accepted_schedule_sync_mode(sync_mode)
+    # The zone is checked for every cadence, not only cron: a preset schedule
+    # stored ``Mars/Olympus`` (Security 15). One IANA validator for settings
+    # and schedules (``workspace_store.validate_timezone``).
+    from services.workspace_store import InvalidTimezone, validate_timezone
+
+    if check_zone:
+        validate_timezone(tz or "UTC")
+    else:
+        try:
+            validate_timezone(tz or "UTC")
+        except InvalidTimezone:
+            tz = "UTC"
     if cron:
         try:
             validate_cron(cron)
@@ -1186,11 +1223,29 @@ def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
     return schedule_bind_summary(sched)
 
 
+_CALLABLE_PLAN_KEYS = frozenset({
+    "sync_mode", "source_read_mode", "source_query", "procedure_call", "procedure_params",
+    "stream_contracts", "enabled", "source_table", "source_connector_id",
+})
+
+
 def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:
-    """Refuse CDC/SCD2/mirror on a persisted CALL/SELECT extract."""
+    """Refuse an unhonourable CALL/SELECT, and CDC/SCD2/mirror on a callable extract.
+
+    QA C3: the save goes through the same intake as a fire
+    (``services.callable_intake``). One stream contract's CALL/SELECT is the
+    schedule's source. An unknown mode word, or a callable word with no
+    statement, raises ``CallablePlacementError``, which routes answer with 422.
+    The stored payload is not rewritten.
+    """
+    from services.callable_intake import apply_callable_intake
     from services.procedure_source import callable_sync_refusal, source_read_mode_of
 
-    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(data or {}))
+    view = {k: (data or {}).get(k) for k in
+            ("source_read_mode", "source_query", "procedure_call", "procedure_params")}
+    apply_callable_intake(view, [dict(c) if isinstance(c, Mapping) else c
+                                 for c in ((data or {}).get("stream_contracts") or [])])
+    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(view))
     if reason:
         raise ValueError(reason)
 
@@ -1351,10 +1406,12 @@ def _assert_dest_pipeline_ownership(
         dst,
         table,
         exclude_schedule_id=str(exclude_id or ""),
+        dest_schema=str(payload.get("dest_schema") or ""),
+        dest_database=str(payload.get("dest_database") or ""),
     )
     if not owners:
         return
-    names = ", ".join(describe_dest_conflict(s) for s in owners)
+    names = describe_dest_conflicts(owners, limit=len(owners))
     raise ValueError(
         f"Destination table '{table}' is already written by enabled "
         f"pipeline(s) {names}: a second pipeline on one destination "
@@ -1405,13 +1462,38 @@ def _assert_schedule_connectors_allowed(data: Mapping[str, Any], *, require_taps
     )
 
 
+def _stamp_request_workspace(data: dict[str, Any]) -> dict[str, Any]:
+    """Give a schedule created inside a request the workspace that request writes to.
+
+    The MCP ``create_schedule`` → ``confirm_action`` path handed the store a
+    payload with no ``workspace_id``. The row was saved unscoped: the scheduler
+    (system scope) ran it and the destination-conflict check (every row) saw
+    it, while GET, list and DELETE — scoped to the caller's workspace — all
+    answered 404 (QA Snowflake D12). A request-bound write now lands in the
+    workspace the request resolved; system writers (no bound scope) keep
+    whatever the payload says.
+    """
+    if str(data.get("workspace_id") or "").strip():
+        return data
+    from services.workspace_filter import current_workspace_stamp
+
+    stamp = str(current_workspace_stamp() or "").strip()
+    return {**data, "workspace_id": stamp} if stamp else data
+
+
 def create_schedule(
     data: dict[str, Any],
     *,
     refuse_empty_enable: bool = False,
+    refuse_unrunnable_mappings: bool = False,
     warnings: list[str] | None = None,
 ) -> PipelineSchedule:
     """Create one schedule.
+
+    ``refuse_unrunnable_mappings`` — a user-facing save (REST, GitOps/import,
+    chat Confirm): mapping rows every run would refuse (G4 floor, Execute
+    review gate) are a 422 naming them, not a schedule that fails on its first
+    beat (QA C10).
 
     ``refuse_empty_enable`` — the caller asked for ``enabled: true`` in so many
     words (REST create). A schedule without mappings cannot be armed, so that
@@ -1427,6 +1509,7 @@ def create_schedule(
     # QA r12 bugs 6/7: refuse an unknown validation_mode / schema_policy at the
     # store every route shares (REST, MCP create_schedule, GitOps apply).
     data = canonicalize_policy_fields(data)
+    data = _stamp_request_workspace(data)
     _assert_schedule_connectors_allowed(data, require_taps=bool(data.get("enabled", True)))
     payload = dict(data)
     from services.duplicate_policy import validate_schedule_file_policy
@@ -1438,6 +1521,7 @@ def create_schedule(
     )
     payload["duplicate_policy"] = policy
     payload["in_file_dedupe"] = dedupe
+    _refuse_keep_last_that_cannot_run(payload)
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
     interval, cron = canonicalize_cadence(
         str(payload.get("interval") or "daily"),
@@ -1473,6 +1557,13 @@ def create_schedule(
             f"{EMPTY_MAPPING_REFUSAL[1:]} Send enabled: false to save a draft. "
             f"{EMPTY_MAPPING_CORRECTIVE}",
         )
+    if refuse_unrunnable_mappings:
+        # A mapping every run would refuse is refused now, by the same G4 floor
+        # and Execute review gate (QA C10) — on every create path, including
+        # the one that persists onto an existing draft below.
+        from services.schedule_mapping_contract import assert_schedule_mappings_executable
+
+        assert_schedule_mappings_executable(rows, str(payload.get("validation_mode") or "strict"))
     if rows:
         target = find_studio_replay_target(
             replay_id,
@@ -1496,7 +1587,9 @@ def create_schedule(
             patch["require_signed_contract"] = require_signed
             if "enabled" not in patch:
                 patch["enabled"] = True
-            updated = update_schedule(target.id, patch)
+            updated = update_schedule(
+                target.id, patch, refuse_unrunnable_mappings=refuse_unrunnable_mappings
+            )
             if updated:
                 return updated
     enabled = bool(payload.get("enabled", True))
@@ -1572,6 +1665,8 @@ _STAMPED_ROUTE_KEYS = (
     "source_table",
     "dest_connector_id",
     "dest_table",
+    "dest_schema",
+    "dest_database",
     "mappings",
     "stream_contracts",
     "sync_mode",
@@ -1633,11 +1728,170 @@ _SOURCE_KEYS = frozenset(
 )
 
 
+TIMEZONE_NORMALIZED_ACTION = "schedule.timezone.normalized"
+
+
+#: Below this many zones (or without a backward link resolving) the zone
+#: database is incomplete: a valid alias would read as invalid, so nothing
+#: is normalised (S4a, second review). ``tzdata`` in requirements.txt makes
+#: the database independent of the host OS.
+_HEALTHY_ZONE_COUNT = 400
+TIMEZONE_NORMALIZATION_CLAIM = "schedule_timezone_normalization"
+TIMEZONE_NORMALIZATION_THROTTLE = timedelta(minutes=10)
+
+
+def zone_database_healthy() -> bool:
+    """Whether this host can judge zone validity (IANA links included)."""
+    from zoneinfo import ZoneInfo, available_timezones
+
+    try:
+        ZoneInfo("America/New_York")
+        ZoneInfo("US/Eastern")  # a ``backward`` link: absent on trimmed OS zone data
+    except Exception:  # noqa: BLE001 — any failure means "cannot judge"
+        return False
+    return len(available_timezones()) >= _HEALTHY_ZONE_COUNT
+
+
+def normalize_invalid_timezones(
+    *, actor: str = "system:schedule-timezone", force: bool = False
+) -> list[dict[str, str]]:
+    """One-time repair of stored zones that are not IANA zones, on the record.
+
+    Rows written before zones were validated (Security 15) could hold
+    ``Mars/Olympus``. Each such row's zone becomes UTC and — because a UTC
+    cadence is a time nobody chose — an enabled row is **paused** (no
+    ``next_run_at``; a disabled row never gets one), with a skipped entry in
+    its run history naming the reason, and a ``schedule.timezone.normalized``
+    audit event (from, to, paused) in its workspace. Guards:
+
+    * nothing is rewritten unless the zone database is healthy (an incomplete
+      host database would turn valid aliases like ``Asia/Calcutta`` into UTC);
+    * it runs once per deployment (Mongo claim), not on every start;
+    * each write is conditional on the stored value still being the invalid
+      one, so a user's PATCH in between wins.
+    """
+    from services.audit_log import append_audit_event
+    from services.maintenance_claim import claim_run
+    from services.workspace_store import InvalidTimezone, validate_timezone
+
+    if not zone_database_healthy():
+        logger.warning("Schedule zone normalisation skipped: this host's zone database is incomplete")
+        return []
+    # A short throttle, not a once-ever claim: the per-row write is conditional
+    # (idempotent), so a crash mid-run or rows that arrive later (a restore, an
+    # import, a rolling deploy) are repaired by the next start (review 3).
+    if not force and claim_run(TIMEZONE_NORMALIZATION_CLAIM, TIMEZONE_NORMALIZATION_THROTTLE) is False:
+        return []
+    repaired: list[dict[str, str]] = []
+    for sched in list_schedules():
+        stored = sched.timezone or ""
+        zone = stored.strip()
+        if not zone:
+            continue
+        try:
+            validate_timezone(zone)
+            continue
+        except InvalidTimezone:
+            pass
+        # Matched on the RAW stored value (whitespace included).
+        changed = _normalize_zone_if_unchanged(sched.id, stored)
+        if changed is None:
+            continue
+        row = {"schedule_id": sched.id, "from": zone, "to": "UTC", "paused": changed}
+        repaired.append(row)
+        append_audit_event(
+            action=TIMEZONE_NORMALIZED_ACTION,
+            resource=f"schedule:{sched.id}",
+            actor=actor,
+            level="warn",
+            outcome="succeeded",
+            workspace_id=sched.workspace_id or None,
+            details={**row, "reason": "stored zone is not an IANA time zone"},
+        )
+        if changed:
+            _notify_zone_pause(sched, zone)
+    return repaired
+
+
+def _notify_zone_pause(sched: PipelineSchedule, invalid_zone: str) -> None:
+    """Tell the schedule's workspace channels it was paused (S4b), never raising."""
+    try:
+        from services.notification_service import notify_workspace
+
+        text = (
+            f"Schedule {sched.name!r} was paused: its stored time zone {invalid_zone!r} is not "
+            "an IANA zone, so it was set to UTC rather than run at times nobody chose. "
+            "Set the intended zone and re-enable it."
+        )
+        notify_workspace(
+            sched.workspace_id or "",
+            {
+                "event": "schedule.paused",
+                "reason_code": "timezone_normalized",
+                "title": f"Schedule paused: {sched.name}",
+                "text": text,
+                "schedule_id": sched.id,
+                "schedule_name": sched.name,
+                "workspace_id": sched.workspace_id or "",
+                "from_timezone": invalid_zone,
+                "to_timezone": "UTC",
+            },
+        )
+    except Exception:  # noqa: BLE001 — the pause and its audit event stand
+        logger.warning("Pause notification for schedule %s failed", sched.id, exc_info=True)
+
+
+def _normalize_zone_if_unchanged(schedule_id: str, invalid_zone: str) -> bool | None:
+    """Set the zone to UTC and pause the row, only if it still holds ``invalid_zone``.
+
+    Returns whether the row was paused (it was enabled), or ``None`` when the
+    stored zone had already changed (a PATCH won) or the row is gone.
+    """
+    note = {
+        "status": "skipped",
+        "reason_code": "timezone_normalized",
+        "reason": (
+            f"The stored time zone {invalid_zone!r} is not an IANA zone; it was set to UTC "
+            "and the schedule was paused. Set the intended zone, then re-enable it."
+        ),
+        "started_at": _now(),
+        "finished_at": _now(),
+    }
+    svc = _mongo_backend()
+    if svc:
+        coll = svc.get_database()["pipeline_schedules"]
+        # Match the RAW stored value: the loaded row may have been normalised
+        # (stripped) on read, the document still holds what was written.
+        raw = (coll.find_one({"_id": schedule_id}, {"timezone": 1}) or {}).get("timezone")
+        if not isinstance(raw, str) or raw.strip() != invalid_zone.strip():
+            return None
+        before = coll.find_one_and_update(
+            {"_id": schedule_id, "timezone": raw},
+            {"$set": {"timezone": "UTC", "enabled": False, "next_run_at": None},
+             "$push": {"run_history": {"$each": [note], "$slice": -RUN_HISTORY_LIMIT}}},
+        )
+        return None if before is None else bool(before.get("enabled"))
+    with _NAME_LOCK:
+        schedules = _load_all()
+        for s in schedules:
+            if s.id != schedule_id:
+                continue
+            if (s.timezone or "").strip() != invalid_zone.strip():
+                return None
+            was_enabled = bool(s.enabled)
+            s.timezone, s.enabled, s.next_run_at = "UTC", False, None
+            s.run_history = (list(s.run_history or []) + [note])[-RUN_HISTORY_LIMIT:]
+            _save_all(schedules)
+            return was_enabled
+    return None
+
+
 def update_schedule(
     schedule_id: str,
     data: dict[str, Any],
     *,
     warnings: list[str] | None = None,
+    refuse_unrunnable_mappings: bool = False,
 ) -> PipelineSchedule | None:
     """Update one schedule. The name lock covers the uniqueness check and the write.
 
@@ -1660,6 +1914,18 @@ def update_schedule(
             from services.schedule_source_probe import assert_schedule_source
 
             assert_schedule_source(merged, armed=armed, warnings=warnings)
+        plan_changed = any(
+            key in data and data[key] != getattr(current, key, None)
+            for key in ("mappings", "validation_mode")
+        )
+        if refuse_unrunnable_mappings and (enabling or plan_changed):
+            from services.schedule_mapping_contract import (
+                assert_schedule_mappings_executable,
+            )
+
+            assert_schedule_mappings_executable(
+                merged.get("mappings"), str(merged.get("validation_mode") or "strict")
+            )
     with _NAME_LOCK:
         return _update_schedule_locked(schedule_id, data)
 
@@ -1684,7 +1950,10 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         cron = cron_norm
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
-        sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
+        # The zone is checked when this write sets it or changes the cadence;
+        # pausing or backing off a legacy row must not trip on its stored zone.
+        cadence_changed = "timezone" in data or (interval, cron) != (s.interval, s.cron)
+        sync_mode = _validate_cadence(interval, cron, tz, sync_mode, check_zone=cadence_changed)
         data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
         # Pausing or renaming a schedule must work while taps are disabled; only
@@ -1725,7 +1994,13 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         )
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
-        _assert_callable_schedule_sync(merged, sync_mode)
+        # Checked when this write touches what the schedule reads, or arms it.
+        # Bookkeeping (next_run_at, last_status) on a legacy row must not trip on
+        # what that row stores: the fire path refuses it with a readable reason.
+        if (_CALLABLE_PLAN_KEYS & (set(data) - {"sync_mode"})) or sync_mode != str(
+            s.sync_mode or ""
+        ):
+            _assert_callable_schedule_sync(merged, sync_mode)
         _assert_cursor_semantics(merged)
         from services.schedule_mapping_contract import (
             EMPTY_MAPPING_REFUSAL,
@@ -1760,7 +2035,10 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
                 str(merged.get("dest_connector_id") or ""),
                 str(merged.get("dest_table") or ""),
             )
-        if any(key in data for key in ("dest_table", "dest_connector_id", "enabled")):
+        if any(
+            key in data
+            for key in ("dest_table", "dest_connector_id", "dest_schema", "dest_database", "enabled")
+        ):
             _assert_dest_pipeline_ownership(merged, exclude_id=schedule_id)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
@@ -1777,6 +2055,11 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             )
             merged["duplicate_policy"] = policy
             merged["in_file_dedupe"] = dedupe
+        if any(
+            key in data
+            for key in ("in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts", "source_connector_id")
+        ):
+            _refuse_keep_last_that_cannot_run(merged)
         # Resume is the re-arm for a finding no signature can clear
         # (approvable is false: remap, fix the source, set a key). Pause then
         # resume used to leave needs_approval set, so the beat kept skipping
@@ -2260,6 +2543,21 @@ def _claim_running_mongo(
     return claimed
 
 
+def _workspace_claim_refusal(schedule_id: str) -> dict[str, Any] | None:
+    from services.team_store import WorkspaceStateUnavailable, workspace_closing
+
+    sched = get_schedule(schedule_id)
+    if sched is None or not sched.workspace_id:
+        return None
+    base = {"schedule_id": schedule_id, "schedule_name": sched.name, "job_id": "", "running_since": None}
+    try:
+        if workspace_closing(sched.workspace_id, fail_closed=True):
+            return {**base, "kind": "workspace_closing"}
+    except WorkspaceStateUnavailable:
+        return {**base, "kind": "store_unavailable"}
+    return None
+
+
 def mark_schedule_running(
     schedule_id: str, instance: str, job_id: str = ""
 ) -> PipelineSchedule | None:
@@ -2268,6 +2566,13 @@ def mark_schedule_running(
     Acts as a concurrency guard: returns ``None`` if this schedule or another
     schedule writing the same destination object already has a live, non-stale run.
     """
+    # The workspace check reads only the schedule's own workspace, outside
+    # the claim lock (review 6): a closing workspace — or one whose state the
+    # store cannot tell — starts nothing.
+    refusal = _workspace_claim_refusal(schedule_id)
+    if refusal is not None:
+        _record_refusal(schedule_id, refusal)
+        return None
     with _CLAIM_LOCK:
         schedules = _load_all()
         now = _now()
@@ -2976,11 +3281,38 @@ def seconds_until_next_schedule(
     return float(min(cap, max(1.0, delta)))
 
 
+def _connector_default_location(connector_id: str) -> tuple[str, str]:
+    """The (schema, database) a schedule with no explicit location writes into."""
+    try:
+        from services.connector_store import get_connector
+        from services.workspace_filter import bound_workspace_filter
+
+        # The writers being compared run in system scope; so does this read.
+        with bound_workspace_filter(None):
+            conn = get_connector(connector_id)
+    except Exception:  # noqa: BLE001 — an unreadable connector has no default
+        conn = None
+    if conn is None:
+        return "", ""
+    if isinstance(conn, Mapping):
+        return str(conn.get("schema") or ""), str(conn.get("database") or "")
+    return str(getattr(conn, "schema", "") or ""), str(getattr(conn, "database", "") or "")
+
+
+def _location_key(schema: str, database: str, default: tuple[str, str]) -> tuple[str, str]:
+    return (
+        (str(schema or "").strip() or default[0]).strip().casefold(),
+        (str(database or "").strip() or default[1]).strip().casefold(),
+    )
+
+
 def conflicting_dest_writers(
     dest_connector_id: str,
     dest_table: str,
     *,
     exclude_schedule_id: str = "",
+    dest_schema: str = "",
+    dest_database: str = "",
 ) -> list[PipelineSchedule]:
     """Enabled pipelines already writing the same destination table (D104).
 
@@ -2989,13 +3321,21 @@ def conflicting_dest_writers(
     collision. The comparison folds case (Snowflake uppercases unquoted
     identifiers) so ``hq1200_shared`` and ``HQ1200_SHARED`` are one table.
     Disabled schedules hold no write claim and are not conflicts.
+
+    The table is located by schema and database too (QA Snowflake D11): an
+    empty location is the connector's default, so ``DST.T`` and ``SRC.T`` on
+    one connector are two tables, while ``T`` and ``<default schema>.T`` are one.
+
+    This reads the same store, unfiltered, as the scheduler that will run
+    these writers; :func:`describe_dest_conflicts` decides what the caller may
+    be shown about each one (QA Snowflake D12).
     """
     dst = str(dest_connector_id or "").strip()
     tbl = str(dest_table or "").strip()
     if not dst or not tbl:
         return []
     exclude = str(exclude_schedule_id or "").strip()
-    return [
+    candidates = [
         s
         for s in _load_all()
         if getattr(s, "enabled", False)
@@ -3003,6 +3343,74 @@ def conflicting_dest_writers(
         and str(getattr(s, "dest_connector_id", "") or "").strip() == dst
         and str(getattr(s, "dest_table", "") or "").strip().casefold() == tbl.casefold()
     ]
+    if not candidates:
+        return []
+    explicit = any(
+        str(getattr(s, "dest_schema", "") or "").strip()
+        or str(getattr(s, "dest_database", "") or "").strip()
+        for s in candidates
+    ) or bool(str(dest_schema or "").strip() or str(dest_database or "").strip())
+    if not explicit:
+        return candidates
+    default = _connector_default_location(dst)
+    wanted = _location_key(dest_schema, dest_database, default)
+    return [
+        s
+        for s in candidates
+        if _location_key(
+            str(getattr(s, "dest_schema", "") or ""),
+            str(getattr(s, "dest_database", "") or ""),
+            default,
+        )
+        == wanted
+    ]
+
+
+#: Where a platform admin lists and reconciles pipeline registrations that no
+#: workspace can see (``services.schedule_orphans``).
+ORPHAN_ADMIN_ROUTE = "/api/v1/schedules/admin/orphans"
+
+
+#: Default scope for :func:`describe_dest_conflicts`: the calling request's.
+_CALLER_SCOPE: Any = object()
+
+
+def describe_dest_conflicts(
+    writers: Sequence[PipelineSchedule],
+    workspace_filter: WorkspaceFilter | None | Any = _CALLER_SCOPE,
+    *,
+    limit: int = 3,
+) -> str:
+    """The conflict sentence for a caller in ``workspace_filter``.
+
+    Left out, the scope is the calling request's (``current_workspace_filter``);
+    ``None`` is system scope.
+
+    A writer the caller's schedules API can read is named, so it can be opened
+    and paused or deleted. A writer outside that scope still blocks — the
+    scheduler runs it regardless — but only its count is told, with the admin
+    route that can reconcile it: naming another workspace's pipeline would
+    leak it, and naming nothing left QA with "1 enabled pipeline" that GET,
+    list and DELETE all answered 404 for (QA Snowflake D12). ``None`` is
+    system scope: every writer is visible.
+    """
+    if workspace_filter is _CALLER_SCOPE:
+        from services.workspace_filter import current_workspace_filter
+
+        workspace_filter = current_workspace_filter()
+    visible = [
+        s for s in writers
+        if workspace_filter is None or workspace_filter.matches(getattr(s, "workspace_id", ""))
+    ]
+    hidden = len(writers) - len(visible)
+    parts = [describe_dest_conflict(s) for s in visible[:limit]]
+    if hidden:
+        parts.append(
+            f"{hidden} pipeline registration(s) not visible in this workspace "
+            "(orphaned, or owned by another workspace) — a platform admin can "
+            f"list and reconcile them at {ORPHAN_ADMIN_ROUTE}"
+        )
+    return "; ".join(parts)
 
 
 def describe_dest_conflict(schedule: PipelineSchedule) -> str:

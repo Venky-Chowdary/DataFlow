@@ -6,6 +6,7 @@ import {
   WORKSPACE_CHANGED_EVENT,
   clearActiveWorkspaceId,
   getActiveWorkspaceId,
+  isKnownWorkspaceChoice,
   landingWorkspaceId,
   setActiveWorkspaceId,
 } from "./workspace";
@@ -85,7 +86,7 @@ export function PermissionsProvider({
         const stored = getActiveWorkspaceId();
         if (stored) {
           const listed = await fetchWorkspaces().catch(() => null);
-          if (listed && !listed.workspaces.some((w) => w.id === stored)) clearActiveWorkspaceId();
+          if (listed && !isKnownWorkspaceChoice(stored, listed.workspaces, listed.views)) clearActiveWorkspaceId();
         }
       }
       const next = await fetchEffectiveIdentity();

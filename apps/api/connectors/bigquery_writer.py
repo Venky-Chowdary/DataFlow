@@ -1621,7 +1621,10 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
-            meta=writer_meta_with_source_rows(None, source_row_count),
+            meta=writer_meta_with_source_rows(
+                write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
+                source_row_count,
+            ),
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

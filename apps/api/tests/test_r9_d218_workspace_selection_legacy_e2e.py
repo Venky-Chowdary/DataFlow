@@ -114,7 +114,13 @@ def test_sign_in_lands_in_last_used_then_own_workspace_never_the_oldest(r9):
     assert _default(again) == (r9.acme, r9.acme)
 
     # A remembered workspace that is gone falls back to the admin's own.
-    assert again.delete(f"/api/v1/team/workspaces/{r9.acme}").status_code == 200
+    # A workspace delete is confirmed by its name (C18 S6).
+    acme_name = next(
+        w["name"] for w in again.get("/api/v1/team/workspaces").json()["workspaces"]
+        if w["id"] == r9.acme
+    )
+    gone = again.delete(f"/api/v1/team/workspaces/{r9.acme}", params={"confirm": acme_name})
+    assert gone.status_code == 200, gone.text
     assert _default(_signed_in(r9, "root@example.test", ROOT_PASSWORD)) == (root_hq, root_hq)
 
     # A header the account may not use is never remembered.

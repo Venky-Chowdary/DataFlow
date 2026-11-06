@@ -348,7 +348,9 @@ def copy_postgres_to_mongo(
             coll, target_cols, converters, pg_mongo_copy_batch()
         )
         try:
-            src_cur.copy_expert(copy_sql, sink)
+            from services.cancel_check import copy_expert_keeping_cancel
+
+            copy_expert_keeping_cancel(src_cur, copy_sql, sink)
         finally:
             sink.close()
         if sink.rows != source_count:

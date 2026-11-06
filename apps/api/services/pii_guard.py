@@ -17,7 +17,9 @@ from services.value_serializer import is_reader_null_cell
 
 # Simplistic but fast patterns.  For production, integrate with a DLP or ML service.
 PII_PATTERNS: dict[str, re.Pattern[str]] = {
-    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    # ``\w`` is unicode-aware: an IDN local part (``山田@example.jp``) is an
+    # address to the preflight gate and the masker alike (D94).
+    "email": re.compile(r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
     "phone": re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     # PAN candidate: 13-19 digits, space/dash separators. Luhn-validated in
@@ -25,6 +27,14 @@ PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "pci_pan": re.compile(r"\b\d(?:[\d -]{11,22}\d)\b"),
     "ip_address": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
+
+# Whole-value forms of the email / SSN patterns for classifying a cell
+# (``services.compliance_guard``). The ``\b`` forms above find tokens inside
+# text; anchored with ``fullmatch`` they reject a value that starts or ends on
+# a non-word character, so "+tag@example.com" and ".dot@example.com" stopped
+# classifying as addresses (D94 review).
+EMAIL_VALUE_RE: re.Pattern[str] = re.compile(r"^[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}$")
+SSN_VALUE_RE: re.Pattern[str] = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 
 # Union of every pattern above: a value matches no label iff it fails this.
 # Used as an exact one-pass gate so a clean column costs one scan, not five.

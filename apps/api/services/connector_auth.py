@@ -57,6 +57,35 @@ def _snowflake_placeholder_host(host: str) -> str | None:
     return None
 
 
+#: Declared modes whose credential is one bare key sent in an HTTP header.
+API_KEY_AUTH_MODES = frozenset({"api_key", "bearer", "token"})
+
+
+def resolve_api_key(cfg: Mapping[str, Any], *, password_is_key: bool = True) -> str:
+    """The bare key an HTTP connector sends (``Bearer <key>`` / ``Api-Key``).
+
+    One rule for every HTTP vector / SaaS tile (Milvus and Zilliz, Pinecone,
+    Weaviate, Qdrant, Airtable, HubSpot, Stripe ...): the ``api_key`` field
+    wins; otherwise a key the operator declared (``auth_mode=api_key``) and
+    pasted in the password or username field is that key. MCP ``create_connector``
+    has no api_key field, so the password field is where a key arrives (D274, D277).
+
+    ``password_is_key`` keeps the older fallback of the key-only tiles
+    (Pinecone, Weaviate, Qdrant: ``api_key or password or username``). Milvus
+    passes ``False`` because an undeclared ``username``/``password`` pair is its
+    ``user:pass`` login, not a key.
+    """
+    key = str(cfg.get("api_key") or "").strip()
+    if key:
+        return key
+    password = str(cfg.get("password") or "").strip()
+    username = str(cfg.get("username") or "").strip()
+    mode = str(cfg.get("auth_mode") or "").strip().lower()
+    if mode in API_KEY_AUTH_MODES or password_is_key:
+        return password or username
+    return ""
+
+
 def infer_auth_mode(
     *,
     auth_mode: str = "",
@@ -145,6 +174,9 @@ def validate_probe_auth(
         return None
 
     if mode == "api_key":
+        api_key = resolve_api_key(
+            {"api_key": api_key, "auth_mode": mode, "password": password, "username": username}
+        )
         if not api_key:
             return "API key is required."
         if not host:

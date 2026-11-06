@@ -11,7 +11,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoSettings, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEventPage, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoSettings, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
   fetchSignupMetrics,
   type SignupMetrics,
 } from "../lib/api";
@@ -23,24 +23,27 @@ import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
 import {
+  chainInconclusive,
   chainNotChecked,
   chainVerdictTitle,
   chainVerdictToast,
   chainVerifiedWithExceptions,
 } from "../lib/auditChain";
 import { auditActorLabel } from "../lib/auditActor";
+import { KEY_IDS_MASKED_HINT, auditKeyIdHint, maskKeyIdsForDisplay } from "../lib/auditKeyIds";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
-import { purgeConfirmCopy, RETENTION_HINT } from "../lib/jobRetention";
+import { purgeConfirmCopy, retentionHint } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
-import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
+import { TENANT_SAVED_EVENT, concreteWorkspaceId, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
 import type { ThemePreference } from "../lib/theme";
 import { auditExportFilename, API_KEY_LIFETIME_OPTIONS, filterWorkspaceApiKeys } from "../lib/iamAdmin";
 import { ServiceAccountsPanel } from "./settings/ServiceAccountsPanel";
 import { ScimSettings } from "./settings/ScimSettings";
+import { PiiHashKeyCard } from "./settings/PiiHashKeyCard";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
@@ -75,6 +78,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [retention, setRetention] = useState("90");
   const [studioSchemaBrowser, setStudioSchemaBrowser] = useState(false);
   const [studioCanvas, setStudioCanvas] = useState(false);
+  const [retentionAutoPurge, setRetentionAutoPurge] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   /** Why General could not be read. Empty means the values below are the API's. */
@@ -84,6 +88,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  /** The API masked key ids for this reader (non-admin); null until the first read. */
+  const [auditKeyIdsMasked, setAuditKeyIdsMasked] = useState<boolean | null>(null);
   const [auditExportFormat, setAuditExportFormat] = useState<AuditExportFormat>("csv");
   /** Last chain verification result. Null means nobody has asked yet — which is not "intact". */
   const [chainReport, setChainReport] = useState<AuditChainVerification | null>(null);
@@ -148,7 +154,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   /** Only edit what was actually read: an unread value must not be re-saved. */
   const generalEditable = workspaceManage.allowed && settingsLoaded && !generalLock.locked;
   const generalTitle = (generalLock.locked ? generalLock.reason : workspaceManage.reason) || undefined;
-  const activeWorkspace = useActiveWorkspaceId();
+  const activeWorkspace = concreteWorkspaceId(useActiveWorkspaceId());
   const generalDirtyRef = useRef(false);
 
   const loadPosture = useCallback(() => {
@@ -192,6 +198,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setRetention(String(ws.retention_days));
         setStudioSchemaBrowser(ws.studio_schema_browser === true);
         setStudioCanvas(ws.studio_canvas === true);
+        setRetentionAutoPurge(ws.retention_auto_purge === true);
         setGeneralLock(platformLock(ws));
         setSettingsLoaded(true);
         setSettingsError("");
@@ -268,19 +275,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const loadAudit = useCallback(() => {
     setAuditLoading(true);
-    fetchAuditEvents(100, logFilter === "all" ? undefined : logFilter)
-      .then((events) =>
+    fetchAuditEventPage(100, logFilter === "all" ? undefined : logFilter)
+      .then(({ events, keyIdsMasked }) => {
+        setAuditKeyIdsMasked(keyIdsMasked);
         setAuditEvents(
           events.map((ev) => ({
             id: ev.id,
             time: new Date(ev.time).toLocaleString(),
-            actor: auditActorLabel(ev),
+            actor: maskKeyIdsForDisplay(auditActorLabel(ev)),
             action: ev.action,
-            resource: ev.resource,
+            resource: maskKeyIdsForDisplay(ev.resource),
             level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
           })),
-        ),
-      )
+        );
+      })
       .catch(() => setAuditEvents([]))
       .finally(() => setAuditLoading(false));
   }, [logFilter]);
@@ -609,12 +617,14 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         org_name: orgName,
         timezone,
         retention_days: Number(retention) || 90,
+        retention_auto_purge: retentionAutoPurge,
         studio_schema_browser: studioSchemaBrowser,
         studio_canvas: studioCanvas,
       });
       setOrgName(ws.org_name);
       setTimezone(ws.timezone);
       setRetention(String(ws.retention_days));
+      setRetentionAutoPurge(ws.retention_auto_purge === true);
       setStudioSchemaBrowser(ws.studio_schema_browser === true);
       setStudioCanvas(ws.studio_canvas === true);
       try {
@@ -648,14 +658,17 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       setChainReport(report);
       const notChecked = chainNotChecked(report);
       const exceptions = chainVerifiedWithExceptions(report);
+      const inconclusive = chainInconclusive(report);
       toast({
         title: notChecked
           ? "Nothing verified"
           : exceptions
             ? "Verified with exceptions"
-            : report.verified ? "Chain verified" : "Chain verification failed",
+            : inconclusive
+              ? "Not judged"
+              : report.verified ? "Chain verified" : "Chain verification failed",
         message: chainVerdictToast(report),
-        tone: notChecked || exceptions ? "warning" : report.verified ? "success" : "error",
+        tone: notChecked || exceptions || inconclusive ? "warning" : report.verified ? "success" : "error",
       });
     } catch (err) {
       setChainReport(null);
@@ -671,7 +684,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const downloadAuditExport = async (format: AuditExportFormat) => {
     try {
-      const blob = await exportAuditLog(format);
+      const { blob, keyIdsMasked } = await exportAuditLog(format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -680,7 +693,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       URL.revokeObjectURL(url);
       toast({
         title: "Audit export ready",
-        message: `Workspace-scoped ${format.toUpperCase()} — not a SOC 2 letter.`,
+        message: `Workspace-scoped ${format.toUpperCase()} — not a SOC 2 letter.${keyIdsMasked ? ` ${KEY_IDS_MASKED_HINT}` : ""}`,
         tone: "success",
       });
     } catch (err) {
@@ -885,6 +898,24 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         />
                       </div>
                       <div className="df2-settings-field">
+                        <label htmlFor="retention-auto-purge">Purge automatically</label>
+                        <input
+                          id="retention-auto-purge"
+                          type="checkbox"
+                          data-testid="retention-auto-purge"
+                          checked={retentionAutoPurge}
+                          disabled={!generalEditable}
+                          title={generalTitle}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setRetentionAutoPurge(e.target.checked);
+                          }}
+                        />
+                        <p className="df2-label-hint">
+                          Off by default. On: finished jobs older than the retention window are deleted daily in every workspace.
+                        </p>
+                      </div>
+                      <div className="df2-settings-field">
                         <label htmlFor="studio-schema-browser">Schema browser</label>
                         <input
                           id="studio-schema-browser"
@@ -929,7 +960,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">{RETENTION_HINT} Write targets stay on each connector.</p>
+                    <p className="df2-settings-hint">{retentionHint(retentionAutoPurge)} Write targets stay on each connector.</p>
                     {workspaceManage.allowed && settingsLoaded && (
                       <button type="button" className="df2-btn df2-btn-ghost" data-testid="job-retention-purge" disabled={retentionBusy} onClick={() => void runRetentionPurge()}>
                         {retentionBusy ? "Checking…" : "Purge old jobs…"}
@@ -968,6 +999,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 </div>
                 <div className="df2-settings-section-body">
                   <TwoFactorCard />
+                  <PiiHashKeyCard />
                   {postureLoading && <p className="df2-cell-meta">Loading security posture…</p>}
                   {!postureLoading && posture && (
                     <>
@@ -1538,7 +1570,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-body">
                   {chainReport && (
                     <div
-                      className={`df2-chain-verdict ${chainNotChecked(chainReport) || chainVerifiedWithExceptions(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
+                      className={`df2-chain-verdict ${chainNotChecked(chainReport) || chainVerifiedWithExceptions(chainReport) || chainInconclusive(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
                       role="status"
                     >
                       <strong>{chainVerdictTitle(chainReport)}</strong>
@@ -1613,6 +1645,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       </tbody>
                     </table>
                     </div>
+                    )}
+                    {auditKeyIdsMasked !== null && (
+                      <p className="df2-settings-hint" role="note" data-testid="audit-key-id-hint">
+                        {auditKeyIdHint(auditKeyIdsMasked)}
+                      </p>
                     )}
                   </div>
                 </div>

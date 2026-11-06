@@ -309,8 +309,42 @@ def stamp_callable_job_id(cfg: dict[str, Any], job_id: str | None) -> dict[str, 
     return out
 
 
+#: The one vocabulary for ``source_read_mode`` (endpoint extra, form fields,
+#: stream contracts). Every reader — single stream and several — goes through
+#: :func:`canonical_read_mode`; a word outside it is refused, never guessed
+#: from whatever statement happens to be left on the endpoint (a typo "tabel"
+#: next to a stale source_query must not run that query).
+READ_MODE_ALIASES: dict[str, str] = {
+    "": MODE_TABLE, "table": MODE_TABLE,
+    "query": MODE_QUERY, "sql": MODE_QUERY, "custom_query": MODE_QUERY, "select": MODE_QUERY,
+    "procedure": MODE_PROCEDURE, "call": MODE_PROCEDURE, "stored_procedure": MODE_PROCEDURE,
+    "sp": MODE_PROCEDURE, "exec": MODE_PROCEDURE,
+}
+
+
+class UnknownReadModeError(ProcedureSourceError):
+    """A ``source_read_mode`` word outside :data:`READ_MODE_ALIASES` (HTTP 422)."""
+
+
+def canonical_read_mode(raw: Any) -> str:
+    """``table`` / ``query`` / ``procedure`` for an operator's mode word, or raise."""
+    word = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    mode = READ_MODE_ALIASES.get(word)
+    if mode is None:
+        raise UnknownReadModeError(
+            f"unknown source_read_mode {str(raw).strip()!r}; use table, query or procedure."
+        )
+    return mode
+
+
 def source_read_mode_of(source: Any) -> str:
-    """Resolve ``table`` | ``query`` | ``procedure`` from endpoint or cfg dict."""
+    """Resolve ``table`` | ``query`` | ``procedure`` from endpoint or cfg dict.
+
+    An explicit word is read through :func:`canonical_read_mode` (unknown words
+    raise). Only when no word was given at all does the one statement present
+    name the mode — the shape a caller that sends just ``source_query`` uses;
+    both a CALL and a SELECT with no word is ambiguous and refused.
+    """
     extra: Mapping[str, Any] = {}
     if source is None:
         return MODE_TABLE
@@ -323,12 +357,19 @@ def source_read_mode_of(source: Any) -> str:
         extra = root
     else:
         return MODE_TABLE
-    raw = str(extra.get("source_read_mode") or "").strip().lower()
-    if raw in {MODE_TABLE, MODE_QUERY, MODE_PROCEDURE}:
-        return raw
-    if extra.get("procedure_call") or extra.get("source_procedure"):
+    raw = str(extra.get("source_read_mode") or "").strip()
+    if raw:
+        return canonical_read_mode(raw)
+    has_call = bool(str(extra.get("procedure_call") or extra.get("source_procedure") or "").strip())
+    has_query = bool(str(extra.get("source_query") or "").strip())
+    if has_call and has_query:
+        raise UnknownReadModeError(
+            "both procedure_call and source_query are set and source_read_mode is not; "
+            "say which one to run (query or procedure)."
+        )
+    if has_call:
         return MODE_PROCEDURE
-    if extra.get("source_query"):
+    if has_query:
         return MODE_QUERY
     return MODE_TABLE
 
@@ -380,6 +421,162 @@ def merge_callable_source_extra(dst: Mapping[str, Any] | None, src: Any) -> dict
     return out
 
 
+class CallablePlacementError(ProcedureSourceError):
+    """A query/procedure setting arrived where it cannot be honoured (HTTP 422)."""
+
+
+#: Where a REST caller may state a query/procedure source, in precedence order
+#: of the message: form fields, ``source_extra_json``, one stream contract.
+_PLACEMENT_KEYS = ("source_read_mode", "source_query", "procedure_call", "procedure_params")
+
+
+def resolve_callable_placements(
+    *,
+    form: Mapping[str, Any] | None,
+    source_extra: Mapping[str, Any] | None,
+    stream_contracts: list[Any] | None,
+    source_kind: str = "database",
+) -> tuple[dict[str, Any], list[Any] | None]:
+    """One answer for "is this a query/procedure source, and which one?".
+
+    QA C3 / MySQL D9: ``source_read_mode``/``source_query`` sent as form fields
+    (which the route did not declare, so FastAPI dropped them) were silently
+    ignored and the whole table was copied. Form fields and
+    ``source_extra_json`` are resolved here into the source ``extra`` Execute
+    reads.
+
+    Stream contracts are read too: with several selected streams each
+    contract's CALL/SELECT is that stream's own statement
+    (``multi_stream_plan.patches_for_stream`` via ``stream_multi``), so they are
+    left exactly as sent. Only a single selected stream's contract placement is
+    lifted onto the endpoint (one stream *is* the endpoint).
+    ``source_read_mode: "table"`` is not a placement. An unrecognised mode word
+    is inferred as before (``source_read_mode_of``).
+
+    Refused (:class:`CallablePlacementError`, HTTP 422): two endpoint-level
+    placements that disagree (``procedure_params`` compared as parsed
+    objects), a query/procedure on a file source, a query mode with no query.
+
+    Returns ``(source_extra, stream_contracts)``.
+    """
+    extra = dict(source_extra or {})
+    found: dict[str, list[tuple[str, Any]]] = {}
+
+    def _note(where: str, key: str, value: Any) -> None:
+        if key == "procedure_params":
+            value = _parsed_params(value)
+        if key == "source_read_mode" and str(value or "").strip():
+            try:
+                value = canonical_read_mode(value)
+            except UnknownReadModeError as exc:
+                raise CallablePlacementError(f"{where}: {exc}") from exc
+            if value == MODE_TABLE:
+                return
+        if value in (None, "", {}, []):
+            return
+        found.setdefault(key, []).append((where, value))
+
+    for key in _PLACEMENT_KEYS:
+        _note("form field", key, (form or {}).get(key))
+        _note("source_extra_json", key, extra.get(key))
+    contracts = None if stream_contracts is None else list(stream_contracts)
+    selected = [
+        i for i, c in enumerate(contracts or [])
+        if isinstance(c, Mapping) and c.get("selected", True) is not False
+    ]
+    for i, c in enumerate(contracts or []):
+        if not isinstance(c, Mapping):
+            continue
+        # Each stream's own binds, parsed once here so a malformed one is a 422
+        # and stream_multi binds the same object the request named.
+        if isinstance(c.get("procedure_params"), str):
+            parsed = _parsed_params(c["procedure_params"])
+            c = {**dict(c), "procedure_params": parsed or {}}
+            contracts[i] = c  # type: ignore[index]
+        # Each stream's mode word: one vocabulary, and a callable word needs
+        # its statement (multi_stream_plan reads the same table).
+        name = str(c.get("name") or f"stream {i + 1}")
+        try:
+            stream_mode = source_read_mode_of({"extra": dict(c)})
+        except UnknownReadModeError as exc:
+            raise CallablePlacementError(f"{name}: {exc}") from exc
+        if stream_mode == MODE_QUERY and not str(c.get("source_query") or "").strip():
+            raise CallablePlacementError(
+                f"{name}: source_read_mode is set to query but no source_query was sent."
+            )
+        if stream_mode == MODE_PROCEDURE and not str(
+            c.get("procedure_call") or c.get("source_procedure") or ""
+        ).strip():
+            raise CallablePlacementError(
+                f"{name}: source_read_mode is set to procedure but no procedure_call was sent."
+            )
+    if len(selected) == 1:
+        i = selected[0]
+        contract = dict(contracts[i])  # type: ignore[index]
+        explicit_table = bool(str(contract.get("source_read_mode") or "").strip()) and (
+            canonical_read_mode(contract.get("source_read_mode")) == MODE_TABLE
+        )
+        if explicit_table:
+            # An explicit table read next to a leftover CALL/SELECT is a table
+            # read (the rule schedule fire follows too). Lifting the stale
+            # statement made source_read_mode_of infer a query on the endpoint.
+            for key in ("source_query", "procedure_call", "source_procedure", "procedure_params"):
+                contract.pop(key, None)
+    if len(selected) == 1:
+        for key in _PLACEMENT_KEYS:
+            value = contract.get(key)
+            if key == "source_read_mode" and canonical_read_mode(value) == MODE_TABLE:
+                continue
+            if value not in (None, "", {}, []):
+                _note("stream_contracts_json", key, contract.pop(key))
+        contracts[i] = contract  # type: ignore[index]
+    for key, values in found.items():
+        distinct = {json.dumps(v, sort_keys=True, default=str) for _w, v in values}
+        if len(distinct) > 1:
+            where = ", ".join(w for w, _v in values)
+            raise CallablePlacementError(
+                f"{key} was sent in more than one place with different values ({where}). "
+                "Send it once."
+            )
+        extra[key] = values[0][1]
+    try:
+        callable_mode = source_read_mode_of({"extra": extra})
+    except UnknownReadModeError as exc:
+        raise CallablePlacementError(str(exc)) from exc
+    if callable_mode != MODE_TABLE:
+        if str(source_kind or "").strip().lower() in {"file", "file_export", "upload", "object_store"}:
+            raise CallablePlacementError(
+                f"A {callable_mode} source needs a database connector; this source is a "
+                f"{source_kind}."
+            )
+        if callable_mode == MODE_QUERY and not str(extra.get("source_query") or "").strip():
+            raise CallablePlacementError(
+                "source_read_mode is 'query' but no source_query was sent."
+            )
+        if callable_mode == MODE_PROCEDURE and not str(
+            extra.get("procedure_call") or extra.get("source_procedure") or ""
+        ).strip():
+            raise CallablePlacementError(
+                "source_read_mode is 'procedure' but no procedure_call was sent."
+            )
+    return extra, contracts
+
+
+def _parsed_params(value: Any) -> Any:
+    """``procedure_params`` as an object, whether it arrived as JSON text or a dict."""
+    if not isinstance(value, str):
+        return value
+    if not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise CallablePlacementError("procedure_params must be a JSON object.") from exc
+    if not isinstance(parsed, dict):
+        raise CallablePlacementError("procedure_params must be a JSON object.")
+    return parsed
+
+
 def callable_identity_token(source: Any) -> str:
     """Watermark identity for a CALL/SELECT — stream name plus SQL+binds digest.
 
@@ -419,12 +616,16 @@ def procedure_text_of(source: Any) -> str:
     elif isinstance(source, Mapping):
         nested = source.get("extra") if isinstance(source.get("extra"), Mapping) else {}
         extra = {**dict(nested or {}), **source}
-    return str(
-        extra.get("procedure_call")
-        or extra.get("source_procedure")
-        or extra.get("source_query")
-        or ""
-    ).strip()
+    # One rule with _source_sql and the placement resolver: the statement is
+    # read from the key its mode names. A SELECT under procedure_call is not a
+    # query-mode statement (and a CALL under source_query is not a procedure);
+    # resolve_callable_placements refuses that shape, so it never runs here.
+    mode = source_read_mode_of(source)
+    if mode == MODE_QUERY:
+        return str(extra.get("source_query") or "").strip()
+    if mode == MODE_PROCEDURE:
+        return str(extra.get("procedure_call") or extra.get("source_procedure") or "").strip()
+    return ""
 
 
 def procedure_params_of(source: Any) -> dict[str, Any]:
@@ -1453,6 +1654,9 @@ def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: b
     conn = engine.connect()
     try:
         _apply_timeout(conn, spec.dialect or str(cfg.get("type") or ""), timeout)
+        # MySQL-family sessions are pinned to UTC when the engine connects
+        # (generic_sql._engine), so a TIMESTAMP's digits are the UTC instant
+        # here as in table mode.
         from services.sql_literals import escape_sqlalchemy_literal_colons
 
         # ``:1`` inside a JSON or time literal is not a bind (QA R2-004).
@@ -1492,6 +1696,9 @@ def _execute_live(
         description = _copy_cursor_description(result)
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
+        instants = _mysql_instant_indexes(description, spec.dialect or str(cfg.get("type") or ""))
+        if instants:
+            fetched = [_instant_row(row, instants) for row in fetched]
         carriers = python_carriers_of_rows(headers, fetched)
         rows = [[_cell(v) for v in row] for row in fetched]
         # The type lookup is a second statement. Close the extract first, or
@@ -1526,7 +1733,7 @@ def _execute_live(
     schema, _intel = peek_callable_schema(headers, rows, carriers)
     schema = _overlay_declared_numerics(
         headers, description, schema,
-        dialect=spec.dialect or str(cfg.get("type") or ""),
+        dialect=spec.dialect or str(cfg.get("type") or ""), carriers=carriers,
     )
     return headers, rows, schema
 
@@ -1548,12 +1755,15 @@ def _execute_to_jsonl(
     try:
         engine, conn, result, headers = _open_callable_result(cfg, spec, peek=False)
         description = _copy_cursor_description(result)
+        instants = _mysql_instant_indexes(description, spec.dialect or str(cfg.get("type") or ""))
         with path.open("w", encoding="utf-8") as fh:
             while True:
                 chunk = result.fetchmany(2_000)
                 if not chunk:
                     break
                 for row in chunk:
+                    if instants:
+                        row = _instant_row(row, instants)
                     cells = [_cell(v) for v in row]
                     if len(sample) < PEEK_ROW_LIMIT:
                         sample.append(cells)
@@ -1593,12 +1803,11 @@ def _execute_to_jsonl(
         if engine is not None:
             release_engine(engine)
 
-    schema, _intel = peek_callable_schema(
-        headers, sample, python_carriers_of_rows(headers, raw_sample)
-    )
+    carriers = python_carriers_of_rows(headers, raw_sample)
+    schema, _intel = peek_callable_schema(headers, sample, carriers)
     schema = _overlay_declared_numerics(
         headers, description, schema,
-        dialect=spec.dialect or str(cfg.get("type") or ""),
+        dialect=spec.dialect or str(cfg.get("type") or ""), carriers=carriers,
     )
     return headers, total, schema
 
@@ -1612,6 +1821,43 @@ def _describe_resolved(conn: Any, description: tuple | None, dialect: str) -> tu
     from services.decimal_observe import annotate_unresolved_pg_types
 
     return annotate_unresolved_pg_types(conn, description, dialect=dialect)
+
+
+#: pymysql ``FIELD_TYPE.TIMESTAMP``. ``DATETIME`` (12) is a zoneless wall clock.
+_MYSQL_TIMESTAMP_TYPE_CODE = 7
+
+
+def _is_mysql_family(dialect: str) -> bool:
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dialect) == "mysql"
+
+
+def _mysql_instant_indexes(description: tuple | None, dialect: str) -> frozenset[int]:
+    """Result columns a MySQL/MariaDB extract returns as ``TIMESTAMP`` instants.
+
+    Table mode reads the catalog and wires a ``TIMESTAMP`` cell as a UTC
+    instant (``mysql_reader``). A query extract has no catalog, so the cell
+    went out as naive digits: Validate then took it for a wall clock, a
+    declared ``source_timezone`` re-zoned an instant that already had one, and
+    the plan collapsed ``TIMESTAMPTZ -> TIMESTAMP`` (QA round 12). The driver's
+    own column type says which columns are instants.
+    """
+    if not description or not _is_mysql_family(dialect):
+        return frozenset()
+    return frozenset(
+        i for i, col in enumerate(description)
+        if col and len(col) > 1 and col[1] == _MYSQL_TIMESTAMP_TYPE_CODE
+    )
+
+
+def _instant_row(row: Any, instants: frozenset[int]) -> tuple:
+    from services.timezone_policy import mysql_timestamp_instant_wire
+
+    return tuple(
+        mysql_timestamp_instant_wire(v) if i in instants else v
+        for i, v in enumerate(row)
+    )
 
 
 def _copy_cursor_description(result: Any) -> tuple | None:
@@ -1633,15 +1879,24 @@ def _overlay_declared_numerics(
     description: Any,
     schema: dict[str, str],
     dialect: str = "",
+    carriers: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Driver type and precision win over the sample envelope.
 
     ``CAST(col AS DATE)`` and a MariaDB text column are in the cursor
-    description. Guessing from the peeked rows rewrote both.
+    description. Guessing from the peeked rows rewrote both. A MySQL LOB
+    result (``JSON_UNQUOTE`` is ``LONGTEXT``) takes its tier from the type
+    code and text-versus-binary from the driver's Python type.
     """
-    from services.decimal_observe import cursor_declared_carriers
+    from services.decimal_observe import cursor_declared_carriers, mysql_lob_carrier
 
     declared = cursor_declared_carriers(headers, description, dialect=dialect)
+    if description and carriers and _is_mysql_family(dialect):
+        for idx, header in enumerate(headers):
+            if idx < len(description) and declared.get(header, "VARCHAR") == "VARCHAR":
+                lob = mysql_lob_carrier(description[idx], carriers.get(header, ""))
+                if lob:
+                    declared[header] = lob
     if not declared:
         return schema
     return {**schema, **declared}

@@ -57,11 +57,20 @@ class IndexColumn:
     #: different index, so this travels with the column rather than being
     #: stripped at parse time.
     opclass: str = ""
+    #: MySQL / MariaDB prefix length (``KEY ix (name(32))``); 0 = the whole column.
+    prefix_length: int = 0
+    #: MySQL / MariaDB column character set (also when inherited from the table):
+    #: a key part costs its width times this charset's bytes per character.
+    charset: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {"name": self.name, "descending": self.descending}
+        payload: dict[str, Any] = {"name": self.name, "descending": self.descending}
         if self.opclass:
             payload["opclass"] = self.opclass
+        if self.prefix_length:
+            payload["prefix_length"] = self.prefix_length
+        if self.charset:
+            payload["charset"] = self.charset
         return payload
 
 
@@ -102,14 +111,20 @@ class SourceIndexes:
     status: IndexStatus
     detail: str = ""
     items: tuple[SourceIndex, ...] = ()
+    # MySQL / MariaDB InnoDB row format: COMPACT / REDUNDANT cap a key at 767
+    # bytes, DYNAMIC / COMPRESSED at 3072 (schema_fidelity.mysql_key_part_limit).
+    row_format: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "dialect": self.dialect,
             "status": self.status,
             "detail": self.detail,
             "items": [i.to_dict() for i in self.items],
         }
+        if self.row_format:
+            payload["row_format"] = self.row_format
+        return payload
 
 
 @dataclass
@@ -361,7 +376,7 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
             cursor,
             """
             SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-                   COLLATION, INDEX_TYPE, EXPRESSION
+                   COLLATION, INDEX_TYPE, EXPRESSION, SUB_PART
             FROM information_schema.STATISTICS
             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
@@ -379,16 +394,19 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
             cursor,
             """
             SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-                   COLLATION, INDEX_TYPE
+                   COLLATION, INDEX_TYPE, SUB_PART
             FROM information_schema.STATISTICS
             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
             """,
             (schema, table),
         )
-        rows = [(*r, None) for r in raw]
+        rows = [(*r[:6], None, *r[6:7]) for r in raw]
+    charsets = mysql_column_charsets(cursor, schema, table)
     grouped: dict[str, dict[str, Any]] = {}
-    for name, non_unique, _seq, column, collation, index_type, expression in rows:
+    for row in rows:
+        name, non_unique, _seq, column, collation, index_type, expression = row[:7]
+        sub_part = row[7] if len(row) > 7 else None
         entry = grouped.setdefault(
             str(name),
             {"unique": not int(non_unique or 0), "cols": [], "expr": "", "type": str(index_type or "")},
@@ -396,7 +414,11 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         if expression:
             entry["expr"] = entry["expr"] or str(expression)
             continue
-        entry["cols"].append(IndexColumn(str(column), descending=str(collation or "A").upper() == "D"))
+        entry["cols"].append(IndexColumn(
+            str(column), descending=str(collation or "A").upper() == "D",
+            prefix_length=int(sub_part or 0),
+            charset=charsets.get(str(column).casefold(), ""),
+        ))
     items = [
         SourceIndex(
             name=name,
@@ -410,7 +432,38 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         )
         for name, v in grouped.items()
     ]
-    return SourceIndexes(dialect="mysql", status="measured", items=tuple(items))
+    return SourceIndexes(
+        dialect="mysql", status="measured", items=tuple(items),
+        row_format=mysql_row_format(cursor, schema, table),
+    )
+
+
+def mysql_column_charsets(cursor: Any, schema: str | None, table: str) -> dict[str, str]:
+    """``column (casefolded) -> CHARACTER_SET_NAME`` (inherited ones included; ``{}`` unread)."""
+    try:
+        rows = _rows(
+            cursor,
+            "SELECT COLUMN_NAME, CHARACTER_SET_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s",
+            (schema or "", table),
+        )
+    except Exception:  # noqa: BLE001 — unread: utf8mb4 pricing is assumed
+        return {}
+    return {str(r[0]).casefold(): str(r[1]) for r in rows if r and r[0] and r[1]}
+
+
+def mysql_row_format(cursor: Any, schema: str | None, table: str) -> str:
+    """The table's InnoDB row format (``""`` when it cannot be read)."""
+    try:
+        rows = _rows(
+            cursor,
+            "SELECT ROW_FORMAT FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s",
+            (schema or "", table),
+        )
+    except Exception:  # noqa: BLE001 — unread: the DYNAMIC limit is assumed
+        return ""
+    return str(rows[0][0] or "").upper() if rows and rows[0] else ""
 
 
 def _sqlserver_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:

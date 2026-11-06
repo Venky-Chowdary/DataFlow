@@ -381,3 +381,63 @@ def _introspect_table_schema(
         strict_namespace=strict_namespace,
     )
     return types
+
+
+def source_schema_catalog_for_endpoint(
+    source: Any, columns: list[str], *, fallback_types: dict[str, str] | None = None
+) -> dict[str, Any] | None:
+    """The create-new fidelity catalog for a source endpoint, or None.
+
+    The streaming path introspects the source once and hands the catalog to
+    the writer; the buffered path (mirror / SCD2 since D250, and every
+    non-streaming write) handed it nothing, so its CREATE TABLE took the
+    destination's server default collation. Run 1 then passed and run 2
+    refused DataFlow's own table as a collation collapse (D275).
+    """
+    from .connector_capabilities import resolve_driver_type, source_read_driver
+
+    read_type = source_read_driver(resolve_driver_type(getattr(source, "format", "") or ""))
+    table = str(getattr(source, "table", "") or "")
+    try:
+        from .adapters import resolve_connector_config
+
+        cfg = resolve_connector_config(source) if table else {}
+    except Exception as exc:  # noqa: BLE001 - a catalog is advisory; CREATE still runs
+        logger.debug("source connector config for catalog failed: %s", exc, exc_info=exc)
+        return None
+    return source_schema_catalog_for_table(
+        read_type, cfg, table, list(columns or []), fallback_types=fallback_types
+    )
+
+
+def source_schema_catalog_for_table(
+    read_type: str,
+    cfg: dict[str, Any],
+    table: str,
+    columns: list[str],
+    *,
+    fallback_types: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """The create-new fidelity catalog for one SQL source table, or None.
+
+    One owner for every path that may CREATE the destination (streaming,
+    buffered, CDC): a source that is not a SQL catalog, or cannot be
+    introspected, yields None and the writer reports a types-only CREATE.
+    """
+    if read_type not in _CATALOG_SOURCE_TYPES or not (table or "").strip():
+        return None
+    try:
+        rich = _introspect_table_schema_rich(read_type, cfg, table, list(columns or []))
+        return source_schema_catalog_payload(
+            read_type, list(columns or []), rich, fallback_types=fallback_types
+        )
+    except Exception as exc:  # noqa: BLE001 - a catalog is advisory; CREATE still runs
+        logger.debug("source schema catalog failed: %s", exc, exc_info=exc)
+        return None
+
+
+#: Sources whose catalog the rich introspection reads (the streaming path's set).
+_CATALOG_SOURCE_TYPES: frozenset[str] = frozenset({
+    "postgresql", "redshift", "mysql", "snowflake", "sqlserver", "oracle",
+    "sqlite", "generic_sql", "bigquery", "databricks",
+})

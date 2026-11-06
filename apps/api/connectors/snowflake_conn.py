@@ -340,6 +340,72 @@ def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
     )
 
 
+class SnowflakeWarehouseError(RuntimeError):
+    """The configured warehouse cannot be used by this login (QA r12 D1)."""
+
+
+def snowflake_object_unusable_message(kind: str, name: str) -> str:
+    """``Warehouse X does not exist or is not authorized`` — one wording."""
+    grant = {
+        "Schema": "the role has USAGE on it and its database",
+        "Role": "the role is granted to this user",
+    }.get(kind, "the role has USAGE on it")
+    return (
+        f"{kind} {name} does not exist or is not authorized for this login. "
+        f"Check the connector's {kind.lower()} name and that {grant}."
+    )
+
+
+_NAMED_OBJECT_RE = re.compile(
+    r"\b(warehouse|database|schema|role)\s+'([^']+)'[^.]*?"
+    r"(?:does not exist|not authorized|not granted|not accessible)",
+    re.IGNORECASE,
+)
+
+
+def _named_snowflake_object_message(raw: str) -> str | None:
+    """Name the warehouse/database/schema/role Snowflake refused (D1).
+
+    ``Database 'X' does not exist or not authorized`` became "Snowflake
+    database or schema was not found" — the name the operator must fix was
+    dropped. A message that already names it passes through.
+    """
+    text = (raw or "").strip()
+    if re.match(
+        r"^(Warehouse|Database|Schema|Role) \S.* does not exist or is not authorized",
+        text,
+    ):
+        return text
+    m = _NAMED_OBJECT_RE.search(text)
+    if not m:
+        return None
+    return snowflake_object_unusable_message(m.group(1).capitalize(), m.group(2))
+
+
+def use_snowflake_warehouse(cur: Any, warehouse: str, quoted: str = "") -> None:
+    """``USE WAREHOUSE``, naming the warehouse when Snowflake refuses it (D1).
+
+    Snowflake answers a missing or ungranted warehouse with the anonymous
+    ``002043 Object does not exist, or operation cannot be performed`` — the
+    operator then read "Destination or resource not found".
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    try:
+        cur.execute(f"USE WAREHOUSE {quoted or quote_sql_identifier(warehouse)}")
+    except Exception as exc:
+        low = str(exc).lower()
+        if (
+            _snowflake_object_missing(exc)
+            or "not authorized" in low
+            or "operation cannot be performed" in low
+        ):
+            raise SnowflakeWarehouseError(
+                snowflake_object_unusable_message("Warehouse", warehouse)
+            ) from exc
+        raise
+
+
 def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | None:
     """Honest operator copy — do not call an invalid role a bad password."""
     stripped = (raw or "").strip()
@@ -406,6 +472,9 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
             "Snowflake key-pair authentication failed. Check the username, account "
             "host, and that the public key is assigned (ALTER USER … SET RSA_PUBLIC_KEY)."
         )
+    named = _named_snowflake_object_message(stripped)
+    if named:
+        return named
     if re.search(
         r"role .+ (does not exist|not granted|not authorized)|unknown role|"
         r"invalid role|251006|390201|specified in the connect string",
@@ -417,8 +486,8 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
         )
     if re.search(r"warehouse .+ (does not exist|not authorized)|invalid warehouse|000606", text):
         return (
-            "Snowflake warehouse is invalid or not granted. Check the warehouse name "
-            "and USAGE privilege."
+            "Snowflake warehouse is invalid or not granted (no active warehouse in "
+            "the session). Check the connector's warehouse name and USAGE privilege."
         )
     if re.search(
         r"database .+ (does not exist|not authorized)|schema .+ (does not exist|not authorized)",
@@ -446,6 +515,23 @@ def _is_local_account(account: str) -> bool:
     return account.lower() in ("local", "localhost", "fakesnow")
 
 
+def snowflake_schema_and_table(schema: str, table: str) -> tuple[str, str]:
+    """``(schema, bare table)`` for a possibly schema-qualified Snowflake name.
+
+    ``PUBLIC.HQ0609_SF`` is a schema and a table, not one identifier (D288):
+    quoted whole it names an object that does not exist. The table's own
+    qualifier wins over the connector schema; a quoted dotted name stays one
+    name (``split_qualified_table``).
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier, split_qualified_table
+
+    own_schema, bare = split_qualified_table(str(table or ""), schema or None)
+    resolved_schema = str(own_schema or schema or "PUBLIC").strip() or "PUBLIC"
+    if own_schema and own_schema != schema:
+        resolved_schema = snowflake_fold_identifier(resolved_schema)
+    return resolved_schema, bare
+
+
 def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | None:
     """Return the exact ``TABLE_NAME`` as stored, or ``None`` if not visible.
 
@@ -461,6 +547,15 @@ def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | Non
     raw = (table or "").strip()
     if not raw:
         raise ValueError("Snowflake table name is empty")
+    # A schema-qualified name resolves inside its own schema (D288). When that
+    # schema is not the one the caller passed, the stored name is handed back
+    # re-qualified so snowflake_qualified_table() addresses the right schema.
+    own_schema, bare = snowflake_schema_and_table(schema, raw)
+    if bare != raw:
+        found = resolve_snowflake_table_name(cur, own_schema, bare)
+        if found is None:
+            return None
+        return found if own_schema == _folded_schema(schema) else f"{own_schema}.{found}"
 
     candidates: list[str] = []
     for c in (snowflake_fold_identifier(raw), raw, raw.upper(), raw.lower()):
@@ -509,13 +604,19 @@ def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | Non
 
 
 def resolve_or_fold_snowflake_table(cur: Any, schema: str, table: str) -> str:
-    """Resolve stored table name, or Snowflake-fold for a not-yet-created table."""
+    """Resolve stored table name, or Snowflake-fold for a not-yet-created table.
+
+    A qualified name resolves in its own schema and comes back re-qualified
+    when that differs from ``schema`` (see ``resolve_snowflake_table_name``).
+    """
     from connectors.sql_identifiers import snowflake_fold_identifier
 
     found = resolve_snowflake_table_name(cur, schema, table)
     if found:
         return found
-    return snowflake_fold_identifier((table or "").strip())
+    own_schema, bare = snowflake_schema_and_table(schema, (table or "").strip())
+    folded = snowflake_fold_identifier(bare)
+    return folded if own_schema == _folded_schema(schema) else f"{own_schema}.{folded}"
 
 
 def snowflake_physical_name_map(
@@ -589,6 +690,38 @@ def snowflake_select_list(
         logical = quote_sql_identifier(str(name))
         items.append(ref if ref == logical else f"{ref} AS {logical}")
     return ", ".join(items)
+
+
+def snowflake_sa_projection(
+    sa_conn: Any, schema: str, table: str, names: list[str]
+) -> tuple[str, Any]:
+    """Select list and column-ref resolver for a SQLAlchemy Snowflake read.
+
+    The transform proof quoted the logical ``"id"`` over the writer's folded
+    ``ID`` — ``000904 invalid identifier`` made every shaped Snowflake run
+    "unverifiable" (QA r12 D8). It now resolves through the writer's own
+    :func:`snowflake_column_ref`, probing the stored names once on the same
+    connection.
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    sch = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+    physical: dict[str, str] = {}
+    try:
+        cur = sa_conn.connection.cursor()
+        try:
+            resolved = resolve_or_fold_snowflake_table(cur, sch, table)
+            physical = snowflake_physical_name_map(cur, sch, resolved) or {}
+        finally:
+            cur.close()
+    except Exception as exc:
+        # Unprobed: fold the way unquoted SQL (and the writer's create-new
+        # DDL) does, never the raw logical spelling.
+        logger.debug("snowflake projection probe failed: %s", exc, exc_info=exc)
+    return (
+        snowflake_select_list(list(names), physical),
+        lambda name: snowflake_column_ref(name, physical),
+    )
 
 
 _SF_COLUMN_PROJECTIONS: tuple[str, ...] = (
@@ -725,17 +858,26 @@ def use_snowflake_namespace(cur: Any, *, database_q: str, schema_q: str, create:
         cur.execute(f"USE {kind} {ident}")
 
 
-def snowflake_qualified_table(schema: str, table: str) -> str:
-    """Quote schema.table using the exact stored/folded names (no second fold)."""
-    from connectors.sql_identifiers import (
-        quote_sql_identifier,
-        snowflake_fold_identifier,
-    )
+def _folded_schema(schema: str) -> str:
+    from connectors.sql_identifiers import snowflake_fold_identifier
 
-    sch = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
-    # ``table`` must already be the resolved information_schema name, or a
+    return snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+
+
+def snowflake_qualified_table(schema: str, table: str) -> str:
+    """Quote schema.table using the exact stored/folded names (no second fold).
+
+    An unquoted ``schema.table`` in ``table`` is two identifiers: its own
+    schema wins over ``schema`` (D288 — quoting it whole named an object that
+    does not exist at every read-back, DESC and COUNT site).
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    own_schema, bare = snowflake_schema_and_table(schema, table)
+    sch = own_schema if bare != table else _folded_schema(schema)
+    # ``bare`` must already be the resolved information_schema name, or a
     # folded name for a table that does not exist yet.
-    return f"{quote_sql_identifier(sch)}.{quote_sql_identifier(table)}"
+    return f"{quote_sql_identifier(sch)}.{quote_sql_identifier(bare)}"
 
 
 def _fakesnow_db_path() -> str:
@@ -828,6 +970,61 @@ def _snowflake_connector_module() -> Any:
     return snowflake.connector
 
 
+# Snowflake's own type names (snowflake.connector.constants.FIELD_ID_TO_NAME)
+# -> the logical carrier a query result column declares.
+_SNOWFLAKE_TYPE_CARRIERS = {
+    "FIXED": "DECIMAL",  # precision/scale come from the description
+    "REAL": "DOUBLE",
+    "TEXT": "VARCHAR",
+    "DATE": "DATE",
+    "TIME": "TIME",
+    "TIMESTAMP": "TIMESTAMP",
+    "TIMESTAMP_NTZ": "TIMESTAMP",
+    "TIMESTAMP_LTZ": "TIMESTAMPTZ",
+    "TIMESTAMP_TZ": "TIMESTAMPTZ",
+    "VARIANT": "JSON",
+    "OBJECT": "JSON",
+    "ARRAY": "JSON",
+    "BINARY": "VARBINARY",
+    "BOOLEAN": "BOOLEAN",
+}
+
+
+def named_cursor_description(description: Any) -> tuple:
+    """Snowflake's cursor description with each type code named by the driver.
+
+    A Snowflake type code is a private integer that collides with the MySQL
+    and PostgreSQL code tables, so services.decimal_observe never reads one
+    (MX2-07: an untrusted int invents nothing; the sample decides). Here the
+    description is known to come from snowflake-connector-python, and the
+    driver's own FIELD_ID_TO_NAME names the code, so TO_VARCHAR output is
+    VARCHAR and a NUMBER(38,0) is DECIMAL(38,0) instead of the raw "2" or a
+    value-inferred INTEGER/TIMESTAMP (D17). The name rides the existing
+    explicit-carrier slot (CursorDeclaredType); an unknown code is left as
+    the driver reported it.
+    """
+    try:
+        from snowflake.connector.constants import FIELD_ID_TO_NAME
+    except ImportError:  # no driver: nothing names the codes
+        FIELD_ID_TO_NAME = {}
+    from services.decimal_observe import CursorDeclaredType
+
+    named: list[tuple] = []
+    for desc in description or ():
+        row = tuple(desc)
+        code = row[1] if len(row) > 1 else None
+        type_name = (
+            FIELD_ID_TO_NAME.get(code)
+            if isinstance(code, int) and not isinstance(code, bool)
+            else None
+        )
+        carrier = _SNOWFLAKE_TYPE_CARRIERS.get(str(type_name or "").upper())
+        if carrier:
+            row = (row[0], CursorDeclaredType(str(type_name), carrier), *row[2:])
+        named.append(row)
+    return tuple(named)
+
+
 _converter_class: type | None = None
 
 _SHORT_YEAR = re.compile(r"^(\d{1,3})(?=-)")
@@ -896,7 +1093,15 @@ def snowflake_converter_class() -> type:
     return _converter_class
 
 
-def _open_connection(
+def _open_connection(**kwargs: Any) -> Any:
+    """Log in to Snowflake; a tool deadline passing meanwhile names this account (D187)."""
+    from src.ai.copilot.tool_deadline import waiting_on
+
+    with waiting_on({"host": str(kwargs.get("account") or ""), "port": 443}):
+        return _login(**kwargs)
+
+
+def _login(
     *,
     account: str,
     username: str,

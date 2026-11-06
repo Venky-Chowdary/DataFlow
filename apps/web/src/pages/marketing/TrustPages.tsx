@@ -113,14 +113,17 @@ export function StatusPage() {
 }
 
 const SUBPROCESSORS = [
+  // The hosting provider is a deployment fact, named in each customer's order
+  // form and DPA. The public bundle describes the role only: it never carries
+  // a hosting provider's name or hostname (bundle brand gate, QA r12 #4b).
   {
-    name: "Railway Corporation",
+    name: "Cloud hosting provider (named in your order form and DPA)",
     purpose: "Hosts the Datawrap web app, API, and transfer workers (control plane)",
     data: "Account, workspace, job metadata; data in transit during transfers",
     when: "All hosted workspaces",
   },
   {
-    name: "MongoDB (Railway-managed or MongoDB Atlas)",
+    name: "MongoDB (managed by the hosting provider, or MongoDB Atlas)",
     purpose: "Control-plane database: jobs, schedules, audit chain, encrypted connector configs",
     data: "Account, workspace, job metadata; encrypted credentials",
     when: "All hosted workspaces",

@@ -135,6 +135,106 @@ def sync_collapses_in_file_duplicates(sync_mode: str | None) -> bool:
     return _normalized_mode(sync_mode) in {"upsert", "incremental_deduped"}
 
 
+#: Sources whose read order IS the change order within a key: an upsert keeps the
+#: last read copy of a key, which is its latest record. Kafka gives that order
+#: per partition, so it holds for a topic whose messages are keyed (one key,
+#: one partition) or that has a single partition — the shape of a changelog
+#: topic. The finding text states the assumption.
+ORDERED_LOG_SOURCES = frozenset({"kafka"})
+ORDERED_LOG_NOTE = (
+    "Repeated keys collapsed to the last message read: Kafka orders messages "
+    "within a partition, so this assumes a keyed (per-key partition) or "
+    "single-partition topic. Declare in_file_dedupe=block to refuse repeats instead."
+)
+
+
+def _stream_scope(stream_contracts: list[dict] | None, stream_name: str = "") -> list[dict]:
+    """The contract(s) a decision is about: the named stream, else every selected one."""
+    selected = [
+        c for c in (stream_contracts or [])
+        if isinstance(c, dict) and c.get("selected") is not False
+    ]
+    if stream_name:
+        named = [
+            c for c in selected
+            if str(c.get("name") or c.get("stream") or "").strip() == stream_name.strip()
+        ]
+        if named:
+            return named
+    return selected
+
+
+def latest_wins_dedupe(
+    in_file_dedupe: str | None,
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> str:
+    """``keep_last`` when an upsert's winner per key is defined by read order.
+
+    ``incremental_deduped`` keeps the latest version of each key. With a
+    declared cursor the incremental read is ordered by it, and a changelog
+    topic is read in offset order, so the last copy read IS the latest one.
+    Refusing a repeated key there blocked the normal shape of a changelog
+    (D89) and of a versioned table (E2-023: 3 versions per key). An explicit
+    operator policy (``block`` / ``keep_last``) always wins.
+
+    Decided per stream: ``stream_name`` picks that contract; without it every
+    selected contract must declare a cursor, so a cursorless stream in a
+    multi-stream request still refuses repeated keys.
+    """
+    explicit = str(in_file_dedupe or "").strip()
+    if explicit or not sync_collapses_in_file_duplicates(sync_mode):
+        return explicit
+    from src.transfer.engine_family import engine_family
+
+    if engine_family(source_type) in ORDERED_LOG_SOURCES:
+        return "keep_last"
+    scope = _stream_scope(stream_contracts, stream_name)
+    if scope and all(
+        str(c.get("cursor_field") or c.get("cursor") or "").strip() for c in scope
+    ):
+        return "keep_last"
+    return explicit
+
+
+def table_reads_latest_wins(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> bool:
+    """True when this read of a table/log defines "the last copy of a key".
+
+    The same answer :func:`latest_wins_dedupe` gives an unset policy: a
+    collapsing sync whose read is cursor-ordered (a versioned table, E2-023)
+    or offset-ordered (a changelog topic, D89). There an operator's explicit
+    ``keep_last`` is the automatic choice spelled out — schedules always
+    stamp ``block`` or ``keep_last``, so refusing it left a versioned-table
+    schedule no setting that runs (QA C2 review 3).
+    """
+    return (
+        latest_wins_dedupe(
+            None,
+            sync_mode,
+            stream_contracts=stream_contracts,
+            source_type=source_type,
+            stream_name=stream_name,
+        )
+        == "keep_last"
+    )
+
+
+def latest_wins_note(source_type: str = "") -> str:
+    """The assumption behind a read-order collapse, for the finding text."""
+    from src.transfer.engine_family import engine_family
+
+    return ORDERED_LOG_NOTE if engine_family(source_type) in ORDERED_LOG_SOURCES else ""
+
+
 def operator_collapses_in_file_duplicates(
     sync_mode: str | None,
     in_file_dedupe: str | None = "",

@@ -385,7 +385,11 @@ def dest_object_missing(
             dest_table, (dest_cfg.get("schema") or "").strip() or None
         )
         ident = resolve_object_identity(engine, table, schema)
-        return not ident.exists
+        if ident.catalog_unreadable:
+            # The catalog did not answer (connection refused, DNS blip, timeout):
+            # that is "unknown", never "dropped" (D266).
+            return None
+        return ident.known_missing
     except Exception:  # noqa: BLE001 — unknown stays unknown
         return None
 
@@ -414,6 +418,7 @@ def cursor_destination_reset_issue(
     dest_rows: int | None,
     *,
     dest_missing: bool | None = None,
+    destination: Any = None,
 ) -> str:
     """Refusal text when the watermark outlived the destination it delivered to.
 
@@ -430,6 +435,13 @@ def cursor_destination_reset_issue(
     """
     if scope is None or not scope.bounded or dest_rows is None or dest_rows > 0:
         return ""
+    if destination is not None:
+        from services.append_continuity import destination_reset_accepted
+
+        if destination_reset_accepted(destination):
+            # The remedy this refusal names was taken: an audited rebaseline
+            # accepted the reset, so this run starts a new history (QA C9).
+            return ""
     return (
         f"Destination reset since the last incremental run: the stored watermark "
         f"'{scope.watermark}' on '{scope.cursor_column}' claims those rows are "
@@ -709,6 +721,7 @@ def refuse_unusable_cursor_state(
     dest_type: str,
     dest_cfg: dict[str, Any],
     dest_table: str,
+    destination: Any = None,
 ) -> None:
     """Raise before a bounded read that its own watermark cannot justify.
 
@@ -726,6 +739,7 @@ def refuse_unusable_cursor_state(
         scope,
         countable_dest_rows(dest_type, dest_cfg, dest_table),
         dest_missing=dest_missing,
+        destination=destination,
     )
     if issue:
         raise CursorDestinationReset(issue, details={

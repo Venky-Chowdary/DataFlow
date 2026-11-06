@@ -4,9 +4,12 @@ Every control-plane store the Settings, SSO, SCIM, audit and team routes touch
 resolves its database through ``services.mongodb_service.get_mongodb_service``.
 The fixture points that one singleton at a throwaway database on the local
 MongoDB, so members, accounts, SCIM state, API keys, the integrations document
-and the audit chain all live in Mongo exactly as they do in production. Only
-stores that are file-backed in production too (workspace settings, tenants,
-notification channels, auth sessions) are redirected to ``tmp_path``.
+and the audit chain all live in Mongo exactly as they do in production — the
+general workspace settings too (``services.workspace_store``: shared store
+whenever a control-plane database is configured). Only stores that are
+file-backed in production too (tenants, notification channels, auth sessions)
+are redirected to ``tmp_path``; ``workspace_store.STORE_PATH`` is redirected so
+a migration reads this test's file, never the developer's.
 
 Import the fixtures into a test module::
 

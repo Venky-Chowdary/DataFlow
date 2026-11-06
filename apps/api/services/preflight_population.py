@@ -591,6 +591,7 @@ def scan_existing_table_population_fit(
         deadline_monotonic=deadline_monotonic,
         deadline_floor_rows=len(sample_rows or ()),
         on_progress=on_progress,
+        validation_mode=validation_mode,
     )
     if population_walk_error:
         from dataclasses import replace
@@ -640,6 +641,7 @@ def scan_existing_table_population_fit(
                 source_format=source_format,
                 sync_mode=sync_mode,
                 dest_table_exists=destination_table_exists,
+                validation_mode=validation_mode,
             ),
         )
         if widen is not None:

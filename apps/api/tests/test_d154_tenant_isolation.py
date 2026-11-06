@@ -115,7 +115,7 @@ def tenants(tmp_path, monkeypatch):
     sched = a.post("/api/v1/schedules/", json={
         "name": f"a-sched-{tag}", "source_connector_id": a_connector, "source_table": "orders",
         "dest_connector_id": a_connector, "dest_table": "orders_copy", "interval": "daily",
-        "mappings": [{"source": "id", "target": "id"}],
+        "mappings": [{"source": "id", "target": "id", "confidence": 0.99}],  # Validate-approved (QA C10)
     })
     assert sched.status_code == 201, sched.text
     a_schedule = sched.json()["id"]

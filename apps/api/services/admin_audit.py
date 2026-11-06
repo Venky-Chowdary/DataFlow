@@ -52,6 +52,7 @@ ADMIN_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("DELETE", "/api/v1/workspace/tenant/{tenant_id}", "workspace.tenant.delete"),
     ("POST", "/api/v1/workspace/jobs/retention/purge", "workspace.jobs.retention.purge"),
     ("POST", "/api/v1/workspace/pii-hash-key/rotate", "workspace.pii_hash_key.rotate"),
+    ("PUT", "/api/v1/workspace/pii-hash-key", "workspace.pii_hash_key.set"),
     ("POST", "/api/v1/iam/mfa/reset", "auth.mfa.reset"),
 )
 
@@ -77,6 +78,10 @@ ADMIN_EVENTS.update(MFA_EVENTS)
 # Refusals of deployment-wide settings writes (services.platform_settings):
 # one name for every route in the general / SSO / AI-provider groups, with the
 # route's own action in the details.
+ADMIN_EVENTS["cdc.capture.auto_drop.changed"] = (
+    "A platform admin turned the automatic drop of orphaned CDC replication slots "
+    "(source table gone past the grace period) on or off."
+)
 ADMIN_EVENTS["platform_settings.write.denied"] = (
     "A write to deployment-wide settings (general, SSO, AI providers, Pilot engine) "
     "was refused because the caller is not a platform admin."

@@ -56,6 +56,55 @@ from services.copy_range_proof import range_keys_match  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _identity_charset_tails(cur: Any, dst_cur: Any, table: str) -> dict[str, str]:
+    """``CHARACTER SET … COLLATE …`` each source text column declares, by name.
+
+    ``COLUMN_TYPE`` names no charset, so an identity CREATE from it put a
+    latin1 ``TINYTEXT`` (255 characters) into the destination's utf8mb4
+    default (255 *bytes*, as few as 63 characters) and the copy died with 1406
+    (QA MySQL D12). The identity copy carries the source's charset, and its
+    collation only where the destination server has that collation — asked of
+    its own ``information_schema.COLLATIONS``, not guessed from the name
+    (MySQL 8 ``utf8mb4_ja_0900_as_cs`` does not exist on MariaDB: 1273).
+    """
+    dst_cur.execute("SELECT CHARACTER_SET_NAME FROM information_schema.CHARACTER_SETS")
+    dest_charsets = {str(r[0]).lower() for r in dst_cur.fetchall()}
+    dst_cur.execute("SELECT COLLATION_NAME FROM information_schema.COLLATIONS")
+    dest_collations = {str(r[0]).lower() for r in dst_cur.fetchall()}
+    # MariaDB 10.10+ lists its uca1400 collations under their charset-qualified
+    # name (``utf8mb4_uca1400_ai_ci``) only in
+    # COLLATION_CHARACTER_SET_APPLICABILITY.FULL_COLLATION_NAME; COLLATIONS has
+    # the charset-less ``uca1400_ai_ci``. Missing them dropped COLLATE even on
+    # the same MariaDB, so ``_as_cs`` landed as the default ``_ai_ci``.
+    dst_cur.execute(
+        "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = "
+        "'information_schema' AND TABLE_NAME = 'COLLATION_CHARACTER_SET_APPLICABILITY' "
+        "AND COLUMN_NAME = 'FULL_COLLATION_NAME'"
+    )
+    if int((dst_cur.fetchone() or [0])[0] or 0):
+        dst_cur.execute(
+            "SELECT FULL_COLLATION_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY"
+        )
+        dest_collations |= {str(r[0]).lower() for r in dst_cur.fetchall() if r and r[0]}
+    cur.execute(
+        "SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME "
+        "FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+        (table,),
+    )
+    tails: dict[str, str] = {}
+    for name, charset, collation in cur.fetchall():
+        cs = str(charset or "").strip()
+        if not cs or cs.lower() not in dest_charsets:
+            continue
+        tail = f"CHARACTER SET {cs}"
+        coll = str(collation or "").strip()
+        if coll and coll.lower() in dest_collations:
+            tail += f" COLLATE {coll}"
+        tails[str(name).lower()] = tail
+    return tails
+
+
 def mysql_mysql_insert_select_enabled() -> bool:
     raw = (getenv_brand("MYSQL_MYSQL_INSERT_SELECT", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -135,7 +184,7 @@ def _fifo_mysql_into_mysql(
     columns: list[str],
 ) -> None:
     from connectors.mysql_load_data import (
-        blocking_load_data_warnings,
+        fetch_load_data_warnings,
         execute_load_data_local,
     )
 
@@ -171,8 +220,7 @@ def _fifo_mysql_into_mysql(
             table_q=table_q,
             columns=columns,
         )
-        dst_cur.execute("SHOW WARNINGS")
-        blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
+        blocked = fetch_load_data_warnings(dst_cur)
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 
@@ -231,9 +279,12 @@ def copy_mysql_to_mysql(
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
             live_l = {k.lower(): v for k, v in live.items()}
+            charset_tails = _identity_charset_tails(src_cur, dst_cur, source_table)
             create_ddls: list[str] = []
             for i, col in enumerate(source_cols):
                 declared = live_l.get(col.lower()) or mysql_ddls[i]
+                if col.lower() in live_l and col.lower() in charset_tails:
+                    declared = f"{declared} {charset_tails[col.lower()]}"
                 if use_insert_select:
                     create_ddls.append(declared)
                 else:

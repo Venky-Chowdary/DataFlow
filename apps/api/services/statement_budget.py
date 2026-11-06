@@ -66,11 +66,17 @@ def _execute(dbapi_connection: Any, statement: str, *, outside_transaction: bool
 
 
 def _on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
-    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+    from src.ai.copilot.tool_deadline import (
+        register_connection,
+        statement_timeout_seconds,
+    )
 
     seconds = statement_timeout_seconds()
     if seconds is None:
         return
+    # The call's deadline can end this connection's blocked I/O if the call
+    # is abandoned (D281); checkin takes it back out below.
+    register_connection(dbapi_connection)
     family = _family(dbapi_connection)
     millis = int(seconds * 1000)
     try:
@@ -92,7 +98,26 @@ def _on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
         logger.debug("statement budget not applied (%s): %s", family, exc)
 
 
+def _on_connect(dbapi_connection: Any, _record: Any) -> None:
+    """A new pooled connection is interruptible before its first query.
+
+    The engine's dialect initialize (server version, settings) runs from the
+    pool's ``connect`` event, before ``checkout``: a source that went silent
+    right after the handshake held that worker in ``recv`` with nothing able
+    to end it (D281). Class-level pool listeners run before the engine's own,
+    so registering here covers those queries. A no-op outside a tool call.
+    """
+    from src.ai.copilot.tool_deadline import register_connection
+
+    register_connection(dbapi_connection)
+
+
 def _on_checkin(dbapi_connection: Any, record: Any) -> None:
+    # The connection stays registered to the call that used it last: SQLAlchemy
+    # runs ``pool_pre_ping`` *before* the checkout event, so a ping on an idle
+    # pooled socket whose tunnel went silent would otherwise block with
+    # nothing registered (the original D281 shape). The next checkout moves
+    # ownership to its call; close/invalidate unregister it.
     family = record.info.pop(_FLAG, None) if record is not None else None
     if not family or dbapi_connection is None:
         return
@@ -109,6 +134,13 @@ def _on_checkin(dbapi_connection: Any, record: Any) -> None:
         logger.debug("statement budget not reset (%s): %s", family, exc)
 
 
+def _on_gone(dbapi_connection: Any, *_args: Any) -> None:
+    """A closed or invalidated connection leaves the interrupt registry."""
+    from src.ai.copilot.tool_deadline import unregister_connection
+
+    unregister_connection(dbapi_connection)
+
+
 def install() -> None:
     """Register the pool listeners once per process."""
     global _installed
@@ -122,6 +154,11 @@ def install() -> None:
             from sqlalchemy.pool import Pool
         except ImportError:  # pragma: no cover - SQLAlchemy is a dependency
             return
+        event.listen(Pool, "first_connect", _on_connect)
+        event.listen(Pool, "connect", _on_connect)
         event.listen(Pool, "checkout", _on_checkout)
         event.listen(Pool, "checkin", _on_checkin)
+        event.listen(Pool, "close", _on_gone)
+        event.listen(Pool, "close_detached", _on_gone)
+        event.listen(Pool, "invalidate", _on_gone)
         _installed = True

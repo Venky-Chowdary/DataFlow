@@ -13,7 +13,7 @@ import json
 import logging
 from typing import Any, Callable
 
-from services.value_serializer import json_default
+from services.value_serializer import json_dumps_exact_text
 
 from connectors.writer_common import (
     reject_on_strict_policy,
@@ -231,7 +231,7 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
     def _serialize_value(v: Any) -> bytes:
         if schema_id is not None and schema_id > 0:
             return encode_confluent_json(schema_id, v)
-        return json.dumps(v, default=json_default).encode("utf-8")
+        return json_dumps_exact_text(v, ensure_ascii=True).encode("utf-8")
 
     from services.copy_kafka_common import kafka_classified_bootstrap, kafka_client_kwargs
 
@@ -728,7 +728,7 @@ def write_mapped_rows(
             written += 1
             if len(produced_sample) < 50:
                 produced_sample.append(dict(payload))
-            digest.update(json.dumps(payload, default=json_default, sort_keys=True).encode())
+            digest.update(json_dumps_exact_text(payload, ensure_ascii=True, sort_keys=True).encode())
             if on_checkpoint and (idx + 1) % 100 == 0:
                 on_checkpoint(written, len(mapped_rows), 1)
         producer.flush(timeout=30)

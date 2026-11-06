@@ -106,6 +106,12 @@ class DestinationCollisionResult:
     # True when this batch is the interrupted run being delivered again.
     # A heap would store that overlap a second time, so resume still blocks.
     resume_redelivery: bool = False
+    # Which identity was probed: ``contract`` / ``destination_pk`` /
+    # ``destination_unique`` / ``source_key``, or ``full_row`` when no key is
+    # declared anywhere and only exact duplicate rows were checked.
+    identity_basis: str = "declared"
+    # Every identity the append was probed on (the clean verdict names them).
+    probed_keys: list[str] = field(default_factory=list)
 
     @property
     def ran(self) -> bool:
@@ -298,12 +304,12 @@ def _sql_existing_keys(
     # ``error`` — a skip that is not proof of a clean append. Address the object
     # the catalog actually holds, with its stored column spelling.
     ident = resolve_object_identity(engine, table, schema, columns=[key_column])
-    if ident.exists:
+    if ident.known_present:
         table = sa.sql.quoted_name(ident.table, True)
         schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
         key_column = ident.columns.get(key_column, key_column)
     tbl = sa.table(table, schema=schema)
-    col = sa.column(sa.sql.quoted_name(key_column, True) if ident.exists else key_column)
+    col = sa.column(sa.sql.quoted_name(key_column, True) if ident.known_present else key_column)
     stmt = (
         sa.select(col)
         .select_from(tbl)
@@ -426,6 +432,7 @@ def probe_append_key_collisions(
     incremental_cursor_column: str = "",
     incremental_watermark: str | None = None,
     incremental_tiebreak_column: str = "",
+    source_key_columns: list[str] | None = None,
 ) -> DestinationCollisionResult | None:
     """Resolve the identity key, then probe it — ``None`` when not applicable.
 
@@ -447,20 +454,88 @@ def probe_append_key_collisions(
     if destination_table_exists is not True:
         return None
 
-    pairs = _identity_pairs(
-        mappings=mappings,
-        source_columns=source_columns,
-        dest_kind=dest_kind,
-        validation_mode=validation_mode,
+    identities = append_identity_pair_sets(
+        mappings=mappings, source_columns=source_columns,
         destination_pk_columns=destination_pk_columns,
-        contract_primary_key=contract_primary_key,
-        stream_contracts=stream_contracts,
-        source_table=source_table,
-        destination_table=destination_table,
+        destination_unique_keys=destination_unique_keys,
+        contract_primary_key=contract_primary_key, stream_contracts=stream_contracts,
+        source_table=source_table, destination_table=destination_table,
+        source_key_columns=source_key_columns,
     )
-    if not pairs:
+    if not identities:
         return None
+    # Every identity is probed. A collision on a key the destination enforces
+    # aborts the insert, so it is the verdict even when an unenforced contract
+    # key also collides (that one only warns). With no collision, the first
+    # probe that could not run is reported (never read as proof), else the
+    # first, naming every key that was probed.
+    results: list[DestinationCollisionResult] = []
+    for pairs, basis, nulls_not_distinct in identities:
+        result = _probe_identity(
+            pairs, basis=basis, nulls_not_distinct=nulls_not_distinct,
+            sample_rows=sample_rows, destination_config=destination_config,
+            destination_db_type=destination_db_type, destination_table=destination_table,
+            destination_pk_columns=destination_pk_columns,
+            destination_unique_keys=destination_unique_keys, resume=resume,
+            incremental_cursor_column=incremental_cursor_column,
+            incremental_watermark=incremental_watermark,
+            incremental_tiebreak_column=incremental_tiebreak_column,
+        )
+        result.identity_basis = basis
+        results.append(result)
+    chosen = (
+        next((r for r in results if r.findings and r.key_enforced), None)
+        or next((r for r in results if r.findings), None)
+        or next((r for r in results if not r.ran), None)
+        or results[0]
+    )
+    chosen.probed_keys = [r.key_column for r in results if r.ran and r.key_column]
+    return chosen
 
+
+_CATALOG_KEY_BASES = frozenset({"destination_pk", "destination_unique"})
+
+
+def _key_null_rule(basis: str, db_type: str, nulls_not_distinct: bool) -> str:
+    """How a destination key compares NULL parts: ``match``, ``skip_any_null``, ``skip_all_null``.
+
+    PostgreSQL, MySQL / MariaDB and SQLite treat NULLs in a UNIQUE / PK key as
+    distinct, so a tuple with a NULL part never collides (unless the key is
+    NULLS NOT DISTINCT); probing it with ``IS NULL`` blocked appends the engine
+    accepts. SQL Server treats NULL as a value (one NULL per key). Oracle does
+    not index an all-NULL tuple but matches a partly-NULL one. Identities that
+    are not destination keys (contract, source key, full row) compare exact
+    rows, NULLs included.
+    """
+    if basis not in _CATALOG_KEY_BASES:
+        return "match"
+    from src.transfer.engine_family import engine_family
+
+    family = engine_family(db_type)
+    if nulls_not_distinct or family == "sqlserver":
+        return "match"
+    if family == "oracle":
+        return "skip_all_null"
+    return "skip_any_null"
+
+
+def _probe_identity(
+    pairs: list[tuple[str, str]],
+    *,
+    basis: str = "",
+    nulls_not_distinct: bool = False,
+    sample_rows: list[dict[str, Any]] | None,
+    destination_config: Mapping[str, Any] | None,
+    destination_db_type: str,
+    destination_table: str,
+    destination_pk_columns: list[str] | None,
+    destination_unique_keys: list[dict[str, Any]] | None,
+    resume: bool,
+    incremental_cursor_column: str,
+    incremental_watermark: str | None,
+    incremental_tiebreak_column: str,
+) -> DestinationCollisionResult:
+    """Probe one identity (column pairs) against the destination."""
     target_columns = [target for _source, target in pairs]
     enforced = destination_enforces_columns(
         target_columns,
@@ -473,7 +548,13 @@ def probe_append_key_collisions(
     # single column. A composite key is not a single-column reject, so the
     # plan answer stands. A catalog miss returns no names and does not invent
     # a blocker; the engine still rejects a real duplicate at insert time.
-    if (
+    if basis == "destination_unique":
+        # The identity *is* a UNIQUE key read from the destination catalog
+        # (pg_index / STATISTICS): it rejects a repeat however the live
+        # single-column read spells it. A plan's PK list is not that proof - it
+        # can be the source key copied forward onto a heap (DEF-B2-001).
+        enforced = True
+    elif (
         destination_config
         and destination_table
         and len(target_columns) == 1
@@ -493,25 +574,45 @@ def probe_append_key_collisions(
         watermark=incremental_watermark,
         tiebreak_column=incremental_tiebreak_column,
     )
+    null_rule = _key_null_rule(basis, destination_db_type, nulls_not_distinct)
     if len(pairs) == 1:
         source_key, target_key = pairs[0]
+        values = [row.get(source_key) for row in batch_rows]
         result = probe_destination_key_collisions(
             destination_config=destination_config,
             destination_db_type=destination_db_type,
             destination_table=destination_table,
             key_column=target_key,
-            values=[row.get(source_key) for row in batch_rows],
+            values=values,
         )
+        if null_rule == "match" and basis in _CATALOG_KEY_BASES and any(
+            key_identity_text(v) is None for v in values
+        ):
+            # SQL Server (and NULLS NOT DISTINCT) admits one NULL per key: a
+            # NULL already stored rejects the batch's NULL.
+            nulls = probe_destination_tuple_collisions(
+                destination_config=destination_config,
+                destination_db_type=destination_db_type,
+                destination_table=destination_table,
+                columns=[target_key],
+                tuples=[(None,)],
+            )
+            result.findings = list(result.findings) + list(nulls.findings)
     else:
+        tuples = [
+            tuple(key_identity_text(row.get(source)) for source, _target in pairs)
+            for row in batch_rows[:MAX_PROBE_VALUES]
+        ]
+        if null_rule == "skip_any_null":
+            tuples = [t for t in tuples if all(v is not None for v in t)]
+        elif null_rule == "skip_all_null":
+            tuples = [t for t in tuples if any(v is not None for v in t)]
         result = probe_destination_tuple_collisions(
             destination_config=destination_config,
             destination_db_type=destination_db_type,
             destination_table=destination_table,
             columns=target_columns,
-            tuples=[
-                tuple(key_identity_text(row.get(source)) for source, _target in pairs)
-                for row in batch_rows[:MAX_PROBE_VALUES]
-            ],
+            tuples=tuples,
         )
     if incremental_cursor_column and incremental_watermark:
         result.delta_scope = {
@@ -530,6 +631,62 @@ def probe_append_key_collisions(
     return result
 
 
+def append_identity_pair_sets(
+    *,
+    mappings: list[dict[str, Any]] | None,
+    source_columns: list[str] | None,
+    destination_pk_columns: list[str] | None,
+    destination_unique_keys: list[dict[str, Any]] | None,
+    contract_primary_key: str | None,
+    stream_contracts: list[dict[str, Any]] | None,
+    source_table: str,
+    destination_table: str,
+    source_key_columns: list[str] | None = None,
+) -> list[tuple[list[tuple[str, str]], str, bool]]:
+    """Every identity an append is probed on, in order: ``(pairs, basis, nulls_not_distinct)``.
+
+    The contract key, then every key the destination enforces (its primary key,
+    then each UNIQUE key, single or composite) — any of them aborts the insert
+    on a repeat — then the source catalog key. Never a column guessed by name
+    (Rfam ``clan``: ``id`` is a label, ``clan_acc`` the key). With none declared
+    anywhere the mapped row is the identity (``full_row``): only exact
+    duplicate rows are checked, and the gate says so.
+    """
+    from services.primary_key import _map_identity_names_to_source
+
+    mapped = _mapped_pairs(mappings)
+    target_by_source = {source: target for source, target in mapped}
+    mapped_targets = {target.casefold() for _source, target in mapped}
+    stream = str(destination_table or source_table or "")
+    contract = _contract_identity_names(contract_primary_key, stream_contracts, stream)
+    candidates: list[tuple[list[str], str, bool, bool]] = [(contract, "contract", False, False)]
+    candidates.append((list(destination_pk_columns or []), "destination_pk", True, False))
+    candidates.extend(
+        (list((uk or {}).get("columns") or []), "destination_unique", True,
+         bool((uk or {}).get("nulls_not_distinct")))
+        for uk in destination_unique_keys or []
+        if isinstance(uk, dict) and not uk.get("expression") and not uk.get("filter_predicate")
+    )
+    candidates.append((list(source_key_columns or []), "source_key", False, False))
+    out: list[tuple[list[tuple[str, str]], str, bool]] = []
+    seen: set[tuple[str, ...]] = set()
+    for names, basis, is_target, nulls_not_distinct in candidates:
+        cleaned = [str(n).strip() for n in names if str(n or "").strip()]
+        if not cleaned or (is_target and any(n.casefold() not in mapped_targets for n in cleaned)):
+            continue
+        sources = _map_identity_names_to_source(
+            cleaned, mappings=list(mappings or []), source_columns=list(source_columns or [])
+        )
+        pairs = [(src, target_by_source.get(src, src)) for src in sources]
+        folded = tuple(sorted(t.casefold() for _s, t in pairs))
+        if pairs and folded not in seen:
+            seen.add(folded)
+            out.append((pairs, basis, nulls_not_distinct))
+    if not out and mapped:
+        out.append((mapped, "full_row", False))
+    return out
+
+
 def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     for item in mappings or []:
@@ -540,6 +697,26 @@ def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]
         if source and target:
             pairs.append((source, target))
     return pairs
+
+
+def _contract_identity_names(
+    contract_primary_key: str | None,
+    stream_contracts: list[dict[str, Any]] | None,
+    stream_name: str,
+) -> list[str]:
+    """The contract's identity columns (single selected stream fallback, as engine_preflight)."""
+    from services.primary_key import extract_contract_primary_key_columns
+
+    contract = extract_contract_primary_key_columns(
+        stream_contracts, stream_name=stream_name, fallback_first=not stream_name.strip()
+    )
+    selected = [c for c in stream_contracts or [] if isinstance(c, dict) and c.get("selected", True)]
+    if not contract and len(selected) == 1:
+        # One selected stream is this write's, whatever it is named.
+        contract = extract_contract_primary_key_columns(selected)
+    return contract or [
+        p.strip() for p in str(contract_primary_key or "").split(",") if p.strip()
+    ]
 
 
 def _identity_pairs(
@@ -558,7 +735,8 @@ def _identity_pairs(
 
     The identity resolver is the same one uniqueness already uses. When it
     names nothing, the mapped row itself is the identity: appending that row
-    again is the same data.
+    again is the same data. (The append probe does not use this name-aware
+    resolver: see :func:`append_identity_pair_sets`.)
     """
     mapped = _mapped_pairs(mappings)
     target_by_source = {source: target for source, target in mapped}
@@ -787,17 +965,17 @@ def _sql_existing_tuples(
     )
     ident = resolve_object_identity(engine, table_name, schema, columns=columns)
     resolved = [
-        ident.columns.get(column, column) if ident.exists else column
+        ident.columns.get(column, column) if ident.known_present else column
         for column in columns
     ]
-    if ident.exists:
+    if ident.known_present:
         table_name = sa.sql.quoted_name(ident.table, True)
         schema_name = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
     else:
         schema_name = schema
     tbl = sa.table(table_name, schema=schema_name)
     cols = [
-        sa.column(sa.sql.quoted_name(name, True) if ident.exists else name)
+        sa.column(sa.sql.quoted_name(name, True) if ident.known_present else name)
         for name in resolved
     ]
     dialect_name = str(getattr(engine.dialect, "name", ""))
@@ -904,7 +1082,55 @@ def live_single_column_unique_keys(
         cols = [str(c) for c in (item.get("column_names") or []) if c]
         if len(cols) == 1 and cols[0] not in names:
             names.append(cols[0])
+    # A UNIQUE INDEX enforces exactly like a UNIQUE constraint, but PostgreSQL
+    # and SQLite list it only among the indexes: the collision was found and
+    # graded a warning, then the insert aborted.
+    for col in _live_single_column_unique_indexes(engine, insp, table_name, schema):
+        if col not in names:
+            names.append(col)
     return names
+
+
+_PG_UNIQUE_INDEX_COLUMNS_SQL = (
+    "SELECT a.attname FROM pg_index i "
+    "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] "
+    "WHERE i.indrelid = to_regclass(%(rel)s) AND i.indisunique AND i.indisvalid "
+    "AND i.indisready AND i.indnkeyatts = 1 AND i.indexprs IS NULL AND i.indpred IS NULL"
+)
+
+
+def _live_single_column_unique_indexes(
+    engine: Any, insp: Any, table_name: str, schema: str | None
+) -> list[str]:
+    """Columns a single-column, whole-column, enforcing UNIQUE INDEX covers.
+
+    Partial (``WHERE``) and expression indexes do not reject every repeat, and a
+    PostgreSQL index that is invalid or not yet ready (a failed or running
+    CREATE INDEX CONCURRENTLY) enforces nothing.
+    """
+    try:
+        if engine.dialect.name == "postgresql":
+            from connectors.sql_identifiers import quote_table_ref
+
+            rel = quote_table_ref(table_name, schema, dialect="postgresql", sanitize=False,
+                                  preserve_case=True)
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql(_PG_UNIQUE_INDEX_COLUMNS_SQL, {"rel": rel}).fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
+        out: list[str] = []
+        for ix in insp.get_indexes(table_name, schema=schema) or []:
+            cols = list(ix.get("column_names") or [])
+            options = dict(ix.get("dialect_options") or {})
+            partial = any(k.endswith("_where") and v is not None for k, v in options.items())
+            if (
+                ix.get("unique") and len(cols) == 1 and cols[0]
+                and not ix.get("expressions") and not partial
+            ):
+                out.append(str(cols[0]))
+        return out
+    except Exception as exc:  # noqa: BLE001 — constraints alone still stand
+        logger.debug("unique index catalog read failed: %s", exc)
+        return []
 
 
 #: What to do about an append that re-delivers stored keys (one wording for

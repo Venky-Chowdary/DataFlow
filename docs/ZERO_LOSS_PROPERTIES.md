@@ -255,15 +255,98 @@ identity; L3 skipped as whole_table_not_comparable; ladder does not
 veto a closed Gate-8 dest-before pass. migration_proven stays false.
 ```
 
-### NOT claimed / remaining for PROVEN
-* SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
-* UI copy sweep so no card says “proof” for sample screening
-* Streaming path without source SQL still depends on buffered records
-* Dual Run ``cutover_ready`` is N consecutive Gate-8 ``full_checksum``
-  cycles (unit: `tests/test_continuous_fidelity.py`). Column-profile
-  screening may diverge the window; it never confers cutover. Not
-  ``migration_proven``. Live N-night overwrite schedule campaign not run
-  this slice.
+### Keyed runs into an occupied table, and concurrent source writers (R14)
+A keyed run into an occupied destination is graded on the keys it wrote
+(X-OW1 batch scope). Whether a difference found there is a loss depends on
+where the source side came from:
+
+* **Buffered route** (the ladder gets the written records): the source side
+  *is* what was written. L2 and L3 both grade those cells (L3 is recomputed on
+  the scoped populations, not skipped as `whole_table_not_comparable`), and any
+  difference vetoes, localized to key and column by L4/L5. That includes a
+  value swapped between two written rows, which keeps every column aggregate.
+* **Re-read route** (streaming SQL, `records == []`): the source side is a scan
+  taken *after* the write. A concurrent writer that updates the source between
+  the write and that scan makes source and destination differ on a key the
+  destination holds exactly as written. That is not a loss. The write pass keeps
+  a per-key witness of what it wrote (`services/keyed_write_witness.py`:
+  canonical key cells mapped to a row-fingerprint digest, plus the encoder that
+  rendered it). The witness is in-process, bounded by `VERIFICATION_LADDER_MAX_ROWS`,
+  and released when the job ends, whatever the outcome.
+  * **When a witness attributes:** only when it is complete: every chunk was
+    fingerprinted, there was no routed write, the run did not resume part-way,
+    and the witnessed rows equal the writer's `rows_written`. The ladder
+    re-hashes its populations with the witness's own encoder.
+  * **What the ladder does per key:**
+    * The source equals what was written but the destination differs: a loss,
+      so it vetoes.
+    * The source moved and the destination equals what was written: a
+      **concurrent source update**. It is advisory, named (`concurrent_source_drift`
+      plus a warning) and never a veto. The next run picks it up.
+    * The source deleted a written key and the destination holds it as written:
+      a **concurrent delete**, disclosed. If the destination lacks it or holds it
+      differently, it is a destination loss and fails the run, although the key
+      is in neither compared population.
+    * A source key this run never wrote that the destination does not hold: a
+      **concurrent insert**, disclosed separately. It leaves the cell layers only
+      when Gate-8's own source count equals the witnessed rows, which shows the
+      key was not in the write-time population. L1 and the key census still
+      grade the counts. A key the run did not write is never "drift".
+    * Neither side equals what was written: the key stays compared and vetoes.
+* **`DATAFLOW_DEST_WRITE_LOCK` (default off).** With the flag off, no
+  destination lock is taken and no witness attributes. Re-read routes stay on
+  the disclosed-unattributed path below: a concurrent source update is
+  disclosed, not attributed, and on a scope Gate-8 marked not comparable a
+  destination rewrite is disclosed (`value_discrepancy_unattributed`), not
+  vetoed. The job summary records the setting
+  (`keyed_write_witness.destination_write_lock`). Each keyed run that would
+  have attributed is audited as `gate8.would_attribute_concurrent_drift`.
+  With the flag on, the lock below applies.
+* **Concurrent DataFlow writers** (review M2): a witness attributes only when
+  its job held the destination table's write lock exclusive, from before the
+  read until the job ended (`services/destination_write_lock.py`, PostgreSQL
+  session advisory lock keyed on `current_database().schema.table`). Without
+  the lock, job A could read V1, job B could read V2 and write it, and A could
+  then write V1 late and excuse the key as drift, leaving the table on a stale
+  value with both jobs green. Keyed upserts take the lock exclusive when it is
+  free. Every other DataFlow writer of the table takes it shared and waits
+  while an exclusive holder runs (bounded by
+  `DATAFLOW_DEST_WRITE_LOCK_WAIT_SECONDS`, default 3600). A keyed job that
+  finds the table busy runs without a witness. Non-PostgreSQL destinations
+  take no lock, so their witness never attributes.
+* **Re-read route without a usable witness** (one of the following):
+  * a resumed attempt;
+  * a routed write;
+  * a chunk that was not fingerprinted;
+  * a count mismatch;
+  * all witness slots held by other in-flight jobs (it never evicts one);
+  * no exclusive destination write lock (a non-PostgreSQL destination, or
+    another job writing the table);
+  * an encoder mismatch.
+
+  In these cases the ladder cannot tell drift from loss, and nothing is excused.
+  Where Gate-8's whole-table scope is not comparable, an L2 miss stays advisory
+  as before. Whenever L2 failed, L2 was skipped, or L3 was skipped on these
+  scoped keys, the report says per-cell fidelity is not proven
+  (`value_discrepancy_unattributed` and a warning naming the columns). That
+  includes a value swapped between two written rows, which keeps every column
+  aggregate.
+* **COPY upsert routes** (`copy_binary_server_to_server_upsert` and the other
+  staged-MERGE routes through `services/copy_upsert.py`) carry **no witness**.
+  The staging table records what *landed*, not what the run read. A corruption
+  in the COPY encoding or transport (escaping, '' becoming NULL, numeric or
+  timestamp rendering) is merged into the destination too. The destination
+  would then equal such a witness while the source differs, and the corruption
+  would be excused as drift. A sound COPY witness must hash what the run sent
+  (the COPY-OUT stream, or the source rows read from the COPY's own snapshot).
+  Until then, a batch-scoped re-read on these routes stays unattributed and is
+  disclosed (above). A concurrent source update there still fails the run, as
+  it did before the witness existed.
+* **File sources** never reach this branch. The ladder cannot re-read a file
+  source (`_read_verify_rows` returns no rows for a non-SQL engine), so the
+  cell layers do not run against the source, and there is no post-write source
+  scan that a concurrent writer could disagree with. The file was staged
+  before the write (`hydrate_file_source`).
 
 ---
 

@@ -89,16 +89,15 @@ def test_kafka_writer_native_json_types(monkeypatch):
     (msg,) = stub.sent
     payload = msg["value"]
     assert payload["id"] == 7 and isinstance(payload["id"], int)
-    # exactly representable decimal → JSON number
-    assert payload["amt"] == 19.5 and isinstance(payload["amt"], float)
-    # not exactly representable → stays Decimal in the payload and lands on
-    # the wire as an exact string, not a rounded float
-    assert isinstance(payload["big"], Decimal)
+    # A DECIMAL field has one JSON type over the whole topic: its exact text.
+    # ``19.5`` as a JSON number beside ``"0.123..."`` as a string mixed two
+    # types in one field and broke typed consumers (D203).
+    assert payload["amt"] == "19.5" and isinstance(payload["amt"], str)
+    assert payload["big"] == "0.12345678901234567890123" and isinstance(payload["big"], str)
     import json as _json
     from services.value_serializer import json_default as _jd
     wire = _json.loads(_json.dumps(payload, default=_jd))
-    assert wire["big"] == "0.12345678901234567890123"
-    assert wire["amt"] == 19.5
+    assert wire["amt"] == "19.5" and wire["big"] == "0.12345678901234567890123"
     assert payload["flag"] is True
     assert payload["note"] is None
     # offset-bearing instant (ISO-8601 space or T form), not bare local time

@@ -17,11 +17,12 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
 from services.vectorization import vectorize_records
+from services.connector_auth import resolve_api_key
 
 from connectors.writer_common import WriteResult as _WriteResult
 
@@ -57,10 +58,20 @@ def _auth_token(
     api_key: str = "",
     username: str = "",
     password: str = "",
+    auth_mode: str = "",
 ) -> str:
-    """Milvus REST expects Bearer ``user:pass`` or a cloud API key."""
-    if api_key.strip():
-        return api_key.strip()
+    """Milvus REST expects Bearer ``user:pass`` or a cloud API key.
+
+    A Zilliz Cloud key declared with ``auth_mode=api_key`` and pasted in the
+    password (or username) field is sent bare — never ``root:<key>`` (D274).
+    An undeclared user/password pair stays the ``user:pass`` login.
+    """
+    key = resolve_api_key(
+        {"api_key": api_key, "username": username, "password": password, "auth_mode": auth_mode},
+        password_is_key=False,
+    )
+    if key:
+        return key
     user = (username or "root").strip() or "root"
     pwd = password if password is not None else ""
     if not pwd and not username:
@@ -107,12 +118,15 @@ def test_milvus(
     password: str = "",
     ssl: bool = False,
     connection_string: str = "",
+    auth_mode: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
     """Quick connectivity check against Milvus REST v2."""
     try:
         session = _requests_session()
-        token = _auth_token(api_key=api_key, username=username, password=password)
+        token = _auth_token(
+            api_key=api_key, username=username, password=password, auth_mode=auth_mode
+        )
         resp = session.post(
             f"{_base_url(host, port, ssl, connection_string)}/v2/vectordb/collections/list",
             data=json.dumps({}),
@@ -975,6 +989,7 @@ def scan_source_ids(
             api_key=str(cfg.get("api_key") or ""),
             username=str(cfg.get("username") or ""),
             password=str(cfg.get("password") or ""),
+            auth_mode=str(cfg.get("auth_mode") or ""),
         )
         base_url = _base_url(
             str(cfg.get("host") or ""),
@@ -1116,7 +1131,12 @@ def write_mapped_rows(
         and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
     )
 
-    token = _auth_token(api_key=api_key, username=username, password=password)
+    token = _auth_token(
+        api_key=api_key,
+        username=username,
+        password=password,
+        auth_mode=str(_kwargs.get("auth_mode") or ""),
+    )
     base_url = _base_url(host, port, ssl, connection_string)
     collection_existed = False
     cached_live_dim: int | None = None
@@ -1439,7 +1459,12 @@ def write_mapped_rows(
             meta={"embedding_usage": usage.to_dict()},
         )
 
-    token = _auth_token(api_key=api_key, username=username, password=password)
+    token = _auth_token(
+        api_key=api_key,
+        username=username,
+        password=password,
+        auth_mode=str(_kwargs.get("auth_mode") or ""),
+    )
     base_url = _base_url(host, port, ssl, connection_string)
     inserted = 0
     fingerprint_status = "unknown"
@@ -1552,7 +1577,7 @@ def write_mapped_rows(
                 payload["dbName"] = db_name
             resp = session.post(
                 f"{base_url}/v2/vectordb/entities/upsert",
-                data=json_dumps_exact_numbers(payload),
+                data=json_dumps_exact_text(payload),
                 headers=hdrs,
                 timeout=60,
             )

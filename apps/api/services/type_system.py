@@ -590,6 +590,25 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "array",
         LOGICAL_BINARY: "string",
     },
+    # Weaviate properties carry what the writer stores: an integer is a JSON
+    # int (``int``, 64-bit); a decimal, float, boolean, temporal, UUID, JSON or
+    # text cell is the exact text the payload writes (``text``). The class the
+    # writer creates declares these same carriers, so the plan and the class
+    # agree (D265/D290 follow-up).
+    "weaviate": {
+        LOGICAL_STRING: "text",
+        LOGICAL_TEXT: "text",
+        LOGICAL_INTEGER: "int",
+        LOGICAL_DECIMAL: "text",
+        LOGICAL_BOOLEAN: "text",
+        LOGICAL_DATE: "text",
+        LOGICAL_DATETIME: "text",
+        LOGICAL_TIME: "text",
+        LOGICAL_UUID: "text",
+        LOGICAL_JSON: "text",
+        LOGICAL_ARRAY: "text",
+        LOGICAL_BINARY: "text",
+    },
     # Engines reached via generic_sql — keep DDL honest for preflight.
     "duckdb": {
         LOGICAL_STRING: "VARCHAR",
@@ -676,6 +695,7 @@ _OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
     "presto": "varchar",
     "trino": "varchar",
     "iceberg": "string",
+    "weaviate": "text",
 }
 for _db_key, _map in DDL_TYPES.items():
     _map.setdefault(LOGICAL_OBJECTID, _OBJECTID_DDL_DEFAULTS.get(_db_key, "VARCHAR(24)"))
@@ -774,6 +794,7 @@ for _dest, _map in DDL_TYPES.items():
         "elasticsearch": "keyword",
         "sqlite": "TEXT",
         "generic_sql": "TEXT",
+        "weaviate": "text",
     }.get(_dest, "TEXT")
     for _logical in (LOGICAL_INTERVAL, LOGICAL_GEOGRAPHY, LOGICAL_VECTOR):
         _map[_logical] = _native.get(_logical, _fallback)
@@ -800,6 +821,9 @@ _FLOAT_DDL: Final[dict[str, str]] = {
     "clickhouse": "Float64",
     "trino": "double",
     "presto": "double",
+    # A Weaviate property holds the exact text the payload writes; the class the
+    # writer creates declares ``text`` for a float (D265/D290 follow-up).
+    "weaviate": "text",
 }
 for _dest, _map in DDL_TYPES.items():
     _map[LOGICAL_FLOAT] = _FLOAT_DDL.get(_dest, "DOUBLE PRECISION")
@@ -826,6 +850,9 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "clickhouse": "String",
     "trino": "varchar",
     "presto": "varchar",
+    # A Weaviate property that is not an integer holds the exact text the
+    # payload writes (``DDL_TYPES["weaviate"]``), so its fallback is ``text``.
+    "weaviate": "text",
 }
 
 # Destination fixed-point caps (precision, scale). When source scale exceeds the
@@ -1724,7 +1751,7 @@ def is_dialect_native_document_wire(
     (NVARCHAR(MAX) / CLOB) that are the intentional document projection —
     not a fidelity collapse.
     """
-    raw = strip_identity_qualifier(target_type).strip()
+    raw = strip_identity_qualifier(strip_charset_qualifier(target_type)).strip()
     if not raw:
         return False
     upper = raw.upper()
@@ -1775,9 +1802,19 @@ def _own_json_carrier_read_backs(db: str) -> tuple[str, ...]:
     return (native, *catalog_read_backs(db, native))
 
 
+def strip_charset_qualifier(spelling: str | None) -> str:
+    """The type with its ``CHARACTER SET x`` / ``CHARSET x`` tail removed.
+
+    A character set is charset evidence on a MySQL carrier, never part of the
+    carrier token: ``LONGTEXT CHARACTER SET utf8mb4`` is the same document
+    wire as ``LONGTEXT`` (D192 after D275 kept the evidence on the type).
+    """
+    return re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", str(spelling or ""), flags=re.I)
+
+
 def _carrier_key(spelling: str | None) -> str:
     """Case/space-folded spelling with identity and charset tails off, COLLATE kept."""
-    text = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", str(spelling or ""), flags=re.I)
+    text = strip_charset_qualifier(spelling)
     collation = parse_collation(text)
     head = strip_identity_qualifier(text)
     if collation:
@@ -2692,6 +2729,12 @@ def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
+    mapped = str((DDL_TYPES.get(_normalize_dest_db(db) if db else "") or {}).get(LOGICAL_FLOAT) or "")
+    if mapped and normalize_logical_type(mapped) != LOGICAL_FLOAT:
+        # The dialect has no IEEE carrier of its own: its writer stores the
+        # exact text of the value (Weaviate ``text``), so the plan names that
+        # carrier instead of a DOUBLE/REAL the destination never creates.
+        return mapped
     upper = re.sub(
         r"\bUNSIGNED\b",
         "",
@@ -5517,9 +5560,11 @@ def _enum_set_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         "greenplum",
     }:
         return "TEXT[]"
-    width = max(len(m) for m in members)
+    # Oracle VARCHAR2(n) is BYTE semantics by default: 'café' is 5 bytes.
+    measure = (lambda m: len(m.encode("utf-8"))) if db == "oracle" else len
+    width = max(measure(m) for m in members)
     if kind == "SET":
-        width = sum(len(m) for m in members) + max(0, len(members) - 1)
+        width = sum(measure(m) for m in members) + max(0, len(members) - 1)
     width = max(1, min(width, 4000))
     if db == "sqlserver":
         return f"NVARCHAR({min(width, 4000)})"
@@ -5528,15 +5573,42 @@ def _enum_set_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     return f"VARCHAR({width})"
 
 
-def enum_domain_would_collapse(source_type: str, target_type: str) -> bool:
+def enum_domain_would_collapse(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when a closed ENUM/SET domain would become an open string sink.
 
     PostgreSQL ``df_enum_*`` type names preserve the domain via CREATE TYPE.
     MySQL ``SET`` → ``TEXT[]`` preserves multi-value polarity (not a string sink).
+
+    ``dest_db`` names the destination. Where that dialect's own create-new
+    carrier for this very source is an open string (SQL Server, Oracle,
+    SQLite, MongoDB, Snowflake, ...), no carrier it can spell holds the
+    domain, so the string sink is the domain's only home there, not a remap
+    the operator could make. Every label still lands byte for byte (width is
+    judged separately), so it is stated rather than graded a collapse: Stripe
+    ``tax_exempt`` into a table DataFlow created on SQL Server was refused as
+    a fidelity collapse of DataFlow's own choice (D271).
     """
     src = parse_enum_or_set_ordered_members(source_type)
     if src is None:
         return False
+    if dest_db:
+        own = ddl_type(dest_db, source_type)
+        if _enum_open_string_sink(src, own):
+            # The dialect's own carrier is sized by the same rule that creates
+            # it: a SET value is comma-joined, and Oracle VARCHAR2(n) counts
+            # bytes. Anything narrower than that carrier truncates or fails
+            # the batch and stays a collapse.
+            width = parse_string_carrier_width(target_type)
+            needed = parse_string_carrier_width(own)
+            if width is None or needed is None or width >= needed:
+                return False
+    return _enum_open_string_sink(src, target_type)
+
+
+def _enum_open_string_sink(src: tuple, target_type: str) -> bool:
+    """True when ``target_type`` holds the members of ``src`` as open text."""
     if parse_enum_or_set_ordered_members(target_type) is not None:
         return False
     tgt = (target_type or "").strip()
@@ -7075,6 +7147,21 @@ def destination_temporal_fractional_digits(
     text = strip_identity_qualifier(target_type)
     if not text:
         return None
+    db = (dest_db or "").strip().lower()
+    from services.document_instant import (
+        DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+        INSTANT_DATE_TOKEN_ENGINES,
+    )
+
+    if db in INSTANT_DATE_TOKEN_ENGINES and normalize_logical_type(text) in {
+        LOGICAL_DATE, LOGICAL_DATETIME,
+    }:
+        # A document store has one instant carrier and it keeps milliseconds,
+        # whatever the sampled spelling says: an existing Mongo collection is
+        # introspected as ``TIMESTAMPTZ(6)``, and reading those six digits
+        # made Gate-8 compare an Oracle .123456 against the stored .123 and
+        # fail every run after the first on a signed, declared narrowing (D278).
+        return int(DOCUMENT_INSTANT_FRACTIONAL_DIGITS)
     explicit = parse_temporal_fractional_precision(text)
     if explicit is not None:
         return explicit
@@ -7085,7 +7172,6 @@ def destination_temporal_fractional_digits(
     # them as the Snowflake default made a MySQL whole-second column look like it
     # kept microseconds, and Gate-8 then hashed precision the column never held.
     bare = bare.replace("_", " ")
-    db = (dest_db or "").strip().lower()
     if bare in {
         "TIME WITHOUT TIME ZONE",
         "TIMESTAMP WITHOUT TIME ZONE",

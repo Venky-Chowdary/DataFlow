@@ -77,11 +77,25 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a from-zero re-run of a failed or cancelled transfer as a new job. "
             "Pending action; the REST retry rules (duplicate protection) apply on Confirm. "
-            "A completed or completed-with-quarantine job uses rerun_job."
+            "A completed or completed-with-quarantine job uses rerun_job. Pass "
+            "risk_acceptance to quarantine the rows that failed to cast and load "
+            "the valid ones."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "selector": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "selector": {"type": "string"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Load the rows that cast and quarantine the ones that do "
+                        "not (the job failed on sample cast failures). "
+                        "{approved_by, reason, execution_policy: CAST_AND_CONTINUE, "
+                        "on_cast_failure: quarantine, columns?: [names that fail]}."
+                    ),
+                },
+            },
             "required": [],
         },
     },
@@ -191,6 +205,42 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 "reason": {"type": "string"},
             },
             "required": ["cursor_key"],
+        },
+    },
+    {
+        "name": "list_cdc_captures",
+        "description": (
+            "List the replication slots and publications on a saved PostgreSQL "
+            "source: which ones Datawrap created, the CDC schedules using each, "
+            "whether the captured table still exists, the WAL each retains, and "
+            "a warning for every orphaned slot (no live schedule, or source table "
+            "gone). Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"connector_id": {"type": "string"}, "name": {"type": "string"}},
+            "required": [],
+        },
+    },
+    {
+        "name": "cleanup_cdc_captures",
+        "description": (
+            "Stage dropping orphaned Datawrap replication slots / publications on a "
+            "saved PostgreSQL source (all cleanable ones, or the slot_names given). "
+            "Only slots Datawrap created, with no reader attached, that no live CDC "
+            "schedule uses or whose source table is gone. Destructive; pending "
+            "action until Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "slot_names": {"type": "array", "items": {"type": "string"}},
+                "include_unregistered": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": [],
         },
     },
     {
@@ -440,6 +490,8 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "prepare_cdc_source": "prepare_cdc_source",
     "clear_cursor_resnapshot": "clear_cursor_resnapshot",
     "rebaseline_transfer": "rebaseline_transfer",
+    "recover_schedule_destination": "recover_schedule_destination",
+    "cleanup_cdc_captures": "cleanup_cdc_captures",
 }
 
 
@@ -724,8 +776,17 @@ def _job_tool(
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} is {status}; only a failed or cancelled job can be retried from zero. Use resume for a paused job.",
             )
-        return _stage(tool, payload={"job_id": jid}, preview=brief,
-                      label=f"Retry job {short} from the beginning", destructive=True)
+        if risk_acceptance is not None and not isinstance(risk_acceptance, dict):
+            return _tool_result(tool, success=False, output=None,
+                error="risk_acceptance must be an object {approved_by, reason, execution_policy, ...}.",
+            )
+        retry_payload: dict[str, Any] = {"job_id": jid}
+        retry_label = f"Retry job {short} from the beginning"
+        if risk_acceptance:
+            retry_payload["risk_acceptance"] = dict(risk_acceptance)
+            retry_label += " — quarantine rows that do not cast"
+        return _stage(tool, payload=retry_payload, preview=brief,
+                      label=retry_label, destructive=True)
     if tool == "rerun_job":
         if status not in {"completed", "completed_with_quarantine", "cancelled", "success", "succeeded"}:
             return _tool_result(tool, success=False, output=None,
@@ -847,16 +908,19 @@ def _resolved_connector_id(conn: dict[str, Any]) -> str:
     return ""
 
 
-def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
-    ctype = str(conn.get("type") or conn.get("format") or "")
-    # Role is the driver's declared topology, not a stale stored string —
-    # connectors saved before role normalization (pgvector with role=both)
-    # would keep reporting the wrong side forever (QA C09).
-    from services.connector_store import normalize_connector_role
+def connector_dial_endpoint(conn: dict[str, Any]) -> tuple[str, int, str]:
+    """``(host, port, source)`` a saved connector really dials.
 
+    One owner for every surface that shows a connector's endpoint (the
+    create/test brief and list_connectors). A URL-form host is dialed on its
+    own authority and a connection string overrides the host field; showing
+    the stored driver default (443 / 8086) or ``None`` for those misreported
+    the endpoint (D239). ``source`` is ``"connection_string"`` when the
+    endpoint came from it, else ``""``.
+    """
     host = str(conn.get("host") or "")
     port = int(conn.get("port") or 0)
-    effective_host, effective_port = host, port
+    effective_host, effective_port, source = host, port, ""
     if "://" in host:
         # A URL-form host is dialed on its own authority (D239).
         try:
@@ -882,8 +946,22 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
                     endpoint[0],
                     endpoint[1] or effective_port,
                 )
+                source = "connection_string"
         except Exception:
             pass
+    return effective_host, effective_port, source
+
+
+def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
+    ctype = str(conn.get("type") or conn.get("format") or "")
+    # Role is the driver's declared topology, not a stale stored string —
+    # connectors saved before role normalization (pgvector with role=both)
+    # would keep reporting the wrong side forever (QA C09).
+    from services.connector_store import normalize_connector_role
+
+    host = str(conn.get("host") or "")
+    port = int(conn.get("port") or 0)
+    effective_host, effective_port, source = connector_dial_endpoint(conn)
     brief = {
         "connector_id": _resolved_connector_id(conn),
         "name": str(conn.get("name") or ""),
@@ -894,7 +972,7 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
         "effective_host": effective_host,
         "effective_port": effective_port,
     }
-    if (effective_host, effective_port) != (host, port):
+    if source == "connection_string" and (effective_host, effective_port) != (host, port):
         brief["host_note"] = (
             f"Probe targets {effective_host}:{effective_port} from the "
             "connection string — the stored host field is not what is dialed."
@@ -1839,4 +1917,95 @@ def stage_rebaseline_transfer(
             + (f".{table}" if table else "")
         ),
         destructive=False,
+    )
+
+
+def _pg_capture_source(tool: str, connector_id: str, name: str):
+    """The saved PostgreSQL source's full config, or a ToolResult refusal."""
+    conn, err = _connector(tool, connector_id, name)
+    if err:
+        return None, None, err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return None, None, _unresolved_id_error(tool, conn)
+    from services.connector_store import get_connector
+
+    saved = get_connector(brief["connector_id"], conn.get("workspace_id") or None)
+    if saved is None or (saved.type or "").lower() not in {"postgresql", "postgres"}:
+        return None, None, _tool_result(
+            tool, success=False, output=None,
+            error="Only a saved PostgreSQL source keeps CDC replication slots.",
+        )
+    return brief, saved, None
+
+
+def list_cdc_captures(connector_id: str = "", name: str = "") -> ToolResult:
+    """C11 ops listing: the same inventory as GET /api/v1/ops/cdc-captures."""
+    brief, saved, err = _pg_capture_source("list_cdc_captures", connector_id, name)
+    if err:
+        return err
+    from services.cdc_capture_inventory import inventory_pg_captures
+
+    try:
+        inv = inventory_pg_captures(
+            saved.to_dict(), connector_id=brief["connector_id"],
+            workspace_id=str(saved.workspace_id or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - name the source failure
+        return _tool_result(
+            "list_cdc_captures", success=False, output=None,
+            error=f"Could not read the source's replication slots: {exc}",
+        )
+    return _tool_result("list_cdc_captures", success=True, output={**brief, **inv})
+
+
+def stage_cleanup_cdc_captures(
+    connector_id: str = "",
+    name: str = "",
+    slot_names: list[str] | None = None,
+    include_unregistered: bool = False,
+    reason: str = "",
+) -> ToolResult:
+    """Stage the slot drop; the preview is a dry run on the source's current state."""
+    brief, saved, err = _pg_capture_source("cleanup_cdc_captures", connector_id, name)
+    if err:
+        return err
+    from services.cdc_capture_inventory import cleanup_pg_captures
+
+    try:
+        plan = cleanup_pg_captures(
+            saved.to_dict(), connector_id=brief["connector_id"],
+            workspace_id=str(saved.workspace_id or ""),
+            slot_names=list(slot_names or []), include_unregistered=bool(include_unregistered),
+            dry_run=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - name the source failure
+        return _tool_result(
+            "cleanup_cdc_captures", success=False, output=None,
+            error=f"Could not read the source's replication slots: {exc}",
+        )
+    would = [r for r in plan["results"] if r.get("action") == "would_drop"]
+    if not would:
+        return _tool_result(
+            "cleanup_cdc_captures", success=True,
+            output={**brief, **plan, "note": "Nothing on this source is safe to drop."},
+        )
+    return _stage(
+        "cleanup_cdc_captures",
+        payload={
+            "connector_id": brief["connector_id"],
+            "slot_names": [r["slot_name"] for r in would if r.get("slot_name")],
+            "publication_names": [
+                r["publication_name"] for r in would
+                if not r.get("slot_name") and r.get("publication_name")
+            ],
+            "include_unregistered": bool(include_unregistered),
+            "reason": str(reason or ""),
+        },
+        preview={**brief, "would_drop": would, "skipped": [
+            r for r in plan["results"] if r.get("action") != "would_drop"
+        ]},
+        label=f"Drop {len(would)} orphaned CDC capture(s) on “{brief['name']}”",
+        destructive=True,
     )

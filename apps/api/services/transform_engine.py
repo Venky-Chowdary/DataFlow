@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 from services.brand_env import getenv_brand
+from services.pii_hash_keys import KEY_UNAVAILABLE_MESSAGE
 import re
 import unicodedata
 import uuid as uuid_lib
@@ -400,6 +401,26 @@ def strict_decimal_comma_reason(value: Any) -> str:
         f"'{text}' is a number only if ',' is the decimal separator (EU reads "
         f"{auto}). Strict validation never guesses a number locale — set number "
         "locale EU in Destination → Advanced, or fix the source value."
+    )
+
+
+_LONE_GROUP_RE = re.compile(r"^[+-]?\d{1,3}([.,])\d{3}$")
+
+
+def ambiguous_grouping_reason(value: Any) -> str:
+    """Why ``1.239`` / ``1,239`` is refused: one 3-digit group reads two ways."""
+    text = str(value or "").strip()
+    match = _LONE_GROUP_RE.match(text)
+    if not match:
+        return ""
+    sep = match.group(1)
+    as_fraction = text.replace(",", ".")
+    as_thousands = text.replace(sep, "")
+    return (
+        f"Invalid decimal: '{text}' is ambiguous: one 3-digit group after '{sep}' reads as "
+        f"{as_fraction} or {as_thousands}. Datawrap never guesses a number "
+        "locale — set number locale in Destination → Advanced, or fix the "
+        "source value."
     )
 
 
@@ -1054,6 +1075,15 @@ def _parse_date_worker(value: str, with_time: bool, date_locale: str) -> str | N
     return None
 
 
+def _non_midnight_clock(text: str) -> str:
+    """The ``HH:MM:SS`` a date-with-time literal carries past midnight, or ``""``."""
+    stamp = _parse_datetime(text)
+    if not stamp or "T" not in stamp:
+        return ""
+    clock = stamp.split("T", 1)[1][:8]
+    return "" if clock in {"00:00:00", ""} else clock
+
+
 def _parse_date(value: str, *, with_time: bool = False, date_locale: str = "") -> str | None:
     return _parse_date_worker(value, with_time, _active_date_locale(date_locale))
 
@@ -1703,23 +1733,16 @@ def _parse_uuid(value: str) -> str | None:
         return None
 
 
-#: What a tenant is told when ``hash_pii`` cannot get its key. Validate raises
-#: it as a blocker and the write path refuses with it, so both say the same
-#: thing (D8). It names no environment variable, host or vendor: the key is a
-#: workspace secret the platform manages (``services.pii_hash_keys``).
-PII_HASH_KEY_SETUP = (
-    "hash_pii could not load this workspace's hashing key, so no row was hashed. "
-    "Try again in a moment, then re-run Validate; if it keeps happening, ask your "
-    "Datawrap administrator. Use mask_pii or redact if a keyed digest is not "
-    "required."
-)
+#: What a tenant is told when ``hash_pii`` cannot get its key — one sentence,
+#: owned by ``services.pii_hash_keys`` (Validate and the write path both say it).
+PII_HASH_KEY_SETUP = KEY_UNAVAILABLE_MESSAGE
 
 
 def _current_workspace() -> str:
     from services.egress_guard import current_egress_workspace
     from services.workspace_filter import current_workspace_stamp
 
-    return current_workspace_stamp() or current_egress_workspace()
+    return current_workspace_stamp(for_write=False) or current_egress_workspace()
 
 
 def pii_hash_key(workspace_id: str | None = None) -> str:
@@ -1730,13 +1753,16 @@ def pii_hash_key(workspace_id: str | None = None) -> str:
     Otherwise each workspace has its own key, generated on first use and
     stored encrypted — deterministic within a workspace, different across them.
     """
-    pinned = getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET") or ""
-    if pinned:
-        return pinned
-    from services.pii_hash_keys import PiiHashKeyUnavailable, workspace_key
+    from services.pii_hash_keys import PiiHashKeyUnavailable, active_key, snapshot_secret
 
+    scope = _current_workspace() if workspace_id is None else workspace_id
+    # Inside a job: the key the job snapshotted once (one digest per value per
+    # job, even across a rotation mid-run — QA review #7).
+    snap = snapshot_secret(scope)
+    if snap is not None:
+        return snap
     try:
-        return workspace_key(_current_workspace() if workspace_id is None else workspace_id)
+        return active_key(scope)[0]
     except PiiHashKeyUnavailable:
         return ""
 
@@ -2145,6 +2171,21 @@ def _samples_prefer_boolean_over_integer(samples: list[str] | None) -> bool:
     return (bool_ok / checked) >= 0.9 and (int_ok / checked) < 0.5
 
 
+_CLOCK_RE = re.compile(r"\d{1,2}:\d{2}|T\d{2}|\b(?:AM|PM)\b", re.I)
+
+
+def _samples_are_date_only(source_samples: list[str] | None) -> bool:
+    """True when the column is date-shaped and no sampled cell carries a clock.
+
+    Every sample is read: one ``2024-01-01 10:30:00`` past a window of clean
+    dates is the cell that proves the column holds a time of day.
+    """
+    cells = [str(c).strip() for c in (source_samples or []) if str(c or "").strip()]
+    return bool(cells) and _samples_look_temporal(cells) and not any(
+        _CLOCK_RE.search(c) for c in cells
+    )
+
+
 def _samples_look_temporal(source_samples: list[str] | None) -> bool:
     """True when most non-empty samples look date/time-like (not status/enum text)."""
     if not source_samples:
@@ -2368,7 +2409,11 @@ def infer_transform_for_mapping(
         # currency / percentage on numeric tgt already handled above when tgt set
         return "none"
     if semantic == "timestamp":
-        return "datetime"
+        # Date-shaped text with no clock in any cell is a calendar day. A
+        # single unparseable cell kept the profiler from settling on DATE,
+        # and the datetime parse then created TIMESTAMP and landed every
+        # ``2024-01-01`` as ``2024-01-01 00:00:00`` (D291).
+        return "date" if _samples_are_date_only(source_samples) else "datetime"
 
     src_col = source_col.upper()
     # Calendar year number (FSI "Year", fiscal_year) is INTEGER — never invent
@@ -2421,6 +2466,13 @@ def infer_transform_for_mapping(
             return "none"
         return "datetime" if src == "datetime" or "epoch" in src_lower else "date"
     if tgt_name.endswith("_id") or tgt_name.endswith("id") or src_col.endswith("_ID"):
+        # A text sink stores the source token. Trimming an id-named text column
+        # rewrote a whitespace-only TINYTEXT ' ' to '' on one side of Gate-8
+        # while the writer stored ' ' (QA: Rfam clan previous_id, "source=''
+        # dest=' '"), and would silently change identity values. Same rule as
+        # the date-named branch above; a typed id target returned earlier.
+        if tgt in {"string", "text", "unknown"} or not tgt:
+            return "none"
         return "trim_id"
     if "qty" in tgt_name or "quantity" in tgt_name:
         # A text plan stays text. The name alone must not cast 'bad' as an
@@ -2713,7 +2765,11 @@ def apply_transform(
         # a bare integer transform stays strict below.
         parsed = _parse_decimal(text, allow_markers=True)
         if parsed is None:
-            return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
+            return None, (
+                strict_decimal_comma_reason(text)
+                or ambiguous_grouping_reason(text)
+                or f"Invalid decimal: {text!r}"
+            )
         # Return Decimal so bind does not re-apply locale to the canonical
         # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
         # Extreme scientific stays a short string (never expand 1e1000000).
@@ -2774,6 +2830,16 @@ def apply_transform(
         parsed = _parse_date(text, with_time=True)
         if parsed is None:
             return None, _calendar_reason(text) or f"Invalid date: {text!r}"
+        clock = _non_midnight_clock(text)
+        if clock:
+            # A DATE carrier cannot hold a time of day. Dropping it silently
+            # turned a planned DATE into a lossy write nothing reported (D291);
+            # the row is a finding the contract can hold out instead.
+            return None, (
+                f"Invalid date: {text!r} carries the time of day {clock}, which a "
+                "DATE column cannot hold — map to a TIMESTAMP column, or hold the "
+                "row out with QUARANTINE_ROW / CAST_AND_CONTINUE"
+            )
         return parsed, None
 
     if transform == "datetime":
@@ -2984,6 +3050,7 @@ def dry_run_sample(
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> tuple[bool, list[str]]:
     """Apply write-path transforms to the sample window.
 
@@ -3037,6 +3104,7 @@ def dry_run_sample(
         dest_types=dest_types,
         database_extract=database_extract,
         file_row_quarantine=file_row_quarantine,
+        validation_mode=validation_mode,
     )
 
 
@@ -3053,6 +3121,7 @@ def _dry_run_sample_body(
     dest_types: dict[str, str],
     database_extract: bool = False,
     file_row_quarantine: bool = False,
+    validation_mode: str | None = None,
 ) -> tuple[bool, list[str]]:
     from services.column_case import header_index
     from services.transform_resolver import resolve_transform
@@ -3103,13 +3172,32 @@ def _dry_run_sample_body(
         # a quarantine holdout — position in the sample must not fail the load
         # (R4-D02). An all-bad column cannot represent the mapping, and a
         # database extract stays fail-fast, so both keep the hard error list.
-        if file_row_quarantine and ok > 0:
+        from services.validation_mode_contract import (
+            CAST_SHARE_RULE,
+            cast_share_holds_out,
+            holdout_tally,
+            mode_holdout_kind,
+        )
+
+        # The column's ONE verdict (share-bounded; strict holds nothing out).
+        held, calendar = holdout_tally(
+            validation_mode, bad, record_batch=bool(file_row_quarantine)
+        )
+        if mode_holdout_kind(
+            validation_mode, failed=len(bad), held=held, cast_ok=ok,
+            record_batch=bool(file_row_quarantine), calendar=calendar,
+        ):
             errors.append(
                 f"holdout {m['source']}→{m['target']}: "
                 f"{len(bad)} sample row(s) will quarantine and the rest will load "
                 f"({bad[0]})"
             )
             continue
+        if held == len(bad) and ok > 0 and not cast_share_holds_out(len(bad), ok):
+            errors.append(
+                f"{m['source']}→{m['target']}: {len(bad)} of {len(bad) + ok} sampled "
+                f"cells fail — {CAST_SHARE_RULE}"
+            )
         shown = bad[:max_errors_per_mapping]
         for err in shown:
             errors.append(f"{m['source']}→{m['target']}: {err}")

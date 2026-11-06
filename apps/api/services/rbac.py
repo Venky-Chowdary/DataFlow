@@ -133,11 +133,11 @@ class Permission:
     AUDIT_READ = "audit.read"
     WORKSPACE_READ = "workspace.read"
     WORKSPACE_MANAGE = "workspace.manage"
-    # Bringing a peer into the workspace you already work in. Held by editor as
-    # well as admin, because ``services.team_store.add_workspace_member`` accepts
-    # an editor adding a non-admin member — a client gating membership on
-    # workspace.manage disabled the control the API would have honoured, and told
-    # an editor to ask for the role it already had.
+    # Adding or removing a non-admin member. Member administration is the
+    # workspace admin's (C6, QA r14): an editor runs pipelines, it does not
+    # decide who else gets into the workspace. Only ``admin`` holds it; it stays
+    # a separate permission so a service account can be scoped to membership
+    # changes without workspace.manage (which alone grants or revokes admin).
     MEMBER_INVITE = "member.invite"
     AI_USE = "ai.use"
     QUERY_USE = "query.use"
@@ -197,7 +197,6 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_MANAGE,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
-        Permission.MEMBER_INVITE,
         Permission.ACCOUNT_SELF,
         Permission.AI_USE,
         Permission.QUERY_USE,
@@ -303,6 +302,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # (a workspace admin need not be a platform admin), so the middleware only
     # requires membership-level read here and lets the store refuse with a reason.
     ("*", "/api/v1/team/users", Permission.WORKSPACE_MANAGE),
+    # Throwaway security-test workspaces (C18): the router also requires a
+    # platform administrator.
+    ("*", "/api/v1/team/sandbox-workspaces", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/team/workspaces/", Permission.WORKSPACE_READ),
     ("GET", "/api/v1/team/workspaces", Permission.WORKSPACE_READ),
     ("*", "/api/v1/team/workspaces", Permission.WORKSPACE_MANAGE),
@@ -360,6 +362,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # holds. Requiring schedule.manage to *list* them refused the viewer's own
     # Schedules page, which the client then drew as "No schedules yet" while
     # schedules existed. Creating, changing, running and deciding stay manage.
+    # Orphaned-registration repair (Snowflake D12) is deployment-wide: the
+    # router requires a platform admin; the gate's floor is workspace admin,
+    # not the schedule.read every viewer holds.
+    ("*", "/api/v1/schedules/admin/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
@@ -426,7 +432,15 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("GET", "/api/v1/ops/cdc-leases", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-leases/list", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-leases/force-release", Permission.WORKSPACE_MANAGE),
+    # C11: listing dials the source; cleanup drops replication slots on it.
+    ("GET", "/api/v1/ops/cdc-captures", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/ops/cdc-captures/cleanup", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/metrics/json", Permission.WORKSPACE_MANAGE),
+    # The platform mail outbox (D130): every tenant's auth mail, so the route
+    # itself refuses anyone but a platform admin
+    # (workspace_access.require_platform_admin, as /audit/retention/purge and
+    # /audit/tip/ do). The gate here must not be the /ops/ prefix's job.read.
+    ("GET", "/api/v1/ops/mail", Permission.WORKSPACE_MANAGE),
     ("GET", "/metrics", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/training-agent/run", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/training-agent/run/sync", Permission.WORKSPACE_MANAGE),

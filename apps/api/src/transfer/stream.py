@@ -32,6 +32,7 @@ from connectors.writer_common import (  # noqa: E402
 )
 from services.keyset_pagination import header_column_index  # noqa: E402
 from services.column_digest import stamp_source as stamp_source_columns  # noqa: E402
+from services.keyed_write_witness import begin_keyed_write_witness  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -126,37 +127,6 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.shape_apply import ShapeRunner
 
 
-def _merge_embedding_usage(previous: Any, incoming: Any) -> dict[str, Any] | None:
-    if not isinstance(incoming, dict):
-        return None
-    if not isinstance(previous, dict) or not previous:
-        return dict(incoming)
-    return {
-        "provider": incoming.get("provider") or previous.get("provider"),
-        "model": incoming.get("model") or previous.get("model"),
-        "calls": int(previous.get("calls") or 0) + int(incoming.get("calls") or 0),
-        "retries": int(previous.get("retries") or 0)
-        + int(incoming.get("retries") or 0),
-        "input_tokens": int(previous.get("input_tokens") or 0)
-        + int(incoming.get("input_tokens") or 0),
-        "token_count_estimated": bool(
-            previous.get("token_count_estimated")
-            or incoming.get("token_count_estimated")
-        ),
-        "cache_hits": int(previous.get("cache_hits") or 0)
-        + int(incoming.get("cache_hits") or 0),
-        "cache_misses": int(previous.get("cache_misses") or 0)
-        + int(incoming.get("cache_misses") or 0),
-        "estimated_cost_usd": (
-            None
-            if previous.get("estimated_cost_usd") is None
-            or incoming.get("estimated_cost_usd") is None
-            else float(previous.get("estimated_cost_usd") or 0)
-            + float(incoming.get("estimated_cost_usd") or 0)
-        ),
-    }
-
-
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
     "sqlserver", "oracle",
@@ -200,6 +170,19 @@ def _source_name(source: EndpointConfig) -> str:
 from .batch_readers import _read_batch_impl  # noqa: E402
 
 
+def _first_page_message(run: Any) -> str:
+    """``Reading the first rows from the source (mysql 10.0.0.5:3306)...``."""
+    from src.ai.copilot.tool_deadline import describe_target
+
+    cfg = run.cfg.src_cfg if isinstance(run.cfg.src_cfg, dict) else {}
+    where = describe_target(cfg) or str(cfg.get("database") or "")
+    label = " ".join(p for p in (str(run.cfg.src_type or ""), where) if p)
+    return (
+        f"Reading from the source ({label or 'source'}) - waiting for it to "
+        "answer; rows are counted as they arrive…"
+    )
+
+
 def _read_batch(*args, **kwargs):
     """Retry transient source-read errors without leaking partial state."""
     budget = RetryBudget(
@@ -210,8 +193,13 @@ def _read_batch(*args, **kwargs):
         jitter=True,
     )
     source_type = args[0] if args else kwargs.get("src_type", "")
+    scan_state = kwargs.get("scan_state")
+    if not isinstance(scan_state, dict):
+        attempt = lambda: _read_batch_impl(*args, **kwargs)  # noqa: E731
+    else:
+        attempt = partial(_read_held_scan_page, scan_state, args, kwargs)
     return with_retry(
-        lambda: _read_batch_impl(*args, **kwargs),
+        attempt,
         budget=budget,
         on_transient=log_retry(
             "read_batch",
@@ -219,6 +207,34 @@ def _read_batch(*args, **kwargs):
             budget=budget,
         ),
     )
+
+
+def _read_held_scan_page(scan_state: dict, args: tuple, kwargs: dict):
+    """One attempt at a held snapshot scan page, safe to retry.
+
+    A failed attempt leaves ``scan_state`` holding a dead cursor. The next
+    attempt used to page that cursor, and pymongo reports a cursor whose find
+    failed as exhausted: the scan "ended" with zero rows. On the first page
+    that is "Source table has no columns or is empty" with every row unread
+    (QA r12 D1, Atlas refusing the noTimeout cursor); mid-scan it is a silent
+    truncation. A scan that has served nothing is closed so the retry reopens
+    it from the top; one that has served pages refuses to continue.
+    """
+    from connectors.sql_snapshot_scan import close_table_scan
+    from services.error_handling import HeldScanInterrupted
+
+    try:
+        batch = _read_batch_impl(*args, **kwargs)
+    except Exception as exc:
+        if scan_state.get("started"):
+            served = int(scan_state.get("pages_served") or 0)
+            close_table_scan(scan_state)
+            if served:
+                raise HeldScanInterrupted(served, exc) from exc
+        raise
+    if scan_state.get("started"):
+        scan_state["pages_served"] = int(scan_state.get("pages_served") or 0) + 1
+    return batch
 
 
 def _unwrap_read(result):
@@ -231,144 +247,6 @@ def _unwrap_read(result):
 from .stream_catalog import (  # noqa: E402
     declared_destination_key_columns as _declared_destination_key_columns,
 )
-
-
-def _merge_chunk_write_summaries(
-    merged: dict[str, Any], incoming: dict[str, Any]
-) -> dict[str, Any]:
-    """Merge per-route write summaries into one batch ledger.
-
-    Row counts sum; rejected-details and warnings concatenate (each detail
-    already names its route's table); anything else takes the latest write's
-    value.
-    """
-    incoming = dict(incoming or {})
-    if not merged:
-        return incoming
-    for key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows", "rows_expanded"):
-        merged[key] = int(merged.get(key) or 0) + int(incoming.get(key) or 0)
-    for key in ("rejected_details", "warnings"):
-        merged[key] = list(merged.get(key) or []) + list(incoming.get(key) or [])
-    for key, value in incoming.items():
-        if key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows", "rows_expanded", "rejected_details", "warnings"):
-            continue
-        merged[key] = value
-    return merged
-
-
-def _arm_strict_keyed_backup(
-    destination: EndpointConfig,
-    *,
-    dest_type: str,
-    dest_cfg: dict[str, Any],
-    dest_table: str,
-    job_id: str,
-) -> dict[str, Any]:
-    """D111 — row-copy a populated PG destination before a strict keyed write.
-
-    A failed verification then restores the exact prior state (DELETE + INSERT
-    FROM ``__dfbak_<job>``) instead of leaving the rejected batch in place.
-    Armed once per run (a COPY attempt and the row path share it); returns the
-    ``route_backups`` stamp on ``destination.extra``. A backup that cannot be
-    taken never aborts the write, but a table whose triggers this role cannot
-    suspend is refused up front (D122) — that restore could never be exact.
-    """
-    from connectors.table_manager import PgBackupRestoreRefused, create_pg_table_backup
-
-    extra = dict(getattr(destination, "extra", None) or {})
-    backups = dict(extra.get("route_backups") or {})
-    if backups:
-        return backups
-    try:
-        pair = create_pg_table_backup(
-            dest_cfg,
-            schema=schema_from_cfg(dest_type, dest_cfg),
-            table=dest_table,
-            job_id=job_id,
-        )
-    except PgBackupRestoreRefused:
-        raise
-    except Exception as exc:  # noqa: BLE001 - never abort a write for the safety net
-        logger.warning("Strict-run destination backup of %s failed: %s", dest_table, exc)
-        return backups
-    if pair:
-        backups[str(pair.get("table") or dest_table)] = pair
-        extra["route_backups"] = backups
-        destination.extra = extra
-    return backups
-
-
-def _seed_write_complete_summary(summary: dict[str, Any], checkpoint: Any) -> None:
-    """Carry the committed write pass into a run resumed at reconcile (D263).
-
-    Every batch was already committed, and its findings are on the DLQ, so this
-    pass writes nothing. Reconcile still needs that pass's key-aligned sample and
-    its quarantine findings, or it reads the committed load as unproven and the
-    held-out rows as missing.
-    """
-    sample = list(getattr(checkpoint, "reconcile_sample", None) or [])
-    if sample:
-        summary["reconcile_sample"] = sample
-    details = list(getattr(checkpoint, "rejected_details", None) or [])
-    if details:
-        summary["rejected_details"] = details
-        summary["quarantine_dlq_persisted_count"] = len(details)
-
-
-def _checkpoint_for_job(run: Any, checkpoint: Any) -> dict[str, Any]:
-    """The checkpoint the job document sees, with the findings this run holds.
-
-    The stream keeps each batch's findings on the run (already on the DLQ), not
-    on the saved checkpoint. Without them the job summary reads "N rejected, no
-    finding" as a unit rolled back before any row was judged, which is false
-    for rows held out with a reason (D258). The persisted count stops the job
-    side from writing those findings to the DLQ a second time.
-    """
-    out = checkpoint.to_dict()
-    summary = run.tally.dest_summary if isinstance(run.tally.dest_summary, dict) else {}
-    details = summary.get("rejected_details") or []
-    if details and not out.get("rejected_details"):
-        out["rejected_details"] = list(details)
-        out["quarantine_dlq_persisted_count"] = int(
-            summary.get("quarantine_dlq_persisted_count") or 0
-        )
-    return out
-
-
-def _undo_failed_write(run: Any, exc: BaseException) -> BaseException:
-    """Undo a failed run's writes (or drop the table it created); return ``exc``.
-
-    Shared by the batch-error handler and the post-loop "nothing written"
-    failures: a run that held out every row has still created its table, and
-    leaving it makes the next run bind to a table nobody approved (D258).
-    """
-    try:
-        from services.batch_undo import undo_failed_batch_if_dest_was_empty
-
-        note = undo_failed_batch_if_dest_was_empty(
-            destination=run.cfg.destination,
-            dest_summary=run.tally.dest_summary,
-            sync_mode=run.cfg.effective_sync,
-        )
-        if note:
-            setattr(exc, "failed_batch_undo_note", note)
-    except Exception:  # noqa: BLE001 - undo must not hide the write failure
-        logging.getLogger(__name__).warning("Failed-write undo did not run", exc_info=True)
-    return exc
-
-
-def _fk_orphans_fail_closed(validation_mode: str) -> bool:
-    return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
-
-
-def _fk_orphan_violation_message(details: list[dict[str, Any]]) -> str:
-    samples = "; ".join(str(d.get("reason") or "") for d in details[:3])
-    return (
-        f"Referential integrity failed before write: {len(details)} orphan "
-        f"child row(s) in this page reference a parent absent at the destination "
-        f"({samples}). Strict validation refuses to commit an orphan row — load "
-        "the parent rows first or run in balanced mode to quarantine them."
-    )
 
 
 def stream_database_transfer(
@@ -461,18 +339,9 @@ from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstri
 
 #: SQL sources whose catalog (types, nullability, defaults, keys) is read for
 #: Property 6 create-new fidelity and keyset pagination.
-_PK_INTROSPECT_TYPES: tuple[str, ...] = (
-    "postgresql",
-    "redshift",
-    "mysql",
-    "snowflake",
-    "sqlserver",
-    "oracle",
-    "sqlite",
-    "generic_sql",
-    "bigquery",
-    "databricks",
-)
+from src.transfer.adapters_introspect import _CATALOG_SOURCE_TYPES  # noqa: E402
+
+_PK_INTROSPECT_TYPES: tuple[str, ...] = tuple(sorted(_CATALOG_SOURCE_TYPES))
 
 
 from .stream_catalog import fast_path_source_catalog as _fast_path_source_catalog  # noqa: E402
@@ -746,7 +615,8 @@ def _stream_database_transfer_impl(
 
             run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(_scope, run.cfg.cursor_pk_source)
             refuse_unusable_cursor_state(
-                _scope, run.cfg.dest_type, run.cfg.dest_cfg, _dest_obj
+                _scope, run.cfg.dest_type, run.cfg.dest_cfg, _dest_obj,
+                destination=run.cfg.destination,
             )
     # Gate-8 append proof needs the destination cardinality from before the
     # first write, whichever path performs it. Measured once here, ahead of the
@@ -770,6 +640,10 @@ def _stream_database_transfer_impl(
             run.cfg.dest_cfg,
             resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
         )
+    if pre_write_rows_before is not None and isinstance(getattr(run.cfg.destination, "extra", None), dict):
+        # C16: a cancelled COPY is measured against this from the job record
+        # (its own key: the write-failure undo keeps reading dest_rows_before).
+        run.cfg.destination.extra.setdefault("cancel_rows_before", int(pre_write_rows_before))
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
     # destination's current shape and fail on the column the source just grew.
@@ -827,6 +701,31 @@ def _stream_database_transfer_impl(
             + ", ".join(risk_contract_columns)
             + ") need per-row quarantine/skip on the row path"
         )
+    # D101 — a staged server-side merge into an existing table that has no
+    # unique key on the upsert columns fails raw (ON CONFLICT) or duplicates
+    # (ON DUPLICATE KEY). The row writer discloses, and once approved runs, the
+    # CREATE UNIQUE INDEX that merge needs; send those runs there.
+    keyless_merge_target = False
+    if run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols:
+        try:
+            from services.upsert_ddl_gate import existing_merge_target_lacks_unique_key
+
+            keyless_merge_target = existing_merge_target_lacks_unique_key(
+                run.cfg.dest_cfg,
+                resolve_dest_table(
+                    run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)
+                ),
+                list(run.cfg.pk_target_cols),
+                run.cfg.dest_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown keeps the existing route
+            logger.debug("merge-target unique-key probe skipped: %s", exc)
+    if keyless_merge_target:
+        copy_decline.append(
+            "COPY fast path declined: the existing destination has no unique key on "
+            f"({', '.join(run.cfg.pk_target_cols)}); the row path owns the disclosed "
+            "CREATE UNIQUE INDEX"
+        )
     # D111/D122 — the strict keyed backup is the rollback for *either* write
     # path. Armed here, a COPY upsert is undone exactly like the row path
     # instead of leaving its rejected batch live; the row path reuses it.
@@ -858,35 +757,40 @@ def _stream_database_transfer_impl(
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
-        fast = None if (
-            pending_shape
-            or writer_owns_evolution
-            or dest_proc_plan is not None
-            or run.cfg.fk_orphan_guard is not None
-            or bool(risk_contract_columns)
-        ) else _try_copy_fast_path(
-            source=run.cfg.source,
-            destination=run.cfg.destination,
-            mappings=run.cfg.mappings,
-            schema=run.cfg.schema,
-            src_type=run.cfg.src_read_type,
-            dest_type=run.cfg.dest_type,
-            src_cfg=run.cfg.src_cfg,
-            dest_cfg=run.cfg.dest_cfg,
-            effective_sync=run.cfg.effective_sync,
-            incremental=run.cfg.incremental,
-            source_filter=run.cfg.source_filter,
-            limit=run.cfg.limit,
-            checkpoint=checkpoint,
-            incremental_cursor=run.cfg.cursor_source_col if run.cfg.incremental else "",
-            incremental_watermark=pre_copy_watermark,
-            incremental_pk=(run.cfg.cursor_pk_source or "") if run.cfg.incremental else "",
-            incremental_key=(
-                (run.cfg.pk_source_cols[0] if run.cfg.pk_source_cols else "")
-                if run.cfg.incremental else ""
-            ),
-            job_id=run.cfg.job_id,
-        )
+        from services.cancel_check import blocking_step
+
+        # D19: a COPY waits on the source's query before its first row.
+        with blocking_step(_first_page_message(run)):
+            fast = None if (
+                pending_shape
+                or writer_owns_evolution
+                or dest_proc_plan is not None
+                or run.cfg.fk_orphan_guard is not None
+                or bool(risk_contract_columns)
+                or keyless_merge_target
+            ) else _try_copy_fast_path(
+                source=run.cfg.source,
+                destination=run.cfg.destination,
+                mappings=run.cfg.mappings,
+                schema=run.cfg.schema,
+                src_type=run.cfg.src_read_type,
+                dest_type=run.cfg.dest_type,
+                src_cfg=run.cfg.src_cfg,
+                dest_cfg=run.cfg.dest_cfg,
+                effective_sync=run.cfg.effective_sync,
+                incremental=run.cfg.incremental,
+                source_filter=run.cfg.source_filter,
+                limit=run.cfg.limit,
+                checkpoint=checkpoint,
+                incremental_cursor=run.cfg.cursor_source_col if run.cfg.incremental else "",
+                incremental_watermark=pre_copy_watermark,
+                incremental_pk=(run.cfg.cursor_pk_source or "") if run.cfg.incremental else "",
+                incremental_key=(
+                    (run.cfg.pk_source_cols[0] if run.cfg.pk_source_cols else "")
+                    if run.cfg.incremental else ""
+                ),
+                job_id=run.cfg.job_id,
+            )
     finally:
         if fast is None:
             progress_rewind(_progress_mark)
@@ -1083,7 +987,9 @@ def _stream_database_transfer_impl(
         run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(scope, run.cfg.cursor_pk_source)
 
         refuse_unusable_cursor_state(
-            scope, run.cfg.dest_type, run.cfg.dest_cfg, resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table)
+            scope, run.cfg.dest_type, run.cfg.dest_cfg,
+            resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table),
+            destination=run.cfg.destination,
         )
         from .engine_kafka import kafka_offsets_bound_the_read
 
@@ -1471,18 +1377,24 @@ def _stream_database_transfer_impl(
     if run.cfg.sdk_source and initial_batch is not None:
         probe, run.cur.ddb_cursor = initial_batch, None
     else:
-        probe, run.cur.ddb_cursor = _unwrap_read(
-            _read_batch(
-                run.cfg.src_read_type, run.cfg.src_cfg, run.cfg.table, None, 0, _batch_limit(run, 0), database=run.cfg.src_db,
-                **_probe_cursor_kw,
-                **run.cfg._scan_kw,
-                **(
-                    {"sdk_state": run.cfg.initial_sdk_state}
-                    if run.cfg.sdk_source and run.cfg.initial_sdk_state
-                    else {}
-                ),
+        from services.cancel_check import blocking_step
+
+        # D19: the first page can take minutes (the source runs its query);
+        # the job says so, and keeps pulsing, instead of a frozen
+        # "Connecting to destination..." that blamed the wrong system.
+        with blocking_step(_first_page_message(run)):
+            probe, run.cur.ddb_cursor = _unwrap_read(
+                _read_batch(
+                    run.cfg.src_read_type, run.cfg.src_cfg, run.cfg.table, None, 0, _batch_limit(run, 0), database=run.cfg.src_db,
+                    **_probe_cursor_kw,
+                    **run.cfg._scan_kw,
+                    **(
+                        {"sdk_state": run.cfg.initial_sdk_state}
+                        if run.cfg.sdk_source and run.cfg.initial_sdk_state
+                        else {}
+                    ),
+                )
             )
-        )
     # This page is not thrown away — it becomes the first written batch.
     run.cfg.phase_profile.add(
         PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
@@ -1555,7 +1467,7 @@ def _stream_database_transfer_impl(
                     sample_recs = [
                         dict(zip(run.cfg.columns, row)) for row in (probe.rows or [])[:50]
                     ]
-                    inferred = FileParser.infer_schema(sample_recs) if sample_recs else {}
+                    inferred = FileParser.infer_schema(sample_recs, invalid_calendar_votes=True) if sample_recs else {}
                     run.cfg.schema = {c: inferred.get(c, "TEXT") for c in run.cfg.columns}
                 except Exception:
                     run.cfg.schema = {c: "TEXT" for c in run.cfg.columns}
@@ -1954,6 +1866,16 @@ def _stream_database_transfer_impl(
         # re-read window cannot be bounded (no cursor column / no observed
         # max). Whether they are used is decided at reconcile time.
         and not run.cfg.incremental
+    )
+    # What a keyed re-read route wrote, per key: the ladder's witness that
+    # tells a concurrent source update from a destination loss.
+    run.tally.keyed_write_witness = begin_keyed_write_witness(
+        job_id=run.cfg.job_id, key_columns=list(run.cfg.pk_target_cols or []),
+        sync_mode=str(run.cfg.effective_sync or ""), resumed=resumed_pass,
+        inline_fingerprints_used=run.tally.inline_fingerprints_used,
+        expected_rows=int(run.cfg.total_rows or 0), columns=list(run.cfg.target_cols or []),
+        dest_db_type=str(run.cfg.dest_bind_dialect or ""), dest_types=run.cfg.digest_dest_types,
+        summary=run.tally.dest_summary,
     )
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
@@ -2756,13 +2678,42 @@ def _stream_database_transfer_impl(
                 sync_mode=str(run.cfg.effective_sync or ""),
                 rows_before=run.tally.dest_summary.get(PRECOUNT_KEY),
                 table_existed_before=run.tally.dest_summary.get("dest_table_existed_before"),
-                keyed=bool(run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols),
+                write_mode=str(run.cfg.write_mode or ""),
+                # The first batch replaces the table (create/replace DDL): until
+                # it was written, a clear-first overwrite cleared nothing.
+                overwrite_applied=bool(run.tally.ddl_state.get("created")),
                 atomic_overwrite=bool(
                     run.cfg.dest_type in ("postgresql", "redshift")
                     and (getattr(run.cfg.destination, "extra", None) or {}).get(
                         "pg_overwrite_in_transaction"
                     )
                 ),
+            )
+            # QA r12 D5 — a non-transactional writer's committed prefix of
+            # the cancelled chunk becomes a durable checkpoint when the count
+            # above proves it, so Resume continues after those documents.
+            from services.job_status import checkpoint_partial_chunk_on_cancel
+
+            checkpoint_partial_chunk_on_cancel(
+                _row_exc,
+                checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service,
+                committed_offset=int(committed_offset or 0),
+                rows_applied=int(run.tally.written or 0),
+                rejected_applied=int(run.tally.rejected_total or 0),
+                write_mode=str(run.cfg.write_mode or ""),
+                sync_mode=str(run.cfg.effective_sync or ""),
+                dest_type=str(run.cfg.dest_type or ""),
+                job_id=str(run.cfg.job_id or ""),
+                connector=str(
+                    getattr(run.cfg.destination, "format", None)
+                    or getattr(run.cfg.destination, "kind", None)
+                    or ""
+                ),
+                next_chunk_idx=int(checkpoint.chunk_index or 0) + 1,
+                use_keyset=bool(run.cfg.use_keyset),
+                keyset_col=str(run.cfg.keyset_col or ""),
+                incremental=bool(run.cfg.incremental),
             )
         if not isinstance(_row_exc, TransferCancelled):
             _undo_failed_write(run, _row_exc)
@@ -3122,6 +3073,22 @@ def _stream_database_transfer_impl(
         )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0
+        from services.primary_key import sync_collapses_in_file_duplicates
+
+        reread_pk_idx = [
+            run.cfg.target_cols.index(c)
+            for c in (run.cfg.pk_target_cols or [])
+            if c in run.cfg.target_cols
+        ]
+        # Versions of one key the re-read saw, in read order; collapsed to the
+        # last one per key (duplicate_policy.collapse_keep_last) for an upsert.
+        reread_versions: list[dict[str, Any]] | None = (
+            []
+            if reread_pk_idx
+            and len(reread_pk_idx) == len(run.cfg.pk_target_cols or [])
+            and sync_collapses_in_file_duplicates(run.cfg.effective_sync)
+            else None
+        )
         try:
             while True:
                 read_limit = _batch_limit(run,
@@ -3248,14 +3215,21 @@ def _stream_database_transfer_impl(
                 )
                 reread_holdouts.extend(reread_rejected or [])
                 if mapped:
-                    fp_accumulator.add_many(
-                        row_fingerprints(
-                            mapped,
-                            run.cfg.target_cols,
-                            dest_db_type=run.cfg.dest_bind_dialect,
-                            dest_types=run.cfg.digest_dest_types,
-                        )
+                    _fps = row_fingerprints(
+                        mapped,
+                        run.cfg.target_cols,
+                        dest_db_type=run.cfg.dest_bind_dialect,
+                        dest_types=run.cfg.digest_dest_types,
                     )
+                    if reread_versions is not None:
+                        # One row per key lands (D89/E2-023); the read is in
+                        # cursor order, so the last copy is the survivor.
+                        reread_versions.extend(
+                            {"key": tuple(_row[i] for i in reread_pk_idx), "fp": _fp}
+                            for _row, _fp in zip(mapped, _fps)
+                        )
+                    else:
+                        fp_accumulator.add_many(_fps)
                 checksum_rows_read += len(batch.rows)
                 if run.cfg.limit > 0 and checksum_rows_read >= run.cfg.limit:
                     break
@@ -3282,6 +3256,11 @@ def _stream_database_transfer_impl(
         finally:
             if reread_scan is not None:
                 close_table_scan(reread_scan)
+        if reread_versions:
+            from services.duplicate_policy import collapse_keep_last
+
+            _kept, _ = collapse_keep_last(reread_versions, ["key"])
+            fp_accumulator.add_many([v["fp"] for v in _kept])
         if reread_shaper is not None:
             # Buffering recipe steps emitted their winners on the write pass at
             # end-of-stream; the digest population must include the same tail
@@ -3769,6 +3748,16 @@ from src.transfer.stream_pin_ledger import (  # noqa: E402,F401 - re-export
 )
 from src.transfer.stream_boundary import (  # noqa: E402,F401 - re-export
     _boundary_append_dedupe,
+)
+from src.transfer.stream_write_ledger import (  # noqa: E402,F401 - re-export
+    _arm_strict_keyed_backup,
+    _checkpoint_for_job,
+    _fk_orphan_violation_message,
+    _fk_orphans_fail_closed,
+    _merge_chunk_write_summaries,
+    _merge_embedding_usage,
+    _seed_write_complete_summary,
+    _undo_failed_write,
 )
 
 

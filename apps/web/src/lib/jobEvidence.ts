@@ -40,6 +40,9 @@ export type JobEvidenceCarrier = {
   rejected_details?: unknown;
   rejected_details_total?: unknown;
   destination_summary?: SummaryCarrier | null;
+  /** Row-conservation ledger: ``rows_quarantined`` is the run's held-out count. */
+  row_accounting?: unknown;
+  reconciliation?: unknown;
   mapping_proof?: unknown;
   transfer_request?: unknown;
 };
@@ -239,9 +242,26 @@ function countFrom(top: unknown, nested: unknown): number {
   return finiteNumber(nested) ?? 0;
 }
 
-/** Quarantine count. Top-level wins when stamped; otherwise the summary (running checkpoints). */
+/**
+ * Quarantine count — the one reader every job surface uses (Theater, Jobs,
+ * Studio result). A positive top-level stamp wins. A stamped ``0`` is not the
+ * last word: the job root is created with ``rejected_rows: 0`` and some routes
+ * record their hold-outs only on the summary, the row-conservation ledger or
+ * Gate-8. Reading the root alone hid the quarantine section, left "Open
+ * quarantine" wired to nothing and said "no quarantined rows" while the ledger
+ * held 2 (QA browser 4).
+ */
 export function readRejectedRows(job: JobEvidenceCarrier | null | undefined): number {
-  return countFrom(job?.rejected_rows, summaryOf(job)?.rejected_rows);
+  const top = finiteNumber(job?.rejected_rows);
+  if (top != null && top > 0) return top;
+  const ledger = isRecord(job?.row_accounting) ? job.row_accounting : null;
+  const recon = isRecord(job?.reconciliation) ? job.reconciliation : null;
+  const fallbacks = [
+    summaryOf(job)?.rejected_rows,
+    ledger?.rows_quarantined,
+    recon?.rejected_rows,
+  ].map(finiteNumber).filter((n): n is number => n != null && n > 0);
+  return fallbacks.length ? Math.max(...fallbacks) : (top ?? finiteNumber(summaryOf(job)?.rejected_rows) ?? 0);
 }
 
 export function readCoercedNullRows(job: JobEvidenceCarrier | null | undefined): number {

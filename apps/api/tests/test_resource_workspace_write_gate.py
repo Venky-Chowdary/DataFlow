@@ -89,6 +89,15 @@ def test_write_mode_keeps_scope_404_before_write_403(workspace_b):
     assert _status(lambda: assert_resource_workspace(req, workspace_b, write=True)) == 404
 
 
+
+def test_editor_elsewhere_is_still_a_viewer_here(workspace_b):
+    """An admin of the actor's own workspace stays a viewer of B: write is 403."""
+    own = team_store.create_workspace(name="Mallory personal", created_by=VIEWER)
+    team_store.add_workspace_member(workspace_id=own.id, email=VIEWER, role="admin", added_by=VIEWER)
+    req = _request(VIEWER)  # no header: the default workspace is the one they administer
+    assert _status(lambda: assert_resource_workspace(req, workspace_b)) == 200
+    assert _status(lambda: assert_resource_workspace(req, workspace_b, write=True)) == 403
+
 class _Mongo:
     def __init__(self, workspace_id: str):
         self.workspace_id = workspace_id

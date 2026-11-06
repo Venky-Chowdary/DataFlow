@@ -278,6 +278,14 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     sync_mode: str = "full_refresh_overwrite"
 
+    @field_validator("sync_mode", mode="before")
+    @classmethod
+    def _sync_mode_vocabulary(cls, value: Any) -> Any:
+        """Same vocabulary as POST /schedules (QA MySQL D13); unknown is a 422."""
+        from services.transfer_policy_values import canonical_sync_mode
+
+        return canonical_sync_mode(value) or "full_refresh_overwrite"
+
     @field_validator("mappings")
     @classmethod
     def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
@@ -984,6 +992,19 @@ async def execute_transfer_json(
     dst_preview = EndpointConfig.from_dict(
         body.destination.kind, body.destination.model_dump(by_alias=True)
     )
+    # QA C3: the one intake every route shares. One stream contract's CALL/SELECT
+    # becomes the endpoint's, and a mode this run cannot honour is a 422 here.
+    # Without it, a one-contract query copied the whole source.table, and an
+    # unknown word was a 500 from the first is_callable_source below.
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
+    try:
+        body.stream_contracts = list(
+            apply_callable_intake(src_preview, list(body.stream_contracts or [])) or []
+        )
+    except ProcedureSourceError as exc:
+        raise HTTPException(status_code=422, detail=redact_log_text(str(exc))) from exc
     try:
         # auto is the product default. select_route_delivery keeps an explicit
         # pin and resolves auto. assert_requested_cdc_delivery rejects auto,
@@ -1006,6 +1027,23 @@ async def execute_transfer_json(
 
     workspace_id = resolve_write_workspace(request, workspace_id)
     _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
+    # Same door as POST /schedules: an upsert with no resolvable key is a 422
+    # here, not a job that the sync-contract gate refuses (MySQL D13 review).
+    from services.upsert_key_door import assert_upsert_key_resolvable
+
+    # The key probe may read the source catalog (bounded 8 s): off the event loop.
+    await asyncio.to_thread(
+        assert_upsert_key_resolvable,
+        sync_mode=body.sync_mode,
+        stream_contracts=body.stream_contracts,
+        destination_extra=dict(body.destination.extra or {}),
+        source_connector_id=str(body.source.connector_id or ""),
+        source_table=str(body.source.table or body.source.collection or ""),
+        source_schema=str(body.source.db_schema or ""),
+        source_database=str(body.source.database or ""),
+        source_type=str(getattr(src_preview, "format", "") or body.source.format or ""),
+        callable_source=is_callable_source(src_preview),
+    )
     src = src_preview
     dst = dst_preview
     require_admin_for_endpoints(request, workspace_id, src, dst)
@@ -1288,6 +1326,10 @@ async def run_universal_transfer(
     source_extra_json: str = Form(""),
     source_file_id: str = Form(""),
     stream_contracts_json: str = Form(""),
+    source_read_mode: str = Form(""),
+    source_query: str = Form(""),
+    procedure_call: str = Form(""),
+    procedure_params: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
     number_locale: str = Form(""),
@@ -1303,6 +1345,8 @@ async def run_universal_transfer(
     decision_artifact_json: str = Form(""),
     contract_id: str = Form(""),
     require_signed_contract: str = Form("false"),
+    risk_acceptance: str = Form(""),
+    risk_acceptance_json: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -1310,6 +1354,12 @@ async def run_universal_transfer(
     """
     Execute universal transfer: file/db → db/file/warehouse.
     Auto-creates tables, collections, and typed schemas.
+
+    ``risk_acceptance`` (alias ``risk_acceptance_json``) is a JSON-encoded
+    ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}``:
+    the same acceptance MCP ``start_transfer`` takes. It signs a
+    continue-policy Risk Contract on the mapped columns that need one, so rows
+    that fail to cast are quarantined and the valid rows load (QA r12 D2).
     """
     from services.execution_engine_contract import (
         DeliveryGuaranteeError,
@@ -1319,9 +1369,31 @@ async def run_universal_transfer(
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
+    # QA r12 D2: parse and shape-check the acceptance before anything runs.
+    from services.risk_acceptance import (
+        parse_risk_acceptance_form,
+        sign_request_risk_acceptance,
+    )
+
+    try:
+        if risk_acceptance.strip() and risk_acceptance_json.strip() and (
+            risk_acceptance.strip() != risk_acceptance_json.strip()
+        ):
+            raise ValueError(
+                "Send risk_acceptance or risk_acceptance_json, not two different values."
+            )
+        form_risk_acceptance = parse_risk_acceptance_form(
+            risk_acceptance or risk_acceptance_json
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Same 422 as the JSON routes; blank still means "inherit the plan".
     validation_mode = form_policy_value("validation_mode", validation_mode)
     schema_policy = form_policy_value("schema_policy", schema_policy)
+    if (sync_mode or "").strip():
+        # One sync-mode vocabulary with POST /schedules (QA MySQL D13).
+        sync_mode = form_policy_value("sync_mode", sync_mode)
     try:
         assert_delivery_guarantee_allowed(delivery_guarantee)
     except DeliveryGuaranteeError as exc:
@@ -1361,6 +1433,46 @@ async def run_universal_transfer(
                 source_extra.update(parsed)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    # QA C3 / MySQL D9: a query/procedure source is resolved from every accepted
+    # placement (form fields, source_extra_json, one stream contract) in one
+    # place, or refused — never silently dropped for a whole-table copy.
+    form_contracts: list | None = None
+    if stream_contracts_json.strip():
+        try:
+            import json as _json
+
+            loaded = _json.loads(stream_contracts_json)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="stream_contracts_json is not valid JSON."
+            ) from exc
+        if not isinstance(loaded, list):
+            raise HTTPException(
+                status_code=422, detail="stream_contracts_json must be a JSON list."
+            )
+        form_contracts = loaded
+    from types import SimpleNamespace
+
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
+    # The same intake as /transfer/execute, schedules and preflight. The form
+    # route adds its own query/procedure form fields.
+    staged_source = SimpleNamespace(kind=source_kind, extra=source_extra)
+    try:
+        form_contracts = apply_callable_intake(
+            staged_source,
+            form_contracts,
+            form={
+                "source_read_mode": source_read_mode,
+                "source_query": source_query,
+                "procedure_call": procedure_call,
+                "procedure_params": procedure_params,
+            },
+        )
+    except ProcedureSourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    source_extra = staged_source.extra
     stored_file_id = (source_file_id or "").strip() or str(source_extra.get("file_id") or "").strip()
     if stored_file_id:
         source_extra["file_id"] = stored_file_id
@@ -1592,16 +1704,24 @@ async def run_universal_transfer(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
     )
-    if stream_contracts_json.strip():
-        try:
-            import json as _json
-            parsed = _json.loads(stream_contracts_json)
-            if isinstance(parsed, list):
-                request_obj.stream_contracts = parsed
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    if form_contracts is not None:
+        request_obj.stream_contracts = form_contracts
 
     _residency_check(request, destination, region)
+
+    if form_risk_acceptance:
+        try:
+            sign_request_risk_acceptance(
+                request_obj,
+                form_risk_acceptance,
+                no_mappings_hint=(
+                    "risk_acceptance signs the mapped columns, and this run has "
+                    "none: send mappings_json (or a plan_id whose plan has "
+                    "mappings) with the column's target type."
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     from src.transfer.contract_engine import stamp_request_contract
 
@@ -2251,7 +2371,7 @@ async def rebaseline_append_continuity(
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
-    resolve_write_workspace(request, workspace_id)
+    write_ws = resolve_write_workspace(request, workspace_id)
     _assert_endpoint_connectors(request, write=(body.destination,))
     reason = (body.reason or "").strip()
     if not reason:
@@ -2266,7 +2386,9 @@ async def rebaseline_append_continuity(
     )
     try:
         return await asyncio.to_thread(
-            rebaseline, dst, actor=_actor_email(request), reason=reason
+            rebaseline, dst, actor=_actor_email(request), reason=reason,
+            # Only this caller's schedules are released (QA C9 review).
+            workspace_id=str(write_ws or ""),
         )
     except RebaselineError as exc:
         raise HTTPException(

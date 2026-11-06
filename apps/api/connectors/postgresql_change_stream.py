@@ -808,6 +808,14 @@ class PostgreSqlChangeStreamCdc:
             "confirmed_flush_lsn": confirmed,
             "wal_status": slot.get("wal_status"),
             "delivery": "at-least-once",
+            # C11: whether this run's slot is on the capture registry.
+            "capture_ownership": (
+                "not_attempted"
+                if not hasattr(self, "_ownership_error")
+                else "not_recorded: " + str(self._ownership_error)
+                if self._ownership_error
+                else "recorded"
+            ),
             **self._transport_fields(),
             **self._lease.theater_fields(),
         }
@@ -996,9 +1004,54 @@ class PostgreSqlChangeStreamCdc:
                     lsn = self._read_slot_lsn(cur)
             conn.commit()
         self._slot_catalog_cache = None
+        # Created now, or attached to: a slot made before the capture registry
+        # existed is adopted on its next run, and the row follows the last job.
+        self._record_ownership()
         if lsn and (created_new or not self.consistent_point_lsn):
             self.consistent_point_lsn = lsn
         return self.consistent_point_lsn
+
+    def _capture_owner(self) -> dict[str, Any]:
+        """The connector config this reader was built from (connector id, job id).
+
+        The one accessor ownership recording reads; a reader assembled without
+        ``__init__`` (unit tests of the slot state machine) has none.
+        """
+        cfg = getattr(self, "cfg", None)
+        return dict(cfg) if isinstance(cfg, dict) else {}
+
+    def _record_ownership(self) -> None:
+        """C11: this run created, or attached to, the slot/publication — record ownership.
+
+        Bookkeeping only: a failure is logged and surfaced on ``cdc_metadata``
+        (``capture_ownership``), never raised into slot creation.
+        """
+        try:
+            from services.cdc_capture_inventory import record_pg_capture
+
+            plugin = getattr(self, "output_plugin", "") or ""
+            recorded = record_pg_capture(
+                self._capture_owner(),
+                slot_name=self.slot_name,
+                publication_name=(
+                    getattr(self, "publication_name", "") if plugin == "pgoutput" else ""
+                ),
+                cursor_key=str(getattr(self, "cursor_key", "") or ""),
+                schema=str(getattr(self, "schema", "") or "public"),
+                tables=list(getattr(self, "tables", None) or []),
+                plugin=plugin,
+            )
+            self._ownership_error = None if recorded else "capture registry write failed"
+            if not recorded:
+                _logger.warning(
+                    "CDC capture ownership for slot %s was not recorded", self.slot_name
+                )
+        except Exception as exc:  # noqa: BLE001 - never break slot creation
+            self._ownership_error = f"{type(exc).__name__}: {exc}"[:300]
+            _logger.warning(
+                "CDC capture ownership for slot %s was not recorded: %s",
+                getattr(self, "slot_name", "?"), self._ownership_error,
+            )
 
     def _drop_replication_slot(self) -> None:
         """Drop an invalidated slot so snapshot can create a new consistent point."""
@@ -1542,7 +1595,8 @@ class PostgreSqlChangeStreamCdc:
                     "SELECT 1 FROM pg_publication WHERE pubname = %s",
                     (pub,),
                 )
-                if cur.fetchone() is None:
+                created_pub = cur.fetchone() is None
+                if created_pub:
                     tables_sql = ", ".join(qualified_list)
                     cur.execute(f"CREATE PUBLICATION {pub} FOR TABLE {tables_sql}")
                 else:
@@ -1555,6 +1609,8 @@ class PostgreSqlChangeStreamCdc:
                             except Exception as exc:
                                 _logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
             conn.commit()
+        if created_pub:
+            self._record_ownership()
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM pg_publication WHERE pubname = %s", (pub,))

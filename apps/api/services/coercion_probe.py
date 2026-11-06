@@ -64,6 +64,9 @@ from services.value_serializer import (
     is_missing_sentinel,
 )
 
+from connectors.sql_temporal import is_date_holdout_refusal
+from services.validation_mode_contract import mode_holdout_kind, mode_holds_out_refusal
+
 _TEXTUAL_LOGICALS = {"string", "text"}
 _STRUCTURAL_LOGICALS = {"json", "array", "struct", "map"}
 SAMPLE_FAILURE_LIMIT = 5
@@ -87,11 +90,20 @@ def samples_coerce_mapping(
     source_types: dict[str, str],
     target_types: dict[str, str],
     rows: list[dict[str, Any]],
+    validation_mode: str | None = None,
+    record_batch: bool = False,
 ) -> bool:
     """True when every non-empty sample coerces via the write-path transform.
 
     Used by G5 integrity, G6 DDL, and schema-drift so declared VARCHAR→NUMBER
     (JSON/CSV numeric strings) does not false-block when values cast cleanly.
+
+    ``validation_mode``: a cell the mode holds out
+    (``validation_mode_contract.mode_holds_out_refusal``, by the refusal's
+    reason) is that row's quarantine, and the pair coerces when the mode's
+    column answer (``mode_holdout_kind``: every failure held, and for lenient
+    at least half the sampled cells cast) says so. Without a mode, every
+    refusal fails the pair, as before.
     """
     src = str(mapping.get("source") or "")
     if not src or not rows:
@@ -102,6 +114,9 @@ def samples_coerce_mapping(
         item["target_type"] = target_types.get(str(tgt))
     transform = resolve_transform(item, column_types=source_types, dest_types=target_types)
     checked = 0
+    failed = 0
+    held = 0
+    calendar = 0
     for row in rows[:DEFAULT_SAMPLE_LIMIT]:
         raw = cell_to_string(lookup_row_value(row, src, ""))
         if not str(raw).strip():
@@ -129,13 +144,31 @@ def samples_coerce_mapping(
                 "time",
                 "timestamp",
             } or (specialty and specialty not in {"CITEXT", "TSVECTOR"}):
-                return False
+                if validation_mode is None:
+                    return False
+                failed += 1
+                held += int(mode_holds_out_refusal(
+                    validation_mode, f"empty value into {tgt_type}", record_batch=record_batch
+                ))
             continue
-        checked += 1
         _val, err = apply_transform(raw, transform)
         if err:
-            return False
-    return checked > 0
+            if validation_mode is None:
+                return False
+            failed += 1
+            if mode_holds_out_refusal(validation_mode, str(err), record_batch=record_batch):
+                held += 1
+                calendar += int(is_date_holdout_refusal(str(err)))
+            continue
+        checked += 1
+    if not failed:
+        return checked > 0
+    return bool(
+        mode_holdout_kind(
+            validation_mode, failed=failed, held=held, cast_ok=checked,
+            record_batch=record_batch, calendar=calendar,
+        )
+    )
 
 
 def _target_type_for(
@@ -277,6 +310,20 @@ def _build_suggestion(
                 f"For an existing typed column, remap or ALTER the destination "
                 f"(mapping Widen alone does not change DDL). "
                 f"Quarantine never silently drops rows. {action}"
+            )
+        elif _dst_gap_reason(failure_reasons):
+            # A spring-forward wall clock is well formed and fits every
+            # timestamp carrier; it does not exist in the declared zone. Telling
+            # the operator to widen the column (already TIMESTAMP_LTZ(9)) sent
+            # them nowhere (D52). Name the value and the zone, and offer the
+            # row-level ways through.
+            fix = (
+                f"Column '{source}' → {target_type}: {_dst_gap_reason(failure_reasons)} "
+                f"(a daylight-saving gap: that wall-clock time never happened there). "
+                f"Correct the source value, declare the zone it was really "
+                f"recorded in, or Accept risk with QUARANTINE_ROW / "
+                f"CAST_AND_CONTINUE to hold that row out while the valid rows load. "
+                f"Widening the column does not help."
             )
         elif fc is FailureClass.EMPTY_VALUE_NOT_NULLABLE:
             fix = (
@@ -537,9 +584,17 @@ def analyze_coercion(
         ):
             continue
 
-        transform = resolve_transform(m, column_types=source_types, dest_types=dest_types)
+        transform = resolve_transform(
+            m, column_types=source_types, dest_types=dest_types, dest_kind=str(dest_db_type or "")
+        )
 
         ok = nulls = sentinel_nulls = failed = 0
+        #: Failures the validation mode holds out given their refusal reason
+        #: (``validation_mode_contract.mode_holds_out_refusal``), counted on
+        #: every failure, not only the five listed in ``sample_failures``.
+        held_failed = 0
+        calendar_failed = 0
+        holdout_kind = ""
         wire_normalize = 0
         wire_failures = 0
         json_scalar_wraps = 0
@@ -801,6 +856,9 @@ def analyze_coercion(
                         raw_failure_values.append(cell[:120])
                 elif err:
                     failed += 1
+                    if mode_holds_out_refusal(mode, err, record_batch=file_row_quarantine):
+                        held_failed += 1
+                        calendar_failed += int(is_date_holdout_refusal(err))
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
                         raw_failure_values.append(cell[:120])
@@ -1032,29 +1090,23 @@ def analyze_coercion(
             contract_present = isinstance(
                 m.get("risk_contract") or m.get("riskContract"), dict
             )
-            # Only a mixed numeric cast (Invalid integer / decimal) is a file
-            # holdout. Timezone invent, NOT NULL, and carrier overflow stay
-            # blocking even when other cells in the column succeed.
-            cast_reasons = [
-                str(item.get("reason") or "")
-                for item in sample_failures
-                if isinstance(item, dict)
-            ]
-            numeric_cast = bool(cast_reasons) and all(
-                reason.casefold().startswith(
-                    ("invalid integer", "invalid decimal", "invalid number")
-                )
-                for reason in cast_reasons
+            # The mode's holdout policy, decided once from every failure's
+            # refusal reason (validation_mode_contract.mode_holdout_kind):
+            # balanced on a file holds out only invalid-calendar refusals below
+            # one in five sampled values (QA browser 3); lenient every cast
+            # refusal. G3 and G8 consume ``holdout_kind``.
+            column_holdout = "" if contract_present else mode_holdout_kind(
+                mode,
+                failed=failed,
+                held=held_failed,
+                cast_ok=ok,
+                record_batch=file_row_quarantine,
+                calendar=calendar_failed,
             )
-            if mapping_has_clearing_risk_contract(m) or (
-                file_row_quarantine
-                and ok > 0
-                and not contract_present
-                and numeric_cast
-            ):
-                severity = "warn"
-            else:
-                severity = "block"
+            # The column's ONE verdict (validation_mode_contract.mode_holdout_kind,
+            # share-bounded): a held column is a warning, everything else blocks.
+            severity = "warn" if mapping_has_clearing_risk_contract(m) or column_holdout else "block"
+            holdout_kind = column_holdout
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
@@ -1240,6 +1292,7 @@ def analyze_coercion(
             "nulls": nulls,
             "sentinel_nulls": sentinel_nulls,
             "failed": failed,
+            "holdout_kind": holdout_kind,
             "wire_normalize": wire_normalize,
             "wire_failures": wire_failures,
             "json_scalar_wraps": json_scalar_wraps,
@@ -1273,3 +1326,12 @@ def analyze_coercion(
         "columns": columns,
         "by_source": by_source,
     }
+
+
+def _dst_gap_reason(failure_reasons: list | None) -> str:
+    """The first "wall clock ... does not exist in timezone ..." refusal, or ""."""
+    for reason in failure_reasons or []:
+        text = str(reason or "").strip()
+        if "does not exist in timezone" in text.lower():
+            return text
+    return ""

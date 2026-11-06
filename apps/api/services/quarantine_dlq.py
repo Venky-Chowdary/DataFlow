@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -182,6 +184,29 @@ def _dlq_coll():
     return mongo_collection(_MONGO_COLL)
 
 
+_JSONL_THREAD_LOCK = threading.Lock()
+
+
+@contextmanager
+def _jsonl_lock(target: Path):
+    """One writer at a time on a DLQ JSONL file: appends, rotation and rewrites.
+
+    A teardown rewriting the file while another tenant's event was appended
+    lost that event (review 4 M2). ``flock`` on a sibling lock file covers the
+    API, worker and scheduler processes; the thread lock covers this process.
+    """
+    import fcntl
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _JSONL_THREAD_LOCK:
+        with open(f"{target}.lock", "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def append_dlq_event(
     *,
     job_id: str,
@@ -215,6 +240,11 @@ def append_dlq_event(
 
     target: Path = path or DLQ_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
+    with _jsonl_lock(target):
+        return _append_jsonl_locked(target, event)
+
+
+def _append_jsonl_locked(target: Path, event: dict[str, Any]) -> dict[str, Any]:
     try:
         if target.exists() and target.stat().st_size >= _DLQ_MAX_BYTES:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -384,6 +414,32 @@ def _hashable_row_key(row: Any) -> Any:
         return repr(row)
 
 
+def finding_row_key(detail: Any) -> Any:
+    """Which source row a finding belongs to — hashable, or None when unnamed.
+
+    A transform divert carries its record in ``row`` (a dict) and its position
+    in ``source_row_index``; a write reject carries the row number in ``row``.
+    The position wins, so two diverted rows with identical records are two
+    rows, and a record image is never hashed as a dict (QA MySQL-D4 500).
+    """
+    if not isinstance(detail, dict):
+        return None
+    index = detail.get("source_row_index")
+    if index is not None and not isinstance(index, (dict, list)):
+        return ("source_row", index)
+    row = detail.get("row")
+    if row is None:
+        return None
+    return ("row", _hashable_row_key(row))
+
+
+def count_finding_rows(details: Any) -> int:
+    """Distinct source rows the findings name (0 when none names a row)."""
+    keys = {finding_row_key(d) for d in details or []}
+    keys.discard(None)
+    return len(keys)
+
+
 def quarantine_details_from_dlq(
     job_id: str,
     *,
@@ -424,10 +480,17 @@ def quarantine_details_from_dlq(
             # The row is a record (dict/list), not a scalar — dedupe on its
             # canonical serialization; an unhashable member made every read
             # of a shape-divert quarantine crash with TypeError.
+            # The record image is part of the identity: two distinct records
+            # refused for the same reason in the same column (row numbers can
+            # repeat across write units) are two findings, never one (E1-018).
+            # A finding persisted twice carries the same image and still dedupes.
+            image = d.get("source_values") or d.get("values")
             key = (
                 _hashable_row_key(row),
                 str(d.get("column") or ""),
                 str(d.get("reason") or "")[:160],
+                _hashable_row_key(image) if isinstance(image, dict) else "",
+                _hashable_row_key(d.get("value")),
             )
             if key in seen:
                 continue
@@ -622,22 +685,31 @@ def assign_unscoped_workspaces(
         return counts
     if not DLQ_PATH.exists():
         return counts
-    out: list[str] = []
-    changed = False
-    for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
-        ev = load_dlq_event(line) if line.strip() else None
-        if ev is not None and unscoped.matches(ev.get("workspace_id")):
-            ws = _place(ev)
-            if ws:
-                ev["workspace_id"] = ws
-                line = json.dumps(ev, default=json_default)
-                changed = True
-        out.append(line)
-    if apply and changed:
-        tmp = DLQ_PATH.with_suffix(DLQ_PATH.suffix + ".tmp")
-        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-        tmp.replace(DLQ_PATH)
+    # Under the append lock, with its own temp name (review 6): a backfill
+    # rewrite must not drop an event appended meanwhile, nor share a temp file
+    # with a teardown scrub.
+    with _jsonl_lock(DLQ_PATH):
+        out: list[str] = []
+        changed = False
+        for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
+            ev = load_dlq_event(line) if line.strip() else None
+            if ev is not None and unscoped.matches(ev.get("workspace_id")):
+                ws = _place(ev)
+                if ws:
+                    ev["workspace_id"] = ws
+                    line = json.dumps(ev, default=json_default)
+                    changed = True
+            out.append(line)
+        if apply and changed:
+            _atomic_rewrite(DLQ_PATH, out)
     return counts
+
+
+def _atomic_rewrite(path: Path, lines: list[str]) -> None:
+    """Replace ``path`` with ``lines`` through a temp file no other writer shares."""
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    tmp.replace(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1274,3 +1346,191 @@ def quarantine_sample_incomplete(job: dict[str, Any] | None, details: list[dict[
             "are persisted — partial replay would leave remaining rejects behind."
         )
     return None
+
+
+REPLAY_DUPLICATE_KEYS_CODE = "REPLAY_DESTINATION_DUPLICATE_KEYS"
+
+
+def replay_duplicate_keys_refusal(
+    *,
+    table: str,
+    key_columns: list[str],
+    samples: list[dict[str, Any]] | None = None,
+    duplicate_keys: int = 0,
+    engine_error: str = "",
+) -> dict[str, Any]:
+    """The typed 409 a keyed replay returns over a table that repeats its key (QA C2).
+
+    A keyed replay merges on ``key_columns``; the merge needs a UNIQUE index the
+    engine cannot build while the table already holds two rows for one key.
+    The answer names those keys and the dedupe route instead of a raw 500.
+    """
+    keys = [str(c) for c in key_columns if c]
+    shown = []
+    for sample in samples or []:
+        values = sample.get("values") if isinstance(sample, dict) else None
+        if not isinstance(values, dict):
+            continue
+        label = ", ".join(str(values.get(k)) for k in keys) if keys else str(values)
+        shown.append(f"{label}×{int(sample.get('count') or 2)}")
+    key_label = " + ".join(keys) or "the replay key"
+    found = f" ({', '.join(shown)})" if shown else ""
+    count = int(duplicate_keys or len(shown) or 0)
+    return {
+        "code": REPLAY_DUPLICATE_KEYS_CODE,
+        "message": (
+            f"Replay merges on {key_label}, but destination table '{table}' already "
+            f"holds {count or 'some'} key value(s) more than once{found}. "
+            "A keyed replay cannot add the unique index it merges on over those rows."
+        ),
+        "table": table,
+        "key_columns": keys,
+        "duplicate_keys": shown,
+        "duplicate_key_count": count,
+        "next_action": (
+            # Each route is followed in
+            # tests/test_r14_c2_review2_keep_last_db_and_replay_bounds_e2e.py.
+            "Dedupe the destination first: delete the extra copies of those "
+            "keys (keep one row per key), or re-run the parent as "
+            "full_refresh_overwrite from a source without the repeats (a file "
+            "source can set in_file_dedupe=keep_last). Then replay the "
+            "quarantine of the run that holds the row."
+        ),
+        "engine_error": engine_error[:300],
+    }
+
+
+def replay_destination_duplicate_keys(
+    dest_cfg: dict[str, Any],
+    *,
+    dest_kind: str,
+    table: str,
+    key_columns: list[str],
+) -> dict[str, Any] | None:
+    """The 409 a keyed replay returns when its merge index cannot be built.
+
+    Only an engine whose upsert fires on a UNIQUE index (PostgreSQL ON
+    CONFLICT, MySQL/MariaDB ON DUPLICATE KEY — ``dest_upsert_needs_unique_index``)
+    builds one; MERGE engines (Snowflake, SQL Server, Oracle, BigQuery,
+    Databricks) key the write themselves and replay over repeated keys there.
+    A key an existing unique constraint already covers cannot repeat. The
+    count is the plan's own bounded probe (``probe_dest_duplicate_keys``); one
+    that does not finish returns None and the writer's own failure is mapped
+    by :func:`replay_unique_index_failure`.
+    """
+    from services.dest_dialect_facts import dest_upsert_needs_unique_index
+
+    if not key_columns or not dest_upsert_needs_unique_index(dest_kind):
+        return None
+    from src.ai.copilot.tool_deadline import (
+        bounded_step,
+        deadline_scope,
+        preflight_deadline_seconds,
+    )
+    import services.upsert_ddl_gate as gate
+
+    # A REST replay opens no tool deadline, and bounded_step runs unbounded
+    # outside one: the catalog read and the GROUP BY get the preflight budget.
+    with deadline_scope(preflight_deadline_seconds()):
+        covering = bounded_step(
+            f"reading unique keys on destination {table}",
+            lambda: gate.destination_unique_covering(dest_cfg, table, list(key_columns), dest_kind),
+            seconds=gate.DEST_DUPLICATE_KEY_STEP_SECONDS,
+            conn=dest_cfg,
+            role="destination",
+        )
+        if not covering.timed_out and covering.error is None and covering.value is True:
+            return None
+        probe = gate.probe_dest_duplicate_keys(
+            dest_cfg, table, list(key_columns), seconds=gate.DEST_DUPLICATE_KEY_STEP_SECONDS
+        )
+    if not probe.get("ran") or not int(probe.get("duplicate_keys") or 0):
+        if not probe.get("ran"):
+            logger.info("replay duplicate-key probe for %s: %s", table, probe.get("message"))
+        return None
+    return replay_duplicate_keys_refusal(
+        table=table,
+        key_columns=key_columns,
+        samples=list(probe.get("samples") or []),
+        duplicate_keys=int(probe.get("duplicate_keys") or 0),
+    )
+
+
+# The engine refusing to BUILD the merge index, not a row colliding on insert.
+# Only the index engines build one (``dest_upsert_needs_unique_index``).
+_UNIQUE_BUILD_FAILURE = ("could not create unique index",)  # PostgreSQL
+
+
+def _unique_build_failed(text: str) -> bool:
+    low = text.lower()
+    if any(marker in low for marker in _UNIQUE_BUILD_FAILURE):
+        return True
+    # MySQL/MariaDB 1062 while adding the writer's own uidx_ index.
+    return "duplicate entry" in low and "uidx_" in low
+
+
+def replay_unique_index_failure(
+    exc: BaseException,
+    *,
+    table: str,
+    key_columns: list[str],
+) -> dict[str, Any] | None:
+    """Map an engine's unique-index / duplicate-key failure to the typed refusal."""
+    text = str(exc or "")
+    if not _unique_build_failed(text):
+        return None
+    import re
+
+    # A value may itself hold ", " — only a one-column key names its value;
+    # a composite key is named by its columns.
+    samples: list[dict[str, Any]] = []
+    if len(key_columns) == 1:
+        match = re.search(r"Key \(([^)]*)\)=\((.*)\) is duplicated", text, re.S)
+        entry = re.search(r"Duplicate entry '(.*)' for key", text, re.S)
+        value = match.group(2) if match else (entry.group(1) if entry else None)
+        if value is not None:
+            samples.append({"values": {key_columns[0]: value}, "count": 2})
+    return replay_duplicate_keys_refusal(
+        table=table,
+        key_columns=key_columns,
+        samples=samples,
+        engine_error=text.strip().splitlines()[0] if text.strip() else "",
+    )
+
+
+def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
+    """Remove every DLQ / quarantine event of ``workspace_id`` (workspace teardown).
+
+    Both stores: the Mongo collection and the JSONL fallback, which holds full
+    row bodies. Matching is exact on the event's workspace — unscoped legacy
+    rows and other workspaces' rows are never touched. Returns the count.
+    """
+    ws = (workspace_id or "").strip()
+    if not ws:
+        raise ValueError("a workspace is required")
+    removed = 0
+    coll = _dlq_coll()
+    if coll is not None:
+        query = {"workspace_id": ws}
+        removed += int(coll.count_documents(query) if dry_run else coll.delete_many(query).deleted_count)
+    # The live file and every rotated one (quarantine_dlq.<stamp>.jsonl) hold
+    # full row bodies. The live file's lock is taken FIRST and held for the
+    # whole scrub: rotation happens under it, so the glob cannot race a
+    # rotation (review 6).
+    with _jsonl_lock(DLQ_PATH):
+        paths = [DLQ_PATH] + sorted(DLQ_PATH.parent.glob(f"{DLQ_PATH.stem}.*{DLQ_PATH.suffix}"))
+        for path in paths:
+            if not path.exists() or path.name.endswith((".tmp", ".lock")):
+                continue
+            kept: list[str] = []
+            hit = 0
+            for line in path.read_text(encoding="utf-8").splitlines():
+                ev = load_dlq_event(line) if line.strip() else None
+                if ev is not None and str(ev.get("workspace_id") or "") == ws:
+                    hit += 1
+                    continue
+                kept.append(line)
+            removed += hit
+            if hit and not dry_run:
+                _atomic_rewrite(path, kept)
+    return removed

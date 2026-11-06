@@ -19,6 +19,7 @@ Skips cleanly when localhost:5432 lacks a logical-decoding PostgreSQL.
 
 from __future__ import annotations
 
+import os
 import socket
 import sys
 import time
@@ -35,6 +36,9 @@ import psycopg2  # noqa: E402
 
 from connectors.postgresql_conn import get_connection  # noqa: E402
 
+#: CI runs a logical-decoding PostgreSQL on 5432; a workstation may run it beside
+#: its everyday cluster.
+_PORT = int(os.environ.get("DATAFLOW_TEST_LOGICAL_PG_PORT", "5432"))
 _TABLE = f"x29_orders_{uuid.uuid4().hex[:8]}"
 _COLS = ["id", "sku", "qty", "updated_at"]
 
@@ -42,7 +46,7 @@ _COLS = ["id", "sku", "qty", "updated_at"]
 def _connect(db: str = "dataflow"):
     return get_connection(
         host="localhost",
-        port=5432,
+        port=_PORT,
         database=db,
         username="dataflow",
         password="dataflow",
@@ -74,7 +78,7 @@ def _rows(db: str, table: str) -> list[tuple]:
 
 def _logical_decoding_ready() -> bool:
     try:
-        with socket.create_connection(("localhost", 5432), timeout=1):
+        with socket.create_connection(("localhost", _PORT), timeout=1):
             pass
     except OSError:
         return False
@@ -94,7 +98,7 @@ def _logical_decoding_ready() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _logical_decoding_ready(),
-    reason="PostgreSQL with wal_level=logical not reachable on localhost:5432",
+    reason=f"PostgreSQL with wal_level=logical not reachable on localhost:{_PORT}",
 )
 
 
@@ -165,7 +169,7 @@ def test_api_created_cdc_schedule_moves_snapshot_and_updates(isolated):
             "type": "postgresql",
             "role": "source",
             "host": "localhost",
-            "port": 5432,
+            "port": _PORT,
             "database": "dataflow",
             "username": "dataflow",
             "password": "dataflow",
@@ -178,7 +182,7 @@ def test_api_created_cdc_schedule_moves_snapshot_and_updates(isolated):
             "type": "postgresql",
             "role": "destination",
             "host": "localhost",
-            "port": 5432,
+            "port": _PORT,
             "database": "dataflow",
             "username": "dataflow",
             "password": "dataflow",
@@ -245,7 +249,7 @@ def test_api_created_cdc_schedule_on_keyless_table_still_refuses_named(isolated)
             "type": "postgresql",
             "role": "source",
             "host": "localhost",
-            "port": 5432,
+            "port": _PORT,
             "database": "dataflow",
             "username": "dataflow",
             "password": "dataflow",

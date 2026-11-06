@@ -270,7 +270,9 @@ def copy_sqlite_to_postgres(
             "(FORMAT text, DELIMITER E'\\t', NULL '\\N')"
         )
         src_cur = source_conn.cursor()
-        dst_cur.copy_expert(copy_sql, _SqliteCopyReader(src_cur, select_sql, pg_ddls))
+        from services.cancel_check import copy_expert_keeping_cancel
+
+        copy_expert_keeping_cancel(dst_cur, copy_sql, _SqliteCopyReader(src_cur, select_sql, pg_ddls))
         dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
         dest_count = int(dst_cur.fetchone()[0])
         if dest_count != source_count:

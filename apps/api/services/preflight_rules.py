@@ -451,10 +451,10 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "reversible across tenants."
         ),
         "fix": (
-            "Re-run Validate in a moment. If the key still cannot be loaded, ask "
-            "your Datawrap administrator. If a keyed digest is not required, switch "
-            "the column to mask_pii or redact. Do not remove the transform: the "
-            "column would be written in clear."
+            "A workspace admin can set or rotate the hashing key in Settings → "
+            "Security, then re-run Validate. If a keyed digest is not required, "
+            "switch the column to mask_pii or redact. Do not remove the transform: "
+            "the column would be written in clear."
         ),
         "examples": [
             "email → hash_pii while the workspace hashing key cannot be loaded.",

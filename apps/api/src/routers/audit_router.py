@@ -80,19 +80,13 @@ def _require_platform_admin(request: Request, scope, permission: str) -> None:
     admin (every self-serve signup is one) may neither run them nor read the
     platform figures they return.
     """
-    if scope.unrestricted:
-        return
-    from services.audit_coverage import record_authz_denial
+    from services.workspace_access import require_platform_admin
 
-    record_authz_denial(
+    require_platform_admin(
         request,
-        required_permission=permission,
-        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
-        reason="platform_admin_required",
-    )
-    raise HTTPException(
-        status_code=403,
-        detail="This acts on the platform-wide audit trail: platform administrators only.",
+        scope,
+        permission,
+        "This acts on the platform-wide audit trail: platform administrators only.",
     )
 
 
@@ -175,6 +169,27 @@ def _cef_line(event: dict[str, object]) -> str:
     )
 
 
+_MASKED_NOTE = (
+    "API key, service-account and SCIM token ids are masked to their last four "
+    "characters for this reader; a workspace or platform admin's export carries "
+    "them whole. Masked records do not re-hash to event_hash."
+)
+
+
+def _reader_masker(request: Request, workspace_id: str):
+    """The projection this reader is shown, or ``None`` for a key manager (Browser 20)."""
+    from services.audit_actor_display import KeyIdMasker, reader_sees_key_ids
+
+    return None if reader_sees_key_ids(request, workspace_id) else KeyIdMasker()
+
+
+def _reader_view(masker, events: list) -> tuple[list, bool]:
+    """Events as this reader may see them: key ids whole only for key managers."""
+    if masker is None:
+        return events, False
+    return [masker(e) for e in events], True
+
+
 @router.get("/events")
 async def list_events(
     request: Request,
@@ -188,15 +203,20 @@ async def list_events(
     ),
     q: str | None = Query(None, max_length=200, description="Substring of action, resource or actor"),
     search: str | None = Query(None, max_length=200, description="Alias of q"),
+    before_seq: int | None = Query(
+        None, ge=0, description="Continue a truncated search below this chain_seq (search_resume_before_seq)"
+    ),
 ):
     from services.audit_log import list_audit_events
 
     scope = tenant_scope(request)
-    workspace_id = scope.requested_workspace_id
+    workspace_id = scope.header_workspace_id
     tenant_id = _tenant_of(workspace_id)
+    masker = _reader_masker(request, workspace_id)
     # Scope by the caller's workspaces (or the one they are looking at). Do not
     # AND tenant_id: events stamped with this workspace before a tenant existed
     # would vanish, and a shared tenant must not pull sibling-workspace rows.
+    # A masked reader's search matches what it is shown, never a hidden key id.
     events = list_audit_events(
         limit=limit,
         level=level,
@@ -204,14 +224,23 @@ async def list_events(
         after_seq=after_seq,
         action=action,
         search=q or search,
+        search_projection=masker,
+        before_seq=before_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    search_truncated = bool(getattr(events, "search_truncated", False))
+    search_resume_before_seq = getattr(events, "search_resume_before_seq", None)
     from services.audit_actor_display import add_actor_display
 
+    events, masked = _reader_view(masker, add_actor_display(events))
     return JSONResponse(
         {
-            "events": add_actor_display(events),
+            "events": events,
             "count": len(events),
+            "key_ids_masked": masked,
+            # A projected search stopped at its scan window: older matches may exist.
+            "search_truncated": search_truncated,
+            "search_resume_before_seq": search_resume_before_seq,
             "workspace_id": workspace_id or None,
             "tenant_id": tenant_id or None,
             "next_after_seq": next_seq,
@@ -260,8 +289,13 @@ async def export_events(
         after_seq=after_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    events, masked = _reader_view(_reader_masker(request, workspace_id), events)
     tip = latest_event_hash()
     honesty = audit_export_honesty()
+    if masked:
+        honesty = {**honesty, "key_ids_masked": True, "key_ids_note": _MASKED_NOTE}
+        # Every format says so, NDJSON and CEF included (no envelope there).
+        cursor_headers = {**cursor_headers, "X-Datawrap-Key-Ids-Masked": "1"}
     attestation = {
         "official": honesty["official"],
         "kind": honesty["kind"],
@@ -273,7 +307,7 @@ async def export_events(
     record_security_event(
         "audit.export.read", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
-        details={"format": fmt, "row_count": len(events)},
+        details={"format": fmt, "row_count": len(events), "key_ids_masked": masked},
     )
     if fmt == "json":
         return JSONResponse(
@@ -286,6 +320,7 @@ async def export_events(
                 "hash_alg": "HMAC-SHA256",
                 "honesty": honesty,
                 "attestation": attestation,
+                "key_ids_masked": masked,
                 "next_after_seq": next_seq,
             },
             headers={
@@ -436,6 +471,27 @@ async def verify_audit_chain(
     tenant's records can neither fail nor appear in the verdict (R7). With no
     header a platform admin gets the platform-wide walk, each finding naming
     its workspace.
+
+    The verdict (C4): ``verified`` is true only when every record in scope was
+    checked and holds up. A record signed under a key this deployment no longer
+    holds (not configured, not retired, not in the persisted keyring) cannot be
+    checked, so it is never counted as verified — and not as tampering when the
+    deployment's sealed key history shows it signed with that key and the
+    record falls within that key's use, or the record sits before the chain
+    position where the history began (a key an earlier deploy lost). A record
+    naming any other key after that position is tampering
+    (``unknown_key_after_keyring``), as is a history whose signed anchor
+    record was reset (``key_history_tampered``; see
+    ``POST /chain/key-history/reanchor`` after a secrets-key change). A chain whose only exceptions are lost keys reports
+    ``status: verified_with_exceptions``, ``verified: false``,
+    ``tampering_detected: false`` and ``unverifiable_key_lost`` (``count`` and
+    ``by_key_id``); supplying that key as a retired audit key makes those
+    records verify again. A record whose content no longer matches its
+    signature, or a record missing from the chain, is tampering (``status:
+    findings``, ``tampering_detected: true``) whatever else is lost; a fork
+    from concurrent writers is counted under ``categories.fork``.
+    ``verified: null`` means nothing was walked (``nothing_checked`` or
+    ``store_unavailable``).
     """
     from services.evidence_chain import verify_chain
 
@@ -499,6 +555,90 @@ async def reanchor_audit_chain(body: ReanchorBody, request: Request):
     return result
 
 
+class KeyHistoryReanchorBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=500)
+    dry_run: bool = True
+    acknowledge_findings: bool = False
+
+
+@router.post("/chain/key-history/reanchor")
+async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Request):
+    """Platform admin: start the sealed audit key history over.
+
+    For a deployment whose ``DATAFLOW_SECRETS_KEY`` changed: the history's
+    MACs no longer verify, so ``/verify`` reports ``key_history_tampered``
+    until an administrator re-anchors it. Dry run by default.
+
+    Both the dry run and the apply run the platform ``verify_chain`` first.
+    While it reports tampering, the call is refused (409) unless
+    ``acknowledge_findings`` is true. Applying it writes the signed
+    ``audit.key_history.reanchored`` chain record whose signed details carry
+    the previous history position, the positions it supersedes, the history
+    problem it resolves and every tampering finding at that moment; the
+    verifier keeps reporting those as ``prior_tampering`` (a re-anchor never
+    whitewashes tampering). History entries whose MAC fails are re-sealed as
+    of now, so records before the re-anchor naming them read as lost keys.
+    A workspace admin cannot do this.
+
+    Upgrade note: key-history rows written in the a350ff42a format (MAC
+    without namespace, epoch without a chain anchor) fail the current MAC and
+    read as ``key_history_tampered`` until re-anchored here. That format was
+    never released, so only test deployments of the integration branch are
+    affected.
+    """
+    from services import audit_chain_keystore as keystore
+    from services.audit_log import actor_from_request
+    from services.evidence_chain import verify_chain
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted or scope.workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Re-anchoring the audit key history is a platform administrator action.",
+        )
+    report = verify_chain()
+    tampering = [
+        {k: f.get(k) for k in ("kind", "category", "event_id", "chain_seq", "workspace_id")}
+        for f in report.get("findings") or [] if f.get("category") == "tampering"
+    ]
+    problem = str(report.get("key_history_tampered") or "")
+    inconclusive = int((report.get("categories") or {}).get("inconclusive") or 0)
+    if (report.get("tampering_detected") or inconclusive) and not body.acknowledge_findings:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The audit chain reports tampering or inconclusive records "
+                f"({len(tampering)} tampering, {inconclusive} inconclusive"
+                f"{'; key history: ' + problem if problem else ''}). Re-anchoring records "
+                "them as prior tampering; send acknowledge_findings=true to proceed."
+            ),
+        )
+    try:
+        result = keystore.reanchor_key_history(
+            actor=actor_from_request(request), reason=body.reason, dry_run=body.dry_run,
+            findings=tampering, history_seq=int(report.get("key_history_seq") or 0),
+            superseded=list(report.get("key_history_signed_positions") or []),
+            history_problem=problem,
+        )
+        if report.get("secrets_key_changed") and not body.dry_run:
+            result["keyring_rekeyed"] = keystore.rekey_after_secrets_change(
+                actor=actor_from_request(request)
+            )
+    except keystore.KeystoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail="The audit key history is not reachable.") from exc
+    record_security_event(
+        "audit.key_history.reanchor", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={
+            "dry_run": body.dry_run, "applied": not body.dry_run, "reason": body.reason,
+            "acknowledged_findings": bool(body.acknowledge_findings),
+            "prior_tampering": len(tampering), "history_problem": problem or None,
+            "entries_resealed": len(result["entries_resealed"]),
+        },
+    )
+    return result
+
+
 @router.post("/verify-pack")
 async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...)):
     """Verify an exported proof pack, and whether the chain still holds its record.
@@ -521,6 +661,22 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)
     chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    chain_record_withheld = False
+    if chain_record:
+        # find_anchor searches the whole chain, so the record may belong to a
+        # workspace this reader cannot see: then only "found" is reported.
+        # Whether its key id shows whole is decided by the RECORD's workspace,
+        # not the reader's header (a workspace admin of A must not read B's
+        # key ids); a record with no workspace is whole for a platform admin only.
+        from services.audit_actor_display import KeyIdMasker, reader_sees_key_ids
+
+        record_ws = str(chain_record.get("workspace_id") or "")
+        scope = tenant_scope(request)
+        # An unscoped record is visible only to a scope that allows "" (L5).
+        if not scope.allows(record_ws):
+            chain_record, chain_record_withheld = {"id": chain_record.get("id")}, True
+        elif not reader_sees_key_ids(request, record_ws):
+            chain_record = KeyIdMasker()(dict(chain_record))
     record_security_event(
         "audit.verify_pack.read", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
@@ -531,7 +687,9 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
         "evidence_sha256": digest,
         "chain_anchor": anchor or None,
         "chain_record_found": bool(chain_record),
+        "chain_record_withheld": chain_record_withheld,
         "chain_record": (
+            None if chain_record_withheld else
             {
                 "id": chain_record.get("id"),
                 "time": chain_record.get("time"),

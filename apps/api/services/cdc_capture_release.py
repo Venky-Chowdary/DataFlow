@@ -49,19 +49,51 @@ def _route_of(s: PipelineSchedule) -> tuple[str, str, str, str]:
     )
 
 
+def _claimed_keys(sched: PipelineSchedule) -> set[str]:
+    """Cursor keys this schedule's capture really uses: what its jobs and
+    watermarks recorded, and its scoped route key. A re-derived *historical*
+    key (names only, shared by every workspace) is not a claim by itself."""
+    return {
+        i["cursor_key"] for i in capture_identities(sched)
+        if i.get("found_via") != "route_derived_legacy"
+    }
+
+
 def route_still_in_use(sched: PipelineSchedule) -> bool:
-    """True when another CDC schedule shares this schedule's capture route."""
+    """True when any other CDC schedule — in any workspace — shares this capture.
+
+    The cursor key (and the PostgreSQL slot derived from it) is global, so a
+    same-workspace check let one workspace's delete or teardown clear another
+    workspace's watermark and drop its slot. Compared by the keys each
+    schedule's capture uses; a schedule whose keys cannot be derived counts
+    as sharing when it captures one of the same tables (fails closed).
+    """
+    from services.workspace_filter import bound_workspace_filter
+
     route = _route_of(sched)
-    for other in list_schedules():
-        if other.id == sched.id:
-            continue
-        if normalize_sync_mode(other.sync_mode) != "cdc":
-            continue
-        if (other.workspace_id or "") != (sched.workspace_id or ""):
-            continue
-        if _route_of(other) == route:
-            return True
+    with bound_workspace_filter(None):
+        mine = _claimed_keys(sched)
+        my_tables = _table_set(sched)
+        for other in list_schedules():
+            if other.id == sched.id or normalize_sync_mode(other.sync_mode) != "cdc":
+                continue
+            if _route_of(other) == route:
+                return True
+            theirs = _claimed_keys(other)
+            if mine & theirs:
+                return True
+            if not theirs and my_tables & _table_set(other):
+                return True
     return False
+
+
+def _table_set(sched: PipelineSchedule) -> set[str]:
+    tables = _capture_tables(sched)
+    return {
+        str(t).split(".")[-1].strip().lower()
+        for t in ([tables] if isinstance(tables, str) else tables)
+        if str(t).strip()
+    }
 
 
 def _capture_tables(sched: PipelineSchedule) -> str | list[str]:
@@ -141,7 +173,10 @@ def capture_identities(sched: PipelineSchedule) -> list[dict[str, Any]]:
         except Exception as exc:  # noqa: BLE001
             _logger.debug("cursor_keys_for_job(%s) failed: %s", jid, exc)
     for ident in _derived_route_identities(sched):
-        _add(ident.get("cursor_key"), tables=ident.get("tables"), via="route_derived")
+        _add(
+            ident.get("cursor_key"), tables=ident.get("tables"),
+            via="route_derived_legacy" if ident.get("legacy_key") else "route_derived",
+        )
     for entry in found.values():
         if not entry["token"]:
             try:
@@ -168,7 +203,12 @@ def release_schedule_cdc_capture(sched: PipelineSchedule) -> dict[str, Any]:
 
     from services.connector_store import get_connector
 
-    identities = capture_identities(sched)
+    # Only keys this schedule's capture really used: a re-derived historical
+    # key is shared by every workspace with the same names, so releasing it
+    # could clear another workspace's watermark or drop its slot.
+    identities = [
+        i for i in capture_identities(sched) if i.get("found_via") != "route_derived_legacy"
+    ]
     connector = get_connector(sched.source_connector_id, sched.workspace_id or None)
     if connector is None:
         for ident in identities:
@@ -208,6 +248,16 @@ def release_schedule_cdc_capture(sched: PipelineSchedule) -> dict[str, Any]:
     return _release_pg(sched, connector.to_dict(), identities)
 
 
+def schedule_capture_slots(sched: PipelineSchedule, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """``{slot_name, publication_name, cursor_keys}`` a CDC schedule's capture uses.
+
+    The names the change stream derives for every identity the schedule may
+    own (jobs, watermark metadata, the re-derived route). Public for the
+    capture inventory (C11), which must know which slots a live route uses.
+    """
+    return _pg_slots(cfg, capture_identities(sched))
+
+
 def _pg_slots(cfg: dict[str, Any], identities: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from connectors.postgresql_change_stream import _publication_name, decode_pg_resume_token
 
@@ -243,9 +293,15 @@ def _release_pg(
     results: list[dict[str, Any]] = []
     leftover: list[dict[str, Any]] = []
     for slot in slots:
+        refusal, publication = _slot_release_guard(sched, cfg, slot)
+        if refusal:
+            results.append({**slot, "slot": "kept", "reason": refusal})
+            if refusal == "a CDC run holds it" or refusal.startswith("in-use check failed"):
+                leftover.append(slot)  # ours, not releasable yet: the beat retries
+            continue
         try:
             detail = pcs.release_pg_capture(
-                cfg, slot_name=slot["slot_name"], publication_name=slot["publication_name"]
+                cfg, slot_name=slot["slot_name"], publication_name=publication
             )
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
@@ -263,6 +319,7 @@ def _release_pg(
             continue
         for key in slot["cursor_keys"]:
             clear_watermark(key)
+        _forget_owned(cfg, slot["slot_name"])
     primary = next(
         (r for r in results if r.get("slot") in {"active", "unreachable", "dropped"}),
         results[0],
@@ -289,6 +346,51 @@ def _release_pg(
         for s in leftover
     )
     return _record_pending(sched, {"released": False, "reason": reason, **out}, slots=leftover)
+
+
+def _slot_release_guard(
+    sched: PipelineSchedule, cfg: dict[str, Any], slot: dict[str, Any]
+) -> tuple[str, str]:
+    """``(why the slot stays, publication to drop with it)`` for one slot.
+
+    The capture inventory's cross-workspace rules, without dialing the source:
+    another workspace recorded the slot, another CDC schedule (any workspace)
+    derives it, or a live lease / pending-running job holds it → it stays; its
+    publication goes with it only when no other slot row or schedule uses it.
+    """
+    from services.cdc_capture_inventory import (
+        _route_running,
+        list_registered_captures,
+        schedule_slot_users,
+    )
+
+    name = slot["slot_name"]
+    pub = str(slot.get("publication_name") or "")
+    try:
+        rows = list_registered_captures()
+        row = next((r for r in rows if r.get("slot_name") == name), None)
+        if row and (row.get("workspace_id") or "") not in {"", sched.workspace_id or ""}:
+            return "recorded by another workspace", ""
+        if _route_running(row or {"cursor_key": (slot.get("cursor_keys") or [""])[0]}, name):
+            return "a CDC run holds it", ""
+        users = schedule_slot_users(cfg)
+        if [u for u in users.get(name, []) if u["schedule_id"] != sched.id]:
+            return "another CDC schedule uses it", ""
+        shared = [r for r in rows if pub and r.get("publication_name") == pub and r.get("slot_name") != name]
+        shared += [
+            u for k, uses in users.items() if k != name for u in uses
+            if pub and u.get("publication_name") == pub and u["schedule_id"] != sched.id
+        ]
+        return "", "" if shared else pub
+    except Exception as exc:  # noqa: BLE001 - doubt keeps the slot
+        return f"in-use check failed: {exc}"[:300], ""
+
+
+def _forget_owned(cfg: dict[str, Any], slot_name: str) -> None:
+    """The slot is gone from the source: close its ownership record (C11)."""
+    from services.cdc_capture_inventory import forget_capture
+
+    forget_capture(cfg, slot_name)
 
 
 # ── Durable pending-release ledger ──────────────────────────────────────────
@@ -445,6 +547,7 @@ def retry_pending_capture_releases(limit: int = 20) -> list[dict[str, Any]]:
                 continue
             for key in slot.get("cursor_keys") or []:
                 clear_watermark(key)
+            _forget_owned(cfg, slot["slot_name"])
         if remaining:
             _bump_pending(entry, error)
             outcomes.append({"id": entry["id"], "released": False, "error": error})

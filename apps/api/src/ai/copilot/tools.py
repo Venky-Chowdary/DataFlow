@@ -237,7 +237,23 @@ TOOL_DEFINITIONS: list[dict] = [
                         "server ledger and is not echoed in the preview."
                     ),
                 },
-                "ssl": {"type": "boolean"},
+                "ssl": {
+                    "type": "boolean",
+                    "description": (
+                        "Require TLS. false = TLS not required (MySQL still negotiates it "
+                        "when offered; ssl-mode=DISABLED in connection_string asks for "
+                        "plaintext). Testing the connector states the real encryption."
+                    ),
+                },
+                "ssl_mode": {
+                    "type": "string",
+                    "enum": ["require", "prefer", "disable"],
+                    "description": (
+                        "Explicit TLS mode; overrides ssl. require = TLS or no connection; "
+                        "prefer = TLS when offered; disable = MySQL family only, a "
+                        "plaintext session where the server allows it."
+                    ),
+                },
                 "schema": {"type": "string"},
                 "warehouse": {
                     "type": "string",
@@ -360,9 +376,12 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "scope": {
                     "type": "string",
-                    "enum": ["workspace", "all"],
+                    "enum": ["workspace", "all", "unassigned"],
                     "default": "workspace",
-                    "description": "workspace = this workspace; all = every workspace",
+                    "description": (
+                        "workspace = this workspace; all = every workspace; "
+                        "unassigned = legacy jobs with no workspace (platform admins)"
+                    ),
                 },
             },
             "required": [],
@@ -749,11 +768,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "delete_mode": {
                     "type": "string",
-                    "enum": ["soft", "hard"],
+                    "enum": ["soft", "hard", "off"],
                     "description": (
-                        "Mirror sync only. 'soft' (default): destination rows whose "
-                        "key left the source are kept and flagged _deleted. 'hard': "
-                        "they are physically DELETEd; the plan warns before staging."
+                        "What happens to destination rows whose key left the source. "
+                        "Mirror: 'soft' (default) keeps them flagged _deleted, 'hard' "
+                        "DELETEs them; the plan warns before staging. CDC: the snapshot "
+                        "sweep removes them with 'hard' (the default when provably safe) "
+                        "or tombstones with 'soft'; 'off' keeps them and reports the "
+                        "count. Other sync modes do not take it."
                     ),
                 },
                 "ddl_acknowledgement": {
@@ -941,11 +963,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "delete_mode": {
                     "type": "string",
-                    "enum": ["soft", "hard"],
+                    "enum": ["soft", "hard", "off"],
                     "description": (
-                        "Mirror sync only. 'soft' (default): destination rows whose "
-                        "key left the source are kept and flagged _deleted. 'hard': "
-                        "they are physically DELETEd; the plan warns before staging."
+                        "What happens to destination rows whose key left the source. "
+                        "Mirror: 'soft' (default) keeps them flagged _deleted, 'hard' "
+                        "DELETEs them; the plan warns before staging. CDC: the snapshot "
+                        "sweep removes them with 'hard' (the default when provably safe) "
+                        "or tombstones with 'soft'; 'off' keeps them and reports the "
+                        "count. Other sync modes do not take it."
                     ),
                 },
             },
@@ -1074,6 +1099,28 @@ TOOL_DEFINITIONS: list[dict] = [
                 "name": {"type": "string"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "recover_schedule_destination",
+        "description": (
+            "Recover a schedule whose destination was dropped or changed outside the "
+            "pipeline (it is parked on a DESTINATION_CONTINUITY finding: enabled, no "
+            "next run). action=rebaseline accepts the destination as it is now (or "
+            "its removal); action=rebuild reloads it from the source with a full "
+            "re-sync — with no key that REPLACES the table (the preview says "
+            "destructive). Audited, needs a reason; re-arms the schedule. Pending "
+            "action until confirm_action."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "string"},
+                "name": {"type": "string"},
+                "action": {"type": "string", "enum": ["rebaseline", "rebuild"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["action", "reason"],
         },
     },
     {
@@ -1662,6 +1709,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_schedules",
             "get_schedule",
             "run_schedule_now",
+            "recover_schedule_destination",
             "create_schedule",
             "confirm_action",
             "list_contracts",
@@ -1878,6 +1926,7 @@ class DataPilotTools:
             "list_schedules": self._list_schedules,
             "get_schedule": self._get_schedule,
             "run_schedule_now": self._run_schedule_now,
+            "recover_schedule_destination": self._recover_schedule_destination,
             "create_schedule": self._create_schedule,
             "list_contracts": self._list_contracts,
             "open_job": self._open_job,
@@ -1902,6 +1951,8 @@ class DataPilotTools:
             "replay_quarantine": self._replay_quarantine,
             "repair_cdc_drift": self._repair_cdc_drift,
             "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
+            "list_cdc_captures": self._list_cdc_captures,
+            "cleanup_cdc_captures": self._cleanup_cdc_captures,
             "rebaseline_transfer": self._rebaseline_transfer,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
@@ -2050,6 +2101,8 @@ class DataPilotTools:
     ) -> ToolResult:
         summary = []
         errors: list[str] = []
+        from .lifecycle_tools import connector_dial_endpoint
+
         try:
             from services.connector_access import caller_workspace_id
             from services.connector_store import list_connectors as store_list
@@ -2066,6 +2119,9 @@ class DataPilotTools:
                     "name": d.get("name"),
                     "type": d.get("type") or d.get("format"),
                     "host": d.get("host"),
+                    # The port this connector dials: a URL-form host's own
+                    # port, never ``None`` (D239).
+                    "port": connector_dial_endpoint(d)[1],
                     "database": d.get("database"),
                     "status": d.get("status", "saved"),
                     "last_test_ok": d.get("last_test_ok"),
@@ -2086,6 +2142,7 @@ class DataPilotTools:
                         "name": c.get("name"),
                         "type": c.get("type"),
                         "host": c.get("host"),
+                        "port": connector_dial_endpoint(c)[1],
                         "database": c.get("database"),
                         "status": c.get("status", "unknown"),
                         "last_test_ok": c.get("last_test_ok"),
@@ -2163,6 +2220,7 @@ class DataPilotTools:
         connection_string: str = "",
         service_account: str = "",
         ssl: bool = False,
+        ssl_mode: str = "",
         schema: str = "",
         warehouse: str = "",
         role: str = "",
@@ -2204,6 +2262,7 @@ class DataPilotTools:
                 "connection_string": connection_string,
                 "service_account": service_account,
                 "ssl": ssl,
+                **({"ssl_mode": ssl_mode} if ssl_mode else {}),
                 "host_key": host_key,
                 "known_hosts": known_hosts,
                 "host_key_policy": host_key_policy,
@@ -2234,6 +2293,12 @@ class DataPilotTools:
             return ToolResult(
                 name="create_connector", success=False, output=None, error=integrity
             )
+        from services.connector_store import validate_ssl_mode
+
+        try:
+            validate_ssl_mode(str(draft.get("type") or ""), {"ssl_mode": draft.get("ssl_mode")})
+        except ValueError as exc:
+            return ToolResult(name="create_connector", success=False, output=None, error=str(exc))
         ok, missing = draft_is_complete(draft)
         if not ok:
             from .ack_ledger import redact_payload
@@ -2525,6 +2590,8 @@ class DataPilotTools:
         return ToolResult(name="confirm_action", success=True, output=body)
 
     def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
+        from services.workspace_filter import UNASSIGNED_WORKSPACE
+
         from .job_reads import (
             job_list_workspace_scope,
             list_transfer_jobs,
@@ -2565,7 +2632,11 @@ class DataPilotTools:
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
                 "store": source,
-                "scope": "all" if workspace_id is None else "workspace",
+                "scope": (
+                    "all" if workspace_id is None
+                    else "unassigned" if workspace_id == UNASSIGNED_WORKSPACE
+                    else "workspace"
+                ),
             },
         )
 
@@ -2625,8 +2696,9 @@ class DataPilotTools:
         quarantine = merge_job_quarantine(job)
         # Skipped and NULL-coerced rows are audit findings, not held-out rows.
         held_out = replay_quarantine_details(quarantine)
-        row_ids = {d.get("row") for d in held_out if d.get("row") is not None}
-        quarantine_row_count = len(row_ids) if row_ids else len(held_out)
+        from services.quarantine_dlq import count_finding_rows
+
+        quarantine_row_count = count_finding_rows(held_out) or len(held_out)
         from services.quarantine_from_preflight import drop_phantom_identity_rows
 
         stored_rejected = int(job.get("rejected_rows") or 0)
@@ -4022,16 +4094,67 @@ class DataPilotTools:
             },
         )
 
+    def _recover_schedule_destination(
+        self, schedule_id: str = "", name: str = "", action: str = "", reason: str = ""
+    ) -> ToolResult:
+        """Stage the schedule's destination recovery; Confirm runs the REST handler."""
+        tool = "recover_schedule_destination"
+        sched, clarify = self._resolve_schedule(schedule_id, name)
+        if clarify or not sched:
+            return ToolResult(name=tool, success=False, output=None,
+                              error=clarify or "Which pipeline? Give a schedule name or id.")
+        from services.schedule_recovery import ACTIONS
+
+        action = str(action or "").strip().lower()
+        if action not in ACTIONS:
+            return ToolResult(name=tool, success=False, output=None,
+                              error=f"action must be one of: {', '.join(ACTIONS)}.")
+        if not str(reason or "").strip():
+            return ToolResult(name=tool, success=False, output=None,
+                              error="A reason is required to recover a destination.")
+        from .ack_ledger import get_ack_ledger
+        from services.schedule_recovery import recovery_plan
+
+        # The same disclosure REST dry_run and the drawer's confirm show: a
+        # rebuild with no key replaces the table, and says so.
+        plan = recovery_plan(sched, action)
+        destructive = bool(plan.get("destructive"))
+        preview = {"schedule_id": sched.id, "name": sched.name, "action": action,
+                   "dest_table": sched.dest_table, "effect": plan["effect"],
+                   "destructive": destructive}
+        ack_id = get_ack_ledger().put(
+            kind=tool,
+            payload={"schedule_id": sched.id, "action": action,
+                     "reason": str(reason).strip(),
+                     # Confirming this preview is the consent to the replace it names.
+                     "confirm_replace": destructive},
+            preview=preview,
+        )
+        return ToolResult(name=tool, success=True, output={
+            "action": tool, "schedule_id": sched.id, "name": sched.name,
+            "label": (f"Replace {sched.dest_table} and rebuild “{sched.name}”" if destructive
+                      else f"Recover destination of “{sched.name}” ({action})"),
+            # A replacing rebuild is its own risk class, not an ordinary mutation.
+            "risk": "destructive" if destructive else "mutate",
+            "destructive": destructive, "requires_confirm": True,
+            "ack_id": ack_id, "preview": preview,
+        })
+
     # Lifecycle operations: staged acks, executed by the REST handler on Confirm.
     def _cancel_job(self, job_id: str = "", selector: str = "") -> ToolResult:
         from .lifecycle_tools import _job_tool
 
         return _job_tool("cancel_job", job_id, selector)
 
-    def _retry_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+    def _retry_job(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        risk_acceptance: dict | None = None,
+    ) -> ToolResult:
         from .lifecycle_tools import _job_tool
 
-        return _job_tool("retry_job", job_id, selector)
+        return _job_tool("retry_job", job_id, selector, risk_acceptance=risk_acceptance)
 
     def _rerun_job(
         self,
@@ -4093,6 +4216,25 @@ class DataPilotTools:
         from .lifecycle_tools import stage_clear_cursor_resnapshot
 
         return stage_clear_cursor_resnapshot(cursor_key, reason)
+
+    def _list_cdc_captures(self, connector_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import list_cdc_captures
+
+        return list_cdc_captures(connector_id, name)
+
+    def _cleanup_cdc_captures(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        slot_names: list[str] | None = None,
+        include_unregistered: bool = False,
+        reason: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_cleanup_cdc_captures
+
+        return stage_cleanup_cdc_captures(
+            connector_id, name, slot_names, include_unregistered, reason
+        )
 
     def _rebaseline_transfer(
         self,

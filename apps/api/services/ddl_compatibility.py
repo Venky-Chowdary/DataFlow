@@ -155,6 +155,50 @@ _OVERWRITE_SYNC = {
     "replace",
 }
 
+def _held_out_text_parse(
+    mapping: dict[str, Any],
+    src_type: str,
+    tgt_type: str | None,
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
+    sample_rows: list[dict] | None,
+    validation_mode: str | None,
+    record_batch: bool = False,
+) -> bool:
+    """A text source cast into a typed column under a mode that holds bad cells out.
+
+    Run 1 of a CSV whose ``price`` holds one ``'abc'`` plans NUMERIC and the
+    integrity audit decides the pair per cell: the parsed rows load and
+    ``'abc'`` is quarantined. Run 2 into the table run 1 created meets the
+    same pair as a live NUMERIC column. Grading it here as a lossy carrier
+    refused run 2 for a load run 1 had made (QA r14). The cells held out are
+    the mode's own (``mode_holds_out_refusal``): lenient any cast refusal,
+    balanced a numeric or calendar refusal on a file (R4-D02); strict none.
+    """
+    from services.validation_mode_contract import mode_may_hold_out
+
+    if (
+        not tgt_type
+        or not sample_rows
+        or not mode_may_hold_out(validation_mode, record_batch=record_batch)
+    ):
+        return False
+    if normalize_logical_type(src_type) not in {"string", "text"}:
+        return False
+    if normalize_logical_type(tgt_type) in {"string", "text", "json"}:
+        return False
+    from services.coercion_probe import samples_coerce_mapping
+
+    return samples_coerce_mapping(
+        mapping,
+        source_types=source_schema,
+        target_types=target_schema,
+        rows=list(sample_rows),
+        validation_mode=validation_mode,
+        record_batch=record_batch,
+    )
+
+
 def evaluate_ddl_compatibility(
     *,
     mappings: list[dict[str, Any]],
@@ -173,10 +217,19 @@ def evaluate_ddl_compatibility(
     contract_primary_key: str | None = None,
     proven_width_narrowings: Any = None,
     population_fit_report: Any = None,
+    destination_config: Any = None,
+    validation_mode: str | None = None,
+    create_source: Any = None,
+    record_batch: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
     Returns (compatible, issues).
+
+    ``validation_mode`` decides a text source into a typed column the way the
+    integrity audit decides it on create-new: under a mode that holds bad
+    cells out, a pair whose sampled cells parse is a per-cell cast, not a
+    lossy carrier (see :func:`_held_out_text_parse`).
     """
     source_schema = source_schema or {}
     target_schema = target_schema or {}
@@ -350,7 +403,10 @@ def evaluate_ddl_compatibility(
             src_logical = normalize_logical_type(src_type)
             tgt_logical = normalize_logical_type(tgt_type)
             # Without clearing contract: never sample soft-pass precision collapses.
-            if not risk_cleared:
+            if not risk_cleared and not _held_out_text_parse(
+                m, src_type, tgt_type, source_schema, target_schema, sample_rows,
+                validation_mode, record_batch,
+            ):
                 note = ""
                 if src_logical == "float" and tgt_logical == "decimal":
                     note = " — float→decimal (IEEE precision risk; accept risk or remap)"
@@ -532,5 +588,21 @@ def evaluate_ddl_compatibility(
     # but operators must see schema hazards immediately rather than a false clean G6.
     if not dest_connected:
         return len(issues) == 0, issues
+
+    # QA MySQL D2: a server that forces a PRIMARY KEY refuses a keyless CREATE (any mode).
+    from services.dest_require_primary_key import keyless_create_refusal
+
+    refusal = keyless_create_refusal(
+        dest_db_type=dest_db_type,
+        destination_config=destination_config,
+        table_exists=table_exists,
+        sync_mode=sync_mode,
+        destination_table=destination_table,
+        key_hint=contract_primary_key or ",".join(destination_pk_columns or []),
+        mappings=mappings,
+        source=create_source,
+    )
+    if refusal:
+        issues.append(refusal)
 
     return len(issues) == 0, issues

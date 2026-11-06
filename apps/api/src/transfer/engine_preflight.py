@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from src.transfer.engine import (
     TransferRequest,
@@ -132,23 +133,44 @@ def _execute_preflight_parity_kwargs(
         or {}
     )
     extra["unique_keys"] = unique_keys
+    indexes_meta = dest_meta.get("indexes_meta") or extra.get("indexes_meta")
+    if indexes_meta:
+        extra["indexes_meta"] = indexes_meta
     extra["foreign_keys"] = foreign_keys
     if isinstance(table_exists, bool):
         extra["table_exists"] = table_exists
     if privilege_probe:
         extra["privilege_probe"] = privilege_probe
+    from services.duplicate_policy import route_duplicate_options
+
+    # One duplicate choice for Validate and the writer (QA C2 remedies).
+    # The source is read the way every other field here is (getattr): a
+    # destination-only parity call carries no source endpoint.
+    duplicate_options = route_duplicate_options(
+        dict(getattr(getattr(request, "source", None), "extra", None) or {}), dict(extra)
+    )
+    extra.update(duplicate_options)
     dest.extra = extra
+    probe_cfg = with_fk_route_option(dest_meta.get("_probe_cfg"), extra.get("foreign_keys_mode"))
+    if duplicate_options and isinstance(probe_cfg, Mapping):
+        from services.secret_config import RedactedConfig
+
+        # Same type back: a RedactedConfig keeps its secrets out of logs.
+        merged = {**dict(probe_cfg), **duplicate_options}
+        probe_cfg = RedactedConfig(merged) if isinstance(probe_cfg, RedactedConfig) else merged
 
     return {
         "destination_pk_columns": pk_cols,
         "destination_unique_keys": unique_keys,
+        "destination_indexes_meta": indexes_meta or None,
+        # The source catalog key an append's collision probe keys on: the
+        # same catalog read the keyed modes' policy pass uses.
+        "source_key_groups": _append_source_key_groups(request),
         "destination_foreign_keys": foreign_keys,
         # D112 — the live CHECK constraints, so Execute names offending rows
         # before the write instead of surfacing the driver's raw violation.
         "destination_check_constraints": list(dest_meta.get("check_constraints") or []),
-        "destination_config": with_fk_route_option(
-            dest_meta.get("_probe_cfg"), extra.get("foreign_keys_mode")
-        ),
+        "destination_config": probe_cfg,
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,
@@ -180,6 +202,23 @@ def _execute_preflight_parity_kwargs(
         ).strip(),
         "preflight_scope": str(getattr(request, "preflight_scope", "") or "").strip(),
     }
+
+
+def _append_source_key_groups(request: TransferRequest) -> list[list[str]] | None:
+    """Source PK / unique key groups for an append with no declared key, else ``None``."""
+    from services.source_schema_authority import append_declares_no_key, endpoint_key_groups
+
+    source = getattr(request, "source", None)
+    if getattr(source, "kind", "") != "database" or not (
+        getattr(source, "table", "") or getattr(source, "collection", "")
+    ):
+        return None
+    if not append_declares_no_key(
+        str(getattr(request, "sync_mode", "") or ""),
+        list(getattr(request, "stream_contracts", None) or []),
+    ):
+        return None
+    return endpoint_key_groups(source)
 
 
 def _catalog_pk_for_policy(

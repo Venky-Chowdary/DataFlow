@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { ComplianceAdvisories } from "./ComplianceAdvisories";
 import { FkRouteNotices } from "./FkRouteNotices";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
@@ -2640,6 +2641,8 @@ export function ValidateDashboard({
           )}
         </div>
       )}
+
+      {!running && <ComplianceAdvisories advisories={proof?.compliance?.advisories} />}
 
       {!running && complianceAck?.actor && (
         <div className="df2-vd-enterprise-trust" role="note">

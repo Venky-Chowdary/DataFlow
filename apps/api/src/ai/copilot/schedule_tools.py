@@ -333,6 +333,15 @@ def create_schedule(
             payload["compliance_acknowledged"] = True
             payload["acknowledgment_actor"] = pii_ack["approved_by"]
             payload["acknowledgment_reason"] = pii_ack["reason"]
+            payload["acknowledgment_at"] = datetime.now(timezone.utc).isoformat()
+    from services.workspace_filter import current_workspace_stamp
+
+    # The workspace this request writes to travels with the approval, and
+    # Confirm checks the confirming caller may write there. An unstamped
+    # payload became a schedule no workspace could see (QA Snowflake D12).
+    staged_ws = str(current_workspace_stamp() or "").strip()
+    if staged_ws:
+        payload["workspace_id"] = staged_ws
     preview: dict[str, Any] = {
         "name": label_name,
         "source": f"{source['connector_name']}.{source['table']}",

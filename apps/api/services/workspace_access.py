@@ -22,6 +22,7 @@ __all__ = [
     "assert_connector_accessible",
     "assert_resource_workspace",
     "authorized_workspace_id",
+    "require_platform_admin",
     "requested_workspace_id",
     "resolve_read_workspace",
     "resolve_tenant_scope",
@@ -56,9 +57,15 @@ def actor_is_platform_admin(request: Request) -> bool:
 
 
 def requested_workspace_id(request: Request) -> str:
-    """Return the requested header scope without authorizing it."""
+    """Return the requested header scope without authorizing it.
+
+    A platform admin's view (All workspaces / Unassigned) names no workspace
+    a row could be stamped with, so it reads as ``""`` here (D218).
+    """
+    from services.workspace_filter import stored_workspace_id
+
     try:
-        return str(request.headers.get("X-Workspace-Id") or "").strip()
+        return stored_workspace_id(request.headers.get("X-Workspace-Id"))
     except Exception:
         return ""
 
@@ -177,6 +184,10 @@ def assert_resource_workspace(
     if not scope.allows(resource_workspace_id):
         raise HTTPException(status_code=404, detail=not_found_detail)
     if write and not scope.can_write(resource_workspace_id):
+        from services.team_store import workspace_closing
+
+        if workspace_closing(str(resource_workspace_id or "")):
+            raise HTTPException(status_code=409, detail="This workspace is being deleted")
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
 
 
@@ -204,3 +215,27 @@ def assert_connector_accessible(
         raise HTTPException(status_code=404, detail="Connector not found")
     if write and not scope.can_write(owner):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
+
+
+def require_platform_admin(
+    request: Request,
+    scope: TenantScope,
+    permission: str,
+    detail: str = "Platform administrators only.",
+) -> None:
+    """Refuse a platform-wide read or action to anyone but a platform admin.
+
+    A workspace admin (every self-serve signup is one) is not one; the denial
+    is audited with the permission it lacked (D220, D130).
+    """
+    if scope.unrestricted:
+        return
+    from services.audit_coverage import record_authz_denial
+
+    record_authz_denial(
+        request,
+        required_permission=permission,
+        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+        reason="platform_admin_required",
+    )
+    raise HTTPException(status_code=403, detail=detail)

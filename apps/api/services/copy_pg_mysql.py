@@ -50,6 +50,7 @@ from services.copy_fast_path import (
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
 from services.copy_range_proof import range_keys_match
+from services.tracing import thread_in_context
 from services.copy_sql_pairs import (
     integer_pk_cuts,
     key_ranges_from_cuts,
@@ -379,28 +380,17 @@ def _fifo_copy_into_mysql(
     """Overlap PG COPY writes with MySQL LOCAL INFILE reads. No full tempfile."""
     from connectors.mysql_load_data import (
         apply_mysql_bulk_load_session,
-        blocking_load_data_warnings,
+        fetch_load_data_warnings,
         execute_load_data_local,
         restore_mysql_bulk_load_session,
     )
 
     def _produce(path: str) -> None:
-        class _CancelAwareWriter:
-            """D102: poll the job's cancel probe on every COPY write block."""
-
-            __slots__ = ("_writer",)
-
-            def __init__(self, writer):
-                self._writer = writer
-
-            def write(self, data):
-                from services.cancel_check import cancel_checkpoint
-
-                cancel_checkpoint()
-                return self._writer.write(data)
+        from services.cancel_check import copy_expert_keeping_cancel
 
         with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-            src_cur.copy_expert(copy_sql, _CancelAwareWriter(writer))
+            # D102: poll the job's cancel probe on every COPY write block.
+            copy_expert_keeping_cancel(src_cur, copy_sql, writer, poll=True)
 
     def _consume(path: str) -> None:
         apply_mysql_bulk_load_session(dst_cur)
@@ -415,10 +405,11 @@ def _fifo_copy_into_mysql(
                 table_q=table_q,
                 columns=columns,
             )
-            dst_cur.execute("SHOW WARNINGS")
+            # Read before the session restore below: its SET statements
+            # replace this cursor's result set (E1-018).
+            blocked = fetch_load_data_warnings(dst_cur)
         finally:
             restore_mysql_bulk_load_session(dst_cur)
-        blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 
@@ -521,8 +512,9 @@ def _launch_copy_shards(
         batch = copy_sqls[offset:offset + parallel]
         threads: list[threading.Thread] = []
         for sql in batch:
-            t = threading.Thread(
-                target=_shard_thread,
+            # Each shard's FIFO producer polls the job's cancel probe (D168).
+            t = thread_in_context(
+                _shard_thread,
                 kwargs={
                     "source_cfg": source_cfg,
                     "dest_cfg": dest_cfg,
