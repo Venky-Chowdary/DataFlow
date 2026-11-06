@@ -5,14 +5,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Email / phone values are read by the one PII classifier the preflight gate
+# uses (D94): the mapper must never say "email-like" where the gate sees none.
+from services.compliance_guard import is_email_value, is_phone_value
 from services.transform_engine import CANONICAL_BOOLEAN_TOKENS, apply_transform, decimal_wire_value
 from services.value_serializer import is_null_evidence
 
-EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
-PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
 # Write-path tokens only — informal yes/on must not score as boolean dest.
 BOOL_VALUES = set(CANONICAL_BOOLEAN_TOKENS)
 
@@ -160,6 +161,12 @@ def _pattern_rate(values: list[str], pattern: re.Pattern[str]) -> float:
     return sum(1 for v in values if pattern.match(v)) / len(values)
 
 
+def _predicate_rate(values: list[str], predicate) -> float:
+    if not values:
+        return 0.0
+    return sum(1 for v in values if predicate(v)) / len(values)
+
+
 def _is_temporal_type(type_str: str) -> bool:
     t = str(type_str or "").upper()
     return any(tok in t for tok in _TEMPORAL_TYPE_TOKENS)
@@ -211,8 +218,8 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         "semantic_pattern_score": 0.0,
     }
     if len(vals) >= 2:
-        email_ratio = _pattern_rate(vals, EMAIL_RE)
-        phone_ratio = _pattern_rate(vals, PHONE_RE)
+        email_ratio = _predicate_rate(vals, is_email_value)
+        phone_ratio = _predicate_rate(vals, is_phone_value)
         uuid_ratio = _pattern_rate(vals, UUID_RE)
         date_hits = sum(1 for v in vals if _sample_binds_temporal(v))
         date_ratio = date_hits / len(vals)

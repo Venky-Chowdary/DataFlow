@@ -11,11 +11,17 @@ import ipaddress
 import logging
 import re
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
+
+from services.pii_guard import PII_PATTERNS, _is_decimal_literal, luhn_valid
 
 _logger = logging.getLogger(__name__)
 
-EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+# The value patterns live in ``services.pii_guard`` (the log masker uses the
+# same ones unanchored). This module is the one column classifier: the
+# preflight gate, the mapper's column profile and create_schedule all read
+# PII through :func:`pii_value_category` (D94) — no second detector.
+EMAIL_RE = PII_PATTERNS["email"]
 # Digits plus the separators printed numbers use; a leading ``(`` is an area
 # code, ``(555) 123-4567`` (D94). The digit count is checked separately
 # against E.164's 7..15 so the shape alone never decides.
@@ -26,7 +32,7 @@ _DOTTED_QUAD_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 # ICAO 9303 TD3 (passport) machine-readable zone, 44 characters per line.
 _MRZ_LINE1_RE = re.compile(r"^P[A-Z<][A-Z][A-Z<]{2}[A-Z<]{39}$")
 _MRZ_LINE2_RE = re.compile(r"^[A-Z0-9<]{9}\d[A-Z][A-Z<]{2}\d{7}[MFX<]\d{7}[A-Z0-9<]{14}[0-9<]\d$")
-SSN_RE = re.compile(r"^\d{3}-\d{2}-\d{4}$")
+SSN_RE = PII_PATTERNS["ssn"]
 # Calendar shapes (ISO / slash) are not PII by themselves. DOB is name-gated
 # in ``_NAME_PATTERN_GROUPS`` — Fivetran / Airbyte / Collibra classifiers treat
 # date-of-birth as a semantic class, not "any 01/02/2024". Value-only matching
@@ -155,8 +161,6 @@ def _is_phone(text: str) -> bool:
         or _YEAR_FIRST_DATE_RE.match(text)
     ):
         return False
-    from services.pii_guard import _is_decimal_literal
-
     # ``12345.67`` is an amount, not a phone (X-26 for the log masker).
     if _is_decimal_literal(text):
         return False
@@ -248,31 +252,87 @@ def _is_passport_mrz(text: str) -> bool:
     )
 
 
+def pii_value_category(value: Any, *, bare_digit_phones: bool = True) -> str:
+    """The PII category one whole value is, or ``""``.
+
+    Precedence: email, SSN, IP, passport MRZ, then a Luhn-valid 13-19 digit
+    PAN (the phone shape matches card numbers, so PCI wins), phone, account.
+    ``bare_digit_phones=False`` keeps an unformatted digit run from reading as
+    a phone (counts and order numbers look the same).
+    """
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return ""
+    if EMAIL_RE.fullmatch(text):
+        return "email"
+    if SSN_RE.fullmatch(text):
+        return "ssn"
+    if _is_ip_address(text):
+        return "ip_address"
+    if _is_passport_mrz(text):
+        return "passport"
+    if luhn_valid(text):
+        return "pci_pan"
+    if _is_phone(text) and (bare_digit_phones or not _is_bare_digits(text)):
+        return "phone"
+    if ACCOUNT_RE.match(text):
+        return "account"
+    return ""
+
+
+def is_email_value(value: Any) -> bool:
+    return pii_value_category(value) == "email"
+
+
+def is_phone_value(value: Any) -> bool:
+    return pii_value_category(value) == "phone"
+
+
+#: Any value that can carry an embedded identifier has an ``@`` or a digit.
+_EMBED_CHARS = frozenset("@0123456789")
+
+
+def embedded_pii_categories(value: Any) -> list[str]:
+    """Identifiers inside free text (``"contact me at x@gmail.com or
+    212-555-0001"``), validated the way whole values are: an IP must parse, a
+    card must pass Luhn, a phone must be formatted (a bare digit run inside
+    prose is an order number). A ``notes`` column full of such text used to
+    pass the gate untouched (D94).
+    """
+    text = str(value if value is not None else "")
+    if not text or _EMBED_CHARS.isdisjoint(text):
+        return []
+    found: list[str] = []
+    for label, pattern in PII_PATTERNS.items():
+        for match in pattern.finditer(text):
+            token = match.group(0)
+            if label == "ip_address" and not _is_ip_address(token):
+                continue
+            if label == "pci_pan" and not luhn_valid(token):
+                continue
+            if label == "phone" and (_is_bare_digits(token) or not _is_phone(token)):
+                continue
+            found.append(label)
+            break
+    return list(dict.fromkeys(found))
+
+
 def _value_hits(values: list[str], *, bare_digit_phones: bool = True) -> list[str]:
     hits: list[str] = []
     for value in values:
-        text = str(value).strip()
-        if not text:
-            continue
-        if EMAIL_RE.match(text):
-            hits.append("email")
-        elif SSN_RE.match(text):
-            hits.append("ssn")
-        elif _is_ip_address(text):
-            hits.append("ip_address")
-        elif _is_passport_mrz(text):
-            hits.append("passport")
-        else:
-            from services.pii_guard import luhn_valid
+        category = pii_value_category(value, bare_digit_phones=bare_digit_phones)
+        if category:
+            hits.append(category)
+    return list(dict.fromkeys(hits))
 
-            # A Luhn-valid 13-19 digit value is a PAN, not a phone/account —
-            # the phone shape matches card numbers, so PCI wins precedence.
-            if luhn_valid(text):
-                hits.append("pci_pan")
-            elif _is_phone(text) and (bare_digit_phones or not _is_bare_digits(text)):
-                hits.append("phone")
-            elif ACCOUNT_RE.match(text):
-                hits.append("account")
+
+def _embedded_hits(values: list[str]) -> list[str]:
+    """Categories found inside values that are not themselves an identifier."""
+    hits: list[str] = []
+    for value in values:
+        if pii_value_category(value):
+            continue
+        hits.extend(embedded_pii_categories(value))
     return list(dict.fromkeys(hits))
 
 
@@ -318,6 +378,7 @@ def detect_pii_fields(
     sensitive_fields: list[str] = []
     field_risk: dict[str, list[str]] = {}
     high_risk_fields: list[str] = []
+    sampled_fields: list[str] = []
 
     field_evidence: dict[str, list[dict[str, str]]] = {}
 
@@ -333,6 +394,7 @@ def detect_pii_fields(
                 name_hits, sample_values, raw_values, str((column_types or {}).get(col) or "")
             ),
         )
+        embedded_hits: list[str] = []
         if value_hits and _temporal_column(col, sample_values):
             _logger.info(
                 "PII value pattern(s) %s on column %r ignored: every sampled value "
@@ -341,7 +403,11 @@ def detect_pii_fields(
                 col,
             )
             value_hits = []
+        elif not _numeric_column(raw_values, str((column_types or {}).get(col) or "")):
+            embedded_hits = [h for h in _embedded_hits(sample_values) if h not in value_hits]
         non_empty = [v for v in sample_values if v]
+        if non_empty:
+            sampled_fields.append(col)
         if (
             "account" in name_hits
             and "account" not in value_hits
@@ -354,7 +420,7 @@ def detect_pii_fields(
             # (PCI tag, visible) instead of a high-risk account number that
             # forces review on a synthetic numeric table.
             name_hits = ["identifier" if h == "account" else h for h in name_hits]
-        categories = list(dict.fromkeys(name_hits + value_hits))
+        categories = list(dict.fromkeys(name_hits + value_hits + embedded_hits))
         if not categories:
             continue
         sensitive_fields.append(col)
@@ -366,6 +432,8 @@ def detect_pii_fields(
             # "phone by column name" alone read as a name-only detector (D94).
             {"category": cat, "rule": "sample_value"}
             for cat in value_hits
+        ] + [
+            {"category": cat, "rule": "embedded_value"} for cat in embedded_hits
         ]
         personal_name = "name" in categories and bool(
             _HIGH_RISK_NAME_RE.search(col.lower())
@@ -389,7 +457,50 @@ def detect_pii_fields(
         "risk_level": risk_level,
         "sensitive_count": len(sensitive_fields),
         "field_evidence": field_evidence,
+        "sampled_fields": sorted(sampled_fields),
     }
+
+
+#: Direct identifiers under GDPR art. 4: medium weight alone, but a table
+#: made of them is a review hold, not a warning (D94).
+_DIRECT_IDENTIFIER_CATEGORIES = frozenset({"email", "phone", "ip_address"})
+_CONTENT_RULES = frozenset({"sample_value", "embedded_value"})
+
+
+def direct_identifier_columns(pii_report: dict[str, Any]) -> list[str]:
+    """Columns whose *content* is an email, phone or IP address.
+
+    A column name alone counts only when the sample showed no value for it
+    (``email_opt_in`` holds booleans, not addresses — its name must not force
+    a hold when the content is there to say otherwise).
+    """
+    evidence = pii_report.get("field_evidence") or {}
+    sampled = set(pii_report.get("sampled_fields") or [])
+    out: list[str] = []
+    for col, items in evidence.items():
+        for item in items:
+            if str(item.get("category")) not in _DIRECT_IDENTIFIER_CATEGORIES:
+                continue
+            if str(item.get("rule")) in _CONTENT_RULES or col not in sampled:
+                out.append(col)
+                break
+    return sorted(out)
+
+
+def direct_identifier_review_reason(direct: list[str], column_count: int) -> str:
+    """Why a set of direct identifiers forces review, or ``""``.
+
+    Three or more identifier columns, or identifiers in at least half of a
+    table's columns (two minimum), is a table *of* personal data. A single
+    customer ``email`` beside twenty business columns stays a warning.
+    """
+    n = len(direct)
+    if n >= 3 or (n >= 2 and 2 * n >= max(column_count, 1)):
+        return (
+            f"direct identifiers (email/phone/IP) in {n} of {column_count} column(s): "
+            + ", ".join(direct)
+        )
+    return ""
 
 
 def score_compliance_risk(
@@ -398,11 +509,15 @@ def score_compliance_risk(
     *,
     sample_limit: int = 100,
     column_types: dict[str, str] | None = None,
+    protected_columns: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Score the compliance and privacy risk of a dataset.
 
     The score is deterministic and bounded to [0.0, 1.0]. The result is meant
     for preflight review, not for claiming legal compliance.
+    ``protected_columns`` (masked / hashed / redacted by their mapping) stay in
+    the findings but do not count toward the direct-identifier hold: masking
+    is the remediation the hold asks for.
     """
     pii_report = detect_pii_fields(
         columns, rows, sample_limit=sample_limit, column_types=column_types
@@ -456,7 +571,16 @@ def score_compliance_risk(
     if sensitive_fields:
         compliance_tags.append("PII")
 
-    requires_review = risk_score >= 0.45 or bool(pii_report["high_risk_fields"])
+    direct = direct_identifier_columns(pii_report)
+    protected = {str(c) for c in protected_columns}
+    review_reason = direct_identifier_review_reason(
+        [c for c in direct if c not in protected], len(columns)
+    )
+    if review_reason:
+        risk_level = "high"
+    requires_review = (
+        risk_score >= 0.45 or bool(pii_report["high_risk_fields"]) or bool(review_reason)
+    )
     evidence = pii_report.get("field_evidence") or {}
     findings = [
         {
@@ -477,4 +601,6 @@ def score_compliance_risk(
         "field_risk": field_risk,
         "findings": findings,
         "compliance_tags": sorted(set(compliance_tags)),
+        "direct_identifier_columns": direct,
+        "review_reason": review_reason,
     }

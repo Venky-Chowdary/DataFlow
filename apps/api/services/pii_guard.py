@@ -17,7 +17,9 @@ from services.value_serializer import is_reader_null_cell
 
 # Simplistic but fast patterns.  For production, integrate with a DLP or ML service.
 PII_PATTERNS: dict[str, re.Pattern[str]] = {
-    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    # ``\w`` is unicode-aware: an IDN local part (``山田@example.jp``) is an
+    # address to the preflight gate and the masker alike (D94).
+    "email": re.compile(r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
     "phone": re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     # PAN candidate: 13-19 digits, space/dash separators. Luhn-validated in

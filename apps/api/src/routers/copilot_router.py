@@ -7,7 +7,7 @@ Customer-facing chat + separate training agent endpoints.
 import asyncio
 import logging
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -219,11 +219,21 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         ) from e
 
 
-def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) -> None:
+def _stamp_confirmation(
+    job_id: str,
+    *,
+    ack_id: str,
+    actor: str,
+    reason: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
     """Record who confirmed the job and why on the job itself (QA MX3-19).
 
     The ack ledger kept the actor and reason, but get_job and audit readers
-    only see the job document.
+    only see the job document. Every confirmed job gets the same record —
+    start_transfer, a confirmed rerun, a schedule run-now (D6) — merged over
+    what the owning route already wrote (a rerun's ``action``/``of``), so
+    ``governance.approval`` never reads null on an approved job.
     """
     if not job_id:
         return
@@ -231,16 +241,23 @@ def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) ->
 
     from services.mongodb_service import get_mongodb_service
 
+    mongo = get_mongodb_service()
+    try:
+        existing = (mongo.get_job(job_id) or {}).get("confirmation")
+    except Exception:  # noqa: BLE001 - the stamp below still carries the approval
+        existing = None
+    # The owning route's record wins (a rerun's ``action``/``of``); ``extra``
+    # fills what it did not write; the ack's identity is always current.
     confirmation = {
+        **(dict(extra) if extra else {}),
+        **(dict(existing) if isinstance(existing, dict) else {}),
         "approved_by": actor,
         "reason": reason,
         "ack_id": ack_id,
         "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
-        stamped = get_mongodb_service().update_job_fields(
-            job_id, {"confirmation": confirmation}
-        )
+        stamped = mongo.update_job_fields(job_id, {"confirmation": confirmation})
     except Exception as exc:  # noqa: BLE001 - the job runs; the audit gap is logged
         _logger.error(
             "Job %s: confirmation by %s could not be recorded: %s",
@@ -842,7 +859,9 @@ async def copilot_confirm(
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             try:
-                job_id = _run_schedule(schedule_id, manual=True)
+                # D6: the person who confirmed is the trigger, as on the REST
+                # Run now; a blank triggered_by erased the audit trail.
+                job_id = _run_schedule(schedule_id, manual=True, triggered_by=actor)
             except ScheduleStartError as exc:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
@@ -870,6 +889,13 @@ async def copilot_confirm(
             "name": str(payload.get("name") or getattr(sched, "name", "") or ""),
             "status": "queued",
         }
+        _stamp_confirmation(
+            str(job_id or ""),
+            ack_id=ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            extra={"action": "run_schedule", "schedule_id": schedule_id},
+        )
         ledger.finalize(
             ack_id,
             actor=actor,
@@ -922,6 +948,18 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=_confirm_failure(kind.replace('_', ' '), exc)) from exc
+        # D6: a lifecycle ack that created a job (rerun, retry, replay) records
+        # its approval on that job. Acting on an existing job (cancel, resume)
+        # must not overwrite the approval that started it.
+        new_job_id = str(result.get("job_id") or "").strip()
+        if new_job_id and new_job_id != str(payload.get("job_id") or "").strip():
+            _stamp_confirmation(
+                new_job_id,
+                ack_id=ack_id,
+                actor=actor,
+                reason=request.reason or "confirmed",
+                extra={"action": kind},
+            )
         ledger.finalize(
             ack_id,
             actor=actor,

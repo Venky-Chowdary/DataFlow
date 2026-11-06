@@ -129,6 +129,18 @@ def _listed(parts: list[str], limit: int = 8) -> str:
     )
 
 
+_PROTECTING_TRANSFORMS = frozenset({"mask_pii", "hash_pii", "redact"})
+
+
+def protected_pii_columns(mappings: list[dict[str, Any]] | None) -> set[str]:
+    """Source columns a mapping masks, hashes or redacts before the write."""
+    return {
+        str(m.get("source") or "")
+        for m in mappings or []
+        if str(m.get("transform") or "").strip().lower() in _PROTECTING_TRANSFORMS
+    }
+
+
 def pii_detection_warning(
     compliance: dict[str, Any] | None, mappings: list[dict[str, Any]] | None = None
 ) -> dict[str, Any] | None:
@@ -143,11 +155,7 @@ def pii_detection_warning(
     fields = list(compliance.get("sensitive_fields") or [])
     if not fields:
         return None
-    protected = {
-        str(m.get("source") or "")
-        for m in mappings or []
-        if str(m.get("transform") or "").strip().lower() in {"mask_pii", "hash_pii", "redact"}
-    }
+    protected = protected_pii_columns(mappings)
     parts = _finding_lines(compliance)
     open_cols = [c for c in fields if c not in protected]
     note = (
@@ -171,9 +179,13 @@ def pii_detection_warning(
 def _compliance_review_message(compliance: dict[str, Any]) -> str:
     """Name the columns, categories and rule behind a PII review hold."""
     listed = _listed(_finding_lines(compliance))
+    # A table *of* direct identifiers is held for that reason even when every
+    # column alone is medium risk (D94); say so, or the hold reads as a score.
+    reason = str(compliance.get("review_reason") or "").strip()
     return (
         "PII/compliance review required"
         + (f" — {listed}" if listed else "")
+        + (f"; {reason}" if reason else "")
         + f" (risk {float(compliance.get('risk_score') or 0.0):.2f}). Acknowledge with "
         "pii_acknowledgement {approved_by, reason} (API: compliance_acknowledged + "
         "acknowledgment_actor/acknowledgment_reason)."
@@ -206,7 +218,9 @@ def build_preflight_proof_bundle(
     quality_score = _quality_score(columns, sample_rows, source_schemas=source_schemas)
 
     from services.compliance_guard import score_compliance_risk
-    compliance = score_compliance_risk(columns, sample_rows)
+    compliance = score_compliance_risk(
+        columns, sample_rows, protected_columns=protected_pii_columns(mappings)
+    )
     compliance["acknowledged"] = bool(compliance_acknowledged)
     if compliance_acknowledged:
         from datetime import datetime, timezone
