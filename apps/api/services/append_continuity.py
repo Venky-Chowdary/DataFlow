@@ -734,9 +734,13 @@ def _keys_this_rebaseline_owns(target: ContinuityTarget, endpoint: Any) -> tuple
                 EndpointConfig(kind="database", format=other.type, connector_id=other.id,
                                table=target.table)
             )
-        except Exception:  # noqa: BLE001 - undecidable: keep it shared
-            shared.update(target.alt_keys)
-            continue
+        except Exception as exc:  # noqa: BLE001 - undecidable: every alt key stays shared
+            logger.warning(
+                "append continuity: cannot resolve connector %s against %s (%s); "
+                "its host keys are treated as shared and left alone",
+                other.id, target.key, type(exc).__name__,
+            )
+            return (target.key,)
         if other_target is not None:
             shared.update(set(other_target.all_keys) & set(target.alt_keys))
     return (target.key, *(k for k in target.alt_keys if k not in shared))

@@ -207,3 +207,31 @@ def test_a_rebaseline_reports_only_its_own_previous_baseline_and_names_the_share
         assert details["previous"] is None
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
+
+
+def test_an_unresolvable_foreign_connector_keeps_the_host_key_shared_and_is_logged(monkeypatch, caplog):
+    """A connector in another workspace on the same host that cannot be resolved
+    makes the host key undecidable. The rebaseline must leave it alone (fail safe)
+    and say why in the log, not swallow the error silently in the loop."""
+    import logging
+    from types import SimpleNamespace
+
+    from services import append_continuity as ac
+    from services import connector_store
+
+    mine = SimpleNamespace(id="c-a", workspace_id="ws-a", host="db.example", type="postgresql")
+    theirs = SimpleNamespace(id="c-b", workspace_id="ws-b", host="DB.example", type="postgresql")
+    monkeypatch.setattr(connector_store, "_load_all", lambda: [mine, theirs])
+
+    def _unresolvable(_endpoint):
+        raise RuntimeError("connector secret unavailable")
+
+    monkeypatch.setattr(ac, "resolve_target", _unresolvable)
+    target = ac.ContinuityTarget(
+        db_type="postgresql", cfg={"host": "db.example"}, schema="public", table="orders",
+        key="id:c-a", alt_keys=("host:db.example:5432",),
+    )
+    with caplog.at_level(logging.WARNING, logger=ac.logger.name):
+        owned = ac._keys_this_rebaseline_owns(target, SimpleNamespace(connector_id="c-a"))
+    assert owned == ("id:c-a",)
+    assert any("c-b" in r.getMessage() and "shared" in r.getMessage() for r in caplog.records)
