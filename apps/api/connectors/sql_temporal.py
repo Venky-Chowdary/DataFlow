@@ -1139,6 +1139,8 @@ def extract_column_from_sql_error(exc: BaseException | str) -> str | None:
 
     text = str(exc)
     for pattern in (
+        # MariaDB column CHECK (4025): CONSTRAINT `table.column` failed for ...
+        r"CONSTRAINT `[^`.]+\.([^`.]+)` failed for",
         r"for column ['`]([^'`]+)['`]",
         r'for column ["“]([^"”]+)["”]',
         r"column ['`]([^'`]+)['`]",
@@ -1182,6 +1184,9 @@ _ROW_CONTRACT_ERROR_SIGNATURES = (
     "violates foreign key constraint",
     "check constraint",
     "foreign key constraint",
+    # MariaDB ER_CONSTRAINT_FAILED (4025): "CONSTRAINT `t.amount` failed for
+    # `db`.`t`" — a CHECK refusal PyMySQL raises as OperationalError (E1-021).
+    "(4025, ",
     # Oracle: 01400 NULL insert, 01438/12899 too large, 02290 check, 02291 FK
     "ora-01400",
     "ora-01438",
