@@ -270,7 +270,7 @@ import {
   type StreamFieldContract,
 } from "../lib/streamContracts";
 import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
-import { fileSourceIssueHold, type FileSourceIssueHold } from "../lib/fileSourceIssueHold";
+import { fileSourceIssueHold, isCalendarHoldoutFinding, type FileSourceIssueHold } from "../lib/fileSourceIssueHold";
 import { FileSourceIssuePanel } from "../components/transfer/FileSourceIssuePanel";
 import { foreignKeysDestExtra, type ForeignKeysMode } from "../lib/foreignKeysMode";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
@@ -4217,6 +4217,29 @@ export function TransferPage({
       || /confidence\s+\d+%\s*</i.test(dryMsg)
       || /remap|posted_date_estimated|Invalid (date|boolean|decimal)/i.test(dryMsg);
 
+    if (sourceKind === "file" && isCalendarHoldoutFinding(integrityText)) {
+      // A non-existent date in named rows is a row holdout, not a mapping
+      // defect: Balanced quarantines exactly those rows with their reason and
+      // loads the rest. Stay on Validate (QA browser 3).
+      setFileIssueHold(null);
+      setValidationMode("balanced");
+      toast({
+        title: "Holding the bad dates out",
+        message: "Balanced validation quarantines each row whose date does not exist, with its reason, and loads the rest. Re-running Validate.",
+        tone: "info",
+      });
+      await executePreflight(undefined, "balanced");
+      return {
+        kind: "quarantine_strip",
+        title: "Quarantine rows with a non-existent date",
+        columnsChanged: [],
+        validationMode: "balanced",
+        steps: [
+          "Switched validation mode to balanced: rows naming no real calendar date are held out in quarantine with their reason.",
+          "Every other row loads; Inspect quarantine lists the held-out rows after Execute.",
+        ],
+      };
+    }
     if (looksLikeBadMapping && !encodingOnly) {
       toast({
         title: "Remap columns — quarantine cannot fix this",

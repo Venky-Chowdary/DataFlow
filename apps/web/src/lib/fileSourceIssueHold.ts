@@ -35,3 +35,13 @@ export function fileSourceIssueHold(
     issueCount,
   };
 }
+
+/**
+ * A finding the write path holds out row by row: a value naming no real
+ * calendar day (the API's ``invalid_calendar_reason`` wording). Quarantine is
+ * the remedy — the column's type is right, so "Remap columns" is the loop QA
+ * hit (QA browser 3).
+ */
+export function isCalendarHoldoutFinding(text: string): boolean {
+  return /not a real calendar date|is not a real (?:calendar )?(?:date|clock)/i.test(String(text || ""));
+}

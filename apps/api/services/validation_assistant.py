@@ -366,9 +366,60 @@ def _is_type_mismatch_blocker(text: str) -> bool:
     )
 
 
+def _row_value_holdout_actions(
+    blockers: list[dict[str, Any]],
+    population_findings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """``quarantine_and_rerun`` for G3f values that fail the declared transform.
+
+    G3f names the rows and values the write path would refuse (an invalid
+    calendar date, a non-number). The remedy for a value in a row is to hold
+    that row out with its reason and load the others, or to correct the
+    source value — the column's type is right.
+    """
+    actions: list[dict[str, Any]] = []
+    for blocker in blockers:
+        if (blocker.get("id") or blocker.get("gate")) != "g3f_population_fit":
+            continue
+        if "fail the declared transform" not in str(blocker.get("message") or ""):
+            continue
+        details = blocker.get("details") if isinstance(blocker.get("details"), dict) else {}
+        for finding in details.get("findings") or population_findings or []:
+            if not isinstance(finding, dict) or not finding.get("unfit_rows"):
+                continue
+            column = str(finding.get("source") or "")
+            rows = [r for r in finding.get("example_rows") or [] if r is not None][:5]
+            values = list(finding.get("example_values") or [])[:5]
+            count = int(finding.get("unfit_rows") or len(rows) or 0)
+            where = ", ".join(
+                f"row {r}" + (f" {values[i]!r}" if i < len(values) else "")
+                for i, r in enumerate(rows)
+            )
+            actions.append({
+                "kind": "quarantine_and_rerun",
+                "column": column,
+                "target": finding.get("target"),
+                "rows": rows,
+                "values": values,
+                "row_count": count,
+                "reason": str(finding.get("unfit_reason") or ""),
+                "label": (
+                    f"Hold out {count} row(s) of '{column}' in quarantine ({where}) "
+                    "and load the rest — correct and replay them from Inspect Quarantine"
+                ),
+                "risk_acceptance": {
+                    "execution_policy": "CAST_AND_CONTINUE",
+                    "on_cast_failure": "quarantine",
+                },
+                "mapping_applyable": False,
+            })
+    return actions
+
+
 def _suggested_actions(
     blockers: list[dict[str, Any]],
     column_fixes: list[dict[str, Any]],
+    population_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Machine-readable next steps the UI can render as one-click actions."""
     actions: list[dict[str, Any]] = []
@@ -539,6 +590,12 @@ def _suggested_actions(
             "kind": "check_connection",
             "label": "Open Connectors — fix credentials / Auth source, then Test",
         })
+    holdouts = _row_value_holdout_actions(blockers, population_findings)
+    if holdouts:
+        # A bad value in named rows (31/02/2025, 'abc') is not a type defect:
+        # hold those rows out and load the rest. "Review mappings" alone sent
+        # the operator back to Source in a loop (QA browser 3).
+        actions = holdouts + [a for a in actions if a.get("kind") != "quarantine_and_rerun"]
     if "g3f_population_fit" in gate_ids and any(
         a.get("kind") == "change_target_type"
         and a.get("to_type")
@@ -766,7 +823,11 @@ def explain_validation(
                 "detail_messages": [],
             })
 
-    actions = _suggested_actions(blockers, column_fixes)
+    actions = _suggested_actions(
+        blockers,
+        column_fixes,
+        list((preflight.get("population_fit") or {}).get("findings") or []),
+    )
     deterministic = _deterministic_narrative(
         passed, issues, column_fixes, decision=decision,
     )

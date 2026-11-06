@@ -87,6 +87,40 @@ def _issue_is_non_blocking_warn(issue: dict[str, Any]) -> bool:
     return False
 
 
+def _population_fit_cells(gate: dict[str, Any]) -> list[dict[str, Any]]:
+    """One finding per row G3f named (row, column, value, reason) — QA browser 3.
+
+    The population scan already knows ``'31/02/2025'`` sits at row 642; the
+    quarantine view showed only the gate sentence with no row or cell.
+    """
+    if str(gate.get("id") or "") != "g3f_population_fit":
+        return []
+    details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
+    out: list[dict[str, Any]] = []
+    for finding in details.get("findings") or []:
+        if not isinstance(finding, dict) or not finding.get("unfit_rows"):
+            continue
+        rows = list(finding.get("example_rows") or [])
+        values = list(finding.get("example_values") or [])
+        for i, row in enumerate(rows):
+            if row is None:
+                continue
+            issue: dict[str, Any] = {
+                "row": row,
+                "source": finding.get("source"),
+                "column": finding.get("source"),
+                "target": finding.get("target"),
+                "target_type": finding.get("target_type"),
+                "reason": str(finding.get("unfit_reason") or finding.get("reason") or ""),
+                "suggested_fix": finding.get("suggested_fix"),
+                "suggested_target_type": finding.get("suggested_target_type"),
+            }
+            if i < len(values):
+                issue["value"] = values[i]
+            out.append(issue)
+    return out
+
+
 def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not preflight:
         return []
@@ -118,6 +152,7 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
                 parsed = _as_issue_dict(item)
                 if parsed and not _issue_is_non_blocking_warn(parsed):
                     out.append(_enrich_from_message(parsed))
+        out.extend(_population_fit_cells(gate))
         # Nested integrity payload
         for nested_key in ("integrity_issues", "checks"):
             nested = details.get(nested_key)

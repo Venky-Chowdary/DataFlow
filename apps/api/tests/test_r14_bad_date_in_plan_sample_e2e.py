@@ -81,3 +81,75 @@ def test_strict_still_refuses_an_invalid_date_inside_the_sample(sftp, dest_table
     staged = _start(sftp(_csv("date", {2: "2024-02-30"})), "postgresql", table, mode="strict")
     assert not staged.success
     assert "2024-02-30" in str(staged.error), staged.error
+
+
+# ------------------------------------------- stored upload, strict (QA row 642)
+
+def _row642_csv():
+    import datetime as dt
+
+    lines, rows = ["id,order_date,amount"], []
+    for i in range(1, 1001):
+        d = (dt.date(2025, 1, 1) + dt.timedelta(days=i % 300)).strftime("%d/%m/%Y")
+        if i == 642:
+            d = "31/02/2025"
+        lines.append(f"{i},{d},{i}.25")
+        rows.append({"id": str(i), "order_date": d, "amount": f"{i}.25"})
+    return ("\n".join(lines) + "\n").encode(), rows
+
+
+@pytest.fixture
+def studio(tmp_path, monkeypatch):
+    from tests import r4_route_harness as h
+
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("DATAFLOW_UPLOAD_DIR", str(tmp_path / "up"))
+    monkeypatch.delenv("DATAFLOW_SEED_DEMO", raising=False)
+    from src.main import app
+
+    with TestClient(app) as c:
+        yield c, h
+
+
+def test_strict_names_row_642_and_offers_hold_out_not_only_review_mappings(studio):
+    """Strict Validate on the stored upload names the cell; explain offers the real routes."""
+    import uuid
+
+    client, h = studio
+    csv, rows = _row642_csv()
+    up = client.post("/api/v1/connectors/upload", files={"file": ("orders.csv", csv, "text/csv")}).json()
+    schema = up["schema"]
+    if not up.get("file_id"):
+        # The upload route stores the file only with an object store; the
+        # Studio preflight reads the same stored upload by id.
+        from services.file_parser import store_upload
+
+        up["file_id"] = store_upload("orders.csv", csv)["file_id"]
+    maps = [{"source": k, "target": k, "confidence": 0.99, "source_type": "VARCHAR", "target_type": v}
+            for k, v in schema.items()]
+    body = {
+        "columns": up["columns"], "column_types": schema, "row_count": 1000, "mappings": maps,
+        "dest_type": "postgresql", "dest_host": h.PG["host"], "dest_port": h.PG["port"],
+        "dest_database": h.PG["database"], "dest_username": h.PG["username"],
+        "dest_password": h.PG["password"], "dest_schema": "public",
+        "dest_table": f"r14b3_{uuid.uuid4().hex[:6]}", "sample_rows": rows,
+        "sync_mode": "full_refresh_overwrite", "validation_mode": "strict",
+        "source_kind": "file", "source_type": "csv", "source_file_id": up.get("file_id") or "",
+    }
+    pf = client.post("/api/v1/preflight/run", json=body).json()
+    assert "31/02/2025" in str(pf.get("blockers")), pf.get("blockers")
+
+    actions = client.post("/api/v1/preflight/explain", json={"preflight": pf}).json()["suggested_actions"]
+    hold = [a for a in actions if a.get("kind") == "quarantine_and_rerun"]
+    assert hold, actions
+    assert actions[0]["kind"] == "quarantine_and_rerun", actions
+    assert hold[0]["column"] == "order_date" and 642 in hold[0]["rows"], hold[0]
+    assert "31/02/2025" in hold[0]["values"] and hold[0]["reason"], hold[0]
+    assert hold[0]["risk_acceptance"]["on_cast_failure"] == "quarantine"
+
+    from services.quarantine_from_preflight import quarantine_rows_from_preflight
+
+    cells = [r for r in quarantine_rows_from_preflight(pf) if r.get("row") == 642]
+    assert cells, quarantine_rows_from_preflight(pf)
+    assert cells[0].get("value") == "31/02/2025" and cells[0].get("column") == "order_date", cells[0]
+    assert str(cells[0].get("reason") or "").strip(), cells[0]

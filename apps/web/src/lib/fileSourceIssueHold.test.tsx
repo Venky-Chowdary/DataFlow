@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { fileSourceIssueHold } from "./fileSourceIssueHold.js";
+import { fileSourceIssueHold, isCalendarHoldoutFinding } from "./fileSourceIssueHold.js";
 import { FileSourceIssuePanel } from "../components/transfer/FileSourceIssuePanel.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -50,5 +50,12 @@ describe("file values that do not fit (QA browser 3)", () => {
     assert.equal((page.match(/fileSourceIssueHold\(parsed\?\.validation/g) || []).length, 2);
     assert.match(page, /<FileSourceIssuePanel/);
     assert.match(page, /executePreflight\(undefined, "balanced"\)/);
+  });
+
+  it("a non-existent date is a holdout finding, not a remap", () => {
+    assert.equal(isCalendarHoldoutFinding("row 642 order_date: Invalid date: '31/02/2025' is not a real calendar date"), true);
+    assert.equal(isCalendarHoldoutFinding("status (VARCHAR) → flag (BOOLEAN) confidence 40% < 70%"), false);
+    const at = page.indexOf("isCalendarHoldoutFinding(integrityText)");
+    assert.ok(at > 0 && at < page.indexOf("if (looksLikeBadMapping && !encodingOnly)"), "checked before the remap branch");
   });
 });
