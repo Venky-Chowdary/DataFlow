@@ -309,11 +309,9 @@ def _source_sql(extra: Mapping[str, Any]) -> tuple[str, str]:
     query = str(extra.get("source_query") or "").strip()
     if mode == "table":
         return "", ""
+    # The statement comes from the key its mode names, never the other one
+    # (procedure_source.procedure_text_of applies the same rule).
     text = call if mode == "procedure" else query
-    if mode == "procedure" and not text:
-        text = query
-    if mode == "query" and not text:
-        text = call
     if text:
         return _align_source(mode, text)
     return mode, ""

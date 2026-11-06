@@ -606,12 +606,16 @@ def procedure_text_of(source: Any) -> str:
     elif isinstance(source, Mapping):
         nested = source.get("extra") if isinstance(source.get("extra"), Mapping) else {}
         extra = {**dict(nested or {}), **source}
-    return str(
-        extra.get("procedure_call")
-        or extra.get("source_procedure")
-        or extra.get("source_query")
-        or ""
-    ).strip()
+    # One rule with _source_sql and the placement resolver: the statement is
+    # read from the key its mode names. A SELECT under procedure_call is not a
+    # query-mode statement (and a CALL under source_query is not a procedure);
+    # resolve_callable_placements refuses that shape, so it never runs here.
+    mode = source_read_mode_of(source)
+    if mode == MODE_QUERY:
+        return str(extra.get("source_query") or "").strip()
+    if mode == MODE_PROCEDURE:
+        return str(extra.get("procedure_call") or extra.get("source_procedure") or "").strip()
+    return ""
 
 
 def procedure_params_of(source: Any) -> dict[str, Any]:

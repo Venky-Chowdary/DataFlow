@@ -240,6 +240,30 @@ def test_job_creation_refuses_an_unresolved_source_on_any_route(client):
     assert req.stream_contracts == [{"name": "a"}]
 
 
+# ------------------------------------------- one rule for the statement's key (review 3)
+
+
+def test_the_statement_is_read_from_the_key_its_mode_names():
+    from services.multi_stream_plan import _source_sql, review_stream_procedures
+    from services.procedure_source import procedure_text_of
+
+    wrong_query = {"source_read_mode": "query", "procedure_call": "SELECT 1 AS x"}
+    wrong_call = {"source_read_mode": "procedure", "source_query": "CALL p()"}
+    assert procedure_text_of({"extra": wrong_query}) == ""
+    assert procedure_text_of({"extra": wrong_call}) == ""
+    assert _source_sql(wrong_query) == ("query", "")
+    assert _source_sql(wrong_call) == ("procedure", "")
+    out = review_stream_procedures(None, None, [{"name": "a", **wrong_query}, {"name": "b"}],
+                                   ["a", "b"])
+    assert "set to query but has no CALL or SELECT" in out, out
+    # The right key still reads; no word infers from the one statement present.
+    assert procedure_text_of({"extra": {"source_read_mode": "sql",
+                                        "source_query": "SELECT 1"}}) == "SELECT 1"
+    assert procedure_text_of({"extra": {"procedure_call": "CALL p()"}}) == "CALL p()"
+    assert procedure_text_of({"extra": {"source_read_mode": "table",
+                                        "procedure_call": "CALL p()"}}) == ""
+
+
 # ------------------------------------------- 422, never 500, and one schedule vocabulary
 
 
