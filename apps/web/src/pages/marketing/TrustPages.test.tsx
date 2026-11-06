@@ -22,9 +22,19 @@ describe("trust pages", () => {
   it("subprocessor list is marked draft and names each provider's trigger", () => {
     const html = renderToStaticMarkup(createElement(SubprocessorsPage));
     assert.match(html, /Draft pending legal review/);
-    for (const name of ["Railway", "MongoDB", "Resend", "OpenAI", "Amazon Web Services"]) {
+    for (const name of ["Cloud hosting provider", "MongoDB", "Resend", "OpenAI", "Amazon Web Services"]) {
       assert.match(html, new RegExp(name));
     }
     assert.match(html, /Only if a workspace admin enables a cloud model/);
+  });
+
+  it("trust pages name no hosting provider and no old brand (bundle brand gate)", () => {
+    // The same /dataflow|railway/i the built bundle is scanned with
+    // (scripts/check_bundle_brand.mjs): the hosting provider is a deployment
+    // fact for the order form and DPA, not for the public bundle.
+    for (const Page of [StatusPage, SubprocessorsPage]) {
+      const html = renderToStaticMarkup(createElement(Page));
+      assert.doesNotMatch(html, /dataflow|railway/i, Page.name);
+    }
   });
 });
