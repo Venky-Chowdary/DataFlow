@@ -151,16 +151,20 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
     return row
 
 
-def mark(row_id: str, status: str, *, claim_token: str | None = None) -> None:
+def mark(row_id: str, status: str, *, claim_token: str | None = None,
+         error: str = "") -> None:
     """Record the terminal status (``sent`` | ``failed`` | ``expired`` |
     ``superseded``) for a row; terminal rows lose the body entirely.
     ``claim_token`` restricts the write to the lease we hold — a stale
     claimer must not stamp its outcome over the replica that now owns
-    the row."""
+    the row. ``error`` is kept as ``last_error`` so a failed row says why
+    (D130: a row marked failed with no cause left the operator guessing)."""
     db = _database()
     if db is not None:
         update: dict[str, Any] = {
             "$set": {"status": status, "finished_at": _now_iso()}}
+        if error:
+            update["$set"]["last_error"] = error
         if status in _TERMINAL:
             update["$unset"] = {k: "" for k in _BODY_KEYS}
         flt: dict[str, Any] = {"_id": row_id}
@@ -176,6 +180,8 @@ def mark(row_id: str, status: str, *, claim_token: str | None = None) -> None:
             return
         row["status"] = status
         row["finished_at"] = _now_iso()
+        if error:
+            row["last_error"] = error
         if status in _TERMINAL:
             for k in _BODY_KEYS:
                 row.pop(k, None)
@@ -341,6 +347,39 @@ def counts() -> dict[str, int]:
         if status in out:
             out[status] += 1
     return out
+
+
+_FAILURE_FIELDS = ("id", "purpose", "status", "attempts", "last_error",
+                   "created_at", "finished_at", "next_attempt_at")
+
+
+def _failure_view(row: dict[str, Any]) -> dict[str, Any]:
+    from services.pii_guard import mask
+
+    out = {k: row.get(k) for k in _FAILURE_FIELDS}
+    out["id"] = str(row.get("_id") or row.get("id") or "")
+    out["attempts"] = int(row.get("attempts") or 0)
+    out["to"] = mask(row.get("to") or "")
+    return out
+
+
+def recent_failures(limit: int = 20) -> list[dict[str, Any]]:
+    """Rows that failed for good, or are waiting to retry after a failure,
+    newest first — the operator's view of "queued but never sent" (D130).
+    Bodies are never returned; the recipient is masked."""
+    limit = max(1, min(int(limit or 20), 200))
+    flt = {"$or": [{"status": "failed"},
+                   {"status": "queued", "attempts": {"$gt": 0}}]}
+    db = _database()
+    if db is not None:
+        rows = list(db[COLLECTION].find(flt).sort("created_at", -1).limit(limit))
+        return [_failure_view(r) for r in rows]
+    doc = load_json_doc(_path(), {"rows": {}})
+    rows = [r for r in doc.get("rows", {}).values()
+            if r.get("status") == "failed"
+            or (r.get("status") == "queued" and int(r.get("attempts") or 0) > 0)]
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return [_failure_view(r) for r in rows[:limit]]
 
 
 def drain_queued(submit, *, skip_reason=None) -> int:

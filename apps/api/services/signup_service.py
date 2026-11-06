@@ -38,6 +38,7 @@ from services import risk_scorer
 from services import email_verifier, email_quota, mail_outbox
 from services.email_quota import consume_send_slot
 from services.email_sender import (
+    describe_send_failure,
     EmailQuotaExceeded,
     EmailSendError,
     OutboundEmail,
@@ -252,9 +253,12 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
     failed attempt audits password.reset.send_failed."""
     retryable = isinstance(exc, EmailSendError) and exc.retryable
     attempts = int(row.get("attempts") or 0)
+    # D130: the provider's refusal (403 edge block, 401 bad key, 422) used
+    # to be audited as a bare "send_failed" and stored as a class name.
+    failure = describe_send_failure(exc)
     if retryable and attempts < _MAX_SEND_RETRIES:
         delay = _retry_delay_sec(exc, attempts + 1)
-        mail_outbox.reschedule(row["id"], delay, type(exc).__name__,
+        mail_outbox.reschedule(row["id"], delay, failure["error"],
                                claim_token=claim_token)
         row["attempts"] = attempts + 1
         timer = threading.Timer(
@@ -264,18 +268,20 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
         timer.daemon = True
         timer.start()
         logger.warning("mail outbox transient failure (%s); retry %d in %.0fs",
-                       type(exc).__name__, attempts + 1, delay)
+                       failure["error"], attempts + 1, delay)
     else:
-        mail_outbox.mark(row["id"], "failed", claim_token=claim_token)
+        mail_outbox.mark(row["id"], "failed", claim_token=claim_token,
+                         error=failure["error"])
         if isinstance(exc, EmailSendError):
-            logger.warning("mail send failed terminally (%s)",
-                           row.get("purpose"))
+            logger.warning("mail send failed terminally (%s): %s",
+                           row.get("purpose"), failure["error"])
         else:
             logger.error("mail delivery failed (%s)", row.get("purpose"),
                          exc_info=True)
     try:
         details = {"ip": actor_ip, "purpose": row.get("purpose"),
-                   "attempt": attempts + 1}
+                   "attempt": attempts + 1, **failure,
+                   "terminal": not (retryable and attempts < _MAX_SEND_RETRIES)}
         if row.get("purpose") == "password.reset":
             record_security_event("password.reset.send_failed",
                                   outcome="failed", actor=row["to"],

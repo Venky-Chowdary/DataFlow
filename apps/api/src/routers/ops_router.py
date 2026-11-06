@@ -302,3 +302,49 @@ async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any
         watermark=body.watermark,
     )
     return {"ok": True, "retention": probe.to_dict(), **probe.job_fields()}
+
+
+@router.get("/mail")
+async def get_mail_outbox_health(
+    request: Request,
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    """The platform mail outbox as an operator sees it (D130).
+
+    Signup codes and reset links are queued here and sent by the API process;
+    a provider refusal (Cloudflare edge 403 "error code: 1010", a bad key,
+    an unverified domain) used to leave only a row marked ``failed`` and a
+    bare ``mail.send_failed`` audit event. This answers "is mail leaving,
+    and if not, why": the configured provider and User-Agent, the status
+    histogram, and the recent failures with their cause. Bodies are never
+    returned and recipients are masked. Platform-wide, so platform
+    administrators only.
+    """
+    from services import mail_outbox
+    from services.email_sender import email_provider_name
+    from services.notification_service import USER_AGENT
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted:
+        from services.audit_coverage import record_authz_denial
+
+        record_authz_denial(
+            request,
+            required_permission="ops.mail.read",
+            effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+            reason="platform_admin_required",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="The mail outbox is platform-wide: platform administrators only.",
+        )
+    counts = mail_outbox.counts()
+    failures = mail_outbox.recent_failures(limit=limit)
+    return {
+        "provider": email_provider_name(),
+        "user_agent": USER_AGENT,
+        "counts": counts,
+        "recent_failures": failures,
+        "healthy": counts.get("failed", 0) == 0 and not failures,
+    }

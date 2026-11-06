@@ -72,6 +72,24 @@ class EmailProviderError(EmailSendError):
         self.status = int(status or 0)
 
 
+def describe_send_failure(exc: BaseException) -> dict[str, Any]:
+    """What an operator needs to know about a failed send, safe to store.
+
+    ``error`` is the typed message for an :class:`EmailSendError` (provider
+    status + machine error name, never the recipient or the body) and the
+    exception class alone for anything else, whose text can echo an address.
+    A refusal that was audited as a bare "mail.send_failed" was indistinguishable
+    from a transport blip (D130).
+    """
+    typed = isinstance(exc, EmailSendError)
+    return {
+        "error": f"{type(exc).__name__}: {exc}" if typed else type(exc).__name__,
+        "status": int(getattr(exc, "status", 0) or 0),
+        "retryable": bool(getattr(exc, "retryable", False)),
+        "provider": email_provider_name(),
+    }
+
+
 @dataclass(frozen=True)
 class OutboundEmail:
     to: str
