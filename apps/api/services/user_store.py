@@ -475,7 +475,22 @@ def change_email(*, email: str, new_email: str,
                 raise EmailTakenError(
                     f"{canonical} already belongs to an account")
             data["users"] = [*users, doc]
+    _retire_old_address(normalized)
     return public_user(doc)
+
+
+def _retire_old_address(old_email: str) -> None:
+    """The old address's sessions end with the rekey (review 5, HIGH).
+
+    Every bearer session of the old address is revoked, and the old address is
+    marked deleted, so a pre-change token never authenticates again — not if
+    the membership rekey fails, and not as whoever later registers that
+    address. Both branches (Mongo, JSON) reach this after the rekey landed.
+    """
+    from services import auth_sessions
+
+    auth_sessions.revoke_all_for_email(old_email)
+    mark_account_deleted(old_email)
 
 
 def mark_rekey_pending(*, email: str, old_email: str) -> None:
@@ -620,21 +635,26 @@ def _deleted_path() -> Path:
     return _store_path().with_name("deleted_accounts.json")
 
 
-def mark_account_deleted(email: str, *, at: int | None = None) -> None:
-    """Record that ``email``'s stored account was deleted, and when.
+class DeletionMarkerUnavailable(RuntimeError):
+    """The deleted-account marker store cannot be read (and the node mirror has no marker)."""
 
-    The auth middleware refuses a session token issued at or before this
-    instant (``account_deleted_since``). An explicit marker — never "the
-    account has no stored record": SSO and SCIM identities sign in without one.
-    A later account under the same email signs in with sessions issued after
-    the marker, so it is unaffected.
+
+def mark_account_deleted(email: str, *, at: float | None = None) -> None:
+    """Record that ``email``'s account was deleted (or its address retired), and when.
+
+    The auth middleware refuses a session issued at or before this instant
+    (``account_deleted_since``). An explicit marker — never "the account has no
+    stored record": SSO and SCIM identities sign in without one. Stored with
+    sub-second precision and compared with each session's own sub-second issue
+    time, so an account re-created in the same second signs in normally; a
+    later account under the same email is unaffected.
     """
     import time
 
     normalized = normalize_email(email)
     if not normalized:
         return
-    stamp = int(at if at is not None else time.time())
+    stamp = float(at if at is not None else time.time())
     db = mongo_database()
     if db is not None:
         db[DELETED_ACCOUNTS_COLLECTION].update_one(
@@ -643,24 +663,38 @@ def mark_account_deleted(email: str, *, at: int | None = None) -> None:
     # Mirrored on this node, like the session store, for a Mongo outage.
     with json_doc_transaction(_deleted_path(), {"deleted": {}}) as data:
         marks = data.setdefault("deleted", {})
-        marks[normalized] = max(int(marks.get(normalized) or 0), stamp)
+        marks[normalized] = max(float(marks.get(normalized) or 0), stamp)
 
 
-def account_deleted_since(email: str) -> int | None:
-    """Epoch seconds the stored account ``email`` was last deleted, or ``None``."""
+def account_deleted_since(email: str) -> float | None:
+    """Epoch seconds ``email``'s account was last deleted, or ``None``.
+
+    Fails closed (review 5): a Mongo read that raises no longer escapes before
+    the node mirror is read; when the mirror holds no marker either, the
+    answer is unknown and :class:`DeletionMarkerUnavailable` is raised — the
+    middleware answers 503 for that session instead of admitting it.
+    """
     normalized = normalize_email(email)
     if not normalized:
         return None
-    values: list[int] = []
+    values: list[float] = []
+    mongo_error: Exception | None = None
     db = mongo_database()
     if db is not None:
-        row = db[DELETED_ACCOUNTS_COLLECTION].find_one({"_id": normalized}) or {}
-        if row.get("deleted_at"):
-            values.append(int(row["deleted_at"]))
+        try:
+            row = db[DELETED_ACCOUNTS_COLLECTION].find_one({"_id": normalized}) or {}
+            if row.get("deleted_at"):
+                values.append(float(row["deleted_at"]))
+        except Exception as exc:  # noqa: BLE001 — decided below, never admitted blind
+            mongo_error = exc
     local = (load_json_doc(_deleted_path(), {"deleted": {}}).get("deleted") or {}).get(normalized)
     if local:
-        values.append(int(local))
-    return max(values) if values else None
+        values.append(float(local))
+    if values:
+        return max(values)
+    if mongo_error is not None:
+        raise DeletionMarkerUnavailable(str(mongo_error)) from mongo_error
+    return None
 
 
 def delete_user(*, email: str) -> bool:

@@ -167,11 +167,14 @@ class SharedAuthState:
         jti: str | None = None,
         csrf_token: str = "",
     ) -> dict[str, Any]:
-        now = int(time.time())
+        issued = time.time()
+        now = int(issued)
         jti = jti or uuid.uuid4().hex
         doc = {
             "jti": jti,
             "user_id": user_id,
+            # Sub-second issue time for the deleted-account marker comparison.
+            "created_at_f": issued,
             "csrf": csrf_token,
             "device_id": device_id,
             "ip": ip,

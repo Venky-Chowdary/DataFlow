@@ -184,19 +184,26 @@ def _issued_before_deletion(email: str, issued_at: Any) -> bool:
     """
     from services.user_store import account_deleted_since
 
-    try:
-        deleted_at = account_deleted_since(email)
-    except Exception:  # noqa: BLE001 — an unreadable marker store is not a deletion
-        logger.warning("deleted-account marker unreadable for a session check", exc_info=True)
-        return False
+    # DeletionMarkerUnavailable propagates: the caller answers 503 (review 5).
+    deleted_at = account_deleted_since(email)
     if deleted_at is None:
         return False
     try:
-        issued = int(issued_at) if issued_at is not None else 0
+        issued = float(issued_at) if issued_at is not None else 0.0
     except (TypeError, ValueError):
-        issued = 0
+        issued = 0.0
     # Unknown issue time on a deleted account: refuse (fail closed).
     return issued <= deleted_at
+
+
+def _deletion_reason(email: str, issued_at: Any) -> str | None:
+    from services.user_store import DeletionMarkerUnavailable
+
+    try:
+        return "account_deleted" if _issued_before_deletion(email, issued_at) else None
+    except DeletionMarkerUnavailable:
+        logger.warning("deleted-account marker unreadable; session refused with 503")
+        return "auth_store_unavailable"
 
 
 def _attach_user_reason(request: Request, token: str) -> str | None:
@@ -205,7 +212,8 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         from services.user_store import get_user_record as get_stored_user
 
         stored = get_stored_user(email)
-        if stored and stored.get("status") == "disabled":
+        # Same statuses as the cookie path (review 5): disabled and banned.
+        if stored and stored.get("status") in ("disabled", "banned"):
             return "disabled_user"
         if _session_idled_out(token, email):
             return "session_idle_timeout"
@@ -217,8 +225,10 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         # Even when the email has an account again: a session issued before
         # the old account's deletion belongs to that deleted account.
         jti = token_jti(token)
-        if jti and _issued_before_deletion(email, session_created_at(jti)):
-            return "account_deleted"
+        if jti:
+            refused = _deletion_reason(email, session_created_at(jti))
+            if refused:
+                return refused
         request.state.user_email = email
         if user:
             request.state.user = user
@@ -329,8 +339,9 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     # request: retry the membership/org move; the flag stays set if the
     # retry fails again, so this never swallows the failure.
     _heal_rekey_if_pending(stored, email)
-    if _issued_before_deletion(email, doc.get("created_at")):
-        return "account_deleted"
+    refused = _deletion_reason(email, doc.get("created_at_f") or doc.get("created_at"))
+    if refused:
+        return refused
     user = lookup_user(email)
     request.state.user_email = email
     # Never None: an identity with no static/stored entry (SSO, SCIM) is a viewer
@@ -510,6 +521,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         status_code=401,
                         content={"detail": "Authentication required"},
                         headers={"WWW-Authenticate": bearer_challenge()},
+                    )
+                if reason_code == "auth_store_unavailable":
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "detail": "Sign-in state cannot be verified right now. Try again shortly.",
+                            "reason": "auth_store_unavailable",
+                        },
                     )
                 if reason_code == "session_idle_timeout":
                     return JSONResponse(

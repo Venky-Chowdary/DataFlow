@@ -485,7 +485,10 @@ def deprovision_user(
     revoked_ids: list[str] = []
     kept_service_accounts = 0
     try:
-        user_store.update_user(email=normalized, status="disabled")
+        # A SCIM-only SSO identity has no stored account to disable (review 5):
+        # skip that step instead of failing before the revoke ever runs.
+        if user_store.get_user(normalized) is not None:
+            user_store.update_user(email=normalized, status="disabled")
         step = "revoke_sessions"
         sessions_revoked = auth_sessions.revoke_all_for_email(normalized)
         step = "revoke_api_keys"
@@ -567,6 +570,9 @@ def delete_user(user_id: str, *, actor: str) -> None:
             group["members"] = [member for member in group["members"] if member != user_id]
             _store_call(scim_store.update_group, group)
     user_store.delete_user(email=user["userName"])
+    # Unconditional: a SCIM-only identity has no stored account, so delete_user
+    # wrote no marker — its sessions must still never authenticate again.
+    user_store.mark_account_deleted(user["userName"])
     _store_call(scim_store.delete_user, user_id)
     _audit(
         "scim.user.delete",

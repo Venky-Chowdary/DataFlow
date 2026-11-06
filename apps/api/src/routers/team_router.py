@@ -316,6 +316,18 @@ async def delete_user_route(email: str, request: Request):
     if not get_user(target):
         raise HTTPException(status_code=404, detail="Account not found")
     delete_user(email=target)
+    # Revocation does not rest on the deletion marker alone (review 5): bearer
+    # sessions and cookie sessions of the account end now.
+    from services import auth_sessions
+    from services.auth_state import get_auth_state
+
+    auth_sessions.revoke_all_for_email(target)
+    try:
+        get_auth_state().revoke_all_for_user(target)
+    except Exception:  # noqa: BLE001 — the marker and bearer revoke already stand
+        import logging
+
+        logging.getLogger(__name__).warning("cookie session revoke failed for a deleted account", exc_info=True)
     _audit(
         "team.user.delete",
         actor=actor,
