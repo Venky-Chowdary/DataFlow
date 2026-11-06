@@ -2353,22 +2353,33 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     )
 
     try:
-        rows_written, ddl_log, dest_summary = write_destination_database(
-            dest,
-            records,
-            columns,
-            schema,
-            mappings,
-            validation_mode=transfer_req.validation_mode or "balanced",
-            backfill_new_fields=bool(transfer_req.backfill_new_fields),
-            write_mode=write_mode,
-            conflict_columns=None if parent_appends else (conflict_columns or None),
-            # Replay is a keyed upsert of the remediated rows (an insert on an
-            # append route). It is never a full-refresh overwrite, and a
-            # failure must not replace an object that already landed (R11-001).
-            sync_mode=replay_sync_mode,
-            protect_landed_object=True,
-        )
+        from services.pii_hash_keys import transfer_job_scope
+
+        # The replay digests with the PARENT job's hash_pii key version (retired
+        # versions are kept), so remediated rows match the rows the parent
+        # wrote; the child job records that version (review B2).
+        with transfer_job_scope(
+            child_req,
+            child_job_id,
+            store=get_mongodb_service,
+            version=str((job or {}).get("pii_hash_key_version") or "") or None,
+        ):
+            rows_written, ddl_log, dest_summary = write_destination_database(
+                dest,
+                records,
+                columns,
+                schema,
+                mappings,
+                validation_mode=transfer_req.validation_mode or "balanced",
+                backfill_new_fields=bool(transfer_req.backfill_new_fields),
+                write_mode=write_mode,
+                conflict_columns=None if parent_appends else (conflict_columns or None),
+                # Replay is a keyed upsert of the remediated rows (an insert on an
+                # append route). It is never a full-refresh overwrite, and a
+                # failure must not replace an object that already landed (R11-001).
+                sync_mode=replay_sync_mode,
+                protect_landed_object=True,
+            )
         rejected = int(dest_summary.get("rejected_rows") or 0)
         # Gate-8 on the child job — Airbyte-class post-write integrity (count +
         # checksum / keyed sample). Upsert into a live table may have extras;

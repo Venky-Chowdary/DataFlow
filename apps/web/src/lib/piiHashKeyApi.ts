@@ -28,16 +28,18 @@ export const PII_HASH_KEY_MIN_LENGTH = 24;
 
 /** The API's rule, word for word (services/pii_hash_keys.KEY_RULE). */
 export const PII_HASH_KEY_RULE =
-  "Use at least 128 random bits: 32 or more hex characters, base64 of 16 or more "
-  + "random bytes (24+ characters), or 32+ characters of random text — no repeated "
-  + "or sequential runs, no spaces at the ends.";
+  "Paste random key material: 32 or more hex characters, or base64 of 16 or more "
+  + "random bytes (for example the output of openssl rand -hex 32). Passwords, "
+  + "phrases and hashes of them are refused; press Rotate to have Datawrap "
+  + "generate a key.";
 
 /** What changes when a new key version becomes active (Rotate and Save alike). */
 export const PII_HASH_KEY_CHANGE_WARNING =
   "Every hash_pii digest written from now on changes. Digests already written keep the old "
   + "key's value, so rows upserted or joined on a hashed column will not match earlier rows; "
-  + "Validate warns on each route whose last run used the old version. The old version stays "
-  + "listed as retired.";
+  + "Validate warns on each route whose last run used the old version. A running job keeps "
+  + "its key until it ends; a continuous CDC job adopts the new key at its next batch. The old "
+  + "version stays listed as retired.";
 
 const URL = `${API_BASE}/workspace/pii-hash-key`;
 

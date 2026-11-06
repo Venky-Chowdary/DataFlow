@@ -32,7 +32,7 @@ from r8_security_world import world  # noqa: E402,F401
 
 RECIPE = {"version": 1, "steps": [{"op": "hash_pii", "column": "email"}]}
 LEAKS = ("PII_HASH_KEY", "DATAFLOW_", "DATAWRAP_", "Railway", "environment", "mongo", ".json")
-ADMIN_KEY = "4f1c9a7e2b8d03c5e6a1f9b7d2c4e8a0-workspace-digest-key"
+ADMIN_KEY = "9c3e71f04ab25d86e0f7c19b3a4d6e28f5b0c7a91d3e46f8a2c5b9e0d7f1a364"
 
 
 @pytest.fixture
@@ -143,12 +143,29 @@ def test_a_deployment_pinned_key_is_reported_not_overridden(keyed, monkeypatch):
 
 # ------------------------------------------------ review follow-up (#5, #6)
 
-@pytest.mark.parametrize("weak", ["abcdefgh" * 4, "password" + "12345678" * 3, "0123456789abcdef" * 2,
-                                  "abcdefghijklmnopqrstuvwxyz012345", "Passw0rd!" * 4])
+import base64 as _b64
+import hashlib as _hl
+
+_WEAK = [
+    "abcdefgh" * 4, "password" + "12345678" * 3, "0123456789abcdef" * 2,
+    "abcdefghijklmnopqrstuvwxyz012345", "Passw0rd!" * 4,
+    # review B1: encodings credited as random without decoding them
+    _hl.sha1(b"password").hexdigest(), _hl.md5(b"dragon").hexdigest(),
+    _hl.sha256(b"password").hexdigest(), _hl.sha256(b"dragon").hexdigest(),
+    b"password12345678".hex(), _b64.b64encode(b"passwordpassword").decode(),
+    _b64.b64encode(b"correcthorsebatterystaple").decode(),
+    _b64.b64encode(_hl.sha256(b"password").digest()).decode(),
+    # plain English, and phrases that happen to be valid base64
+    "correcthorsebatterystaplecorrect", "The quick brown fox jumps over the lazy dog",
+    "CorrectHorseBatteryStaple2024xyz", "00" * 32, bytes(range(32)).hex(),
+]
+
+
+@pytest.mark.parametrize("weak", _WEAK)
 def test_guessable_keys_are_refused(keyed, weak):
     response = keyed.owner.put("/api/v1/workspace/pii-hash-key", json={"key": weak})
     assert response.status_code == 422, response.text
-    assert "128 random bits" in response.text
+    assert "random key material" in response.text or "common password" in response.text, response.text
     assert weak not in response.text
 
 
@@ -173,3 +190,16 @@ def test_a_refused_body_never_echoes_the_submitted_key(keyed, body):
     submitted = str(next(iter(body.values())))
     assert submitted not in response.text
     assert submitted[:40] not in response.text
+
+
+def test_genuine_random_keys_are_never_refused_by_the_pattern_rules():
+    """review S3: openssl rand -hex 32 style keys are not refused by chance."""
+    import secrets
+
+    from services.pii_hash_keys import key_strength_problem
+
+    for _ in range(5000):
+        assert key_strength_problem(secrets.token_hex(32)) == ""
+        assert key_strength_problem(secrets.token_hex(16)) == ""
+        assert key_strength_problem(_b64.b64encode(secrets.token_bytes(16)).decode()) == ""
+        assert key_strength_problem(secrets.token_urlsafe(32)) == ""

@@ -3596,6 +3596,11 @@ def _run_cdc_single_stream(
         acked when the dump finishes.
         """
         nonlocal chunk_idx, total_chunks, eos_active
+        # A long CDC drain adopts a rotated hash_pii key between batches and
+        # records each version it used (review S6); a batch never mixes keys.
+        from services.pii_hash_keys import renew_job_key_at_boundary
+
+        renew_job_key_at_boundary()
         from services.cdc_resume_tokens import (
             is_durable_log_resume_token,
             is_side_channel_resume_token,

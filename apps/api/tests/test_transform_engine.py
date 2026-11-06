@@ -169,9 +169,10 @@ def test_hash_pii_fails_closed_without_secret(monkeypatch):
     from services import pii_hash_keys
 
     def _unavailable(_workspace_id):
-        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
+        raise RuntimeError("store down")
 
-    monkeypatch.setattr(pii_hash_keys, "workspace_key", _unavailable)
+    # The key document cannot be read (one read serves secret and version).
+    monkeypatch.setattr(pii_hash_keys, "_active_doc", _unavailable)
     val, err = apply_transform("secret@email.com", "hash_pii")
     assert val is None
     assert err and "hashing key" in err and "PII_HASH_KEY" not in err

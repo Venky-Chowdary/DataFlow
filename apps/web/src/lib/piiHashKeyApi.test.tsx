@@ -64,7 +64,7 @@ describe("Settings → Security: hash_pii key", () => {
 
   it("checks a typed key the way the API does", () => {
     assert.equal(PII_HASH_KEY_MIN_LENGTH, 24);
-    assert.match(piiHashKeyInputProblem("short"), /128 random bits/);
+    assert.match(piiHashKeyInputProblem("short"), /random key material/);
     assert.match(piiHashKeyInputProblem(` ${"k".repeat(40)}`), /spaces/);
     assert.equal(piiHashKeyInputProblem("0123456789abcdef0123456789abcdef"), "");
   });
