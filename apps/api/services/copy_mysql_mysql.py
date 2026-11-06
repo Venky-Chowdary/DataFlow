@@ -71,6 +71,21 @@ def _identity_charset_tails(cur: Any, dst_cur: Any, table: str) -> dict[str, str
     dest_charsets = {str(r[0]).lower() for r in dst_cur.fetchall()}
     dst_cur.execute("SELECT COLLATION_NAME FROM information_schema.COLLATIONS")
     dest_collations = {str(r[0]).lower() for r in dst_cur.fetchall()}
+    # MariaDB 10.10+ lists its uca1400 collations under their charset-qualified
+    # name (``utf8mb4_uca1400_ai_ci``) only in
+    # COLLATION_CHARACTER_SET_APPLICABILITY.FULL_COLLATION_NAME; COLLATIONS has
+    # the charset-less ``uca1400_ai_ci``. Missing them dropped COLLATE even on
+    # the same MariaDB, so ``_as_cs`` landed as the default ``_ai_ci``.
+    dst_cur.execute(
+        "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = "
+        "'information_schema' AND TABLE_NAME = 'COLLATION_CHARACTER_SET_APPLICABILITY' "
+        "AND COLUMN_NAME = 'FULL_COLLATION_NAME'"
+    )
+    if int((dst_cur.fetchone() or [0])[0] or 0):
+        dst_cur.execute(
+            "SELECT FULL_COLLATION_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY"
+        )
+        dest_collations |= {str(r[0]).lower() for r in dst_cur.fetchall() if r and r[0]}
     cur.execute(
         "SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME "
         "FROM information_schema.COLUMNS "

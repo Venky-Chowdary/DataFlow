@@ -153,3 +153,40 @@ def test_mysql_to_mariadb_identity_copy_keeps_charset_and_only_known_collations(
     finally:
         _sql("mysql", f"DROP TABLE IF EXISTS `{src_t}`")
         _sql("mariadb", f"DROP TABLE IF EXISTS `{src_t}`")
+
+
+@pytest.mark.parametrize("src_engine", ["mariadb", "mysql"])
+def test_identity_copy_into_mariadb_keeps_uca1400_and_listed_collations(client, src_engine):
+    """MariaDB 10.10+ names utf8mb4_uca1400_* only in
+    COLLATION_CHARACTER_SET_APPLICABILITY.FULL_COLLATION_NAME; the identity copy
+    must still carry it (as_cs must not land as the default ai_ci)."""
+    from tests.test_r14_mysql_latin1_cp1252_strict_e2e import _mariadb_conn
+
+    _mariadb_conn().close()  # skips without MariaDB
+    token = uuid.uuid4().hex[:8]
+    src_t, dst_t = f"r14uca_{token}", f"r14ucad_{token}"
+    coll = "utf8mb4_uca1400_as_cs" if src_engine == "mariadb" else "utf8mb4_bin"
+    try:
+        _sql(src_engine, f"CREATE TABLE `{src_t}` (pmid int PRIMARY KEY, "
+                         f"nm varchar(20) CHARACTER SET utf8mb4 COLLATE {coll}, "
+                         "t tinytext CHARACTER SET latin1 COLLATE latin1_swedish_ci)")
+        for row in [(1, "a", "’"), (2, "A", " "), (3, "á", None), (4, "", "")]:
+            _sql(src_engine, f"INSERT INTO `{src_t}` VALUES (%s, %s, %s)", row)
+        src = _connector(src_engine, _cfg(src_engine), "source")
+        dst = _connector("mariadb", _cfg("mariadb"), "destination")
+        args = {"source_connector_id": src, "dest_connector_id": dst, "dest_table": dst_t,
+                "source_table": src_t, "sync_mode": "full_refresh_overwrite",
+                "primary_key": "pmid", "validation_mode": "strict"}
+        for run in (1, 2):
+            ok, staged = h.mcp_call(client, "start_transfer", args)
+            assert ok, {"error": staged}
+            h.confirm(client, staged["ack_id"], reason=f"r14-uca-{run}")
+        cols = dict((r[0], r[1]) for r in _sql(
+            "mariadb", "SELECT COLUMN_NAME, COLLATION_NAME FROM information_schema.COLUMNS "
+                       f"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{dst_t}'"))
+        assert cols["nm"] == coll and cols["t"] == "latin1_swedish_ci", cols
+        got = {r[0]: r for r in _sql("mariadb", f"SELECT pmid, nm, t FROM `{dst_t}`")}
+        assert got == {r[0]: r for r in _sql(src_engine, f"SELECT pmid, nm, t FROM `{src_t}`")}
+    finally:
+        _sql(src_engine, f"DROP TABLE IF EXISTS `{src_t}`")
+        _sql("mariadb", f"DROP TABLE IF EXISTS `{dst_t}`")
