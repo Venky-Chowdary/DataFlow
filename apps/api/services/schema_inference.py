@@ -742,18 +742,21 @@ def infer_type(
 
 def infer_schema_map(
     samples_by_field: dict[str, list[str]],
+    *,
+    invalid_calendar_votes: bool = False,
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     """Canonical choke point: field → logical type + full intelligence records.
 
     All introspect paths (Mongo, SQL sample refine, files) should call this
     instead of ad-hoc ``infer_type`` loops so semantic_role / notes stay attached.
+    ``invalid_calendar_votes`` only from a file's own rows (see infer_column).
     """
     schema: dict[str, str] = {}
     intel: dict[str, dict[str, Any]] = {}
     token = _settled_number_locale(samples_by_field)
     try:
         for field, samples in samples_by_field.items():
-            rec = infer_column(samples, field_name=field)
+            rec = infer_column(samples, field_name=field, invalid_calendar_votes=invalid_calendar_votes)
             schema[field] = str(rec["logical_type"])
             intel[field] = rec
     finally:

@@ -104,3 +104,36 @@ def test_a_zoned_file_column_with_one_impossible_stamp_stays_zoned():
                                    "10:30:00", "25:61", "2024-13", "x" * 300])
 def test_values_the_rule_does_not_flag(token):
     assert _invalid_calendar_family(token) == ""
+
+
+def test_every_file_path_types_an_impossible_day_column_the_same_way():
+    """Review: FileParser.infer_schema / infer_schema_map take the same opt-in,
+    passed by the file adapters only (adapters file/GCS/ADLS/S3 reads,
+    file_stream peeks, Kafka sampling, the upload profile route)."""
+    import re as _re
+    from pathlib import Path
+
+    from services.file_parser import FileParser
+    from services.schema_inference import infer_schema_map
+
+    records = [{"d": v} for v in [*REAL, "2024-02-30"]]
+    assert FileParser.infer_schema(records, invalid_calendar_votes=True)["d"] == "DATE"
+    assert FileParser.infer_schema(records)["d"] == "VARCHAR"
+    assert infer_schema_map({"d": [*REAL, "2024-02-30"]}, invalid_calendar_votes=True)[0]["d"] == "DATE"
+
+    api = Path(__file__).resolve().parents[1]
+    adapters = (api / "src/transfer/adapters.py").read_text()
+    # Database readers (DynamoDB, Elasticsearch) keep their text columns text.
+    for engine in ("dynamodb", "elasticsearch"):
+        block = adapters[adapters.index(f'if db_type == "{engine}":'):]
+        block = block[: block.index("return _pack_source_read")]
+        assert "invalid_calendar_votes" not in block, engine
+    for engine in ("gcs", "adls", "s3"):
+        block = adapters[adapters.index(f'if db_type == "{engine}":'):]
+        block = block[: block.index("return _pack_source_read")]
+        assert "invalid_calendar_votes=True" in block, engine
+    file_stream = (api / "src/transfer/file_stream.py").read_text()
+    calls = _re.findall(r"FileParser\.infer_schema\(([^()]*)\)", file_stream)
+    assert calls and all("invalid_calendar_votes=True" in c for c in calls), calls
+    router = (api / "src/routers/connectors_router.py").read_text()
+    assert "FileParser.infer_schema(result.data, invalid_calendar_votes=True)" in router

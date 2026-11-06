@@ -445,7 +445,7 @@ def _peek_parsed_file_source(
                 if len(preview_rows) < 100:
                     preview_rows.append(list(row))
         sample = [dict(zip(headers, row)) for row in preview_rows]
-        schema = FileParser.infer_schema(sample)
+        schema = FileParser.infer_schema(sample, invalid_calendar_votes=True)
         return headers, schema, total, sample
 
     if file_type in ("jsonl", "ndjson"):
@@ -469,7 +469,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
@@ -482,7 +482,7 @@ def _peek_parsed_file_source(
         if not headers:
             raise ValueError("Excel file has no header row")
         sample = [dict(zip(headers, row)) for row in rows[:100]]
-        schema = FileParser.infer_schema(sample)
+        schema = FileParser.infer_schema(sample, invalid_calendar_votes=True)
         return headers, schema, total, sample
 
     if file_type == "parquet":
@@ -587,7 +587,7 @@ def _peek_parsed_file_source(
                 '[{...}], a wrapper like {"data":[{...}]}, or a single object record.'
             )
         headers = sorted(columns)
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "xml":
@@ -620,7 +620,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("XML file has no record rows")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, int(total), sample_objs[:100]
 
     if file_type == "yaml":
@@ -653,7 +653,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("YAML file has no record rows")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, int(total), sample_objs[:100]
 
     if file_type == "fixed_width":
@@ -691,7 +691,7 @@ def _peek_parsed_file_source(
         if total == 0:
             raise ValueError("Fixed-width file has no record rows")
         headers = list(columns.keys())
-        schema = FileParser.infer_schema(sample_objs)
+        schema = FileParser.infer_schema(sample_objs, invalid_calendar_votes=True)
         return headers, schema, int(total), sample_objs[:100]
 
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")

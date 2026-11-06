@@ -2760,7 +2760,7 @@ def profile_file_upload(
             detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
         )
 
-    schema = FileParser.infer_schema(result.data)
+    schema = FileParser.infer_schema(result.data, invalid_calendar_votes=True)
     try:
         from services.data_profiler import merge_profiler_schema, profile_dataset
 

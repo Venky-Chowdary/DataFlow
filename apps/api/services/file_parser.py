@@ -1767,8 +1767,13 @@ class FileParser:
         return cell_to_string(value)
 
     @staticmethod
-    def infer_schema(records: list[dict]) -> dict[str, str]:
-        """Infer rich schema from records using statistical type inference."""
+    def infer_schema(records: list[dict], *, invalid_calendar_votes: bool = False) -> dict[str, str]:
+        """Infer rich schema from records using statistical type inference.
+
+        ``invalid_calendar_votes``: True only for a file's own rows (uploads,
+        object stores, SFTP, Kafka messages) — an impossible day among real
+        dates then votes DATE and is held out per cell (QA browser 3).
+        """
         if not records:
             return {}
 
@@ -1784,7 +1789,7 @@ class FileParser:
 
         from services.schema_inference import infer_schema_map
 
-        schema, _intel = infer_schema_map(samples)
+        schema, _intel = infer_schema_map(samples, invalid_calendar_votes=invalid_calendar_votes)
         return schema
 
 

@@ -1467,7 +1467,7 @@ def _stream_database_transfer_impl(
                     sample_recs = [
                         dict(zip(run.cfg.columns, row)) for row in (probe.rows or [])[:50]
                     ]
-                    inferred = FileParser.infer_schema(sample_recs) if sample_recs else {}
+                    inferred = FileParser.infer_schema(sample_recs, invalid_calendar_votes=True) if sample_recs else {}
                     run.cfg.schema = {c: inferred.get(c, "TEXT") for c in run.cfg.columns}
                 except Exception:
                     run.cfg.schema = {c: "TEXT" for c in run.cfg.columns}

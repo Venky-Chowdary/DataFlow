@@ -230,7 +230,7 @@ def parse_file_content(
     schema = (
         dict(writer_schema)
         if writer_schema
-        else FileParser.infer_schema(result.data)
+        else FileParser.infer_schema(result.data, invalid_calendar_votes=True)
     )
     from services.value_serializer import payload_record_wire
 
@@ -268,7 +268,7 @@ def parse_file_route_sample(
             for row in rows[:preview_rows]
         ]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {h: "string" for h in headers}
         )
@@ -283,7 +283,7 @@ def parse_file_route_sample(
         dict(writer_schema)
         if writer_schema
         else (
-            FileParser.infer_schema(sample)
+            FileParser.infer_schema(sample, invalid_calendar_votes=True)
             if sample
             else {c: "string" for c in result.columns}
         )
@@ -1071,7 +1071,7 @@ def read_source_database(
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {c: "string" for c in batch.headers}
         )
@@ -1093,7 +1093,7 @@ def read_source_database(
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {c: "string" for c in batch.headers}
         )
@@ -1115,7 +1115,7 @@ def read_source_database(
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = (
-            FileParser.infer_schema(records)
+            FileParser.infer_schema(records, invalid_calendar_votes=True)
             if records
             else {c: "string" for c in batch.headers}
         )
