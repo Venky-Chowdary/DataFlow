@@ -583,15 +583,21 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
             detail="Re-anchoring the audit key history is a platform administrator action.",
         )
     try:
+        from services.evidence_chain import verify_chain
+
+        report = verify_chain()
         result = keystore.reanchor_key_history(
             actor=actor_from_request(request), reason=body.reason, dry_run=body.dry_run,
+            history_seq=int(report.get("key_history_seq") or 0),
+            superseded=list(report.get("key_history_signed_positions") or []),
+            history_problem=str(report.get("key_history_tampered") or ""),
         )
     except keystore.KeystoreUnavailable as exc:
         raise HTTPException(status_code=503, detail="The audit key history is not reachable.") from exc
     record_security_event(
         "audit.key_history.reanchor", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
-        details={"dry_run": body.dry_run, "entries_dropped": result["entries_dropped"]},
+        details={"dry_run": body.dry_run, "entries_resealed": len(result["entries_resealed"])},
     )
     return result
 

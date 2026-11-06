@@ -301,7 +301,7 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         # the limit, not a deletion. A whole-store walk asks the checkpoints.
         prefix_explained = True if window.truncated_by_limit else None
         link_field = "prev_hash"
-    anchor = _key_history_anchor(_hmac_event_hash)
+    anchor = _key_history_state(_hmac_event_hash)
     findings = _walk(
         events, positions, _hmac_event_hash, truncations,
         link_field=link_field, prefix_explained=prefix_explained,
@@ -309,12 +309,14 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         anchor=anchor,
     )
     history_tampered = anchor["tampered"]
+    history_unreadable = anchor["unreadable"]
     head = events[-1]
     found = [f.as_dict() for f in findings]
     for f in found:
         ev = events[f["index"]]
         f["cause"] = _cause(f["kind"], ev)
         f["category"] = finding_category(f["kind"], f["cause"])
+        f["chain_seq"] = _position(ev) or None
         if not ws:
             f["workspace_id"] = _event_workspace(ev) or None
     found, reanchored = split_reanchored(found, events)
@@ -326,8 +328,10 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         # The key history's anchor was removed or altered: the lost-key /
         # relabel verdicts rest on it, so that alone is tampering.
         categories["tampering"] += 1
-    if history_tampered:
+    if history_tampered or categories["tampering"]:
         status = "findings"
+    elif categories["inconclusive"]:
+        status = "inconclusive"
     elif not found:
         status = "verified"
     elif categories["unverifiable_key_lost"] == len(found):
@@ -363,6 +367,9 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
             "verified": not found and not history_tampered,
             "status": status,
             "key_history_tampered": history_tampered or None,
+            "key_history_unreadable": history_unreadable or None,
+            "key_history_seq": anchor["history_seq"] or None,
+            "key_history_signed_positions": anchor["signed_kh"],
             "categories": categories,
             "unverifiable_key_lost": lost,
             "tampering_detected": categories["tampering"] > 0,
@@ -437,11 +444,12 @@ def _walk(
     link-checked (older records predate it).
     """
     from services import audit_chain_keystore as keystore
-    from services.audit_chain_keys import check_signature, known_key_history
+    from services.audit_chain_keys import check_signature, keyring
 
-    history = known_key_history()
     if anchor is None:
-        anchor = _key_history_anchor(hmac_of)
+        anchor = _key_history_state(hmac_of)
+    history = anchor["history"]
+    held = keyring()
     signatures = [check_signature(events[i], hmac_of) if events[i].get("event_hash") else ("", None)
                   for i in positions]
     # The time of the next record that verifies, per walked position: the
@@ -479,13 +487,14 @@ def _walk(
             )
         else:
             verdict, key_id = signatures[n]
-            relabel = (
+            judged, relabel = (
                 _relabel_reason(
                     key_id, history, trusted_at, anchor, seq=_position(event),
                     own_time=_as_time(event.get("time")), next_trusted=next_trusted[n],
+                    proven_from=_relabelled_from(event, held, hmac_of),
                 )
                 if verdict == "unknown_key"
-                else ""
+                else ("", "")
             )
             if verdict == "ok":
                 stamp = _as_time(event.get("time"))
@@ -493,7 +502,11 @@ def _walk(
                     trusted_at = stamp
                     if key_id and (key_id not in verified_by_key or stamp > verified_by_key[key_id]):
                         verified_by_key[key_id] = stamp
-            if relabel:
+            if judged == "inconclusive":
+                findings.append(
+                    ChainFinding("unknown_key_unjudged", index=index, event_id=event_id, detail=relabel)
+                )
+            elif relabel:
                 findings.append(
                     ChainFinding(
                         "unknown_key_after_keyring",
@@ -632,92 +645,146 @@ def _walk(
 #: record's own time, earlier than its verified predecessor's or later than
 #: its verified successor's, reads as edited (F2).
 CLOCK_SKEW = timedelta(minutes=5)
-_ANCHOR_INDEXED: set[str] = set()
+_KH_INDEXED: set[str] = set()
 
 
-def _key_history_anchor(hmac_of: Any) -> dict[str, Any]:
-    """The key history's epoch, located in the chain (review of a350ff42a).
+def _relabelled_from(event: dict[str, Any], held: dict[str, bytes], hmac_of: Any) -> str:
+    """The held key the record verifies under once its ``key_id`` is set back.
 
-    ``epoch`` (time) and ``history_seq`` (chain position) say where the sealed
-    key history begins; ``tampered`` is why it cannot be trusted, or "".
+    Proof of a relabel that needs none of the record's own unverifiable
+    fields: only a holder of that key could have produced its hash.
+    """
+    stored = str(event.get("event_hash") or "")
+    for kid, key in held.items():
+        if stored and hmac_of({**event, "key_id": kid}, key) == stored:
+            return kid
+    return ""
 
-    The epoch row names the signed ``audit.key_history.began`` (or, after an
-    admin re-anchor, ``audit.key_history.reanchored``) record it was created
-    with. That record must still be in the chain with that hash (F1). An
-    earlier verified "began" record after the last re-anchor means the
-    history, its copy and the epoch were wiped and recreated: tampering, and
-    the history is judged from that earlier record, so a relabel in between
-    still reads as one.
+
+def _key_history_state(hmac_of: Any) -> dict[str, Any]:
+    """Where the sealed key history begins, judged from VERIFIED records only.
+
+    Every signed record carries the history's position in its signed fields
+    (``kh_seq``: the chain position of the "began" or current re-anchor
+    record; ``kh_epoch``: its epoch id). ``history_seq`` is the EARLIEST
+    ``kh_seq`` any verified record signs (or the epoch's anchor). A verified
+    ``kh_seq`` the current epoch cannot reach through verified re-anchor
+    records (whose signed details name the positions they supersede) means
+    the history was reset or rolled back: ``tampered``. Nothing here reads an
+    unverifiable record's action, resource, time or key id. Records written
+    before ``kh_seq`` existed carry none and never move the anchor.
+
+    ``unreadable``: the epoch or the entries could not be read — unknown keys
+    are then not judged at all (inconclusive), never excused as lost.
     """
     from services import audit_chain_keystore as keystore
+    from services.audit_chain_keys import check_signature
 
-    out: dict[str, Any] = {"epoch": None, "history_seq": 0, "tampered": ""}
+    out: dict[str, Any] = {
+        "epoch": None, "history_seq": 0, "tampered": "", "unreadable": "", "history": {},
+        "prior_tampering": [], "resolved": [], "configured": True, "signed_kh": [],
+    }
+    rec: dict[str, str] | None = None
     try:
-        rec = keystore.epoch_record()
+        rec = keystore.epoch_record(fresh=True)
     except keystore.HistoryTampered as exc:
         out["tampered"] = str(exc)
-        return out
-    except Exception:  # noqa: BLE001 - history unreadable: judged without it
-        return out
-    if not rec:
-        return out
-    out["epoch"] = _as_time(rec.get("at"))
-    head_seq = _position({"chain_seq": rec.get("head_seq")})
-    out["history_seq"] = head_seq
+        if "MAC" in str(exc) or "disagrees" in str(exc):
+            # The MAC key changed (a secrets-key change) or the row was edited:
+            # no entry can be trusted, so no unknown key can be judged.
+            out["unreadable"] = f"the key history cannot be trusted ({exc})"
+    except Exception as exc:  # noqa: BLE001 - unreadable: inconclusive, never "judged without"
+        out["unreadable"] = f"the key history epoch could not be read ({type(exc).__name__})"
     try:
-        from services.audit_chain_keys import check_signature
+        out["history"] = keystore.key_history(strict=True)
+    except Exception as exc:  # noqa: BLE001
+        out["unreadable"] = out["unreadable"] or (
+            f"the key history entries could not be read ({type(exc).__name__})"
+        )
+    if rec is None and not out["tampered"] and not out["unreadable"]:
+        out["configured"] = False  # no control-plane database: no history kept
+        return out
+    head_seq = _position({"chain_seq": (rec or {}).get("head_seq")}) if rec else 0
+    if rec:
+        out["epoch"] = _as_time(rec.get("at"))
+    try:
         from services.control_plane_store import mongo_collection
 
         coll = mongo_collection("audit_events")
-        if coll is None or not head_seq:
+        if coll is None:
+            out["history_seq"] = head_seq
             return out
-        _ensure_anchor_index(coll)
-        anchors: list[tuple[int, str, str, Any]] = []
-        cursor = coll.find(
-            {"resource": "audit_chain_key_history",
-             "action": {"$in": [keystore.EPOCH_ACTION, keystore.REANCHOR_ACTION]}}
-        ).sort("chain_seq", 1).limit(1000)
-        for doc in cursor:
-            if doc.get("event_hash") and check_signature(doc, hmac_of)[0] == "ok":
-                anchors.append((_position(doc), str(doc.get("action")), str(doc.get("event_hash")),
-                                _as_time(doc.get("time"))))
-        head = [a for a in anchors if a[2] == str(rec.get("head_hash") or "")]
-        if not head or head[0][0] != head_seq:
+        _ensure_kh_index(coll)
+
+        def verified(doc: dict[str, Any]) -> bool:
+            return bool(doc.get("event_hash")) and check_signature(doc, hmac_of)[0] == "ok"
+
+        signed_kh: set[int] = set()
+        for value in coll.distinct("kh_seq"):
+            v = _position({"chain_seq": value})
+            if v and any(verified(d) for d in coll.find({"kh_seq": value}).limit(20)):
+                signed_kh.add(v)
+        reanchors = [
+            d for d in coll.find({"action": keystore.REANCHOR_ACTION}).sort("chain_seq", 1).limit(1000)
+            if verified(d) and _position({"chain_seq": d.get("kh_seq")}) == _position(d)
+        ]
+        if head_seq:
+            anchor = next((d for d in coll.find({"chain_seq": head_seq}).limit(5)
+                           if str(d.get("event_hash") or "") == str(rec.get("head_hash") or "")), None)
+            ok = (anchor is not None and verified(anchor)
+                  and _position({"chain_seq": anchor.get("kh_seq")}) == head_seq
+                  and str(anchor.get("kh_epoch") or "") == str(rec.get("epoch_id") or ""))
             purged = coll.find_one({"chain_seq": {"$lte": head_seq}}, {"_id": 1}) is None
-            if not purged:
-                out["tampered"] = (
+            if not ok and not purged:
+                out["tampered"] = out["tampered"] or (
                     "the chain record that anchors the key history (position "
                     f"{head_seq}) is missing or no longer verifies"
                 )
-            return out
-        reanchors = [a[0] for a in anchors if a[1] == keystore.REANCHOR_ACTION and a[0] <= head_seq]
-        since = max(reanchors) if reanchors else 0
-        earlier = [a for a in anchors if since <= a[0] < head_seq]
-        if earlier:
-            began = earlier[0]
-            out["history_seq"] = began[0]
-            out["epoch"] = began[3] or out["epoch"]
-            out["tampered"] = (
-                f"the key history was reset: it began at chain position {began[0]}, "
-                f"but its epoch now names position {head_seq} with no admin re-anchor between"
-            )
-    except Exception as exc:  # noqa: BLE001 - the chain walk still reports what it can
+            # Positions the current epoch legitimately supersedes, through
+            # verified re-anchor records reachable from it.
+            legit = {head_seq}
+            changed = True
+            while changed:
+                changed = False
+                for r in reanchors:
+                    if _position(r) in legit:
+                        d = r.get("details") or {}
+                        for v in [d.get("prev_history_seq"), *(d.get("superseded_kh_seq") or [])]:
+                            v = _position({"chain_seq": v})
+                            if v and v not in legit:
+                                legit.add(v)
+                                changed = True
+            stray = sorted(v for v in signed_kh if v not in legit)
+            if stray:
+                earlier = [v for v in stray if v < head_seq]
+                out["tampered"] = out["tampered"] or (
+                    f"the key history was reset: verified records sign the history begun at "
+                    f"chain position {earlier[0]}, but its epoch now names position {head_seq} "
+                    "with no verified re-anchor between"
+                    if earlier
+                    else f"the key history epoch was rolled back: verified records sign position "
+                    f"{stray[0]}, after the epoch's {head_seq}"
+                )
+        out["signed_kh"] = sorted(signed_kh)
+        starts = sorted(signed_kh | ({head_seq} if head_seq else set()))
+        out["history_seq"] = starts[0] if starts else 0
+    except Exception as exc:  # noqa: BLE001 - the anchor could not be checked: inconclusive
+        out["unreadable"] = out["unreadable"] or (
+            f"the key history anchor could not be checked ({type(exc).__name__})"
+        )
         logger.warning("key history anchor not checked: %s", type(exc).__name__)
     return out
 
 
-def _ensure_anchor_index(coll: Any) -> None:
+def _ensure_kh_index(coll: Any) -> None:
     ns = str(getattr(coll, "full_name", "") or id(coll))
-    if ns in _ANCHOR_INDEXED:
+    if ns in _KH_INDEXED:
         return
-    _ANCHOR_INDEXED.add(ns)
+    _KH_INDEXED.add(ns)
     try:
-        coll.create_index(
-            [("action", 1), ("chain_seq", 1)], name="key_history_anchor",
-            partialFilterExpression={"resource": "audit_chain_key_history"},
-        )
+        coll.create_index([("kh_seq", 1)], name="key_history_position", sparse=True)
     except Exception as exc:  # noqa: BLE001 - the lookup works without it, slower
-        logger.warning("key history anchor index not created: %s", str(exc)[:200])
+        logger.warning("key history position index not created: %s", str(exc)[:200])
 
 
 def _trusted_time_before(first: dict[str, Any], hmac_of: Any) -> datetime | None:
@@ -761,56 +828,73 @@ def _relabel_reason(
     seq: int = 0,
     own_time: datetime | None = None,
     next_trusted: datetime | None = None,
-) -> str:
-    """Why an unknown-key record is a relabel, or "" when it may be a lost key.
+    proven_from: str = "",
+) -> tuple[str, str]:
+    """``(judgement, detail)`` for a record naming a key this deployment does not hold.
 
-    Judged by chain position and the trusted clock, never by the time the
-    record itself claims (F2):
-    * a key never on the sealed history, on a record after the position the
-      history began at, was never this deployment's key;
-    * a key on the history that stopped signing well before the trusted clock
-      (the last verified record before it, or the history's own anchor) was
-      relabelled onto the record;
-    * a record whose own time runs backwards against its verified neighbours
-      had its time edited.
-    Before the history began (pre-upgrade deploys) an unknown key is a lost key.
+    ``("relabel", why)`` is tampering; ``("inconclusive", why)`` means it
+    cannot be judged (history unreadable); ``("", "")`` may be a lost key.
+    In order:
+    * its hash verifies under a held key once ``key_id`` is set back: relabel;
+    * the history is unreadable: inconclusive, never lost;
+    * its own time runs backwards/forwards against its verified neighbours by
+      more than :data:`CLOCK_SKEW`: an edit;
+    * a key on the history that stopped signing well before the trusted clock: relabel;
+    * a key never on the history, at a chain position after the history began
+      (``history_seq``, from verified records' signed ``kh_seq``): relabel.
+    Before that position (pre-upgrade deploys) an unknown key is a lost key.
     """
+    if proven_from:
+        return "relabel", (
+            f"Names key {key_id}, but its hash verifies under held key {proven_from}: "
+            "the record's key id was changed. Counted as tampering."
+        )
+    if anchor.get("unreadable"):
+        # A tampered history is still judged by position (failing toward
+        # tampering); only one that could not be read is not judged at all.
+        why = anchor.get("unreadable")
+        return "inconclusive", (
+            f"Names key {key_id}, which this deployment does not hold, and {why}: whether "
+            "it is a lost key or a relabel cannot be judged, so it is neither excused nor verified."
+        )
     epoch = anchor.get("epoch")
     history_seq = int(anchor.get("history_seq") or 0)
     after_history = bool(history_seq and seq and seq > history_seq)
     if after_history and epoch is not None and (trusted_at is None or trusted_at < epoch):
         trusted_at = epoch  # the anchor record verified, and this one follows it
-    if own_time is not None and trusted_at is not None and own_time < trusted_at - CLOCK_SKEW:
-        return (
-            f"Names key {key_id} and claims {own_time.isoformat()}, earlier than the "
-            f"verified record before it ({trusted_at.isoformat()}): the record was "
-            "back-dated. Counted as tampering."
-        )
-    if own_time is not None and next_trusted is not None and own_time > next_trusted + CLOCK_SKEW:
-        return (
-            f"Names key {key_id} and claims {own_time.isoformat()}, later than the "
-            f"verified record after it ({next_trusted.isoformat()}): the record's time "
-            "was edited. Counted as tampering."
-        )
     entry = history.get(str(key_id or ""))
+    skew = CLOCK_SKEW
+    if own_time is not None:
+        if trusted_at is not None and own_time < trusted_at - skew:
+            return "relabel", (
+                f"Names key {key_id} and claims {own_time.isoformat()}, earlier than the "
+                f"verified record before it ({trusted_at.isoformat()}): the record was "
+                "back-dated. Counted as tampering."
+            )
+        if next_trusted is not None and own_time > next_trusted + skew:
+            return "relabel", (
+                f"Names key {key_id} and claims {own_time.isoformat()}, later than the "
+                f"verified record after it ({next_trusted.isoformat()}): the record's time "
+                "was edited. Counted as tampering."
+            )
     if entry is not None:
         last = _as_time(entry.get("last_seen"))
         if last is not None and trusted_at is not None and trusted_at > last + RELABEL_SLACK:
-            return (
+            return "relabel", (
                 f"Names key {key_id}, which last signed at {last.isoformat()}, on a record "
                 f"written after {trusted_at.isoformat()}: the key id was changed. "
                 "Counted as tampering."
             )
-        return ""
+        return "", ""
     if after_history or (
         not seq and epoch is not None and trusted_at is not None and trusted_at >= epoch
     ):
-        return (
+        return "relabel", (
             f"Names key {key_id}, which this deployment never signed with, on a record "
             "after the key history began: every writer since signs with a key on that "
             "history, so the record's key id was changed. Counted as tampering."
         )
-    return ""
+    return "", ""
 
 
 def _position(event: dict[str, Any]) -> int:
@@ -821,7 +905,7 @@ def _position(event: dict[str, Any]) -> int:
 
 
 #: Report categories. Only ``tampering`` means content or history was changed.
-CATEGORIES = ("tampering", "fork", "unverifiable_key_lost", "legacy_hash_input")
+CATEGORIES = ("tampering", "fork", "unverifiable_key_lost", "legacy_hash_input", "inconclusive")
 
 
 def finding_category(kind: str, cause: str) -> str:
@@ -829,6 +913,8 @@ def finding_category(kind: str, cause: str) -> str:
         return "fork"
     if kind == "key_mismatch":
         return "unverifiable_key_lost"
+    if kind == "unknown_key_unjudged":
+        return "inconclusive"
     if kind == "event_hash_mismatch" and cause == "legacy_datetime_roundtrip":
         return "legacy_hash_input"
     return "tampering"

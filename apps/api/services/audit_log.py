@@ -229,8 +229,15 @@ def append_audit_event(
     session_id: str | None = None,
     trace_id: str | None = None,
     route_template: str | None = None,
+    key_history_anchor: str | None = None,
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
+
+    Every record signs the key history's position (``kh_seq``, ``kh_epoch``;
+    ``audit_chain_keystore.current_position``, looked up before the append
+    lock and cached), so the verifier can tell from VERIFIED records alone
+    where the history began. ``key_history_anchor`` (an epoch id; keystore
+    only) marks the anchor record itself: its ``kh_seq`` is its own position.
 
     Events are hash-chained with HMAC-SHA256 under the chain's own key
     (``DATAFLOW_AUDIT_HMAC_KEY``; each record names it in ``key_id``), never the
@@ -291,6 +298,7 @@ def append_audit_event(
             if actor == created_by or actor == "api-key":
                 actor = f"{actor_type}:{actor_id}"
 
+    key_history = None if key_history_anchor else _key_history_position()
     with _APPEND_LOCK:
         state: dict[str, Any] = {"stage": "chain_read", "event": None}
         try:
@@ -340,6 +348,12 @@ def append_audit_event(
                     "key_id": key_id,
                     "hash_alg": "HMAC-SHA256",
                 }
+                if key_history_anchor:
+                    event["kh_seq"] = event["chain_seq"]
+                    event["kh_epoch"] = key_history_anchor
+                elif key_history:
+                    event["kh_seq"] = key_history["kh_seq"]
+                    event["kh_epoch"] = key_history["kh_epoch"]
                 # The position is the _id: unique in every Mongo collection, so
                 # two processes can never both take it (D221).
                 event["_id"] = position_id(event["chain_seq"])
@@ -376,6 +390,15 @@ def append_audit_event(
         if tracker is not None and not action.startswith("http."):
             tracker["named"] = int(tracker.get("named", 0)) + 1
         return persisted
+
+
+def _key_history_position() -> dict[str, Any] | None:
+    try:
+        from services.audit_chain_keystore import current_position
+
+        return current_position()
+    except Exception:  # noqa: BLE001 - an unanchored record is still written
+        return None
 
 
 def _persist_event(event: dict[str, Any]) -> dict[str, Any]:

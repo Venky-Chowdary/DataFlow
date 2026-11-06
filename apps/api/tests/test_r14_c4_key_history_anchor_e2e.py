@@ -230,8 +230,12 @@ def test_f5_workers_starting_together_create_one_epoch(ent):
         t.start()
     for t in threads:
         t.join(30)
-    assert len(results) == 6 and not [r for r in results if isinstance(r, Exception)], results
-    assert len({tuple(sorted(r.items())) for r in results}) == 1, results
+    # Nobody waits on the creator: the others see it pending, never "tampered".
+    assert len(results) == 6, results
+    assert all(isinstance(r, dict) or isinstance(r, store.EpochPending) for r in results), results
+    created = [r for r in results if isinstance(r, dict)]
+    assert len({tuple(sorted(r.items())) for r in created}) == 1, results
+    assert store.epoch_record(fresh=True) == created[0]
     assert ent.db["audit_events"].count_documents({"action": store.EPOCH_ACTION}) == 1
 
 
@@ -259,7 +263,7 @@ def test_f6_a_secrets_key_change_is_fixed_by_an_audited_admin_reanchor(ent, monk
     assert ent.admin.post(route, json={"reason": "short", "dry_run": False}).status_code == 422
     plan = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06"})
     assert plan.status_code == 200, plan.text
-    assert plan.json()["dry_run"] is True and plan.json()["problem_before"]
+    assert plan.json()["dry_run"] is True and plan.json()["history_problem"]
     assert _verify(ent, ws)["key_history_tampered"], "a dry run changes nothing"
 
     applied = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06", "dry_run": False})

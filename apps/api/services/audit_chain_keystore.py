@@ -88,7 +88,9 @@ def reset_cache() -> None:
     with _lock:
         _cache.update({"ns": None, "doc": None, "keys": {}, "read_at": 0.0, "imported": set()})
         _noted.clear()
+        _note_retry_at.clear()
         _epoch_cache.clear()
+        _position_cache.update({"ns": None, "value": None, "until": 0.0})
 
 
 def _key_id(key: bytes) -> str:
@@ -335,30 +337,43 @@ def _history_coll() -> Any | None:
     return mongo_collection(HISTORY_COLLECTION)
 
 
+_note_retry_at: dict[str, float] = {}
+#: After a failed history write, the next attempt waits this long, so an
+#: outage costs one slow call, not one per audit write.
+NOTE_RETRY_S = 10.0
+
+
 def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None:
     """Remember, tamper-evidently, that this deployment signed with ``key_id``.
 
     Ids and times only, each row MAC'd (``_mac``). ``last_seen`` is when the
     key last signed (refreshed at most hourly per process) — a record naming
     the key long after it stopped signing is a relabel, not a lost key. One
-    row per key, updated in place (no new secret per call). Never raises.
+    row per key, updated in place. Only once this process knows the epoch
+    (``current_position`` ran before the signing lock), so an entry is never
+    written ahead of its epoch, and never does the epoch lookup itself (it is
+    called under the audit append lock). Never raises.
     """
     if not key_id:
         return
     now_mono = time.monotonic()
     if seen_at is None and now_mono - _noted.get(key_id, -HISTORY_REFRESH_S) < HISTORY_REFRESH_S:
         return
+    if now_mono < _note_retry_at.get(key_id, 0.0):
+        return
     try:
         coll = _history_coll()
         if coll is None:
             return
-        history_epoch()
+        ns = str(getattr(coll, "full_name", "") or id(coll))
+        if ns not in _epoch_cache:
+            return  # epoch not known yet: noted on a later write
         when = seen_at or _now()
         current = _valid(coll.find_one({"_id": key_id}) or {}) or {}
         first = str(current.get("first_seen") or when)
         if current.get("last_seen") and str(current["last_seen"]) >= when:
             when = str(current["last_seen"])
-        first = min(first, when)
+        first = min(first, when) if first else when
         coll.update_one(
             {"_id": key_id},
             {"$set": {"origin": origin, "first_seen": first, "last_seen": when,
@@ -367,6 +382,7 @@ def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None
         )
         _noted[key_id] = now_mono
     except Exception as exc:  # noqa: BLE001 - signing must never fail on bookkeeping
+        _note_retry_at[key_id] = now_mono + NOTE_RETRY_S
         logger.debug("audit key history not recorded: %s", exc)
 
 
@@ -374,14 +390,35 @@ class HistoryTampered(RuntimeError):
     """The key history's anchor was removed, reset or altered."""
 
 
+class EpochPending(KeystoreUnavailable):
+    """Another process is creating the epoch right now (not a finding)."""
+
+
 #: Chain actions that anchor the key history (written by this module).
 EPOCH_ACTION = "audit.key_history.began"
 REANCHOR_ACTION = "audit.key_history.reanchored"
 _creating = threading.local()
+#: A pending epoch older than this is a crashed creator's: adopted when its
+#: anchor record is in the chain, otherwise reported as tampering.
+PENDING_STALE_S = 15.0
+#: A pending epoch dated more than this into the future was not written by a creator.
+PENDING_FUTURE_S = 60.0
+#: ``current_position`` re-reads the epoch this often; a failure is retried
+#: after :data:`POSITION_RETRY_S` (negative cache), so an outage costs one call.
+POSITION_TTL_S = 30.0
+POSITION_RETRY_S = 10.0
+_position_cache: dict[str, Any] = {"ns": None, "value": None, "until": 0.0}
 
 
-def _epoch_mac(at: str, head_seq: str, head_hash: str) -> str:
-    return _mac("epoch", at, head_seq, head_hash)
+def _epoch_mac(at: str, head_seq: str, head_hash: str, epoch_id: str) -> str:
+    return _mac("epoch", at, head_seq, head_hash, epoch_id)
+
+
+def _copy_mac(at: str, head_seq: str, head_hash: str, epoch_id: str) -> str:
+    return _mac("epoch-copy", at, head_seq, head_hash, epoch_id)
+
+
+_EPOCH_FIELDS = ("at", "head_seq", "head_hash", "epoch_id")
 
 
 def _epoch_copy_in_keyring(coll_keys: Any) -> dict[str, str] | None:
@@ -390,76 +427,103 @@ def _epoch_copy_in_keyring(coll_keys: Any) -> dict[str, str] | None:
 
     doc = coll_keys.find_one({"_id": DOC_ID}, {"history_epoch": 1}) if coll_keys is not None else None
     copy = (doc or {}).get("history_epoch") or {}
-    at, seq, head = (str(copy.get(k) or "") for k in ("at", "head_seq", "head_hash"))
-    if at and hmac.compare_digest(_mac("epoch-copy", at, seq, head), str(copy.get("mac") or "")):
-        return {"at": at, "head_seq": seq, "head_hash": head}
+    vals = [str(copy.get(k) or "") for k in _EPOCH_FIELDS]
+    if vals[0] and hmac.compare_digest(_copy_mac(*vals), str(copy.get("mac") or "")):
+        return dict(zip(_EPOCH_FIELDS, vals))
     return None
 
 
-def _anchor_in_chain(action: str, at: str, actor: str = "system", reason: str = "") -> tuple[str, str]:
-    """Write the signed chain record that anchors the history; ``(seq, hash)``."""
+def _anchor_in_chain(
+    action: str, at: str, epoch_id: str, actor: str = "system", reason: str = "",
+    extra: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Write the signed chain record that anchors the history; ``(seq, hash)``.
+
+    The record carries its own position as its signed ``kh_seq`` and the
+    ``epoch_id`` in its signed ``kh_epoch``: it is the anchor every later
+    record points at.
+    """
     from services.audit_log import append_audit_event
 
     _creating.active = True
     try:
         event = append_audit_event(
             action=action, resource="audit_chain_key_history", actor=actor,
-            details={"epoch_at": at, **({"reason": reason} if reason else {})},
+            details={"epoch_at": at, "epoch_id": epoch_id, **({"reason": reason} if reason else {}),
+                     **(extra or {})},
+            key_history_anchor=epoch_id,
         )
     finally:
         _creating.active = False
     return str(event.get("chain_seq") or ""), str(event.get("event_hash") or "")
 
 
-def _store_epoch(coll: Any, keys: Any, at: str, seq: str, head: str) -> None:
+def _store_epoch(coll: Any, keys: Any, rec: dict[str, str]) -> None:
+    vals = [str(rec.get(k) or "") for k in _EPOCH_FIELDS]
     coll.update_one(
         {"_id": _EPOCH_ID},
-        {"$set": {"at": at, "head_seq": seq, "head_hash": head, "mac": _epoch_mac(at, seq, head)},
+        {"$set": {**dict(zip(_EPOCH_FIELDS, vals)), "mac": _epoch_mac(*vals)},
          "$unset": {"pending": ""}},
         upsert=True,
     )
     if keys is not None:
         keys.update_one(
             {"_id": DOC_ID},
-            {"$set": {"history_epoch": {"at": at, "head_seq": seq, "head_hash": head,
-                                        "mac": _mac("epoch-copy", at, seq, head)}}},
+            {"$set": {"history_epoch": {**dict(zip(_EPOCH_FIELDS, vals)), "mac": _copy_mac(*vals)}}},
         )
 
 
-#: A pending epoch (its creator is writing the anchor record) is waited for this
-#: long; older than :data:`PENDING_STALE_S`, another process takes it over.
-PENDING_WAIT_S = 3.0
-PENDING_STALE_S = 15.0
-
-
-def _anchor_pending(coll: Any, keys: Any, at: str) -> dict[str, str]:
+def _anchor_pending(coll: Any, keys: Any, at: str, epoch_id: str) -> dict[str, str]:
     """This process holds the pending epoch row: anchor it in the chain."""
     try:
-        seq, head = _anchor_in_chain(EPOCH_ACTION, at)
+        seq, head = _anchor_in_chain(EPOCH_ACTION, at, epoch_id)
     except Exception:
-        # Release the claim, so the next writer anchors it instead of waiting.
-        coll.delete_one({"_id": _EPOCH_ID, "pending": True, "at": at})
+        # Release the claim, so the next writer anchors it instead.
+        coll.delete_one({"_id": _EPOCH_ID, "pending": True, "epoch_id": epoch_id})
         raise
-    _store_epoch(coll, keys, at, seq, head)
-    return {"at": at, "head_seq": seq, "head_hash": head}
+    rec = {"at": at, "head_seq": seq, "head_hash": head, "epoch_id": epoch_id}
+    _store_epoch(coll, keys, rec)
+    return rec
 
 
-def epoch_record() -> dict[str, str] | None:
-    """``{at, head_seq, head_hash}`` of the history epoch, or None (no database).
+def _verified_anchor_for(epoch_id: str) -> dict[str, Any] | None:
+    """The verified chain record that anchors ``epoch_id``, if one was written."""
+    from services.audit_chain_keys import check_signature
+    from services.audit_log import _hmac_event_hash
+    from services.control_plane_store import mongo_collection
+
+    events = mongo_collection("audit_events")
+    if events is None or not epoch_id:
+        return None
+    for doc in events.find({"kh_epoch": epoch_id}).sort("chain_seq", 1).limit(5):
+        seq = doc.get("chain_seq")
+        if (str(doc.get("kh_seq")) == str(seq) and doc.get("event_hash")
+                and check_signature(doc, _hmac_event_hash)[0] == "ok"):
+            return doc
+    return None
+
+
+def epoch_record(*, fresh: bool = False) -> dict[str, str] | None:
+    """``{at, head_seq, head_hash, epoch_id}`` of the history epoch, or None (no database).
 
     The epoch is anchored IN the hash chain: creating it writes a signed
-    ``audit.key_history.began`` record whose position and hash the MAC'd epoch
-    row (and its MAC'd copy on the keyring document) store. Deleting the
-    history and the copy recreates the epoch at a later position, and the
-    verifier finds the earlier anchor record (review of a350ff42a, F1).
+    ``audit.key_history.began`` record whose signed ``kh_seq`` is its own
+    position, and every later record signs that position (``kh_seq``) and the
+    epoch id (``kh_epoch``). The MAC'd epoch row and its MAC'd copy on the
+    keyring name the anchor; the verifier (``evidence_chain``) judges where
+    the history began from VERIFIED records' signed ``kh_seq`` only.
 
-    Creation is claimed by an atomic insert of a ``pending`` row; other
-    processes wait for it (a stale claim is taken over). Raises
-    :class:`HistoryTampered` when the row fails its MAC, disagrees with its
-    copy, or is missing while entries or the copy exist — re-read once first,
-    so two workers starting together never race into a false finding (F5).
+    Creation is claimed by an atomic insert of a ``pending`` row (with the
+    epoch id); a process that finds it pending does not wait: it raises
+    :class:`EpochPending`. A pending row dated in the future, or older than
+    :data:`PENDING_STALE_S` with no verified anchor record for its epoch id,
+    is :class:`HistoryTampered`; a stale one whose anchor IS in the chain (the
+    creator crashed after writing it) is adopted, never re-anchored. Also
+    tampered: the row failing its MAC, disagreeing with its copy, or missing
+    while entries or the copy exist (re-read once first, F5).
     """
     import hmac
+    import uuid
 
     if getattr(_creating, "active", False):
         return None
@@ -467,10 +531,9 @@ def epoch_record() -> dict[str, str] | None:
     if coll is None:
         return None
     ns = str(getattr(coll, "full_name", "") or id(coll))
-    if ns in _epoch_cache:
+    if ns in _epoch_cache and not fresh:
         return dict(_epoch_cache[ns])
     keys = _collection()
-    started = time.monotonic()
     missing_seen = False
     while True:
         doc = coll.find_one({"_id": _EPOCH_ID})
@@ -483,45 +546,80 @@ def epoch_record() -> dict[str, str] | None:
                     time.sleep(0.25)
                     continue
                 raise HistoryTampered("the key history epoch was removed")
-            at = _now()
+            at, eid = _now(), uuid.uuid4().hex
             won = coll.update_one(
-                {"_id": _EPOCH_ID}, {"$setOnInsert": {"at": at, "pending": True}}, upsert=True
+                {"_id": _EPOCH_ID},
+                {"$setOnInsert": {"at": at, "pending": True, "epoch_id": eid}}, upsert=True,
             )
             if getattr(won, "upserted_id", None) is None:
-                continue  # another process claimed it first: wait for its anchor
-            rec = _anchor_pending(coll, keys, at)
+                raise EpochPending("another process is creating the key history epoch")
+            rec = _anchor_pending(coll, keys, at, eid)
             break
         if doc.get("pending") and not doc.get("mac"):
-            at = str(doc.get("at") or "")
-            age = (datetime.now(timezone.utc) - _parse_time(at)).total_seconds() if at else 1e9
-            if age > PENDING_STALE_S:
-                taken = coll.update_one(
-                    {"_id": _EPOCH_ID, "pending": True, "at": doc.get("at"), "mac": {"$exists": False}},
-                    {"$set": {"at": _now()}},
+            at, eid = str(doc.get("at") or ""), str(doc.get("epoch_id") or "")
+            age = (datetime.now(timezone.utc) - _parse_time(at)).total_seconds()
+            if age < -PENDING_FUTURE_S:
+                raise HistoryTampered("a pending key history epoch is dated in the future")
+            if age <= PENDING_STALE_S:
+                raise EpochPending("another process is creating the key history epoch")
+            anchor = _verified_anchor_for(eid)
+            if anchor is None:
+                raise HistoryTampered(
+                    "a pending key history epoch was left unfinished with no anchor record"
                 )
-                if taken.modified_count == 1:
-                    fresh = coll.find_one({"_id": _EPOCH_ID}) or {}
-                    rec = _anchor_pending(coll, keys, str(fresh.get("at") or ""))
-                    break
-            elif time.monotonic() - started > PENDING_WAIT_S:
-                raise KeystoreUnavailable("the key history epoch is still being created")
-            time.sleep(0.1)
-            continue
-        at, seq, head = (str(doc.get(k) or "") for k in ("at", "head_seq", "head_hash"))
-        if not at or not hmac.compare_digest(_epoch_mac(at, seq, head), str(doc.get("mac") or "")):
+            # The creator crashed after anchoring: adopt its record (no reset).
+            rec = {"at": at, "head_seq": str(anchor.get("chain_seq") or ""),
+                   "head_hash": str(anchor.get("event_hash") or ""), "epoch_id": eid}
+            _store_epoch(coll, keys, rec)
+            break
+        vals = [str(doc.get(k) or "") for k in _EPOCH_FIELDS]
+        if not vals[0] or not hmac.compare_digest(_epoch_mac(*vals), str(doc.get("mac") or "")):
             raise HistoryTampered("the key history epoch fails its MAC")
-        if copy and (copy["at"], copy["head_seq"], copy["head_hash"]) != (at, seq, head):
+        rec = dict(zip(_EPOCH_FIELDS, vals))
+        if copy and copy != rec:
             raise HistoryTampered("the key history epoch disagrees with its keyring copy")
         if copy is None and keys is not None:
             keys.update_one(
                 {"_id": DOC_ID, "history_epoch": {"$exists": False}},
-                {"$set": {"history_epoch": {"at": at, "head_seq": seq, "head_hash": head,
-                                            "mac": _mac("epoch-copy", at, seq, head)}}},
+                {"$set": {"history_epoch": {**rec, "mac": _copy_mac(*vals)}}},
             )
-        rec = {"at": at, "head_seq": seq, "head_hash": head}
         break
     _epoch_cache[ns] = rec
     return dict(rec)
+
+
+def current_position() -> dict[str, Any] | None:
+    """``{kh_seq, kh_epoch}`` every new audit record signs, or None.
+
+    Called by ``append_audit_event`` BEFORE it takes the append lock, never
+    on the signing path. Cached for :data:`POSITION_TTL_S`; a failure (no
+    database, pending epoch, unreadable or tampered history) is cached for
+    :data:`POSITION_RETRY_S`, so N writes during an outage pay for one lookup.
+    Never raises.
+    """
+    if getattr(_creating, "active", False):
+        return None
+    now = time.monotonic()
+    try:
+        coll = _history_coll()
+    except Exception:  # noqa: BLE001
+        coll = None
+    ns = str(getattr(coll, "full_name", "") or id(coll)) if coll is not None else None
+    if _position_cache["ns"] == ns and now < _position_cache["until"]:
+        return _position_cache["value"]
+    value: dict[str, Any] | None = None
+    ttl = POSITION_RETRY_S
+    try:
+        rec = epoch_record(fresh=True) if coll is not None else None
+        if rec and str(rec.get("head_seq") or "").isdigit():
+            value = {"kh_seq": int(rec["head_seq"]), "kh_epoch": str(rec.get("epoch_id") or "")}
+            ttl = POSITION_TTL_S
+    except HistoryTampered as exc:
+        logger.error("audit key history: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - audit writes never wait on the history
+        logger.warning("audit key history unavailable, records go unanchored: %s", type(exc).__name__)
+    _position_cache.update({"ns": ns, "value": value, "until": now + ttl})
+    return value
 
 
 def _parse_time(value: str) -> datetime:
@@ -538,50 +636,72 @@ def history_epoch() -> str | None:
     return rec["at"] if rec else None
 
 
-def reanchor_key_history(*, actor: str, reason: str, dry_run: bool = False) -> dict[str, Any]:
+def reanchor_key_history(
+    *, actor: str, reason: str, dry_run: bool = False,
+    findings: list[dict[str, Any]] | None = None, history_seq: int = 0,
+    superseded: list[int] | None = None, history_problem: str = "",
+) -> dict[str, Any]:
     """Start the key history over (after a ``DATAFLOW_SECRETS_KEY`` change).
 
-    Platform-admin action (``POST /api/v1/audit/chain/key-history/reanchor``),
-    audited by the signed ``audit.key_history.reanchored`` chain record it
-    writes; the epoch moves to that record, and the verifier accepts the move
-    because that record verifies under a held key (an attacker without a
-    chain key cannot write one). Entries whose MAC no longer verifies are
-    dropped — they cannot be told from forged ones — so records before the
-    re-anchor naming a key off the history read as lost keys, and relabels
-    after it are still caught. ``dry_run`` reports what it would do.
+    Platform-admin action (``POST /api/v1/audit/chain/key-history/reanchor``,
+    which runs ``verify_chain`` first and passes its tampering findings and
+    the history's position here). It writes the signed
+    ``audit.key_history.reanchored`` chain record whose signed details carry
+    the previous ``history_seq``, every superseded ``kh_seq``, the history
+    problem it resolves and the tampering findings at that moment: the
+    verifier keeps surfacing those as ``prior_tampering``, so a re-anchor
+    never whitewashes them. Entries whose MAC fails are re-sealed with
+    ``last_seen`` = now (their original times cannot be trusted), so records
+    before the re-anchor naming those keys read as lost keys and later ones
+    as relabels. ``dry_run`` reports what it would do.
 
     Also the upgrade path from the a350ff42a row format (never released;
     test deployments only): those rows fail the current MAC and read as
     tampered until a platform admin re-anchors.
     """
+    import uuid
+
     coll = _history_coll()
     if coll is None:
         raise KeystoreUnavailable("no control-plane database holds the key history")
     keys = _collection()
-    try:
-        before = epoch_record()
-        problem = ""
-    except HistoryTampered as exc:
-        before, problem = None, str(exc)
-    stale = [str(d["_id"]) for d in coll.find({"_id": {"$ne": _EPOCH_ID}}) if _valid(d) is None]
+    stale = [d for d in coll.find({"_id": {"$ne": _EPOCH_ID}}) if _valid(d) is None]
     plan: dict[str, Any] = {
-        "dry_run": dry_run, "epoch_before": before, "problem_before": problem or None,
-        "entries_dropped": len(stale), "entries_kept": len(key_history()),
+        "dry_run": dry_run, "history_problem": history_problem or None,
+        "history_seq": history_seq, "entries_resealed": sorted(str(d["_id"]) for d in stale),
+        "entries_kept": len(key_history()), "prior_tampering": list(findings or []),
     }
     if dry_run:
         return plan
-    at = _now()
-    seq, head = _anchor_in_chain(REANCHOR_ACTION, at, actor=actor, reason=reason)
-    for kid in stale:
-        coll.delete_one({"_id": kid})
-    _store_epoch(coll, keys, at, seq, head)
+    at, eid = _now(), uuid.uuid4().hex
+    seq, head = _anchor_in_chain(
+        REANCHOR_ACTION, at, eid, actor=actor, reason=reason,
+        extra={"prev_history_seq": int(history_seq or 0),
+               "superseded_kh_seq": sorted({int(x) for x in (superseded or []) if x}),
+               "history_problem": history_problem, "findings": list(findings or [])[:500],
+               "resealed_key_ids": plan["entries_resealed"]},
+    )
+    for doc in stale:
+        kid = str(doc["_id"])
+        coll.update_one(
+            {"_id": kid},
+            {"$set": {"origin": "reanchored", "first_seen": "", "last_seen": at,
+                      "mac": _entry_mac(kid, "reanchored", "", at)}},
+        )
+    rec = {"at": at, "head_seq": seq, "head_hash": head, "epoch_id": eid}
+    _store_epoch(coll, keys, rec)
     _epoch_cache.clear()
+    _position_cache.update({"ns": None, "value": None, "until": 0.0})
     logger.warning("audit key history re-anchored at chain position %s by %s", seq, actor)
-    return {**plan, "epoch_after": {"at": at, "head_seq": seq, "head_hash": head}}
+    return {**plan, "epoch_after": rec}
 
 
-def key_history() -> dict[str, dict[str, Any]]:
-    """MAC-valid history entries by key id (forged or edited rows left out)."""
+def key_history(*, strict: bool = False) -> dict[str, dict[str, Any]]:
+    """MAC-valid history entries by key id (forged or edited rows left out).
+
+    ``strict``: an unreadable history raises instead of reading as empty
+    (the verifier must not judge keys on a history it could not read).
+    """
     try:
         coll = _history_coll()
         if coll is None:
@@ -593,6 +713,8 @@ def key_history() -> dict[str, dict[str, Any]]:
                 out[entry["key_id"]] = entry
         return out
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return {}
 
 

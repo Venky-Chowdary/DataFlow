@@ -180,6 +180,7 @@ def test_imported_file_keyring_flags_a_relabel(ent, monkeypatch):
     ws = ent.workspace("R14 C4 imported keyring")
     ent.db["audit_events"].delete_many({})
     ent.db[store.COLLECTION].delete_many({})
+    ent.db[store.HISTORY_COLLECTION].delete_many({})  # anchored in the chain just wiped
     _fresh_container(ent, monkeypatch, "imported-old")
     with monkeypatch.context() as m:
         m.setattr(store, "_collection", lambda: None)
