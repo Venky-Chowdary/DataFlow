@@ -1718,7 +1718,8 @@ TIMEZONE_NORMALIZED_ACTION = "schedule.timezone.normalized"
 #: is normalised (S4a, second review). ``tzdata`` in requirements.txt makes
 #: the database independent of the host OS.
 _HEALTHY_ZONE_COUNT = 400
-TIMEZONE_NORMALIZATION_CLAIM = "schedule_timezone_normalization_v1"
+TIMEZONE_NORMALIZATION_CLAIM = "schedule_timezone_normalization"
+TIMEZONE_NORMALIZATION_THROTTLE = timedelta(minutes=10)
 
 
 def zone_database_healthy() -> bool:
@@ -1758,11 +1759,15 @@ def normalize_invalid_timezones(
     if not zone_database_healthy():
         logger.warning("Schedule zone normalisation skipped: this host's zone database is incomplete")
         return []
-    if not force and claim_run(TIMEZONE_NORMALIZATION_CLAIM, timedelta(days=36500)) is False:
+    # A short throttle, not a once-ever claim: the per-row write is conditional
+    # (idempotent), so a crash mid-run or rows that arrive later (a restore, an
+    # import, a rolling deploy) are repaired by the next start (review 3).
+    if not force and claim_run(TIMEZONE_NORMALIZATION_CLAIM, TIMEZONE_NORMALIZATION_THROTTLE) is False:
         return []
     repaired: list[dict[str, str]] = []
     for sched in list_schedules():
-        zone = (sched.timezone or "").strip()
+        stored = sched.timezone or ""
+        zone = stored.strip()
         if not zone:
             continue
         try:
@@ -1770,7 +1775,8 @@ def normalize_invalid_timezones(
             continue
         except InvalidTimezone:
             pass
-        changed = _normalize_zone_if_unchanged(sched.id, zone)
+        # Matched on the RAW stored value (whitespace included).
+        changed = _normalize_zone_if_unchanged(sched.id, stored)
         if changed is None:
             continue
         row = {"schedule_id": sched.id, "from": zone, "to": "UTC", "paused": changed}
@@ -1784,7 +1790,37 @@ def normalize_invalid_timezones(
             workspace_id=sched.workspace_id or None,
             details={**row, "reason": "stored zone is not an IANA time zone"},
         )
+        if changed:
+            _notify_zone_pause(sched, zone)
     return repaired
+
+
+def _notify_zone_pause(sched: PipelineSchedule, invalid_zone: str) -> None:
+    """Tell the schedule's workspace channels it was paused (S4b), never raising."""
+    try:
+        from services.notification_service import notify_workspace
+
+        text = (
+            f"Schedule {sched.name!r} was paused: its stored time zone {invalid_zone!r} is not "
+            "an IANA zone, so it was set to UTC rather than run at times nobody chose. "
+            "Set the intended zone and re-enable it."
+        )
+        notify_workspace(
+            sched.workspace_id or "",
+            {
+                "event": "schedule.paused",
+                "reason_code": "timezone_normalized",
+                "title": f"Schedule paused: {sched.name}",
+                "text": text,
+                "schedule_id": sched.id,
+                "schedule_name": sched.name,
+                "workspace_id": sched.workspace_id or "",
+                "from_timezone": invalid_zone,
+                "to_timezone": "UTC",
+            },
+        )
+    except Exception:  # noqa: BLE001 — the pause and its audit event stand
+        logger.warning("Pause notification for schedule %s failed", sched.id, exc_info=True)
 
 
 def _normalize_zone_if_unchanged(schedule_id: str, invalid_zone: str) -> bool | None:
@@ -1806,10 +1842,15 @@ def _normalize_zone_if_unchanged(schedule_id: str, invalid_zone: str) -> bool | 
     svc = _mongo_backend()
     if svc:
         coll = svc.get_database()["pipeline_schedules"]
+        # Match the RAW stored value: the loaded row may have been normalised
+        # (stripped) on read, the document still holds what was written.
+        raw = (coll.find_one({"_id": schedule_id}, {"timezone": 1}) or {}).get("timezone")
+        if not isinstance(raw, str) or raw.strip() != invalid_zone.strip():
+            return None
         before = coll.find_one_and_update(
-            {"_id": schedule_id, "timezone": invalid_zone},
+            {"_id": schedule_id, "timezone": raw},
             {"$set": {"timezone": "UTC", "enabled": False, "next_run_at": None},
-             "$push": {"run_history": note}},
+             "$push": {"run_history": {"$each": [note], "$slice": -RUN_HISTORY_LIMIT}}},
         )
         return None if before is None else bool(before.get("enabled"))
     with _NAME_LOCK:
@@ -1817,11 +1858,11 @@ def _normalize_zone_if_unchanged(schedule_id: str, invalid_zone: str) -> bool | 
         for s in schedules:
             if s.id != schedule_id:
                 continue
-            if (s.timezone or "").strip() != invalid_zone:
+            if (s.timezone or "").strip() != invalid_zone.strip():
                 return None
             was_enabled = bool(s.enabled)
             s.timezone, s.enabled, s.next_run_at = "UTC", False, None
-            s.run_history = list(s.run_history or []) + [note]
+            s.run_history = (list(s.run_history or []) + [note])[-RUN_HISTORY_LIMIT:]
             _save_all(schedules)
             return was_enabled
     return None
@@ -2492,6 +2533,15 @@ def mark_schedule_running(
         for i, s in enumerate(schedules):
             if s.id != schedule_id:
                 continue
+            from services.team_store import workspace_closing
+
+            if workspace_closing(s.workspace_id or ""):
+                # Its workspace is being deleted (S3): the beat starts nothing.
+                _record_refusal(schedule_id, {
+                    "kind": "workspace_closing", "schedule_id": schedule_id,
+                    "schedule_name": s.name, "job_id": "", "running_since": None,
+                })
+                return None
             holder = claim_holder(s, snapshot=schedules)
             _record_refusal(schedule_id, holder)
             if holder is not None:

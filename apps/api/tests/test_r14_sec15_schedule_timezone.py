@@ -130,14 +130,37 @@ def test_scheduler_start_normalises_invalid_zones_to_utc_on_the_record(ent, heal
     assert len(events) == 1 and events[0]["details"]["from"] == "Mars/Olympus"
 
 
-def test_normalisation_runs_once_per_deployment_not_every_start(ent, healthy_zones):
-    from services.schedule_store import get_schedule, normalize_invalid_timezones
+def test_normalisation_is_throttled_not_once_ever(ent, healthy_zones):
+    """Review 3: a once-ever claim meant a crash or a later-arriving row was never repaired."""
+    from datetime import timedelta
 
-    ws = ent.workspace("Legacy tz once")
+    from services import maintenance_claim
+    from services.schedule_store import (
+        TIMEZONE_NORMALIZATION_CLAIM, get_schedule, normalize_invalid_timezones,
+    )
+
+    ws = ent.workspace("Legacy tz throttle")
     normalize_invalid_timezones()
     late = _legacy(ws)
-    assert normalize_invalid_timezones() == []  # a second start does nothing
-    assert get_schedule(late.id).timezone == "Mars/Olympus"
+    assert normalize_invalid_timezones() == []  # same throttle window: nothing
+    # The window passes (a restart later, a restore): the late row is repaired.
+    db = maintenance_claim.durable_store()
+    db[maintenance_claim.COLLECTION].update_one(
+        {"_id": TIMEZONE_NORMALIZATION_CLAIM},
+        {"$set": {"next_due_at": datetime.now(timezone.utc) - timedelta(seconds=1)}},
+    )
+    assert [r["schedule_id"] for r in normalize_invalid_timezones()] == [late.id]
+    assert get_schedule(late.id).timezone == "UTC"
+
+
+def test_raw_stored_value_with_whitespace_is_repaired(ent, healthy_zones):
+    from services.schedule_store import get_schedule, normalize_invalid_timezones
+
+    ws = ent.workspace("Legacy tz raw")
+    padded = _legacy(ws, zone=" Mars/Olympus ")
+    repaired = normalize_invalid_timezones(force=True)
+    assert [r["schedule_id"] for r in repaired] == [padded.id]
+    assert get_schedule(padded.id).timezone == "UTC"
 
 
 def test_an_incomplete_zone_database_rewrites_nothing(ent, monkeypatch):
@@ -176,3 +199,20 @@ def test_disabled_legacy_row_stays_disabled_with_no_next_run(ent, healthy_zones)
     assert repaired == [{"schedule_id": sched.id, "from": "Mars/Olympus", "to": "UTC", "paused": False}]
     after = get_schedule(sched.id)
     assert after.enabled is False and after.next_run_at is None
+
+
+def test_a_paused_schedule_notifies_its_workspace_channels(ent, healthy_zones, monkeypatch):
+    """S4b: the owner hears that the schedule was paused, through notify_workspace."""
+    from services import notification_service
+    from services.schedule_store import normalize_invalid_timezones, update_schedule
+
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(notification_service, "notify_workspace",
+                        lambda ws, payload, **kw: sent.append((ws, payload)) or [])
+    ws = ent.workspace("Legacy tz notify")
+    armed = _legacy(ws)
+    idle = _legacy(ws)
+    update_schedule(idle.id, {"enabled": False})
+    normalize_invalid_timezones(force=True)
+    assert [(w, p["schedule_id"], p["event"]) for w, p in sent] == [(ws, armed.id, "schedule.paused")]
+    assert "Mars/Olympus" in sent[0][1]["text"]
