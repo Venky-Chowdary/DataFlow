@@ -75,7 +75,9 @@ def connect(kind: str):
         conn = pymysql.connect(
             host=cfg["host"], port=cfg["port"], user=cfg["username"],
             password=cfg["password"], database=cfg["database"], charset="utf8mb4",
+            autocommit=True,
         )
+        return conn
     else:
         import pyodbc
 

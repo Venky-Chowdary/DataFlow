@@ -5528,15 +5528,36 @@ def _enum_set_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     return f"VARCHAR({width})"
 
 
-def enum_domain_would_collapse(source_type: str, target_type: str) -> bool:
+def enum_domain_would_collapse(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when a closed ENUM/SET domain would become an open string sink.
 
     PostgreSQL ``df_enum_*`` type names preserve the domain via CREATE TYPE.
     MySQL ``SET`` → ``TEXT[]`` preserves multi-value polarity (not a string sink).
+
+    ``dest_db`` names the destination. Where that dialect's own create-new
+    carrier for this very source is an open string (SQL Server, Oracle,
+    SQLite, MongoDB, Snowflake, ...), no carrier it can spell holds the
+    domain, so the string sink is the domain's only home there, not a remap
+    the operator could make. Every label still lands byte for byte (width is
+    judged separately), so it is stated rather than graded a collapse: Stripe
+    ``tax_exempt`` into a table DataFlow created on SQL Server was refused as
+    a fidelity collapse of DataFlow's own choice (D271).
     """
     src = parse_enum_or_set_ordered_members(source_type)
     if src is None:
         return False
+    if dest_db and _enum_open_string_sink(src, ddl_type(dest_db, source_type)):
+        width = parse_string_carrier_width(target_type)
+        longest = max((len(str(m)) for m in src[1]), default=0)
+        if width is None or width >= longest:
+            return False
+    return _enum_open_string_sink(src, target_type)
+
+
+def _enum_open_string_sink(src: tuple, target_type: str) -> bool:
+    """True when ``target_type`` holds the members of ``src`` as open text."""
     if parse_enum_or_set_ordered_members(target_type) is not None:
         return False
     tgt = (target_type or "").strip()

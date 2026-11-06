@@ -246,7 +246,7 @@ def is_precision_collapse_coercion(
         return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
-    if enum_domain_would_collapse(source_type, target_type):
+    if enum_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -914,7 +914,7 @@ def is_lossy_coercion(
             return True
         if enum_set_domain_would_reject(source_type, target_type):
             return True
-        if enum_domain_would_collapse(source_type, target_type):
+        if enum_domain_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
@@ -1113,7 +1113,7 @@ def is_lossy_coercion(
         return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
-    if enum_domain_would_collapse(source_type, target_type):
+    if enum_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
