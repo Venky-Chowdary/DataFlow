@@ -1547,6 +1547,7 @@ def detect_schema_drift(
     dest_recreated: bool = False,
     dest_key_groups: list[list[str]] | None = None,
     validation_mode: str | None = None,
+    record_batch: bool = False,
     dest_key_part_bytes: int = 3072,
     dest_key_charsets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -1665,9 +1666,9 @@ def detect_schema_drift(
     widen_proposals: list[dict[str, Any]] = []
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
-        from services.validation_mode_contract import mode_holds_out_refusal
+        from services.validation_mode_contract import mode_may_hold_out
 
-        hold_out_text_cells = mode_holds_out_refusal(validation_mode, record_batch=False)
+        hold_out_text_cells = mode_may_hold_out(validation_mode, record_batch=record_batch)
         from services.migration_risk_contract import (
             mapping_has_clearing_risk_contract,
         )
@@ -1789,6 +1790,7 @@ def detect_schema_drift(
                     and normalize_logical_type(str(src_type)) in {"string", "text"}
                     else None
                 ),
+                record_batch=record_batch,
             ):
                 continue
             type_mismatches.append({

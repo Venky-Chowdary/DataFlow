@@ -163,6 +163,7 @@ def _held_out_text_parse(
     target_schema: dict[str, str],
     sample_rows: list[dict] | None,
     validation_mode: str | None,
+    record_batch: bool = False,
 ) -> bool:
     """A text source cast into a typed column under a mode that holds bad cells out.
 
@@ -170,12 +171,17 @@ def _held_out_text_parse(
     integrity audit decides the pair per cell: the parsed rows load and
     ``'abc'`` is quarantined. Run 2 into the table run 1 created meets the
     same pair as a live NUMERIC column. Grading it here as a lossy carrier
-    refused run 2 for a load run 1 had made (QA r14). Strict and balanced do
-    not hold cells out, so they keep refusing on both runs.
+    refused run 2 for a load run 1 had made (QA r14). The cells held out are
+    the mode's own (``mode_holds_out_refusal``): lenient any cast refusal,
+    balanced a numeric or calendar refusal on a file (R4-D02); strict none.
     """
-    from services.validation_mode_contract import mode_holds_out_refusal
+    from services.validation_mode_contract import mode_may_hold_out
 
-    if not tgt_type or not sample_rows or not mode_holds_out_refusal(validation_mode, record_batch=False):
+    if (
+        not tgt_type
+        or not sample_rows
+        or not mode_may_hold_out(validation_mode, record_batch=record_batch)
+    ):
         return False
     if normalize_logical_type(src_type) not in {"string", "text"}:
         return False
@@ -189,6 +195,7 @@ def _held_out_text_parse(
         target_types=target_schema,
         rows=list(sample_rows),
         validation_mode=validation_mode,
+        record_batch=record_batch,
     )
 
 
@@ -213,6 +220,7 @@ def evaluate_ddl_compatibility(
     destination_config: Any = None,
     validation_mode: str | None = None,
     create_source: Any = None,
+    record_batch: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -396,7 +404,8 @@ def evaluate_ddl_compatibility(
             tgt_logical = normalize_logical_type(tgt_type)
             # Without clearing contract: never sample soft-pass precision collapses.
             if not risk_cleared and not _held_out_text_parse(
-                m, src_type, tgt_type, source_schema, target_schema, sample_rows, validation_mode
+                m, src_type, tgt_type, source_schema, target_schema, sample_rows,
+                validation_mode, record_batch,
             ):
                 note = ""
                 if src_logical == "float" and tgt_logical == "decimal":

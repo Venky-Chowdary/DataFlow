@@ -417,7 +417,7 @@ def ambiguous_grouping_reason(value: Any) -> str:
     as_fraction = text.replace(",", ".")
     as_thousands = text.replace(sep, "")
     return (
-        f"'{text}' is ambiguous: one 3-digit group after '{sep}' reads as "
+        f"Invalid decimal: '{text}' is ambiguous: one 3-digit group after '{sep}' reads as "
         f"{as_fraction} or {as_thousands}. DataFlow never guesses a number "
         "locale — set number locale in Destination → Advanced, or fix the "
         "source value."
@@ -3175,17 +3175,17 @@ def _dry_run_sample_body(
         from services.validation_mode_contract import (
             CAST_SHARE_RULE,
             cast_share_holds_out,
+            holdout_tally,
             mode_holdout_kind,
-            mode_holds_out_refusal,
         )
 
         # The column's ONE verdict (share-bounded; strict holds nothing out).
-        held = sum(
-            1 for e in bad if mode_holds_out_refusal(validation_mode, e, record_batch=bool(file_row_quarantine))
+        held, calendar = holdout_tally(
+            validation_mode, bad, record_batch=bool(file_row_quarantine)
         )
         if mode_holdout_kind(
             validation_mode, failed=len(bad), held=held, cast_ok=ok,
-            record_batch=bool(file_row_quarantine),
+            record_batch=bool(file_row_quarantine), calendar=calendar,
         ):
             errors.append(
                 f"holdout {m['source']}→{m['target']}: "

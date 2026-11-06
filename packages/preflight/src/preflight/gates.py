@@ -121,8 +121,9 @@ def _risk_cleared(m: Any) -> bool:
 def _holds_out(mode: str, reason: str | None = None, *, record_batch: bool) -> bool:
     """The validation mode's holdout policy (``services.validation_mode_contract``).
 
-    ``record_batch`` is required: balanced holds a calendar refusal out only
-    on a file. Without the policy module nothing is held out (fail closed).
+    ``record_batch`` is required: balanced holds a numeric-cast or calendar
+    refusal out only on a file. Without the policy module nothing is held out
+    (fail closed).
     """
     try:
         from services.validation_mode_contract import mode_holds_out_refusal
@@ -3247,6 +3248,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     # share-bounded; strict holds nothing out) decides the pre-write holdout
     # targets — the any-mode "one cell casts" file rule held a strict 1-of-40
     # INTEGER column out and passed 40 rows (QA C2 review 3 #6).
+    from connectors.sql_temporal import is_invalid_calendar_refusal
     from services.validation_mode_contract import mode_holdout_kind
 
     for probe in ctx.plan.mappings:
@@ -3259,6 +3261,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         ok_cells = 0
         failed_cells = 0
         held_cells = 0
+        calendar_cells = 0
         for probe_row in sample_rows:
             probe_raw = _serialize_for_write(_row_cell(probe_row, probe.source, ""))
             _probe_val, probe_err = _apply_write_path_transform(probe_raw, probe.transform)
@@ -3266,13 +3269,16 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 ok_cells += 1
             elif probe_err:
                 failed_cells += 1
-                held_cells += int(_holds_out(g8_mode, probe_err, record_batch=file_load))
+                if _holds_out(g8_mode, probe_err, record_batch=file_load):
+                    held_cells += 1
+                    calendar_cells += int(is_invalid_calendar_refusal(probe_err))
             else:
                 ok_cells += 1
         dest_col = dest_by_name.get(str(probe.target or "").lower())
         not_null = dest_col is not None and not bool(getattr(dest_col, "nullable", True))
         if not not_null and mode_holdout_kind(
-            g8_mode, failed=failed_cells, held=held_cells, cast_ok=ok_cells, record_batch=file_load
+            g8_mode, failed=failed_cells, held=held_cells, cast_ok=ok_cells,
+            record_batch=file_load, calendar=calendar_cells,
         ):
             file_holdout_targets.add(str(probe.target))
     mapped_rows: list[dict[str, Any]] = []

@@ -283,7 +283,7 @@ def test_held_out_sample_filter_drops_by_value_only_for_cast_refusals():
 # ── 6. ONE verdict per column (mode_holdout_kind) for every gate ──────────
 @pytest.mark.parametrize("mode, good, bad, holds", [
     ("lenient", 1, 9, False), ("lenient", 6, 4, True), ("lenient", 5, 5, True),
-    ("strict", 6, 4, False), ("balanced", 6, 4, False),
+    ("strict", 6, 4, False), ("balanced", 6, 4, True), ("balanced", 1, 9, False),
 ])
 def test_every_cast_holdout_site_asks_the_one_verdict(mode, good, bad, holds):
     from services.coercion_probe import analyze_coercion
@@ -295,7 +295,7 @@ def test_every_cast_holdout_site_asks_the_one_verdict(mode, good, bad, holds):
     m = {"source": "price", "target": "price", "target_type": "DECIMAL(10,2)", "transform": "decimal",
          "confidence": 1}
     rows = [{"price": v} for v in values]
-    held = bad if mode == "lenient" else 0
+    held = bad if mode in ("lenient", "balanced") else 0  # numeric casts, a file (R4-D02)
     assert bool(mode_holdout_kind(mode, failed=bad, held=held, cast_ok=good, record_batch=True)) is holds
     fin = _check_financial_precision([m], {"price": "VARCHAR"}, rows, file_row_quarantine=True,
                                      validation_mode=mode)
@@ -357,10 +357,8 @@ def test_g3f_never_calls_a_refused_column_held_out(client, mode):
     assert gates["g3f_population_fit"] == "block", (mode, g3f)
     assert "held out" not in g3f.replace("are held out per row only while", ""), g3f
     assert "fail the declared transform" in g3f, g3f
-    if mode == "lenient":
-        assert CAST_SHARE_RULE in g3f, g3f
-    else:
-        assert "validation mode 'balanced' does not hold these refusals out" in g3f, g3f
+    # Balanced holds a numeric cast out on a file too (R4-D02), within the same share.
+    assert CAST_SHARE_RULE in g3f, g3f
 
 
 def test_g3f_names_the_mode_holdout_not_a_signed_contract(client):

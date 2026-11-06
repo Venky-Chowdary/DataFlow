@@ -76,12 +76,13 @@ def test_bad_row_near_the_top_of_a_file_quarantines_and_loads_the_rest(tmp_path)
     assert rows == [(2, 10), (3, 20)]
 
 
-@pytest.mark.parametrize("mode", ["lenient", "strict"])
+@pytest.mark.parametrize("mode", ["balanced", "lenient", "strict"])
 def test_mixed_sample_does_not_block_on_sample_transform(mode):
     """A bad first row plus good rows is a holdout, not a blocking sample transform.
 
-    That is lenient's verdict (validation_mode_contract.mode_holdout_kind);
-    strict holds nothing out, so there it blocks (QA C2 review 3 #6).
+    The one policy (validation_mode_contract.mode_holdout_kind): balanced and
+    lenient hold a numeric cast refusal out on a file while at least half the
+    sampled cells cast (CAST_SHARE_RULE); strict holds nothing out and blocks.
     """
     from services.preflight_service import run_file_preflight
 

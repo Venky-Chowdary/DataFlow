@@ -382,7 +382,10 @@ def _mixed_numeric_column_held(
 ) -> bool:
     """The column's ONE verdict for a mixed numeric file column (mode_holdout_kind)."""
     from services.transform_engine import decimal_wire_value
-    from services.validation_mode_contract import mode_holdout_kind, mode_holds_out_refusal
+    from services.validation_mode_contract import (
+        mode_holdout_kind,
+        mode_holds_out_numeric_casts,
+    )
 
     ok = bad = 0
     for row in rows:
@@ -395,7 +398,9 @@ def _mixed_numeric_column_held(
             bad += 1
         else:
             ok += 1
-    held = bad if mode_holds_out_refusal(validation_mode, record_batch=False) else 0
+    # A mixed numeric FILE column (the callers' scope): an unparseable amount
+    # is a numeric cast refusal, which lenient and balanced hold out (R4-D02).
+    held = bad if mode_holds_out_numeric_casts(validation_mode, record_batch=True) else 0
     return bool(mode_holdout_kind(validation_mode, failed=bad, held=held, cast_ok=ok, record_batch=True))
 
 
@@ -559,12 +564,17 @@ def _check_financial_precision(
             CAST_SHARE_RULE,
             cast_share_holds_out,
             mode_holdout_kind,
-            mode_holds_out_refusal,
+            mode_holds_out_numeric_casts,
         )
 
-        # The column's ONE verdict: the mode holds the unparseable amounts out
-        # per row only within the share (strict and balanced never do).
-        held = len(unparseable) if mode_holds_out_refusal(validation_mode, record_batch=False) else 0
+        # The column's ONE verdict: an unparseable amount is a numeric cast
+        # refusal, held out per row within the share by lenient, and by
+        # balanced on a file (R4-D02); strict never holds it out.
+        held = (
+            len(unparseable)
+            if mode_holds_out_numeric_casts(validation_mode, record_batch=file_row_quarantine)
+            else 0
+        )
         if holdouts_contracted:
             contracted.extend(unparseable)
         elif not contract_present and unparseable and mode_holdout_kind(

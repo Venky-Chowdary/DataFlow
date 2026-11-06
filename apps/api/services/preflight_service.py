@@ -1156,6 +1156,8 @@ def run_file_preflight(
             mappings = _waived_maps
 
     target_cols = list(drift_dest_types.keys())
+    from services.preflight_source_kind import source_is_record_batch
+
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=write_maps,
         source_schema=column_types,
@@ -1175,6 +1177,7 @@ def run_file_preflight(
         population_fit_report=pre_gate_fit_report,
         destination_config=destination_config,
         validation_mode=validation_mode,
+        record_batch=source_is_record_batch(source_kind, source_format),
         create_source={
             "config": source_config,
             "connector_id": source_connector_id,
@@ -1210,6 +1213,7 @@ def run_file_preflight(
         schema_policy=schema_policy,
         table_exists=dest_table_exists,
         dest_recreated=dest_recreated, validation_mode=validation_mode,
+        record_batch=source_is_record_batch(source_kind, source_format),
         dest_key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                         contract_primary_key, destination_indexes_meta),
         dest_key_part_bytes=dest_key_limit(destination_indexes_meta),

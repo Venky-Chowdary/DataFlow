@@ -64,6 +64,7 @@ from services.value_serializer import (
     is_missing_sentinel,
 )
 
+from connectors.sql_temporal import is_invalid_calendar_refusal
 from services.validation_mode_contract import mode_holdout_kind, mode_holds_out_refusal
 
 _TEXTUAL_LOGICALS = {"string", "text"}
@@ -115,6 +116,7 @@ def samples_coerce_mapping(
     checked = 0
     failed = 0
     held = 0
+    calendar = 0
     for row in rows[:DEFAULT_SAMPLE_LIMIT]:
         raw = cell_to_string(lookup_row_value(row, src, ""))
         if not str(raw).strip():
@@ -154,14 +156,17 @@ def samples_coerce_mapping(
             if validation_mode is None:
                 return False
             failed += 1
-            held += int(mode_holds_out_refusal(validation_mode, str(err), record_batch=record_batch))
+            if mode_holds_out_refusal(validation_mode, str(err), record_batch=record_batch):
+                held += 1
+                calendar += int(is_invalid_calendar_refusal(str(err)))
             continue
         checked += 1
     if not failed:
         return checked > 0
     return bool(
         mode_holdout_kind(
-            validation_mode, failed=failed, held=held, cast_ok=checked, record_batch=record_batch
+            validation_mode, failed=failed, held=held, cast_ok=checked,
+            record_batch=record_batch, calendar=calendar,
         )
     )
 
@@ -588,6 +593,7 @@ def analyze_coercion(
         #: (``validation_mode_contract.mode_holds_out_refusal``), counted on
         #: every failure, not only the five listed in ``sample_failures``.
         held_failed = 0
+        calendar_failed = 0
         holdout_kind = ""
         wire_normalize = 0
         wire_failures = 0
@@ -852,6 +858,7 @@ def analyze_coercion(
                     failed += 1
                     if mode_holds_out_refusal(mode, err, record_batch=file_row_quarantine):
                         held_failed += 1
+                        calendar_failed += int(is_invalid_calendar_refusal(err))
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
                         raw_failure_values.append(cell[:120])
@@ -1094,6 +1101,7 @@ def analyze_coercion(
                 held=held_failed,
                 cast_ok=ok,
                 record_batch=file_row_quarantine,
+                calendar=calendar_failed,
             )
             # The column's ONE verdict (validation_mode_contract.mode_holdout_kind,
             # share-bounded): a held column is a warning, everything else blocks.

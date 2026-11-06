@@ -49,7 +49,17 @@ def _write_refusal(value: str, err: str) -> str:
     """The refusal the write path gives this cell (the calendar rule names its own)."""
     from connectors.sql_temporal import invalid_calendar_reason
 
-    return invalid_calendar_reason((value or "").strip()) or err
+    v = (value or "").strip()
+    calendar = invalid_calendar_reason(v)
+    if calendar:
+        return calendar
+    # The write path's own numeric refusal, so the hold-out policy can read it
+    # (validation_mode_contract.is_numeric_cast_refusal, R4-D02).
+    if err.startswith("expected integer"):
+        return f"Invalid integer: {v[:40]!r}"
+    if err.startswith("expected number"):
+        return f"Invalid decimal: {v[:40]!r}"
+    return err
 
 
 def _holdout_modes(refusals: list[str], *, capped: bool) -> dict[str, bool]:

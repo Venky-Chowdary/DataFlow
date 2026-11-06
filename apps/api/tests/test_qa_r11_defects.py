@@ -308,12 +308,14 @@ def test_empty_object_store_integer_is_null_not_quarantine():
     assert mapped == [("A", 4), ("B", None)]
 
 
-@pytest.mark.parametrize("mode", ["lenient", "strict"])
+@pytest.mark.parametrize("mode", ["balanced", "lenient", "strict"])
 def test_bad_rows_at_the_end_of_a_file_do_not_drop_the_prefix(tmp_path, mode):
     """Bad casts after a good prefix quarantine those rows and keep the rest (R4-D02).
 
-    That is lenient's verdict (validation_mode_contract.mode_holdout_kind);
-    strict holds nothing out, so there the same file blocks (QA C2 review 3 #6).
+    The one policy (validation_mode_contract.mode_holdout_kind): balanced and
+    lenient hold a numeric cast refusal out on a file while at least half the
+    sampled cells cast (CAST_SHARE_RULE); strict holds nothing out, so there the
+    same file blocks at Validate, as Execute refuses a partial write.
     """
     from src.transfer.file_stream import stream_file_to_database
     from src.transfer.models import EndpointConfig

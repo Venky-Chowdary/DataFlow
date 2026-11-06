@@ -1136,6 +1136,7 @@ def scan_rows(
     #: (``mode_holds_out_refusal``) — the inputs of ``mode_holdout_kind``.
     present: dict[int, int] = {}
     mode_held: dict[int, int] = {}
+    mode_calendar: dict[int, int] = {}
     tally_mode = validation_mode is not None
     env_int: dict[int, int] = {}
     env_scale: dict[int, int] = {}
@@ -1152,6 +1153,7 @@ def scan_rows(
     envelope_truncated = False
 
     from services.decimal_observe import write_int_digits_and_scale
+    from connectors.sql_temporal import is_invalid_calendar_refusal
     from services.validation_mode_contract import (
         CAST_SHARE_RULE,
         cast_share_holds_out,
@@ -1179,6 +1181,8 @@ def scan_rows(
                 validation_mode, refusal, record_batch=record_batch
             ):
                 mode_held[idx] = mode_held.get(idx, 0) + 1
+                if is_invalid_calendar_refusal(refusal):
+                    mode_calendar[idx] = mode_calendar.get(idx, 0) + 1
         carrier = bounded[idx].carrier
         grew = False
         if carrier == CARRIER_DECIMAL:
@@ -1668,6 +1672,7 @@ def scan_rows(
                 held=held,
                 cast_ok=cast_ok,
                 record_batch=record_batch,
+                calendar=mode_calendar.get(idx, 0),
             )
             if not holdout_kind:
                 mode_refused = True

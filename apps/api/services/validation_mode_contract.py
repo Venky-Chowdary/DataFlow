@@ -224,18 +224,38 @@ def cast_share_holds_out(failed: int, cast_ok: int) -> bool:
     return cast_ok > 0 and cast_ok >= LENIENT_MIN_CAST_SHARE * (cast_ok + failed)
 
 
+def is_numeric_cast_refusal(reason: str | None) -> bool:
+    """Is ``reason`` a numeric cast refusal — the R4-D02 class?
+
+    ``Invalid integer: 'abc'`` / ``Invalid decimal`` / ``Invalid number`` /
+    ``Invalid float`` (``decision_kernel`` ``INVALID_NUMERIC``). A fractional
+    value into an integer, a carrier overflow, a NOT NULL or a time-zone
+    invent are not: those change or lose a value the cell holds.
+    """
+    from services.decision_kernel.findings import FailureClass, classify_transform_failure
+
+    text = str(reason or "").strip()
+    return bool(text) and classify_transform_failure(text) == FailureClass.INVALID_NUMERIC
+
+
+def _is_balanced(mode: str | None) -> bool:
+    return str(mode_contract(mode).get("id") or "") == "balanced"
+
+
 def mode_holds_out_refusal(
     mode: str | None, reason: str | None = None, *, record_batch: bool
 ) -> bool:
     """THE policy: does this validation mode hold out a cell its cast refused?
 
     Every gate that grades a refused cell asks this one question (coercion
-    probe, G3, G5, G8, Target DDL, schema drift, the integrity audit):
+    probe, G3, G5, G8, g3f, Target DDL, schema drift, the integrity audit), and
+    the writer's quarantine on Execute applies the same classes:
 
     * lenient — every per-cell cast refusal (``holds_out_bad_cells``);
-    * balanced — only a refusal whose REASON is the invalid-calendar rule
-      (``connectors.sql_temporal.is_invalid_calendar_refusal``), on a
-      record-batch (file) source (QA browser 3);
+    * balanced — on a record-batch (file) source only: a numeric cast refusal
+      (:func:`is_numeric_cast_refusal`, QA R4-D02) and an invalid-calendar
+      refusal (``connectors.sql_temporal.is_invalid_calendar_refusal``, QA
+      browser 3). A database extract holds nothing out;
     * strict / maximum / review — nothing.
 
     ``reason=None`` asks for any reason, which only lenient answers yes to.
@@ -244,37 +264,77 @@ def mode_holds_out_refusal(
     """
     if _holds_out_every_refusal(mode):
         return True
-    if reason is None or not record_batch:
-        return False
-    if str(mode_contract(mode).get("id") or "") != "balanced":
+    if reason is None or not record_batch or not _is_balanced(mode):
         return False
     from connectors.sql_temporal import is_invalid_calendar_refusal
 
-    return is_invalid_calendar_refusal(reason)
+    return is_invalid_calendar_refusal(reason) or is_numeric_cast_refusal(reason)
+
+
+def mode_holds_out_numeric_casts(mode: str | None, *, record_batch: bool) -> bool:
+    """Does the mode hold out a numeric cast refusal on this source? (no reason text)"""
+    return mode_holds_out_refusal(mode, "Invalid decimal", record_batch=record_batch)
+
+
+def mode_may_hold_out(mode: str | None, *, record_batch: bool) -> bool:
+    """Can this mode hold ANY refused cell out on this source? (gate pre-check)"""
+    return _holds_out_every_refusal(mode) or bool(record_batch and _is_balanced(mode))
+
+
+def holdout_tally(
+    mode: str | None, reasons: Any, *, record_batch: bool
+) -> tuple[int, int]:
+    """``(held, calendar)`` over refusal reasons, for :func:`mode_holdout_kind`."""
+    from connectors.sql_temporal import is_invalid_calendar_refusal
+
+    held = calendar = 0
+    for reason in reasons or ():
+        if mode_holds_out_refusal(mode, reason, record_batch=record_batch):
+            held += 1
+            calendar += int(is_invalid_calendar_refusal(reason))
+    return held, calendar
 
 
 def mode_holdout_kind(
-    mode: str | None, *, failed: int, held: int, cast_ok: int, record_batch: bool
+    mode: str | None,
+    *,
+    failed: int,
+    held: int,
+    cast_ok: int,
+    record_batch: bool,
+    calendar: int = 0,
 ) -> str:
-    """THE column verdict: ``"cast_failure"`` (lenient), ``"invalid_calendar"``
-    (balanced on a file, fewer than one in five sampled values — ``connectors.
-    sql_temporal.INVALID_CALENDAR_MAX_SHARE``), or ``""`` (block; strict always).
-    ``held`` counts the failures :func:`mode_holds_out_refusal` held out; every
-    failure must be one. Every per-row cast holdout is also bounded by
-    :func:`cast_share_holds_out` (``CAST_SHARE_RULE``); an all-bad column is
-    never a holdout. The coercion probe (G3), the dry run (G5), Gate-8's
-    pre-write check, Target DDL, schema drift and the integrity audit's
-    financial and expectation checks all ask this one function per column.
+    """THE column verdict: ``"cast_failure"``, ``"invalid_calendar"`` or ``""`` (block).
+
+    ``held`` counts the failures :func:`mode_holds_out_refusal` held out (every
+    failure must be one); ``calendar`` how many of those are invalid-calendar
+    refusals (:func:`holdout_tally`). The share bounds are stated once:
+
+    * a cast holdout (lenient; balanced numeric on a file) needs at least half
+      the sampled cells to cast — :func:`cast_share_holds_out`, ``CAST_SHARE_RULE``;
+    * an invalid-calendar holdout (balanced on a file) needs fewer than one in
+      five sampled values bad — ``connectors.sql_temporal.INVALID_CALENDAR_MAX_SHARE``;
+    * strict, and balanced on a database extract, never hold out.
+
+    An all-bad column is never a holdout. The coercion probe (G3), the dry run
+    (G5), Gate-8's pre-write check, g3f, Target DDL, schema drift and the
+    integrity audit's financial and expectation checks all ask this function.
     """
     if failed <= 0 or held != failed or cast_ok <= 0:
         return ""
     if _holds_out_every_refusal(mode):
         return "cast_failure" if cast_share_holds_out(failed, cast_ok) else ""
+    if not record_batch or not _is_balanced(mode):
+        return ""
     from connectors.sql_temporal import invalid_calendar_share_holds_out
 
-    if record_batch and invalid_calendar_share_holds_out(failed, failed + cast_ok):
+    calendar = max(0, min(int(calendar or 0), failed))
+    total = failed + cast_ok
+    if calendar and not invalid_calendar_share_holds_out(calendar, total):
+        return ""
+    if calendar == failed:
         return "invalid_calendar"
-    return ""
+    return "cast_failure" if cast_share_holds_out(failed, cast_ok) else ""
 
 
 def _holds_out_every_refusal(mode: str | None) -> bool:

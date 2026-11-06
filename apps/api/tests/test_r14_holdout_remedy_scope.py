@@ -93,8 +93,16 @@ def test_the_remedy_is_balanced_validation_not_a_second_mechanism():
 BAD_INT = dict(transform="cast_integer", reason="cast_integer: Invalid integer: 'abc'")
 
 
-def test_a_bad_number_is_offered_lenient_not_balanced():
+def test_a_bad_number_in_a_file_is_offered_balanced():
+    """Balanced holds a numeric cast refusal out on a file (R4-D02, the one policy)."""
     holds = _holds(explain_validation(_preflight([_finding("qty", unfit=1, **BAD_INT)]), use_llm=False))
+    assert holds and holds[0]["validation_mode"] == "balanced", holds
+    assert holds[0]["balanced_holds_out"] is True
+
+
+def test_a_bad_number_on_a_database_source_is_offered_lenient_not_balanced():
+    pf = _preflight([_finding("qty", unfit=1, **BAD_INT)], record_batch=False)
+    holds = _holds(explain_validation(pf, use_llm=False))
     assert holds and holds[0]["validation_mode"] == "lenient", holds
     assert holds[0]["balanced_holds_out"] is False
     assert "switches the whole run to Lenient validation" in holds[0]["label"]
@@ -127,5 +135,9 @@ def test_the_csv_report_says_which_mode_holds_every_issue_out():
     }
     nums = b"id,q\n1,5\n2,abc\n"
     assert validate_csv_content(nums, ["id", "q"], {"id": "INTEGER", "q": "INTEGER"})["holdout_modes"] == {
+        "balanced": True, "lenient": True,
+    }
+    flags = b"id,b\n1,true\n2,maybe\n"  # not a numeric or calendar refusal
+    assert validate_csv_content(flags, ["id", "b"], {"id": "INTEGER", "b": "BOOLEAN"})["holdout_modes"] == {
         "balanced": False, "lenient": True,
     }
