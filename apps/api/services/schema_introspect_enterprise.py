@@ -690,6 +690,17 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                     if col_rows:
                         schema = found_schema
                         break
+            from services.default_collation import (
+                database_default_collation,
+                declared_collation_carrier,
+                keep_key_collations,
+            )
+
+            # Only a destination read: the default is "what a CREATE without a
+            # COLLATE clause got"; a source's collation is its real equality.
+            db_default_collation = database_default_collation(
+                lambda q: conn.execute(sa.text(q)).scalar(), "sqlserver"
+            ) if str(kwargs.get("introspect_purpose") or "").lower() == "destination" else ""
             columns: list[dict] = []
             for row in col_rows:
                 (
@@ -732,11 +743,14 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                     dtype = f"{base}({int(dt_prec)})"
                 logical = _sqlserver_to_logical(dtype)
                 coll = str(collation or "").strip()
+                collation_note = ""
                 if coll:
                     from services.type_system import normalize_logical_type
 
                     if normalize_logical_type(logical) in {"string", "text"}:
-                        logical = f"{logical} COLLATE {coll}"
+                        logical, collation_note = declared_collation_carrier(
+                            logical, coll, db_default_collation, column=str(name)
+                        )
                 col_mssql: dict[str, Any] = {
                     "name": name,
                     "inferred_type": logical,
@@ -748,6 +762,7 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                     ),
                     "data_type": dtype,
                     "collation": coll,
+                    "collation_note": collation_note,
                 }
                 attach_declared_catalog_type(
                     col_mssql, str(dtype or ""), dest_db="sqlserver"
@@ -792,6 +807,7 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 if columns
                 else {"primary_key_columns": [], "unique_keys": []}
             )
+            keep_key_collations(columns, unique_meta)
             foreign_keys, foreign_keys_meta = (
                 _si._fetch_foreign_keys("sqlserver", conn, schema, table)
                 if columns

@@ -279,6 +279,8 @@ def _schema_rows(
             "inferred_type": str(col.get("inferred_type") or "TEXT"),
             "nullable": bool(col.get("nullable", True)),
             "samples": list(col.get("samples") or samples.get(name) or [])[:20],
+            # A destination column at the database default collation (D275).
+            **({"collation_note": col["collation_note"]} if col.get("collation_note") else {}),
         })
     return rows
 
@@ -1555,6 +1557,14 @@ def plan_transfer(
             # What the source introspection could not see, as data: e.g. HubSpot
             # custom objects unavailable without their scope (D270).
             "source_notes": _source_notes(src_info),
+            # Disclosed, not refused: destination columns compared under the
+            # database default collation (a table DataFlow created before it
+            # stamped collations, or one created without a COLLATE clause).
+            "destination_notes": sorted({
+                str(m.get("destination_note") or "")
+                for m in mappings
+                if m.get("destination_note")
+            })[:20],
             "preflight": preflight,
             # Align with Execute unlock — passed alone must not invent safe_to_start,
             # and an uncleared block-severity coercion on the final mappings

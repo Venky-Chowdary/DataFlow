@@ -486,6 +486,7 @@ def _introspect_schema_unscoped(
             ssl=ssl,
             table=table,
             strict_namespace=strict_namespace,
+            introspect_purpose=introspect_purpose,
             **options,
         )
     if db_type == "bigquery":
@@ -1501,6 +1502,11 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         (db_name, requested or target),
                     )
                     rows = cur.fetchall()
+                # A destination column at the database default was not chosen;
+                # a source's collation is its real equality, default or not.
+                db_default_collation = database_default_collation(
+                    lambda q: (cur.execute(q), cur.fetchone())[1], "mysql"
+                ) if _destination_probe(kwargs) else ""
                 # No host-wide fallback: a MySQL connector names its database.
                 # Scanning information_schema.tables across every schema of the
                 # server for a lookalike name hung Validate on hosts with
@@ -1519,8 +1525,10 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     # not a computed column.
                     elif _mysql_extra_is_computed_column(extra):
                         logical = f"{logical} GENERATED ALWAYS"
-                    if collation:
-                        logical = f"{logical} COLLATE {collation}"
+                    logical, collation_note = declared_collation_carrier(
+                        logical, collation, db_default_collation,
+                        column=str(name), charset=charset,
+                    )
                     default = row[6] if len(row) > 6 else None
                     col_my: dict[str, Any] = {
                         "name": name,
@@ -1539,6 +1547,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                             else ("by_default" if "auto_increment" in extra else "")
                         ),
                         "collation": collation,
+                        "collation_note": collation_note,
                         "charset": charset,
                         "data_type": str(dtype or ""),
                     }
@@ -1563,6 +1572,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             indexes_meta: dict[str, Any] | None = None
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
+                keep_key_collations(columns, unique_meta)
                 foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
                     "mysql", cur, db_name, target
                 )
@@ -1943,39 +1953,19 @@ ORDER BY a.attnum
 """
 
 
+from services.default_collation import (  # noqa: E402
+    database_default_collation,
+    declared_collation_carrier,
+    keep_key_collations,
+)
+from services.pg_enum_labels import _pg_fetch_enum_labels  # noqa: E402,F401
+
+
 def format_enum_domain_carrier(members: list[str] | tuple[str, ...]) -> str:
     """Build ``ENUM('a','b')`` carrier from ordered labels (MySQL / PG pg_enum)."""
     from services.type_system import format_enum_domain_carrier as _fmt
 
     return _fmt(members)
-
-
-def _pg_fetch_enum_labels(cur: Any, type_oids: list[int]) -> dict[int, list[str]]:
-    """Load ``pg_enum`` labels ordered by ``enumsortorder`` (Postgres catalog)."""
-    if not type_oids:
-        return {}
-    # Deduplicate while preserving order for stable ANY/IN binds.
-    uniq: list[int] = []
-    seen: set[int] = set()
-    for oid in type_oids:
-        if oid in seen:
-            continue
-        seen.add(oid)
-        uniq.append(int(oid))
-    placeholders = ",".join(["%s"] * len(uniq))
-    cur.execute(
-        f"""
-        SELECT enumtypid, enumlabel
-        FROM pg_catalog.pg_enum
-        WHERE enumtypid IN ({placeholders})
-        ORDER BY enumtypid, enumsortorder
-        """,
-        tuple(uniq),
-    )
-    out: dict[int, list[str]] = {}
-    for typoid, label in cur.fetchall():
-        out.setdefault(int(typoid), []).append(str(label))
-    return out
 
 
 def _pg_apply_identity_carrier(logical: str, attidentity: str, default_expr: str | None) -> str:

@@ -564,6 +564,8 @@ def _repair_unparseable_numeric_targets(
     lacked samples; Validate then correctly blocked. Even with a typed dest
     ``id``, non-numeric samples must never stay on that column.
     """
+    from services.semantic_mapper import name_identical
+
     from services.schema_inference import samples_fit_logical_type
 
     # Typed database extracts render numbers in wire form (``150.345``), which
@@ -641,7 +643,7 @@ def _repair_unparseable_numeric_targets(
                     and not _is_create_new_mapping(m)
                     and tgt.lower() in {t.lower() for t in tgt_by}
                 )
-                if existing_dest_column and src.lower() == tgt.lower():
+                if existing_dest_column and name_identical(src, tgt):
                     # The destination already has this column. A non-numeric
                     # sample is a row to quarantine, not a reason to ADD a
                     # ``qty_text`` twin beside ``qty INTEGER`` (R4-D08).
@@ -1266,6 +1268,11 @@ def run_mapping_pipeline(
         reasoning = m["reasoning"]
         if enrichment and enrichment not in reasoning.lower():
             reasoning = f"{reasoning} · enriched: {enrichment}"
+        destination_note = str(
+            target_by_name.get(m["target"], {}).get("collation_note") or ""
+        )
+        if destination_note and destination_note not in reasoning:
+            reasoning = f"{reasoning} · {destination_note}"
         # What the source *declared*, captured before canonicalization widened
         # ambiguous spellings for the CREATE question. Only the report reads it;
         # every invent below still uses the never-narrower carrier.
@@ -1607,6 +1614,7 @@ def run_mapping_pipeline(
                     else {}
                 ),
                 "reasoning": reasoning,
+                **({"destination_note": destination_note} if destination_note else {}),
                 "agent": "MappingReasonerAgent",
                 "format_class": classification["format"],
                 **(
