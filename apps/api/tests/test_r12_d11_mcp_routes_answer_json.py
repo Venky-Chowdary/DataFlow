@@ -292,6 +292,35 @@ def test_nginx_template_never_serves_the_spa_for_api_or_discovery(web_nginx):
     assert status == 200 and "spa" in text
 
 
+#: Where an MCP client POSTs after a 401 when no OAuth server is advertised:
+#: the MCP TS SDK falls back to ``/register`` / ``/token`` on the origin it was
+#: given. A mistyped MCP URL lands on the same SPA catch-all.
+_NON_API_POSTS = ["/register", "/token", "/authorize", "/mcp", "/", "/jobs/123"]
+
+
+def test_nginx_template_answers_a_non_get_outside_the_api_with_json(web_nginx):
+    """A POST outside /api/ was nginx's HTML ``405 Not Allowed``, which the MCP
+    client reports as "Invalid OAuth error response: Unexpected token '<'".
+    It is a JSON OAuth-shaped error naming the MCP endpoint and the header."""
+    failures = []
+    for path in _NON_API_POSTS:
+        status, ctype, text = _fetch(web_nginx, "POST", path, {"client_name": "probe"})
+        try:
+            body = json.loads(text)
+        except ValueError:
+            failures.append((path, status, ctype, text[:80]))
+            continue
+        if status != 404 or not _is_json(ctype) or body.get("error") != "invalid_request":
+            failures.append((path, status, ctype, text[:80]))
+        elif "/api/v1/mcp" not in body.get("error_description", ""):
+            failures.append((path, "no MCP endpoint named", body))
+    assert not failures, failures
+    # GET still serves the SPA and its client-side routes (``/register`` too).
+    for path in ("/", "/register", "/jobs/123"):
+        status, _ctype, text = _fetch(web_nginx, "GET", path)
+        assert status == 200 and "spa" in text, (path, status, text[:80])
+
+
 def test_nginx_template_answers_json_when_the_api_is_down(tmp_path):
     dead = _free_port()
     proc, port = _run_nginx(tmp_path, TEMPLATE, f"http://127.0.0.1:{dead}/api/v1")
@@ -314,5 +343,6 @@ def test_compose_nginx_conf_has_the_same_json_guards():
         "location ^~ /.well-known/",
         "location = /api",
         "@api_unavailable",
+        "@json_wrong_method",
     ):
         assert needle in text, needle
