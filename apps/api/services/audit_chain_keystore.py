@@ -88,6 +88,7 @@ def reset_cache() -> None:
     with _lock:
         _cache.update({"ns": None, "doc": None, "keys": {}, "read_at": 0.0, "imported": set()})
         _noted.clear()
+        _epoch_cache.clear()
 
 
 def _key_id(key: bytes) -> str:
@@ -280,17 +281,45 @@ def rotate(*, actor: str, local_key: bytes | None = None) -> dict[str, Any]:
 
 
 HISTORY_COLLECTION = "audit_chain_key_history"
-_noted: set[str] = set()
+_HISTORY_LABEL = "audit_chain_key_history"
+#: A configured key's "last signed" stamp is refreshed at most this often.
+HISTORY_REFRESH_S = 3600.0
+_noted: dict[str, float] = {}
 
 
-def note_key_id(key_id: str, *, origin: str) -> None:
-    """Remember that this deployment signed with ``key_id`` (an id, never material).
+def _seal(key_id: str, origin: str, last_seen: str) -> str:
+    from services.secret_vault import encrypt_secret
 
-    A configured (env) key is not in the keyring; if an operator later drops it
-    without moving it to the retired keys, its records must still read as a
-    lost key, not as a relabel (C4). Once per process per key; never raises.
+    return encrypt_secret(f"{key_id}|{origin}|{last_seen}", label=_HISTORY_LABEL)
+
+
+def _unseal(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The entry when its vault seal matches its fields; None for a forged row."""
+    from services.secret_vault import decrypt_secret
+
+    try:
+        plain = decrypt_secret(str(doc.get("seal") or ""))
+    except Exception:  # noqa: BLE001 - unsealed / foreign rows are not history
+        return None
+    kid, origin, last_seen = (plain.split("|", 2) + ["", "", ""])[:3]
+    if kid != str(doc.get("_id")) or origin != str(doc.get("origin") or ""):
+        return None
+    return {"key_id": kid, "origin": origin, "last_seen": last_seen}
+
+
+def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None:
+    """Remember, tamper-evidently, that this deployment signed with ``key_id``.
+
+    Ids and times only, sealed with the vault key (a database-level writer
+    cannot add or move an entry: an unsealed or mismatched row is ignored).
+    ``last_seen`` is when the key last signed (refreshed at most hourly per
+    process) — a record naming the key after it stopped signing is a relabel,
+    not a lost key (C4 review). Never raises.
     """
-    if not key_id or key_id in _noted:
+    if not key_id:
+        return
+    now_mono = time.monotonic()
+    if seen_at is None and now_mono - _noted.get(key_id, -HISTORY_REFRESH_S) < HISTORY_REFRESH_S:
         return
     try:
         from services.control_plane_store import mongo_collection
@@ -298,25 +327,76 @@ def note_key_id(key_id: str, *, origin: str) -> None:
         coll = mongo_collection(HISTORY_COLLECTION)
         if coll is None:
             return
+        when = seen_at or _now()
+        current = _unseal(coll.find_one({"_id": key_id}) or {}) or {}
+        if current.get("last_seen") and str(current["last_seen"]) >= when:
+            when = str(current["last_seen"])
         coll.update_one(
             {"_id": key_id},
-            {"$setOnInsert": {"origin": origin, "first_seen": _now()}},
+            {"$set": {"origin": origin, "last_seen": when, "seal": _seal(key_id, origin, when)},
+             "$setOnInsert": {"first_seen": _now()}},
             upsert=True,
         )
-        _noted.add(key_id)
+        _noted[key_id] = now_mono
     except Exception as exc:  # noqa: BLE001 - signing must never fail on bookkeeping
         logger.debug("audit key history not recorded: %s", exc)
 
 
-def noted_key_ids() -> set[str]:
-    """Every key id this deployment recorded signing with outside the keyring."""
+_EPOCH_ID = "__history_epoch__"
+_epoch_cache: dict[str, str] = {}
+
+
+def history_epoch() -> str | None:
+    """When this deployment began keeping the sealed key history (ISO time).
+
+    Records written before it may name a key nobody recorded (an earlier
+    deploy's lost key); records after it never legitimately do. Created once,
+    sealed like the entries; None without a control-plane database.
+    """
+    if "at" in _epoch_cache:
+        return _epoch_cache["at"]
     try:
         from services.control_plane_store import mongo_collection
 
         coll = mongo_collection(HISTORY_COLLECTION)
-        return {str(d["_id"]) for d in coll.find({}, {"_id": 1})} if coll is not None else set()
+        if coll is None:
+            return None
+        now = _now()
+        coll.update_one(
+            {"_id": _EPOCH_ID},
+            {"$setOnInsert": {"origin": "epoch", "last_seen": now, "seal": _seal(_EPOCH_ID, "epoch", now)}},
+            upsert=True,
+        )
+        entry = _unseal(coll.find_one({"_id": _EPOCH_ID}) or {})
+        if entry is None:
+            return None
+        _epoch_cache["at"] = entry["last_seen"]
+        return entry["last_seen"]
     except Exception:  # noqa: BLE001
-        return set()
+        return None
+
+
+def key_history() -> dict[str, dict[str, Any]]:
+    """Sealed history entries by key id (forged or unsealed rows left out)."""
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection(HISTORY_COLLECTION)
+        if coll is None:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for doc in coll.find({}):
+            entry = _unseal(doc)
+            if entry is not None and entry["key_id"] != _EPOCH_ID:
+                out[entry["key_id"]] = entry
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def noted_key_ids() -> set[str]:
+    """Every key id the sealed history holds."""
+    return set(key_history())
 
 
 def status() -> dict[str, Any]:

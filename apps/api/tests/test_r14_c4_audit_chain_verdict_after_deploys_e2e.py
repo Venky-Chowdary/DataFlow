@@ -108,3 +108,84 @@ def test_an_edited_record_relabelled_to_an_unknown_key_is_tampering(ent):
         f["kind"] == "unknown_key_after_keyring" and f["category"] == "tampering"
         for f in platform["findings"]
     ), platform["findings"][:3]
+
+
+def _relabel(ent, record, key_id: str) -> None:
+    ent.db["audit_events"].update_one(
+        {"_id": record["_id"]}, {"$set": {"resource": "/edited", "key_id": key_id}}
+    )
+
+
+def _tampered(report: dict) -> list[str]:
+    return [f["kind"] for f in report["findings"] if f["category"] == "tampering"]
+
+
+def test_a_forged_history_row_does_not_excuse_a_relabel(ent):
+    """Second review: the key history was a plain collection; inserting
+    {_id: 'k-forged'} and relabelling an edited record to it hid the edit."""
+    from services.audit_chain_keystore import HISTORY_COLLECTION
+
+    ws = ent.workspace("R14 C4 forged history")
+    _write(3, action="r14c4.forged", workspace_id=ws)
+    ent.db[HISTORY_COLLECTION].insert_one(
+        {"_id": "k-forged", "origin": "configured", "last_seen": "2999-01-01T00:00:00+00:00"}
+    )
+    _relabel(ent, _records(ent, "r14c4.forged")[1], "k-forged")
+    report = _verify(ent, ws)
+    assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
+    assert report["unverifiable_key_lost"]["count"] == 0
+
+
+def test_a_relabel_to_a_known_but_lost_key_after_it_stopped_signing_is_tampering(ent, monkeypatch):
+    import time
+
+    from services import audit_chain_keystore, evidence_chain
+    from services.audit_chain_keys import key_id_for
+
+    monkeypatch.setattr(audit_chain_keystore, "HISTORY_REFRESH_S", 0.0)
+    monkeypatch.setattr(evidence_chain, "RELABEL_SLACK", __import__("datetime").timedelta(seconds=1))
+    ws = ent.workspace("R14 C4 known lost key")
+    env_key = "env-" + secrets.token_urlsafe(24)
+    kid = key_id_for(env_key.encode())
+    monkeypatch.setenv("DATAFLOW_AUDIT_HMAC_KEY", env_key)
+    _write(3, action="r14c4.env", workspace_id=ws)
+    monkeypatch.delenv("DATAFLOW_AUDIT_HMAC_KEY")
+    _forget_process_keys()
+    time.sleep(2.5)
+    _write(3, action="r14c4.after", workspace_id=ws)
+    _relabel(ent, _records(ent, "r14c4.after")[2], kid)
+    report = _verify(ent, ws)
+    # The env key's own records read as a lost key; the relabel does not.
+    assert report["unverifiable_key_lost"]["by_key_id"] == {kid: 3}, report["unverifiable_key_lost"]
+    assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
+
+
+def test_env_key_only_deployment_flags_a_relabel(ent, monkeypatch):
+    ws = ent.workspace("R14 C4 env only")
+    monkeypatch.setenv("DATAFLOW_AUDIT_HMAC_KEY", "env-only-" + secrets.token_urlsafe(24))
+    _forget_process_keys()
+    _write(3, action="r14c4.envonly", workspace_id=ws)
+    _relabel(ent, _records(ent, "r14c4.envonly")[1], "k-nobody-ever-had")
+    report = _verify(ent, ws)
+    assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
+
+
+def test_imported_file_keyring_flags_a_relabel(ent, monkeypatch):
+    """A keyring whose only key was imported from a node file (origin
+    imported_local_file) had no anchor, so every relabel read as lost."""
+    from services import audit_chain_keystore as store
+
+    ws = ent.workspace("R14 C4 imported keyring")
+    ent.db["audit_events"].delete_many({})
+    ent.db[store.COLLECTION].delete_many({})
+    _fresh_container(ent, monkeypatch, "imported-old")
+    with monkeypatch.context() as m:
+        m.setattr(store, "_collection", lambda: None)
+        _write(1, action="r14c4.pre", workspace_id=ws)
+    _forget_process_keys()
+    _write(3, action="r14c4.imported", workspace_id=ws)
+    doc = ent.db[store.COLLECTION].find_one({"_id": store.DOC_ID})
+    assert {k["origin"] for k in doc["keys"]} == {"imported_local_file"}, doc["keys"]
+    _relabel(ent, _records(ent, "r14c4.imported")[1], "k-nobody-ever-had")
+    report = _verify(ent, ws)
+    assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]

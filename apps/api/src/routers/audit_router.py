@@ -466,11 +466,12 @@ async def verify_audit_chain(
     The verdict (C4): ``verified`` is true only when every record in scope was
     checked and holds up. A record signed under a key this deployment no longer
     holds (not configured, not retired, not in the persisted keyring) cannot be
-    checked, so it is never counted as verified — and not as tampering when it
-    predates the shared keyring's first signed record (a key an earlier deploy
-    lost). After that record, every writer signs with a held key, so a record
-    naming a key the deployment never held is tampering
-    (``unknown_key_after_keyring``). A pre-keyring lost-key chain reports
+    checked, so it is never counted as verified — and not as tampering when the
+    deployment's sealed key history shows it signed with that key and the
+    record falls within that key's use, or the record predates the history (a
+    key an earlier deploy lost). A record naming any other key after a
+    verified record is tampering
+    (``unknown_key_after_keyring``). A chain whose only exceptions are lost keys reports
     ``status: verified_with_exceptions``, ``verified: false``,
     ``tampering_detected: false`` and ``unverifiable_key_lost`` (``count`` and
     ``by_key_id``); supplying that key as a retired audit key makes those

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -209,13 +209,19 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         hold — not configured, not retired, not in the persisted keyring — so
         its HMAC cannot be checked. Not evidence of tampering, and not
         verified either: the record stays unverifiable until that key is
-        supplied again (D221, QA r12 #3). Only records before the first one
-        signed with a key the shared keyring created can be lost-key records.
+        supplied again (D221, QA r12 #3). A key is "lost" only if the
+        sealed key history (vault-sealed ids and last-signed times:
+        ``audit_chain_keystore.key_history``) says the deployment signed with
+        it and the record falls within its use, or the record predates the
+        history (an earlier deploy).
     ``unknown_key_after_keyring`` (category ``tampering``)
-        A record written after the shared keyring signed the chain names a key
-        this deployment never signed with (not in the keyring, not a recorded
-        configured key). Every writer since then signs with a held key, so the
-        key id was changed — typically to hide an edit (C4).
+        Judged on the trusted clock — the last record before it that verified
+        under a held key: the record names a key the deployment never signed
+        with although it was written after the history began, or a key that
+        had stopped signing long before (C4 review). The key id was changed,
+        typically to hide an edit. A forged history row fails its seal and does
+        not count. Every verify walk adds the keys it verified to the history,
+        so an env key dropped later reads as lost, not as tampering.
     ``broken_link``
         ``prev_hash`` does not name the previous record, nor any earlier one: a
         record between them was deleted, or the records were reordered.
@@ -406,20 +412,16 @@ def _walk(
     For the workspace line only records that carry ``link_field`` are
     link-checked (older records predate it).
     """
-    from services.audit_chain_keys import (
-        check_signature,
-        known_key_history,
-        native_keyring_key_ids,
-    )
+    from services import audit_chain_keystore as keystore
+    from services.audit_chain_keys import check_signature, known_key_history
 
-    native = native_keyring_key_ids()
     history = known_key_history()
-    # The first record signed with a key the shared keyring created. From there
-    # on every writer signs with a held key, so an unknown key id is a relabel.
-    keyring_anchor = next(
-        (n for n, i in enumerate(positions) if str(events[i].get("key_id") or "") in native),
-        None,
-    )
+    epoch = _as_time(keystore.history_epoch())
+    # The time of the last record that verified under a held key: a trusted
+    # clock for the records after it (an unverifiable record's own time is
+    # whatever its editor wrote).
+    trusted_at: datetime | None = None
+    verified_by_key: dict[str, datetime] = {}
     findings: list[ChainFinding] = []
     seen_prev: dict[str, int] = {}
     walked: dict[str, int] = {}
@@ -440,23 +442,24 @@ def _walk(
             )
         else:
             verdict, key_id = check_signature(event, hmac_of)
-            if (
-                verdict == "unknown_key"
-                and key_id not in history
-                and keyring_anchor is not None
-                and n > keyring_anchor
-            ):
+            relabel = (
+                _relabel_reason(key_id, history, trusted_at, epoch)
+                if verdict == "unknown_key"
+                else ""
+            )
+            if verdict == "ok":
+                stamp = _as_time(event.get("time"))
+                if stamp is not None:
+                    trusted_at = stamp
+                    if key_id and (key_id not in verified_by_key or stamp > verified_by_key[key_id]):
+                        verified_by_key[key_id] = stamp
+            if relabel:
                 findings.append(
                     ChainFinding(
                         "unknown_key_after_keyring",
                         index=index,
                         event_id=event_id,
-                        detail=(
-                            f"Names key {key_id}, which this deployment never held, yet it "
-                            "was written after the shared keyring signed the chain: every "
-                            "writer since then signs with a held key, so the record's key "
-                            "id was changed. Counted as tampering."
-                        ),
+                        detail=relabel,
                     )
                 )
             elif verdict == "unknown_key":
@@ -578,7 +581,61 @@ def _walk(
             walked[stored_hash] = index
         prev_hash = stored_hash or prev_hash
         prev_seq = seq
+    # Backfill: every key that verified here is now on the sealed history with
+    # the newest record it signed, so dropping it later reads as a lost key.
+    for kid, last in verified_by_key.items():
+        keystore.note_key_id(kid, origin="verified", seen_at=last.isoformat())
     return findings
+
+
+#: A lost key may have signed records this long after its sealed "last seen".
+RELABEL_SLACK = timedelta(hours=2)
+
+
+def _as_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _relabel_reason(
+    key_id: str | None,
+    history: dict[str, dict[str, Any]],
+    trusted_at: datetime | None,
+    epoch: datetime | None,
+) -> str:
+    """Why an unknown-key record is a relabel, or "" when it may be a lost key.
+
+    Judged on the trusted clock (the last verified record before it):
+    * a key on the sealed history that stopped signing well before then was
+      relabelled onto the record;
+    * a key never on the history, on a record after the history began and
+      after a verified record, was never this deployment's key.
+    Before the history began (pre-upgrade deploys) an unknown key is a lost key.
+    """
+    if trusted_at is None:
+        return ""
+    entry = history.get(str(key_id or ""))
+    if entry is not None:
+        last = _as_time(entry.get("last_seen"))
+        if last is not None and trusted_at > last + RELABEL_SLACK:
+            return (
+                f"Names key {key_id}, which last signed at {last.isoformat()}, on a record "
+                f"written after {trusted_at.isoformat()}: the key id was changed. "
+                "Counted as tampering."
+            )
+        return ""
+    if epoch is not None and trusted_at >= epoch:
+        return (
+            f"Names key {key_id}, which this deployment never signed with, on a record "
+            "written after a verified one: every writer since signs with a held key, so "
+            "the record's key id was changed. Counted as tampering."
+        )
+    return ""
 
 
 def _position(event: dict[str, Any]) -> int:
