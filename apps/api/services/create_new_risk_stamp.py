@@ -116,12 +116,14 @@ def apply_create_new_risk_stamps(
         )
         if db and stamped:
             if physical_from_src and stamped.casefold() == physical_from_src.casefold():
-                # The stamp is exactly the carrier the kernel invents for this
-                # source, i.e. a destination token. Re-reading it under the
-                # *source* dialect turned MongoDB's integer carrier ``long`` into
-                # Oracle's text LOB ``LONG``: every Oracle NUMBER(p,0) landed in
-                # Mongo as a string and run 2 blocked below the floor (D279).
-                physical_from_stamp = stamped
+                # The stamp is the carrier the kernel invents for this source,
+                # i.e. a destination token. Re-reading it under the *source*
+                # dialect turned MongoDB's integer carrier ``long`` into Oracle's
+                # text LOB ``LONG``: every Oracle NUMBER(p,0) landed in Mongo as
+                # a string and run 2 blocked below the floor (D279). The kernel's
+                # own spelling is kept, so a stamp that only differs in case
+                # (``DATE`` vs ``date``) still re-derives its verdict below.
+                physical_from_stamp = physical_from_src
             else:
                 physical_from_stamp = create_new_mapping_target_type(
                     stamped, db, samples=col_samples, source_db=source_db_type
