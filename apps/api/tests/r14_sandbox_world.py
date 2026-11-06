@@ -51,8 +51,16 @@ def provision(ent, *, ttl_hours: int = 24, name: str = "security retest") -> San
     return Sandbox(ent, body["workspace"]["id"], tester, client, body)
 
 
+def confirm(workspace_id: str, reason: str = "test teardown") -> dict[str, str]:
+    """The ?confirm=<workspace name>&reason= a real workspace delete requires (S6)."""
+    from services import team_store
+
+    ws = team_store.get_workspace(workspace_id)
+    return {"confirm": ws.name if ws else "", "reason": reason}
+
+
 @pytest.fixture
 def sandbox(ent):
     box = provision(ent)
     yield box
-    ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params={"reason": "test teardown"})
+    ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params=confirm(box.workspace_id))

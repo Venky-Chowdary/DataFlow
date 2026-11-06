@@ -24,6 +24,7 @@ from services.team_store import (
     PermissionDenied,
     TeamStoreBusy,
     TeamStoreError,
+    WorkspaceClosing,
     WorkspaceNotFound,
     add_workspace_member,
     break_glass_set_admin,
@@ -174,6 +175,8 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     LastAdminProtected: 409,
     # Same class of answer: the membership this add would create is already there.
     MemberAlreadyExists: 409,
+    # A teardown of this workspace is under way.
+    WorkspaceClosing: 409,
 }
 
 
@@ -403,18 +406,28 @@ async def patch_workspace(workspace_id: str, body: WorkspaceBody, request: Reque
 
 
 def _confirmed_delete(ws_name: str, confirm: str, reason: str) -> str:
-    """An irreversible wipe needs the workspace's name typed back, or a reason (S6)."""
-    reason = " ".join((reason or "").split())
-    if (confirm or "").strip() == ws_name or reason:
-        return reason
-    raise HTTPException(
-        status_code=422,
-        detail=(
-            "Deleting a workspace removes its connectors, schedules, jobs, uploads and keys "
-            "and cannot be undone. Preview it with ?dry_run=true, then confirm with "
-            f"?confirm=<the workspace name, {ws_name!r}> or give a ?reason=."
-        ),
-    )
+    """An irreversible wipe needs the workspace's name typed back (S6, review 4).
+
+    ``confirm`` must equal the workspace's name; ``reason`` is recorded with
+    it, never instead of it. A workspace with a blank name cannot be confirmed
+    and is renamed first.
+    """
+    name = (ws_name or "").strip()
+    if not name:
+        raise HTTPException(
+            status_code=422,
+            detail="This workspace has no name to confirm with — rename it, then delete it",
+        )
+    if (confirm or "").strip() != name:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Deleting a workspace removes its connectors, schedules, jobs, uploads and keys "
+                "and cannot be undone. Preview it with ?dry_run=true, then confirm with "
+                f"?confirm=<the workspace name, {name!r}> (a ?reason= is recorded with it)."
+            ),
+        )
+    return " ".join((reason or "").split())
 
 
 @router.delete("/workspaces/{workspace_id}")
@@ -451,7 +464,7 @@ async def delete_workspace_route(
         actor=actor,
         resource=f"/team/workspaces/{workspace_id}",
         level="warn",
-        details={**summary, "name": ws.name, "reason": why or None, "confirmed_by_name": not why},
+        details={**summary, "name": ws.name, "reason": why or None, "confirmed_by_name": True},
     )
     return {"ok": True, **summary}
 

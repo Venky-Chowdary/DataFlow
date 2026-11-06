@@ -629,7 +629,8 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
 
         record_ws = str(chain_record.get("workspace_id") or "")
         scope = tenant_scope(request)
-        if record_ws and not scope.allows(record_ws):
+        # An unscoped record is visible only to a scope that allows "" (L5).
+        if not scope.allows(record_ws):
             chain_record, chain_record_withheld = {"id": chain_record.get("id")}, True
         elif not reader_sees_key_ids(request, record_ws):
             chain_record = KeyIdMasker()(dict(chain_record))

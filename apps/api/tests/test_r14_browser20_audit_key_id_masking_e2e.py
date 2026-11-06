@@ -200,14 +200,17 @@ def test_verify_pack_masks_a_key_actor_for_a_non_admin_reader(world):
     editor = world.as_key(world.mint_key("editor"))
     masked = editor.post("/api/v1/audit/verify-pack", json=pack)
     assert masked.status_code == 200, masked.text
-    record = masked.json()["chain_record"]
-    assert record is not None
     assert key["id"] not in masked.text
-    assert record["actor"] == f"api_key:…{key['id'][-4:]}"
+    # This anchor carries no workspace: an editor's scope does not cover
+    # unscoped records, so only "found" is reported (review 4 L5).
+    assert masked.json()["chain_record_found"] is True
+    assert masked.json()["chain_record_withheld"] is True and masked.json()["chain_record"] is None
     # Whole only for a key manager of the RECORD's workspace (review 3): this
     # anchor is filed outside any request, so it carries no workspace and only
     # a platform admin reads the id whole.
-    full = world.root.post("/api/v1/audit/verify-pack", json=pack)
+    platform = world.root
+    platform.headers.pop("X-Workspace-Id", None)  # the platform-wide view covers unscoped records
+    full = platform.post("/api/v1/audit/verify-pack", json=pack)
     assert full.json()["chain_record"]["actor"] == f"api_key:{key['id']}"
     owner = world.owner.post("/api/v1/audit/verify-pack", json=pack).json()
     assert owner["chain_record_withheld"] or key["id"] not in str(owner)

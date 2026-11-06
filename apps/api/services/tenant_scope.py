@@ -200,6 +200,13 @@ class TenantScope:
         if not self.allows(resource_workspace_id):
             return False
         ws = _norm(resource_workspace_id)
+        if ws:
+            from services.team_store import workspace_closing
+
+            if workspace_closing(ws):
+                # Tombstoned: id-addressed updates and deletes are refused too
+                # (review 4 L2), for every caller including platform admins.
+                return False
         if self.unrestricted or not ws:
             return True
         return dict(self.memberships).get(ws, "") in _WRITE_ROLES
@@ -232,14 +239,14 @@ class TenantScope:
             if self.unrestricted:
                 raise HTTPException(status_code=400, detail="X-Workspace-Id required")
             raise HTTPException(status_code=403, detail="No workspace membership")
-        if write and not self.can_write(ws):
-            raise HTTPException(status_code=403, detail="Write access to workspace denied")
         if write:
             from services.team_store import workspace_closing
 
             if workspace_closing(ws):
                 # Tombstoned by a teardown in progress (S3): nothing new lands.
                 raise HTTPException(status_code=409, detail="This workspace is being deleted")
+        if write and not self.can_write(ws):
+            raise HTTPException(status_code=403, detail="Write access to workspace denied")
         return ws
 
     def narrowed(self, workspace_id: str) -> "TenantScope":

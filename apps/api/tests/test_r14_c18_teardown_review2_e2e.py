@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import pytest
 
 from r8_ent_harness import ent  # noqa: F401
-from r14_sandbox_world import provision
+from r14_sandbox_world import confirm, provision
 
 REASON = {"reason": "teardown review test"}
 
@@ -140,7 +140,7 @@ def test_teardown_removes_every_scoped_row_and_a_third_workspace_stays_intact(en
     before_c = _present(ent, other, c_rows)
     assert all(before_c.values()), before_c
 
-    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=REASON,
+    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=confirm(box.workspace_id),
                             headers={"X-Workspace-Id": other})
     assert gone.status_code == 200, gone.text
     body = gone.json()
@@ -213,7 +213,7 @@ def test_a_closing_workspace_refuses_writes_jobs_and_schedule_claims(ent, monkey
         return real_api_keys(workspace_id, dry_run)
 
     monkeypatch.setattr(workspace_teardown, "_api_keys", mid_teardown)
-    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=REASON)
+    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=confirm(box.workspace_id))
     assert gone.status_code == 200, gone.text
     assert seen == {"closing": True, "post": 409, "claim": None, "job": "refused"}, seen
 
@@ -233,7 +233,7 @@ def test_a_job_that_slips_in_is_caught_by_the_recheck(ent, monkeypatch):
         return real_connectors(workspace_id, dry_run)
 
     monkeypatch.setattr(workspace_teardown, "_connectors", sneak)
-    busy = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=REASON)
+    busy = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=confirm(box.workspace_id))
     assert busy.status_code == 409, busy.text
     ws = team_store.get_workspace(box.workspace_id)
     assert ws is not None and ws.deleting_at, "the workspace must stay closed, not reopen"
@@ -250,7 +250,7 @@ def test_unknown_job_store_refuses_the_teardown(ent, monkeypatch):
         raise RuntimeError("job store down")
 
     monkeypatch.setattr(type(svc), "count_jobs", broken)
-    busy = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=REASON)
+    busy = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params=confirm(box.workspace_id))
     assert busy.status_code == 409, busy.text
     assert "cannot say" in busy.json()["detail"]
     assert team_store.get_workspace(box.workspace_id).deleting_at == ""
@@ -264,7 +264,7 @@ def test_logins_the_tester_created_inside_the_sandbox_are_removed(ent):
                            json={"email": "made-by-tester@example.test", "role": "viewer", "create_account": True})
     assert made.status_code == 200, made.text
     assert user_store.get_user("made-by-tester@example.test") is not None
-    gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params=REASON)
+    gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params=confirm(box.workspace_id))
     assert gone.status_code == 200, gone.text
     assert gone.json()["tester_created_logins_removed"] == 1
     assert user_store.get_user("made-by-tester@example.test") is None
@@ -278,7 +278,7 @@ def test_a_tester_login_that_became_a_real_account_is_kept(ent):
     real = ent.workspace("Real team")
     team_store._write_membership(team_store.Membership(
         workspace_id=real, email=box.tester_email, role="editor", added_by="root-admin@example.com"))
-    gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params=REASON)
+    gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params=confirm(box.workspace_id))
     assert gone.status_code == 200, gone.text
     assert gone.json()["tester_login_removed"] is False and gone.json()["tester_login_kept"] is True
     assert user_store.get_user(box.tester_email) is not None
@@ -321,3 +321,125 @@ def test_rollback_when_the_fingerprint_write_fails_still_removes_the_minted_logi
         sandbox_workspaces.create_sandbox(
             name="flaky", tester_email="flaky-c18@example.test", reason="r", actor="root-admin@example.com")
     assert user_store.get_user("flaky-c18@example.test") is None
+
+
+# ── review 4 ────────────────────────────────────────────────────────────────
+
+
+def test_a_reason_alone_does_not_confirm_and_a_blank_name_cannot_be_deleted(ent):
+    from services import team_store
+
+    box = provision(ent)
+    only_reason = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params={"reason": "cleanup"})
+    assert only_reason.status_code == 422, only_reason.text
+    ws = team_store.get_workspace(box.workspace_id)
+    ws.name = "   "
+    team_store._write_workspace(ws)
+    blank = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params={"confirm": "   "})
+    assert blank.status_code == 422 and "no name" in blank.json()["detail"]
+    assert team_store.get_workspace(box.workspace_id) is not None
+
+
+def test_a_closing_workspace_refuses_id_addressed_writes_and_scim_role_changes(ent):
+    from services import team_store
+
+    box = provision(ent)
+    conn = box.tester.post("/api/v1/connectors/saved", json={
+        "name": "l2", "type": "postgresql", "host": "h.invalid", "port": 5432,
+        "username": "u", "password": "p", "database": "d"})
+    assert conn.status_code in (200, 201), conn.text
+    cid = conn.json().get("id") or conn.json()["connector"]["id"]
+    team_store.mark_workspace_closing(box.workspace_id)
+    from services import connector_store
+
+    for client in (box.tester, ent.admin):
+        res = client.delete(f"/api/v1/connectors/saved/{cid}", headers={"X-Workspace-Id": box.workspace_id})
+        # Refused — 409 where the route asks the write gate directly, 404 where
+        # it answers a non-writable connector like a missing one (D222).
+        assert res.status_code in (403, 404, 409), res.text
+    assert connector_store.get_connector(cid) is not None, "an id-addressed delete went through"
+    # SCIM group sync (and any store-level caller) cannot add a member either.
+    with pytest.raises(team_store.WorkspaceClosing):
+        team_store.add_workspace_member(workspace_id=box.workspace_id, email="scim@example.test",
+                                        role="viewer", added_by="scim", actor_is_platform_admin=True)
+
+
+def test_job_create_and_beat_claim_fail_closed_when_the_store_cannot_be_read(monkeypatch):
+    from services import team_store
+
+    def boom(_ws):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(team_store, "get_workspace", boom)
+    with pytest.raises(team_store.WorkspaceClosing):
+        team_store.assert_workspace_open("ws-unknown")
+    assert team_store.workspace_closing("ws-unknown", fail_closed=True) is True
+    assert team_store.workspace_closing("ws-unknown") is False
+
+
+def test_a_resumed_teardown_still_knows_the_members_and_removes_tester_logins(ent, monkeypatch):
+    from services import user_store, workspace_teardown
+
+    box = provision(ent)
+    made = box.tester.post(f"/api/v1/team/workspaces/{box.workspace_id}/members",
+                           json={"email": "l4-made@example.test", "role": "viewer", "create_account": True})
+    assert made.status_code == 200, made.text
+    real_schedules = workspace_teardown._schedules
+    state = {"failed": False}
+
+    def fail_once(*a, **k):
+        if not state["failed"]:
+            state["failed"] = True
+            raise RuntimeError("interrupted after memberships were removed")
+        return real_schedules(*a, **k)
+
+    monkeypatch.setattr(workspace_teardown, "_schedules", fail_once)
+    with pytest.raises(RuntimeError):
+        workspace_teardown.teardown_workspace(box.workspace_id, actor="test")
+    resumed = workspace_teardown.teardown_workspace(box.workspace_id, actor="test")
+    assert resumed["workspace_removed"] is True
+    assert resumed["tester_created_logins_removed"] == 1
+    assert user_store.get_user("l4-made@example.test") is None
+
+
+def test_the_sweep_is_complete_only_when_every_sandbox_went(ent):
+    from datetime import timedelta
+
+    from services import maintenance_claim
+    from services.mongodb_service import get_mongodb_service
+    from services.sandbox_workspaces import SWEEP_CLAIM, sweep_expired_sandboxes
+
+    box = provision(ent, ttl_hours=1)
+    get_mongodb_service().get_database()["transfer_jobs"].insert_one(
+        {"_id": f"l4-run-{uuid.uuid4().hex[:6]}", "workspace_id": box.workspace_id, "status": "running"})
+    sweep_expired_sandboxes(now=datetime.now(timezone.utc) + timedelta(hours=2))
+    assert "completed_at" not in maintenance_claim.claim_status(SWEEP_CLAIM)
+
+
+def test_a_teardown_rewrite_never_loses_an_append_from_another_tenant(tmp_path, monkeypatch):
+    """M2: the JSONL rewrite and the append share one lock."""
+    import threading
+    import time
+
+    from services import quarantine_dlq as q
+
+    monkeypatch.setattr(q, "DLQ_PATH", tmp_path / "quarantine_dlq.jsonl")
+    monkeypatch.setattr(q, "_dlq_coll", lambda: None)
+    for i in range(3):
+        q.append_dlq_event(job_id=f"b{i}", action="quarantine", workspace_id="ws-b")
+    appended = threading.Event()
+
+    def other_tenant():
+        q.append_dlq_event(job_id="c-late", action="quarantine", workspace_id="ws-c")
+        appended.set()
+
+    with q._jsonl_lock(q.DLQ_PATH):
+        t = threading.Thread(target=other_tenant)
+        t.start()
+        time.sleep(0.3)
+        assert not appended.is_set(), "an append ran while the file was locked for a rewrite"
+    t.join(5)
+    assert appended.is_set()
+    assert q.delete_workspace_events("ws-b") == 3
+    text = q.DLQ_PATH.read_text(encoding="utf-8")
+    assert "c-late" in text and "ws-b" not in text

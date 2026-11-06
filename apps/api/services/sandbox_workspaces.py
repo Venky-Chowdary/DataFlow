@@ -213,6 +213,7 @@ def sweep_expired_sandboxes(*, now: datetime | None = None, force: bool = False)
         if not claimed:
             return []
     removed: list[dict[str, Any]] = []
+    all_done = True
     for ws in list_workspaces():
         expires = _parse(ws.sandbox_expires_at) if is_sandbox(ws) else None
         if expires is None or expires > current:
@@ -220,12 +221,16 @@ def sweep_expired_sandboxes(*, now: datetime | None = None, force: bool = False)
         try:
             removed.append(delete_sandbox(ws.id, actor=EXPIRY_ACTOR, reason="expired"))
         except SandboxBusy:
+            all_done = False
             logger.info("Expired sandbox %s has an active job; the next sweep retries", ws.id)
         except Exception:  # noqa: BLE001 — one sandbox must not stop the sweep
+            all_done = False
             logger.exception("Expired sandbox %s could not be removed", ws.id)
-    from services.maintenance_claim import complete_run
+    if all_done:
+        # "Done" only when every expired sandbox went (review 4 L4).
+        from services.maintenance_claim import complete_run
 
-    complete_run(SWEEP_CLAIM)
+        complete_run(SWEEP_CLAIM)
     return removed
 
 

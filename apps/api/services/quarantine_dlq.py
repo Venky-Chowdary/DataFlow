@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -182,6 +184,29 @@ def _dlq_coll():
     return mongo_collection(_MONGO_COLL)
 
 
+_JSONL_THREAD_LOCK = threading.Lock()
+
+
+@contextmanager
+def _jsonl_lock(target: Path):
+    """One writer at a time on a DLQ JSONL file: appends, rotation and rewrites.
+
+    A teardown rewriting the file while another tenant's event was appended
+    lost that event (review 4 M2). ``flock`` on a sibling lock file covers the
+    API, worker and scheduler processes; the thread lock covers this process.
+    """
+    import fcntl
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _JSONL_THREAD_LOCK:
+        with open(f"{target}.lock", "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def append_dlq_event(
     *,
     job_id: str,
@@ -215,6 +240,11 @@ def append_dlq_event(
 
     target: Path = path or DLQ_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
+    with _jsonl_lock(target):
+        return _append_jsonl_locked(target, event)
+
+
+def _append_jsonl_locked(target: Path, event: dict[str, Any]) -> dict[str, Any]:
     try:
         if target.exists() and target.stat().st_size >= _DLQ_MAX_BYTES:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1474,18 +1504,24 @@ def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
     if coll is not None:
         query = {"workspace_id": ws}
         removed += int(coll.count_documents(query) if dry_run else coll.delete_many(query).deleted_count)
-    if DLQ_PATH.exists():
-        kept: list[str] = []
-        hit = 0
-        for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
-            ev = load_dlq_event(line) if line.strip() else None
-            if ev is not None and str(ev.get("workspace_id") or "") == ws:
-                hit += 1
-                continue
-            kept.append(line)
-        removed += hit
-        if hit and not dry_run:
-            tmp = DLQ_PATH.with_suffix(DLQ_PATH.suffix + ".tmp")
-            tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-            tmp.replace(DLQ_PATH)
+    # The live file and every rotated one (quarantine_dlq.<stamp>.jsonl) hold
+    # full row bodies; each is rewritten under the append lock.
+    paths = [DLQ_PATH] + sorted(DLQ_PATH.parent.glob(f"{DLQ_PATH.stem}.*{DLQ_PATH.suffix}"))
+    for path in paths:
+        if not path.exists() or path.name.endswith((".tmp", ".lock")):
+            continue
+        with _jsonl_lock(path):
+            kept: list[str] = []
+            hit = 0
+            for line in path.read_text(encoding="utf-8").splitlines():
+                ev = load_dlq_event(line) if line.strip() else None
+                if ev is not None and str(ev.get("workspace_id") or "") == ws:
+                    hit += 1
+                    continue
+                kept.append(line)
+            removed += hit
+            if hit and not dry_run:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+                tmp.replace(path)
     return removed

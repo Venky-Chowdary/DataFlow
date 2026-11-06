@@ -2535,7 +2535,7 @@ def mark_schedule_running(
                 continue
             from services.team_store import workspace_closing
 
-            if workspace_closing(s.workspace_id or ""):
+            if workspace_closing(s.workspace_id or "", fail_closed=True):
                 # Its workspace is being deleted (S3): the beat starts nothing.
                 _record_refusal(schedule_id, {
                     "kind": "workspace_closing", "schedule_id": schedule_id,

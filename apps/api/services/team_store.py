@@ -349,6 +349,10 @@ class Workspace:
     #: Set when deletion starts (``services.workspace_teardown``): a closing
     #: workspace accepts no write, no new job and no schedule claim (S3).
     deleting_at: str = ""
+    #: The member emails at the moment the teardown closed the workspace: a
+    #: resumed teardown (memberships already gone) still knows whose logins
+    #: it may remove (review 4 L4).
+    deleting_members: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -365,6 +369,7 @@ class Workspace:
             sandbox_tester=str(data.get("sandbox_tester") or ""),
             sandbox_tester_created_at=str(data.get("sandbox_tester_created_at") or ""),
             deleting_at=str(data.get("deleting_at") or ""),
+            deleting_members=[str(e) for e in (data.get("deleting_members") or []) if e],
         )
 
 
@@ -542,30 +547,45 @@ def _delete_membership(workspace_id: str, email: str) -> bool:
     return removed
 
 
-def mark_workspace_closing(workspace_id: str) -> Workspace | None:
-    """Tombstone a workspace before its teardown (idempotent; keeps the first stamp)."""
+def mark_workspace_closing(workspace_id: str, *, members: list[str] | None = None) -> Workspace | None:
+    """Tombstone a workspace before its teardown (idempotent; keeps the first stamp).
+
+    ``members`` is recorded once, with the first stamp, and grows on a resume
+    (a member added before the tombstone landed is not lost).
+    """
     ws = get_workspace(workspace_id)
     if ws is None:
         return None
-    if not ws.deleting_at:
-        ws.deleting_at = _now()
+    known = list(ws.deleting_members)
+    merged = known + [e for e in (members or []) if e and e not in known]
+    if not ws.deleting_at or merged != known:
+        ws.deleting_at = ws.deleting_at or _now()
+        ws.deleting_members = merged
         _write_workspace(ws)
     return ws
 
 
-def workspace_closing(workspace_id: str) -> bool:
-    """True while a teardown of ``workspace_id`` is under way (or was interrupted)."""
+def workspace_closing(workspace_id: str, *, fail_closed: bool = False) -> bool:
+    """True while a teardown of ``workspace_id`` is under way (or was interrupted).
+
+    ``fail_closed`` (job creation, the beat's schedule claim): a store that
+    cannot be read answers "closing" — starting work in a workspace whose state
+    is unknown is the unsafe choice (review 4 L3). Request gates keep the
+    default; the authority check after them reads the same store.
+    """
     if not workspace_id:
         return False
     try:
         ws = get_workspace(workspace_id)
-    except Exception:  # noqa: BLE001 — an unreadable store is not a tombstone
-        return False
+    except Exception:  # noqa: BLE001
+        return fail_closed
     return bool(ws is not None and ws.deleting_at)
 
 
-class WorkspaceClosing(PermissionError):
-    """A write, job or schedule claim aimed at a workspace being deleted."""
+class WorkspaceClosing(TeamStoreError, PermissionError):
+    """A write, job, schedule claim or membership change aimed at a workspace being deleted."""
+
+    reason = "workspace_closing"
 
     def __init__(self, workspace_id: str):
         super().__init__(f"Workspace {workspace_id} is being deleted")
@@ -573,7 +593,7 @@ class WorkspaceClosing(PermissionError):
 
 
 def assert_workspace_open(workspace_id: str) -> None:
-    if workspace_closing(workspace_id):
+    if workspace_closing(workspace_id, fail_closed=True):
         raise WorkspaceClosing(workspace_id)
 
 
@@ -765,8 +785,13 @@ def _add_workspace_member(
     A platform administrator may seed the first member of any workspace: without
     that, a workspace created by one admin could never be handed to anyone else.
     """
-    if not workspace_id or not get_workspace(workspace_id):
+    ws_row = get_workspace(workspace_id) if workspace_id else None
+    if ws_row is None:
         raise WorkspaceNotFound("Workspace not found")
+    if ws_row.deleting_at:
+        # Closing (teardown under way): no member is added or re-roled — SCIM
+        # group sync included (review 4 L2).
+        raise WorkspaceClosing(workspace_id)
     role = normalize_role(role)
     authority = _authority(workspace_id, added_by, actor_is_platform_admin, principal)
     existing = next(

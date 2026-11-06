@@ -2244,7 +2244,7 @@ def delete_workspace_uploads(workspace_id: str, *, dry_run: bool = False) -> int
             logging.getLogger(__name__).warning("staged upload %s not removed: %s", fid, exc)
         _file_registry.pop(fid, None)
         if coll is not None:
-            coll.delete_one({"_id": fid})
+            coll.delete_one({"_id": fid, "workspace_id": ws})
     if coll is None:
         _save_registry()
     return len(rows)

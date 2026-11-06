@@ -106,15 +106,19 @@ delegates to it). It is irreversible, so:
 
 - `?dry_run=true` returns what would be removed (counts per store, active
   jobs, what is retained) and changes nothing;
-- the real delete needs `?confirm=<workspace name>` or `?reason=<text>`
-  (422 otherwise); both are audited on `team.workspace.delete`.
+- the real delete needs `?confirm=<workspace name>` (422 otherwise; a
+  workspace with a blank name is renamed first); `?reason=<text>` is recorded
+  with it, never instead of it; both are audited on `team.workspace.delete`.
 
 The cascade runs in system scope and names the target workspace on every
 store, matching it exactly (another workspace's or an unscoped legacy row is
 never touched). It refuses (409) while any job of the workspace is active or
 when the job store cannot say, then **tombstones** the workspace — writes to it
 answer 409, no job can be created in it and the beat claims none of its
-schedules — revokes its API keys, removes its memberships, releases each
+schedules, and no id-addressed update, delete or SCIM role change reaches it
+(job creation and the beat's claim fail closed when the store cannot be read);
+the member list is kept on the tombstone so a resumed delete still knows it —
+revokes its API keys, removes its memberships, releases each
 schedule's CDC capture and deletes the schedules, deletes saved connectors and
 credentials, finished jobs with their checkpoints, the incremental watermarks
 and quality-profile runs only its jobs produced, quarantine rows (Mongo and

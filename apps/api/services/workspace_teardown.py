@@ -366,10 +366,14 @@ def _cascade(workspace_id: str, *, actor: str, dry_run: bool) -> dict[str, Any]:
         "active_jobs": active,
         "retained": list(RETAINED),
     }
-    if not dry_run and workspace is not None:
-        team_store.mark_workspace_closing(workspace_id)
-    # Authority goes first; the member list is kept for the login step.
+    # Authority goes first; the member list is kept — on the tombstone, so a
+    # resumed teardown (memberships already removed) still has it (L4).
     member_emails = {m["email"] for m in team_store.list_workspace_members(workspace_id)}
+    if not dry_run and workspace is not None:
+        closed = team_store.mark_workspace_closing(workspace_id, members=sorted(member_emails))
+        if closed is not None:
+            member_emails |= set(closed.deleting_members)
+            workspace = closed
     steps: list[tuple[str, Callable[[], int]]] = [
         ("api_keys_revoked", lambda: _api_keys(workspace_id, dry_run)),
         ("members_removed", lambda: _memberships(workspace_id, dry_run)),

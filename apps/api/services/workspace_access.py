@@ -184,6 +184,10 @@ def assert_resource_workspace(
     if not scope.allows(resource_workspace_id):
         raise HTTPException(status_code=404, detail=not_found_detail)
     if write and not scope.can_write(resource_workspace_id):
+        from services.team_store import workspace_closing
+
+        if workspace_closing(str(resource_workspace_id or "")):
+            raise HTTPException(status_code=409, detail="This workspace is being deleted")
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
 
 

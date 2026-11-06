@@ -66,6 +66,12 @@ def _pubs() -> set[str]:
     return {r[0] for r in _sql("SELECT pubname FROM pg_publication", fetch=True)}
 
 
+def _name(workspace_id: str) -> str:
+    from services import team_store
+
+    return team_store.get_workspace(workspace_id).name
+
+
 class Route:
     """One workspace's CDC route: source table, connectors, a run, a schedule."""
 
@@ -157,7 +163,7 @@ def test_teardown_releases_the_deleted_workspaces_capture_and_keeps_workspace_c(
         assert all(get_watermark(k) is not None for k in a_keys + c_keys)
 
         # The admin is looking at workspace C while deleting A (B1's shape).
-        gone = ent.admin.delete(f"/api/v1/team/workspaces/{a.ws}", params={"reason": "S7 live"},
+        gone = ent.admin.delete(f"/api/v1/team/workspaces/{a.ws}", params={"confirm": _name(a.ws), "reason": "S7 live"},
                                 headers={"X-Workspace-Id": c.ws})
         assert gone.status_code == 200, gone.text
         assert gone.json()["schedules_removed"] == 1

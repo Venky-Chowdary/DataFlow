@@ -4079,15 +4079,15 @@ export async function previewWorkspaceDelete(workspaceId: string): Promise<Works
 
 /**
  * Irreversible: the API removes the workspace's connectors, schedules, jobs,
- * uploads and keys. It requires the workspace name typed back (`confirm`) or
- * a `reason`; preview first with {@link previewWorkspaceDelete}.
+ * uploads and keys. It requires the workspace name typed back (`confirm`); a
+ * `reason` is recorded with it. Preview first with {@link previewWorkspaceDelete}.
  */
 export async function deleteWorkspace(
   workspaceId: string,
-  confirmation: { confirm?: string; reason?: string },
+  confirmation: { confirm: string; reason?: string },
 ): Promise<void> {
   const params = new URLSearchParams();
-  if (confirmation.confirm) params.set("confirm", confirmation.confirm);
+  params.set("confirm", confirmation.confirm);
   if (confirmation.reason) params.set("reason", confirmation.reason);
   const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}?${params.toString()}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete workspace"));
