@@ -1219,8 +1219,6 @@ def gate8_writer_meta(
 def writer_meta_with_source_rows(
     meta: dict[str, Any] | None,
     source_row_count: int | None,
-    *,
-    collapsed_duplicate_rows: int = 0,
 ) -> dict[str, Any]:
     """Put the *reader's* population count where Gate-8 reads it.
 
@@ -1233,11 +1231,6 @@ def writer_meta_with_source_rows(
     out = dict(meta or {})
     if source_row_count is not None and int(source_row_count) >= 0:
         out["source_row_count"] = int(source_row_count)
-    # Older images of a key an upsert kept the latest of (D89 / E2-023). Without
-    # this stamp Gate-8 expected every copy on the table and failed a correct
-    # deduped load ("expected target 30 vs target 10").
-    if int(collapsed_duplicate_rows or 0) > 0:
-        out["collapsed_duplicate_rows"] = int(collapsed_duplicate_rows)
     return out
 
 

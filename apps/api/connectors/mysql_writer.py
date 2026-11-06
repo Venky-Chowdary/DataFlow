@@ -1997,12 +1997,18 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
             load_method=load_method,
+            # One Gate-8 meta seam for every SQL writer: the accumulator stamps
+            # the sample, written ids and the images an upsert collapsed.
             meta=writer_meta_with_source_rows(
-                {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
-                if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
-                else {},
+                {
+                    **write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
+                    **(
+                        {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
+                        if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
+                        else {}
+                    ),
+                },
                 source_row_count,
-                collapsed_duplicate_rows=write_acc.collapsed_duplicate_rows,
             ),
         )
     except TransferCancelled:

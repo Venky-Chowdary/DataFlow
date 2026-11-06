@@ -3422,21 +3422,20 @@ def _maybe_attach_verification_ladder(
         # E2-023/D89: an upsert lands one row per key — the latest. The
         # window re-read (seeded inclusive at the watermark's tie group) still
         # holds the older versions, so compare the survivor only.
-        from services.duplicate_policy import collapse_keep_last
+        from services.duplicate_policy import latest_version_per_key
 
-        _cur = window.cursor if window is not None else ""
-        if _cur:
-            try:  # natural order (numbers, datetimes); text only if mixed
-                source_rows = sorted(
-                    source_rows,
-                    key=lambda r: (r.get(_cur) is not None, r.get(_cur) or 0),
-                )
-            except TypeError:
-                source_rows = sorted(
-                    source_rows,
-                    key=lambda r: (r.get(_cur) is not None, str(r.get(_cur) or "")),
-                )
-        source_rows, _ = collapse_keep_last(source_rows, [pk_column])
+        # The cursor as the rows spell it: the source name, or its mapped target.
+        _cur = ""
+        if window is not None:
+            _renamed = {
+                str(m.get("source") or ""): str(m.get("target") or "")
+                for m in mappings
+                if m.get("source") and m.get("target")
+            }.get(window.cursor, "")
+            _cur = next((c for c in (window.cursor, _renamed) if c and c in source_rows[0]), "")
+        source_rows = latest_version_per_key(
+            source_rows, cursor_column=_cur, key_columns=[pk_column]
+        )
     # D67/D95: rows the writer held out to quarantine are in the source
     # re-read but never entered the destination. Hashing them in the L3
     # source digest makes every correct quarantining run fail Gate-8 on its

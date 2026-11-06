@@ -3055,8 +3055,10 @@ def _stream_database_transfer_impl(
             for c in (run.cfg.pk_target_cols or [])
             if c in run.cfg.target_cols
         ]
-        reread_latest: dict[tuple, Any] | None = (
-            {}
+        # Versions of one key the re-read saw, in read order; collapsed to the
+        # last one per key (duplicate_policy.collapse_keep_last) for an upsert.
+        reread_versions: list[dict[str, Any]] | None = (
+            []
             if reread_pk_idx
             and len(reread_pk_idx) == len(run.cfg.pk_target_cols or [])
             and sync_collapses_in_file_duplicates(run.cfg.effective_sync)
@@ -3194,11 +3196,13 @@ def _stream_database_transfer_impl(
                         dest_db_type=run.cfg.dest_bind_dialect,
                         dest_types=run.cfg.digest_dest_types,
                     )
-                    if reread_latest is not None:
+                    if reread_versions is not None:
                         # One row per key lands (D89/E2-023); the read is in
                         # cursor order, so the last copy is the survivor.
-                        for _row, _fp in zip(mapped, _fps):
-                            reread_latest[tuple(_row[i] for i in reread_pk_idx)] = _fp
+                        reread_versions.extend(
+                            {"key": tuple(_row[i] for i in reread_pk_idx), "fp": _fp}
+                            for _row, _fp in zip(mapped, _fps)
+                        )
                     else:
                         fp_accumulator.add_many(_fps)
                 checksum_rows_read += len(batch.rows)
@@ -3227,8 +3231,11 @@ def _stream_database_transfer_impl(
         finally:
             if reread_scan is not None:
                 close_table_scan(reread_scan)
-        if reread_latest:
-            fp_accumulator.add_many(list(reread_latest.values()))
+        if reread_versions:
+            from services.duplicate_policy import collapse_keep_last
+
+            _kept, _ = collapse_keep_last(reread_versions, ["key"])
+            fp_accumulator.add_many([v["fp"] for v in _kept])
         if reread_shaper is not None:
             # Buffering recipe steps emitted their winners on the write pass at
             # end-of-stream; the digest population must include the same tail

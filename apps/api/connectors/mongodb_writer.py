@@ -1247,6 +1247,9 @@ def write_mapped_rows(
         chunks = max(1, (total + mongo_batch_size - 1) // mongo_batch_size)
         written = 0
         skipped_total = 0
+        # Older images of a key this upsert kept the latest of (E2-023): Gate-8
+        # expects one row per key, not every version read.
+        collapsed_total = 0
         key_index_ready = False
 
         for chunk_idx in range(chunks):
@@ -1365,6 +1368,8 @@ def write_mapped_rows(
                         key = _mongo_conflict_key(doc, pk_cols)
                         seen_docs[key] = (doc, sparse)
                     paired = list(seen_docs.values())
+                if write_mode == "upsert" and pk_cols:
+                    collapsed_total += max(0, len(docs) - len(paired))
                 docs = [p[0] for p in paired]
                 sparse_flags = [p[1] for p in paired]
 
@@ -1508,7 +1513,10 @@ def write_mapped_rows(
                     for col in sorted(ms_truncated_cols)
                 ),
             ],
-            meta=gate8_writer_meta(mapped_rows, target_cols),
+            meta={
+                **gate8_writer_meta(mapped_rows, target_cols),
+                **({"collapsed_duplicate_rows": collapsed_total} if collapsed_total else {}),
+            },
         )
     except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(

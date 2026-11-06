@@ -195,6 +195,51 @@ def current_order_column() -> str:
     return _ORDER.get()
 
 
+def latest_version_per_key(
+    rows: list[dict],
+    *,
+    cursor_column: str,
+    key_columns: list[str],
+) -> list[dict]:
+    """One row per key — the one an ordered upsert keeps.
+
+    The writer reads ``ORDER BY cursor, key`` and keeps the last copy of a key
+    it sees. Ranking a population the same way needs the watermark's typed
+    comparison (``services.sync_cursor.compare_cursor_values``: ``999`` before
+    ``1000``, instants by value, NULL lowest) with the key as the tie-break;
+    sorting the wire text ranked ``"999"`` above ``"1000"`` and let a NULL
+    cursor win. Equal ``(cursor, key)`` keep arrival order (stable sort), as
+    the writer does. Then :func:`collapse_keep_last`.
+    """
+    from functools import cmp_to_key
+
+    from services.sync_cursor import compare_cursor_values
+    from services.value_serializer import is_reader_null_cell
+
+    keys = [str(c) for c in key_columns if str(c or "").strip()]
+    if not rows or not keys:
+        return list(rows)
+
+    def _typed(value: Any) -> str | None:
+        return None if value is None or is_reader_null_cell(value) else str(value)
+
+    ordered = list(rows)
+    if cursor_column:
+        def _writer_order(a: dict, b: dict) -> int:
+            by_cursor = compare_cursor_values(_typed(a.get(cursor_column)), _typed(b.get(cursor_column)))
+            if by_cursor:
+                return by_cursor
+            for col in keys:
+                by_key = compare_cursor_values(_typed(a.get(col)), _typed(b.get(col)))
+                if by_key:
+                    return by_key
+            return 0
+
+        ordered = sorted(ordered, key=cmp_to_key(_writer_order))
+    kept, _dropped = collapse_keep_last(ordered, keys)
+    return kept
+
+
 def collapse_keep_last(
     rows: list[dict],
     key_columns: list[str],

@@ -1258,6 +1258,7 @@ def _check_duplicate_keys(
     identity_declared: bool | None = None,
     in_file_dedupe: str = "",
     duplicate_policy: str = "",
+    dedupe_note: str = "",
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
@@ -1430,6 +1431,12 @@ def _check_duplicate_keys(
                 probe_example,
             )
         )
+
+    if dedupe_note and (
+        population_extra or collapsed_extra or probe_collapsed_extra or sample_extra
+    ):
+        # The collapse rests on read order; say what that assumes (item 5).
+        advisory_warnings.append(dedupe_note)
 
     dest_has_enforced_key = bool(destination_pk_columns) or any(
         _unique_constraint_enforced(uk, dest_kind=dest_kind)
@@ -2246,11 +2253,15 @@ def run_integrity_audit(
         or destination_pk_columns
         or _stream_contracts_declare_identity(stream_contracts)
     )
-    from services.primary_key import latest_wins_dedupe
+    from services.primary_key import latest_wins_dedupe, latest_wins_note
 
-    in_file_dedupe = latest_wins_dedupe(
-        in_file_dedupe, sync_mode, stream_contracts=stream_contracts, source_type=source_db_type
-    )
+    dedupe_note = ""
+    if not str(in_file_dedupe or "").strip():
+        in_file_dedupe = latest_wins_dedupe(
+            in_file_dedupe, sync_mode, stream_contracts=stream_contracts, source_type=source_db_type
+        )
+        if in_file_dedupe:
+            dedupe_note = latest_wins_note(source_db_type)
 
     checks: list[dict[str, Any]] = []
 
@@ -2351,6 +2362,7 @@ def run_integrity_audit(
                 source_duplicate_probe_expected=source_duplicate_probe_expected,
                 in_file_dedupe=in_file_dedupe,
                 duplicate_policy=duplicate_policy,
+                dedupe_note=dedupe_note,
             )
         )
         if source_null_key_rows:

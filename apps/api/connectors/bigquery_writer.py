@@ -1622,9 +1622,8 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
             meta=writer_meta_with_source_rows(
-                None,
+                write_acc.gate8_meta(conflict_columns=write_acc.conflict_columns or None),
                 source_row_count,
-                collapsed_duplicate_rows=write_acc.collapsed_duplicate_rows,
             ),
         )
     except Exception as exc:
