@@ -34,7 +34,8 @@ from tests import r4_route_harness as h
 
 pytestmark = pytest.mark.timeout(300)
 
-_MAPS = [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}]
+#: Validate-approved rows (a row without confidence is refused at save, QA C10).
+_MAPS = [{"source": c, "target": c, "confidence": 0.99} for c in ("id", "name")]
 
 
 @pytest.fixture
