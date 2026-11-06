@@ -362,6 +362,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # holds. Requiring schedule.manage to *list* them refused the viewer's own
     # Schedules page, which the client then drew as "No schedules yet" while
     # schedules existed. Creating, changing, running and deciding stay manage.
+    # Orphaned-registration repair (Snowflake D12) is deployment-wide: the
+    # router requires a platform admin; the gate's floor is workspace admin,
+    # not the schedule.read every viewer holds.
+    ("*", "/api/v1/schedules/admin/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
