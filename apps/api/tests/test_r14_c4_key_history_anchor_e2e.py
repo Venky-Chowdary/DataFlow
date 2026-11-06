@@ -261,12 +261,17 @@ def test_f6_a_secrets_key_change_is_fixed_by_an_audited_admin_reanchor(ent, monk
     ws_admin = ent.member(email=f"f6-{secrets.token_hex(4)}@example.com", workspace_id=ws, role="admin")
     assert ws_admin.post(route, json={"reason": "secrets key rotated", "dry_run": False}).status_code == 403
     assert ent.admin.post(route, json={"reason": "short", "dry_run": False}).status_code == 422
-    plan = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06"})
+    # The chain reports tampering (the history's MACs fail): refused unless acknowledged.
+    refused = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06"})
+    assert refused.status_code == 409, refused.text
+    plan = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06",
+                                       "acknowledge_findings": True})
     assert plan.status_code == 200, plan.text
     assert plan.json()["dry_run"] is True and plan.json()["history_problem"]
     assert _verify(ent, ws)["key_history_tampered"], "a dry run changes nothing"
 
-    applied = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06", "dry_run": False})
+    applied = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06", "dry_run": False,
+                                          "acknowledge_findings": True})
     assert applied.status_code == 200, applied.text
     receipt = ent.db["audit_events"].find_one({"action": store.REANCHOR_ACTION})
     assert receipt is not None and receipt["details"]["reason"] == "secrets key rotated on 2026-11-06"

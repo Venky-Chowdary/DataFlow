@@ -552,6 +552,7 @@ async def reanchor_audit_chain(body: ReanchorBody, request: Request):
 class KeyHistoryReanchorBody(BaseModel):
     reason: str = Field(min_length=10, max_length=500)
     dry_run: bool = True
+    acknowledge_findings: bool = False
 
 
 @router.post("/chain/key-history/reanchor")
@@ -560,12 +561,18 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
 
     For a deployment whose ``DATAFLOW_SECRETS_KEY`` changed: the history's
     MACs no longer verify, so ``/verify`` reports ``key_history_tampered``
-    until an administrator re-anchors it. Dry run by default (reports the
-    current problem and how many entries would be dropped). Applying it
-    writes the signed ``audit.key_history.reanchored`` chain record, moves
-    the history's epoch to it and drops entries whose MAC fails; records
-    before it naming a key off the history then read as lost keys, never
-    verified. A workspace admin cannot do this.
+    until an administrator re-anchors it. Dry run by default.
+
+    Both the dry run and the apply run the platform ``verify_chain`` first.
+    While it reports tampering, the call is refused (409) unless
+    ``acknowledge_findings`` is true. Applying it writes the signed
+    ``audit.key_history.reanchored`` chain record whose signed details carry
+    the previous history position, the positions it supersedes, the history
+    problem it resolves and every tampering finding at that moment; the
+    verifier keeps reporting those as ``prior_tampering`` (a re-anchor never
+    whitewashes tampering). History entries whose MAC fails are re-sealed as
+    of now, so records before the re-anchor naming them read as lost keys.
+    A workspace admin cannot do this.
 
     Upgrade note: key-history rows written in the a350ff42a format (MAC
     without namespace, epoch without a chain anchor) fail the current MAC and
@@ -575,6 +582,7 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
     """
     from services import audit_chain_keystore as keystore
     from services.audit_log import actor_from_request
+    from services.evidence_chain import verify_chain
 
     scope = tenant_scope(request)
     if not scope.unrestricted or scope.workspace_id:
@@ -582,22 +590,39 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
             status_code=403,
             detail="Re-anchoring the audit key history is a platform administrator action.",
         )
+    report = verify_chain()
+    tampering = [
+        {k: f.get(k) for k in ("kind", "category", "event_id", "chain_seq", "workspace_id")}
+        for f in report.get("findings") or [] if f.get("category") == "tampering"
+    ]
+    problem = str(report.get("key_history_tampered") or "")
+    if report.get("tampering_detected") and not body.acknowledge_findings:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The audit chain reports tampering ({len(tampering)} record finding(s)"
+                f"{'; key history: ' + problem if problem else ''}). Re-anchoring records "
+                "them as prior tampering; send acknowledge_findings=true to proceed."
+            ),
+        )
     try:
-        from services.evidence_chain import verify_chain
-
-        report = verify_chain()
         result = keystore.reanchor_key_history(
             actor=actor_from_request(request), reason=body.reason, dry_run=body.dry_run,
-            history_seq=int(report.get("key_history_seq") or 0),
+            findings=tampering, history_seq=int(report.get("key_history_seq") or 0),
             superseded=list(report.get("key_history_signed_positions") or []),
-            history_problem=str(report.get("key_history_tampered") or ""),
+            history_problem=problem,
         )
     except keystore.KeystoreUnavailable as exc:
         raise HTTPException(status_code=503, detail="The audit key history is not reachable.") from exc
     record_security_event(
         "audit.key_history.reanchor", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
-        details={"dry_run": body.dry_run, "entries_resealed": len(result["entries_resealed"])},
+        details={
+            "dry_run": body.dry_run, "applied": not body.dry_run, "reason": body.reason,
+            "acknowledged_findings": bool(body.acknowledge_findings),
+            "prior_tampering": len(tampering), "history_problem": problem or None,
+            "entries_resealed": len(result["entries_resealed"]),
+        },
     )
     return result
 

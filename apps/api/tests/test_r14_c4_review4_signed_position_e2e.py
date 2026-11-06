@@ -176,6 +176,53 @@ def test_b2_audit_writes_never_wait_on_a_future_pending_epoch(ent):
     assert elapsed < 1.0, f"5 audit writes took {elapsed:.2f}s behind a pending epoch"
 
 
+# ── HIGH 3 ─────────────────────────────────────────────────────────────────
+
+
+def _reanchor(ent, **body):
+    return ent.admin.post(ROUTE, json={"reason": "operator re-anchor after review", **body})
+
+
+def test_h3_a_reanchor_never_whitewashes_a_relabel(ent):
+    ws = ent.workspace("R14 C4 r4 H3 relabel")
+    _write(3, action="r14c4r4.h3", workspace_id=ws)
+    victim = _records(ent, "r14c4r4.h3")[1]
+    _set(ent, victim, key_id=NOBODY, resource="/edited")
+    for body in ({}, {"dry_run": False}):
+        refused = _reanchor(ent, **body)
+        assert refused.status_code == 409, refused.text
+    applied = _reanchor(ent, dry_run=False, acknowledge_findings=True)
+    assert applied.status_code == 200, applied.text
+    _forget_process_keys()
+    _write(1, action="r14c4r4.h3.after", workspace_id=ws)
+    report = _verify(ent)
+    assert str(victim["id"]) in {f["event_id"] for f in report["findings"]
+                                 if f["category"] == "tampering"}, report["findings"]
+    assert str(victim["id"]) in {p.get("event_id") for p in report["prior_tampering"]}
+    assert report["verified"] is False and report["tampering_detected"] is True
+    event = ent.db["audit_events"].find_one({"action": "audit.key_history.reanchor"},
+                                            sort=[("chain_seq", -1)])
+    assert event["details"]["applied"] is True
+    assert event["details"]["reason"] == "operator re-anchor after review"
+
+
+def test_h3_a_reanchor_after_a_reset_keeps_reporting_the_reset(ent):
+    ws = ent.workspace("R14 C4 r4 H3 reset")
+    _write(3, action="r14c4r4.h3reset", workspace_id=ws)
+    _wipe_history(ent)
+    _forget_process_keys()
+    _write(1, action="r14c4r4.h3reset.after", workspace_id=ws)
+    assert "reset" in (_verify(ent)["key_history_tampered"] or "")
+    applied = _reanchor(ent, dry_run=False, acknowledge_findings=True)
+    assert applied.status_code == 200, applied.text
+    _forget_process_keys()
+    report = _verify(ent)
+    assert report["key_history_tampered"] is None, report["key_history_tampered"]
+    assert any(p.get("kind") == "key_history_tampered" and "reset" in p.get("problem", "")
+               for p in report["prior_tampering"]), report["prior_tampering"]
+    assert report["verified"] is False and report["tampering_detected"] is True
+
+
 # ── LOW ────────────────────────────────────────────────────────────────────
 
 

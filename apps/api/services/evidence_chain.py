@@ -310,6 +310,12 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     )
     history_tampered = anchor["tampered"]
     history_unreadable = anchor["unreadable"]
+    # A workspace sees its own records' prior findings and history-level ones.
+    prior = [
+        p for p in anchor["prior_tampering"]
+        if not ws or p.get("workspace_id") == ws
+        or (not p.get("workspace_id") and not p.get("event_id"))
+    ]
     head = events[-1]
     found = [f.as_dict() for f in findings]
     for f in found:
@@ -328,6 +334,8 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         # The key history's anchor was removed or altered: the lost-key /
         # relabel verdicts rest on it, so that alone is tampering.
         categories["tampering"] += 1
+    # Tampering an admin re-anchor acknowledged stays tampering (review 4, HIGH 3).
+    categories["tampering"] += len(prior)
     if history_tampered or categories["tampering"]:
         status = "findings"
     elif categories["inconclusive"]:
@@ -364,10 +372,12 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     return present_verify_report(
         {
             **walk,
-            "verified": not found and not history_tampered,
+            "verified": not found and not history_tampered and not prior,
             "status": status,
             "key_history_tampered": history_tampered or None,
             "key_history_unreadable": history_unreadable or None,
+            "prior_tampering": prior,
+            "key_history_resolved": anchor["resolved"],
             "key_history_seq": anchor["history_seq"] or None,
             "key_history_signed_positions": anchor["signed_kh"],
             "categories": categories,
@@ -676,6 +686,7 @@ def _key_history_state(hmac_of: Any) -> dict[str, Any]:
 
     ``unreadable``: the epoch or the entries could not be read — unknown keys
     are then not judged at all (inconclusive), never excused as lost.
+    ``prior_tampering``: findings verified re-anchor records signed.
     """
     from services import audit_chain_keystore as keystore
     from services.audit_chain_keys import check_signature
@@ -765,6 +776,21 @@ def _key_history_state(hmac_of: Any) -> dict[str, Any]:
                     else f"the key history epoch was rolled back: verified records sign position "
                     f"{stray[0]}, after the epoch's {head_seq}"
                 )
+            for r in reanchors:
+                if _position(r) not in legit:
+                    continue
+                d = r.get("details") or {}
+                out["prior_tampering"].extend(
+                    {**f, "reanchored_at": _position(r)} for f in (d.get("findings") or [])
+                    if isinstance(f, dict)
+                )
+                problem = str(d.get("history_problem") or "")
+                if problem:
+                    item = {"reanchored_at": _position(r), "problem": problem}
+                    if "fails its MAC" in problem:
+                        out["resolved"].append(item)  # a secrets-key change reads like this
+                    else:
+                        out["prior_tampering"].append({"kind": "key_history_tampered", **item})
         out["signed_kh"] = sorted(signed_kh)
         starts = sorted(signed_kh | ({head_seq} if head_seq else set()))
         out["history_seq"] = starts[0] if starts else 0
