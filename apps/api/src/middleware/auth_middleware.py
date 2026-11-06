@@ -179,12 +179,20 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         if _session_idled_out(token, email):
             return "session_idle_timeout"
         _heal_rekey_if_pending(stored, email)
-        request.state.user_email = email
         user = lookup_user(email)
+        if user is None and stored is None:
+            from src.services.auth_service import token_jti
+
+            if token_jti(token):
+                # A session token for an account that no longer exists (deleted,
+                # e.g. by a workspace teardown): its session row may outlive the
+                # account by a race, so the account is the authority (review 3).
+                return "user_not_found"
+        request.state.user_email = email
         if user:
             request.state.user = user
         else:
-            # Valid token for a user not in the static user list: default to viewer.
+            # Valid legacy token for a user not in the static user list: viewer.
             request.state.user = {"email": email, "role": "viewer"}
         return None
 
@@ -290,9 +298,12 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     # request: retry the membership/org move; the flag stays set if the
     # retry fails again, so this never swallows the failure.
     _heal_rekey_if_pending(stored, email)
-    request.state.user_email = email
     user = lookup_user(email)
-    request.state.user = user if user else {"email": email, "role": "viewer"}
+    if user is None and stored is None:
+        # The cookie's session outlived its account (review 3): refused.
+        return "user_not_found"
+    request.state.user_email = email
+    request.state.user = user
     from services.auth_state import get_auth_state
     from services.session_policy import enforce_idle
 
