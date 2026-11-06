@@ -85,6 +85,20 @@ def test_a_profile_cannot_retype_a_declared_json_string():
     assert out == {"metadata.tier": "VARCHAR(500)", "created": "INTEGER"}
 
 
+@pytest.mark.parametrize("brand", ["airtable", "notion"])
+def test_airtable_and_notion_string_fields_are_declared_too(brand):
+    """Their readers carry the JSON scalar type per value, like Stripe's."""
+    from services.schema_inference import honor_declared_strings
+
+    out = honor_declared_strings(
+        {"Zip": "INTEGER", "Count": "INTEGER"},
+        {"Zip": "TEXT", "Count": "INTEGER"},
+        {"Zip": ["02134", "10001"], "Count": ["3", "4"]},
+        brand,
+    )
+    assert out == {"Zip": "TEXT", "Count": "INTEGER"}
+
+
 @pytest.fixture
 def connectors(stripe_host, tmp_path):
     from services.connector_store import create_connector, delete_connector

@@ -575,7 +575,14 @@ def write_mapped_rows(
         or []
     ) or None
     collection = table_name or "dataflow_vectors"
-    api_key = password or username or ""
+    api_key = resolve_api_key(
+        {
+            "api_key": _kwargs.get("api_key", ""),
+            "password": password,
+            "username": username,
+            "auth_mode": _kwargs.get("auth_mode", ""),
+        }
+    )
     base_url = connection_string if connection_string else _base_url(host, port, ssl)
 
     studio_live = _kwargs.get("destination_column_types")

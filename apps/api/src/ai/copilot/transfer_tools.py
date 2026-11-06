@@ -1552,6 +1552,9 @@ def plan_transfer(
             },
             "quality_issues": (mapping.get("quality_issues") or [])[:10],
             "coercion_issues": (mapping.get("coercion_issues") or [])[:10],
+            # What the source introspection could not see, as data: e.g. HubSpot
+            # custom objects unavailable without their scope (D270).
+            "source_notes": _source_notes(src_info),
             "preflight": preflight,
             # Align with Execute unlock — passed alone must not invent safe_to_start,
             # and an uncleared block-severity coercion on the final mappings
@@ -1575,6 +1578,17 @@ _UNREACHABLE_MARKERS = (
     "name or service not known",
     "no route to host",
 )
+
+
+def _source_notes(src_info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Structured notes the source introspection attached (never only prose)."""
+    raw = src_info.get("raw") if isinstance(src_info.get("raw"), dict) else {}
+    notes: list[dict[str, Any]] = []
+    if raw.get("custom_objects_unavailable"):
+        notes.append({"code": "custom_objects_unavailable", "message": str(raw.get("warning") or "")})
+    elif raw.get("warning"):
+        notes.append({"code": "introspection_warning", "message": str(raw["warning"])})
+    return notes
 
 
 def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) -> str:

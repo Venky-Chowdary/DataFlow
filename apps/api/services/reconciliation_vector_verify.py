@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+
+from services.connector_auth import resolve_api_key
 from collections.abc import Iterator
 from itertools import chain
 from typing import Any
@@ -35,7 +37,7 @@ def verify_weaviate_class(
             _requests_session,
         )
 
-        key = api_key or password or username or ""
+        key = resolve_api_key({"api_key": api_key, "password": password, "username": username})
         base_url = _base_url(host, port, ssl, connection_string)
         cls = _class_name(class_name)
         session = _requests_session()
@@ -141,6 +143,8 @@ def verify_milvus_collection(
         db_name = (database or "").strip()
         if db_name.lower() in {"", "test_db", "default", "public"}:
             db_name = ""
+        # ``api_key`` arrives resolved (reconciliation passes resolve_api_key(dest)):
+        # a declared key in the password field is sent bare, never root:<key>.
         token = _auth_token(api_key=api_key, username=username, password=password)
         base_url = _base_url(host, port, ssl, connection_string)
         session = _requests_session()

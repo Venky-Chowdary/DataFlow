@@ -935,9 +935,6 @@ def _introspect_endpoint_impl(
     if _sdk_cls is not None:
         return _sdk_introspect(out, endpoint, cfg, fmt, _sdk_cls)
 
-    if fmt in _SAAS_INTROSPECT_DRIVERS:
-        return _saas_introspect(out, endpoint, cfg, fmt)
-
     if fmt == "rest_api":
         # Reachability + field names come from the canonical describe; typing
         # stays with the sampled read Map already uses. Stamping the describe's
@@ -1655,14 +1652,6 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         )
 
 
-#: SaaS drivers whose Describe is already modelled in ``schema_introspect``.
-#: They declared ``introspect: True`` and answered "not yet implemented" here,
-#: so a Salesforce or HubSpot *destination* could never prove its object exists
-#: and every route into one failed G2 on unknown existence. The metadata was
-#: written and reachable; only this dispatch was missing.
-_SAAS_INTROSPECT_DRIVERS = frozenset({"salesforce", "hubspot"})
-
-
 def _saas_introspect(
     out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str
 ) -> dict:
@@ -1713,6 +1702,9 @@ def _saas_introspect(
     if info.get("warning"):
         # e.g. HubSpot custom objects unavailable without their scope (D270).
         out["message"] += f". {info['warning']}"
+        out["warning"] = str(info["warning"])
+    if info.get("custom_objects_unavailable"):
+        out["custom_objects_unavailable"] = True
     if not obj:
         return out
 

@@ -56,3 +56,9 @@ def test_brief_does_not_call_a_url_host_a_connection_string():
     )
     assert (via_dsn["effective_host"], via_dsn["effective_port"]) == ("db.qa.test", 6543)
     assert "connection string" in via_dsn["host_note"]
+    # A connection string that keeps the host but moves the port still earns the note (D264).
+    port_only = _connector_brief(
+        {"type": "postgresql", "host": "db.qa.test", "port": 5432, "connection_string": "postgresql://u:p@db.qa.test:6543/x"}
+    )
+    assert port_only["effective_port"] == 6543
+    assert "connection string" in port_only["host_note"]

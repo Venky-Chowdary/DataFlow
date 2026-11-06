@@ -379,7 +379,9 @@ def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
         tables = list_object_types(cfg, notes=notes)
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
-    note = {"warning": " ".join(notes)} if notes else {}
+    # ``custom_objects_unavailable`` is the structured form for callers that
+    # decide (plan_transfer); ``warning`` is the operator copy.
+    note = {"warning": " ".join(notes), "custom_objects_unavailable": True} if notes else {}
 
     if not table:
         return {"ok": True, "columns": [], "tables": tables, "schema": "", **note}

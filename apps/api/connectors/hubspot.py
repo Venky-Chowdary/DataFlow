@@ -71,12 +71,19 @@ CUSTOM_OBJECTS_UNAVAILABLE = (
 
 
 def _is_scope_refusal(exc: Exception) -> bool:
-    """HTTP 403: the token is valid but not granted this API (not a bad token)."""
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status is not None:
-        return status == 403
-    text = str(exc).lower()
-    return "403" in text or "forbidden" in text
+    """A 403 whose body HubSpot categorises MISSING_SCOPES: valid token, API not granted.
+
+    Any other 403 (revoked token, IP allowlist, suspended portal) is an auth
+    failure and must not read as "no custom objects".
+    """
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) != 403:
+        return False
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - a non-JSON 403 is not a scope answer
+        return False
+    return isinstance(body, dict) and str(body.get("category") or "").upper() == "MISSING_SCOPES"
 
 
 def list_object_types(cfg: dict[str, Any], *, notes: list[str] | None = None) -> list[str]:

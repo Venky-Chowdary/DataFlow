@@ -51,9 +51,11 @@ class _HubSpot(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         query = parse_qs(url.query)
         _Log.requests.append((url.path, query))
-        if self.headers.get("Authorization") != f"Bearer {TOKEN}":
+        if self.headers.get("Authorization") not in {f"Bearer {TOKEN}", f"Bearer {TOKEN}-revoked-elsewhere"}:
             return self._send(401, {"status": "error", "category": "INVALID_AUTHENTICATION"})
         if url.path == "/crm/v3/schemas":
+            if self.headers.get("Authorization") == f"Bearer {TOKEN}-revoked-elsewhere":
+                return self._send(403, {"status": "error", "category": "BANNED", "message": "portal suspended"})
             return self._send(
                 403,
                 {
@@ -94,6 +96,16 @@ def test_standard_objects_are_listed_and_the_403_says_custom_objects_unavailable
     assert out["ok"], out
     assert {"contacts", "companies", "deals"} <= set(out["tables"])
     assert "custom objects unavailable" in out["warning"]
+    assert out["custom_objects_unavailable"] is True
+
+
+def test_a_403_that_is_not_a_scope_answer_still_fails(hubspot):
+    from services.schema_introspect import introspect_schema
+
+    out = introspect_schema("hubspot", host=hubspot, port=443, api_key=f"{TOKEN}-revoked-elsewhere")
+    assert not out["ok"]
+    assert "403" in out["error"]
+    assert "custom_objects_unavailable" not in out
 
 
 def test_a_standard_object_describes_without_the_custom_object_scope(hubspot):
@@ -147,6 +159,30 @@ def test_list_connector_objects_lists_standard_objects(saved_hubspot):
     assert out["connected"] is True
     assert {"contacts", "companies", "deals"} <= set(out["objects"])
     assert "custom objects unavailable" in out["message"]
+
+
+def test_plan_carries_the_scope_note_as_data(saved_hubspot, tmp_path):
+    from services.connector_store import create_connector, delete_connector
+    from src.ai.copilot.tools import get_pilot_tools
+
+    dest = create_connector({"name": "r13-d270-dst", "type": "sqlite", "database": str(tmp_path / "d.db")})
+    try:
+        res = get_pilot_tools().execute(
+            "plan_transfer",
+            {
+                "source_connector_id": saved_hubspot.id,
+                "source_table": "contacts",
+                "dest_connector_id": dest.id,
+                "dest_table": "contacts_copy",
+                "sync_mode": "full_refresh_overwrite",
+            },
+        )
+        assert res.success, res.error
+        notes = res.output["source_notes"]
+        assert notes and notes[0]["code"] == "custom_objects_unavailable"
+        assert "crm.schemas.custom.read" in notes[0]["message"]
+    finally:
+        delete_connector(dest.id)
 
 
 def test_sample_reads_one_bounded_page_through_the_reader(saved_hubspot):

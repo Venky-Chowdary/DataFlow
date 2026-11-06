@@ -52,14 +52,20 @@ def _handler(ok_auth: str):
 
 @pytest.fixture
 def stub():
+    servers: list[HTTPServer] = []
+
     def _start(ok_auth: str) -> int:
         srv = HTTPServer(("127.0.0.1", 0), _handler(ok_auth))
+        servers.append(srv)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         _Seen.headers.clear()
         _Seen.paths.clear()
         return srv.server_address[1]
 
-    return _start
+    yield _start
+    for srv in servers:
+        srv.shutdown()
+        srv.server_close()
 
 
 # --- the one rule ----------------------------------------------------------
@@ -186,14 +192,64 @@ def test_airtable_check_dials_with_the_password_held_pat(stub):
     assert _Seen.paths[0].startswith("/v0/meta/bases/appIJJuyLVheGLPlz/tables")
 
 
-def test_absolute_http_url_forms():
+def test_absolute_http_url_never_downgrades_a_bare_host():
     from connectors.saas_common import absolute_http_url
 
     assert absolute_http_url("api.airtable.com", port=443, ssl=True) == "https://api.airtable.com"
     assert absolute_http_url("api.airtable.com") == "https://api.airtable.com"
-    assert absolute_http_url("http://127.0.0.1:8123", port=443) == "http://127.0.0.1:8123"
+    # The MCP form stores ssl=False by default: that is not permission to send
+    # a bearer key in plaintext. 443 / 0 / None are https regardless.
+    assert absolute_http_url("api.airtable.com", port=443, ssl=False) == "https://api.airtable.com"
+    assert absolute_http_url("api.airtable.com", port=0, ssl=False) == "https://api.airtable.com"
+    assert absolute_http_url("api.airtable.com", port=None, ssl=False) == "https://api.airtable.com"
+    assert absolute_http_url("api.example.com", port=8443, ssl=False) == "http://api.example.com:8443"
+    assert absolute_http_url("api.example.com", port=8443, ssl=True) == "https://api.example.com:8443"
+    # Only an explicit non-443 port with ssl=False is plain HTTP (a local stub).
     assert absolute_http_url("127.0.0.1", port=8123, ssl=False) == "http://127.0.0.1:8123"
+    # A typed URL is kept as typed.
+    assert absolute_http_url("http://127.0.0.1:8123", port=443) == "http://127.0.0.1:8123"
     assert absolute_http_url("", port=443) == ""
+    with pytest.raises(ValueError, match="credentials"):
+        absolute_http_url("pat@api.airtable.com", port=443)
+    with pytest.raises(ValueError, match="credentials"):
+        absolute_http_url("https://u:pw@api.airtable.com")
+
+
+def test_airtable_connector_exactly_as_the_mcp_form_stores_it_is_https():
+    """QA's shape: host api.airtable.com, port 443, ssl False (the form default), key in password."""
+    from connectors.sdk.airtable import AirtableSource
+    from connectors.sdk.transfer_bridge import _connector_config
+
+    stored = {
+        "type": "airtable",
+        "host": "api.airtable.com",
+        "port": 443,
+        "ssl": False,
+        "database": "appIJJuyLVheGLPlz",
+        "auth_mode": "api_key",
+        "password": "pat-82-bytes",
+        "username": "",
+        "api_key": "",
+    }
+    cfg = _connector_config(stored, "airtable")
+    assert cfg["base_url"] == "https://api.airtable.com"
+    source = AirtableSource(cfg)
+    assert source._base_url == "https://api.airtable.com/"
+    assert source.auth.headers["Authorization"] == "Bearer pat-82-bytes"
+
+
+def test_readback_and_sample_sessions_send_a_declared_milvus_key_bare():
+    """Gate-8 read-back / target sample build their own session from the raw dict."""
+    from services.copy_milvus_common import _milvus_session
+    from services.reconciliation_readback import verify_qdrant_collection  # noqa: F401 - import path
+    from services.connector_auth import resolve_api_key
+
+    cfg = {"host": "127.0.0.1", "port": 19530, "ssl": False, "auth_mode": "api_key", "password": KEY}
+    _session, _url, headers, _db = _milvus_session(cfg)
+    assert headers["Authorization"] == f"Bearer {KEY}"
+    # The reconciliation call sites hand the verifiers the resolved key.
+    assert resolve_api_key(cfg, password_is_key=False) == KEY
+    assert resolve_api_key({"username": "root", "password": "Milvus"}, password_is_key=False) == ""
 
 
 def test_zilliz_is_the_milvus_driver():

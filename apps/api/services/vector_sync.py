@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from connectors.table_manager import DestinationDeleteError
+from services.connector_auth import resolve_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -849,9 +850,7 @@ def _m6_engine_rows(
         base_url = _index_url(
             str(cfg.get("host") or ""), str(cfg.get("connection_string") or "")
         )
-        headers = _headers(
-            str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
-        )
+        headers = _headers(resolve_api_key(cfg))
         namespace = str(target or cfg.get("schema") or "").strip()
         ids: list[str] = []
         token = ""
@@ -941,6 +940,7 @@ def _m6_engine_rows(
                 api_key=str(cfg.get("api_key") or ""),
                 username=str(cfg.get("username") or ""),
                 password=str(cfg.get("password") or ""),
+                auth_mode=str(cfg.get("auth_mode") or ""),
             )
         )
         db_name = str(cfg.get("database") or "")
@@ -1068,9 +1068,7 @@ def _m6_delete_ids(
         base_url = _index_url(
             str(cfg.get("host") or ""), str(cfg.get("connection_string") or "")
         )
-        headers = _headers(
-            str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
-        )
+        headers = _headers(resolve_api_key(cfg))
         namespace = str(target or cfg.get("schema") or "").strip()
         try:
             for offset in range(0, len(values), 1000):
@@ -1113,6 +1111,7 @@ def _m6_delete_ids(
                 api_key=str(cfg.get("api_key") or ""),
                 username=str(cfg.get("username") or ""),
                 password=str(cfg.get("password") or ""),
+                auth_mode=str(cfg.get("auth_mode") or ""),
             )
         )
         filter_expr = "id in [" + ",".join(

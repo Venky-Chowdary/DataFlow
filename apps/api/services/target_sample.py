@@ -14,6 +14,7 @@ lost write.
 from __future__ import annotations
 
 from services.brand import bigquery_default_dataset
+from services.connector_auth import resolve_api_key
 import json
 import logging
 from typing import Any
@@ -1229,9 +1230,7 @@ def _read_destination_sample(
             from connectors.pinecone_writer import _headers, _index_url, _requests_session
 
             index_url = _index_url(dest.get("host", ""), dest.get("connection_string", ""))
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
+            key = resolve_api_key(dest)
             if not index_url or not key:
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
@@ -1274,7 +1273,7 @@ def _read_destination_sample(
         if db_type == "qdrant":
             from connectors.qdrant_writer import _base_url, _headers, _requests_session
 
-            api_key = dest.get("password") or dest.get("username") or ""
+            api_key = resolve_api_key(dest)
             base_url = (
                 dest.get("connection_string", "").rstrip("/")
                 if dest.get("connection_string")
@@ -1340,9 +1339,7 @@ def _read_destination_sample(
                 _requests_session,
             )
 
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
+            key = resolve_api_key(dest)
             base_url = _base_url(
                 dest.get("host", ""),
                 int(dest.get("port") or 8080),
@@ -1422,6 +1419,7 @@ def _read_destination_sample(
                 api_key=str(dest.get("api_key") or ""),
                 username=dest.get("username", ""),
                 password=dest.get("password", ""),
+                auth_mode=str(dest.get("auth_mode") or ""),
             )
             base_url = _base_url(
                 dest.get("host", ""),

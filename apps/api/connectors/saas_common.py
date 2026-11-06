@@ -227,16 +227,25 @@ def absolute_http_url(host: str, *, port: int | None = 0, ssl: bool | None = Non
     non-443 port names a plain-HTTP endpoint (a local stub).
     """
     text = (host or "").strip().rstrip("/")
-    if not text or "://" in text:
+    if not text:
+        return text
+    if "@" in text.split("://", 1)[-1].split("/", 1)[0]:
+        # A key never travels in the host field, where it would be logged,
+        # shown in briefs and sent in plaintext on a downgrade.
+        raise ValueError("host must not carry credentials (user:password@host)")
+    if "://" in text:
         return text
     try:
         port_num = int(port or 0)
     except (TypeError, ValueError):
         port_num = 0
-    if ssl is None:
-        ssl = port_num in (0, 443)
-    scheme = "https" if ssl else "http"
-    if port_num and port_num not in (443 if ssl else 80,) and ":" not in text.split("@")[-1]:
+    # A bare host is an https origin. The stored ssl flag is False by default
+    # on every MCP-created connector, so it cannot mean "send the bearer key
+    # in plaintext": only an explicit non-443 port with ssl=False names a
+    # plain-HTTP endpoint (a local stub). The operator types http:// otherwise.
+    plain = ssl is False and port_num not in (0, 443)
+    scheme = "http" if plain else "https"
+    if port_num and port_num != (80 if plain else 443) and ":" not in text:
         text = f"{text}:{port_num}"
     return f"{scheme}://{text}"
 

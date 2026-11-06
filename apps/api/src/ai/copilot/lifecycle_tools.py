@@ -922,6 +922,7 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
     from services.connector_store import normalize_connector_role
 
     host = str(conn.get("host") or "")
+    port = int(conn.get("port") or 0)
     effective_host, effective_port, source = connector_dial_endpoint(conn)
     brief = {
         "connector_id": _resolved_connector_id(conn),
@@ -933,7 +934,7 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
         "effective_host": effective_host,
         "effective_port": effective_port,
     }
-    if source == "connection_string" and effective_host != host:
+    if source == "connection_string" and (effective_host, effective_port) != (host, port):
         brief["host_note"] = (
             f"Probe targets {effective_host}:{effective_port} from the "
             "connection string — the stored host field is not what is dialed."
