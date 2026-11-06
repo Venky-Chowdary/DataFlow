@@ -92,6 +92,15 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "or widen file_wait_seconds, then run the schedule again."),
     # D100: a watermark that outlived its destination can never self-heal —
     # park on the first beat and name the recovery, don't re-fail every tick.
+    # QA C9: a dropped or externally changed append destination is refused the
+    # same way on every beat until an operator recovers it. ("could not be
+    # re-read" is left out: a connection blip is not a drop, D266.)
+    (r"verification failed for table '[^']*': the (table no longer exists|"
+     r"destination changed since the last verified run)",
+     "Recover the destination: rebaseline it (accept it as it is now, or accept "
+     "its removal) or rebuild it from the source — the schedule's Recover "
+     "destination action, POST /api/v1/schedules/{id}/recover, or MCP "
+     "recover_schedule_destination."),
     # QA MySQL D7: the PII hold says the same thing to every attempt until a
     # human attests. Park on the first beat with the compliance approval.
     (r"pii/compliance review required",

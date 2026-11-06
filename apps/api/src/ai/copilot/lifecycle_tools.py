@@ -454,6 +454,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "prepare_cdc_source": "prepare_cdc_source",
     "clear_cursor_resnapshot": "clear_cursor_resnapshot",
     "rebaseline_transfer": "rebaseline_transfer",
+    "recover_schedule_destination": "recover_schedule_destination",
 }
 
 

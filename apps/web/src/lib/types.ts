@@ -1688,7 +1688,15 @@ export interface PipelineSchedule {
   in_file_dedupe?: string;
   file_wait_seconds?: number;
   last_run_at: string | null;
+  /** Null while paused or stalled (never silently null while armed: see `state`). */
   next_run_at: string | null;
+  /**
+   * What the schedule will do on its own (QA C9 / Mongo D9): `stalled` is armed
+   * but will not fire until someone acts on `stalled_reason`.
+   */
+  state?: "paused" | "running" | "scheduled" | "stalled";
+  /** Why a stalled schedule will not fire, and the action that clears it. */
+  stalled_reason?: string;
   last_job_id: string | null;
   /** Derived by the API from the latest run record (not a stored copy). */
   last_status: string | null;

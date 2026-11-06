@@ -5,7 +5,12 @@ import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ScheduleRunHistory } from "./schedules/ScheduleRunHistory";
-import { historyRefreshKey } from "../lib/scheduleRunStatus";
+import {
+  historyRefreshKey,
+  nextRunView,
+  type DestinationRecoveryAction,
+} from "../lib/scheduleRunStatus";
+import { ScheduleHeldPanel } from "./schedules/ScheduleHeldPanel";
 import {
   fetchContractBreaker,
   fetchJob,
@@ -70,6 +75,8 @@ interface PipelineDetailDrawerProps {
   onExportYaml?: () => void;
   /** Empty mapping contract — open Studio instead of pretending Run now will invent a map. */
   onOpenStudio?: () => void;
+  /** QA C9: answer a DESTINATION_CONTINUITY finding (audited, re-arms the schedule). */
+  onRecoverDestination?: (action: DestinationRecoveryAction, reason: string) => void | Promise<void>;
 }
 
 function formatWhen(iso: string | null | undefined): string {
@@ -108,6 +115,7 @@ export function PipelineDetailDrawer({
   onResetBreaker,
   onExportYaml,
   onOpenStudio,
+  onRecoverDestination,
 }: PipelineDetailDrawerProps) {
   const [mappingCount, setMappingCount] = useState(0);
   const [mappings, setMappings] = useState<{ source: string; target: string }[]>([]);
@@ -195,6 +203,8 @@ export function PipelineDetailDrawer({
   if (!sched) return null;
 
   const isRunning = Boolean(running || sched.running);
+  const nextRun = nextRunView(sched);
+
   const breakerState = breaker?.state || breakerHint || null;
   const breakerOpen = breakerBlocksRuns(breakerState);
   const cadence = scheduleCadenceLabel(sched);
@@ -491,9 +501,22 @@ export function PipelineDetailDrawer({
         </div>
         <div className="df2-drawer-fact">
           <span>Next run</span>
-          <strong title={cadenceDetail}>{formatWhen(sched.next_run_at)}</strong>
+          <strong
+            title={nextRun.title || cadenceDetail}
+            className={nextRun.stalled ? "df2-text-warn" : undefined}
+          >
+            {nextRun.label ?? formatWhen(sched.next_run_at)}
+          </strong>
         </div>
       </div>
+
+      {nextRun.stalled && (
+        <ScheduleHeldPanel
+          schedule={sched}
+          manageRefusal={manageRefusal}
+          onRecoverDestination={onRecoverDestination}
+        />
+      )}
 
       {(lastJob || mappingCount > 0) && (
         <div className="df2-drawer-facts df2-drawer-trust" aria-label="Integrity summary">

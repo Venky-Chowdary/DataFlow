@@ -1629,10 +1629,22 @@ def _open_finding(
 
             unmapped_sentence = message_is_unmapped_column_drift(message)
             missing_table = _missing_source_table(sched, message)
+            from services.schedule_recovery import (
+                DESTINATION_CONTINUITY_CODE,
+                continuity_corrective,
+                is_continuity_refusal,
+            )
+
             if is_empty_mapping_refusal(message):
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
+            elif is_continuity_refusal(message):
+                # No signature makes a dropped table hold its history again: the
+                # finding names the schedule's own recovery (QA C9).
+                code = DESTINATION_CONTINUITY_CODE
+                scopes = ()
+                corrective = continuity_corrective(schedule_id)
             elif missing_table:
                 # No signature can create a table: name it and the fix (QA SC5).
                 code = SOURCE_TABLE_MISSING_CODE

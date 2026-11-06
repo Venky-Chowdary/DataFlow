@@ -2295,6 +2295,21 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   return res.json();
 }
 
+/** QA C9: rebaseline or rebuild a schedule's destination after it changed, then re-arm it. */
+export async function recoverScheduleDestination(
+  id: string,
+  action: "rebaseline" | "rebuild",
+  reason: string,
+): Promise<{ success: boolean; action: string; job_id: string }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/recover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, reason }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not recover the destination"));
+  return res.json();
+}
+
 export async function exportDatawrapManifest(): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/schedules/export/manifest?format=yaml`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export datawrap.yaml"));

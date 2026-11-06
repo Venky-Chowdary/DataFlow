@@ -559,6 +559,24 @@ async def _run_lifecycle_confirm(
             )
         except RebaselineError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if kind == "recover_schedule_destination":
+        # The REST handler owns the recovery, its audit and the re-arm (QA C9).
+        sid = str(payload.get("schedule_id") or "").strip()
+        body = schedules_router.RecoverDestinationRequest(
+            action=str(payload.get("action") or ""),
+            reason=str(payload.get("reason") or ""),
+        )
+        result = await schedules_router.recover_schedule_destination_route(
+            sid, body, http_request, workspace_id
+        )
+        sched = result.get("schedule")
+        return {
+            "schedule_id": sid,
+            "action": result.get("action"),
+            "job_id": result.get("job_id") or "",
+            "state": getattr(sched, "state", "") if sched is not None else "",
+            "next_run_at": getattr(sched, "next_run_at", "") if sched is not None else "",
+        }
     if kind == "update_schedule":
         # Cadence and name only. Connectors, tables, mappings, and sync mode
         # stay on the stored schedule — this patch must not re-plan the route.

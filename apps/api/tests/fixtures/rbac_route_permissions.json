@@ -315,6 +315,7 @@
   "POST /api/v1/schedules/{schedule_id}/approvals/{approval_id}/reject": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/authorization": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/catch-up": "schedule.manage",
+  "POST /api/v1/schedules/{schedule_id}/recover": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/run": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/sync": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/transform-recipe/upgrade": "schedule.manage",

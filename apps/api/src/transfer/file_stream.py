@@ -1932,6 +1932,7 @@ def stream_file_to_database(
                 scope,
                 precount_table(dest_type, dest_cfg, dest_table),
                 dest_missing=dest_object_missing(dest_type, dest_cfg, dest_table),
+                destination=destination,
             )
             if reset_issue:
                 raise ValueError(reset_issue)

@@ -1370,6 +1370,58 @@ async def run_pipeline_now(
     return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
 
 
+class RecoverDestinationRequest(BaseModel):
+    #: ``rebaseline`` accepts the destination as it is now (or its removal);
+    #: ``rebuild`` reloads it from the source with a full re-sync.
+    action: str = Field(..., min_length=1, max_length=32)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+@router.post("/{schedule_id}/recover")
+async def recover_schedule_destination_route(
+    schedule_id: str,
+    body: RecoverDestinationRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Recover a destination that changed under this schedule, then re-arm it (QA C9).
+
+    The finding a dropped / externally changed append destination parks on is
+    answered here, audited with the operator and reason. MCP
+    ``recover_schedule_destination`` confirms through this same handler.
+    """
+    import asyncio
+
+    from services.schedule_recovery import (
+        ScheduleRecoveryRefused,
+        recover_schedule_destination,
+    )
+
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id, write=True)
+    actor = _decider(request)
+    try:
+        result = await asyncio.to_thread(
+            recover_schedule_destination,
+            schedule_id,
+            action=body.action,
+            actor=actor,
+            reason=body.reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ScheduleRecoveryRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ApiError:
+        raise
+    sched = result.pop("schedule", None) or get_schedule(schedule_id)
+    return {
+        "success": True,
+        **result,
+        "schedule": ScheduleResponse.from_schedule(sched) if sched else None,
+    }
+
+
 class CatchUpRequest(BaseModel):
     #: How many overdue cadence windows to replay as individual runs.
     #: 0 = every outstanding window, still capped (server-side) per request.

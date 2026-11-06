@@ -614,7 +614,8 @@ def _stream_database_transfer_impl(
 
             run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(_scope, run.cfg.cursor_pk_source)
             refuse_unusable_cursor_state(
-                _scope, run.cfg.dest_type, run.cfg.dest_cfg, _dest_obj
+                _scope, run.cfg.dest_type, run.cfg.dest_cfg, _dest_obj,
+                destination=run.cfg.destination,
             )
     # Gate-8 append proof needs the destination cardinality from before the
     # first write, whichever path performs it. Measured once here, ahead of the
@@ -981,7 +982,9 @@ def _stream_database_transfer_impl(
         run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(scope, run.cfg.cursor_pk_source)
 
         refuse_unusable_cursor_state(
-            scope, run.cfg.dest_type, run.cfg.dest_cfg, resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table)
+            scope, run.cfg.dest_type, run.cfg.dest_cfg,
+            resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table),
+            destination=run.cfg.destination,
         )
         from .engine_kafka import kafka_offsets_bound_the_read
 

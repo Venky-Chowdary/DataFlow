@@ -1086,6 +1086,27 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "recover_schedule_destination",
+        "description": (
+            "Recover a schedule whose destination was dropped or changed outside the "
+            "pipeline (it is parked on a DESTINATION_CONTINUITY finding: enabled, no "
+            "next run). action=rebaseline accepts the destination as it is now (or "
+            "its removal); action=rebuild reloads it from the source with a full "
+            "re-sync. Audited, needs a reason; re-arms the schedule. Pending action "
+            "until confirm_action."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "string"},
+                "name": {"type": "string"},
+                "action": {"type": "string", "enum": ["rebaseline", "rebuild"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["action", "reason"],
+        },
+    },
+    {
         "name": "create_schedule",
         "description": (
             "Stage a recurring pipeline (schedule) between two saved connectors for the "
@@ -1671,6 +1692,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_schedules",
             "get_schedule",
             "run_schedule_now",
+            "recover_schedule_destination",
             "create_schedule",
             "confirm_action",
             "list_contracts",
@@ -1887,6 +1909,7 @@ class DataPilotTools:
             "list_schedules": self._list_schedules,
             "get_schedule": self._get_schedule,
             "run_schedule_now": self._run_schedule_now,
+            "recover_schedule_destination": self._recover_schedule_destination,
             "create_schedule": self._create_schedule,
             "list_contracts": self._list_contracts,
             "open_job": self._open_job,
@@ -4042,6 +4065,48 @@ class DataPilotTools:
                 "preview": preview,
             },
         )
+
+    def _recover_schedule_destination(
+        self, schedule_id: str = "", name: str = "", action: str = "", reason: str = ""
+    ) -> ToolResult:
+        """Stage the schedule's destination recovery; Confirm runs the REST handler."""
+        tool = "recover_schedule_destination"
+        sched, clarify = self._resolve_schedule(schedule_id, name)
+        if clarify or not sched:
+            return ToolResult(name=tool, success=False, output=None,
+                              error=clarify or "Which pipeline? Give a schedule name or id.")
+        from services.schedule_recovery import ACTIONS, ACTION_REBUILD
+
+        action = str(action or "").strip().lower()
+        if action not in ACTIONS:
+            return ToolResult(name=tool, success=False, output=None,
+                              error=f"action must be one of: {', '.join(ACTIONS)}.")
+        if not str(reason or "").strip():
+            return ToolResult(name=tool, success=False, output=None,
+                              error="A reason is required to recover a destination.")
+        from .ack_ledger import get_ack_ledger
+
+        effect = (
+            "Reload the destination from the source with a full re-sync, then "
+            "continue the cadence from the new high-water mark."
+            if action == ACTION_REBUILD
+            else "Accept the destination as it is now (or its removal) as the "
+            "verified baseline; the next run appends from the cursor."
+        )
+        preview = {"schedule_id": sched.id, "name": sched.name, "action": action,
+                   "dest_table": sched.dest_table, "effect": effect}
+        ack_id = get_ack_ledger().put(
+            kind=tool,
+            payload={"schedule_id": sched.id, "action": action,
+                     "reason": str(reason).strip()},
+            preview=preview,
+        )
+        return ToolResult(name=tool, success=True, output={
+            "action": tool, "schedule_id": sched.id, "name": sched.name,
+            "label": f"Recover destination of “{sched.name}” ({action})",
+            "risk": "mutate", "destructive": False, "requires_confirm": True,
+            "ack_id": ack_id, "preview": preview,
+        })
 
     # Lifecycle operations: staged acks, executed by the REST handler on Confirm.
     def _cancel_job(self, job_id: str = "", selector: str = "") -> ToolResult:

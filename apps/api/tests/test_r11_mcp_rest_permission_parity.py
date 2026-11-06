@@ -53,6 +53,7 @@ REST_TWIN: dict[str, tuple[str, str]] = {
     "delete_connector": ("DELETE", "/api/v1/connectors/saved/c-1"),
     "test_connector": ("POST", "/api/v1/connectors/saved/c-1/test"),
     "run_schedule_now": ("POST", "/api/v1/schedules/s-1/run"),
+    "recover_schedule_destination": ("POST", "/api/v1/schedules/s-1/recover"),
     "create_schedule": ("POST", "/api/v1/schedules/"),
     "set_schedule_enabled": ("PATCH", "/api/v1/schedules/s-1"),
     "update_schedule": ("PATCH", "/api/v1/schedules/s-1"),

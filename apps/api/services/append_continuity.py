@@ -611,6 +611,7 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     target = resolve_target(getattr(request, "destination", None))
     if target is None:
         return
+    _clear_accepted_reset(target)
     mode = effective_sync_mode(request)
     if mode is None or not (
         is_append_sync(mode) or is_overwrite_sync(mode) or requires_upsert(mode)
@@ -640,15 +641,48 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     save_baseline(target.key, fp, job_id)
 
 
+#: An audited rebaseline that accepted a dropped or emptied destination. The
+#: incremental cursor still claims its history is at rest there, so the cursor
+#: reset gate (D100) reads this marker as the operator's decision and lets the
+#: next append start a new history from the watermark. One-shot: the next
+#: verified run's baseline clears it (QA C9).
+ACCEPTED_RESET_PREFIX = "accepted_reset:"
+
+
+def destination_reset_accepted(endpoint: Any) -> bool:
+    """True when an audited rebaseline accepted this destination's removal or emptying."""
+    try:
+        target = resolve_target(endpoint)
+        if target is None:
+            return False
+        return any(load_baseline(ACCEPTED_RESET_PREFIX + k) for k in target.all_keys)
+    except Exception:  # noqa: BLE001 - an unreadable marker accepts nothing
+        return False
+
+
+def _clear_accepted_reset(target: ContinuityTarget) -> None:
+    for key in target.all_keys:
+        try:
+            if load_baseline(ACCEPTED_RESET_PREFIX + key):
+                clear_baseline(ACCEPTED_RESET_PREFIX + key)
+        except Exception:  # noqa: BLE001
+            logger.warning("accepted-reset marker not cleared for %s", key, exc_info=True)
+
+
 class RebaselineError(ValueError):
     """The destination cannot be accepted as a new baseline."""
 
 
-def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
+def rebaseline(
+    endpoint: Any, *, actor: str, reason: str, release_schedules: bool = True
+) -> dict[str, Any]:
     """Operator accepts the current destination as the verified baseline.
 
     Explicit and audited: the audit event is written before the baseline
-    moves, so an audit failure leaves the old baseline in force.
+    moves, so an audit failure leaves the old baseline in force. With
+    ``release_schedules`` every schedule parked on a continuity finding for
+    this table is re-armed too (QA C9): accepting the destination at the route
+    is the decision the parked schedule was waiting for.
     """
     reason = (reason or "").strip()
     if not reason:
@@ -731,6 +765,14 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             clear_baseline(key)
         else:
             save_baseline(key, current, rebaseline_id)
+        if removal or int((current or {}).get("rows") or 0) == 0:
+            save_baseline(
+                ACCEPTED_RESET_PREFIX + key,
+                # The entry's presence is the marker; job_id names the audited
+                # rebaseline that accepted the reset.
+                {"rows": 0, "checksum": "accepted-reset"},
+                rebaseline_id,
+            )
     logger.warning(
         "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
         target.db_type,
@@ -740,8 +782,14 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         prev_view and prev_view.get("rows"),
         "table removed" if removal else current.get("rows"),
     )
+    released: list[str] = []
+    if release_schedules:
+        from services.schedule_recovery import release_continuity_parks
+
+        released = release_continuity_parks(endpoint, actor=actor, reason=reason)
     return {
         "rebaseline_id": rebaseline_id,
+        "released_schedules": released,
         "table": target.table,
         "previous": prev_view,
         "current": dict(current) if current else None,

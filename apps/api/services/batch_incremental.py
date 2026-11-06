@@ -160,7 +160,7 @@ def bind_batch_incremental(
     if scope.bounded and dest_rows is not None:
         from services.preflight_cursor_gate import cursor_destination_reset_issue
 
-        reset_issue = cursor_destination_reset_issue(scope, dest_rows)
+        reset_issue = cursor_destination_reset_issue(scope, dest_rows, destination=destination)
         if reset_issue:
             raise ValueError(reset_issue)
     # SCD2 compares a whole source snapshot against the destination's current
