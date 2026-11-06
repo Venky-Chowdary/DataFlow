@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  chainInconclusive,
   chainNotChecked,
   chainVerdictTitle,
   chainVerdictToast,
@@ -121,9 +122,74 @@ describe("records signed with a lost key (QA r12 #3)", () => {
     assert.equal(chainVerifiedWithExceptions(report), true);
     assert.equal(chainNotChecked(report), false);
     const title = chainVerdictTitle(report);
-    assert.match(title, /No tampering found — 1657 of 1983 records verified/);
-    assert.match(title, /326 record\(s\) signed with key ak_ca4273e3aaaaaaaa/);
-    assert.doesNotMatch(title, /failed|intact/i);
-    assert.match(chainVerdictToast(report), /No tampering found; 326 record/);
+    // Fifth review: not "No tampering found" — those records were not checked.
+    assert.match(title, /^Verified except 326 record\(s\) whose key is not held \(key ak_ca4273e3aaaaaaaa\)/);
+    assert.match(title, /1657 of 1983 records verified/);
+    assert.doesNotMatch(title, /failed|intact|no tampering/i);
+    assert.match(chainVerdictToast(report), /^Verified except 326 record\(s\) whose key is not held/);
+    assert.doesNotMatch(chainVerdictToast(report), /no tampering/i);
+  });
+});
+
+describe("inconclusive and prior tampering (C4 reviews 4 and 5)", () => {
+  it("says records could not be judged, never verified or tampered", () => {
+    const report = {
+      verified: false,
+      status: "inconclusive",
+      checked: 40,
+      findings: [{ kind: "unknown_key_unjudged", event_id: "e1" }],
+      categories: { inconclusive: 1 },
+      key_history_unreadable: "the key history epoch could not be read (ServerSelectionTimeoutError)",
+      scope: "platform" as const,
+    };
+    assert.equal(chainInconclusive(report), true);
+    assert.equal(chainVerifiedWithExceptions(report), false);
+    const title = chainVerdictTitle(report);
+    assert.match(title, /^Not judged — 1 record\(s\) name a key whose status cannot be judged/);
+    assert.match(title, /could not be read/);
+    assert.doesNotMatch(title, /intact|verified except|no tampering/i);
+    assert.match(chainVerdictToast(report), /^Not judged/);
+  });
+
+  it("names a vault secrets-key change and the re-anchor it needs", () => {
+    const report = {
+      verified: false,
+      status: "inconclusive",
+      checked: 9,
+      findings: [],
+      categories: { inconclusive: 1 },
+      secrets_key_changed: true,
+      scope: "platform" as const,
+    };
+    assert.match(chainVerdictTitle(report), /secrets key changed; a platform admin must re-anchor/);
+    assert.match(chainVerdictToast(report), /re-anchor the key history/);
+  });
+
+  it("keeps reporting tampering a re-anchor recorded", () => {
+    const report = {
+      verified: false,
+      status: "findings",
+      checked: 20,
+      findings: [],
+      prior_tampering: [{ kind: "unknown_key_after_keyring", event_id: "e9", reanchored_at: 14 }],
+      scope: "platform" as const,
+    };
+    const title = chainVerdictTitle(report);
+    assert.match(title, /^Chain verification failed — 1 finding\(s\) recorded at a key-history re-anchor/);
+    assert.match(chainVerdictToast(report), /recorded at a key-history re-anchor/);
+    const withLive = { ...report, findings: [{ kind: "unknown_key_after_keyring", event_id: "e9" }] };
+    assert.match(chainVerdictTitle(withLive), /1 record\(s\) across 1 workspace\(s\); 1 earlier finding/);
+  });
+
+  it("names a truncated tail", () => {
+    const report = {
+      verified: false,
+      status: "findings",
+      checked: 5,
+      findings: [],
+      tail_truncated: { witnessed_seq: 8, store_head_seq: 5, reason: "the newest 3 record(s) up to the witnessed head at position 8 are gone" },
+      scope: "platform" as const,
+    };
+    assert.match(chainVerdictTitle(report), /newest 3 record\(s\)/);
   });
 });

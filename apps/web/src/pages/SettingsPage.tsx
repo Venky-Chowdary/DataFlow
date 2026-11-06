@@ -23,6 +23,7 @@ import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
 import {
+  chainInconclusive,
   chainNotChecked,
   chainVerdictTitle,
   chainVerdictToast,
@@ -657,14 +658,17 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       setChainReport(report);
       const notChecked = chainNotChecked(report);
       const exceptions = chainVerifiedWithExceptions(report);
+      const inconclusive = chainInconclusive(report);
       toast({
         title: notChecked
           ? "Nothing verified"
           : exceptions
             ? "Verified with exceptions"
-            : report.verified ? "Chain verified" : "Chain verification failed",
+            : inconclusive
+              ? "Not judged"
+              : report.verified ? "Chain verified" : "Chain verification failed",
         message: chainVerdictToast(report),
-        tone: notChecked || exceptions ? "warning" : report.verified ? "success" : "error",
+        tone: notChecked || exceptions || inconclusive ? "warning" : report.verified ? "success" : "error",
       });
     } catch (err) {
       setChainReport(null);
@@ -1566,7 +1570,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-body">
                   {chainReport && (
                     <div
-                      className={`df2-chain-verdict ${chainNotChecked(chainReport) || chainVerifiedWithExceptions(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
+                      className={`df2-chain-verdict ${chainNotChecked(chainReport) || chainVerifiedWithExceptions(chainReport) || chainInconclusive(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
                       role="status"
                     >
                       <strong>{chainVerdictTitle(chainReport)}</strong>
