@@ -29,8 +29,11 @@ def test_delimited_keeps_textual_number_digits():
     assert out == "10.50"
 
 
-def test_json_wire_still_emits_number_for_exact_decimal():
-    # The demote stays correct where it belongs: JSON/kafka payloads carry a
-    # JSON number, not a quoted decimal.
+def test_json_wire_emits_one_type_for_a_decimal_field():
+    # A JSON wire (Kafka) parses numbers as float64, so a declared DECIMAL
+    # field is its exact text for every value - never a number for the values
+    # binary64 happens to hold beside a string for the rest (D203).
     out = to_json_value(Decimal("10.50"), "amount", {"amount": "decimal"})
-    assert out == 10.5 and isinstance(out, float)
+    assert out == "10.50" and isinstance(out, str)
+    big = to_json_value("99999999999.999999", "amount", {"amount": "decimal"})
+    assert big == "99999999999.999999" and isinstance(big, str)

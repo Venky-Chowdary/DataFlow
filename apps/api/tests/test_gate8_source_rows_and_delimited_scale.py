@@ -30,8 +30,10 @@ from src.transfer.adapters import _writer_diagnostics, carry_dest_spelling_acros
 def test_delimited_cell_keeps_declared_decimal_scale():
     types = {"amount": "DECIMAL(7,4)"}
     assert to_delimited_value("10.50", "amount", types) == "10.50"
-    # JSON exports keep native numbers — that contract does not change.
-    assert to_json_value("10.50", "amount", types) == pytest.approx(10.5)
+    # JSON *files* keep native numbers (``exact_decimal``); a JSON wire such as
+    # Kafka carries a DECIMAL field as its exact text for every value (D203).
+    assert to_json_value("10.50", "amount", types, exact_decimal=True) == Decimal("10.50")
+    assert to_json_value("10.50", "amount", types) == "10.50"
 
 
 def test_delimited_cell_still_refuses_empty_string_into_a_numeric_column():

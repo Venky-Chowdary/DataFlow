@@ -595,15 +595,15 @@ def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     ``to_json_value``; only an already-textual number keeps its own digits.
     """
     parsed = to_json_value(value, col, dest_types)
-    if (
-        isinstance(value, str)
-        and isinstance(parsed, (int, float, Decimal))
-        and not isinstance(parsed, bool)
-    ):
-        return value.strip()
-    if isinstance(value, Decimal) and isinstance(parsed, float):
-        # C26's JSON demote is right for the JSON wire (binary64 has no scale),
-        # but a Decimal input already states its scale — ``Decimal("10.50")``
+    if isinstance(value, str) and not isinstance(parsed, bool):
+        if isinstance(parsed, (int, float, Decimal)):
+            return value.strip()
+        if isinstance(parsed, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
+            # A DECIMAL column's JSON wire is the exact text (D203); the
+            # delimited cell keeps the source's own spelling (``1E+2`` stays).
+            return value.strip()
+    if isinstance(value, Decimal) and isinstance(parsed, (float, str)):
+        # A Decimal input already states its scale — ``Decimal("10.50")``
         # demoted to ``10.5`` loses the trailing digit on the delimited/excel
         # wire where the file itself is the deliverable. Keep the Decimal so
         # ``cell_to_string`` writes the stated digits.
@@ -612,6 +612,21 @@ def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
 
 
 _EXACT_DECIMAL_TEXT = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _exact_decimal_cell(value: Any) -> Decimal | int | None:
+    """The exact number a DECIMAL-declared cell states, or ``None`` to leave it."""
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            return None
+        return Decimal(repr(value))
+    if isinstance(value, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
+        return Decimal(value.strip())
+    return None
 
 
 def to_json_value(
@@ -678,18 +693,28 @@ def to_json_value(
         if coerced is not value:
             return coerced
         return value
-    if exact_decimal and ctype in {"decimal", "numeric"} and not isinstance(value, bool):
-        # A JSON number has no binary64 limit. The file sinks dump with
-        # ``json_dumps_exact_numbers``, so a DECIMAL cell is written with the
-        # digits and scale the source stated: ``0.1000000000`` and ``1`` stay
-        # that, instead of ``0.1`` / ``1.0`` beside quoted text for the values
-        # binary64 could not hold (D144).
-        if isinstance(value, Decimal) and value.is_finite():
-            return value
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
-            return Decimal(value.strip())
+    if ctype in {"decimal", "numeric"} and not isinstance(value, bool):
+        exact = _exact_decimal_cell(value)
+        if exact is not None:
+            if exact_decimal:
+                # A JSON number has no binary64 limit. The file sinks dump with
+                # ``json_dumps_exact_numbers``, so a DECIMAL cell is written
+                # with the digits and scale the source stated: ``0.1000000000``
+                # and ``1`` stay that, instead of ``0.1`` / ``1.0`` beside
+                # quoted text for the values binary64 could not hold (D144).
+                return exact
+            # A JSON wire (Kafka, Redis, a document store) parses a JSON number
+            # as IEEE float64, so a declared DECIMAL field has one JSON type
+            # over the whole topic: its exact text. Demoting the values binary64
+            # happens to hold (``1.5``) to numbers beside ``"99999999999.999999"``
+            # as text mixed two types in one field and broke typed consumers
+            # (D203); the Registry JSON Schema already declares DECIMAL as
+            # string.
+            from services.value_serializer import safe_decimal_text
+
+            text = safe_decimal_text(exact)
+            if text is not None:
+                return text
     if ctype in {
         "integer",
         "int",
