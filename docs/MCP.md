@@ -36,6 +36,8 @@ platform label. `test_connector` additionally refuses connector types that run
 executables on the API host (`singer_tap`) unless the caller is the platform
 administrator, exactly as `POST /connectors/saved/{id}/test` does.
 
+`list_cdc_captures` and `cleanup_cdc_captures` are the MCP twins of `GET /api/v1/ops/cdc-captures` and `POST /api/v1/ops/cdc-captures/cleanup`: the replication slots and publications Datawrap created on a PostgreSQL source, scoped to the caller's workspace (other workspaces' and non-Datawrap slots are counted, never shown or dropped). Cleanup is staged and runs on Confirm; it never drops a slot a CDC schedule uses or a running job holds.
+
 | Tool | Required permission scope | Effect |
 | --- | --- | --- |
 | `aggregate_data` | `query.use` | `read` |
@@ -43,6 +45,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `analyze_result` | `query.use` | `read` |
 | `brief_workspace` | `workspace.read` | `read` |
 | `cancel_job` | `job.manage` | `mutate` |
+| `cleanup_cdc_captures` | `workspace.manage` | `mutate` |
 | `clear_cursor_resnapshot` | `workspace.manage` | `mutate` |
 | `compare_connectors` | `connector.read` | `read` |
 | `compare_datasets` | `workspace.read` | `read` |
@@ -64,6 +67,7 @@ administrator, exactly as `POST /connectors/saved/{id}/test` does.
 | `get_transfer_capabilities` | `workspace.read` | `read` |
 | `inspect_schema_policy` | `connector.read` | `read` |
 | `introspect_connector_schema` | `connector.read` | `read` |
+| `list_cdc_captures` | `workspace.manage` | `read` |
 | `list_connector_objects` | `connector.read` | `read` |
 | `list_connectors` | `connector.read` | `read` |
 | `list_contracts` | `job.read` | `read` |

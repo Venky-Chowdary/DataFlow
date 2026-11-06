@@ -310,7 +310,7 @@ def test_cleanup_never_drops_a_slot_datawrap_did_not_create_or_a_live_route_uses
 
     token = uuid.uuid4().hex[:6]
     external = f"ext_r14_{token}"
-    lookalike = f"df_dataflow_lookalike_{token}"
+    lookalike = f"df_dataflow_lookalike_{uuid.uuid4().hex[:8]}"
     for name in (external, lookalike):
         _sql("SELECT pg_create_logical_replication_slot(%s, 'test_decoding')", (name,))
     job_id = _run_cdc(route)

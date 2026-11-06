@@ -217,11 +217,16 @@ def _capture_connector(request: Request, connector_id: str, workspace_id: str, *
     from services.connector_store import get_connector
     from services.workspace_access import resolve_read_workspace, resolve_write_workspace
 
+    from services.workspace_access import tenant_scope
+
     ws = (
         resolve_write_workspace(request, workspace_id)
         if write
         else resolve_read_workspace(request, workspace_id)
     )
+    # A platform admin with no workspace named sees every workspace's captures;
+    # anyone else sees only rows their workspace recorded (C11 review).
+    unrestricted = bool(tenant_scope(request, workspace_id).unrestricted) and not ws
     connector = get_connector(connector_id, ws or None)
     if connector is None:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -233,7 +238,7 @@ def _capture_connector(request: Request, connector_id: str, workspace_id: str, *
                 f"connector {connector_id} is {connector.type}."
             ),
         )
-    return connector, ws
+    return connector, ws, unrestricted
 
 
 @router.get("/cdc-captures")
@@ -256,10 +261,11 @@ async def get_cdc_captures(
 
     from services.cdc_capture_inventory import inventory_pg_captures
 
-    connector, ws = _capture_connector(request, connector_id, workspace_id, write=False)
+    connector, ws, unrestricted = _capture_connector(request, connector_id, workspace_id, write=False)
     try:
         return await asyncio.to_thread(
-            inventory_pg_captures, connector.to_dict(), connector_id=connector_id, workspace_id=ws
+            inventory_pg_captures, connector.to_dict(), connector_id=connector_id,
+            workspace_id=ws, unrestricted=unrestricted,
         )
     except Exception as exc:  # noqa: BLE001 - name the source failure, never a 500
         raise HTTPException(
@@ -293,13 +299,16 @@ async def post_cdc_captures_cleanup(
     from services.audit_coverage import record_security_event
     from services.cdc_capture_inventory import cleanup_pg_captures
 
-    connector, ws = _capture_connector(request, body.connector_id, workspace_id, write=True)
+    connector, ws, unrestricted = _capture_connector(
+        request, body.connector_id, workspace_id, write=True
+    )
     try:
         result = await asyncio.to_thread(
             cleanup_pg_captures,
             connector.to_dict(),
             connector_id=body.connector_id,
             workspace_id=ws,
+            unrestricted=unrestricted,
             slot_names=body.slot_names,
             publication_names=body.publication_names,
             include_unregistered=body.include_unregistered,

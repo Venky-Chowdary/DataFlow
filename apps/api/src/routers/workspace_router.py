@@ -224,10 +224,8 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
 
     from services.workspace_store import InvalidTimezone
 
-    from services.workspace_store import get_workspace_settings
-
     actor = _actor(request)
-    before = get_workspace_settings()
+    toggle: tuple[dict[str, Any], dict[str, Any]] | None = None
     try:
         updated = update_workspace_settings(
             org_name=body.org_name,
@@ -237,8 +235,14 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             studio_canvas=body.studio_canvas,
             actor=actor,
             retention_auto_purge=body.retention_auto_purge,
-            cdc_orphan_auto_drop=body.cdc_orphan_auto_drop,
         )
+        if body.cdc_orphan_auto_drop is not None:
+            from services.cdc_capture_inventory import set_auto_drop
+
+            # Shared control-plane setting; the store returns the value it
+            # replaced atomically, so the audit's from/to holds across replicas.
+            toggle = set_auto_drop(bool(body.cdc_orphan_auto_drop), actor=actor)
+            updated = {**updated, "cdc_orphan_auto_drop": toggle[1]["enabled"]}
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record_admin_change(
@@ -255,15 +259,16 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             "cdc_orphan_auto_drop": updated["cdc_orphan_auto_drop"],
         },
     )
-    if bool(before.get("cdc_orphan_auto_drop")) != bool(updated["cdc_orphan_auto_drop"]):
+    if toggle is not None and toggle[0]["enabled"] != toggle[1]["enabled"]:
         # A destructive automation on client databases: its own audit entry.
         record_admin_change(
             request,
             "cdc.capture.auto_drop.changed",
             target="cdc_orphan_auto_drop",
             details={
-                "from": bool(before.get("cdc_orphan_auto_drop")),
-                "to": bool(updated["cdc_orphan_auto_drop"]),
+                "from": toggle[0]["enabled"],
+                "to": toggle[1]["enabled"],
+                "enabled_at": toggle[1].get("enabled_at"),
                 "actor": actor,
             },
         )

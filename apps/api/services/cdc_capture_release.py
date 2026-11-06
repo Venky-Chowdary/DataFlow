@@ -208,6 +208,16 @@ def release_schedule_cdc_capture(sched: PipelineSchedule) -> dict[str, Any]:
     return _release_pg(sched, connector.to_dict(), identities)
 
 
+def schedule_capture_slots(sched: PipelineSchedule, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """``{slot_name, publication_name, cursor_keys}`` a CDC schedule's capture uses.
+
+    The names the change stream derives for every identity the schedule may
+    own (jobs, watermark metadata, the re-derived route). Public for the
+    capture inventory (C11), which must know which slots a live route uses.
+    """
+    return _pg_slots(cfg, capture_identities(sched))
+
+
 def _pg_slots(cfg: dict[str, Any], identities: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from connectors.postgresql_change_stream import _publication_name, decode_pg_resume_token
 

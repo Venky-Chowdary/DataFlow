@@ -47,3 +47,28 @@ def test_auto_drop_is_off_by_default_admin_only_and_every_change_is_audited(ent)
     changes = [e.get("details") or {} for e in _toggles(ent)[seen:]]
     assert [(c.get("from"), c.get("to")) for c in changes] == [(False, True), (True, False)], changes
     assert all(c.get("target") == "cdc_orphan_auto_drop" for c in changes), changes
+
+
+def test_the_setting_is_shared_across_replicas_and_each_change_is_audited_once(ent, monkeypatch):
+    """Review repro (S7): the setting lived in the per-replica workspace.json, so
+    on-then-off through two replicas left one replica dropping and the off went
+    unaudited. Replica B here is a process with its own empty data directory."""
+    import services.workspace_store as workspace_store
+    from services.cdc_capture_inventory import auto_drop_enabled
+
+    seen = len(_toggles(ent))
+    try:
+        assert ent.admin.patch("/api/v1/workspace/settings",
+                               json={"cdc_orphan_auto_drop": True}).status_code == 200
+        replica_b = ent.tmp / "replica-b"
+        replica_b.mkdir()
+        monkeypatch.setenv("DATAFLOW_DATA_DIR", str(replica_b))
+        monkeypatch.setattr(workspace_store, "STORE_PATH", replica_b / "workspace.json")
+        assert auto_drop_enabled() is True, "replica B does not see the setting"
+        assert ent.admin.get("/api/v1/workspace/settings").json()["cdc_orphan_auto_drop"] is True
+    finally:
+        off = ent.admin.patch("/api/v1/workspace/settings", json={"cdc_orphan_auto_drop": False})
+    assert off.status_code == 200
+    assert auto_drop_enabled() is False
+    changes = [e.get("details") or {} for e in _toggles(ent)[seen:]]
+    assert [(c.get("from"), c.get("to")) for c in changes] == [(False, True), (True, False)], changes
