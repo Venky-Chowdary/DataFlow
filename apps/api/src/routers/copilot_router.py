@@ -578,6 +578,7 @@ async def _run_lifecycle_confirm(
         body = schedules_router.RecoverDestinationRequest(
             action=str(payload.get("action") or ""),
             reason=str(payload.get("reason") or ""),
+            confirm_replace=bool(payload.get("confirm_replace")),
         )
         result = await schedules_router.recover_schedule_destination_route(
             sid, body, http_request, workspace_id

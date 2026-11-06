@@ -1400,6 +1400,10 @@ class RecoverDestinationRequest(BaseModel):
     #: workspace's caller is refused 403/404 before the body is judged.
     action: str = Field(default="", max_length=32)
     reason: str = Field(default="", max_length=2000)
+    #: Return the plan (what it does to the destination) and change nothing.
+    dry_run: bool = False
+    #: Required when a rebuild replaces the table (no key to upsert on).
+    confirm_replace: bool = False
 
 
 @router.post("/{schedule_id}/recover")
@@ -1424,14 +1428,17 @@ async def recover_schedule_destination_route(
 
     resolve_write_workspace(request, workspace_id)
     _bound_schedule(request, schedule_id, write=True)
-    missing = [k for k in ("action", "reason") if not str(getattr(body, k) or "").strip()]
+    required = ("action",) if body.dry_run else ("action", "reason")
+    missing = [k for k in required if not str(getattr(body, k) or "").strip()]
     if missing:
         raise HTTPException(
             status_code=422,
             detail=f"{' and '.join(missing)} required: action is rebaseline or rebuild; "
             "the reason is audited.",
         )
-    actor = _decider(request)
+    from ..services.schedule_runner import ScheduleStartError
+
+    actor = "" if body.dry_run else _decider(request)
     try:
         result = await asyncio.to_thread(
             recover_schedule_destination,
@@ -1439,11 +1446,18 @@ async def recover_schedule_destination_route(
             action=body.action,
             actor=actor,
             reason=body.reason,
+            dry_run=body.dry_run,
+            confirm_replace=body.confirm_replace,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ScheduleRecoveryRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ScheduleStartError as exc:
+        # The rebuild could not start; the finding stays open (audited as failed).
+        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApiError:
         raise
     sched = result.pop("schedule", None) or get_schedule(schedule_id)

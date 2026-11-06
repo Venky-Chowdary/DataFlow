@@ -115,14 +115,21 @@ reconciliation, not log replay.
 `recover_schedule_destination` (`schedule_id` or `name`, `action`, `reason`)
 answers a schedule parked on a `DESTINATION_CONTINUITY` finding — its
 incremental-append destination was dropped or changed outside the pipeline.
-`action: "rebaseline"` accepts the destination as it is now (or its removal),
-so the next run appends from the cursor; `action: "rebuild"` reloads it from
-the source with one full re-sync, after which the cadence continues
-incrementally. It stages a confirmation; `confirm_action` runs the same handler
-as `POST /api/v1/schedules/{id}/recover`, which re-checks `schedule.manage` and
-the workspace, refuses a schedule parked on a different finding, records
-`schedule.destination.recovered` with the reason, closes the finding and
-re-arms the schedule.
+`action: "rebaseline"` accepts the destination as it is now (or its removal);
+nothing is written, and the next run appends rows after the stored cursor — a
+removed table is recreated with those rows only, earlier history is not
+reloaded. `action: "rebuild"` reloads the destination with one full re-sync:
+with a key it upserts every source row and keeps rows only the destination
+holds; **with no key it replaces the table** (every row it holds is dropped).
+The staged preview says which (`destructive`, `effect` naming the table), and
+confirming it is the consent to that replace; `POST /api/v1/schedules/{id}/recover`
+answers the same plan to `dry_run: true` and refuses a replacing rebuild
+without `confirm_replace: true`. `confirm_action` runs that handler, which
+re-checks `schedule.manage` and the workspace and refuses a schedule parked on
+a different finding. A rebuild whose run cannot start (already running, a
+refused start, a key that may not use the endpoints) leaves the finding open
+and is audited as failed; otherwise `schedule.destination.recovered` records
+the reason, the finding closes, and the cadence resumes at its next slot.
 
 Unknown tools are denied. `confirm_action` is not implicitly enabled when
 another mutating tool is allowed; it is governed independently.

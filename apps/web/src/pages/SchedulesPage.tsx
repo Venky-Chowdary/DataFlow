@@ -23,6 +23,7 @@ import { useToast } from "../components/Toast";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { useConfirm } from "../components/ui/ConfirmDialog";
+import { recoveryConfirmOptions } from "../lib/scheduleRecovery";
 import {
   applyGitopsManifest,
   createSchedule,
@@ -461,7 +462,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   ) => {
     if (!allowOrExplain(scheduleManage)) return;
     try {
-      const out = await recoverScheduleDestination(id, action, reason);
+      // Ask the server what this will do, say it (naming the table), then act.
+      const dry = await recoverScheduleDestination(id, action, reason, { dryRun: true });
+      const sched = schedules.find((row) => row.id === id);
+      const accepted = await confirm(
+        recoveryConfirmOptions(dry.plan, { name: sched?.name ?? "", dest_table: sched?.dest_table ?? "" }),
+      );
+      if (!accepted) return;
+      const out = await recoverScheduleDestination(id, action, reason, {
+        confirmReplace: dry.plan.destructive,
+      });
       await load();
       toast({
         title: action === "rebuild" ? "Destination rebuild started" : "Destination rebaselined",

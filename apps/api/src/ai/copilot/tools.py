@@ -1108,8 +1108,9 @@ TOOL_DEFINITIONS: list[dict] = [
             "pipeline (it is parked on a DESTINATION_CONTINUITY finding: enabled, no "
             "next run). action=rebaseline accepts the destination as it is now (or "
             "its removal); action=rebuild reloads it from the source with a full "
-            "re-sync. Audited, needs a reason; re-arms the schedule. Pending action "
-            "until confirm_action."
+            "re-sync — with no key that REPLACES the table (the preview says "
+            "destructive). Audited, needs a reason; re-arms the schedule. Pending "
+            "action until confirm_action."
         ),
         "input_schema": {
             "type": "object",
@@ -4102,7 +4103,7 @@ class DataPilotTools:
         if clarify or not sched:
             return ToolResult(name=tool, success=False, output=None,
                               error=clarify or "Which pipeline? Give a schedule name or id.")
-        from services.schedule_recovery import ACTIONS, ACTION_REBUILD
+        from services.schedule_recovery import ACTIONS
 
         action = str(action or "").strip().lower()
         if action not in ACTIONS:
@@ -4112,26 +4113,29 @@ class DataPilotTools:
             return ToolResult(name=tool, success=False, output=None,
                               error="A reason is required to recover a destination.")
         from .ack_ledger import get_ack_ledger
+        from services.schedule_recovery import recovery_plan
 
-        effect = (
-            "Reload the destination from the source with a full re-sync, then "
-            "continue the cadence from the new high-water mark."
-            if action == ACTION_REBUILD
-            else "Accept the destination as it is now (or its removal) as the "
-            "verified baseline; the next run appends from the cursor."
-        )
+        # The same disclosure REST dry_run and the drawer's confirm show: a
+        # rebuild with no key replaces the table, and says so.
+        plan = recovery_plan(sched, action)
+        destructive = bool(plan.get("destructive"))
         preview = {"schedule_id": sched.id, "name": sched.name, "action": action,
-                   "dest_table": sched.dest_table, "effect": effect}
+                   "dest_table": sched.dest_table, "effect": plan["effect"],
+                   "destructive": destructive}
         ack_id = get_ack_ledger().put(
             kind=tool,
             payload={"schedule_id": sched.id, "action": action,
-                     "reason": str(reason).strip()},
+                     "reason": str(reason).strip(),
+                     # Confirming this preview is the consent to the replace it names.
+                     "confirm_replace": destructive},
             preview=preview,
         )
         return ToolResult(name=tool, success=True, output={
             "action": tool, "schedule_id": sched.id, "name": sched.name,
-            "label": f"Recover destination of “{sched.name}” ({action})",
-            "risk": "mutate", "destructive": False, "requires_confirm": True,
+            "label": (f"Replace {sched.dest_table} and rebuild “{sched.name}”" if destructive
+                      else f"Recover destination of “{sched.name}” ({action})"),
+            "risk": "mutate",
+            "destructive": destructive, "requires_confirm": True,
             "ack_id": ack_id, "preview": preview,
         })
 

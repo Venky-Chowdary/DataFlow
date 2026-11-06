@@ -2295,16 +2295,32 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   return res.json();
 }
 
+/** What a destination recovery will do (POST /schedules/{id}/recover dry_run). */
+export interface DestinationRecoveryPlan {
+  action: "rebaseline" | "rebuild";
+  /** True when it replaces the table (a rebuild with no key to upsert on). */
+  destructive: boolean;
+  /** The disclosure, naming the table. */
+  effect: string;
+  destination_missing?: boolean;
+}
+
 /** QA C9: rebaseline or rebuild a schedule's destination after it changed, then re-arm it. */
 export async function recoverScheduleDestination(
   id: string,
   action: "rebaseline" | "rebuild",
   reason: string,
-): Promise<{ success: boolean; action: string; job_id: string }> {
+  options: { dryRun?: boolean; confirmReplace?: boolean } = {},
+): Promise<{ success: boolean; action: string; job_id: string; plan: DestinationRecoveryPlan }> {
   const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/recover`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, reason }),
+    body: JSON.stringify({
+      action,
+      reason,
+      dry_run: Boolean(options.dryRun),
+      confirm_replace: Boolean(options.confirmReplace),
+    }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not recover the destination"));
   return res.json();

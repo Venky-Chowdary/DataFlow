@@ -91,13 +91,19 @@ def _open_continuity_finding(sched: Any) -> dict[str, Any] | None:
     return None
 
 
-def _close_and_rearm(sched: Any, *, action: str, actor: str, reason: str) -> Any:
-    """Close an open continuity finding (if any) and make the next beat due now."""
-    from services.schedule_approvals import STATUS_APPROVED, _resolved
-    from services.schedule_store import update_schedule
+def _close_finding(sched: Any, *, action: str, actor: str, reason: str, due_now: bool) -> Any:
+    """Close an open continuity finding (if any) and re-arm the cadence.
 
+    ``due_now`` (rebaseline): the next beat runs at once. A rebuild already
+    started its run, so the cadence resumes at its next slot — a beat now
+    would only race the rebuild for the claim.
+    """
+    from services.schedule_approvals import STATUS_APPROVED, _resolved
+    from services.schedule_store import next_run_for, update_schedule
+
+    now = datetime.now(timezone.utc)
     patch: dict[str, Any] = {
-        "next_run_at": datetime.now(timezone.utc).isoformat(),
+        "next_run_at": now.isoformat() if due_now else next_run_for(sched, now),
         "retry_at": None,
         "retry_attempt": 0,
     }
@@ -111,19 +117,86 @@ def _close_and_rearm(sched: Any, *, action: str, actor: str, reason: str) -> Any
     return update_schedule(sched.id, patch)
 
 
-def _audit(sched: Any, *, action: str, actor: str, reason: str, details: dict[str, Any]) -> None:
+def _close_and_rearm(sched: Any, *, action: str, actor: str, reason: str) -> Any:
+    return _close_finding(sched, action=action, actor=actor, reason=reason, due_now=True)
+
+
+def _audit(
+    sched: Any,
+    *,
+    action: str,
+    actor: str,
+    reason: str,
+    details: dict[str, Any],
+    outcome: str = "succeeded",
+    status: int = 200,
+) -> None:
     from services.audit_coverage import record_security_event
     from services.logging_config import log_context
 
     with log_context(workspace_id=getattr(sched, "workspace_id", "") or ""):
         record_security_event(
             "schedule.destination.recovered",
-            outcome="succeeded",
+            outcome=outcome,
             actor=str(actor or "").strip() or "system",
             resource=f"schedule:{sched.id}",
-            status=200,
+            status=status,
             details={"action": action, "reason": reason, **details},
         )
+
+
+def recovery_plan(sched: Any, action: str) -> dict[str, Any]:
+    """What a recovery will do to the destination, in the operator's terms.
+
+    The same disclosure for REST (``dry_run``), MCP (the staged preview) and the
+    drawer's confirm dialog: whether it replaces the table, and what the next
+    run writes.
+    """
+    from services.sync_now import full_resync_plan
+
+    table = str(getattr(sched, "dest_table", "") or "the destination")
+    watermark = str(getattr(sched, "cursor_value", "") or "").strip()
+    after = f"after {sched.cursor_column} {watermark}" if watermark and sched.cursor_column else (
+        "after the stored cursor" if sched.cursor_column else "from the next read"
+    )
+    if action == ACTION_REBUILD:
+        plan = full_resync_plan({
+            "sync_mode": getattr(sched, "sync_mode", ""),
+            "primary_key": getattr(sched, "primary_key", ""),
+            "stream_contracts": list(getattr(sched, "stream_contracts", None) or []),
+        })
+        destructive = bool(plan.get("destructive"))
+        effect = (
+            f"Replaces {table}: every row it holds now is dropped and the table is "
+            "reloaded from the full source (no key to upsert on)."
+            if destructive
+            else f"Re-reads the full source and upserts every row into {table} on "
+            f"{getattr(sched, 'primary_key', '') or 'its key'}; rows only {table} "
+            "holds are kept."
+        )
+        return {"action": action, "destructive": destructive,
+                "sync_mode": plan.get("sync_mode"), "effect": effect + (
+                    " The cadence then continues incrementally.")}
+    missing = None
+    try:
+        from services.append_continuity import destination_missing, resolve_target
+
+        target = resolve_target(_destination_endpoint(sched))
+        missing = destination_missing(target) if target is not None else None
+    except Exception:  # noqa: BLE001 - the disclosure says what it knows
+        missing = None
+    if missing is True:
+        effect = (
+            f"Accepts that {table} was removed. The next run recreates {table} with "
+            f"rows {after} only — earlier history is not reloaded (choose rebuild for that)."
+        )
+    else:
+        effect = (
+            f"Accepts {table} as it is now as the verified baseline; nothing is "
+            f"written now, and the next run appends rows {after}."
+        )
+    return {"action": action, "destructive": False, "destination_missing": missing is True,
+            "effect": effect}
 
 
 def recover_schedule_destination(
@@ -132,12 +205,17 @@ def recover_schedule_destination(
     action: str,
     actor: str,
     reason: str,
+    dry_run: bool = False,
+    confirm_replace: bool = False,
 ) -> dict[str, Any]:
     """Rebaseline or rebuild a schedule's destination, then re-arm it.
 
-    Refuses (``ScheduleRecoveryRefused``) an unknown action, a blank reason, and
-    a schedule parked on some other finding — a destination recovery must not
-    clear a refusal it does not answer.
+    Refuses (``ScheduleRecoveryRefused``) an unknown action, a blank reason, a
+    schedule parked on some other finding — a destination recovery must not
+    clear a refusal it does not answer — and a rebuild that replaces the table
+    without ``confirm_replace``. ``dry_run`` returns the plan and does nothing.
+    A rebuild whose run cannot start (``ScheduleStartError`` / ``PermissionError``)
+    leaves the finding open, is audited as failed, and re-raises.
     """
     from services.append_continuity import RebaselineError, rebaseline
     from services.schedule_store import get_schedule, has_open_approval
@@ -148,8 +226,6 @@ def recover_schedule_destination(
         raise ScheduleRecoveryRefused(
             f"Unknown recovery action {action!r}. Use one of: {', '.join(ACTIONS)}."
         )
-    if not reason:
-        raise ScheduleRecoveryRefused("A reason is required to recover a destination.")
     sched = get_schedule(schedule_id)
     if sched is None:
         raise LookupError("Schedule not found")
@@ -159,8 +235,18 @@ def recover_schedule_destination(
             f"This schedule is parked on another finding ({req.get('code') or 'RUN_REFUSED'}), "
             "not a destination change. Resolve that finding instead."
         )
+    plan = recovery_plan(sched, action)
+    base = {"schedule_id": schedule_id, "action": action, "plan": plan}
+    if dry_run:
+        return {**base, "dry_run": True, "job_id": "", "schedule": sched}
+    if not reason:
+        raise ScheduleRecoveryRefused("A reason is required to recover a destination.")
+    if plan["destructive"] and not confirm_replace:
+        raise ScheduleRecoveryRefused(
+            f"{plan['effect']} Send confirm_replace: true to proceed (or choose rebaseline)."
+        )
     endpoint = _destination_endpoint(sched)
-    details: dict[str, Any] = {"dest_table": sched.dest_table}
+    details: dict[str, Any] = {"dest_table": sched.dest_table, "destructive": plan["destructive"]}
     job_id = ""
     if action == ACTION_REBASELINE:
         try:
@@ -171,25 +257,32 @@ def recover_schedule_destination(
             rebaseline_id=result.get("rebaseline_id"),
             destination_missing=bool(result.get("destination_missing")),
         )
+        updated = _close_finding(sched, action=action, actor=actor, reason=reason, due_now=True)
         _audit(sched, action=action, actor=actor, reason=reason, details=details)
-        updated = _close_and_rearm(sched, action=action, actor=actor, reason=reason)
     else:
-        _audit(sched, action=action, actor=actor, reason=reason, details=details)
-        updated = _close_and_rearm(sched, action=action, actor=actor, reason=reason)
-        from services.schedule_runner import _run_schedule
+        from services.schedule_runner import ScheduleStartError, _run_schedule
 
-        # A full re-sync: upsert on the key from the start (or replace without
-        # one). It re-baselines continuity, so the cadence appends after it.
-        job_id = str(
-            _run_schedule(schedule_id, manual=True, resync_mode="full",
-                          triggered_by=actor or f"recover:{action}") or ""
-        )
+        # The run starts first: if it cannot (already running, committed rows
+        # that cannot be replayed, a refused start, a principal that may not use
+        # the endpoints), the finding stays open and the failure is the record.
+        try:
+            job_id = str(
+                _run_schedule(schedule_id, manual=True, resync_mode="full",
+                              triggered_by=actor or f"recover:{action}") or ""
+            )
+        except (ScheduleStartError, PermissionError) as exc:
+            status = int(getattr(exc, "http_status", 403 if isinstance(exc, PermissionError) else 409))
+            _audit(sched, action=action, actor=actor, reason=reason,
+                   details={**details, "error": str(exc)[:300]}, outcome="failed", status=status)
+            raise
+        details["job_id"] = job_id
+        updated = _close_finding(sched, action=action, actor=actor, reason=reason, due_now=False)
+        _audit(sched, action=action, actor=actor, reason=reason, details=details)
     return {
-        "schedule_id": schedule_id,
-        "action": action,
+        **base,
         "job_id": job_id,
         "schedule": updated or get_schedule(schedule_id),
-        **{k: v for k, v in details.items() if k != "dest_table"},
+        **{k: v for k, v in details.items() if k not in ("dest_table", "job_id")},
     }
 
 

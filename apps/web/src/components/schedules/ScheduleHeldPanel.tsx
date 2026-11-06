@@ -61,7 +61,7 @@ export function ScheduleHeldPanel({ schedule: sched, manageRefusal = "", onRecov
             variant="secondary"
             loading={busy === "rebuild"}
             disabled={blocked}
-            title={manageRefusal || "Reload the destination from the source with a full re-sync, then continue the cadence"}
+            title={manageRefusal || "Reload the destination from the source with a full re-sync (with no key this replaces the table — you confirm first), then continue the cadence"}
             onClick={() => void recover("rebuild")}
           >
             Rebuild from source
