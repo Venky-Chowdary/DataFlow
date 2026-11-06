@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
@@ -1552,7 +1552,7 @@ def write_mapped_rows(
                 payload["dbName"] = db_name
             resp = session.post(
                 f"{base_url}/v2/vectordb/entities/upsert",
-                data=json_dumps_exact_numbers(payload),
+                data=json_dumps_exact_text(payload),
                 headers=hdrs,
                 timeout=60,
             )

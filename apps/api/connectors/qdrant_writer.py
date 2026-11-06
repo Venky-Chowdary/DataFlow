@@ -17,7 +17,7 @@ from typing import Any, Callable
 from services.value_serializer import (
     cell_to_string,
     json_default,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
@@ -1303,7 +1303,7 @@ def write_mapped_rows(
             batch = points[i : i + batch_size]
             resp = session.put(
                 f"{base_url}/collections/{collection}/points?wait=true",
-                data=json_dumps_exact_numbers({"points": batch}),
+                data=json_dumps_exact_text({"points": batch}),
                 headers=hdrs,
                 timeout=30,
             )
