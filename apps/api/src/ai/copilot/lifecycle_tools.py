@@ -77,11 +77,25 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a from-zero re-run of a failed or cancelled transfer as a new job. "
             "Pending action; the REST retry rules (duplicate protection) apply on Confirm. "
-            "A completed or completed-with-quarantine job uses rerun_job."
+            "A completed or completed-with-quarantine job uses rerun_job. Pass "
+            "risk_acceptance to quarantine the rows that failed to cast and load "
+            "the valid ones."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "selector": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "selector": {"type": "string"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Load the rows that cast and quarantine the ones that do "
+                        "not (the job failed on sample cast failures). "
+                        "{approved_by, reason, execution_policy: CAST_AND_CONTINUE, "
+                        "on_cast_failure: quarantine, columns?: [names that fail]}."
+                    ),
+                },
+            },
             "required": [],
         },
     },
@@ -724,8 +738,17 @@ def _job_tool(
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} is {status}; only a failed or cancelled job can be retried from zero. Use resume for a paused job.",
             )
-        return _stage(tool, payload={"job_id": jid}, preview=brief,
-                      label=f"Retry job {short} from the beginning", destructive=True)
+        if risk_acceptance is not None and not isinstance(risk_acceptance, dict):
+            return _tool_result(tool, success=False, output=None,
+                error="risk_acceptance must be an object {approved_by, reason, execution_policy, ...}.",
+            )
+        retry_payload: dict[str, Any] = {"job_id": jid}
+        retry_label = f"Retry job {short} from the beginning"
+        if risk_acceptance:
+            retry_payload["risk_acceptance"] = dict(risk_acceptance)
+            retry_label += " — quarantine rows that do not cast"
+        return _stage(tool, payload=retry_payload, preview=brief,
+                      label=retry_label, destructive=True)
     if tool == "rerun_job":
         if status not in {"completed", "completed_with_quarantine", "cancelled", "success", "succeeded"}:
             return _tool_result(tool, success=False, output=None,
