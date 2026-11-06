@@ -44,6 +44,7 @@ from services.db_type_utils import (
 )
 from services.append_delta_probe import probe_append_key_collisions_over_delta
 from services.destination_key_collision_probe import probe_append_key_collisions
+from services.source_schema_authority import append_identity_source_key
 from services.preflight_file_plan import (
     _fit_scan_deadline,
     _lift_in_file_collapse_advisories,
@@ -350,6 +351,7 @@ def run_file_preflight(
     destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_indexes_meta: dict[str, Any] | None = None,
+    source_key_groups: list[list[str]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
     destination_check_constraints: list[Any] | None = None,
     destination_config: Mapping[str, Any] | None = None,
@@ -1467,6 +1469,12 @@ def run_file_preflight(
         source_table=source_table,
         resume=resume,
         resume_write_complete=resume_write_complete,
+        source_key_columns=append_identity_source_key(
+            sync_mode=sync_mode, stream_contracts=stream_contracts,
+            contract_primary_key=contract_primary_key, source_key_groups=source_key_groups,
+            source_connector_id=source_connector_id, source_table=source_table,
+            source_config=source_config,
+        ),
         incremental_cursor_column=read_scope.cursor_column,
         incremental_watermark=read_scope.watermark,
         incremental_tiebreak_column=read_scope.primary_key,

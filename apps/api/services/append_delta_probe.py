@@ -80,6 +80,8 @@ def probe_append_key_collisions_over_delta(
                 stream_contracts=probe_kw.get("stream_contracts"),
                 source_table=str(probe_kw.get("source_table") or ""),
                 destination_table=str(probe_kw.get("destination_table") or ""),
+                source_key_columns=probe_kw.get("source_key_columns"),
+                declared_only=True,
             )
             rows = _delta_key_rows(
                 pairs=pairs,

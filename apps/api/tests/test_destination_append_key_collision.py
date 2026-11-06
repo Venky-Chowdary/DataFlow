@@ -37,6 +37,7 @@ def _run(
     destination_pk_columns: list[str],
     destination_table_exists: bool = True,
     resume: bool = False,
+    contract_primary_key: str = "",
 ) -> dict[str, Any]:
     from services.preflight_service import run_file_preflight
 
@@ -65,6 +66,7 @@ def _run(
         destination_column_types={"id": "TEXT", "name": "TEXT"},
         validation_mode="strict",
         resume=resume,
+        contract_primary_key=contract_primary_key,
     )
     return result
 
@@ -101,7 +103,12 @@ def test_append_passes_when_batch_keys_are_new(tmp_path: Path) -> None:
 
 
 def test_append_warns_when_a_heap_already_holds_the_key(tmp_path: Path) -> None:
-    """A table with no key stores the second copy. That is append."""
+    """A table that does not enforce the declared key stores the second copy. That is append.
+
+    The identity is declared (contract key): the probe never keys on a column
+    merely *named* ``id`` (Rfam ``clan``, tests/test_r14_append_collision_probe_
+    uses_catalog_key_live.py).
+    """
     db_path = tmp_path / "heap.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
@@ -113,6 +120,7 @@ def test_append_warns_when_a_heap_already_holds_the_key(tmp_path: Path) -> None:
         sample_rows=[{"id": "a", "name": "A2"}],
         sync_mode="append",
         destination_pk_columns=[],
+        contract_primary_key="id",
     )
     g6 = _gate(result, "g6_target_ddl")
     assert g6["status"] == "warn", g6

@@ -161,6 +161,9 @@ def _execute_preflight_parity_kwargs(
         "destination_pk_columns": pk_cols,
         "destination_unique_keys": unique_keys,
         "destination_indexes_meta": indexes_meta or None,
+        # The source catalog key an append's collision probe keys on: the
+        # same catalog read the keyed modes' policy pass uses.
+        "source_key_groups": _append_source_key_groups(request),
         "destination_foreign_keys": foreign_keys,
         # D112 — the live CHECK constraints, so Execute names offending rows
         # before the write instead of surfacing the driver's raw violation.
@@ -197,6 +200,23 @@ def _execute_preflight_parity_kwargs(
         ).strip(),
         "preflight_scope": str(getattr(request, "preflight_scope", "") or "").strip(),
     }
+
+
+def _append_source_key_groups(request: TransferRequest) -> list[list[str]] | None:
+    """Source PK / unique key groups for an append with no declared key, else ``None``."""
+    from services.source_schema_authority import append_declares_no_key, endpoint_key_groups
+
+    source = getattr(request, "source", None)
+    if getattr(source, "kind", "") != "database" or not (
+        getattr(source, "table", "") or getattr(source, "collection", "")
+    ):
+        return None
+    if not append_declares_no_key(
+        str(getattr(request, "sync_mode", "") or ""),
+        list(getattr(request, "stream_contracts", None) or []),
+    ):
+        return None
+    return endpoint_key_groups(source)
 
 
 def _catalog_pk_for_policy(

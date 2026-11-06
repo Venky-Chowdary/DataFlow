@@ -426,6 +426,7 @@ def probe_append_key_collisions(
     incremental_cursor_column: str = "",
     incremental_watermark: str | None = None,
     incremental_tiebreak_column: str = "",
+    source_key_columns: list[str] | None = None,
 ) -> DestinationCollisionResult | None:
     """Resolve the identity key, then probe it — ``None`` when not applicable.
 
@@ -457,6 +458,8 @@ def probe_append_key_collisions(
         stream_contracts=stream_contracts,
         source_table=source_table,
         destination_table=destination_table,
+        source_key_columns=source_key_columns,
+        declared_only=True,
     )
     if not pairs:
         return None
@@ -542,6 +545,33 @@ def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]
     return pairs
 
 
+def _declared_identity_names(
+    contract_primary_key: str | None,
+    stream_contracts: list[dict[str, Any]] | None,
+    stream_name: str,
+    destination_pk_columns: list[str] | None,
+    source_key_columns: list[str] | None,
+) -> list[str]:
+    """The first declared identity: contract key, destination PK, source catalog key."""
+    from services.primary_key import extract_contract_primary_key_columns
+
+    contract = extract_contract_primary_key_columns(
+        stream_contracts, stream_name=stream_name, fallback_first=not stream_name.strip()
+    )
+    selected = [c for c in stream_contracts or [] if isinstance(c, dict) and c.get("selected", True)]
+    if not contract and len(selected) == 1:
+        # One selected stream is this write's, whatever it is named (engine_preflight).
+        contract = extract_contract_primary_key_columns(selected)
+    contract = contract or [
+        p.strip() for p in str(contract_primary_key or "").split(",") if p.strip()
+    ]
+    for names in (contract, destination_pk_columns, source_key_columns):
+        cleaned = [str(n).strip() for n in names or [] if str(n or "").strip()]
+        if cleaned:
+            return cleaned
+    return []
+
+
 def _identity_pairs(
     *,
     mappings: list[dict[str, Any]] | None,
@@ -553,15 +583,39 @@ def _identity_pairs(
     stream_contracts: list[dict[str, Any]] | None,
     source_table: str,
     destination_table: str,
+    source_key_columns: list[str] | None = None,
+    declared_only: bool = False,
 ) -> list[tuple[str, str]]:
     """Source/target columns that identify a row, else every mapped column.
 
     The identity resolver is the same one uniqueness already uses. When it
     names nothing, the mapped row itself is the identity: appending that row
     again is the same data.
+
+    ``declared_only`` (the append probe) takes a declared identity only — the
+    contract key, else the destination's primary key, else the source catalog
+    key (``source_key_columns``), else the mapped row — and never the
+    resolver's name guess: on Rfam ``clan`` the guessed ``id`` is a label, and a
+    new clan repeating it was refused as "already stored on id".
     """
     mapped = _mapped_pairs(mappings)
     target_by_source = {source: target for source, target in mapped}
+    if declared_only:
+        names = _declared_identity_names(
+            contract_primary_key, stream_contracts,
+            str(destination_table or source_table or ""),
+            destination_pk_columns, source_key_columns,
+        )
+        if names:
+            from services.primary_key import _map_identity_names_to_source
+
+            return [
+                (source, target_by_source.get(source, source))
+                for source in _map_identity_names_to_source(
+                    names, mappings=list(mappings or []), source_columns=list(source_columns or [])
+                )
+            ]
+        return mapped
     try:
         from services.primary_key import resolve_primary_key_source_columns
 
