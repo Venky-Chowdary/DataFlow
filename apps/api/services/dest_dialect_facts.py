@@ -209,6 +209,20 @@ def dest_has_no_uuid_type(db_type: str | None) -> bool:
     return _normalize_dest_db(db_type) in _UUID_TYPELESS_ENGINES
 
 
+# MySQL/MariaDB name every collation ``<charset>_<rule>``; the charset prefix is
+# MySQL's vocabulary, not a PostgreSQL ICU/libc locale. ``latin1_swedish_ci``
+# ends in neither ``_unicode_ci`` nor ``_general_ci`` and passed the PG name
+# test, so a latin1 MySQL table created ``VARCHAR(255) COLLATE
+# "latin1_swedish_ci"`` on PostgreSQL (QA MySQL D1/D12).
+_MYSQL_CHARSET_COLLATION_RE = re.compile(
+    r"^(?:armscii8|ascii|big5|binary|cp1250|cp1251|cp1256|cp1257|cp850|cp852|"
+    r"cp866|cp932|dec8|eucjpms|euckr|gb18030|gb2312|gbk|geostd8|greek|hebrew|hp8|"
+    r"keybcs2|koi8r|koi8u|latin1|latin2|latin5|latin7|macce|macroman|sjis|swe7|"
+    r"tis620|ucs2|ujis|utf16|utf16le|utf32|utf8|utf8mb3|utf8mb4)_[a-z0-9_]+$",
+    re.I,
+)
+
+
 def _collation_compatible_with_dest(db: str, collation: str) -> bool:
     """Refuse cross-engine invent (MySQL utf8mb4_* on PG, etc.)."""
     coll = (collation or "").strip()
@@ -267,7 +281,7 @@ def _collation_compatible_with_dest(db: str, collation: str) -> bool:
         if coll.lower() in {"default", "c", "posix"}:
             return False
         # ICU / libc names only — never invent MySQL/SS collations on PG.
-        if mysqlish or windowish:
+        if mysqlish or windowish or _MYSQL_CHARSET_COLLATION_RE.match(coll):
             return False
         return bool(re.match(r"^[A-Za-z0-9_.\-]+$", coll))
     return False

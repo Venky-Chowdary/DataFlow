@@ -1924,18 +1924,24 @@ def _check_mapping_confidence(
 def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
     """U+XXXX codes of ``(control, format)`` characters in ``text``.
 
-    Controls (Cc, minus tab/newline/CR — NUL, BEL, ESC …) are rejected or
-    corrupted by destinations. Format characters (Cf — U+200B, ZWJ/ZWNJ,
-    soft hyphen, BOM, bidi marks) are valid Unicode every UTF-8 destination
-    stores verbatim; they only make visually equal text compare unequal.
+    C0 controls (Cc below U+0080, minus tab/newline/CR — NUL, BEL, ESC …)
+    are rejected or corrupted by destinations. Format characters (Cf — U+200B,
+    ZWJ/ZWNJ, soft hyphen, BOM, bidi marks) are valid Unicode every UTF-8
+    destination stores verbatim; they only make visually equal text compare
+    unequal. C1 controls (U+0080–U+009F) are the second kind: they are what a
+    single-byte page legitimately decodes to — MySQL ``latin1`` stores bytes
+    0x81/0x8D/0x8F/0x90/0x9D and returns U+0081/U+008D/U+008F/U+0090/U+009D —
+    and every Unicode destination keeps them byte-for-byte, so blocking them
+    refused an exact copy of the source's own data (QA MySQL D1). Whether a
+    destination page can hold one is the encoding-capacity gate's question.
     """
     controls: list[str] = []
     formats: list[str] = []
     for ch in text:
         cat = unicodedata.category(ch)
-        if cat == "Cc" and ch not in "\t\n\r":
+        if cat == "Cc" and ch not in "\t\n\r" and ord(ch) < 0x80:
             bucket = controls
-        elif cat == "Cf":
+        elif cat in {"Cf", "Cc"} and ch not in "\t\n\r":
             bucket = formats
         else:
             continue
