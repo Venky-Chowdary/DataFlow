@@ -29,6 +29,13 @@ class _Store:
             self.messages.append(str(kwargs.get("message") or ""))
         return True
 
+    def update_job_fields(self, job_id: str, fields: dict, *, touch_updated_at: bool = True) -> bool:
+        # Pulses with no row hashed are heartbeat stamps (updated_at untouched).
+        assert touch_updated_at is False
+        with self.lock:
+            self.messages.append(str(fields.get("message") or ""))
+        return True
+
 
 def test_the_wait_sentence_follows_the_configured_bound_and_stops_promising_past_it(monkeypatch):
     monkeypatch.setenv("DATAFLOW_DEST_LOCK_WAIT_SECONDS", "1")

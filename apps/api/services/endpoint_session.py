@@ -196,6 +196,11 @@ def _releaser(scope: _Scope, pool: _Pool, conn: Any, close: Callable[[Any], None
         if done.is_set():
             return
         done.set()
+        # The session now belongs to the scope, not to the thread that used
+        # it: an abandoned probe must not shut it under its next borrower.
+        from src.ai.copilot.tool_deadline import unregister_connection
+
+        unregister_connection(conn)
         with scope.lock:
             if not scope.closed:
                 pool.idle.append(conn)

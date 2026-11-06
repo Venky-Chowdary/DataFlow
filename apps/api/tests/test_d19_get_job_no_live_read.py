@@ -70,6 +70,11 @@ def test_progress_heartbeat_during_slow_source():
         def update_job_status(self, job_id, status, **kw):
             self.events.append((job_id, status, kw))
 
+        def update_job_fields(self, job_id, fields, *, touch_updated_at=True):
+            # Pulses stamp heartbeat_at without moving updated_at.
+            assert touch_updated_at is False
+            self.events.append((job_id, "running", fields))
+
     mongo = _Mongo()
     with job_phase_heartbeat(
         mongo,

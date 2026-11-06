@@ -24,6 +24,12 @@ class _FakeMongo:
         self.calls.append({"job_id": job_id, "status": status, **kwargs})
         return True
 
+    def update_job_fields(self, job_id: str, fields: dict, *, touch_updated_at: bool = True):
+        # A pulse with no new rows hashed is a heartbeat stamp, not progress:
+        # it carries the same phase and numbers and leaves updated_at alone.
+        self.calls.append({"job_id": job_id, "status": "running", **fields})
+        return True
+
 
 def test_reconcile_heartbeat_sets_phase_and_pulses_message():
     mongo = _FakeMongo()

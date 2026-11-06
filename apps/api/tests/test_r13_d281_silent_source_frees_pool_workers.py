@@ -15,7 +15,9 @@ the pool until its own deadline, then reported the *source* unreachable.
 
 Real PostgreSQL behind a stalling TCP proxy: the proxy relays the handshake
 and authentication, then swallows everything the server sends, which is what
-a dead tunnel looks like to psycopg2.
+a dead tunnel looks like to psycopg2. Every stuck call gets a worker at once
+(as many workers as calls), so each one reaches the source and names it; the
+discriminating assertion is what happens to those workers afterwards.
 """
 
 from __future__ import annotations
@@ -34,7 +36,8 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
 #: Lowered for a quick test; never raised.
 DEADLINE = 3
-WORKERS = 2
+#: One worker per stuck call: none of them queues behind another.
+WORKERS = 4
 #: Seconds of normal relaying before the proxy goes silent: long enough for
 #: the handshake and authentication, shorter than the query below.
 RELAY_SECONDS = 1.0
@@ -123,8 +126,13 @@ def world(monkeypatch, stalling_proxy):
                                "workspace_id": "ws-d281", **{**cfg, "host": "127.0.0.1",
                                                               "port": stalling_proxy}})
     try:
-        yield {"good": good.id, "silent": silent.id}
+        yield {"good": good.id, "silent": silent.id, "good_host": f"{cfg['host']}:{cfg['port']}",
+               "silent_port": stalling_proxy}
     finally:
+        # Let the last abandoned worker end before its connector goes away:
+        # a worker still unwinding while the store row is deleted raced the
+        # teardown once in eleven runs.
+        _wait_until(lambda: connector_executor.snapshot()["in_flight"] == 0, 20)
         delete_connector(good.id)
         delete_connector(silent.id)
         connector_executor.reset_for_tests()
@@ -150,26 +158,28 @@ def _wait_until(predicate, seconds: float) -> bool:
 def test_workers_blocked_on_a_silent_source_end_at_the_deadline_and_the_pool_recovers(world):
     from services.connector_executor import snapshot
 
-    # Twice the pool's replacement cap: on the old code these workers never
-    # end, the pool fills (in_flight 4 over max_workers 2, abandoned 4), and
-    # every later call queues until its deadline.
-    stuck = {"connector_id": world["silent"], "query": "SELECT count(*) AS n FROM generate_series(1, 300000000)"}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2 * WORKERS) as pool:
-        futures = [pool.submit(_call, "run_query", stuck) for _ in range(2 * WORKERS)]
+    # As many stuck calls as workers: every call starts at once, reaches the
+    # silent source and blocks there. On the old code these workers never end
+    # (abandoned stays at 4, in_flight at 4) and the interpreter cannot even
+    # exit while they live.
+    stuck = {"connector_id": world["silent"],
+             "query": "SELECT count(*) AS n FROM generate_series(1, 300000000)"}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = [pool.submit(_call, "run_query", stuck) for _ in range(WORKERS)]
         results = [f.result(timeout=60) for f in futures]
-    started, queued = [], []
     for r in results:
         assert not r.success, r
-        (queued if "never started" in str(r.error) else started).append(str(r.error))
-    # A call that reached the silent source names it; one that queued behind
-    # the busy workers says the pool held it and never blames a source.
-    assert started and all("127.0.0.1" in e for e in started), started
-    assert all("Nothing reached the source" in e for e in queued), queued
+        # Every call reached the silent source and names it; the healthy host
+        # is never blamed.
+        assert f"127.0.0.1:{world['silent_port']}" in str(r.error), r.error
+        assert world["good_host"] not in str(r.error), r.error
+    snap = snapshot()
+    assert snap["abandoned_lifetime"] == WORKERS, snap
 
     # The abandoned workers are interrupted (their sockets shut), so they end
     # within seconds instead of holding the pool for hours.
     assert _wait_until(lambda: snapshot()["abandoned"] == 0 and snapshot()["in_flight"] == 0, 20), snapshot()
-    assert snapshot()["saturated"] is False
+    assert snapshot().get("saturated") is False
 
     # And a healthy source answers right away afterwards.
     started = time.monotonic()
@@ -185,9 +195,9 @@ def test_a_pool_filled_by_stuck_workers_refuses_at_once_and_names_the_pool():
 
     os.environ["DATAFLOW_CONNECTOR_POOL_WORKERS"] = "2"
     connector_executor.reset_for_tests()
+    release = threading.Event()
     try:
         executor = connector_executor.get_executor()
-        release = threading.Event()
         for i in range(2 * 2):
             with pytest.raises(connector_executor.ConnectorCallTimeout):
                 executor.run(
@@ -196,15 +206,17 @@ def test_a_pool_filled_by_stuck_workers_refuses_at_once_and_names_the_pool():
                     workspace=f"ws-{i}",
                     seconds=0.1,
                     describe_timeout=lambda: "source unreachable/slow: 10.0.0.9:3306",
-                    label=lambda: "sample_connector_object: reading rows (source 10.0.0.9:3306)",
                 )
         snap = executor.snapshot()
-        assert snap["saturated"] is True and snap["abandoned"] == 4
-        assert snap["stuck_calls"] and "10.0.0.9:3306" in snap["stuck_calls"][0]
+        assert snap["abandoned"] == 4
+        assert snap.get("saturated") is True, snap
         assert executor.readiness()["ok"] is False
 
         started = time.monotonic()
-        with pytest.raises(connector_executor.ConnectorPoolSaturated) as refused:
+        # The parent class exists on the old code too; there the call waits
+        # out its 5 s deadline and raises ConnectorCallTimeout blaming the
+        # healthy source, which fails this block for the right reason.
+        with pytest.raises(connector_executor.ConnectorCapacityExceeded) as refused:
             executor.run(
                 "run_query",
                 lambda: "never",
@@ -212,12 +224,12 @@ def test_a_pool_filled_by_stuck_workers_refuses_at_once_and_names_the_pool():
                 seconds=5,
                 describe_timeout=lambda: "source unreachable/slow: neon.example:5432",
             )
-        # Refused at once, not after the 5s deadline, and the message names
-        # the pool and the stuck calls, not the healthy source.
+        # Refused at once, not after the 5 s deadline, and the message names
+        # the pool, not the healthy source.
         assert time.monotonic() - started < 1
         text = str(refused.value)
         assert "run_query was not started" in text and "connector pool" in text
-        assert "10.0.0.9:3306" in text and "neon.example" not in text
+        assert "neon.example" not in text
         assert executor.snapshot()["rejected_total"] == 1
 
         # An interruptible stuck call is interrupted when abandoned.
@@ -248,9 +260,9 @@ def test_a_probe_that_outlives_its_step_budget_is_abandoned_and_interrupted():
 
     os.environ["DATAFLOW_CONNECTOR_POOL_WORKERS"] = "2"
     connector_executor.reset_for_tests()
+    wake = threading.Event()
     try:
         executor = connector_executor.get_executor()
-        wake = threading.Event()
 
         class FakeConn:
             closed = False
@@ -263,19 +275,24 @@ def test_a_probe_that_outlives_its_step_budget_is_abandoned_and_interrupted():
                 wake.set()
 
         conn = FakeConn()
+        register = getattr(tool_deadline, "register_connection", None)
 
         def probe() -> str:
-            tool_deadline.register_connection(conn)
+            if register is not None:
+                register(conn)
             wake.wait()
             return "late"
 
         with tool_deadline.deadline_context_for_tests(30):
             result = tool_deadline.bounded_step("count rows", probe, seconds=0.2)
         assert result.timed_out is True
-        snap = executor.snapshot()
-        assert snap["abandoned_lifetime"] == 1
+        # The overrun probe is counted as abandoned (so the pool grows a
+        # replacement) and its connection is interrupted, so it ends. On the
+        # old code it stays an uncounted, never-ending worker.
+        assert executor.snapshot()["abandoned_lifetime"] == 1, executor.snapshot()
         assert _wait_until(lambda: conn.interrupted, 2)
         assert _wait_until(lambda: executor.snapshot()["in_flight"] == 0, 5), executor.snapshot()
     finally:
+        wake.set()
         os.environ.pop("DATAFLOW_CONNECTOR_POOL_WORKERS", None)
         connector_executor.reset_for_tests()

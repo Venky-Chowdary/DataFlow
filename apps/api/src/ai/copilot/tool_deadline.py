@@ -24,6 +24,7 @@ import os
 import socket
 import threading
 import time
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -343,52 +344,125 @@ def _clear_step() -> None:
         progress.slots.pop(threading.get_ident(), None)
 
 
+#: Which call currently owns a registered connection, by ``id(conn)``. A
+#: connection has one owner: registering it for a new call (a pooled session
+#: checked out again) takes it away from the previous one, so an abandoned
+#: call can never shut a session another call is using.
+_owners: "weakref.WeakValueDictionary[int, _Progress]" = weakref.WeakValueDictionary()
+_owners_lock = threading.Lock()
+
+
+def _socket_identity(conn: Any) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the connection's socket, or ``None``."""
+    fileno = getattr(conn, "fileno", None)
+    if not callable(fileno) or getattr(conn, "closed", False):
+        return None
+    try:
+        st = os.fstat(int(fileno()))
+    except (OSError, ValueError, TypeError):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+class _Registered:
+    """A registered connection and the identity of its socket at that time."""
+
+    __slots__ = ("conn", "identity")
+
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+        # psycopg2 exposes only a descriptor number; the kernel identity of
+        # the socket behind it is what proves, at interrupt time, that the
+        # number was not reused by another socket in between.
+        self.identity = _socket_identity(conn)
+
+
+def _drop_from(progress: _Progress, key: int) -> None:
+    with progress.lock:
+        for thread_conns in progress.connections.values():
+            thread_conns.pop(key, None)
+
+
 def register_connection(conn: Any) -> None:
-    """Remember a driver connection this thread opened for the current tool call.
+    """Remember a driver connection this thread uses for the current tool call.
 
     A call abandoned at its deadline is interrupted through these: a worker
     blocked on a connected socket that never answers (a tunnel that accepted
     and went silent) has no server-side timeout that can reach it, and such
     workers filled the connector pool for hours (D281). A no-op outside a tool
     call, so transfer jobs' sessions are never touched.
+
+    Registration moves ownership: the connection leaves every other thread's
+    and every other call's bucket, so a probe that borrowed a session and
+    handed it back cannot shut it under the thread now using it.
     """
     progress = _progress.get()
     if progress is None or conn is None:
         return
+    key = id(conn)
     thread = threading.get_ident()
+    with _owners_lock:
+        previous = _owners.get(key)
+        _owners[key] = progress
+    if previous is not None and previous is not progress:
+        _drop_from(previous, key)
     with progress.lock:
         late = progress.interrupted or thread in progress.interrupted_threads
         if not late:
-            progress.connections.setdefault(thread, {})[id(conn)] = conn
+            for other, thread_conns in progress.connections.items():
+                if other != thread:
+                    thread_conns.pop(key, None)
+            progress.connections.setdefault(thread, {})[key] = _Registered(conn)
     if late:
         try:
-            _interrupt_connection(conn)
+            _interrupt_connection(_Registered(conn))
         except Exception as exc:  # noqa: BLE001 - best effort
             logger.debug("late connection interrupt skipped: %s", exc)
 
 
 def unregister_connection(conn: Any) -> None:
-    """Forget a connection handed back to a pool (another consumer owns it now)."""
-    progress = _progress.get()
-    if progress is None or conn is None:
+    """Forget a connection that is closed, invalidated or handed to another consumer.
+
+    Works from any thread and outside a tool call: the owner is looked up, not
+    the caller's context, so a session released back to an endpoint scope by
+    a probe thread leaves the probe's bucket at once.
+    """
+    if conn is None:
         return
-    with progress.lock:
-        for thread_conns in progress.connections.values():
-            thread_conns.pop(id(conn), None)
+    key = id(conn)
+    with _owners_lock:
+        owner = _owners.pop(key, None)
+    if owner is not None:
+        _drop_from(owner, key)
 
 
-def _shutdown_descriptor(fd: int) -> None:
-    # ``shutdown`` acts on the kernel socket, so a duplicate descriptor ends
-    # the recv the worker thread is blocked in without owning its object.
-    dup = socket.socket(fileno=os.dup(fd))
+def _shutdown_descriptor(fd: int, identity: tuple[int, int] | None) -> bool:
+    """Shut the socket behind ``fd`` if it is still the registered one.
+
+    ``shutdown`` acts on the kernel socket, so a duplicate descriptor ends the
+    recv the worker thread is blocked in without owning its object. The worker
+    may close the connection between our ``fileno()`` and the ``dup``, and the
+    number can then belong to a new socket: the duplicate is checked against
+    the identity recorded at registration before anything is shut.
+    """
     try:
+        dup = socket.socket(fileno=os.dup(fd))
+    except OSError:
+        return False
+    try:
+        st = os.fstat(dup.fileno())
+        if identity is not None and (st.st_dev, st.st_ino) != identity:
+            return False
         dup.shutdown(socket.SHUT_RDWR)
+        return True
     finally:
         dup.close()
 
 
-def _interrupt_connection(conn: Any) -> bool:
-    """End the blocking I/O of one driver connection from another thread."""
+def _interrupt_connection(entry: Any) -> bool:
+    """End the blocking I/O of one registered driver connection from another thread."""
+    conn = entry.conn if isinstance(entry, _Registered) else entry
+    identity = entry.identity if isinstance(entry, _Registered) else None
     # pymysql keeps the socket object; a closed connection has none.
     sock = getattr(conn, "_sock", None)
     if sock is not None and hasattr(sock, "shutdown"):
@@ -397,8 +471,7 @@ def _interrupt_connection(conn: Any) -> bool:
     # psycopg2 (and anything else with a live descriptor): closed ones raise.
     fileno = getattr(conn, "fileno", None)
     if callable(fileno) and not getattr(conn, "closed", False):
-        _shutdown_descriptor(int(fileno()))
-        return True
+        return _shutdown_descriptor(int(fileno()), identity)
     # python-oracledb: break the call in flight on the connection.
     cancel = getattr(conn, "cancel", None)
     if callable(cancel):
@@ -417,15 +490,21 @@ def interrupt_connections(progress: _Progress, thread: int | None = None) -> int
     with progress.lock:
         if thread is None:
             progress.interrupted = True
-            conns = [c for bucket in progress.connections.values() for c in bucket.values()]
+            entries = [e for bucket in progress.connections.values() for e in bucket.values()]
             progress.connections.clear()
         else:
             progress.interrupted_threads.add(thread)
-            conns = list(progress.connections.pop(thread, {}).values())
+            entries = list(progress.connections.pop(thread, {}).values())
     done = 0
-    for conn in conns:
+    for entry in entries:
+        with _owners_lock:
+            # Only the current owner may shut it: a pooled session checked out
+            # again by another call since then belongs to that call.
+            if _owners.get(id(entry.conn)) is not progress:
+                continue
+            _owners.pop(id(entry.conn), None)
         try:
-            if _interrupt_connection(conn):
+            if _interrupt_connection(entry):
                 done += 1
         except Exception as exc:  # noqa: BLE001 - best effort, per connection
             logger.debug("connection interrupt skipped: %s", exc)

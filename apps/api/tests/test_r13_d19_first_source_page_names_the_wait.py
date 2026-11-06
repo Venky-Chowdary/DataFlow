@@ -50,12 +50,18 @@ class _Store:
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         with self.lock:
             self.writes.append((time.monotonic(), str(kwargs.get("message") or "")))
+            self.status_writes = getattr(self, "status_writes", 0) + 1
         return self._inner.update_job_status(job_id, status, **kwargs)
 
-    def update_job_fields(self, job_id: str, fields: dict, **_kw) -> bool:
+    def update_job_fields(self, job_id: str, fields: dict, *, touch_updated_at: bool = True) -> bool:
         job = self._inner.get_job(job_id)
         if job is None:
             return False
+        with self.lock:
+            if "heartbeat_at" in fields:
+                self.heartbeats = getattr(self, "heartbeats", []) + [
+                    (time.monotonic(), str(fields.get("message") or ""), touch_updated_at)
+                ]
         job.update(fields)
         return True
 
@@ -126,10 +132,18 @@ def test_the_job_names_the_source_wait_and_pulses_until_the_first_page(world):
     assert waiting, [m for _, m in msgs]
     # The wait names the source, not the destination.
     assert "sqlite" in waiting[0][1] and "Connecting to destination" not in waiting[0][1]
-    # The job row kept moving during the wait: at least two writes within it.
+    # The worker proved it was alive during the wait through heartbeat_at,
+    # and never through updated_at: a pulse must not hide a dead worker from
+    # job_stall_seconds (review item 1).
     started = waiting[0][0]
-    during = [t for t, _m in msgs if started <= t <= started + FIRST_PAGE_SECONDS]
-    assert len(during) >= 3, [m for _, m in msgs]
+    beats = [b for b in getattr(store, "heartbeats", []) if started <= b[0] <= started + FIRST_PAGE_SECONDS]
+    assert len(beats) >= 2, getattr(store, "heartbeats", [])
+    assert all(touch is False for _t, _m, touch in beats), beats
+    assert all("has not stalled" in m for _t, m, _touch in beats), beats
+    # No status write (which moves updated_at) landed between the wait's own
+    # message and the first batch.
+    between = [t for t, m in msgs if started < t <= started + FIRST_PAGE_SECONDS and m != waiting[0][1]]
+    assert not between, [m for t, m in msgs if started < t <= started + FIRST_PAGE_SECONDS]
     # And the first batch came after the wait, not before.
     first_batch = next((t for t, m in msgs if m.startswith("Writing batch")), None)
     assert first_batch is None or first_batch >= started

@@ -157,6 +157,9 @@ def _open_guarded(psycopg2: Any, kwargs: dict[str, Any]) -> Any:
 
 
 def _really_close(conn: Any) -> None:
+    from src.ai.copilot.tool_deadline import unregister_connection
+
+    unregister_connection(conn)
     conn._df_release = None
     conn.close()
 

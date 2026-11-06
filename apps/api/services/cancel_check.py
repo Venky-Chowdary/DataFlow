@@ -209,8 +209,21 @@ class ProgressMeter:
 BLOCKING_STEP_PULSE_SECONDS = 15.0
 
 
+def _blocking_step_bound_seconds() -> float:
+    """How long a wait may claim "has not stalled": the existing readiness
+    bound for the oldest in-flight connector call (default 300 s)."""
+    from services.connector_executor import (
+        DEFAULT_READY_MAX_AGE_SECONDS,
+        _float_setting,
+    )
+
+    return _float_setting(
+        "DATAFLOW_CONNECTOR_READY_MAX_AGE_SECONDS", DEFAULT_READY_MAX_AGE_SECONDS
+    )
+
+
 @contextlib.contextmanager
-def blocking_step(message: str, *, phase: str = "writing") -> Iterator[None]:
+def blocking_step(message: str, *, phase: str = "reading") -> Iterator[None]:
     """Say what the run is waiting on, and keep the job's heartbeat moving.
 
     Between the engine's last phase message and the first committed batch the
@@ -219,10 +232,12 @@ def blocking_step(message: str, *, phase: str = "writing") -> Iterator[None]:
     "Connecting to destination and creating table..." with ``updated_at``
     frozen while the wait was the *source* (D19). Inside this scope the message
     names the real wait at once and the existing phase pulse
-    (``job_phase_heartbeat``) stamps elapsed time until rows start arriving;
-    from then on the per-batch meter is the heartbeat. A no-op outside a run,
-    for a cancelled job (the status fence refuses it) and for a superseded
-    attempt.
+    (``job_phase_heartbeat``) stamps ``heartbeat_at`` until rows start
+    arriving; from then on the per-batch meter is the heartbeat. The pulse
+    never moves ``updated_at`` (the operator's stall signal) and past the
+    readiness bound it says the source has not answered. A no-op outside a
+    run, for a cancelled job (the status fence refuses it) and for a
+    superseded attempt; it also stops as soon as the attempt is superseded.
     """
     meter = _meter.get()
     if meter is None:
@@ -249,7 +264,8 @@ def blocking_step(message: str, *, phase: str = "writing") -> Iterator[None]:
         phase=phase,
         message=message,
         interval_s=BLOCKING_STEP_PULSE_SECONDS,
-        until=lambda: meter.mark() > rows_at_entry,
+        until=lambda: meter.mark() > rows_at_entry or attempt_superseded(mongo, job_id),
+        bound_seconds=_blocking_step_bound_seconds(),
     ):
         yield
 

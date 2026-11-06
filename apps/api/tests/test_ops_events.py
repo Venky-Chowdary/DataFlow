@@ -286,6 +286,10 @@ def test_reconcile_heartbeat_thread_keeps_job_context():
                 "reconcile-heartbeat")))
             return True
 
+        def update_job_fields(self, job_id, fields, *, touch_updated_at=True):
+            # A pulse with nothing hashed is a heartbeat stamp on the same thread.
+            return self.update_job_status(job_id, "running", **fields)
+
     with job_log_context("job-hb-1"):
         with reconcile_phase_heartbeat(_Mongo(), "job-hb-1", processed=10, total=10,
                                        interval_s=0.02):

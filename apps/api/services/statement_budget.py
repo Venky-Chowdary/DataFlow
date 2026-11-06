@@ -113,9 +113,11 @@ def _on_connect(dbapi_connection: Any, _record: Any) -> None:
 
 
 def _on_checkin(dbapi_connection: Any, record: Any) -> None:
-    from src.ai.copilot.tool_deadline import unregister_connection
-
-    unregister_connection(dbapi_connection)
+    # The connection stays registered to the call that used it last: SQLAlchemy
+    # runs ``pool_pre_ping`` *before* the checkout event, so a ping on an idle
+    # pooled socket whose tunnel went silent would otherwise block with
+    # nothing registered (the original D281 shape). The next checkout moves
+    # ownership to its call; close/invalidate unregister it.
     family = record.info.pop(_FLAG, None) if record is not None else None
     if not family or dbapi_connection is None:
         return
@@ -130,6 +132,13 @@ def _on_checkin(dbapi_connection: Any, record: Any) -> None:
             dbapi_connection.timeout = 0
     except Exception as exc:  # noqa: BLE001 - the pool invalidates a broken one
         logger.debug("statement budget not reset (%s): %s", family, exc)
+
+
+def _on_gone(dbapi_connection: Any, *_args: Any) -> None:
+    """A closed or invalidated connection leaves the interrupt registry."""
+    from src.ai.copilot.tool_deadline import unregister_connection
+
+    unregister_connection(dbapi_connection)
 
 
 def install() -> None:
@@ -149,4 +158,7 @@ def install() -> None:
         event.listen(Pool, "connect", _on_connect)
         event.listen(Pool, "checkout", _on_checkout)
         event.listen(Pool, "checkin", _on_checkin)
+        event.listen(Pool, "close", _on_gone)
+        event.listen(Pool, "close_detached", _on_gone)
+        event.listen(Pool, "invalidate", _on_gone)
         _installed = True
