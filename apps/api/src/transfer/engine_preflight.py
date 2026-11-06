@@ -133,6 +133,9 @@ def _execute_preflight_parity_kwargs(
         or {}
     )
     extra["unique_keys"] = unique_keys
+    indexes_meta = dest_meta.get("indexes_meta") or extra.get("indexes_meta")
+    if indexes_meta:
+        extra["indexes_meta"] = indexes_meta
     extra["foreign_keys"] = foreign_keys
     if isinstance(table_exists, bool):
         extra["table_exists"] = table_exists
@@ -157,6 +160,7 @@ def _execute_preflight_parity_kwargs(
     return {
         "destination_pk_columns": pk_cols,
         "destination_unique_keys": unique_keys,
+        "destination_indexes_meta": indexes_meta or None,
         "destination_foreign_keys": foreign_keys,
         # D112 — the live CHECK constraints, so Execute names offending rows
         # before the write instead of surfacing the driver's raw violation.

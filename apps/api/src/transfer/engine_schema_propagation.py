@@ -222,16 +222,21 @@ def _plan_schema_auto_propagate(
     # live-contract lane never emitted destination-widen proposals. Emit them
     # here against the introspected destination types — additive widen_type
     # entries propagate/acknowledgement flows already understand.
+    # One key-group source with Validate: the catalog PK, unique keys and
+    # every index engine_preflight stamped on the destination, plus the key.
+    _dest_extra = getattr(request.destination, "extra", None) or {}
+    _key_groups = dest_key_groups(
+        list(_dest_extra.get("primary_key_columns") or []),
+        list(_dest_extra.get("unique_keys") or []),
+        contract.primary_key if contract else None,
+        _dest_extra.get("indexes_meta"),
+    )
     _widen_props = propose_dest_widens(
         mappings,
         source_schema=schema,
         target_schema=dest_schema_types or {},
         dest_db=(getattr(request.destination, "format", "") or "").lower(),
-        key_groups=dest_key_groups(
-            list((getattr(request.destination, "extra", None) or {}).get("primary_key_columns") or []),
-            None,
-            contract.primary_key if contract else None,
-        ),
+        key_groups=_key_groups,
     )
     if _widen_props:
         _additive = list(evolution.get("additive") or [])
@@ -272,6 +277,7 @@ def _plan_schema_auto_propagate(
             dest_types=dest_schema_types,
             dest_db=(getattr(request.destination, "format", "") or "").lower(),
             adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
+            key_groups=_key_groups,
         )
     if not evolution.get("should_propagate"):
         return mappings

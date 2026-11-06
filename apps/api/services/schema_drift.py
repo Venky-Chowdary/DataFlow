@@ -923,12 +923,16 @@ def dest_key_groups(
     pk_columns: list[str] | None = None,
     unique_keys: list[dict[str, Any]] | None = None,
     contract_key: str | list[str] | None = None,
+    indexes_meta: dict[str, Any] | None = None,
 ) -> list[list[str]]:
-    """The column sets this run holds in a key on the destination.
+    """The column sets this run holds in an index on the destination.
 
-    The catalog's primary key and unique keys, plus the stream contract's
-    identity key (single column or comma-separated composite), which the
-    writer enforces with a unique index.
+    The catalog's primary key, unique keys and every other index
+    (``services.secondary_indexes`` payload, plain indexes included: MySQL's
+    key length limit binds those too, and the writer's widen pass reads the
+    same set from ``information_schema.statistics``), plus the stream
+    contract's identity key (single column or comma-separated composite),
+    which the writer enforces with a unique index.
     """
     groups: list[list[str]] = []
     if isinstance(contract_key, str):
@@ -938,6 +942,11 @@ def dest_key_groups(
     candidates = [
         [str(c) for c in pk_columns or [] if str(c or "").strip()],
         *([str(c) for c in (uk or {}).get("columns") or []] for uk in unique_keys or []),
+        *(
+            [str((c or {}).get("name") or "") for c in (ix or {}).get("columns") or []]
+            for ix in ((indexes_meta or {}).get("items") or [])
+            if isinstance(ix, dict) and not ix.get("expression")
+        ),
         contract_cols,
     ]
     for cols in candidates:
@@ -1085,6 +1094,7 @@ def plan_destination_evolution(
     dest_types: dict[str, str],
     dest_db: str = "",
     adopt_unmapped: bool = False,
+    key_groups: list[list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     """Apply approved destination evolution to the plan, once.
 
@@ -1111,7 +1121,8 @@ def plan_destination_evolution(
     applied: list[dict[str, Any]] = []
 
     widens = propose_dest_widens(
-        active, source_schema=source_schema, target_schema=types, dest_db=dest_db
+        active, source_schema=source_schema, target_schema=types, dest_db=dest_db,
+        key_groups=key_groups,
     )
     applied.extend(stamp_approved_widens(planned, widens))
     by_target = {str(k).lower(): k for k in types}

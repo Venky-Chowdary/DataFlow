@@ -459,6 +459,25 @@ def resolve_writer_backfill(
     )
 
 
+def widen_skip_key_columns(
+    conflict_columns: list[str] | None, mappings: list[dict[str, Any]] | None
+) -> list[str]:
+    """Key columns the writer's widen pass must leave alone this run.
+
+    A key column is not widened on the writer's own initiative. One whose widen
+    the operator approved (``schema_drift.stamp_approved_widens`` stamps
+    ``dest_widen``) is: Validate told them "Execute ALTERs it before writing",
+    and skipping it left ``id VARCHAR(200)`` in place so the approved long key
+    failed at write.
+    """
+    approved = {
+        str(m.get("target") or "").casefold()
+        for m in mappings or []
+        if isinstance(m, dict) and m.get("dest_widen")
+    }
+    return [c for c in conflict_columns or [] if str(c).casefold() not in approved]
+
+
 def stamp_is_dataflow_projection(mapping: dict[str, Any] | None) -> bool:
     """True when DataFlow projected this row's carrier for a column it creates.
 

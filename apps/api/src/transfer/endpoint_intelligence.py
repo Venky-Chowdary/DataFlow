@@ -1566,6 +1566,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 (schema_keys or {}).get("primary_key_columns") or []
             )
             out["unique_keys"] = list((schema_keys or {}).get("unique_keys") or [])
+            # Every index, plain ones included: a keyed column widens by the
+            # key budget (schema_drift.dest_key_groups).
+            out["indexes_meta"] = (schema_keys or {}).get("indexes_meta")
             out["unconstrained_decimals"] = list(
                 (schema_keys or {}).get("unconstrained_decimals") or []
             )

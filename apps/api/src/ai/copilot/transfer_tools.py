@@ -2217,6 +2217,7 @@ def _run_preflight(
                 dest_probe.get("primary_key_columns") or dest_probe.get("pk_columns")
             ),
             destination_unique_keys=list(dest_probe.get("unique_keys") or []),
+            destination_indexes_meta=dest_probe.get("indexes_meta"),
             destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
             destination_check_constraints=list(dest_probe.get("check_constraints") or []),
             # D139: an existing DynamoDB table's HASH/RANGE contract. Without

@@ -234,6 +234,7 @@ def inspect_destination_for_preflight(
     # Live UNIQUE / PK catalog — feeds identity uniqueness + append PK enforce.
     out["primary_key_columns"] = list(info.get("primary_key_columns") or [])
     out["unique_keys"] = list(info.get("unique_keys") or [])
+    out["indexes_meta"] = info.get("indexes_meta")
     out["pk_columns"] = list(out["primary_key_columns"])
     # Pass through FK metadata when introspect provides it — never invent FKs.
     out["foreign_keys"] = list(

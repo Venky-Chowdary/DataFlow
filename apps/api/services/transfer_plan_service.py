@@ -469,6 +469,7 @@ def run_plan_preflight(
         destination_dynamo_key_schema=dest_meta.get("dynamo_key_schema") or [],
         destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
         destination_unique_keys=dest_meta.get("unique_keys") or [],
+        destination_indexes_meta=dest_meta.get("indexes_meta"),
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
         destination_check_constraints=dest_meta.get("check_constraints") or [],
         # Without the destination connection the append key-collision probe cannot

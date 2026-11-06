@@ -68,3 +68,27 @@ def test_a_key_with_budget_left_is_offered_the_budgeted_varchar_not_text():
 def test_unkeyed_and_non_mysql_columns_keep_the_plain_widen():
     assert _props(["code"], None) == {"code": "TEXT"}
     assert _props(["cust_code"], [["cust_code"]], dest="postgresql") == {"cust_code": "TEXT"}
+
+
+def test_a_keyed_varchar_growth_is_capped_at_the_key_budget():
+    """VARCHAR(2000) cannot be a MySQL key (8000 bytes > 3072): the widen is VARCHAR(768)."""
+    from connectors.schema_drift import mysql_keyed_widen_carrier
+
+    live = {"id": "VARCHAR(200) CHARACTER SET UTF8MB4", "region": "VARCHAR(16)"}
+    assert mysql_keyed_widen_carrier([["id"]], "id", "VARCHAR(2000) CHARACTER SET UTF8MB4", live) == (
+        "VARCHAR(768) CHARACTER SET UTF8MB4", False)
+    assert mysql_keyed_widen_carrier([["id"]], "id", "VARCHAR(300)", live) == ("VARCHAR(300)", False)
+    assert mysql_keyed_widen_carrier([["region", "id"]], "id", "VARCHAR(2000)", live) == (
+        "VARCHAR(752)", False)
+    assert mysql_keyed_widen_carrier([["id"]], "id", "JSON", live)[1] is True
+
+
+def test_plain_indexes_and_unique_keys_are_one_key_group_source():
+    """The writer reads every index; the proposal reads the same set from the catalog."""
+    indexes_meta = {"status": "ok", "items": [
+        {"name": "ix_code", "columns": [{"name": "code"}], "unique": False},
+        {"name": "ix_expr", "columns": [], "expression": "lower(code)"},
+    ]}
+    groups = dest_key_groups(["cust_code"], [{"columns": ["note"]}], "cust_code", indexes_meta)
+    assert groups == [["cust_code"], ["note"], ["code"]]
+    assert _props(["code"], groups) == {"code": "VARCHAR(768)"}

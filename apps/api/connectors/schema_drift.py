@@ -836,7 +836,7 @@ def _mysql_keyed_widen_carrier(
     """
     from services.schema_fidelity import mysql_index_requires_prefix
 
-    if not mysql_index_requires_prefix(new_type):
+    if not (mysql_index_requires_prefix(new_type) or _mysql_string_carrier(new_type)):
         return new_type, False
     groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
     return mysql_keyed_widen_carrier(
@@ -905,16 +905,20 @@ def mysql_keyed_widen_carrier(
     """``(carrier, keep)`` for widening a MySQL/MariaDB column held in a key.
 
     MySQL cannot hold a TEXT/BLOB/JSON column in a key without a prefix length
-    (error 1170; MariaDB quietly switches the key to HASH), and a prefix would
-    enforce a different uniqueness rule than the source. A keyed column is
-    therefore widened by the rule the create path already applies to a key
+    (error 1170; MariaDB quietly switches the key to HASH), nor a VARCHAR wider
+    than the 3072-byte key limit (error 1071: 2000 utf8mb4 characters is 8000
+    bytes), and a prefix would enforce a different uniqueness rule than the
+    source. Every string widen of a keyed column is therefore capped by the rule
+    the create path applies to a key
     (``services.schema_fidelity.mysql_key_compatible_types``): the widest
-    full-value VARCHAR the 3072-byte key budget allows across every key the
-    column sits in. ``keep`` is True when the column must stay as it is — the
-    rule refused, or the budgeted carrier is no wider than the existing one
-    (the column already *is* the key's spelling of TEXT). The writer's widen
-    pass and the widen proposal (``services.schema_drift.dest_widen_proposal``)
-    both ask this, so a proposal never offers an ALTER the writer would not run.
+    full-value VARCHAR the key budget allows across every key the column sits
+    in. A candidate within the budget is kept as asked. ``keep`` is True when the
+    column must stay as it is — the rule refused, or the budgeted carrier is no
+    wider than the existing one (the column already *is* the key's spelling of
+    TEXT). The writer's widen pass and the widen proposal
+    (``services.schema_drift.dest_widen_proposal``) both ask this, so a proposal
+    names exactly the ALTER the writer runs; values longer than that carrier are
+    the population-fit gate's to refuse by name.
     """
     from services.schema_fidelity import (
         mysql_index_requires_prefix,
@@ -924,14 +928,19 @@ def mysql_keyed_widen_carrier(
 
     want = column.casefold()
     groups = [g for g in key_groups or [] if any(c.casefold() == want for c in g)]
-    if not mysql_index_requires_prefix(new_type) or not groups:
+    lob = mysql_index_requires_prefix(new_type)
+    asked = None if lob else parse_string_carrier_width(new_type)
+    if not groups or not (lob or (asked and _mysql_string_carrier(new_type))):
         return new_type, False
     by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
     existing_type = by_fold.get(want, "")
+    # The budget question is asked of an unbounded text key, so a bounded
+    # VARCHAR candidate is capped by the same width a TEXT key would get.
+    probe = new_type if asked is None else "TEXT"
     budget: int | None = None
     for key_cols in groups:
         types = [
-            new_type if c.casefold() == want else by_fold.get(c.casefold(), "")
+            probe if c.casefold() == want else by_fold.get(c.casefold(), "")
             for c in key_cols
         ]
         sized, refusal = mysql_key_compatible_types(
@@ -953,7 +962,12 @@ def mysql_keyed_widen_carrier(
         if not width:
             return existing_type, True
         budget = width if budget is None else min(budget, width)
-    carrier = f"VARCHAR({budget})"
+    if asked is not None and budget is not None and asked <= budget:
+        carrier = new_type
+    elif asked is not None:
+        carrier = re.sub(r"\(\s*\d+\s*\)", f"({budget})", new_type, count=1)
+    else:
+        carrier = f"VARCHAR({budget})"
     if not is_wider_type(existing_type, carrier, dest_db=dialect):
         return existing_type, True
     logger.info(

@@ -349,6 +349,7 @@ def run_file_preflight(
     destination_dynamo_key_schema: list[dict[str, Any]] | None = None,
     destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
+    destination_indexes_meta: dict[str, Any] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
     destination_check_constraints: list[Any] | None = None,
     destination_config: Mapping[str, Any] | None = None,
@@ -801,7 +802,7 @@ def run_file_preflight(
             schema_policy, acknowledged=schema_drift_acknowledged
         )
     ):
-        from services.schema_drift import plan_destination_evolution
+        from services.schema_drift import dest_key_groups, plan_destination_evolution
 
         mappings, destination_column_types, destination_evolution = (
             plan_destination_evolution(
@@ -811,6 +812,8 @@ def run_file_preflight(
                 dest_types=destination_column_types,
                 dest_db=str(destination_db_type or ""),
                 adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
+                key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
+                                           contract_primary_key, destination_indexes_meta),
             )
         )
 
@@ -1199,7 +1202,7 @@ def run_file_preflight(
         table_exists=dest_table_exists,
         dest_recreated=dest_recreated, validation_mode=validation_mode,
         dest_key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
-                                        contract_primary_key),
+                                        contract_primary_key, destination_indexes_meta),
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.

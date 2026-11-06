@@ -49,7 +49,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from connectors.writer_common import writer_meta_with_source_rows
+from connectors.writer_common import widen_skip_key_columns, writer_meta_with_source_rows
 from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
@@ -1299,7 +1299,7 @@ def write_mapped_rows(
                 target_cols,
                 desired_types,
                 backfill=backfill_new_fields,
-                skip_cols=conflict_columns or [],
+                skip_cols=widen_skip_key_columns(conflict_columns, mappings),
                 source_types=source_type_by_col,
                 suppressed_out=suppressed_widens,
                 # A BSON datetime on TIMESTAMP(0) must MODIFY to DATETIME(3)
