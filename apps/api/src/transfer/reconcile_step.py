@@ -6986,6 +6986,7 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
         )
 
+    readback_failure, readback_transient = "", False
     if routed_tables:
         # The router partitioned the run into per-route tables; the base table
         # name was never written to. Verify each route table independently —
@@ -7200,7 +7201,9 @@ def _run_reconciliation_impl(
         from services.column_digest import clear_readback, stamp_readback
 
         clear_readback()
-        target_rows, target_checksum = verify_target(
+        from services.reconciliation import verify_target_with_retry
+
+        target_rows, target_checksum, readback_failure, readback_transient = verify_target_with_retry(
             db_type,
             cfg,
             schema=schema,
@@ -7212,6 +7215,7 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
             written_ids=None,
             pk_column=None,
+            verify=verify_target,
         )
         if isinstance(dest_summary, dict):
             stamp_readback(dest_summary, target_checksum)
@@ -7702,6 +7706,32 @@ def _run_reconciliation_impl(
                 "rows_skipped": rows_skipped,
                 "sample_compare": sample_compare,
                 "assurance_level": "sample_screening",
+            })
+        if strict_checksum and not dest_only and readback_failure:
+            # D284: the engine has a verifier; the read itself failed. Say what
+            # failed. A transient fault (retried) is not evidence the committed
+            # rows are wrong, so they are kept rather than undone.
+            return _finalize({
+                "passed": False,
+                "verification_unavailable": readback_transient,
+                "message": (
+                    f"Strict reconciliation could not read the {db_type} destination "
+                    f"back ({readback_failure})"
+                    + (
+                        ", after retrying. The committed rows were kept; re-run "
+                        "verification once the destination is reachable."
+                        if readback_transient
+                        else "."
+                    )
+                ),
+                "source_rows": source_rows,
+                "target_rows": -1,
+                "source_checksum": source_checksum,
+                "target_checksum": "",
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "sample_compare": sample_compare,
             })
         if strict_checksum and not dest_only:
             return _finalize({

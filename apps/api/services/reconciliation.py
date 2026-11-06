@@ -1856,6 +1856,52 @@ def keyed_readback_sa_clause(
     return where, params
 
 
+from contextvars import ContextVar as _ContextVar
+
+#: Why the last full-table read-back returned ``-1`` (D284). The verify_*
+#: helpers swallow the driver error so a failed read never raises out of
+#: Gate-8; without this the reconcile could only say "verifier unavailable"
+#: for an engine that has a verifier.
+_READBACK_FAILURE: _ContextVar[str] = _ContextVar("df_readback_failure", default="")
+
+
+def note_readback_failure(exc: BaseException) -> None:
+    _READBACK_FAILURE.set(f"{type(exc).__name__}: {exc}"[:300])
+
+
+def verify_target_with_retry(
+    *args: Any, verify: Any = None, **kwargs: Any
+) -> tuple[int, str, str, bool]:
+    """:func:`verify_target` (or the caller's ``verify``), retrying a read-back
+    that failed transiently.
+
+    Returns ``(rows, checksum, failure_reason, transient)``. The reason is
+    ``""`` when the read succeeded (or the engine has no read-back at all).
+    Deterministic failures (grants, missing objects) are not retried.
+    """
+    from services.error_handling import RetryBudget, classify_error
+
+    read = verify or verify_target
+    budget = RetryBudget()
+    while True:
+        _READBACK_FAILURE.set("")
+        rows, checksum = read(*args, **kwargs)
+        reason = _READBACK_FAILURE.get()
+        if rows >= 0 or not reason:
+            return rows, checksum, "", False
+        transient = bool(classify_error(reason).get("retriable"))
+        if not transient or budget.attempts_made + 1 >= budget.max_attempts:
+            return rows, checksum, reason, transient
+        delay = budget.next_delay()
+        logger.warning(
+            "Gate-8 full read-back failed transiently (attempt %d/%d); retrying in %.1fs: %s",
+            budget.attempts_made, budget.max_attempts, delay, reason,
+        )
+        import time as _t
+
+        _t.sleep(delay)
+
+
 def verify_postgres_table(
     *,
     host: str,
@@ -1923,6 +1969,7 @@ def verify_postgres_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -1990,6 +2037,7 @@ def verify_postgres_route_table(
         return count, canonical, additive
     except Exception as exc:
         logger.warning("Route read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, "", ""
 
 
@@ -2125,6 +2173,7 @@ def verify_pgvector_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2219,6 +2268,7 @@ def verify_mysql_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2289,6 +2339,7 @@ def verify_sqlserver_table(
         return count, checksum
     except Exception as exc:
         logger.warning("SQL Server reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2370,6 +2421,7 @@ def _verify_saas_read_object(
         )
     except Exception as exc:
         logger.warning("%s reconciliation read-back failed: %s", driver, exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2438,6 +2490,7 @@ def verify_sqlite_table(
         return -1, ""
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
@@ -2535,6 +2588,7 @@ def verify_snowflake_table(
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        note_readback_failure(exc)
         return -1, ""
 
 
