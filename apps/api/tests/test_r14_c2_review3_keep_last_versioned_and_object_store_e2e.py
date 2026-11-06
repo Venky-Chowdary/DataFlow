@@ -5,6 +5,10 @@
    out: it runs and the latest version of each key lands. Where the read has
    no order (overwrite of a table) it is refused with routes for that sync.
 3. The lenient note for a table names the table's routes, never keep_last.
+7. A kept PostgreSQL column narrower than the data (VARCHAR(3) 'abcdef',
+   NUMERIC(6,2) 12345.67): strict refuses with the prior rows intact, lenient
+   quarantines the cells; the COPY overwrite swap never CASTs a value down to
+   the column's width.
 """
 
 from __future__ import annotations
@@ -359,3 +363,75 @@ def test_a_mostly_unparseable_file_column_is_refused_naming_the_share_rule(clien
         assert h.query("postgresql", f'SELECT count(*) FROM public."{table}"') == [(0,)]  # nosec B608
     finally:
         h.drop_table("postgresql", table)
+
+
+# ── 7. a kept column narrower than the data: held out or refused, never cut ──
+_OVERFLOW = {
+    # case: (live DDL, prior cell, fitting cell, overflowing cells)
+    "varchar": ("varchar(3)", "old", "abc", {"x1": "abcdef", "x2": "abcdefgh"}),
+    "numeric": ("numeric(6,2)", "1.00", "12.50", {"x1": "12345.67"}),
+}
+
+
+@pytest.mark.parametrize("policy", ["propagate_columns", "manual_review"])
+@pytest.mark.parametrize("mode", ["strict", "lenient"])
+@pytest.mark.parametrize("case", sorted(_OVERFLOW))
+def test_overflow_into_a_kept_column_is_never_stored_cut(client, case, mode, policy):
+    ddl, prior, fits, overflow = _OVERFLOW[case]
+    table = f"r14w_{uuid.uuid4().hex[:6]}"
+    h.execute("postgresql", f'CREATE TABLE public."{table}" (k text, c {ddl})')  # nosec B608
+    h.execute("postgresql", f"INSERT INTO public.\"{table}\" VALUES ('old', '{prior}')")  # nosec B608
+    lines = ["k,c"] + [f"r{i},{fits}" for i in range(298)] + [f"{k},{v}" for k, v in overflow.items()]
+    if case == "numeric":
+        lines.append("x2,9999.99")  # the column's largest value still lands
+    data = {"source_kind": "file", "dest_kind": "database", "dest_table": table, "async_mode": "false",
+            "validation_mode": mode, "sync_mode": "full_refresh_overwrite", "schema_policy": policy,
+            **PG_DEST}
+    try:
+        resp = client.post("/api/v1/transfer/run", data=data,
+                           files={"file": ("w.csv", ("\n".join(lines) + "\n").encode(), "text/csv")})
+        rows = dict(h.query("postgresql", f'SELECT k, c::text FROM public."{table}"'))  # nosec B608
+        # Whatever the verdict, an overflowing cell is never stored cut down.
+        for key in overflow:
+            assert key not in rows, (case, mode, policy, key, rows.get(key))
+        if mode == "strict":
+            assert resp.status_code == 422, resp.text[:800]
+            assert rows == {"old": prior}, (case, policy, len(rows))  # the prior data survives
+            return
+        assert resp.status_code == 200, resp.text[:1200]
+        assert "old" not in rows
+        assert len(rows) == 300 - len(overflow), len(rows)
+        assert set(rows.values()) == ({fits, "9999.99"} if case == "numeric" else {fits})
+        job_id = resp.json()["job_id"]
+        quarantine = client.get(f"/api/v1/connectors/jobs/{job_id}/quarantine")
+        assert quarantine.status_code == 200, quarantine.text[:600]
+        held = {(d.get("values") or {}).get("k"): d.get("value") for d in quarantine.json()["quarantine"]}
+        assert held == overflow, quarantine.text[:1500]
+    finally:
+        h.drop_table("postgresql", table)
+
+
+def test_the_overwrite_swap_never_casts_a_kept_column_down_to_its_width():
+    import psycopg2
+
+    from services.dest_overwrite_swap import pg_swap_staged_dest
+
+    live, stage = f"r14sw_{uuid.uuid4().hex[:6]}", f"r14st_{uuid.uuid4().hex[:6]}"
+    h.execute("postgresql", f'CREATE TABLE public."{live}" (k text, c varchar(3))')  # nosec B608
+    h.execute("postgresql", f"INSERT INTO public.\"{live}\" VALUES ('old', 'old')")  # nosec B608
+    h.execute("postgresql", f'CREATE TABLE public."{stage}" (k text, c text)')  # nosec B608
+    h.execute("postgresql", f"INSERT INTO public.\"{stage}\" VALUES ('new', 'abcdef')")  # nosec B608
+    conn = h.pg_conn()
+    conn.autocommit = False  # the caller owns the swap's transaction
+    try:
+        with pytest.raises(psycopg2.Error, match="too long"):
+            with conn.cursor() as cur:
+                pg_swap_staged_dest(cur, schema="public", dest_table=live, staging_table=stage,
+                                    quote=lambda n: f'"{n}"')
+        conn.rollback()
+        assert h.query("postgresql", f'SELECT k, c FROM public."{live}"') == [("old", "old")]  # nosec B608
+    finally:
+        conn.close()
+        h.drop_table("postgresql", live)
+        h.drop_table("postgresql", stage)
+

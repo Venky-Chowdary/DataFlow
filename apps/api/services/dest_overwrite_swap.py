@@ -286,6 +286,40 @@ def pg_empty_live_for_overwrite(
     return True
 
 
+_PG_TRUNCATING_CAST = re.compile(
+    r"^\s*(character varying|varchar|character|char|bpchar|bit varying|varbit|bit)\s*\(", re.I
+)
+
+
+def pg_kept_columns_narrower(
+    cur: Any, schema: str, table: str, staged: dict[str, str]
+) -> list[str]:
+    """Kept columns whose bounded character width is narrower than the staged carrier.
+
+    ``staged`` maps column -> the DDL the load would stage. A staged unbounded
+    TEXT/VARCHAR, or a wider VARCHAR(n), into a kept VARCHAR(m) is narrower.
+    """
+    from services.ddl_compatibility import parse_varchar_width
+
+    cur.execute(
+        "SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped",
+        (schema, table),
+    )
+    live = {str(name): str(typ) for name, typ in cur.fetchall()}
+    out: list[str] = []
+    for col, ddl in staged.items():
+        live_t = live.get(col)
+        if not live_t or not _PG_TRUNCATING_CAST.match(live_t):
+            continue
+        live_w = parse_varchar_width(live_t)
+        staged_w = parse_varchar_width(str(ddl or ""))
+        if live_w is not None and (staged_w is None or staged_w > live_w):
+            out.append(f"{col} {live_t}")
+    return out
+
+
 def pg_swap_staged_dest(
     cur: Any, *, schema: str, dest_table: str, staging_table: str,
     trash_table: str = "", quote,
@@ -324,7 +358,12 @@ def pg_swap_staged_dest(
         live_t = types.get(("live", live_col))
         expr = quote(stage_col)
         if live_t and types.get(("stage", stage_col)) != live_t:
-            expr = f"CAST({expr} AS {live_t})"
+            # An explicit CAST to a bounded character / bit type TRUNCATES in
+            # PostgreSQL ('abcdef'::varchar(3) = 'abc'). Leave those to the
+            # assignment cast, which refuses an overlong value — never a
+            # silent truncation (QA C2 review 3 #7).
+            if not _PG_TRUNCATING_CAST.match(live_t):
+                expr = f"CAST({expr} AS {live_t})"
         selects.append(expr)
     overriding = (
         " OVERRIDING SYSTEM VALUE" if any(live in identity for _s, live in pairs) else ""

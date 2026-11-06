@@ -1154,6 +1154,19 @@ def copy_csv_to_postgres(
         swap_dest_ref = dest_ref
         swap_dest_table = dest_table
         if replace_destination and exists:
+            from services.dest_overwrite_swap import pg_kept_columns_narrower
+
+            narrower = pg_kept_columns_narrower(
+                dst_cur, dest_schema_n, dest_table, dict(zip(target_cols, pg_ddls))
+            )
+            if narrower:
+                # The staged carrier is wider than the kept column: the swap
+                # would have to narrow it. The row writer widens (an approved
+                # plan) or holds the overlong cells out — COPY never truncates.
+                raise FastPathUnavailable(
+                    "kept destination column(s) narrower than the load's carrier: "
+                    + ", ".join(narrower)
+                )
             # C03/X-OW2 — stage the overwrite, rename-swap inside the txn.
             from services.dest_overwrite_swap import (
                 overwrite_trash_name,

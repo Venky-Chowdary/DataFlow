@@ -591,7 +591,8 @@ def text_cell_copy_safe(
     quarantined. The census therefore runs over every cell before the
     destination is touched, and a cell the carrier cannot hold declines the
     fast path so the row path validates and quarantines it. Text carriers hold
-    anything; unknown logical types are left to the row path's own contract.
+    anything up to a bounded width; unknown logical types are left to the row
+    path's own contract.
 
     Syntax alone is not the carrier: ``99999999999999999999`` is an integer the
     engine's BIGINT parser rejects at load, and ``0.016666668`` is a decimal
@@ -629,6 +630,20 @@ def text_cell_copy_safe(
         return fits_decimal(value, params[0], params[1], dest_db=dest_db)
     if kind == "boolean":
         return value in _COPY_BOOLEAN_TEXT
+    if kind in {"string", "text"}:
+        # A bounded character carrier does not hold anything: a bulk load
+        # into VARCHAR(3) either fails the whole load on 'abcdef' or (MySQL
+        # non-strict) truncates it. The row path owns the holdout.
+        if not physical:
+            return True
+        from services.ddl_compatibility import parse_varchar_width
+
+        width = parse_varchar_width(physical)
+        if width is None:
+            return True
+        from connectors.writer_common import fits_varchar
+
+        return fits_varchar(value, width, physical, dialect_label=dest_db)
     if kind in {"date", "datetime", "time"}:
         shape = {"date": _ISO_DATE_TEXT, "datetime": _ISO_DATETIME_TEXT}.get(kind, _ISO_TIME_TEXT)
         if not shape.match(value):
