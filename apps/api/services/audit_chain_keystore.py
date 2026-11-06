@@ -454,7 +454,8 @@ def epoch_record() -> dict[str, str] | None:
     Creation is claimed by an atomic insert of a ``pending`` row; other
     processes wait for it (a stale claim is taken over). Raises
     :class:`HistoryTampered` when the row fails its MAC, disagrees with its
-    copy, or is missing while entries or the copy exist.
+    copy, or is missing while entries or the copy exist — re-read once first,
+    so two workers starting together never race into a false finding (F5).
     """
     import hmac
 
@@ -468,12 +469,17 @@ def epoch_record() -> dict[str, str] | None:
         return dict(_epoch_cache[ns])
     keys = _collection()
     started = time.monotonic()
+    missing_seen = False
     while True:
         doc = coll.find_one({"_id": _EPOCH_ID})
         copy = _epoch_copy_in_keyring(keys)
         if doc is None:
             has_entries = any(_valid(d) for d in coll.find({"_id": {"$ne": _EPOCH_ID}}).limit(50))
             if has_entries or copy:
+                if not missing_seen:
+                    missing_seen = True  # F5: another worker may be mid-write
+                    time.sleep(0.25)
+                    continue
                 raise HistoryTampered("the key history epoch was removed")
             at = _now()
             won = coll.update_one(

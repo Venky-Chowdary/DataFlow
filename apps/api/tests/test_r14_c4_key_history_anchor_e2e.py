@@ -19,6 +19,7 @@ Each test is a reviewer probe:
 from __future__ import annotations
 
 import secrets
+import threading
 from datetime import datetime
 
 import pytest
@@ -181,3 +182,54 @@ def test_f2_time_running_backwards_before_the_history_is_an_edit(ent, monkeypatc
     report = _verify(ent)
     assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
     assert "back-dated" in next(f["detail"] for f in report["findings"] if f["category"] == "tampering")
+
+
+# ── F5 ─────────────────────────────────────────────────────────────────────
+
+
+def test_f5_a_reader_that_misses_the_epoch_mid_creation_re_reads_before_raising(ent, monkeypatch):
+    from services import audit_chain_keystore as store
+
+    ws = ent.workspace("R14 C4 F5")
+    _write(1, action="r14c4.f5", workspace_id=ws)
+    real = store._history_coll()
+    expected = store.history_epoch()
+
+    class _ReadBeforeTheOtherWorkerInserted:
+        full_name = real.full_name
+        misses = 1
+
+        def find_one(self, flt, *a, **k):
+            if flt == {"_id": "__history_epoch__"} and self.misses:
+                self.misses -= 1
+                return None
+            return real.find_one(flt, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    store.reset_cache()
+    monkeypatch.setattr(store, "_history_coll", lambda: _ReadBeforeTheOtherWorkerInserted())
+    assert store.history_epoch() == expected
+
+
+def test_f5_workers_starting_together_create_one_epoch(ent):
+    from services import audit_chain_keystore as store
+
+    _wipe_to_an_empty_store(ent)
+    results: list[object] = []
+
+    def start() -> None:
+        try:
+            results.append(store.epoch_record())
+        except Exception as exc:  # noqa: BLE001 - the assertion names it
+            results.append(exc)
+
+    threads = [threading.Thread(target=start) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert len(results) == 6 and not [r for r in results if isinstance(r, Exception)], results
+    assert len({tuple(sorted(r.items())) for r in results}) == 1, results
+    assert ent.db["audit_events"].count_documents({"action": store.EPOCH_ACTION}) == 1
