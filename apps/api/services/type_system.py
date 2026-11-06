@@ -1751,7 +1751,7 @@ def is_dialect_native_document_wire(
     (NVARCHAR(MAX) / CLOB) that are the intentional document projection —
     not a fidelity collapse.
     """
-    raw = strip_identity_qualifier(target_type).strip()
+    raw = strip_identity_qualifier(strip_charset_qualifier(target_type)).strip()
     if not raw:
         return False
     upper = raw.upper()
@@ -1802,9 +1802,19 @@ def _own_json_carrier_read_backs(db: str) -> tuple[str, ...]:
     return (native, *catalog_read_backs(db, native))
 
 
+def strip_charset_qualifier(spelling: str | None) -> str:
+    """The type with its ``CHARACTER SET x`` / ``CHARSET x`` tail removed.
+
+    A character set is charset evidence on a MySQL carrier, never part of the
+    carrier token: ``LONGTEXT CHARACTER SET utf8mb4`` is the same document
+    wire as ``LONGTEXT`` (D192 after D275 kept the evidence on the type).
+    """
+    return re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", str(spelling or ""), flags=re.I)
+
+
 def _carrier_key(spelling: str | None) -> str:
     """Case/space-folded spelling with identity and charset tails off, COLLATE kept."""
-    text = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", str(spelling or ""), flags=re.I)
+    text = strip_charset_qualifier(spelling)
     collation = parse_collation(text)
     head = strip_identity_qualifier(text)
     if collation:
