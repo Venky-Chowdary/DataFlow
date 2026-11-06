@@ -10,6 +10,7 @@ streaming re-read route) unless it says otherwise:
   failed attempt's in the registry, and the ladder took it.
 * SHOULD-FIX 3 — the witness and the ladder rendered with different encoders.
 * SHOULD-FIX 4 — the registry evicted an in-flight witness.
+* SHOULD-FIX 5 — an unwitnessed batch-scoped re-read went green silently.
 * NIT 6 — a written key gone from both populations was never checked.
 * NIT 7 — key labels were parsed out of the joined fingerprint.
 """
@@ -209,6 +210,28 @@ def test_should_fix4_an_in_flight_witness_is_never_evicted(world, monkeypatch):
     finally:
         for jid in planted:
             kww.take_keyed_write_witness(jid)
+
+
+def test_should_fix5_an_unwitnessed_scoped_reread_is_never_silently_green(world, monkeypatch):
+    """No witness, the whole-table digests are not comparable (foreign row),
+    L2 passes because (ap, 3) and (ap, 4) swapped their amounts at the
+    destination: the run stays advisory, but says what it did not prove."""
+    fake, conn, src, dst = world
+    _foreign_row(conn, dst)
+    assert _run(fake, src, dst).success
+    _trigger(
+        conn, dst,
+        "IF NEW.region = 'ap' AND NEW.id = 3 THEN NEW.amount := 4.50; END IF;\n"
+        "          IF NEW.region = 'ap' AND NEW.id = 4 THEN NEW.amount := 3.50; END IF;",
+    )
+    monkeypatch.setattr(kww, "take_keyed_write_witness", lambda _job_id: None)
+    res = _run(fake, src, dst)
+    report = res.reconciliation or {}
+    ladder = report.get("verification_ladder") or {}
+    assert ladder["layers"]["L2"]["passed"] is True
+    unproven = report.get("value_discrepancy_unattributed") or {}
+    assert unproven.get("l3") == "skipped" and unproven.get("l2") == "passed", report
+    assert any("value swapped between two written rows" in w for w in report.get("warnings") or [])
 
 
 @pytest.mark.parametrize("dest_kept_old", [True, False], ids=["lost_update", "as_written"])

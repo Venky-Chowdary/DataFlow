@@ -269,31 +269,45 @@ where the source side came from:
   taken *after* the write. A concurrent writer that updates the source between
   the write and that scan makes source and destination differ on a key the
   destination holds exactly as written. That is not a loss. The write pass keeps
-  a per-key witness of what it wrote (`services/keyed_write_witness.py`,
-  in-process, bounded by `VERIFICATION_LADDER_MAX_ROWS`). For each key:
-  * The source still equals what was written but the destination differs: a
-    real loss, so the ladder vetoes it.
-  * The source moved and the destination equals what was written: concurrent
-    source drift. It is advisory, named on the report (`concurrent_source_drift`,
-    with a warning listing the keys) and never a veto. The next run picks the
-    new value up.
-  * Neither side equals what was written: the destination is not what this run
-    wrote, so it stays compared and vetoes.
-* **Re-read route without a witness** (a run resumed at reconcile, a route that
-  does not record one, or a witness whose fingerprints do not match the
-  ladder's): the ladder cannot tell drift from loss. The L2 miss stays advisory,
-  as before. It is never silent: the report carries
-  `value_discrepancy_unattributed` and a warning naming the columns.
+  a per-key witness of what it wrote (`services/keyed_write_witness.py`:
+  canonical key cells mapped to a row-fingerprint digest, plus the encoder that
+  rendered it). The witness is in-process, bounded by `VERIFICATION_LADDER_MAX_ROWS`,
+  and released when the job ends, whatever the outcome.
+  * **When a witness attributes:** only when it is complete: every chunk was
+    fingerprinted, there was no routed write, the run did not resume part-way,
+    and the witnessed rows equal the writer's `rows_written`. The ladder
+    re-hashes its populations with the witness's own encoder.
+  * **What the ladder does per key:**
+    * The source equals what was written but the destination differs: a loss,
+      so it vetoes.
+    * The source moved and the destination equals what was written: a
+      **concurrent source update**. It is advisory, named (`concurrent_source_drift`
+      plus a warning) and never a veto. The next run picks it up.
+    * The source deleted a written key and the destination holds it as written:
+      a **concurrent delete**, disclosed. If the destination lacks it or holds it
+      differently, it is a destination loss and fails the run, although the key
+      is in neither compared population.
+    * A source key this run never wrote that the destination does not hold: a
+      **concurrent insert**, disclosed separately. It leaves the cell layers only
+      when Gate-8's own source count equals the witnessed rows, which shows the
+      key was not in the write-time population. L1 and the key census still
+      grade the counts. A key the run did not write is never "drift".
+    * Neither side equals what was written: the key stays compared and vetoes.
+* **Re-read route without a usable witness** (one of the following):
+  * a resumed attempt;
+  * a routed write;
+  * a chunk that was not fingerprinted;
+  * a count mismatch;
+  * all witness slots held by other in-flight jobs (it never evicts one);
+  * an encoder mismatch.
 
-### NOT claimed / remaining for PROVEN
-* SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
-* UI copy sweep so no card says “proof” for sample screening
-* Streaming path without source SQL still depends on buffered records
-* Dual Run ``cutover_ready`` is N consecutive Gate-8 ``full_checksum``
-  cycles (unit: `tests/test_continuous_fidelity.py`). Column-profile
-  screening may diverge the window; it never confers cutover. Not
-  ``migration_proven``. Live N-night overwrite schedule campaign not run
-  this slice.
+  In these cases the ladder cannot tell drift from loss, and nothing is excused.
+  Where Gate-8's whole-table scope is not comparable, an L2 miss stays advisory
+  as before. Whenever L2 failed, L2 was skipped, or L3 was skipped on these
+  scoped keys, the report says per-cell fidelity is not proven
+  (`value_discrepancy_unattributed` and a warning naming the columns). That
+  includes a value swapped between two written rows, which keeps every column
+  aggregate.
 
 ---
 

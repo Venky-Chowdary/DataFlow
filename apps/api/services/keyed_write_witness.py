@@ -396,24 +396,42 @@ def attach_concurrent_drift(report: dict[str, Any], record: dict[str, Any]) -> d
 def attach_unattributed_discrepancy(
     report: dict[str, Any], ladder: dict[str, Any] | None, reason: str
 ) -> dict[str, Any]:
-    """An L2 value miss the ladder could not attribute stays visible (never silent green)."""
+    """A batch-scoped re-read the ladder could not attribute: say what it did
+    not prove (never silently green)."""
     layers = (ladder or {}).get("layers") or {}
     l2 = layers.get("L2") or {}
-    details = l2.get("details") or {}
-    if l2.get("passed") is not False or details.get("skipped"):
-        return report
-    cols = [str(c) for c in details.get("mismatched_columns") or []]
+    l3 = layers.get("L3") or {}
+    l2_details = l2.get("details") or {}
+    l3_skipped = bool((l3.get("details") or {}).get("skipped"))
+    l2_skipped = bool(l2_details.get("skipped"))
+    l2_miss = l2.get("passed") is False and not l2_skipped
+    if not (l2_miss or l2_skipped or l3_skipped):
+        return report  # L2 and L3 both compared the scoped cells and agreed
+    cols = [str(c) for c in l2_details.get("mismatched_columns") or []]
     out = dict(report)
-    out[UNATTRIBUTED_KEY] = {"columns": cols, "reason": reason}
+    out[UNATTRIBUTED_KEY] = {
+        "columns": cols, "reason": reason,
+        "l2": "skipped" if l2_skipped else ("failed" if l2_miss else "passed"),
+        "l3": "skipped" if l3_skipped else ("passed" if l3.get("passed") else "failed"),
+    }
+    parts = []
+    if l2_miss:
+        parts.append(
+            "column aggregates differ between the source and the destination in "
+            f"{', '.join(cols) or 'one or more columns'}"
+        )
+    if l2_skipped:
+        parts.append("the column-aggregate layer did not compare these rows")
+    if l3_skipped:
+        parts.append(
+            "the row checksum was not compared on the written keys, so a value swapped "
+            "between two written rows would not be seen"
+        )
     sentence = (
-        "Column aggregates differ between the source and the destination in "
-        f"{', '.join(cols) or 'one or more columns'}, but the source was re-read after "
-        "the write and this run holds no record of what it wrote, so a concurrent "
-        "source update cannot be told from a destination loss. Per-cell fidelity is "
-        "not proven for these columns."
+        "Per-cell fidelity is not proven for the keys this run wrote: "
+        + "; ".join(parts)
+        + ". The source was re-read after the write and this run holds no usable record "
+        f"of what it wrote ({reason}), so a concurrent source update cannot be told from "
+        "a destination loss."
     )
-    out["warnings"] = [*list(out.get("warnings") or []), sentence]
-    base = str(out.get("message") or "").rstrip()
-    if sentence not in base:
-        out["message"] = f"{base} {sentence}".strip() if base else sentence
-    return out
+    return _with_sentence(out, sentence)
