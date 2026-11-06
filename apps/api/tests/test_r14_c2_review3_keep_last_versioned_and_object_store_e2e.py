@@ -11,6 +11,8 @@
    the column's width.
 8. An approved widen is the Gate-8 carrier; a scale-only overflow is
    quarantined as rounding.
+g3f. Population fit asks the same verdict: a column the probe refuses is never
+   forecast as "held out", and a mode holdout is not called a signed contract.
 """
 
 from __future__ import annotations
@@ -323,7 +325,9 @@ def _gates_for(client, mode, lines):
         body = resp.json()
         job_id = body.get("job_id") or (body.get("detail") or {}).get("job_id")
         job = get_mongodb_service().get_job(job_id) or {}
-        gates = {g.get("id"): g.get("status") for g in (job.get("preflight") or {}).get("gates") or []}
+        rows = (job.get("preflight") or {}).get("gates") or []
+        gates = {g.get("id"): g.get("status") for g in rows}
+        _gates_for.messages = {g.get("id"): str(g.get("message") or "") for g in rows}
         landed = h.query("postgresql", f'SELECT count(*) FROM public."{table}"')[0][0]  # nosec B608
         return resp, gates, landed
     finally:
@@ -337,6 +341,32 @@ def test_one_castable_of_forty_into_integer_every_gate_blocks(client, mode):
     for gate in ("g3_schema_contract", "g5_dry_run", "g6_target_ddl", "g8_reconciliation"):
         assert gates.get(gate) == "block", (mode, gate, gates)
     assert landed == 0
+
+
+@pytest.mark.parametrize("mode", ["lenient", "balanced"])
+def test_g3f_never_calls_a_refused_column_held_out(client, mode):
+    from services.validation_mode_contract import CAST_SHARE_RULE
+
+    resp, gates, landed = _gates_for(client, mode, ["k,d", "a,5"] + [f"b{i},word{i}" for i in range(39)])
+    g3f = _gates_for.messages["g3f_population_fit"]
+    assert resp.status_code == 422 and landed == 0, resp.text[:600]
+    assert gates["g3f_population_fit"] == "block", (mode, g3f)
+    assert "held out" not in g3f.replace("are held out per row only while", ""), g3f
+    assert "fail the declared transform" in g3f, g3f
+    if mode == "lenient":
+        assert CAST_SHARE_RULE in g3f, g3f
+    else:
+        assert "validation mode 'balanced' does not hold these refusals out" in g3f, g3f
+
+
+def test_g3f_names_the_mode_holdout_not_a_signed_contract(client):
+    lines = ["k,d"] + [f"a{i},{i}" for i in range(39)] + ["b,word"]
+    resp, gates, _landed = _gates_for(client, "lenient", lines)
+    g3f = _gates_for.messages["g3f_population_fit"]
+    assert resp.status_code == 200, resp.text[:600]
+    assert gates["g3f_population_fit"] == "warn", g3f
+    assert "1 row(s) will be held out in quarantine on write" in g3f, g3f
+    assert "holds them out per row (cast_failure)" in g3f and "signed" not in g3f, g3f
 
 
 def test_lenient_mostly_castable_integer_column_loads_and_quarantines(client):
