@@ -206,9 +206,10 @@ def _store_down(exc: BaseException) -> HTTPException:
     """503: the shared settings store is configured but unreachable (fails closed)."""
     return HTTPException(
         status_code=503,
+        # No driver text: pymongo errors name hosts and the replica topology.
         detail=(
             "The deployment settings store is unreachable; nothing was read from or "
-            f"written to a node-local copy. Try again shortly. ({exc})"
+            "written to a node-local copy. Try again shortly."
         ),
     )
 
@@ -276,17 +277,40 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             actor=actor,
             retention_auto_purge=body.retention_auto_purge,
         )
-        if body.cdc_orphan_auto_drop is not None:
-            from services.cdc_capture_inventory import set_auto_drop
-
-            # Shared control-plane setting; the store returns the value it
-            # replaced atomically, so the audit's from/to holds across replicas.
-            toggle = set_auto_drop(bool(body.cdc_orphan_auto_drop), actor=actor)
-            updated = {**updated, "cdc_orphan_auto_drop": toggle[1]["enabled"]}
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except _STORE_DOWN as exc:
         raise _store_down(exc) from exc
+    # The general settings are written: audit them before anything else can
+    # fail, so a 503 on the auto-drop switch never leaves a change unaudited.
+    _audit_settings_update(request, before, updated)
+    if body.cdc_orphan_auto_drop is not None:
+        from services.cdc_capture_inventory import set_auto_drop
+
+        try:
+            # Shared control-plane setting; the store returns the value it
+            # replaced atomically, so the audit's from/to holds across replicas.
+            toggle = set_auto_drop(bool(body.cdc_orphan_auto_drop), actor=actor)
+        except _STORE_DOWN as exc:
+            raise _store_down(exc) from exc
+        updated = {**updated, "cdc_orphan_auto_drop": toggle[1]["enabled"]}
+        if toggle[0]["enabled"] != toggle[1]["enabled"]:
+            # A destructive automation on client databases: its own audit entry.
+            record_admin_change(
+                request,
+                "cdc.capture.auto_drop.changed",
+                target="cdc_orphan_auto_drop",
+                details={
+                    "from": toggle[0]["enabled"],
+                    "to": toggle[1]["enabled"],
+                    "enabled_at": toggle[1].get("enabled_at"),
+                    "actor": actor,
+                },
+            )
+    return updated
+
+
+def _audit_settings_update(request: Request, before: dict[str, Any], updated: dict[str, Any]) -> None:
     record_admin_change(
         request,
         "workspace.settings.update",
@@ -307,20 +331,6 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             },
         },
     )
-    if toggle is not None and toggle[0]["enabled"] != toggle[1]["enabled"]:
-        # A destructive automation on client databases: its own audit entry.
-        record_admin_change(
-            request,
-            "cdc.capture.auto_drop.changed",
-            target="cdc_orphan_auto_drop",
-            details={
-                "from": toggle[0]["enabled"],
-                "to": toggle[1]["enabled"],
-                "enabled_at": toggle[1].get("enabled_at"),
-                "actor": actor,
-            },
-        )
-    return updated
 
 
 @router.get("/sso")

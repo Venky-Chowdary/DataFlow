@@ -52,22 +52,63 @@ def _explicit_mongo_uri() -> bool:
     return False
 
 
+def _seen_marker():
+    from services.platform_config import data_dir
+
+    return data_dir() / ".control_plane_seen"
+
+
+def _remember_seen() -> None:
+    try:
+        marker = _seen_marker()
+        if not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("1", encoding="utf-8")
+    except OSError:
+        _logger.debug("control-plane marker not written", exc_info=True)
+
+
 def control_plane_configured() -> bool:
     """A real (non-memory) control-plane store is part of this deployment.
 
-    True when the Mongo service is connected, or a Mongo URI is configured
-    even if the client is down right now. A dev/single-node deployment with
-    neither (or the in-memory job store) keeps its node-local files.
+    True when the Mongo service is connected, a Mongo URI is configured, or
+    this node has reached the shared store before (a marker in its data
+    directory) — so a later boot-time outage fails closed instead of reading
+    the node's files (third review). A dev / single-node deployment that never
+    had one (or the in-memory job store) keeps its node-local files.
     """
     try:
         from services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
     except Exception:  # noqa: BLE001
-        return _explicit_mongo_uri()
+        return _explicit_mongo_uri() or _seen_marker().exists()
     if not mongo or type(mongo).__name__ == "MemoryMongoDBService":
         return False
-    return bool(getattr(mongo, "client", None)) or _explicit_mongo_uri()
+    return bool(getattr(mongo, "client", None)) or _explicit_mongo_uri() or _seen_marker().exists()
+
+
+_last_reconnect = [0.0]
+RECONNECT_INTERVAL_S = 30.0
+
+
+def _try_reconnect() -> None:
+    """A client that never connected (boot-time outage) retries, at most every 30 s."""
+    import time
+
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        mongo = get_mongodb_service()
+        if type(mongo).__name__ == "MemoryMongoDBService" or getattr(mongo, "client", None):
+            return
+        now = time.monotonic()
+        if now - _last_reconnect[0] < RECONNECT_INTERVAL_S:
+            return
+        _last_reconnect[0] = now
+        mongo.connect()
+    except Exception:  # noqa: BLE001 - still down: the caller fails closed
+        _logger.debug("control-plane reconnect failed", exc_info=True)
 
 
 def shared_collection(name: str) -> Any | None:
@@ -77,10 +118,12 @@ def shared_collection(name: str) -> Any | None:
     client is down — the caller must fail closed, not read a local file.
     """
     coll = mongo_collection(name)
+    if coll is None:
+        _try_reconnect()
+        coll = mongo_collection(name)
     if coll is not None:
+        _remember_seen()
         return coll
     if control_plane_configured():
-        raise ControlPlaneUnavailable(
-            f"the control-plane database is configured but unreachable ({name})"
-        )
+        raise ControlPlaneUnavailable("the control-plane database is configured but unreachable")
     return None

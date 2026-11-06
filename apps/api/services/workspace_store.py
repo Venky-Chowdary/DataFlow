@@ -188,7 +188,11 @@ _SEED_MAX = ("retention_days",)
 
 
 def _merge_sources(sources: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per field, the newest file wins — except what can delete data.
+    """The newest whole file wins — except what can delete data.
+
+    Files carry one ``updated_at`` for the whole document, not per field, so
+    the files are applied oldest to newest and a field takes the value of the
+    newest file that carries it ("newest file", not "newest per field").
 
     A destructive toggle (``SAFETY_FLAGS``) always seeds off: a replica's
     stale file must never arm a deployment-wide purge (second review); a
@@ -215,7 +219,16 @@ def _shared_effective(coll: Any, written: dict[str, Any] | None = None) -> dict[
     merged = dict(_DEFAULTS)
     merged.update(_merge_sources(list(coll.database[_SOURCES].find({}))))
     doc = written if written is not None else (coll.find_one({"_id": _DOC_ID}) or {})
-    merged.update(_known({k: v for k, v in doc.items() if k != "_id"}))
+    values = _known({k: v for k, v in doc.items() if k != "_id"})
+    if doc.get("_migrated_from"):
+        # A document c32b61c4c seeded from the first replica's file: its
+        # destructive toggles are that file's, not an admin's — only a flag a
+        # platform admin wrote through the store since (``_admin_set``) counts.
+        admin_set = set(doc.get("_admin_set") or [])
+        for flag in SAFETY_FLAGS:
+            if flag not in admin_set:
+                values.pop(flag, None)
+    merged.update(values)
     return merged
 
 
@@ -228,7 +241,10 @@ def _load_raw() -> dict[str, Any]:
         except SettingsUnavailable:
             raise
         except Exception as exc:  # pymongo errors: the store is configured but failing
-            raise SettingsUnavailable(f"shared settings store unreadable: {exc}") from exc
+            import logging
+
+            logging.getLogger(__name__).warning("shared settings store unreadable: %s", exc)
+            raise SettingsUnavailable("shared settings store unreadable") from exc
     merged = dict(_DEFAULTS)
     raw = _read_file()
     if raw is not None:
@@ -249,12 +265,19 @@ def _write(patch: dict[str, Any]) -> dict[str, Any]:
             # This node's file joins the merge before anything is written, so a
             # first write never leaves its values out.
             _contribute_local_file(coll)
-            before_doc = coll.find_one_and_update({"_id": _DOC_ID}, {"$set": patch}, upsert=True) or {}
+            update: dict[str, Any] = {"$set": patch}
+            flags = [f for f in SAFETY_FLAGS if f in patch]
+            if flags:
+                update["$addToSet"] = {"_admin_set": {"$each": flags}}
+            before_doc = coll.find_one_and_update({"_id": _DOC_ID}, update, upsert=True) or {}
             return _shared_effective(coll, written=before_doc)
         except SettingsUnavailable:
             raise
         except Exception as exc:
-            raise SettingsUnavailable(f"shared settings store unwritable: {exc}") from exc
+            import logging
+
+            logging.getLogger(__name__).warning("shared settings store unwritable: %s", exc)
+            raise SettingsUnavailable("shared settings store unwritable") from exc
     data = _load_raw()
     before = dict(data)
     data.update(patch)

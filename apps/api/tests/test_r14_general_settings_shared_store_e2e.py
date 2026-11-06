@@ -169,7 +169,8 @@ def test_a_down_store_fails_closed_never_a_stale_file(replicas, monkeypatch, ent
     replicas.use("b")
     stale = {"retention_auto_purge": True, "retention_days": 1}
     replicas.file("b").write_text(json.dumps(stale), encoding="utf-8")
-    replicas.svcs["b"].client = None  # the connection is down
+    replicas.svcs["b"].client = None  # the connection is down, and stays down
+    monkeypatch.setattr(replicas.svcs["b"], "connect", lambda: False)
     with pytest.raises(SettingsUnavailable):
         workspace_store.get_workspace_settings()
     assert auto_purge_enabled() is False
@@ -229,3 +230,69 @@ def test_on_through_one_replica_off_through_the_other_is_audited_and_the_beat_fo
     )[seen:]
     changes = [u["details"]["changes"].get("retention_auto_purge") for u in updates]
     assert changes == [{"from": False, "to": True}, {"from": True, "to": False}], changes
+
+
+# ── Third review (6b131dd08) ───────────────────────────────────────────────
+
+
+def test_a_boot_time_outage_fails_closed_and_the_client_reconnects(replicas, monkeypatch):
+    """A client that never connected and no URI env: the file was used. Now a
+    node that reached the store before fails closed, and the client retries."""
+    import services.control_plane_store as cps
+    from services.workspace_store import SettingsUnavailable, get_workspace_settings, update_workspace_settings
+
+    for key in ("MONGODB_URI", "MONGO_URL", "MONGO_PRIVATE_URL", "MONGODB_URL", "MONGO_PUBLIC_URL"):
+        monkeypatch.delenv(key, raising=False)
+    replicas.use("b")
+    update_workspace_settings(org_name="Shared", actor="a@example.com")  # b reached the store
+    replicas.file("b").write_text(json.dumps({"org_name": "Stale file", "retention_auto_purge": True}),
+                                  encoding="utf-8")
+    replicas.svcs["b"].client = None  # the next boot: the connect failed
+    monkeypatch.setattr(replicas.svcs["b"], "connect", lambda: False)
+    monkeypatch.setattr(cps, "_last_reconnect", [0.0])
+    with pytest.raises(SettingsUnavailable):
+        get_workspace_settings()
+    # The database comes back: the client reconnects on its own.
+    real = __import__("services.mongodb_service", fromlist=["MongoDBService"]).MongoDBService.connect
+    monkeypatch.setattr(replicas.svcs["b"], "connect", lambda: real(replicas.svcs["b"]))
+    monkeypatch.setattr(cps, "_last_reconnect", [0.0])
+    assert get_workspace_settings()["org_name"] == "Shared"
+
+
+def test_a_c32b61c4c_seed_never_keeps_the_first_files_purge_switch(replicas):
+    from services.workspace_store import get_workspace_settings, update_workspace_settings
+
+    replicas.use("a")
+    replicas.db["workspace_settings"].insert_one({
+        "_id": "general", "org_name": "Seeded", "retention_auto_purge": True, "retention_days": 1,
+        "_migrated_from": "/data/workspace.json", "_migrated_at": "2026-11-06T00:00:00+00:00",
+    })
+    seen = get_workspace_settings()
+    assert seen["org_name"] == "Seeded" and seen["retention_auto_purge"] is False
+    update_workspace_settings(retention_auto_purge=True, actor="admin@example.com")
+    assert get_workspace_settings()["retention_auto_purge"] is True
+
+
+def test_a_failed_auto_drop_step_still_audits_the_settings_written(ent, monkeypatch):
+    import services.cdc_capture_inventory as inv
+    from services.control_plane_store import ControlPlaneUnavailable
+
+    seen = ent.db["audit_events"].count_documents({"action": "workspace.settings.update"})
+
+    def down(*_a, **_k):
+        raise ControlPlaneUnavailable("down")
+
+    monkeypatch.setattr(inv, "set_auto_drop", down)
+    res = ent.admin.patch("/api/v1/workspace/settings",
+                          json={"org_name": "Audited Ünï", "cdc_orphan_auto_drop": True})
+    assert res.status_code == 503, res.text
+    assert "mongodb://" not in res.text and "localhost" not in res.text, res.text
+    updates = list(ent.db["audit_events"].find({"action": "workspace.settings.update"}))[seen:]
+    assert len(updates) == 1, updates
+    assert updates[0]["details"]["changes"]["org_name"]["to"] == "Audited Ünï"
+
+
+def test_health_reports_the_settings_store_not_the_file(ent):
+    from services.health_service import _workspace_settings_readable
+
+    assert _workspace_settings_readable(ent.tmp) is True  # shared store, no file on disk
