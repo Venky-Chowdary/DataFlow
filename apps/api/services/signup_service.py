@@ -66,6 +66,21 @@ _MAIL_LANE = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dw-mail")
 FORGOT_FLOOR_SEC = 0.25
 
 
+def drain_mail_lane(timeout: float = 10.0) -> bool:
+    """Wait until every delivery queued so far has run (tests, shutdown).
+
+    The lane has one worker, so a no-op queued now finishes only after every
+    earlier delivery. Returns False when that did not happen within
+    ``timeout``. Tests drain before resetting the console outbox, so a mail an
+    earlier test queued cannot land in the next test's outbox.
+    """
+    try:
+        _MAIL_LANE.submit(lambda: None).result(timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001 — shut down or timed out
+        return False
+
+
 def _deliver_later(fn) -> None:
     """Fire-and-forget mail delivery; the request path never awaits it."""
     try:

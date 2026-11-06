@@ -879,3 +879,25 @@ def _guard_no_test_writes_dev_data_dir():
             "data_dir() (DATAWRAP_DATA_DIR is tmp_path in tests). "
             f"changed/created: {changed[:20]}; removed: {removed[:20]}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_console_outbox():
+    """Every test starts with an empty console outbox and no mail in flight.
+
+    The signup mail lane delivers asynchronously; a verification or reset
+    mail an earlier test queued could land in the next test's
+    ``ConsoleEmailSender.OUTBOX`` and break its counts (CI runs files
+    together). Drain the lane, then clear the outbox — only when those modules
+    are already loaded, so unrelated tests import nothing.
+    """
+    import sys
+
+    signup = sys.modules.get("services.signup_service")
+    if signup is not None and hasattr(signup, "drain_mail_lane"):
+        signup.drain_mail_lane()
+    sender = sys.modules.get("services.email_sender")
+    if sender is not None:
+        sender.ConsoleEmailSender.OUTBOX.clear()
+    yield
+

@@ -120,10 +120,17 @@ def _forgot(c: TestClient, email: str = "ada@example.com"):
                         "form_token": form_token_mod.issue("reset")})
 
 
+def _reset_links(to: str | None = None) -> list:
+    """The reset-link mails in the outbox (optionally to one recipient)."""
+    return [m for m in ConsoleEmailSender.OUTBOX
+            if "reset-password#token=" in m.text and (to is None or m.to == to)]
+
+
 def _link_token() -> str:
-    m = re.search(r"reset-password#token=([A-Za-z0-9_\-]+)",
-                  ConsoleEmailSender.OUTBOX[-1].text)
-    assert m, ConsoleEmailSender.OUTBOX[-1].text
+    links = _reset_links()
+    assert links, [m.subject for m in ConsoleEmailSender.OUTBOX]
+    m = re.search(r"reset-password#token=([A-Za-z0-9_\-]+)", links[-1].text)
+    assert m, links[-1].text
     return m.group(1)
 
 
@@ -432,11 +439,15 @@ def test_delivery_exception_is_audited_and_rerequest_works(monkeypatch):
     r1 = _forgot(c)
     assert r1.status_code == 202  # the reply never reveals the failure
     assert any(e == "password.reset.send_failed" for e, _ in events), events
-    # Re-request works right away and a fresh link actually goes out.
-    before = len(ConsoleEmailSender.OUTBOX)
+    # Re-request works right away and a fresh link actually goes out. Count
+    # this account's reset links only — the outbox is shared with every other
+    # mail the lane delivers (verification codes, other tests' mail).
+    signup_service.drain_mail_lane()
+    before = len(_reset_links("ada@example.com"))
     r2 = _forgot(c)
     assert r2.status_code == 202
-    assert len(ConsoleEmailSender.OUTBOX) == before + 1
+    signup_service.drain_mail_lane()
+    assert len(_reset_links("ada@example.com")) == before + 1
     assert _link_token()
 
 
