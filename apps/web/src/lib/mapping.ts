@@ -85,6 +85,7 @@ export type MappingReviewKind =
   | "temporal_polarity"
   | "lossy"
   | "create_new"
+  | "rename"
   | "generic";
 
 export interface EditableMapping {
@@ -1083,6 +1084,7 @@ const REVIEW_KIND_SET: ReadonlySet<string> = new Set([
   "temporal_polarity",
   "lossy",
   "create_new",
+  "rename",
   "generic",
 ]);
 
@@ -1152,6 +1154,14 @@ const REVIEW_KIND_META: Record<MappingReviewKind, Omit<MappingReviewKindMeta, "k
     detail: "This source will ADD a destination column. Confirm the name and type before Validate.",
     primaryLabel: "Review dest name",
     confirmLabel: "Approve",
+  },
+  rename: {
+    chip: "possible rename",
+    noun: "possible rename(s)",
+    detail:
+      "Proposed match, not a confirmed one: the old destination column is gone from the source and this new source name was only auto-matched onto it. Approve to accept the rename, or remap.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Approve rename",
   },
   generic: {
     chip: "review",
