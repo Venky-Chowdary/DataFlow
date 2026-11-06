@@ -3953,6 +3953,11 @@ def _canonicalize_number(value: Any) -> str | None:
                         pass
         if d.is_nan():
             return None
+        if d.is_finite() and d.is_zero():
+            # Zero has one canonical spelling. The float path already folded
+            # -0.0 to "0" while the text "-0.0" kept its sign, so a Mongo
+            # -0.0 (read as text) never matched SQL Server's 0.0 (D262).
+            d = d.copy_abs()
         from services.value_serializer import safe_decimal_text
 
         s = safe_decimal_text(_normalize_exact(d) if d.is_finite() else d)

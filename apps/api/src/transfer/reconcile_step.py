@@ -596,11 +596,15 @@ class _PinStore:
                 (lim,),
             )
         ]
+        # D262: a key the recipe's expected population holds is not "extra",
+        # even when this run's write did not consume it (a seed-inclusive
+        # window re-reads the cursor tie the previous run already landed).
         extra = [
             r[0]
             for r in self.db.execute(
                 "SELECT d.k FROM destk d LEFT JOIN pin p ON p.k = d.k "
-                "WHERE p.k IS NULL ORDER BY d.k LIMIT ?",
+                "LEFT JOIN exp e ON e.k = d.k "
+                "WHERE p.k IS NULL AND e.k IS NULL ORDER BY d.k LIMIT ?",
                 (lim,),
             )
         ]

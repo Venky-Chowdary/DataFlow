@@ -40,6 +40,7 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
     if cfg.src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
         return
     _pad_schemaless_absent_attrs(cfg, batch)
+    _absent_field_is_null_in_relational_dest(cfg, batch)
 
     with cfg._schema_absorb_lock:
         known = set(cfg.columns)
@@ -73,6 +74,34 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
         if new_headers:
             cfg.backfill_new_fields = True
             cfg.target_cols, _ = resolve_target_columns(cfg.mappings, cfg.column_types, preserve_case=True)
+
+
+def _absent_field_is_null_in_relational_dest(cfg, batch) -> None:
+    """A field a full document does not carry is NULL in a relational table (D262).
+
+    A batch read returns whole documents, so a field one of them lacks — never
+    set, or ``$unset`` since the last run — is known absent. The missing
+    sentinel ("left alone on update") kept the previous run's value in a SQL
+    destination: the source dropped ``note`` and the table still said
+    ``note 12``. A relational row has one spelling of absent, NULL. A CDC page
+    (partial change images) and a schemaless destination (which can omit the
+    field itself) keep the sentinel.
+    """
+    from services.db_type_utils import SCHEMALESS_DESTS
+    from services.sync_cursor import normalize_sync_mode
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
+    if normalize_sync_mode(str(cfg.effective_sync or ""), default="") == "cdc":
+        return
+    if str(cfg.dest_type or "").strip().lower() in SCHEMALESS_DESTS:
+        return
+    rows = batch.rows
+    if not rows or not all(isinstance(r, list) for r in rows):
+        return
+    for row in rows:
+        for i, cell in enumerate(row):
+            if cell == DF_MISSING_SENTINEL:
+                row[i] = SQL_NULL_SENTINEL
 
 
 def _pad_schemaless_absent_attrs(cfg, batch) -> None:
