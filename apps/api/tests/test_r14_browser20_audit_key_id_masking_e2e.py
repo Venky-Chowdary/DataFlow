@@ -204,6 +204,55 @@ def test_verify_pack_masks_a_key_actor_for_a_non_admin_reader(world):
     assert record is not None
     assert key["id"] not in masked.text
     assert record["actor"] == f"api_key:…{key['id'][-4:]}"
-    # The workspace admin still reads the full id (forensics).
-    full = world.owner.post("/api/v1/audit/verify-pack", json=pack)
+    # Whole only for a key manager of the RECORD's workspace (review 3): this
+    # anchor is filed outside any request, so it carries no workspace and only
+    # a platform admin reads the id whole.
+    full = world.root.post("/api/v1/audit/verify-pack", json=pack)
     assert full.json()["chain_record"]["actor"] == f"api_key:{key['id']}"
+    owner = world.owner.post("/api/v1/audit/verify-pack", json=pack).json()
+    assert owner["chain_record_withheld"] or key["id"] not in str(owner)
+
+
+def test_verify_pack_judges_by_the_records_workspace_not_the_readers_header(world):
+    """Review 3: A's admin posting a pack from B's key saw B's key id unmasked."""
+    from services import team_store
+    from services.signed_proof_pack import export_proof_pack_for_job
+
+    other = team_store.create_workspace(name="B", created_by="boss@b.test")
+    key_b = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+    from services.workspace_filter import WorkspaceFilter, bound_workspace_filter
+
+    with bound_workspace_filter(WorkspaceFilter.only(other.id), stamp=other.id):
+        pack = export_proof_pack_for_job(
+            {"_id": "job-b-pack", "workspace_id": other.id, "reconciliation": {"passed": True}},
+            actor=f"api_key:{key_b}",
+        )
+    seen = world.owner.post("/api/v1/audit/verify-pack", json=pack)  # admin of A, header A
+    assert seen.status_code == 200, seen.text
+    assert key_b not in seen.text
+    body = seen.json()
+    assert body["chain_record_found"] is True
+    if body["chain_record_withheld"]:
+        assert body["chain_record"] is None
+    else:
+        assert body["chain_record"]["actor"] == "api_key:…cb6d"
+
+
+def test_key_store_unreadable_masks_every_uuid(monkeypatch):
+    from services import audit_actor_display
+
+    def broken(*, strict=False):
+        raise RuntimeError("key store down")
+
+    monkeypatch.setattr(audit_actor_display, "_key_names", broken)
+    job = "6ae69b70-1111-4111-8111-111111111111"
+    out = audit_actor_display.mask_key_ids([{"id": "e", "resource": f"/jobs/{job}"}])[0]
+    assert job not in out["resource"] and out["resource"].endswith("…1111")
+
+
+def test_prefixed_reference_after_an_underscore_is_masked():
+    from services.audit_actor_display import mask_key_ids
+
+    kid = "276d4753-0000-4000-8000-000000000001"
+    out = mask_key_ids([{"id": "e", "details": {"h": f"x_api_key:{kid}"}}])[0]
+    assert kid not in str(out)

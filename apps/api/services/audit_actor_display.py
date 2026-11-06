@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _MACHINE = {"api_key": "key", "service_account": "service account", "scim": "SCIM token"}
 
 
-def _key_names() -> dict[str, str]:
+def _key_names(*, strict: bool = False) -> dict[str, str]:
     try:
         from services.integrations_store import load_api_key_records
 
@@ -27,6 +27,8 @@ def _key_names() -> dict[str, str]:
             if r.get("id")
         }
     except Exception as exc:  # noqa: BLE001 — display only; the raw actor stays
+        if strict:
+            raise
         logger.debug("API key names unavailable for audit display: %s", exc)
         return {}
 
@@ -101,8 +103,18 @@ def reader_sees_key_ids(request: Any, workspace_id: str) -> bool:
 
 
 _PREFIXED_ID = re.compile(
-    r"(?i)\b(api_key|service_account|scim_token|scim)([:/])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"(?i)(api_key|service_account|scim_token|scim)([:/])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
+
+
+class _AllUuids(frozenset):
+    """Membership test that says yes to every UUID (fail-closed masking)."""
+
+    def __contains__(self, item: object) -> bool:
+        return True
+
+
+_ALL_UUIDS = _AllUuids()
 
 
 def _mask_value(value: Any, ids: set[str]) -> Any:
@@ -137,9 +149,20 @@ class KeyIdMasker:
     """
 
     def __init__(self) -> None:
-        self._ids = {i.lower() for i in _key_names() if i}
+        # Fail closed: when the key store cannot be read, which UUIDs are key
+        # ids is unknown, so every UUID is masked.
+        self.mask_all = False
+        try:
+            self._ids = {i.lower() for i in _key_names(strict=True) if i}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("API key store unreadable; masking every id in this audit read: %s", exc)
+            self._ids, self.mask_all = set(), True
 
     def __call__(self, event: dict[str, Any]) -> dict[str, Any]:
+        if self.mask_all:
+            return {
+                k: (v if k in _EXACT_FIELDS else _mask_value(v, _ALL_UUIDS)) for k, v in event.items()
+            }
         ids = self._ids
         ident = _machine_identity(event)
         if ident is not None and ident[1].lower() not in ids:

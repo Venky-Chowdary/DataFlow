@@ -569,12 +569,21 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)
     chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    chain_record_withheld = False
     if chain_record:
-        # The record's actor is an API-key id when a key exported the pack:
-        # the same reader view as /audit/events (S8, second review).
-        masker = _reader_masker(request, tenant_scope(request).header_workspace_id)
-        if masker is not None:
-            chain_record = masker(dict(chain_record))
+        # find_anchor searches the whole chain, so the record may belong to a
+        # workspace this reader cannot see: then only "found" is reported.
+        # Whether its key id shows whole is decided by the RECORD's workspace,
+        # not the reader's header (a workspace admin of A must not read B's
+        # key ids); a record with no workspace is whole for a platform admin only.
+        from services.audit_actor_display import KeyIdMasker, reader_sees_key_ids
+
+        record_ws = str(chain_record.get("workspace_id") or "")
+        scope = tenant_scope(request)
+        if record_ws and not scope.allows(record_ws):
+            chain_record, chain_record_withheld = {"id": chain_record.get("id")}, True
+        elif not reader_sees_key_ids(request, record_ws):
+            chain_record = KeyIdMasker()(dict(chain_record))
     record_security_event(
         "audit.verify_pack.read", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
@@ -585,7 +594,9 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
         "evidence_sha256": digest,
         "chain_anchor": anchor or None,
         "chain_record_found": bool(chain_record),
+        "chain_record_withheld": chain_record_withheld,
         "chain_record": (
+            None if chain_record_withheld else
             {
                 "id": chain_record.get("id"),
                 "time": chain_record.get("time"),
