@@ -418,7 +418,7 @@ def ambiguous_grouping_reason(value: Any) -> str:
     as_thousands = text.replace(sep, "")
     return (
         f"Invalid decimal: '{text}' is ambiguous: one 3-digit group after '{sep}' reads as "
-        f"{as_fraction} or {as_thousands}. DataFlow never guesses a number "
+        f"{as_fraction} or {as_thousands}. Datawrap never guesses a number "
         "locale — set number locale in Destination → Advanced, or fix the "
         "source value."
     )
