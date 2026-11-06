@@ -247,3 +247,22 @@ def test_a_saved_schedule_that_cannot_honour_keep_last_parks_once(tmp_path, monk
         assert "keep_last" in parked[0] and "append" in parked[0]
     finally:
         h.drop_table("postgresql", table)
+
+
+# ── 5. only a value-decided refusal drops sample rows by value ──────────────
+def test_held_out_sample_filter_drops_by_value_only_for_cast_refusals():
+    from src.transfer.reconcile_step import _without_held_out_cells
+
+    sample = [{"k": "A", "v": "1"}, {"k": "B", "v": "abc"}, {"k": "C", "v": "2"}]
+    unique = [{"row": 4, "column": "k", "value": "A",
+               "reason": 'duplicate key value violates unique constraint "t_k_key"'}]
+    # The landed first copy of A stays in the compare and the written-ids scope.
+    assert _without_held_out_cells(sample, unique) == sample
+    cast = [{"row": 2, "column": "v", "value": "abc", "reason": "Invalid decimal: 'abc'"}]
+    assert _without_held_out_cells(sample, cast) == [sample[0], sample[2]]
+    width = [{"row": 3, "column": "v", "value": "2",
+              "reason": "value too long for type character varying(0)"}]
+    assert _without_held_out_cells(sample, width) == [sample[0], sample[1]]
+    not_null = [{"row": 9, "column": "k", "value": "C",
+                 "reason": 'null value in column "k" violates not-null constraint'}]
+    assert _without_held_out_cells(sample, not_null) == sample

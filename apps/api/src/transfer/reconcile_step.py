@@ -5852,17 +5852,38 @@ def _dedupe_dest_winner_tuples(
             ]
 
 
+#: Refusals decided by the cell's value alone: every row holding that value in
+#: that column was refused the same way. A constraint rejection (UNIQUE, FK,
+#: CHECK, NOT NULL) is decided by the row and the table, not the value.
+_VALUE_DECIDED_REFUSALS = frozenset({
+    "TYPE_CAST_FAILURE", "INVALID_NUMERIC", "INVALID_TIMESTAMP", "INVALID_BOOLEAN",
+    "FRACTIONAL_PRECISION_LOSS", "OVERFLOW", "UNDERFLOW", "LENGTH_OVERFLOW",
+})
+_ROW_DECIDED_MARKERS = ("unique", "duplicate", "constraint", "foreign key", "not-null", "not null")
+
+
+def _value_decided_refusal(reason: str) -> bool:
+    text = str(reason or "").lower()
+    if any(marker in text for marker in _ROW_DECIDED_MARKERS):
+        return False
+    from services.decision_kernel.findings import classify_transform_failure
+
+    return classify_transform_failure(str(reason or "")).value in _VALUE_DECIDED_REFUSALS
+
+
 def _without_held_out_cells(
     sample_records: list[dict[str, Any]],
     rejected: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Drop sample rows carrying a cell the writer refused.
+    """Drop sample rows carrying a cell the writer's CAST refused.
 
     A row held out in quarantine never landed, so keying the read-back on it
     asked a NUMERIC column for ``'abc'`` and failed Gate-8 after an overwrite
-    had replaced the table (QA C2-neighbour review). The writer's cast is a
-    function of the cell, so every sample row with that column value was
-    refused too.
+    had replaced the table. Only a value-decided refusal (a cast, a width or
+    range overflow) may drop by (column, value): every row with that value was
+    refused. A UNIQUE / FK / CHECK rejection is about one row — dropping by
+    value took the landed first copy of a key out of the compare and of the
+    written-ids scope (QA C2 review 3), so those never drop here.
     """
     refused: set[tuple[str, str]] = set()
     for detail in rejected:
@@ -5870,6 +5891,8 @@ def _without_held_out_cells(
             continue
         value = detail.get("value")
         if value is None or isinstance(value, (dict, list)):
+            continue
+        if not _value_decided_refusal(str(detail.get("reason") or detail.get("failure_reason") or "")):
             continue
         refused.add((str(detail["column"]), str(value)))
     if not refused or not sample_records:
