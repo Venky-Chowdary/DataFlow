@@ -170,10 +170,11 @@ def test_run_mapping_pipeline_varchar_date_samples_widen_physical():
         use_llm=False,
     )
     row = result["mappings"][0]
-    assert row.get("transform") == "datetime", row
+    # Clock-less dates are a calendar day: DATE, not DATETIME(6) (D291). The
+    # typed stamp must still survive the create-new re-stamp (never TEXT).
+    assert row.get("transform") == "date", row
     tgt = str(row.get("target_type") or "")
-    assert "DATETIME" in tgt.upper(), row
-    assert tgt.upper() != "DATETIME"
+    assert tgt.upper() == "DATE", row
     assert tgt.upper() != "TEXT"
 
 def test_mysql_time6_create_new_not_bare_time():
