@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -558,6 +559,28 @@ def widen_refusal_message(
 
 class WidenNotSupported(RuntimeError):
     """Engine refused an in-place column conversion — fail closed, never guess."""
+
+
+#: Attempts a widen makes when another session holds the table's lock.
+WIDEN_LOCK_ATTEMPTS = 3
+
+
+def _is_lock_wait_timeout(exc: Exception) -> bool:
+    """MySQL 1205 "Lock wait timeout exceeded", PostgreSQL "canceling statement due to lock timeout"."""
+    err = str(exc).lower()
+    return "lock wait timeout" in err or "lock timeout" in err or "(1205" in err
+
+
+def raise_widen_lock_timeout(
+    table_name: str, columns: str, exc: Exception, attempts: int = WIDEN_LOCK_ATTEMPTS
+) -> None:
+    """Refuse a widen another session's lock kept from running — never load against the narrow column."""
+    tries = f"through {attempts} attempts" if attempts > 1 else "past the lock wait"
+    raise WidenNotSupported(
+        f"Could not widen {columns} on {table_name}: another session held a lock on the "
+        f"table {tries} ({exc}). The widen was not applied and no rows were written; "
+        "re-run once the lock is released."
+    ) from exc
 
 
 def raise_widen_refusal(
@@ -1210,11 +1233,15 @@ def widen_existing_columns_native(
             )
         except Exception as exc:
             err = str(exc).lower()
-            # Ignore "already correct width" / concurrent-alter / lock-timeout
-            # races and harmless syntax issues.
+            # A lock timeout aborts a PostgreSQL transaction, so it is refused
+            # (never skipped: the load would run against the narrow column).
+            if _is_lock_wait_timeout(exc):
+                raise_widen_lock_timeout(table_name, col, exc, attempts=1)
+            # Ignore "already correct width" / concurrent-alter races and
+            # harmless syntax issues.
             if any(
                 phrase in err
-                for phrase in ("already", "cannot alter", "not supported", "lock timeout")
+                for phrase in ("already", "cannot alter", "not supported")
             ):
                 logger.debug(
                     "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
@@ -1242,19 +1269,31 @@ def _execute_mysql_modifies(
     first = modifies[0][0]
     head = first[: first.index(" MODIFY COLUMN ")]
     ddl = head + " " + ", ".join(m[0][m[0].index(" MODIFY COLUMN ") + 1:] for m in modifies)
-    try:
-        cursor.execute(ddl)
-    except Exception as exc:
-        err = str(exc).lower()
-        if any(phrase in err for phrase in ("already", "not supported", "lock timeout")):
-            logger.debug("Widen skipped for %s: %s", table_name, exc, exc_info=exc)
-            return []
-        logger.warning("Widen failed for %s: %s (DDL: %s)", table_name, exc, ddl, exc_info=exc)
-        col = ", ".join(m[1] for m in modifies)
-        raise_widen_refusal(
-            col, ", ".join(m[2] for m in modifies), ", ".join(m[3] for m in modifies), exc
-        )
-        raise
+    cols = ", ".join(m[1] for m in modifies)
+    for attempt in range(1, WIDEN_LOCK_ATTEMPTS + 1):
+        try:
+            cursor.execute(ddl)
+            break
+        except Exception as exc:
+            if _is_lock_wait_timeout(exc):
+                # A lock someone else holds can clear; a failed MySQL ALTER
+                # changes nothing, so it is safe to ask again - a bounded
+                # number of times, then refuse. Skipping the widen loaded the
+                # run against the narrow columns it had been approved to widen.
+                if attempt < WIDEN_LOCK_ATTEMPTS:
+                    logger.info("Widen of %s.%s waited on a lock (attempt %d): %s",
+                                table_name, cols, attempt, exc)
+                    time.sleep(min(2 * attempt, 5))
+                    continue
+                raise_widen_lock_timeout(table_name, cols, exc)
+            if "already" in str(exc).lower():
+                logger.debug("Widen skipped for %s: %s", table_name, exc, exc_info=exc)
+                return []
+            logger.warning("Widen failed for %s: %s (DDL: %s)", table_name, exc, ddl, exc_info=exc)
+            raise_widen_refusal(
+                cols, ", ".join(m[2] for m in modifies), ", ".join(m[3] for m in modifies), exc
+            )
+            raise
     for _ddl, col, old, new in modifies:
         logger.debug("Widened %s.%s from %s to %s", table_name, col, old, new)
     return [ddl]
