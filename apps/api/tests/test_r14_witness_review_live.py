@@ -193,9 +193,12 @@ def test_should_fix4_an_in_flight_witness_is_never_evicted(world, monkeypatch):
     fake, conn, src, dst = world
     _foreign_row(conn, dst)
     assert _run(fake, src, dst).success
+    from contextlib import ExitStack
+
     planted = [f"r14inflight{i}" for i in range(kww._MAX_JOBS)]
-    try:
+    with ExitStack() as in_flight:  # other jobs, still running
         for jid in planted:
+            in_flight.enter_context(kww.keyed_write_witness_scope(jid))
             assert kww.begin_keyed_write_witness(
                 job_id=jid, key_columns=["id"], sync_mode="upsert",
                 inline_fingerprints_used=False, resumed=False,
@@ -207,9 +210,7 @@ def test_should_fix4_an_in_flight_witness_is_never_evicted(world, monkeypatch):
         assert (report.get("value_discrepancy_unattributed") or {}).get("reason") == (
             "witness_capacity_in_use_by_other_jobs"
         )
-    finally:
-        for jid in planted:
-            kww.take_keyed_write_witness(jid)
+    assert not set(planted) & set(kww.held_witness_job_ids())
 
 
 def test_should_fix5_an_unwitnessed_scoped_reread_is_never_silently_green(world, monkeypatch):

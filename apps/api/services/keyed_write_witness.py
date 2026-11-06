@@ -35,9 +35,10 @@ time, per key:
   source count equals the witnessed rows (the key was not in the write-time
   population). L1 and the census still grade the counts.
 
-The witness lives in this process only, keyed by job id. It is released when
-the job ends (``keyed_write_witness_scope`` in ``execute_tracked``) whatever the
-outcome, and when a resumed attempt declines to start one. An in-flight
+The witness lives in this process only, keyed by job id, and only a job inside
+``keyed_write_witness_scope`` (``execute_tracked``) may register one. It is
+released when that job ends, whatever the outcome, and when a resumed attempt
+declines to start one. An in-flight
 witness is never evicted: past ``_MAX_JOBS`` live witnesses a new run does not
 start one and says why.
 """
@@ -60,6 +61,9 @@ _SAMPLE = 20
 _MAX_JOBS = 4
 _LOCK = threading.Lock()
 _REGISTRY: dict[str, "KeyedWriteWitness"] = {}
+#: Jobs inside ``keyed_write_witness_scope``: the only ones that may register
+#: a witness, because only their scope guarantees its release.
+_ACTIVE_JOBS: set[str] = set()
 
 KeyCells = tuple[str, ...]
 
@@ -189,6 +193,9 @@ def begin_keyed_write_witness(
     witness: KeyedWriteWitness | None = None
     with _LOCK:
         _REGISTRY.pop(jid, None)
+        if not reason and jid not in _ACTIVE_JOBS:
+            # A caller outside execute_tracked: nothing would release it.
+            reason = "outside_a_tracked_job"
         if not reason and len(_REGISTRY) >= _MAX_JOBS:
             reason = "witness_capacity_in_use_by_other_jobs"
         if not reason:
@@ -219,11 +226,21 @@ def held_witness_job_ids() -> list[str]:
 @contextmanager
 def keyed_write_witness_scope(job_id: Any) -> Iterator[None]:
     """Job scope: whatever the outcome (completed, failed, cancelled, raised),
-    the job's witness leaves memory when the job ends."""
+    the job's witness leaves memory when the job ends. Only a job inside this
+    scope may register one, so the registry never holds an unreleasable entry
+    and the capacity limit counts live jobs only."""
+    jid = str(job_id or "")
+    with _LOCK:
+        nested = jid in _ACTIVE_JOBS
+        if jid:
+            _ACTIVE_JOBS.add(jid)
     try:
         yield
     finally:
-        take_keyed_write_witness(job_id)
+        if not nested:
+            with _LOCK:
+                _ACTIVE_JOBS.discard(jid)
+                _REGISTRY.pop(jid, None)
 
 
 def _not_attributed(reason: str, source_rows, target_rows):

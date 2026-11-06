@@ -371,12 +371,25 @@ def test_no_witness_outlives_its_job(world, monkeypatch, outcome):
 def test_the_job_scope_releases_the_witness_when_the_body_raises():
     import services.keyed_write_witness as kww
 
-    witness = kww.begin_keyed_write_witness(
-        job_id="scope-raise", key_columns=["id"], sync_mode="upsert",
-        inline_fingerprints_used=False, resumed=False,
-    )
-    assert witness is not None and "scope-raise" in kww.held_witness_job_ids()
     with pytest.raises(KeyboardInterrupt):
         with kww.keyed_write_witness_scope("scope-raise"):
+            witness = kww.begin_keyed_write_witness(
+                job_id="scope-raise", key_columns=["id"], sync_mode="upsert",
+                inline_fingerprints_used=False, resumed=False,
+            )
+            assert witness is not None and "scope-raise" in kww.held_witness_job_ids()
             raise KeyboardInterrupt
     assert "scope-raise" not in kww.held_witness_job_ids()
+
+
+def test_no_witness_is_registered_outside_a_tracked_job():
+    """Nothing would release it: a direct stream call must not fill the registry."""
+    import services.keyed_write_witness as kww
+
+    summary: dict = {}
+    assert kww.begin_keyed_write_witness(
+        job_id="no-scope", key_columns=["id"], sync_mode="upsert",
+        inline_fingerprints_used=False, resumed=False, summary=summary,
+    ) is None
+    assert summary["keyed_write_witness"]["reason"] == "outside_a_tracked_job"
+    assert "no-scope" not in kww.held_witness_job_ids()
