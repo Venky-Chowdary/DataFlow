@@ -491,6 +491,9 @@ class MySqlChangeStreamCdc:
             return False
 
     def _binlog_connection_settings(self) -> dict[str, Any]:
+        return self._binlog_dial()[0]
+
+    def _binlog_dial(self) -> tuple[dict[str, Any], Any]:
         """Dial settings for the binlog reader, under the one MySQL TLS plan.
 
         The binlog carries row data, so it gets the same TLS contract as every
@@ -515,13 +518,20 @@ class MySqlChangeStreamCdc:
 
         plan = mysql_tls_plan(ssl=bool(self.cfg.get("ssl")), connection_string=dsn,
                               host=base["host"], options=connection_options(self.cfg))
-        return resolved_kwargs_for_external_dial(base, plan, host=base["host"])
+        return resolved_kwargs_for_external_dial(base, plan, host=base["host"]), (plan, base["host"])
 
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:
         # Unique server_id per connector/table so multi-stream CDC does not collide.
         server_id = self._mysql_server_id()
+        from connectors.mysql_tls import checked_external_connect
+
+        settings, (plan, host) = self._binlog_dial()
         kwargs: dict[str, Any] = {
-            "connection_settings": self._binlog_connection_settings(),
+            "connection_settings": settings,
+            # The reader dials its control and stream connections itself; each
+            # one is checked like dial_pymysql checks ours (REQUIRED / VERIFY_*
+            # never streams row data in plaintext).
+            "pymysql_wrapper": checked_external_connect(plan, host),
             "server_id": server_id,
             "resume_stream": True,
             "blocking": blocking,

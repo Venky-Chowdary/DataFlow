@@ -280,6 +280,45 @@ def resolved_kwargs_for_external_dial(base: dict[str, Any], plan: TlsPlan, host:
     return connect_kwargs_for(base, plan)
 
 
+def server_reports_cipher(conn: Any) -> bool:
+    """True when the server says this session is encrypted (``Ssl_cipher`` set).
+
+    Works with tuple and dict cursors: the binlog reader's control connection
+    uses ``DictCursor``.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
+        row = cur.fetchone()
+    if not row:
+        return False
+    value = row.get("Value") if isinstance(row, dict) else row[1]
+    return bool(str(value or "").strip())
+
+
+def checked_external_connect(plan: TlsPlan, host: str = ""):
+    """A ``pymysql.connect`` for a library that dials by itself (the binlog reader).
+
+    It reads ``Ssl_cipher`` from the server on every connection it opens and
+    refuses a plaintext session when ``plan`` must encrypt. This is the check
+    ``dial_pymysql`` makes, applied to the reader's control and stream
+    connections.
+    """
+    import pymysql
+
+    def _connect(**kwargs: Any):
+        conn = pymysql.connect(**kwargs)
+        if plan.must_encrypt and not server_reports_cipher(conn):
+            conn.close()
+            raise TlsModeError(
+                f"TLS is required ({plan.mode}) but the binlog session to "
+                f"{host or 'the server'} is not encrypted; refusing to stream row data in "
+                "plaintext."
+            )
+        return conn
+
+    return _connect
+
+
 def session_encryption(conn: Any) -> dict[str, Any]:
     """The session's actual encryption, read from the server (``Ssl_cipher``)."""
     out: dict[str, Any] = {
