@@ -113,13 +113,13 @@ def test_oracle_read_back_does_not_fold_the_name_on_an_unreadable_catalog(monkey
 
     monkeypatch.setattr(
         soi, "resolve_object_identity",
-        lambda conn, table, schema=None, columns=None: soi.ObjectIdentity(schema, table, False, resolved=False),
+        lambda conn, table, schema=None, columns=None, **kw: soi.ObjectIdentity(schema, table, False, resolved=False),
     )
     with pytest.raises(OracleCatalogUnreadable):
         oracle_catalog_identity(object(), "USERS", "APP", ["ID"])
     monkeypatch.setattr(
         soi, "resolve_object_identity",
-        lambda conn, table, schema=None, columns=None: soi.ObjectIdentity(schema, table, False),
+        lambda conn, table, schema=None, columns=None, **kw: soi.ObjectIdentity(schema, table, False),
     )
     assert oracle_catalog_identity(object(), "USERS", "APP", ["ID"]) == (None, None, {})
 
@@ -159,3 +159,30 @@ def test_remaining_identity_consumers_use_the_tri_state():
         src = inspect.getsource(mod)
         assert "ident.exists" not in src, mod.__name__
         assert "known_present" in src, mod.__name__
+
+
+def test_oracle_identity_reads_a_proxy_connection_without_a_dialect():
+    """Shard 6 (c08b4636c): a connection that exposes no ``.dialect`` sniffed as
+    unknown, went to the generic inspector and a healthy catalog read as
+    unreadable. The Oracle caller now names the dialect; a real blip still raises."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from services.reconciliation_oracle import OracleCatalogUnreadable, oracle_catalog_identity
+
+    def _result(rows):
+        r = MagicMock()
+        r.fetchall.return_value = rows
+        return r
+
+    calls = iter([_result([("APP", "NOTES")]), _result([("ID",), ("NOTE",)])])
+    proxy = SimpleNamespace(execute=lambda *a, **k: next(calls))
+    assert oracle_catalog_identity(proxy, "notes", "APP", ["id", "note"]) == (
+        "APP", "NOTES", {"id": "ID", "note": "NOTE"},
+    )
+
+    def _blip(*a, **k):
+        raise ConnectionError("ORA-03113 end-of-file on communication channel")
+
+    with pytest.raises(OracleCatalogUnreadable):
+        oracle_catalog_identity(SimpleNamespace(execute=_blip), "NOTES", "APP", ["ID"])

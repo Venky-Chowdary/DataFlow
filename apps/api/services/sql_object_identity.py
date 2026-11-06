@@ -140,8 +140,15 @@ def resolve_object_identity(
     schema: str | None = None,
     *,
     columns: list[str] | None = None,
+    dialect: str = "",
 ) -> ObjectIdentity:
-    """Resolve ``schema.table`` (and optionally columns) against the catalog."""
+    """Resolve ``schema.table`` (and optionally columns) against the catalog.
+
+    ``dialect`` names the engine when the caller knows it. A connection that
+    does not expose ``.dialect`` (a pooled proxy, a driver-level connection)
+    otherwise sniffs as unknown and goes to the SQLAlchemy inspector, which
+    cannot inspect it — a readable catalog then read as "unreadable".
+    """
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import split_qualified_table
@@ -150,7 +157,7 @@ def resolve_object_identity(
     if not want_table:
         return ObjectIdentity(want_schema, want_table, False)
 
-    if _dialect_name(engine) == "oracle":
+    if (dialect or "").strip().lower() == "oracle" or _dialect_name(engine) == "oracle":
         return _oracle_identity(engine, want_table, want_schema, columns)
 
     try:

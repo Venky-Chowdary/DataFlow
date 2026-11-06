@@ -73,7 +73,10 @@ def oracle_catalog_identity(
     """
     from services.sql_object_identity import resolve_object_identity
 
-    ident = resolve_object_identity(conn, table_name, schema, columns=columns)
+    # The caller knows this is Oracle: ask Oracle's catalog directly rather
+    # than sniffing the connection (a proxy without ``.dialect`` fell to the
+    # generic inspector and read as unreadable on a healthy catalog).
+    ident = resolve_object_identity(conn, table_name, schema, columns=columns, dialect="oracle")
     if ident.catalog_unreadable:
         # "Could not ask" is not "not there": a read-back that folded the name
         # on a blip would verify the wrong object or report it missing (D266).
