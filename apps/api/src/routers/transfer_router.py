@@ -1018,7 +1018,9 @@ async def execute_transfer_json(
     # here, not a job that the sync-contract gate refuses (MySQL D13 review).
     from services.upsert_key_door import assert_upsert_key_resolvable
 
-    assert_upsert_key_resolvable(
+    # The key probe may read the source catalog (bounded 8 s): off the event loop.
+    await asyncio.to_thread(
+        assert_upsert_key_resolvable,
         sync_mode=body.sync_mode,
         stream_contracts=body.stream_contracts,
         destination_extra=dict(body.destination.extra or {}),

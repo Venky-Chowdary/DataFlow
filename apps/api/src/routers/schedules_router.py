@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
@@ -773,7 +775,8 @@ async def create_pipeline_schedule(
     for key in ("dest_schema", "dest_database"):
         payload[key] = str(payload.get(key) or "").strip()
     warnings: list[str] = []
-    _assert_upsert_key(payload)
+    # The key probe may read the source catalog (bounded 8 s): off the event loop.
+    await asyncio.to_thread(_assert_upsert_key, payload)
     try:
         payload.update(_acknowledgment_fields(request, payload))
         sched = create_schedule(
@@ -817,7 +820,7 @@ async def patch_pipeline_schedule(
     if not data:
         return ScheduleResponse.from_schedule(existing)
     if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
-        _assert_upsert_key({**existing.to_dict(), **data})
+        await asyncio.to_thread(_assert_upsert_key, {**existing.to_dict(), **data})
     warnings: list[str] = []
     try:
         if "compliance_acknowledged" in data or (
