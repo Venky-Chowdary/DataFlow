@@ -102,7 +102,10 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"card_?(?:number|no|num)\b",
         r"credit_?card",
         r"debit_?card",
-        r"\bpan\b",
+        r"payment_?card",
+        # ``_`` is a word character, so ``\bpan\b`` missed card_pan / pan_value.
+        r"(?:^|_|\b)pan(?:_|\b|$)",
+        r"(?:^|_)cc_?(?:number|no|num)\b",
         r"\bcvv\b",
         r"card_?holder",
         r"expir(?:y|ation)_?(?:date|month|year)?\b",
@@ -288,6 +291,45 @@ def _is_bare_digits(text: str) -> bool:
 #: Share of non-empty sampled values that must be phone-shaped before a column
 #: of bare digit runs counts as phones without a name hint (QA round 11).
 _BARE_PHONE_SHARE = 0.8
+
+#: Share of a numeric column's non-empty sampled values that must be card
+#: numbers (13-19 digits, Luhn-valid, a card network's IIN) before the column
+#: reads as PANs without a name hint. One in ten integers passes Luhn by chance
+#: (QA MySQL D7's ids measured 0.1005); a real card column passes ~100%.
+NUMERIC_PAN_SHARE = 0.8
+
+_INTEGRAL_DECIMAL = re.compile(r"^(\d+)\.0+$")
+
+
+def _card_iin(digits: str) -> bool:
+    """The issuer prefix of a card network: Visa 4, Mastercard 51-55 / 2221-2720,
+    Amex 34/37, Discover 6011 / 644-649 / 65, JCB 35, UnionPay 62."""
+    two, four = int(digits[:2]), int(digits[:4])
+    return (
+        digits[0] == "4"
+        or 51 <= two <= 55
+        or 2221 <= four <= 2720
+        or two in (34, 37, 35, 62, 65)
+        or four == 6011
+        or 644 <= int(digits[:3]) <= 649
+    )
+
+
+def _numeric_column_holds_pans(values: list[str]) -> bool:
+    """A numeric column of card numbers, judged on the column, never per value."""
+    digits = []
+    for value in values:
+        if not value:
+            continue
+        match = _INTEGRAL_DECIMAL.match(value)
+        digits.append(match.group(1) if match else value)
+    if not digits:
+        return False
+    cards = sum(
+        1 for d in digits
+        if _is_bare_digits(d) and 13 <= len(d) <= 19 and luhn_valid(d) and _card_iin(d)
+    )
+    return cards / len(digits) >= NUMERIC_PAN_SHARE
 
 _NUMERIC_TYPE_RE = re.compile(
     r"^(?:big|small|tiny|medium)?int(?:eger)?\d*\b|^(?:numeric|decimal|number|"
@@ -531,18 +573,20 @@ def detect_pii_fields(
             "" if value is None else str(value).strip() for value in raw_values
         ]
         declared = str((column_types or {}).get(col) or "")
+        numeric = _numeric_column(raw_values, declared)
         value_hits = _value_hits(
             sample_values,
             bare_digit_phones=_bare_digits_may_be_phone(
                 name_hits, sample_values, raw_values, declared, col,
             ),
-            # A column that holds integers (declared BIGINT, or int cells) holds
-            # numbers: a Luhn-valid one is a key, not a card, unless the name
-            # says card (QA MySQL D7: ids that are multiples of 100000000007).
-            bare_digit_pans=(
-                "pci_pan" in name_hits or not _numeric_column(raw_values, declared)
-            ),
+            # A numeric column (declared BIGINT/DECIMAL, or int cells) is judged
+            # on its share of card numbers, not value by value: one in ten
+            # integer keys passes Luhn (QA MySQL D7: multiples of 100000000007),
+            # a card column passes nearly all. A card-hinting name still flags.
+            bare_digit_pans="pci_pan" in name_hits or not numeric,
         )
+        if numeric and "pci_pan" not in value_hits and _numeric_column_holds_pans(sample_values):
+            value_hits.append("pci_pan")
         # Plain digit strings (order ids, epochs, Kafka keys) read as phones
         # only by the share rule above; that is a warning, not an identifier
         # (D94 follow-up: a second Kafka run sampled one message and held).

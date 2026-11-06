@@ -170,3 +170,32 @@ def test_stored_acknowledgement_applies_and_the_approve_route_resumes(client):
         cur.execute(f"DROP TABLE IF EXISTS `{table}`")
         for d in dests:
             h.drop_table("postgresql", d)
+
+
+def test_real_card_numbers_in_a_bigint_column_are_still_held(client):
+    """Review of 04f5423fd: a neutral-named BIGINT of real PANs is PCI, not a key."""
+    my = h.mysql_conn()
+    cur = my.cursor()
+    token = uuid.uuid4().hex[:8]
+    table, dest = f"d7_pan_{token}", f"d7_pan_dst_{token}"
+    pans = [4111111111111111, 5555555555554444, 378282246310005, 6011111111111117]
+    try:
+        cur.execute(f"CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, ref BIGINT, label VARCHAR(20)) "
+                    "CHARSET=utf8mb4")
+        cur.executemany(f"INSERT INTO `{table}` VALUES (%s, %s, %s)",
+                        [(i + 1, p, ("Ada", "", "   ", "Zoë ✓")[i % 4]) for i, p in enumerate(pans * 3)])
+        src, dst = _connectors(token)
+        resp = client.post("/api/v1/schedules/", json={
+            "name": f"d7 pan {token}", "source_connector_id": src.id, "source_table": table,
+            "dest_connector_id": dst.id, "dest_table": dest, "interval": "hourly",
+            "sync_mode": "full_refresh_overwrite", "primary_key": "id",
+            "mappings": _maps(["id", "ref", "label"]), "enabled": True,
+        })
+        assert resp.status_code == 201, resp.text
+        run = _beat(resp.json()["id"])
+        error = str(run["job"].get("error") or "")
+        assert run["job"].get("status") != "completed", run["job"].get("status")
+        assert "ref (pci_pan by sample value)" in error, error
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        h.drop_table("postgresql", dest)
