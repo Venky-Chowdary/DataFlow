@@ -57,7 +57,11 @@ def count_dest_duplicate_keys(
             "duplicate_keys": 0,
             "duplicate_rows": 0,
             "samples": [],
-            "message": f"destination object '{table}' not found",
+            "message": (
+                f"destination catalog could not be read for '{table}'"
+                if not ident.resolved
+                else f"destination object '{table}' not found"
+            ),
         }
     resolved = [ident.columns.get(c) for c in columns]
     if any(r is None for r in resolved):
@@ -132,6 +136,8 @@ def destination_unique_covering(
             table, (cfg.get("schema") or "").strip() or None
         )
         ident = resolve_object_identity(engine, table, schema)
+        if not ident.resolved:
+            return None  # catalog unreadable: unproven, not "no constraint" (D266)
         if not ident.exists:
             return False
         insp = sa.inspect(engine)
