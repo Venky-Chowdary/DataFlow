@@ -39,6 +39,20 @@ class ObjectIdentity:
     #: only; empty where the catalog read did not return types).
     column_types: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def known_missing(self) -> bool:
+        """The catalog answered and has no such object (never "could not ask")."""
+        return self.resolved and not self.exists
+
+    @property
+    def known_present(self) -> bool:
+        return self.resolved and self.exists
+
+    @property
+    def catalog_unreadable(self) -> bool:
+        """The catalog did not answer; ``exists`` says nothing (D266)."""
+        return not self.resolved
+
 
 def _pick(candidates: list[str], wanted: str) -> str | None:
     """Exact spelling first, then a unique case-insensitive match."""

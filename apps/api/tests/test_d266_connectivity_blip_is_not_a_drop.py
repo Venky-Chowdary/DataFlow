@@ -94,3 +94,31 @@ def test_sibling_probes_do_not_read_unresolved_as_absent(monkeypatch, probe):
 
         with pytest.raises(ValueError, match="could not be read"):
             _sql_null_count(dict(_REFUSED_PG), "t", "updated_at")
+
+
+def test_object_identity_is_tri_state():
+    from services.sql_object_identity import ObjectIdentity
+
+    unreadable = ObjectIdentity(None, "t", False, resolved=False)
+    assert unreadable.catalog_unreadable and not unreadable.known_missing and not unreadable.known_present
+    absent = ObjectIdentity(None, "t", False)
+    assert absent.known_missing and not absent.catalog_unreadable
+    present = ObjectIdentity(None, "t", True)
+    assert present.known_present and not present.known_missing
+
+
+def test_oracle_read_back_does_not_fold_the_name_on_an_unreadable_catalog(monkeypatch):
+    import services.sql_object_identity as soi
+    from services.reconciliation_oracle import OracleCatalogUnreadable, oracle_catalog_identity
+
+    monkeypatch.setattr(
+        soi, "resolve_object_identity",
+        lambda conn, table, schema=None, columns=None: soi.ObjectIdentity(schema, table, False, resolved=False),
+    )
+    with pytest.raises(OracleCatalogUnreadable):
+        oracle_catalog_identity(object(), "USERS", "APP", ["ID"])
+    monkeypatch.setattr(
+        soi, "resolve_object_identity",
+        lambda conn, table, schema=None, columns=None: soi.ObjectIdentity(schema, table, False),
+    )
+    assert oracle_catalog_identity(object(), "USERS", "APP", ["ID"]) == (None, None, {})
