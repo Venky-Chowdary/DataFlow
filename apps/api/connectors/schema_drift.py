@@ -1199,13 +1199,30 @@ def widen_existing_columns_native(
     # A key column's ALTER is refused before any DDL when something depends on
     # it: PostgreSQL cannot retype a column a view or generated column reads,
     # and a referencing foreign key on either engine must change with it.
+    # PostgreSQL refuses ALTER ... TYPE on any column a view, rule or stored
+    # generated column reads, so every column it would widen is checked there.
     keys = {str(c).casefold() for c in key_columns or []}
-    for col in growing:
-        if col.casefold() in keys:
+    pg = dialect in ("postgresql", "postgres", "redshift")
+
+    def _will_alter(col: str) -> bool:
+        # The loop's own filters: a widen it would skip needs no dependents check.
+        new_type = growing[col]
+        if not backfill and not mysql_temporal_fsp_is_wider(
+            existing[col], new_type, dest_db=dialect
+        ):
+            return False
+        source_type = str((source_types or {}).get(col) or "").strip()
+        return not (
+            source_type and not is_lossy_coercion(source_type, existing[col], dest_db=dialect)
+        )
+
+    for col in [c for c in growing if _will_alter(c)]:
+        if col.casefold() in keys or pg:
             dependents = _key_widen_dependents(cursor, dialect, schema, table_name, col)
             if dependents:
+                kind = "key column" if col.casefold() in keys else "column"
                 raise WidenNotSupported(
-                    f"Could not widen key column {col} on {table_name}: "
+                    f"Could not widen {kind} {col} on {table_name}: "
                     f"{', '.join(dependents)} depend on it. Change or drop them first, "
                     "then re-run; nothing was altered and no rows were written."
                 )
@@ -1281,10 +1298,11 @@ def widen_existing_columns_native(
                 raise_widen_lock_timeout(table_name, col, exc, attempts=1)
             # Ignore "already correct width" / concurrent-alter races and
             # harmless syntax issues.
-            # Not "cannot alter": PostgreSQL says that for a column a view or a
-            # generated column depends on, and skipping it loaded the run
-            # against the narrow column.
-            if any(phrase in err for phrase in ("already", "not supported")):
+            # Not "cannot alter" / "not supported" on PostgreSQL: it says that for
+            # a column a view, rule or generated column depends on, and skipping
+            # it loaded the run against the narrow column. It is refused below.
+            skippable = ("already",) if pg else ("already", "not supported")
+            if any(phrase in err for phrase in skippable):
                 logger.debug(
                     "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
                 )
