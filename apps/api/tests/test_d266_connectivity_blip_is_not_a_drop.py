@@ -122,3 +122,40 @@ def test_oracle_read_back_does_not_fold_the_name_on_an_unreadable_catalog(monkey
         lambda conn, table, schema=None, columns=None: soi.ObjectIdentity(schema, table, False),
     )
     assert oracle_catalog_identity(object(), "USERS", "APP", ["ID"]) == (None, None, {})
+
+
+def test_oracle_sample_on_an_unreadable_catalog_is_unavailable_not_missing(monkeypatch):
+    """F11: the ladder's read-back treats the blip as 'sample unavailable, keep rows'."""
+    import contextlib
+
+    import connectors.generic_sql as gs
+    import services.reconciliation_oracle as ro
+    from services.reconciliation import TargetSampleUnavailable
+    from services.target_sample import read_target_sample
+
+    class _Engine:
+        def connect(self):
+            return contextlib.nullcontext(object())
+
+    monkeypatch.setattr(gs, "get_sqlalchemy_engine", lambda cfg: _Engine())
+
+    def _unreadable(*a, **k):
+        raise ro.OracleCatalogUnreadable("ORA-12541 no listener")
+
+    monkeypatch.setattr(ro, "oracle_catalog_identity", _unreadable)
+    dest = {"type": "oracle", "host": "h", "port": 1521, "database": "x", "username": "u", "password": "p", "schema": "APP"}
+    with pytest.raises(TargetSampleUnavailable) as exc:
+        read_target_sample("oracle", dest, schema="APP", table_name="USERS", columns=["ID"], limit=5)
+    assert getattr(exc.value, "transient", False) is True
+
+
+def test_remaining_identity_consumers_use_the_tri_state():
+    import inspect
+
+    import services.code_crosswalk as cc
+    import services.destination_key_collision_probe as dk
+
+    for mod in (cc, dk):
+        src = inspect.getsource(mod)
+        assert "ident.exists" not in src, mod.__name__
+        assert "known_present" in src, mod.__name__

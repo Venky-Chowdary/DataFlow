@@ -414,17 +414,28 @@ def _read_destination_sample(
             db_type == "generic_sql"
             and (dest.get("connection_string") or "").lower().startswith("oracle")
         ):
-            from services.reconciliation_oracle import read_oracle_target_sample
-
-            return read_oracle_target_sample(
-                dest,
-                schema=schema,
-                table_name=table_name,
-                cols=list(cols),
-                keys=list(keys),
-                sort_key=sort_key,
-                limit=limit,
+            from services.reconciliation import TargetSampleUnavailable
+            from services.reconciliation_oracle import (
+                OracleCatalogUnreadable,
+                read_oracle_target_sample,
             )
+
+            try:
+                return read_oracle_target_sample(
+                    dest,
+                    schema=schema,
+                    table_name=table_name,
+                    cols=list(cols),
+                    keys=list(keys),
+                    sort_key=sort_key,
+                    limit=limit,
+                )
+            except OracleCatalogUnreadable as exc:
+                # The ladder reads this as "sample unavailable, keep the rows,
+                # re-verify" — never as a missing object (D266).
+                unavailable = TargetSampleUnavailable(str(exc))
+                unavailable.transient = True  # the retrying reader's flag
+                raise unavailable from exc
 
         if db_type == "duckdb" or (
             db_type == "generic_sql"
@@ -754,9 +765,6 @@ def _read_destination_sample(
                 )
                 from connectors.sql_identifiers import require_safe_identifier
 
-                from connectors.snowflake_conn import snowflake_schema_and_table
-
-                schema, table_name = snowflake_schema_and_table(schema or "PUBLIC", table_name)
                 with conn.cursor() as cur:
                     resolved = resolve_or_fold_snowflake_table(
                         cur, schema or "PUBLIC", table_name

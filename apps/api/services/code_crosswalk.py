@@ -549,7 +549,7 @@ def scan_sql_observed_codes(
         table, (cfg.get("schema") or "").strip() or None
     )
     ident = resolve_object_identity(engine, tbl_name, schema, columns=list(columns))
-    if ident.exists:
+    if ident.known_present:
         tbl_name = sa.sql.quoted_name(ident.table, True)
         schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
         columns = [ident.columns.get(c, c) for c in columns]

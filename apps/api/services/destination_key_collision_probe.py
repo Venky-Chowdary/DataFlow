@@ -298,12 +298,12 @@ def _sql_existing_keys(
     # ``error`` — a skip that is not proof of a clean append. Address the object
     # the catalog actually holds, with its stored column spelling.
     ident = resolve_object_identity(engine, table, schema, columns=[key_column])
-    if ident.exists:
+    if ident.known_present:
         table = sa.sql.quoted_name(ident.table, True)
         schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
         key_column = ident.columns.get(key_column, key_column)
     tbl = sa.table(table, schema=schema)
-    col = sa.column(sa.sql.quoted_name(key_column, True) if ident.exists else key_column)
+    col = sa.column(sa.sql.quoted_name(key_column, True) if ident.known_present else key_column)
     stmt = (
         sa.select(col)
         .select_from(tbl)
@@ -787,17 +787,17 @@ def _sql_existing_tuples(
     )
     ident = resolve_object_identity(engine, table_name, schema, columns=columns)
     resolved = [
-        ident.columns.get(column, column) if ident.exists else column
+        ident.columns.get(column, column) if ident.known_present else column
         for column in columns
     ]
-    if ident.exists:
+    if ident.known_present:
         table_name = sa.sql.quoted_name(ident.table, True)
         schema_name = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
     else:
         schema_name = schema
     tbl = sa.table(table_name, schema=schema_name)
     cols = [
-        sa.column(sa.sql.quoted_name(name, True) if ident.exists else name)
+        sa.column(sa.sql.quoted_name(name, True) if ident.known_present else name)
         for name in resolved
     ]
     dialect_name = str(getattr(engine.dialect, "name", ""))
