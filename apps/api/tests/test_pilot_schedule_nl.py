@@ -347,6 +347,9 @@ def test_confirm_creates_the_schedule_once_through_the_store(monkeypatch):
         sync_mode = "full_refresh_append"
         enabled = True
         next_run_at = "2026-08-18T02:00:00+00:00"
+        # A stored schedule always has a workspace; Confirm reports where it
+        # landed (5d708f9c8), so the stub carries it like PipelineSchedule.
+        workspace_id = ""
 
     def _create(data: dict[str, Any]):
         created.append(data)
