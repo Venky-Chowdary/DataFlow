@@ -7132,6 +7132,21 @@ def destination_temporal_fractional_digits(
     text = strip_identity_qualifier(target_type)
     if not text:
         return None
+    db = (dest_db or "").strip().lower()
+    from services.document_instant import (
+        DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+        INSTANT_DATE_TOKEN_ENGINES,
+    )
+
+    if db in INSTANT_DATE_TOKEN_ENGINES and normalize_logical_type(text) in {
+        LOGICAL_DATE, LOGICAL_DATETIME,
+    }:
+        # A document store has one instant carrier and it keeps milliseconds,
+        # whatever the sampled spelling says: an existing Mongo collection is
+        # introspected as ``TIMESTAMPTZ(6)``, and reading those six digits
+        # made Gate-8 compare an Oracle .123456 against the stored .123 and
+        # fail every run after the first on a signed, declared narrowing (D278).
+        return DOCUMENT_INSTANT_FRACTIONAL_DIGITS
     explicit = parse_temporal_fractional_precision(text)
     if explicit is not None:
         return explicit
@@ -7142,7 +7157,6 @@ def destination_temporal_fractional_digits(
     # them as the Snowflake default made a MySQL whole-second column look like it
     # kept microseconds, and Gate-8 then hashed precision the column never held.
     bare = bare.replace("_", " ")
-    db = (dest_db or "").strip().lower()
     if bare in {
         "TIME WITHOUT TIME ZONE",
         "TIMESTAMP WITHOUT TIME ZONE",

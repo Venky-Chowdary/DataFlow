@@ -6376,6 +6376,7 @@ def _run_reconciliation_impl(
                 mapping_dicts,
                 column_types=source_schema,
                 dest_types=dest_types,
+                dest_kind=str(db_type or ""),
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)

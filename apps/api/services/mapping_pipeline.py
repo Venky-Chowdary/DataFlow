@@ -1790,6 +1790,7 @@ def run_mapping_pipeline(
         # widening into a numeric destination changes nothing, so it is shown as
         # identity; the write path still validates that cell on the way in.
         for_write=False,
+        dest_kind=str(destination_db_type or ""),
     )
 
     from services.mapping_proof import stamp_mapping_fidelity

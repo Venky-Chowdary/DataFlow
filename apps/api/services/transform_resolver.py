@@ -167,8 +167,14 @@ def resolve_transform(
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     for_write: bool = True,
+    dest_kind: str = "",
 ) -> str:
     """Pick engine transform for a mapping dict.
+
+    ``dest_kind`` names the destination engine when the caller knows it. On a
+    document store (MongoDB, Elasticsearch) the ``date`` token is the BSON /
+    ES instant, not a calendar day: resolving it to the calendar ``date``
+    transform refused every cell that carried a clock (D232, D278).
 
     Respects explicit transforms when they are compatible with the target type;
     otherwise falls back to a type-correct transform derived from source/target
@@ -228,14 +234,22 @@ def resolve_transform(
         or dest_types.get(tgt_name.lower())
         or dest_types.get(tgt_name.upper())
     )
+    declared_tgt_token = str(
+        live_hit or mapping.get("target_type") or column_types.get(mapping["target"]) or ""
+    )
     if live_hit:
         target_type = normalize_logical_type(live_hit)
     else:
-        target_type = normalize_logical_type(
-            mapping.get("target_type")
-            or column_types.get(mapping["target"])
-            or "VARCHAR",
-        )
+        target_type = normalize_logical_type(declared_tgt_token or "VARCHAR")
+    if target_type == "date" and dest_kind:
+        from services.document_instant import is_document_instant_token
+
+        if is_document_instant_token(dest_kind, declared_tgt_token):
+            target_type = "datetime"
+            if str(raw or "").strip().lower() == "date":
+                # A calendar-day cast stamped before the destination was known
+                # (Map / write stamp): on an instant carrier it is the instant cast.
+                raw = "datetime"
 
     # D79 — the logical type of BIT/VARBIT is "binary", so the decision below
     # would validate 0/1 text as hex/base64 bytes and refuse ``101``. Decide on
@@ -308,6 +322,7 @@ def attach_transforms_to_mappings(
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     for_write: bool = True,
+    dest_kind: str = "",
 ) -> list[dict]:
     """Ensure every mapping carries a resolved engine transform."""
     out: list[dict] = []
@@ -318,6 +333,7 @@ def attach_transforms_to_mappings(
             column_types=column_types,
             dest_types=dest_types,
             for_write=for_write,
+            dest_kind=dest_kind,
         )
         out.append(enriched)
     return out
@@ -329,6 +345,7 @@ def write_plan_transform(
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     destination_table_exists: bool | None = None,
+    dest_kind: str = "",
 ) -> Any:
     """Write-path cast Gate-8 will apply — the same resolver Execute stamps.
 
@@ -344,6 +361,7 @@ def write_plan_transform(
             mapping if isinstance(mapping, dict) else {},
             column_types=dict(column_types or {}),
             dest_types=dict(live or {}),
+            dest_kind=dest_kind,
         )
     except Exception:
         logger.debug("write-path transform resolve skipped", exc_info=True)

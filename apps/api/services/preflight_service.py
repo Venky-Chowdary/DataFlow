@@ -922,6 +922,7 @@ def run_file_preflight(
                 column_types=column_types,
                 dest_types=dest_types,
                 destination_table_exists=destination_table_exists,
+                dest_kind=destination_db_type,
             ),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),

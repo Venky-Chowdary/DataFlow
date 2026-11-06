@@ -404,6 +404,7 @@ def _scannable_transform(
     *,
     source_types: Mapping[str, str],
     dest_types: Mapping[str, str],
+    dest_db: str = "",
 ) -> str:
     """The write's own transform for this column, when its parse is decidable.
 
@@ -419,6 +420,7 @@ def _scannable_transform(
             dict(mapping),
             column_types=dict(source_types),
             dest_types=dict(dest_types),
+            dest_kind=str(dest_db or ""),
         )
         or ""
     ).strip()
@@ -616,7 +618,7 @@ def bounded_targets(
             dest_db=dest_db,
         )
         carrier = _carrier_for(target_type, dest_db=dest_db)
-        transform = _scannable_transform(m, source_types=src_types, dest_types=types)
+        transform = _scannable_transform(m, source_types=src_types, dest_types=types, dest_db=dest_db)
         if not carrier:
             if not transform:
                 if target_type:

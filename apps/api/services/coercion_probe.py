@@ -551,7 +551,9 @@ def analyze_coercion(
         ):
             continue
 
-        transform = resolve_transform(m, column_types=source_types, dest_types=dest_types)
+        transform = resolve_transform(
+            m, column_types=source_types, dest_types=dest_types, dest_kind=str(dest_db_type or "")
+        )
 
         ok = nulls = sentinel_nulls = failed = 0
         wire_normalize = 0

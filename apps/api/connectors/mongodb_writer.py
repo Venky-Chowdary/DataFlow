@@ -829,8 +829,18 @@ def write_mapped_rows(
 
         from bson.decimal128 import Decimal128
 
+        # The write's own resolver, with the destination known: on BSON the
+        # ``date`` token is the instant carrier, so a calendar-day cast stamped
+        # before the destination was known must not pick the midnight branch
+        # below (D232, D278). Same SSOT build_mapped_rows binds through.
+        from services.transform_resolver import resolve_transform
+
         transform_by_col = {
-            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (m.get("transform") or "")
+            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (
+                resolve_transform(m, column_types=column_types, dest_kind="mongodb")
+                if m.get("transform")
+                else ""
+            )
             for m in mappings
         }
         # Columns whose operator accepted the UTC-normalize risk. BSON date is an
