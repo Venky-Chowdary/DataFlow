@@ -1223,11 +1223,29 @@ def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
     return schedule_bind_summary(sched)
 
 
+_CALLABLE_PLAN_KEYS = frozenset({
+    "sync_mode", "source_read_mode", "source_query", "procedure_call", "procedure_params",
+    "stream_contracts", "enabled", "source_table", "source_connector_id",
+})
+
+
 def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:
-    """Refuse CDC/SCD2/mirror on a persisted CALL/SELECT extract."""
+    """Refuse an unhonourable CALL/SELECT, and CDC/SCD2/mirror on a callable extract.
+
+    QA C3: the save goes through the same intake as a fire
+    (``services.callable_intake``). One stream contract's CALL/SELECT is the
+    schedule's source. An unknown mode word, or a callable word with no
+    statement, raises ``CallablePlacementError``, which routes answer with 422.
+    The stored payload is not rewritten.
+    """
+    from services.callable_intake import apply_callable_intake
     from services.procedure_source import callable_sync_refusal, source_read_mode_of
 
-    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(data or {}))
+    view = {k: (data or {}).get(k) for k in
+            ("source_read_mode", "source_query", "procedure_call", "procedure_params")}
+    apply_callable_intake(view, [dict(c) if isinstance(c, Mapping) else c
+                                 for c in ((data or {}).get("stream_contracts") or [])])
+    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(view))
     if reason:
         raise ValueError(reason)
 
@@ -1976,7 +1994,13 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         )
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
-        _assert_callable_schedule_sync(merged, sync_mode)
+        # Checked when this write touches what the schedule reads, or arms it.
+        # Bookkeeping (next_run_at, last_status) on a legacy row must not trip on
+        # what that row stores: the fire path refuses it with a readable reason.
+        if (_CALLABLE_PLAN_KEYS & (set(data) - {"sync_mode"})) or sync_mode != str(
+            s.sync_mode or ""
+        ):
+            _assert_callable_schedule_sync(merged, sync_mode)
         _assert_cursor_semantics(merged)
         from services.schedule_mapping_contract import (
             EMPTY_MAPPING_REFUSAL,

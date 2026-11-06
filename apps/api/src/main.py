@@ -20,6 +20,7 @@ from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.safe_errors import public_error
 from services.upload_limits import PayloadTooLarge
+from services.procedure_source import ProcedureSourceError
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -914,6 +915,21 @@ async def payload_too_large_handler(request: Request, exc: PayloadTooLarge):
     if exc.actual is not None:
         content["actual_bytes"] = exc.actual
     return JSONResponse(status_code=413, content=content)
+
+
+@app.exception_handler(ProcedureSourceError)
+async def procedure_source_error_handler(request: Request, exc: ProcedureSourceError):
+    """A query/procedure source the request cannot have is a 422, not a 500.
+
+    The callable intake (``services.callable_intake``) answers these on each route.
+    This handler catches one raised anywhere else in a handler, such as an
+    ``is_callable_source`` on a shape the intake never saw.
+    """
+    logger.info("Query/procedure source refused on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=422,
+        content={"error": "callable_source_refused", "detail": str(exc)},
+    )
 
 
 @app.exception_handler(Exception)

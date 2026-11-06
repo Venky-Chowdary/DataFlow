@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from services.acknowledgment_contract import MIN_ACTOR_LEN
 from services.transfer_policy_values import PolicyFieldsModel
 from services.api_errors import ApiError
+from services.procedure_source import ProcedureSourceError
 from services.audit_coverage import record_security_event
 from services.brand import PRODUCT_SLUG
 from services.cdc_capture_release import release_schedule_cdc_capture
@@ -803,6 +804,10 @@ async def create_pipeline_schedule(
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ProcedureSourceError as exc:
+        # QA C3: a query/procedure the schedule cannot honour (unknown mode
+        # word, callable word with no statement) is the request's fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record_schedule_created(sched, request=request)
@@ -851,6 +856,10 @@ async def patch_pipeline_schedule(
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ProcedureSourceError as exc:
+        # QA C3: a query/procedure the schedule cannot honour (unknown mode
+        # word, callable word with no statement) is the request's fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:

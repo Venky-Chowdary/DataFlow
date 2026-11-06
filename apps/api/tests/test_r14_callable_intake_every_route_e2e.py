@@ -178,6 +178,15 @@ def test_a_saved_one_contract_schedule_runs_its_query(sched_client, two_tables):
     assert _pg_rows(a) == [(4, " 日本 ")]
 
 
+def test_a_schedule_with_an_unhonourable_contract_is_422_at_save(sched_client, two_tables):
+    a, b = two_tables
+    src, dst = _connector("mysql", "source"), _connector("postgresql", "destination")
+    for contract in ({"name": a, "source_read_mode": "call", "procedure_call": ""},
+                     {"name": a, "source_read_mode": "tabel", "source_query": f"SELECT * FROM {b}"}):
+        resp = sched_client.post("/api/v1/schedules/", json=_schedule_body(src, dst, a, contract))
+        assert resp.status_code == 422, (contract, resp.status_code, resp.text[:400])
+
+
 def test_a_stored_unhonourable_schedule_fails_with_a_readable_reason(sched_client, two_tables,
                                                                      monkeypatch):
     """A schedule saved before this check fires into a readable refusal, not a table copy."""
@@ -229,3 +238,47 @@ def test_job_creation_refuses_an_unresolved_source_on_any_route(client):
     apply_callable_intake(req)  # idempotent: a second pass changes nothing
     assert req.source.extra.get("source_query") == "SELECT 1 AS id"
     assert req.stream_contracts == [{"name": "a"}]
+
+
+# ------------------------------------------- 422, never 500, and one schedule vocabulary
+
+
+def test_a_procedure_source_error_anywhere_in_a_handler_is_422(client):
+    """A mode error raised outside the intake (an unguarded is_callable_source) is a 422."""
+    from services.procedure_source import is_callable_source
+    from src.main import app
+
+    path = f"/api/v1/__r14_callable_probe_{uuid.uuid4().hex[:6]}"
+
+    def _probe():
+        return {"callable": is_callable_source({"extra": {"source_read_mode": "tabel"}})}
+
+    app.add_api_route(path, _probe, methods=["GET"])
+    try:
+        resp = client.get(path)
+        assert resp.status_code == 422, (resp.status_code, resp.text[:300])
+        assert "unknown source_read_mode" in resp.text
+    finally:
+        app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", "") != path]
+
+
+def test_a_schedule_stamps_its_source_with_the_one_vocabulary():
+    from types import SimpleNamespace
+
+    from services.procedure_source import UnknownReadModeError
+    from services.schedule_runner import _apply_callable_schedule_source
+
+    def _stamp(**sched):
+        src = SimpleNamespace(extra={})
+        _apply_callable_schedule_source(src, SimpleNamespace(**{
+            "source_read_mode": "", "procedure_call": "", "source_query": "",
+            "procedure_params": {}, **sched}))
+        return src.extra
+
+    assert _stamp(source_read_mode="sql", source_query="SELECT 1")["source_read_mode"] == "query"
+    assert _stamp(source_read_mode="call", procedure_call="CALL p()")["source_read_mode"] == \
+        "procedure"
+    # An explicit table read is a table read, even next to a leftover CALL.
+    assert _stamp(source_read_mode="table", procedure_call="CALL p()") == {}
+    with pytest.raises(UnknownReadModeError):
+        _stamp(source_read_mode="tabel", source_query="SELECT 1")

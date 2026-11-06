@@ -218,14 +218,21 @@ def _resolve_connector_for_schedule(connector_id: str, sched: Any) -> dict | Non
 
 def _apply_callable_schedule_source(source, sched) -> None:
     """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
-    mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
+    from services.procedure_source import MODE_TABLE, source_read_mode_of
+
     call = str(getattr(sched, "procedure_call", "") or "").strip()
     query = str(getattr(sched, "source_query", "") or "").strip()
     params = getattr(sched, "procedure_params", None) or {}
-    if mode not in {"procedure", "query"} and not call and not query:
+    # One vocabulary (procedure_source.READ_MODE_ALIASES): "sql" is a query and
+    # "call" is a procedure. An explicit "table" is a table read even next to a
+    # leftover CALL. An unknown word raises UnknownReadModeError, a ValueError
+    # the fire path parks with, instead of being guessed from the statement.
+    mode = source_read_mode_of({"extra": {
+        "source_read_mode": str(getattr(sched, "source_read_mode", "") or "").strip(),
+        "procedure_call": call, "source_query": query,
+    }})
+    if mode == MODE_TABLE:
         return
-    if mode not in {"procedure", "query"}:
-        mode = "procedure" if call else "query"
     extra = dict(getattr(source, "extra", None) or {})
     extra["source_read_mode"] = mode
     if call:
