@@ -64,6 +64,8 @@ from services.value_serializer import (
     is_missing_sentinel,
 )
 
+from services.validation_mode_contract import mode_holdout_kind, mode_holds_out_refusal
+
 _TEXTUAL_LOGICALS = {"string", "text"}
 _STRUCTURAL_LOGICALS = {"json", "array", "struct", "map"}
 SAMPLE_FAILURE_LIMIT = 5
@@ -566,6 +568,11 @@ def analyze_coercion(
         )
 
         ok = nulls = sentinel_nulls = failed = 0
+        #: Failures the validation mode holds out given their refusal reason
+        #: (``validation_mode_contract.mode_holds_out_refusal``), counted on
+        #: every failure, not only the five listed in ``sample_failures``.
+        held_failed = 0
+        holdout_kind = ""
         wire_normalize = 0
         wire_failures = 0
         json_scalar_wraps = 0
@@ -827,6 +834,8 @@ def analyze_coercion(
                         raw_failure_values.append(cell[:120])
                 elif err:
                     failed += 1
+                    if mode_holds_out_refusal(mode, err, record_batch=file_row_quarantine):
+                        held_failed += 1
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
                         raw_failure_values.append(cell[:120])
@@ -1072,6 +1081,19 @@ def analyze_coercion(
                 )
                 for reason in cast_reasons
             )
+            # The mode's holdout policy, decided once from every failure's
+            # refusal reason (validation_mode_contract.mode_holdout_kind):
+            # balanced on a file holds out only invalid-calendar refusals below
+            # one in five sampled values (QA browser 3); lenient every cast
+            # refusal. G3 and G8 consume ``holdout_kind``.
+            column_holdout = "" if contract_present else mode_holdout_kind(
+                mode,
+                failed=failed,
+                held=held_failed,
+                cast_ok=ok,
+                record_batch=file_row_quarantine,
+            )
+            calendar_holdout = column_holdout == "invalid_calendar"
             if mapping_has_clearing_risk_contract(m) or (
                 file_row_quarantine
                 and ok > 0
@@ -1079,8 +1101,13 @@ def analyze_coercion(
                 and numeric_cast
             ):
                 severity = "warn"
+            elif calendar_holdout:
+                severity = "warn"
             else:
+                # Lenient keeps "block" here: its gates pass with a quarantine
+                # forecast (G3 lenient branch) — same policy, worded there.
                 severity = "block"
+            holdout_kind = column_holdout
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
@@ -1266,6 +1293,7 @@ def analyze_coercion(
             "nulls": nulls,
             "sentinel_nulls": sentinel_nulls,
             "failed": failed,
+            "holdout_kind": holdout_kind,
             "wire_normalize": wire_normalize,
             "wire_failures": wire_failures,
             "json_scalar_wraps": json_scalar_wraps,

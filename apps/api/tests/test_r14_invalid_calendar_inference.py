@@ -1,46 +1,78 @@
-"""QA browser 3: an ISO-shaped value naming no real calendar day votes for its temporal family.
+"""QA browser 3 (review follow-up): where an impossible day votes for a date column.
 
-``2024-02-30`` inside the plan sample used to classify as text, demoting the
-whole column to VARCHAR (then refused as VARCHAR -> DATE). It now votes DATE
-(``... 25:61:00`` votes TIMESTAMP); the cell is still refused at write by the
-same predicate (``connectors.sql_temporal.invalid_calendar_reason``). Nothing
-else may change classification: every token that predicate does not flag
-classifies exactly as before.
+``classify_value`` is shared by database narrowing (catalog TEXT columns,
+Elasticsearch keyword samples, generic SQL sample typing): it keeps
+``2024-02-30`` text, exactly as before round 14. Only the record-batch
+inference (a file's rows, ``infer_columns_from_rows``) counts an impossible
+day as a vote for its temporal family, and only when every other non-blank
+sample is a real date/time, at least one is, and the impossible ones stay
+below ``connectors.sql_temporal.INVALID_CALENDAR_MAX_SHARE``. A zoned stamp
+stays zoned.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from services.schema_inference import _invalid_calendar_family, classify_value, infer_column
+from connectors.sql_temporal import INVALID_CALENDAR_MAX_SHARE
+from services.schema_inference import (
+    _invalid_calendar_family,
+    classify_value,
+    infer_column,
+    infer_columns_from_rows,
+)
 
-#: Tokens across every family the classifier knows, none an invalid calendar date.
-UNCHANGED = [
-    "", "  ", "null", "abc", "hello world", "2024-02-28", "2024-02-29", "2023-02-29x",
-    "2024-01-01 10:00:00", "2024-01-01T00:00:00", "2024-01-01T10:00:00Z", "10:30:00",
-    "25:61", "31/02/2025", "01/02/2024", "20240230", "20240101", "42", "0", "007",
-    "3.14", "1e5", "-17", "$1,000.00", "45%", "true", "f", "yes", "550e8400-e29b-41d4-a716-446655440000",
-    "{\"a\": 1}", "[1,2]", "POINT(1 2)", "P1D", "a@b.co", "+1 555 010 0001", "2024-13", "2024-1-1",
-    "x" * 300,
-]
+REAL = [f"2024-01-{d:02d}" for d in range(1, 20)]
 
 
-@pytest.mark.parametrize("token", UNCHANGED)
-def test_tokens_the_rule_does_not_flag_classify_as_before(token):
-    assert _invalid_calendar_family(token) == ""
+@pytest.mark.parametrize("token", ["2024-02-30", "1234-56-78", "0000-00-00", "2024-02-10 25:61:00",
+                                   "2024-02-30 10:00:00+05:00"])
+def test_shared_classifier_keeps_impossible_days_text(token):
+    assert classify_value(token) == "VARCHAR"
+    assert classify_value(token, field_name="d") == "VARCHAR"
+
+
+def test_database_narrowing_is_unchanged():
+    # The default (database, catalog, keyword) path never re-types the column.
+    assert infer_column([*REAL, "2024-02-30"], field_name="d")["logical_type"] == "VARCHAR"
+
+
+def test_a_file_column_with_one_impossible_day_is_a_date_column():
+    assert infer_column([*REAL, "2024-02-30"], field_name="d", invalid_calendar_votes=True)["logical_type"] == "DATE"
+    cols = infer_columns_from_rows(["d"], [[v] for v in [*REAL, "2024-02-30"]])
+    assert cols[0]["inferred_type"] == "DATE"
+
+
+@pytest.mark.parametrize("samples", [
+    ["1234-56-78", "2210-44-19"],                    # no real date at all
+    ["2024-01-01", "1234-56-78", "2210-44-19"],      # impossible days are not a minority
+    [*REAL[:3], "2024-02-30"],                       # 1 of 4 = 25% >= the share
+    [*REAL, "2024-02-30", "next tuesday"],           # a word keeps the column text
+])
+def test_no_vote_without_a_dominant_real_date_majority(samples):
+    assert infer_column(samples, field_name="d", invalid_calendar_votes=True)["logical_type"] != "DATE"
+
+
+def test_the_share_is_the_documented_constant():
+    assert INVALID_CALENDAR_MAX_SHARE == 0.2
 
 
 @pytest.mark.parametrize("token,family", [
-    ("2024-02-30", "DATE"), ("2025-02-31", "DATE"), ("2024-13-01", "DATE"), ("0000-00-00", "DATE"),
-    ("2024-02-30 10:00:00", "TIMESTAMP"), ("2024-02-10 25:61:00", "TIMESTAMP"),
+    ("2024-02-30", "DATE"), ("1234-56-78", "DATE"), ("2024-02-30 10:00:00", "TIMESTAMP"),
+    ("2024-02-30 10:00:00+05:00", "TIMESTAMPTZ"), ("2024-02-30T10:00:00Z", "TIMESTAMPTZ"),
+    ("2024-02-30 10:00:00 UTC", "TIMESTAMPTZ"), ("2024-02-10 25:61:00-03", "TIMESTAMPTZ"),
 ])
-def test_invalid_calendar_values_vote_their_temporal_family(token, family):
-    assert classify_value(token) == family
-    assert classify_value(token, field_name="d") == family
+def test_family_keeps_the_zone(token, family):
+    assert _invalid_calendar_family(token) == family
 
 
-def test_one_bad_day_in_the_sample_keeps_the_column_a_date():
-    samples = ["2024-01-01", "2024-02-30", "2024-03-01", "", "2024-04-01"]
-    assert infer_column(samples, field_name="d")["logical_type"] == "DATE"
-    # A word is still a word: the column stays text.
-    assert infer_column(["2024-01-01", "next tuesday"], field_name="d")["logical_type"] != "DATE"
+def test_a_zoned_file_column_with_one_impossible_stamp_stays_zoned():
+    zoned = [f"2024-01-{d:02d} 10:00:00+05:00" for d in range(1, 20)]
+    out = infer_column([*zoned, "2024-02-30 10:00:00+05:00"], field_name="ts", invalid_calendar_votes=True)
+    assert out["logical_type"] == "TIMESTAMPTZ"
+
+
+@pytest.mark.parametrize("token", ["", "abc", "2024-02-28", "2024-02-29", "31/02/2025", "20240230", "42",
+                                   "10:30:00", "25:61", "2024-13", "x" * 300])
+def test_values_the_rule_does_not_flag(token):
+    assert _invalid_calendar_family(token) == ""

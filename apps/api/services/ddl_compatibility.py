@@ -173,9 +173,9 @@ def _held_out_text_parse(
     refused run 2 for a load run 1 had made (QA r14). Strict and balanced do
     not hold cells out, so they keep refusing on both runs.
     """
-    from services.validation_mode_contract import mode_holds_out_bad_cells
+    from services.validation_mode_contract import mode_holds_out_refusal
 
-    if not tgt_type or not sample_rows or not mode_holds_out_bad_cells(validation_mode):
+    if not tgt_type or not sample_rows or not mode_holds_out_refusal(validation_mode):
         return False
     if normalize_logical_type(src_type) not in {"string", "text"}:
         return False

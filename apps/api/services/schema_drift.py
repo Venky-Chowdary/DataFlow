@@ -1523,9 +1523,9 @@ def detect_schema_drift(
     widen_proposals: list[dict[str, Any]] = []
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
-        from services.validation_mode_contract import mode_holds_out_bad_cells
+        from services.validation_mode_contract import mode_holds_out_refusal
 
-        hold_out_text_cells = mode_holds_out_bad_cells(validation_mode)
+        hold_out_text_cells = mode_holds_out_refusal(validation_mode)
         from services.migration_risk_contract import (
             mapping_has_clearing_risk_contract,
         )

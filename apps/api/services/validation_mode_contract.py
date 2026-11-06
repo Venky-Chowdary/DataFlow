@@ -208,6 +208,53 @@ def confidence_floor_for_mode(mode: str | None) -> float:
     return float(mode_contract(mode)["confidence_floor"])
 
 
+def mode_holds_out_refusal(
+    mode: str | None, reason: str | None = None, *, record_batch: bool = True
+) -> bool:
+    """THE policy: does this validation mode hold out a cell its cast refused?
+
+    Every gate that grades a refused cell asks this one question (coercion
+    probe, G3, G5, G8, Target DDL, schema drift, the integrity audit):
+
+    * lenient — every per-cell cast refusal (``holds_out_bad_cells``);
+    * balanced — only a refusal whose REASON is the invalid-calendar rule
+      (``connectors.sql_temporal.is_invalid_calendar_refusal``), on a
+      record-batch (file) source (QA browser 3);
+    * strict / maximum / review — nothing.
+
+    ``reason=None`` asks for any reason, which only lenient answers yes to.
+    """
+    if mode_holds_out_bad_cells(mode):
+        return True
+    if reason is None or not record_batch:
+        return False
+    if str(mode_contract(mode).get("id") or "") != "balanced":
+        return False
+    from connectors.sql_temporal import is_invalid_calendar_refusal
+
+    return is_invalid_calendar_refusal(reason)
+
+
+def mode_holdout_kind(
+    mode: str | None, *, failed: int, held: int, cast_ok: int, record_batch: bool
+) -> str:
+    """The column-level answer: ``"cast_failure"`` (lenient), ``"invalid_calendar"``
+    (balanced, fewer than one in five sampled values — ``connectors.sql_temporal.
+    INVALID_CALENDAR_MAX_SHARE``), or ``""`` (block). ``held`` counts the failures
+    :func:`mode_holds_out_refusal` held out; every failure must be one, and some
+    sampled cell must cast — an all-bad column is never a holdout.
+    """
+    if failed <= 0 or held != failed or cast_ok <= 0:
+        return ""
+    if mode_holds_out_bad_cells(mode):
+        return "cast_failure"
+    from connectors.sql_temporal import invalid_calendar_share_holds_out
+
+    if record_batch and invalid_calendar_share_holds_out(failed, failed + cast_ok):
+        return "invalid_calendar"
+    return ""
+
+
 def mode_holds_out_bad_cells(mode: str | None) -> bool:
     """True when this mode quarantines a cell that fails its cast and loads the rest.
 

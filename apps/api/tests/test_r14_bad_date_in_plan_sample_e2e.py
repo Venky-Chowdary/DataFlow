@@ -153,3 +153,65 @@ def test_strict_names_row_642_and_offers_hold_out_not_only_review_mappings(studi
     assert cells, quarantine_rows_from_preflight(pf)
     assert cells[0].get("value") == "31/02/2025" and cells[0].get("column") == "order_date", cells[0]
     assert str(cells[0].get("reason") or "").strip(), cells[0]
+
+
+# ------------------------------------- review follow-up: database sources, zones
+
+def _pilot_run(src_id: str, src_table: str, dst_id: str, dst_table: str, mode: str = "balanced"):
+    from src.ai.copilot.tools import get_pilot_tools
+
+    staged = get_pilot_tools().execute("start_transfer", {
+        "source_connector_id": src_id, "source_table": src_table,
+        "dest_connector_id": dst_id, "dest_table": dst_table,
+        "sync_mode": "full_refresh_overwrite", "primary_key": "id", "validation_mode": mode,
+    })
+    return staged
+
+
+def test_a_pg_text_column_holding_an_impossible_day_stays_text_pg_to_pg():
+    """Database narrowing is unchanged: a catalog TEXT column is not re-typed."""
+    import uuid
+
+    from tests._r4_temporal_harness import connector, pg_exec
+
+    src, dst = f"r14t_src_{uuid.uuid4().hex[:6]}", f"r14t_dst_{uuid.uuid4().hex[:6]}"
+    pg_exec(f'CREATE TABLE public."{src}" (id int PRIMARY KEY, d TEXT)')
+    try:
+        values = ",".join(
+            f"({i}, '{'2024-02-30' if i == 7 else f'2024-01-{(i % 28) + 1:02d}'}')" for i in range(1, 201)
+        )
+        pg_exec(f'INSERT INTO public."{src}" VALUES {values}')
+        staged = _pilot_run(connector("postgresql", "source"), src, connector("postgresql", "destination"), dst)
+        assert staged.success, staged.error
+        job = _job(staged)
+        assert job.get("status") == "completed", (job.get("status"), job.get("error"))
+        kind = pg_exec(
+            "SELECT data_type FROM information_schema.columns WHERE table_name = %s AND column_name = 'd'", (dst,)
+        )
+        assert kind == [("text",)], kind
+        assert pg_exec(f'SELECT d FROM public."{dst}" WHERE id = 7') == [("2024-02-30",)]
+        assert pg_exec(f'SELECT count(*) FROM public."{dst}"') == [(200,)]
+    finally:
+        pg_exec(f'DROP TABLE IF EXISTS public."{src}"')
+        pg_exec(f'DROP TABLE IF EXISTS public."{dst}"')
+        pg_exec(f'DROP TABLE IF EXISTS public."{dst}_df_quarantine"')
+
+
+def test_one_impossible_zoned_stamp_keeps_the_column_zoned(sftp, dest_table):  # noqa: F811
+    from tests._r4_temporal_harness import pg_exec
+
+    lines = ["id,name,ts"]
+    for i in range(1, 201):
+        stamp = "2024-02-30 10:00:00+05:00" if i == 3 else f"2024-01-{(i % 28) + 1:02d} 10:00:00+05:00"
+        lines.append(f"{i},n{i},{stamp}")
+    table = dest_table("postgresql", None)
+    staged = _start(sftp("\n".join(lines) + "\n"), "postgresql", table, mode="balanced")
+    assert staged.success, staged.error
+    job = _job(staged)
+    assert job.get("status") == "completed_with_quarantine", job.get("error")
+    assert int(job.get("rejected_rows") or 0) == 1
+    kind = pg_exec(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = %s AND column_name = 'ts'", (table,)
+    )
+    assert kind == [("timestamp with time zone",)], kind
+    assert pg_exec(f'SELECT count(*) FROM public."{table}"') == [(199,)]

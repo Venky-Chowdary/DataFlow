@@ -114,6 +114,33 @@ def invalid_calendar_reason(value: Any) -> str:
     return _clock_reason(text, clock) if clock else ""
 
 
+#: Largest share of a column's sampled non-blank values that may name no real
+#: calendar day while Validate still treats them as row holdouts (QA browser 3).
+#: Below it the column is a date column with a few impossible days: each such
+#: row is quarantined with its reason and the rest load. At or above it the
+#: column itself is in doubt, so Validate blocks. Execute holds the same cells
+#: out beyond the sample either way; this bound only governs the plan.
+INVALID_CALENDAR_MAX_SHARE = 0.2
+
+
+def is_invalid_calendar_refusal(reason: Any) -> bool:
+    """Is ``reason`` this module's own invalid-calendar refusal (date or clock)?
+
+    Decisions about a refused cell read the refusal, not the value: a
+    ``2024-02-30`` refused for another rule (boolean target, time-zone invent)
+    is not an invalid-calendar holdout.
+    """
+    text = str(reason or "")
+    return (
+        text.startswith("Invalid date: ") and "is not a real calendar date" in text
+    ) or (text.startswith("Invalid time: ") and "is not a real time of day" in text)
+
+
+def invalid_calendar_share_holds_out(bad: int, total: int) -> bool:
+    """``bad`` invalid-calendar cells out of ``total`` sampled are row holdouts."""
+    return 0 < bad < total and bad < INVALID_CALENDAR_MAX_SHARE * total
+
+
 def temporal_text_unfit_reason(value: Any, ddl_type: str, *, engine: str = "") -> str:
     """The bind's own verdict on one temporal text cell, without binding it.
 

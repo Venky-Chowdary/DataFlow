@@ -515,15 +515,13 @@ def _refuses_numeric_inference(text: str) -> bool:
 
 
 def _invalid_calendar_family(text: str) -> str:
-    """``DATE``/``TIMESTAMP`` for an ISO-shaped value naming no real day or clock.
+    """``DATE`` / ``TIMESTAMP`` / ``TIMESTAMPTZ`` for an ISO-shaped value naming no real day or clock.
 
-    ``2024-02-30`` is a date that does not exist, not a word. Reading it as
-    text demoted the whole column to VARCHAR when it fell inside the plan
-    sample, so the plan graded the column VARCHAR -> DATE as a lossy collapse
-    and refused it — while the same cell beyond the sample is held out alone
-    by the write path (``connectors.sql_temporal.invalid_calendar_reason``).
-    It votes for its temporal family; the cell itself is still refused and
-    quarantined, never written as NULL or a shifted date (QA browser 3).
+    ``classify_value`` keeps such a value text (database narrowing, catalog
+    TEXT columns, Elasticsearch keyword samples are never re-typed by it). Only
+    the record-batch inference (``infer_column(..., invalid_calendar_votes=
+    True)``) counts it as a vote for its temporal family — see there. The
+    zone suffix (``Z``, ``UTC``, ``±HH[:MM]``) keeps a zoned stamp zoned.
     """
     from connectors.sql_temporal import _CLOCK_RE, _ISO_CIVIL_RE, invalid_calendar_reason
 
@@ -532,7 +530,44 @@ def _invalid_calendar_family(text: str) -> str:
     m = _ISO_CIVIL_RE.match(text)
     if m is None:
         return ""
-    return "TIMESTAMP" if m.group("clock") else "DATE"
+    if not m.group("clock"):
+        return "DATE"
+    return "TIMESTAMPTZ" if _has_explicit_timezone_suffix(text) or text.upper().endswith("UTC") else "TIMESTAMP"
+
+
+_TEMPORAL_VOTES = ("DATE", "TIMESTAMP", "TIMESTAMPTZ")
+
+
+def _count_invalid_calendar_votes(
+    counts: "Counter[str]", non_empty: list[str], notes: list[str]
+) -> None:
+    """Re-vote a minority of impossible days in a real date column (QA browser 3).
+
+    One ``2024-02-30`` among real dates inside a file's plan sample demoted the
+    whole column to text, and the plan then refused it as VARCHAR -> DATE; the
+    same cell beyond the sample is held out alone by the write path. Here such
+    a cell votes for its temporal family only when every other non-blank
+    sample is a real date/time, at least one is, and the impossible ones stay
+    below ``INVALID_CALENDAR_MAX_SHARE`` of the samples. The cell itself is
+    still refused and quarantined at write.
+    """
+    from connectors.sql_temporal import INVALID_CALENDAR_MAX_SHARE
+
+    bad = [f for f in (_invalid_calendar_family(v.strip()) for v in non_empty) if f]
+    real = sum(counts.get(t, 0) for t in _TEMPORAL_VOTES)
+    if not bad or real == 0 or counts.get("VARCHAR", 0) != len(bad):
+        return
+    if len(bad) >= INVALID_CALENDAR_MAX_SHARE * (len(bad) + real):
+        return
+    counts["VARCHAR"] -= len(bad)
+    if counts["VARCHAR"] <= 0:
+        del counts["VARCHAR"]
+    for family in bad:
+        counts[family] += 1
+    notes.append(
+        f"{len(bad)} sample value(s) name no real calendar day — counted as "
+        "dates; each is held out at write with its reason"
+    )
 
 
 def classify_value(value: str, *, field_name: str | None = None) -> str:
@@ -604,10 +639,6 @@ def classify_value(value: str, *, field_name: str | None = None) -> str:
             return "TIME"
         except ValueError:
             continue
-
-    invalid_calendar = _invalid_calendar_family(s)
-    if invalid_calendar:
-        return invalid_calendar
 
     # '45%' is a percentage token. Stripping the marker and inferring INTEGER
     # then blocks the same value as a lossy cast (QA R2-017). Keep the text.
@@ -978,7 +1009,7 @@ def safe_ddl_logical_type(
 
 
 def infer_column(
-    samples: list[str], *, field_name: str | None = None
+    samples: list[str], *, field_name: str | None = None, invalid_calendar_votes: bool = False
 ) -> dict[str, Any]:
     """Full schema-intelligence record for one column.
 
@@ -1057,6 +1088,8 @@ def infer_column(
         counts: Counter[str] = Counter(
             _classify_value(sample, field_name=field_name) for sample in non_empty
         )
+    if invalid_calendar_votes:
+        _count_invalid_calendar_votes(counts, non_empty, notes)
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:
@@ -1380,7 +1413,8 @@ def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_sa
     sample_rows = rows[:max_samples]
     for i, name in enumerate(headers):
         samples = [str(row[i]) if i < len(row) else "" for row in sample_rows]
-        intel = infer_column(samples, field_name=name)
+        # A file's rows: an impossible day among real dates is a row holdout.
+        intel = infer_column(samples, field_name=name, invalid_calendar_votes=True)
         columns.append(
             {
                 "name": name.strip() or f"column_{i + 1}",
