@@ -205,9 +205,17 @@ def test_one_query_stream_beside_a_table_stream(client, two_tables):
                            source_query=f"SELECT id, v FROM {a} WHERE hidden = 0",
                            mappings=maps[:2]),
                  _contract(b, mappings=maps)]
-    _run_ok(client, _multi_form(src, dst, "mysql", contracts))
+    job = _run_ok(client, _multi_form(src, dst, "mysql", contracts))
     assert _pg_rows(a) == _VISIBLE
     assert sorted(r[:2] for r in h.query("postgresql", f'SELECT id, v FROM "{b}"')) == _ALL
+    # The query stream's read side is the reader's own count, and says so; the
+    # table stream's read side is an independent COUNT(*).
+    streams = (job.get("destination_summary") or {}).get("streams") or job.get("streams") or []
+    by_name = {str(s.get("name") or s.get("stream") or ""): s.get("row_accounting") or {}
+               for s in (streams.values() if isinstance(streams, dict) else streams)}
+    read_labels = {n: led.get("rows_read_source") for n, led in by_name.items()}
+    assert any(n.endswith(a) and v == "reader_self_count" for n, v in read_labels.items()), read_labels
+    assert any(n.endswith(b) and v != "reader_self_count" for n, v in read_labels.items()), read_labels
 
 
 @pytest.mark.parametrize("query_source", ["mysql"], indirect=True)
