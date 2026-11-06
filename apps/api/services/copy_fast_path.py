@@ -1766,12 +1766,22 @@ def copy_between_postgres(
         dest_conn.commit()
         source_conn.commit()
         return result
-    except Exception:
+    except Exception as failure:
+        rolled_back = True
         for conn in (dest_conn, source_conn):
             try:
                 conn.rollback()
             except Exception as exc:
+                rolled_back = False
                 logger.debug("rollback after fast-path failure: %s", exc)
+        from services.error_handling import TransferCancelled
+
+        if isinstance(failure, TransferCancelled) and rolled_back:
+            # C16: the whole copy (DDL, clear and rows) was one transaction and
+            # it rolled back — the route's evidence, not a row-count guess.
+            from services.job_status import mark_write_rolled_back
+
+            mark_write_rolled_back(failure)
         raise
     finally:
         for conn in (dest_conn, source_conn):

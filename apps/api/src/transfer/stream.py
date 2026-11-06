@@ -640,8 +640,9 @@ def _stream_database_transfer_impl(
             resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
         )
     if pre_write_rows_before is not None and isinstance(getattr(run.cfg.destination, "extra", None), dict):
-        # C16: a cancelled COPY is measured against this from the job record.
-        run.cfg.destination.extra.setdefault("dest_rows_before", int(pre_write_rows_before))
+        # C16: a cancelled COPY is measured against this from the job record
+        # (its own key: the write-failure undo keeps reading dest_rows_before).
+        run.cfg.destination.extra.setdefault("cancel_rows_before", int(pre_write_rows_before))
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
     # destination's current shape and fail on the column the source just grew.
@@ -2666,7 +2667,10 @@ def _stream_database_transfer_impl(
                 sync_mode=str(run.cfg.effective_sync or ""),
                 rows_before=run.tally.dest_summary.get(PRECOUNT_KEY),
                 table_existed_before=run.tally.dest_summary.get("dest_table_existed_before"),
-                keyed=bool(run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols),
+                write_mode=str(run.cfg.write_mode or ""),
+                # The first batch replaces the table (create/replace DDL): until
+                # it was written, a clear-first overwrite cleared nothing.
+                overwrite_applied=bool(run.tally.ddl_state.get("created")),
                 atomic_overwrite=bool(
                     run.cfg.dest_type in ("postgresql", "redshift")
                     and (getattr(run.cfg.destination, "extra", None) or {}).get(

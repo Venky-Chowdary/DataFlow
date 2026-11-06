@@ -96,6 +96,33 @@ def _count(value: object) -> int | None:
         return None
 
 
+def keyed_landing(sync_mode: str | None, write_mode: str | None = "") -> bool:
+    """Whether a write addresses rows by key (so COUNT growth is new keys only).
+
+    The one predicate every cancel measurement uses: an upsert/merge write
+    mode, or a convergent keyed sync mode (upsert, incremental_deduped,
+    ``*_mirror``, SCD2) or CDC — overwrite is handled on its own branch.
+    """
+    from services.execution_engine_contract import is_idempotent_sync
+    from services.sync_cursor import is_overwrite_sync
+
+    if str(write_mode or "").strip().lower() in {"upsert", "merge"}:
+        return True
+    sync = str(sync_mode or "").strip().lower()
+    if sync.startswith("cdc"):
+        return True
+    return is_idempotent_sync(sync) and not is_overwrite_sync(sync)
+
+
+def mark_write_rolled_back(exc: BaseException) -> None:
+    """A route's own evidence: its transaction (or staged swap) never committed.
+
+    Set by a COPY route that rolled its write back on the cancel before any
+    data commit; :func:`measure_cancel_landing` claims a rollback only on it.
+    """
+    exc.write_rolled_back = True  # type: ignore[attr-defined]
+
+
 def measure_cancel_landing(
     exc: BaseException,
     *,
@@ -105,8 +132,10 @@ def measure_cancel_landing(
     sync_mode: str,
     rows_before: object,
     table_existed_before: object,
-    keyed: bool,
     atomic_overwrite: bool,
+    keyed: bool | None = None,
+    write_mode: str = "",
+    overwrite_applied: bool | None = None,
 ) -> None:
     """D199 / C16 — stamp what the destination holds once a cancelled run stopped.
 
@@ -117,18 +146,25 @@ def measure_cancel_landing(
     transaction, or a run-created table dropped by the copy's undo, reported
     "1,024 rows retained" / "2,048 rows written and retained" for a table that
     no longer existed (QA C16, MySQL D11). By the time the cancel reaches here
-    every writer has stopped, so the destination is measured:
+    every writer has stopped, so the destination is measured, and a number is
+    attributed to this run only on evidence:
 
     * the table does not exist → nothing of this run is there (0, exact);
     * the run created it → every row there is this run's;
-    * an append with the rows before known → the growth;
-    * an overwrite that clears first → every row now there; one that runs in a
-      single transaction (or a staged swap) and still holds exactly what it
-      held before was rolled back → 0;
-    * a keyed upsert into a table that was empty before → every row there.
+    * a keyless append with the rows before known → the growth;
+    * an overwrite whose route reports its write rolled back
+      (:func:`mark_write_rolled_back`) and that holds exactly its pre-run
+      count → 0; an overwrite that clears first and whose first batch was
+      written (``overwrite_applied``) → every row now there; an overwrite that
+      wrote nothing (``overwrite_applied`` false) and holds its pre-run count
+      → 0. A row count alone never proves a rollback: a committed same-size
+      replacement holds the same count. Anything else is unattributed;
+    * a keyed write into a table that was empty before → every row there.
 
-    A keyed upsert into a populated table grows by new keys only, so it keeps
+    A keyed write into a populated table grows by new keys only, so it keeps
     the tally, labelled as a lower bound, beside the destination's own count.
+    ``destination_rows_before`` is stamped so the message never says "as it
+    did before" unless the count is the pre-run count.
     """
     try:
         from services.dest_precount import precount_table
@@ -153,29 +189,36 @@ def measure_cancel_landing(
         except Exception:  # noqa: BLE001 - unknown existence stays unknown
             exists_now = None
     exc.destination_rows_now = int(now)  # type: ignore[attr-defined]
+    before = _count(rows_before)
+    if before is not None:
+        exc.destination_rows_before = before  # type: ignore[attr-defined]
     if exists_now is False:
         exc.destination_table_exists = False  # type: ignore[attr-defined]
         exc.destination_rows_by_run = 0  # type: ignore[attr-defined]
         return
     from services.sync_cursor import is_overwrite_sync
 
-    before = _count(rows_before)
+    if keyed is None:
+        keyed = keyed_landing(sync_mode, write_mode)
+    rolled_back = getattr(exc, "write_rolled_back", None) is True
+    unchanged = before is not None and int(now) == before
     by_run: int | None = None
     if table_existed_before is False:
         # Created by this run: no older row can be there.
         by_run = int(now)
     elif is_overwrite_sync(sync_mode):
-        if not atomic_overwrite:
+        if rolled_back or overwrite_applied is False:
+            by_run = 0 if unchanged else None
+        elif not atomic_overwrite and overwrite_applied is True:
             by_run = int(now)
-        elif before is not None:
-            # One transaction / staged swap: either it committed (every row is
-            # the replacement) or it rolled back and the table is as before.
-            by_run = 0 if int(now) == before else int(now)
+        elif not atomic_overwrite and overwrite_applied is None and not unchanged:
+            # A clear-first overwrite that changed the table cleared it.
+            by_run = int(now)
     elif not keyed:
         if before is not None and now >= before:
             by_run = int(now) - before
     elif before == 0:
-        # A keyed upsert into a table that was empty before its first pass has
+        # A keyed write into a table that was empty before its first pass has
         # no older key a write could have replaced: every row there is this
         # job's. On a resumed pass ``rows_before`` is the first pass's
         # pre-write count, so the number covers every pass (QA: "121,856
@@ -297,6 +340,9 @@ def cancel_outcome_for(
     destination_rows_by_run: int | None = None,
     destination_rows_now: int | None = None,
     destination_table_exists: bool | None = None,
+    destination_rows_before: int | None = None,
+    write_rolled_back: bool = False,
+    tally_is_commit_evidence: bool = True,
     tally_is_exact: bool = False,
 ) -> dict:
     """What a cancel left behind, stated as the destination holds it.
@@ -307,29 +353,43 @@ def cancel_outcome_for(
 
     D199 / C16: the number comes from the destination when it was re-counted
     after the writers stopped. ``rows_committed`` (the writer's tally) is only
-    the fallback, labelled a lower bound — and never stated for rows a
-    rollback removed: when the destination holds none of this run's rows the
-    outcome says the write was rolled back (or the run-created table is gone),
-    whatever the writer had acknowledged before the cancel.
+    the fallback, labelled a lower bound — and only where the tally counts
+    committed batches. A COPY route's tally is a progress meter of rows sent
+    into one transaction (``tally_is_commit_evidence=False``): without the
+    destination's attribution the outcome says the number is unknown, never
+    the meter. A rollback is claimed only on the route's evidence
+    (``write_rolled_back``) or a destination table that no longer exists, and
+    "as it did before the run" only when the count is the pre-run count.
     """
     tally = _count(rows_committed) or 0
     by_run = _count(destination_rows_by_run)
     now = _count(destination_rows_now)
+    before = _count(destination_rows_before)
     if by_run is not None:
         rows, source = by_run, "destination_count"
     elif tally_is_exact:
         # The run finished and Gate-8 counted it before the cancel landed.
         rows, source = tally, "completed_run"
+    elif not tally_is_commit_evidence and (tally or now):
+        rows, source = None, "unknown"
     else:
         rows, source = tally, "committed_batches"
-    # Nothing of this run is there although it wrote (a tally), or the table it
-    # wrote into is gone: the write was undone, not merely never started.
     rolled_back = (
         source == "destination_count"
         and rows == 0
-        and (tally > 0 or destination_table_exists is False)
+        and (bool(write_rolled_back) or destination_table_exists is False)
     )
-    if rows and source == "completed_run":
+    if source == "unknown":
+        held = f"the destination table now holds {now:,} row(s)" if now is not None else (
+            "the destination could not be counted"
+        )
+        message = (
+            f"Transfer cancelled by user. {held[0].upper()}{held[1:]}; how many of them "
+            "this run wrote could not be established (the route did not report "
+            "whether its write was committed or undone). Count the destination "
+            "before re-running an append."
+        )
+    elif rows and source == "completed_run":
         message = (
             f"Cancelled after {rows:,} row(s) were already committed to the "
             "destination — the load had finished when the cancel landed; they "
@@ -364,26 +424,36 @@ def cancel_outcome_for(
             + "). A retry starts from zero."
         )
     elif source == "destination_count":
+        if before is not None and now == before:
+            held = f"holds {now:,} row(s), as it did before the run"
+        elif before is not None:
+            held = f"now holds {now or 0:,} row(s) (it held {before:,} before the run)"
+        else:
+            held = f"now holds {now or 0:,} row(s)"
         message = (
             "Transfer cancelled by user. No row of this run was kept"
-            + (": the write was rolled back" if tally else "")
-            + f" — the destination table holds {now or 0:,} row(s), as it did "
-            "before the run (counted on the destination after the writers "
-            "stopped). A retry starts from zero."
+            + (": the write was rolled back" if write_rolled_back else "")
+            + f" — the destination table {held} (counted on the destination "
+            "after the writers stopped). A retry starts from zero."
         )
     else:
         message = "Transfer cancelled by user"
-    out = {
-        "partial_write": bool(rows),
+    out: dict[str, Any] = {
+        "partial_write": bool(rows) if rows is not None else None,
         "rows_committed": rows,
         "rows_committed_source": source,
         "rolled_back": rolled_back,
         "message": message,
     }
+    if source == "unknown":
+        out["rows_committed_known"] = False
+        out["progress_tally"] = tally
     if source == "committed_batches" and rows:
         out["rows_committed_is_lower_bound"] = True
     if now is not None:
         out["destination_rows_now"] = now
+    if before is not None:
+        out["destination_rows_before"] = before
     if destination_table_exists is not None:
         out["destination_table_exists"] = bool(destination_table_exists)
     if by_run is not None and tally != by_run:

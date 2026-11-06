@@ -647,19 +647,29 @@ def _fail_runtime_job(
     if cancelled:
         from services.job_status import cancel_outcome_for
 
-        if getattr(exc, "destination_rows_now", None) is None and request is not None:
+        # A route that did not count its destination (COPY fast paths,
+        # adapters) reports a progress meter, not committed batches.
+        unmeasured = getattr(exc, "destination_rows_now", None) is None
+        if unmeasured and request is not None:
             _measure_unmeasured_cancel(exc, request)
         outcome = cancel_outcome_for(
             status_kwargs.get("records_processed", prev.get("records_processed")),
             destination_rows_by_run=getattr(exc, "destination_rows_by_run", None),
             destination_rows_now=getattr(exc, "destination_rows_now", None),
             destination_table_exists=getattr(exc, "destination_table_exists", None),
+            destination_rows_before=getattr(exc, "destination_rows_before", None),
+            write_rolled_back=getattr(exc, "write_rolled_back", None) is True,
+            tally_is_commit_evidence=not (unmeasured and request is not None),
         )
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch
             # tally wherever the job reports it.
             status_kwargs["records_processed"] = outcome["rows_committed"]
+        elif outcome.get("rows_committed_source") == "unknown":
+            # Unknown is not zero: a retry must not read the meter's 0 (or
+            # its rolled-back rows) as a fact about the destination.
+            status_kwargs["records_processed"] = None
         # The error text is the cancel message too: the exception's own
         # "N row(s) were already written and were not removed" is the writer's
         # tally, which a rollback (or a dropped run-created table) makes untrue
@@ -700,10 +710,12 @@ def _measure_unmeasured_cancel(exc: BaseException, request: Any) -> None:
     an adapter raises the cancel with only the writer's tally — the meter a
     single-transaction COPY moved before it rolled back, or the rows of a
     run-created table its undo dropped. The pre-run facts ride
-    ``destination.extra`` (``dest_table_existed_before``, ``dest_rows_before``),
-    so the same measurement applies here. A COPY route's overwrite is one
-    transaction or a staged swap on every SQL destination, so it is atomic; a
-    schemaless sink clears first.
+    ``destination.extra`` (``dest_table_existed_before``, and the pre-write
+    count ``cancel_rows_before``), so the same measurement applies here. A
+    COPY route's overwrite is one transaction or a staged swap on every SQL
+    destination (atomic); a schemaless sink clears first. A rollback is
+    claimed only when the route marked it (``mark_write_rolled_back``); keyed
+    modes use the shared ``keyed_landing`` predicate.
     """
     try:
         from services.job_status import measure_cancel_landing
@@ -730,9 +742,14 @@ def _measure_unmeasured_cancel(exc: BaseException, request: Any) -> None:
             or ""
         )
         extra = getattr(_dst, "extra", None) or {}
-        before = extra.get("dest_rows_before")
-        if not isinstance(before, int):
-            before = extra.get("overwrite_rows_before")
+        before = next(
+            (
+                extra.get(k)
+                for k in ("dest_rows_before", "cancel_rows_before", "overwrite_rows_before")
+                if isinstance(extra.get(k), int)
+            ),
+            None,
+        )
         measure_cancel_landing(
             exc,
             dest_type=_dtype,
@@ -741,7 +758,7 @@ def _measure_unmeasured_cancel(exc: BaseException, request: Any) -> None:
             sync_mode=sync,
             rows_before=before,
             table_existed_before=extra.get("dest_table_existed_before"),
-            keyed="upsert" in sync.lower() or "merge" in sync.lower(),
+            write_mode=str(getattr(request, "write_mode", "") or ""),
             atomic_overwrite=not is_schemaless_family(_dtype),
         )
     except Exception as count_exc:  # noqa: BLE001 - the tally still stands

@@ -3092,7 +3092,7 @@ def stream_file_to_database(
                 sync_mode=str(effective_sync or ""),
                 rows_before=dest_summary.get(PRECOUNT_KEY),
                 table_existed_before=dest_summary.get("dest_table_existed_before"),
-                keyed=bool(write_mode == "upsert" and pk_target_cols),
+                write_mode=str(write_mode or ""),
                 atomic_overwrite=bool(pg_overwrite_one_txn),
             )
         if not isinstance(_write_exc, TransferCancelled):
