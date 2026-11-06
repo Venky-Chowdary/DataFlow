@@ -245,3 +245,35 @@ def test_procedure_params_compare_as_objects():
     two = [{"name": "a", "source_query": "SELECT 1"}, {"name": "b", "source_query": "SELECT 2"}]
     extra, contracts = resolve_callable_placements(form={}, source_extra={}, stream_contracts=two)
     assert "source_query" not in extra and contracts == two  # left for stream_multi
+
+
+def test_legacy_mode_word_and_text_binds_on_several_streams(client, two_tables):
+    """'sql' is inferred as the query it carries (not a whole-table copy), and a
+    stream's procedure_params sent as JSON text are its binds (not dropped)."""
+    a, b = two_tables
+    src, dst = _connector("mysql", "source"), _connector("postgresql", "destination")
+    contracts = [
+        _contract(a, source_read_mode="sql", source_query=f"SELECT id, v FROM {a} WHERE hidden = 0"),
+        _contract(b, source_read_mode="query", source_query=f"SELECT id, v FROM {b} WHERE id <= :n",
+                  procedure_params='{"n": 2}'),
+    ]
+    _run_ok(client, _multi_form(src, dst, "mysql", contracts))
+    assert _pg_rows(a) == _VISIBLE
+    assert _pg_rows(b) == [(1, "x"), (2, None)]
+
+
+def test_stream_patches_normalise_mode_words_and_params():
+    from services.multi_stream_plan import patches_for_stream
+
+    src, _dst = patches_for_stream({"source_read_mode": "sql", "source_query": "SELECT 1 AS x"})
+    assert src and src["source_read_mode"] == "query" and src["source_query"] == "SELECT 1 AS x"
+    src, _dst = patches_for_stream({"procedure_call": "CALL p(:n)", "procedure_params": '{"n": 3}'})
+    assert src and src["procedure_params"] == {"n": 3}
+    _extra, contracts = resolve_callable_placements(
+        form={}, source_extra={},
+        stream_contracts=[{"name": "a", "source_query": "SELECT :n", "procedure_params": '{"n": 1}'},
+                          {"name": "b", "source_query": "SELECT 2"}])
+    assert contracts[0]["procedure_params"] == {"n": 1}
+    with pytest.raises(CallablePlacementError):
+        resolve_callable_placements(form={}, source_extra={}, stream_contracts=[
+            {"name": "a", "procedure_params": "[1]"}, {"name": "b"}])

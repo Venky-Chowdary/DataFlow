@@ -438,6 +438,12 @@ def resolve_callable_placements(
         i for i, c in enumerate(contracts or [])
         if isinstance(c, Mapping) and c.get("selected", True) is not False
     ]
+    for i, c in enumerate(contracts or []):
+        # Each stream's own binds, parsed once here so a malformed one is a 422
+        # and stream_multi binds the same object the request named.
+        if isinstance(c, Mapping) and isinstance(c.get("procedure_params"), str):
+            parsed = _parsed_params(c["procedure_params"])
+            contracts[i] = {**dict(c), "procedure_params": parsed or {}}  # type: ignore[index]
     if len(selected) == 1:
         i = selected[0]
         contract = dict(contracts[i])  # type: ignore[index]

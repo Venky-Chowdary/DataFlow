@@ -299,6 +299,11 @@ def _source_sql(extra: Mapping[str, Any]) -> tuple[str, str]:
     statement is not an extract.
     """
     mode = str(extra.get("source_read_mode") or "").strip().lower()
+    if mode not in {"table", "query", "procedure"}:
+        # A word the engine does not name ("sql", "select", ...) is inferred
+        # from the statement present, exactly as procedure_source.source_read_mode_of
+        # reads it; dropping it made a per-stream SELECT copy the whole table (C3).
+        mode = ""
     call = str(extra.get("procedure_call") or extra.get("source_procedure") or "").strip()
     query = str(extra.get("source_query") or "").strip()
     if mode == "table":
@@ -609,6 +614,17 @@ def review_stream_procedures(
     return ""
 
 
+def _stream_params(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """A stream's ``procedure_params`` as an object, whether sent as a dict or JSON text.
+
+    JSON text became ``{}`` and the CALL ran without its binds.
+    """
+    from services.procedure_source import _parsed_params
+
+    value = _parsed_params(raw.get("procedure_params"))
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def patches_for_stream(
     contract: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -622,7 +638,7 @@ def patches_for_stream(
     source_patch: dict[str, Any] | None = None
     mode, sql = _source_sql(raw)
     if mode in {"procedure", "query"} and sql:
-        params = raw.get("procedure_params") if isinstance(raw.get("procedure_params"), Mapping) else {}
+        params = _stream_params(raw)
         source_patch = {
             "source_read_mode": mode,
             "procedure_call": sql if mode == "procedure" else "",
