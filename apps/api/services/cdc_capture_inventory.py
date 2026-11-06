@@ -441,9 +441,12 @@ def schedule_slot_users(cfg: dict[str, Any], server: str = "") -> dict[str, list
     Matched by the derived slot name — it already embeds the database, the
     table and the route's cursor hash — never by server identity, which a
     rotated password or a DNS blip makes unreadable (review: that failed open).
-    A PostgreSQL CDC schedule whose names cannot be derived is listed under
-    :data:`UNDERIVABLE` with its tables, and every slot on those tables is
-    treated as in use (fails closed). ``cfg``/``server`` are kept for callers.
+    A PostgreSQL CDC schedule whose names cannot be derived — or a CDC
+    schedule whose source connector is gone, so its server is unknown — is
+    listed under :data:`UNDERIVABLE` with its tables: every slot on those
+    tables is treated as in use, and while any is listed no unregistered
+    slot or publication is dropped anywhere (fails closed, third review #5).
+    ``cfg``/``server`` are kept for callers.
     """
     from services.connector_store import get_connector
     from services.schedule_store import list_schedules
@@ -456,14 +459,22 @@ def schedule_slot_users(cfg: dict[str, Any], server: str = "") -> dict[str, list
             if normalize_sync_mode(sched.sync_mode) != "cdc":
                 continue
             connector = get_connector(sched.source_connector_id)
-            if connector is None or (connector.type or "").lower() not in {"postgresql", "postgres"}:
+            use = {"schedule_id": sched.id, "workspace_id": sched.workspace_id or ""}
+            if connector is None:
+                # Its server is unknown: it may be this one (fails closed).
+                users.setdefault(UNDERIVABLE, []).append(
+                    {**use, "publication_name": "", "tables": _schedule_tables(sched),
+                     "why": "source connector missing"}
+                )
+                continue
+            if (connector.type or "").lower() not in {"postgresql", "postgres"}:
                 continue
             other = {**connector.to_dict(), "connector_id": connector.id}
             slots = _schedule_slot_names(sched, other)
-            use = {"schedule_id": sched.id, "workspace_id": sched.workspace_id or ""}
             if not slots:
                 users.setdefault(UNDERIVABLE, []).append(
-                    {**use, "publication_name": "", "tables": _schedule_tables(sched)}
+                    {**use, "publication_name": "", "tables": _schedule_tables(sched),
+                     "why": "slot names not derivable"}
                 )
             for slot in slots:
                 users.setdefault(slot["slot_name"], []).append(
@@ -489,21 +500,56 @@ def _underivable_uses(users: dict[str, list[dict[str, Any]]], slot_name: str,
     ]
 
 
-def _live_jobs() -> list[dict[str, Any]]:
-    """Pending/queued/running/retrying jobs (system scope), slim."""
+def unregistered_drop_blockers(users: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """CDC schedules whose slots cannot be told apart from an unregistered one."""
+    return list(users.get(UNDERIVABLE) or [])
+
+
+def _live_jobs(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pending/queued/running/retrying jobs of this capture's route (system scope).
+
+    Asked by the route's cursor key or source connector directly, never a
+    first page of every live job (third review #6: 500 stopped short).
+    """
     from services.mongodb_service import get_mongodb_service
 
+    cursor_key = str(entry.get("cursor_key") or "")
+    connector_id = str(entry.get("connector_id") or "")
+    if not (cursor_key or connector_id):
+        return []
     svc = get_mongodb_service()
-    statuses = sorted(_LIVE_JOB_STATUSES)
     if type(svc).__name__ == "MemoryMongoDBService":
-        return [dict(j) for j in getattr(svc, "_jobs", {}).values()
-                if str(j.get("status") or "") in _LIVE_JOB_STATUSES]
+        return [
+            dict(j) for j in getattr(svc, "_jobs", {}).values()
+            if str(j.get("status") or "") in _LIVE_JOB_STATUSES
+            and ((cursor_key and j.get("cursor_key") == cursor_key) or (
+                connector_id and str(((j.get("transfer_request") or {}).get("source") or {})
+                                     .get("connector_id") or "") == connector_id))
+        ]
+    either = ([{"cursor_key": cursor_key}] if cursor_key else []) + (
+        [{"transfer_request.source.connector_id": connector_id}] if connector_id else []
+    )
     coll = svc.get_database()["transfer_jobs"]
     return list(coll.find(
-        {"status": {"$in": statuses}},
+        {"status": {"$in": sorted(_LIVE_JOB_STATUSES)}, "$or": either},
         {"cursor_key": 1, "status": 1, "sync_mode": 1, "transfer_request.source": 1,
-         "transfer_request.sync_mode": 1},
-    ).limit(500))
+         "transfer_request.sync_mode": 1, "transfer_request.stream_contracts": 1},
+    ))
+
+
+def _bare(name: Any) -> str:
+    return str(name or "").split(".")[-1].strip().lower()
+
+
+def _job_tables(req: dict[str, Any]) -> set[str]:
+    """Every table a job reads: its source table(s) and selected stream contracts."""
+    src = req.get("source") or {}
+    raw = src.get("table")
+    tables = {_bare(t) for t in (raw if isinstance(raw, list) else [raw])}
+    for contract in req.get("stream_contracts") or []:
+        if isinstance(contract, dict) and contract.get("selected", True):
+            tables.add(_bare(contract.get("name")))
+    return tables - {""}
 
 
 def _job_holds(job: dict[str, Any], entry: dict[str, Any]) -> bool:
@@ -516,8 +562,7 @@ def _job_holds(job: dict[str, Any], entry: dict[str, Any]) -> bool:
         return False
     if str(src.get("connector_id") or "") != str(entry.get("connector_id")):
         return False
-    table = str(src.get("table") or "").split(".")[-1].lower()
-    return table in {str(t).split(".")[-1].lower() for t in entry.get("tables") or []}
+    return bool(_job_tables(req) & {_bare(t) for t in entry.get("tables") or []})
 
 
 def _route_running(entry: dict[str, Any] | None, slot_name: str) -> bool:
@@ -549,7 +594,7 @@ def _route_running(entry: dict[str, Any] | None, slot_name: str) -> bool:
             return True
         # A queued job of the same route that has no lease and is not named on
         # the row yet (review): by cursor key, or by connector + table + cdc.
-        return any(_job_holds(job, entry or {}) for job in _live_jobs())
+        return any(_job_holds(job, entry or {}) for job in _live_jobs(entry or {}))
     except Exception as exc:  # noqa: BLE001
         _logger.info("CDC job check failed for %s: %s", slot_name, exc)
         return True
@@ -636,6 +681,18 @@ def _tables_present(cur: Any, schema: str, tables: list[str]) -> dict[str, bool]
 
 
 def _warn(item: dict[str, Any]) -> str:
+    text = _warn_state(item)
+    blocked = item.get("unregistered_drop_blocked_by")
+    if blocked:
+        name = item.get("slot_name") or item.get("publication_name")
+        text = (text + " " if text else "") + (
+            f"{name} is not dropped while {blocked} CDC schedule(s) have a capture "
+            "Datawrap cannot name (slot names not derivable, or source connector gone)."
+        )
+    return text
+
+
+def _warn_state(item: dict[str, Any]) -> str:
     wal = item.get("retained_wal_bytes")
     held = f" It retains {wal:,} bytes of WAL on the source." if isinstance(wal, int) else ""
     cleanup = "Clean it up with POST /api/v1/ops/cdc-captures/cleanup (MCP: cleanup_cdc_captures)."
@@ -753,12 +810,22 @@ def _slot_item(
     item["cleanup_allowed"] = bool(
         ownership == "datawrap" and state in CLEANABLE_STATES and not slot["active"]
     )
+    if entry is None and not uses:
+        _mark_blocked(item, users_all)
     item["warning"] = _warn(item)
     return item
 
 
+def _mark_blocked(item: dict[str, Any], users_all: dict[str, list[dict[str, Any]]]) -> None:
+    """An unregistered item while some schedule's slots cannot be derived."""
+    blockers = unregistered_drop_blockers(users_all)
+    if blockers:
+        item["unregistered_drop_blocked_by"] = len(blockers)
+
+
 def _pub_item(
-    pub_name: str, pub_tables: list[str], entry: dict[str, Any] | None
+    pub_name: str, pub_tables: list[str], entry: dict[str, Any] | None,
+    users_all: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     running = _route_running(entry, str((entry or {}).get("slot_name") or ""))
     item = {
@@ -773,6 +840,8 @@ def _pub_item(
         "unregistered_match": entry is None,
     }
     item["cleanup_allowed"] = entry is not None and not running
+    if entry is None:
+        _mark_blocked(item, users_all or {})
     item["warning"] = _warn(item)
     return item
 
@@ -861,7 +930,7 @@ def inventory_pg_captures(
         if not visible:
             foreign["count"] += 1
             continue
-        items.append(_pub_item(pub_name, pub_tables, entry))
+        items.append(_pub_item(pub_name, pub_tables, entry, users))
     warnings = [i["warning"] for i in items if i.get("warning")]
     if foreign["count"]:
         warnings.append(
@@ -972,6 +1041,8 @@ def _still_unused(cfg: dict[str, Any], item: dict[str, Any]) -> tuple[str, dict[
         users = schedule_slot_users(cfg, server)
         if slot and (users.get(slot) or _underivable_uses(users, slot, list((entry or {}).get("tables") or []))):
             return "a CDC schedule uses it", item
+        if entry is None and unregistered_drop_blockers(users):
+            return _BLOCKED_REASON, item
         if _route_running(entry or {"cursor_key": item.get("cursor_key")}, slot):
             return "a CDC run holds it", item
         others = _publication_users(cfg, pub, slot, users)
@@ -1047,6 +1118,13 @@ def cleanup_pg_captures(
     }
 
 
+_BLOCKED_REASON = (
+    "no ownership record, and a CDC schedule's slot names cannot be derived (or its "
+    "source connector is gone), so this may be that schedule's capture — unregistered "
+    "slots and publications are not dropped until every schedule's capture is known"
+)
+
+
 def _cleanup_one(
     cfg: dict[str, Any], item: dict[str, Any], *, explicit: bool, include_unregistered: bool,
     dry_run: bool,
@@ -1065,6 +1143,8 @@ def _cleanup_one(
         and item["ownership"] == "datawrap_named"
         and item["state"] in {"unregistered", "orphaned_publication"}
     )
+    if allowed and item.get("unregistered_drop_blocked_by") and item["ownership"] != "datawrap":
+        return {**base, "action": "skipped", "reason": _BLOCKED_REASON}
     if not allowed:
         reason = {
             "external": "not created by Datawrap — never dropped",
