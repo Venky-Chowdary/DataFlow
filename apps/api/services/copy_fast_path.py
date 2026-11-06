@@ -47,12 +47,12 @@ import logging
 import os
 import re
 import tempfile
-import threading
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
 from services.brand_env import getenv_brand
+from services.tracing import thread_in_context
 
 from services.copy_range_proof import range_keys_match  # noqa: E402
 
@@ -713,7 +713,9 @@ def stream_between_cursors(
         except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
             failure.append(exc)
 
-    pump = threading.Thread(target=_pump, name=f"{prefix}fifo", daemon=True)
+    # The producer polls the job's cancel probe and feeds its progress meter
+    # (ContextVars): it must run in the job's context (D168).
+    pump = thread_in_context(_pump, name=f"{prefix}fifo")
     pump.start()
     try:
         consumer(path)
@@ -1209,7 +1211,7 @@ def _stream_copy(
         except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
             failure.append(exc)
 
-    pump = threading.Thread(target=_pump, name="copy-fast-path", daemon=True)
+    pump = thread_in_context(_pump, name="copy-fast-path")
     pump.start()
     class _CancelAwareReader:
         """D102: poll the job's cancel probe on every COPY read block."""

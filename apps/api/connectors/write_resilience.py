@@ -362,13 +362,20 @@ def apply_postgres_session_guards(conn: Any) -> None:
     the operator.  DDL paths that need a shorter fail-fast window can ``SET LOCAL``
     a lower value and ``RESET`` afterwards.
     """
-    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+    from src.ai.copilot.tool_deadline import (
+        register_connection,
+        statement_timeout_seconds,
+    )
 
     # Inside a tool call (plan, rank, sample, query...) a statement may not
     # outlive the call: the server cancels it at the call's deadline instead of
     # scanning on for a caller that gave up (D181). Transfer jobs keep 0.
     budget = statement_timeout_seconds()
     statement_ms = int(budget * 1000) if budget is not None else 0
+    if budget is not None:
+        # A silent socket has no server to cancel on: the abandoned call shuts
+        # it from the caller's side instead (D281).
+        register_connection(conn)
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -410,6 +417,11 @@ def apply_mysql_session_guards(
     modes raises — never continue a transfer that can silently truncate.
     """
     lock_s = max(5, min(int(lock_wait_seconds or destination_lock_wait_seconds()), 600))
+    from src.ai.copilot.tool_deadline import register_connection
+
+    # Inside a tool call the abandoned call can end this session's blocked
+    # I/O (D281); outside one this is a no-op.
+    register_connection(conn)
     try:
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")

@@ -315,6 +315,28 @@ def submit_in_context(executor: Any, fn: Any, /, *args: Any, **kwargs: Any) -> A
     return executor.submit(ctx.run, fn, *args, **kwargs)
 
 
+def thread_in_context(
+    target: Any,
+    /,
+    *,
+    name: str | None = None,
+    daemon: bool = True,
+    kwargs: dict[str, Any] | None = None,
+) -> threading.Thread:
+    """A (not yet started) thread that runs ``target`` in a copy of the caller's
+    contextvars, like :func:`submit_in_context` for a pool.
+
+    A bare ``threading.Thread`` starts with an empty context. On a transfer
+    that drops the job's cancel probe, progress meter and run-attempt fence
+    (``services.cancel_check``): a COPY producer on such a thread could not be
+    cancelled and never moved the job's progress (D168, D230, D166).
+    """
+    ctx = contextvars.copy_context()
+    return threading.Thread(
+        target=ctx.run, args=(target,), kwargs=kwargs or {}, name=name, daemon=daemon
+    )
+
+
 def ensure_provider() -> bool:
     """Initialize the global TracerProvider once. Safe to call repeatedly."""
     global _PROVIDER_READY, _TRACER
