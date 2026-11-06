@@ -43,6 +43,11 @@ def _vocabulary(field: str) -> tuple[frozenset[str], dict[str, str]]:
         from services.schema_drift import SCHEMA_POLICIES, SCHEMA_POLICY_ALIASES
 
         return SCHEMA_POLICIES, SCHEMA_POLICY_ALIASES
+    if field == "delete_mode":
+        # Stream-contract field shared by mirror and the CDC snapshot sweep.
+        from services.mirror_engine import MIRROR_DELETE_MODES
+
+        return MIRROR_DELETE_MODES, {}
     raise KeyError(field)
 
 

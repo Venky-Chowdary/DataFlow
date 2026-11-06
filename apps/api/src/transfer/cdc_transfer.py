@@ -991,57 +991,76 @@ def _max_cursor_value(records: list[dict[str, Any]], cursor_field: str, wm_type:
 
 
 def _shared_snapshot_censuses(
-    plan: dict[str, Any], dest_type: str, dest_cfg: dict[str, Any], destination: Any,
-    stream_cfg: dict[str, dict[str, Any]],
+    plan: dict[str, Any], dest_type: str, dest_cfg: dict[str, Any], src_cfg: dict[str, Any],
+    stream_cfg: dict[str, dict[str, Any]], selected: list[Any],
 ) -> dict[str, Any]:
     """One snapshot key census per stream whose destination table already existed (E3-006)."""
-    from services.cdc_snapshot_sweep import SnapshotKeyCensus, sweep_eligible
+    from services.cdc_snapshot_sweep import SnapshotKeyCensus, plan_snapshot_sweep
     from services.cdc_snapshot_window import _pk_columns
 
+    delete_modes = {
+        str(getattr(c, "name", "") or ""): str(getattr(c, "delete_mode", "") or "")
+        for c in (selected or [])
+    }
+    names = list(stream_cfg)
+    shared = len(set(names)) != len(names)
     out: dict[str, Any] = {}
     for name, cfg in stream_cfg.items():
         absent = _dest_table_absent(dest_type, dest_cfg, str(name))
-        if sweep_eligible(plan, dest_type, dest_absent_before=absent):
-            out[name] = SnapshotKeyCensus(_pk_columns(cfg["primary_key"]))
+        pk_source = _pk_columns(cfg["primary_key"])
+        sweep = plan_snapshot_sweep(
+            plan, dest_type=dest_type, dest_absent_before=absent, source_cfg=src_cfg,
+            mappings=list(cfg.get("mappings") or []), pk_sources=pk_source,
+            shared_destination=shared, delete_mode=delete_modes.get(name, ""),
+        )
+        if sweep is not None:
+            out[name] = SnapshotKeyCensus(pk_source, sweep)
     return out
 
 
 def _sweep_shared_snapshot(
     censuses: dict[str, Any], destination: Any, stream_cfg: dict[str, dict[str, Any]],
-    headers: list[str], ddl_log: list[str], summary: dict[str, Any],
-) -> None:
-    """Remove each stream's destination keys its complete snapshot did not present."""
+    ddl_log: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Settle each stream's destination keys its complete snapshot did not present.
+
+    Returns the per-stream findings; the caller stamps them on the summary it
+    returns (the stream phase rebinds its running summary per batch).
+    """
     if not censuses:
-        return
+        return {}
     from services.cdc_snapshot_window import _pk_columns
 
     saved = getattr(destination, "table", None)
-    deleted: dict[str, int] = {}
+    findings: dict[str, dict[str, Any]] = {}
     try:
         for name, census in censuses.items():
             cfg = stream_cfg[name]
             maps = list(cfg.get("mappings") or [])
             pk_source = _pk_columns(cfg["primary_key"])
+            # Inherited mappings are identity; the stream's own key columns only
+            # (never another stream's headers) reach the kernel.
             pk_target = (
                 list(pk_source)
                 if cfg.get("mappings_inherited")
                 else [map_source_to_target(c, maps) or c for c in pk_source]
             )
             destination.table = name
-            result = census.sweep(
-                destination, mappings=maps, columns=list(headers or []), schema=None,
-                pk_target_cols=pk_target,
-            )
-            if result is not None:
-                deleted[name] = result["deleted"]
-                ddl_log.append(
-                    f"CDC snapshot removed {result['deleted']} row(s) from {name} whose key "
-                    "the source no longer has (deleted while the stream was stopped)"
-                )
+            result = census.settle(destination, mappings=maps, pk_target_cols=pk_target)
+            findings[name] = result
+            ddl_log.append(f"{name}: {result['finding']}")
     finally:
         destination.table = saved
-    if deleted:
-        summary["snapshot_leftover_deleted"] = deleted
+    return findings
+
+
+def _stamp_snapshot_leftover(summary: dict[str, Any], findings: dict[str, dict[str, Any]]) -> None:
+    if not findings:
+        return
+    summary["snapshot_leftover"] = findings
+    removed = {n: r["removed"] for n, r in findings.items() if r.get("removed")}
+    if removed:
+        summary["snapshot_leftover_deleted"] = removed
 
 
 def _dest_table_absent(dest_type: str, dest_cfg: dict[str, Any], table: str) -> bool:
@@ -2601,9 +2620,10 @@ def _run_cdc_shared_multi_table(
         return bool(change.total_changes)
 
     snapshot_censuses = _shared_snapshot_censuses(
-        snapshot_plan, dest_type, dest_cfg, destination, stream_cfg
+        snapshot_plan, dest_type, dest_cfg, src_cfg, stream_cfg, selected
     )
     snapshot_cut_short = False
+    sweep_findings: dict[str, dict[str, Any]] = {}
     try:
         with cdc_destination_hooks(destination, ddl_log):
             if run_snapshot:
@@ -2617,8 +2637,8 @@ def _run_cdc_shared_multi_table(
                             snapshot_cut_short = True
                             break
                 if not snapshot_cut_short:
-                    _sweep_shared_snapshot(
-                        snapshot_censuses, destination, stream_cfg, headers, ddl_log, last_summary
+                    sweep_findings = _sweep_shared_snapshot(
+                        snapshot_censuses, destination, stream_cfg, ddl_log
                     )
             if run_stream and not (limit and total_rows >= limit):
                 max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
@@ -2724,6 +2744,7 @@ def _run_cdc_shared_multi_table(
     )
     last_summary["cdc_shared_reader"] = True
     last_summary["snapshot_mode"] = snapshot_mode.value
+    _stamp_snapshot_leftover(last_summary, sweep_findings)
     stamp = snapshot_plan_stamp(snapshot_plan)
     if stamp:
         last_summary["snapshot_plan"] = stamp
@@ -2768,6 +2789,7 @@ def _run_cdc_multi_stream_sequential(
     stream_health: list[dict[str, Any]] = []
     worst_lag: float | None = None
     last_summary: dict[str, Any] = {}
+    leftover_by_stream: dict[str, dict[str, Any]] = {}
 
     original_table = getattr(source, "table", None)
     original_collection = getattr(source, "collection", None)
@@ -2841,6 +2863,10 @@ def _run_cdc_multi_stream_sequential(
                     ddl_log.extend(stream_ddl)
                     total_rows += rows
                     last_summary = summary
+                    # Each stream's leftover finding stays visible by name (the
+                    # last stream's summary becomes the run's summary below).
+                    if isinstance(summary.get("snapshot_leftover"), dict) and "finding" in summary["snapshot_leftover"]:
+                        leftover_by_stream[str(stream_name)] = summary["snapshot_leftover"]
                     lag = summary.get("cdc_lag_seconds")
                     if isinstance(lag, (int, float)):
                         worst_lag = lag if worst_lag is None else max(worst_lag, float(lag))
@@ -2893,6 +2919,9 @@ def _run_cdc_multi_stream_sequential(
 
     last_summary = dict(last_summary or {})
     last_summary["streams"] = stream_health
+    if leftover_by_stream:
+        last_summary.pop("snapshot_leftover_deleted", None)
+        _stamp_snapshot_leftover(last_summary, leftover_by_stream)
     if worst_lag is not None:
         last_summary["cdc_lag_seconds"] = worst_lag
     return total_rows, ddl_log, last_summary, headers
@@ -3849,13 +3878,19 @@ def _run_cdc_single_stream(
         )
 
     dest_absent_before = _dest_table_absent(dest_type, dest_cfg, str(dest_table or ""))
-    from services.cdc_snapshot_sweep import SnapshotKeyCensus, sweep_eligible
+    from services.cdc_snapshot_sweep import SnapshotKeyCensus, plan_snapshot_sweep
 
-    snapshot_census = (
-        SnapshotKeyCensus(pk_source_cols)
-        if sweep_eligible(snapshot_plan, dest_type, dest_absent_before=dest_absent_before)
-        else None
+    sweep_plan = plan_snapshot_sweep(
+        snapshot_plan,
+        dest_type=dest_type,
+        dest_absent_before=dest_absent_before,
+        source_cfg=src_cfg,
+        mappings=list(mappings or []),
+        pk_sources=list(pk_source_cols),
+        shared_destination=False,
+        delete_mode=str(getattr(contract, "delete_mode", "") or "") if contract else "",
     )
+    snapshot_census = SnapshotKeyCensus(pk_source_cols, sweep_plan) if sweep_plan else None
     snapshot_sweep: dict[str, Any] | None = None
     try:
         with cdc_destination_hooks(destination, ddl_log):
@@ -3902,23 +3937,14 @@ def _run_cdc_single_stream(
                 if snapshot_census is not None and not _dump_still_open(
                     state.running_cursor
                 ):
-                    snapshot_sweep = snapshot_census.sweep(
-                        destination,
-                        mappings=mappings,
-                        columns=list(headers or []),
-                        schema=column_types if isinstance(column_types, dict) else None,
-                        pk_target_cols=pk_target_cols,
+                    snapshot_sweep = snapshot_census.settle(
+                        destination, mappings=mappings, pk_target_cols=pk_target_cols
                     )
                 if snapshot_census is not None:
                     snapshot_census.close()
                     snapshot_census = None
                 if snapshot_sweep is not None:
-                    ddl_log.append(
-                        "CDC snapshot removed "
-                        f"{snapshot_sweep['deleted']} destination row(s) whose "
-                        "key the source no longer has (deleted while the "
-                        "stream was stopped)"
-                    )
+                    ddl_log.append(snapshot_sweep["finding"])
 
             # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
             # continuously poll until idle so a single job drains the slot/binlog/CT stream.
@@ -4343,7 +4369,9 @@ def _run_cdc_single_stream(
                 summary[ha_key] = lag_fields.get(ha_key)
         summary["snapshot_mode"] = snapshot_mode.value
         if snapshot_sweep is not None:
-            summary["snapshot_leftover_deleted"] = snapshot_sweep["deleted"]
+            summary["snapshot_leftover"] = snapshot_sweep
+            if snapshot_sweep.get("removed"):
+                summary["snapshot_leftover_deleted"] = snapshot_sweep["removed"]
         stamp = snapshot_plan_stamp(snapshot_plan)
         if stamp:
             summary["snapshot_plan"] = stamp

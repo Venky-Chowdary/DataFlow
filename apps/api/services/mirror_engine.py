@@ -42,6 +42,14 @@ SOFT_DELETE_AT_COLUMN = "_deleted_at"
 _KEY_SEP = "\x1f"
 
 
+#: The mirror / CDC-snapshot delete vocabulary: ``hard`` DELETEs destination keys
+#: the source no longer has, ``soft`` tombstones them (``_deleted``), ``off``
+#: keeps them and only reports the count. ``count`` is internal: measure, change
+#: nothing.
+MIRROR_DELETE_MODES = frozenset({"hard", "soft", "off"})
+COUNT_ONLY = "count"
+
+
 def resolve_mirror_delete_mode(contract: Any = None, options: Any = None) -> str:
     """The mirror delete behaviour a run applies: ``soft`` unless declared.
 
@@ -543,6 +551,30 @@ def apply_inferred_deletes_via_staging(
         for c in pk_columns
     )
 
+    if delete_mode == COUNT_ONLY:
+        # Measure only: how many destination keys this snapshot did not
+        # present. Nothing is written — the caller discloses the number
+        # when it may not (or was told not to) remove them.
+        scanned = _dest_engine_count(
+            conn,
+            f"SELECT COUNT(*) FROM {target_qualified}",  # nosec B608
+        )
+        would_delete = _dest_engine_count(
+            conn,
+            f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
+            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
+        )
+        return {
+            "soft_deleted": 0,
+            "hard_deleted": 0,
+            "would_delete": would_delete,
+            "reactivated": 0,
+            "mirror_delete_mode": COUNT_ONLY,
+            "tombstone_rows": 0,
+            "physical_rows": scanned,
+            "rows_scanned": scanned,
+        }
+
     if delete_mode == "hard":
         # D38: the documented mirror behavior — keys missing from this
         # snapshot are DELETEed, not tombstoned behind an undeclared
@@ -904,8 +936,14 @@ def apply_inferred_soft_deletes(
     source_key_spool: Any = None,
     pk_sources: list[str] | None = None,
     delete_mode: str = "soft",
+    active_checksum: bool = True,
 ) -> dict[str, Any]:
     """Soft-delete destination rows that are no longer in the source snapshot.
+
+    ``delete_mode="count"`` measures the keys the snapshot would remove and
+    changes nothing. ``active_checksum=False`` skips the full-table active
+    digest (a caller that discards it — the CDC snapshot sweep — must not pay
+    for a SELECT of every column of every swept table).
 
     ``endpoint`` must be a database ``EndpointConfig`` for an SQLAlchemy-backed
     destination. ``conflict_columns`` is the destination primary key. Source
@@ -937,10 +975,12 @@ def apply_inferred_soft_deletes(
     if not resolved_pk_sources:
         raise ValueError("mirror sync requires a primary key / conflict column")
     delete_mode = (delete_mode or "soft").strip().lower()
-    if delete_mode not in {"hard", "soft"}:
+    if delete_mode not in {"hard", "soft", COUNT_ONLY}:
         raise ValueError(
             f"Unknown mirror delete_mode {delete_mode!r} — declare 'hard' or 'soft'."
         )
+    if delete_mode == COUNT_ONLY:
+        active_checksum = False
 
     from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from src.transfer.adapters import resolve_connector_config
@@ -963,7 +1003,7 @@ def apply_inferred_soft_deletes(
     from connectors.generic_sql import _resolve_physical_column_idents
 
     stored = _resolve_physical_column_idents(
-        engine, table, schema_name, [*pk_columns, *target_cols]
+        engine, table, schema_name, [*pk_columns, *(target_cols if active_checksum else [])]
     )
     pk_physical = [stored.get(c, c) for c in pk_columns]
     pk_quoted = ", ".join(
@@ -975,7 +1015,7 @@ def apply_inferred_soft_deletes(
     )
     census: dict[str, Any] = {}
     active_rows = 0
-    active_checksum = ""
+    active_digest = ""
     source_key_rows = 0
     try:
         with engine.connect() as conn:
@@ -1019,16 +1059,17 @@ def apply_inferred_soft_deletes(
                 delete_mode=delete_mode,
             )
             conn.commit()
-            active_rows, active_checksum = _compute_active_checksum(
-                conn,
-                qualified,
-                target_cols,
-                soft_delete_column if delete_mode == "soft" else "",
-                batch_size,
-                dest_types=target_fingerprint_types(mappings, schema),
-                physical=stored,
-            )
-            conn.commit()
+            if active_checksum:
+                active_rows, active_digest = _compute_active_checksum(
+                    conn,
+                    qualified,
+                    target_cols,
+                    soft_delete_column if delete_mode == "soft" else "",
+                    batch_size,
+                    dest_types=target_fingerprint_types(mappings, schema),
+                    physical=stored,
+                )
+                conn.commit()
             _drop_pk_staging(conn, stg_qualified)
     except Exception:
         try:
@@ -1053,8 +1094,9 @@ def apply_inferred_soft_deletes(
         "tombstone_rows": census.get("tombstone_rows"),
         "physical_rows": physical,
         "rows_scanned": physical,
+        "would_delete": census.get("would_delete"),
         "active_rows": active_rows,
-        "active_checksum": active_checksum,
+        "active_checksum": active_digest,
         "target_columns": target_cols,
         "primary_key_columns": pk_columns,
         "soft_delete_column": census.get("soft_delete_column") or (

@@ -167,24 +167,31 @@ def test_cdc_snapshot_into_loaded_table_applies_source_deletes(isolated, engine,
 
 
 def test_sweep_never_runs_after_a_partial_dump():
-    from services.cdc_snapshot_sweep import sweep_eligible
+    from services.cdc_snapshot_sweep import plan_snapshot_sweep
+
+    def _plan(plan, **over):
+        kw = dict(dest_type="postgresql", dest_absent_before=False, source_cfg={"type": "mysql"},
+                  mappings=[], pk_sources=["id"], shared_destination=False, delete_mode="")
+        kw.update(over)
+        return plan_snapshot_sweep(plan, **kw)
 
     full = {"run_snapshot": True, "reason": "watermark_missing"}
-    assert sweep_eligible(full, "postgresql", dest_absent_before=False)
-    assert not sweep_eligible({**full, "reason": "snapshot_in_progress"}, "postgresql", dest_absent_before=False)
-    assert not sweep_eligible({**full, "snapshot_dump_open": True}, "postgresql", dest_absent_before=False)
-    assert not sweep_eligible(full, "postgresql", dest_absent_before=True)
-    assert not sweep_eligible(full, "postgresql", dest_absent_before=None)
-    assert not sweep_eligible({"run_snapshot": False}, "postgresql", dest_absent_before=False)
-    assert not sweep_eligible(full, "mongodb", dest_absent_before=False)
+    assert _plan(full).allowed
+    assert _plan({**full, "reason": "snapshot_in_progress"}) is None
+    assert _plan({**full, "snapshot_dump_open": True}) is None
+    assert _plan(full, dest_absent_before=True) is None
+    assert _plan(full, dest_absent_before=None) is None
+    assert _plan({"run_snapshot": False}) is None
+    assert _plan(full, dest_type="mongodb") is None
 
 
 def test_a_snapshot_row_without_a_full_key_disables_the_sweep():
     from services.cdc_engine import ChangeBatch
-    from services.cdc_snapshot_sweep import SnapshotKeyCensus
+    from services.cdc_snapshot_sweep import SnapshotKeyCensus, SweepPlan
 
-    census = SnapshotKeyCensus(["id"])
+    census = SnapshotKeyCensus(["id"], SweepPlan("hard", False, True))
     census.add(ChangeBatch(inserts=[{"id": 1}, {"id": None}]))
     assert census.complete is False
-    assert census.sweep(object(), mappings=[], columns=["id"], schema={}, pk_target_cols=["id"]) is None
+    out = census.settle(object(), mappings=[], pk_target_cols=["id"])
+    assert out["status"] == "unmeasured" and out["removed"] == 0
     census.close()
