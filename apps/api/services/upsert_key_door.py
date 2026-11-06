@@ -8,9 +8,16 @@ the same way for ``POST /schedules`` (and PATCH) and ``/transfer/execute``.
 
 A key resolves from, in order: the declared ``primary_key``, a stream
 contract's ``primary_key`` / ``primary_keys``, the destination's declared
-``primary_key`` / ``upsert_key``, then the live source catalog. Only a catalog
-that was read and has no key refuses; a source that does not answer in
-``PROBE_SECONDS`` (or is a query / procedure extract) is left to the run.
+``primary_key`` / ``upsert_key``, an SDK connector manifest's stream identity
+(what the runner seeds through ``seed_sdk_contract_defaults``), then the live
+source catalog. Only a catalog that was read and has no key refuses; a source
+that does not answer in ``PROBE_SECONDS`` is left to the run, and a query /
+procedure extract (no catalog key to read) is never judged here.
+
+A signed data contract (``contract_id``) does not carry the run's key: the
+contract engine checks columns and types, and the run resolves its key only
+from the places above (``tests/test_r14_d13_upsert_door_false_refusals.py``
+trips if that changes, so this door is updated with it).
 """
 
 from __future__ import annotations
@@ -93,6 +100,8 @@ def assert_upsert_key_resolvable(
     source_table: str = "",
     source_schema: str = "",
     source_database: str = "",
+    source_type: str = "",
+    callable_source: bool = False,
 ) -> None:
     from services.transfer_policy_values import canonical_sync_mode
 
@@ -103,8 +112,15 @@ def assert_upsert_key_resolvable(
         return  # the vocabulary check answers an unknown mode
     if declared_upsert_keys(primary_key, stream_contracts, destination_extra):
         return
+    if callable_source:
+        return  # a query / CALL result has no catalog key; the run decides
     if not (source_connector_id or "").strip() or not (source_table or "").strip():
         return
+    if (source_type or "").strip():
+        from connectors.sdk.transfer_bridge import sdk_manifest_stream_identity
+
+        if (sdk_manifest_stream_identity(source_type, source_table.strip()) or {}).get("primary_key"):
+            return  # the vendor manifest declares the stream key (as the run seeds it)
     catalog = _catalog_key(source_connector_id.strip(), source_table.strip(),
                            source_schema or "", source_database or "")
     if catalog is None or catalog:

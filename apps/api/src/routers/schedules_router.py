@@ -60,14 +60,26 @@ def _acknowledgment_fields(
 
 def _assert_upsert_key(plan: dict[str, Any]) -> None:
     """``sync_mode=upsert`` with no resolvable key is a 422 here, as on /transfer/execute."""
+    from services.connector_store import get_connector
+    from services.schedule_source_probe import _callable_source
     from services.upsert_key_door import assert_upsert_key_resolvable
 
+    source_type = ""
+    connector_id = str(plan.get("source_connector_id") or "")
+    if connector_id:
+        try:
+            conn = get_connector(connector_id, workspace_id=str(plan.get("workspace_id") or "") or None)
+            source_type = str(getattr(conn, "type", "") or "") if conn else ""
+        except Exception:  # noqa: BLE001 - an unread connector is judged without its type
+            source_type = ""
     assert_upsert_key_resolvable(
         sync_mode=plan.get("sync_mode"),
         primary_key=plan.get("primary_key") or "",
         stream_contracts=plan.get("stream_contracts") or [],
-        source_connector_id=str(plan.get("source_connector_id") or ""),
+        source_connector_id=connector_id,
         source_table=str(plan.get("source_table") or ""),
+        source_type=source_type,
+        callable_source=_callable_source(plan),
     )
 
 

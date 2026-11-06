@@ -1028,6 +1028,8 @@ async def execute_transfer_json(
         source_table=str(body.source.table or body.source.collection or ""),
         source_schema=str(body.source.db_schema or ""),
         source_database=str(body.source.database or ""),
+        source_type=str(getattr(src_preview, "format", "") or body.source.format or ""),
+        callable_source=is_callable_source(src_preview),
     )
     src = src_preview
     dst = dst_preview
