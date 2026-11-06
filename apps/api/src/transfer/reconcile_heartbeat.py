@@ -47,6 +47,31 @@ def reconcile_heartbeat_scope(dest_summary: Any) -> dict[str, Any]:
     return scope
 
 
+def _first_row_wait_phrase(elapsed: int) -> str:
+    """What the checksum is waiting on before its first destination row.
+
+    The pulse used to promise "a metadata lock fails within 120s" for as long
+    as the scan sat at 0%: at 467s on 30 rows, with no query on either
+    database, the promise was false and pointed at a lock that did not exist
+    (D280). The bound is the configured lock wait; past it the sentence says
+    the destination has not answered instead of repeating the promise.
+    """
+    from connectors.write_resilience import destination_lock_wait_seconds
+
+    bound = destination_lock_wait_seconds()
+    if elapsed <= bound:
+        return (
+            " No destination row has been read yet; a lock wait on the "
+            f"destination ends within {bound}s."
+        )
+    return (
+        f" No destination row has been read after {elapsed}s, longer than the "
+        f"{bound}s lock-wait bound: the destination has not answered the "
+        "checksum read. Check the destination's sessions and the connection "
+        "to it; cancelling the job stops the scan."
+    )
+
+
 @contextmanager
 def reconcile_phase_heartbeat(
     mongo: Any,
@@ -142,12 +167,7 @@ def reconcile_phase_heartbeat(
                         f"not the whole job…{hashed_phrase}{checksum_phrase}"
                     )
                 else:
-                    waiting = ""
-                    if hashed <= 0:
-                        waiting = (
-                            " No destination row has been read yet; a metadata "
-                            "lock fails within 120s."
-                        )
+                    waiting = _first_row_wait_phrase(elapsed) if hashed <= 0 else ""
                     pulse = (
                         f"Reconciling data ({elapsed}s) — checksum scan still "
                         f"running for {processed:,} rows.{hashed_phrase}{waiting} "
