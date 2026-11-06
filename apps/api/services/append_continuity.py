@@ -692,6 +692,56 @@ def _clear_accepted_reset(target: ContinuityTarget) -> None:
             logger.warning("accepted-reset marker not cleared for %s", key, exc_info=True)
 
 
+def _keys_this_rebaseline_owns(target: ContinuityTarget, endpoint: Any) -> tuple[str, ...]:
+    """The keys an audited rebaseline may move (QA C9 review 2).
+
+    The connector's own ``id:<connector>`` key always. The ``host:<h>:<p>`` alt
+    key (D204: a job rebuilt from the host reads it) only when no other
+    workspace's connector resolves to the same physical table — otherwise
+    workspace A's rebaseline would move workspace B's baseline. When that
+    cannot be decided, the alt key is treated as shared and left alone.
+    """
+    if not target.alt_keys:
+        return (target.key,)
+    connector_id = str(getattr(endpoint, "connector_id", "") or "").strip()
+    try:
+        from services.connector_store import _load_all
+        from src.transfer.models import EndpointConfig
+
+        connectors = list(_load_all())
+    except Exception:  # noqa: BLE001
+        return (target.key,)
+    owner = next((c for c in connectors if c.id == connector_id), None)
+    if owner is None:
+        try:
+            from services.connector_store import get_connector
+
+            owner = get_connector(connector_id)  # the caller's own connector
+        except Exception:  # noqa: BLE001
+            owner = None
+    if owner is None:
+        return (target.key,)
+    owner_ws = str(getattr(owner, "workspace_id", "") or "")
+    host = str(target.cfg.get("host") or "").strip().lower()
+    shared: set[str] = set()
+    for other in connectors:
+        if other.id == connector_id or str(getattr(other, "workspace_id", "") or "") == owner_ws:
+            continue
+        if str(getattr(other, "host", "") or "").strip().lower() != host:
+            continue
+        try:
+            other_target = resolve_target(
+                EndpointConfig(kind="database", format=other.type, connector_id=other.id,
+                               table=target.table)
+            )
+        except Exception:  # noqa: BLE001 - undecidable: keep it shared
+            shared.update(target.alt_keys)
+            continue
+        if other_target is not None:
+            shared.update(set(other_target.all_keys) & set(target.alt_keys))
+    return (target.key, *(k for k in target.alt_keys if k not in shared))
+
+
 class RebaselineError(ValueError):
     """The destination cannot be accepted as a new baseline."""
 
@@ -789,7 +839,7 @@ def rebaseline(
             ) from exc
     # Every spelling of this table's key moves together: the next append reads
     # whichever one its door builds, and must find the accepted state (D204).
-    for key in target.all_keys:
+    for key in _keys_this_rebaseline_owns(target, endpoint):
         if removal:
             clear_baseline(key)
         else:

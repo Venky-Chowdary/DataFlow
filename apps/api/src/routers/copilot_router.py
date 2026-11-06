@@ -568,7 +568,9 @@ async def _run_lifecycle_confirm(
         try:
             return await asyncio.to_thread(
                 rebaseline, dst, actor=actor or "", reason=reason,
-                workspace_id=str(getattr(conn, "workspace_id", "") or workspace_id or ""),
+                # The caller's workspace first; the connector's only when the
+                # caller named none (QA C9 review 2).
+                workspace_id=str(workspace_id or getattr(conn, "workspace_id", "") or ""),
             )
         except RebaselineError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

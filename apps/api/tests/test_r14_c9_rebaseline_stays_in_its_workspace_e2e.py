@@ -116,3 +116,51 @@ def test_workspace_a_rebaseline_leaves_workspace_b_parked(client):
         for table in (src_a, src_b):
             cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
         h.drop_table("postgresql", dest)
+
+
+def test_workspace_a_rebaseline_does_not_move_workspace_b_baseline(client, monkeypatch):
+    """Review 2: rebaseline() saved under every key, including the shared
+    host:<h>:<p>|db|schema|table alt key, so A's rebaseline moved B's baseline."""
+    import services.audit_log as audit_log
+    from services import append_continuity as ac
+    from services.connector_store import create_connector
+    from src.transfer.models import EndpointConfig
+
+    monkeypatch.setattr(audit_log, "append_audit_event", lambda **kw: kw)
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    table = f"c9b_{token}"
+    try:
+        cur.execute(f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, name TEXT)")  # nosec B608
+        cur.executemany(f"INSERT INTO {table} VALUES (%s, %s)",  # nosec B608
+                        [(1, "Ada"), (2, ""), (3, "Zoë ✓")])
+
+        def _endpoint(ws):
+            conn = create_connector({"name": f"c9b-{ws}-{token}", "role": "destination",
+                                     "workspace_id": ws, "ssl": False,
+                                     **h.dest_config("postgresql")})
+            return EndpointConfig(kind="database", format="postgresql", connector_id=conn.id,
+                                  table=table)
+
+        endpoint_b = _endpoint("ws-b")
+        target_b = ac.resolve_target(endpoint_b)
+        assert target_b.alt_keys, "a connector endpoint carries the host alt key"
+        host_key = target_b.alt_keys[0]
+        ac.rebaseline(endpoint_b, actor="b@example.com", reason="B accepts 3 rows",
+                      workspace_id="ws-b")
+        b_id_before = ac.load_baseline(target_b.key)
+        host_before = ac.load_baseline(host_key)
+        assert b_id_before and host_before and host_before["rows"] == 3
+
+        endpoint_a = _endpoint("ws-a")
+        target_a = ac.resolve_target(endpoint_a)
+        assert host_key in target_a.alt_keys  # the same physical table
+        cur.execute(f"INSERT INTO {table} VALUES (4, '   ')")  # nosec B608
+        ac.rebaseline(endpoint_a, actor="a@example.com", reason="A accepts 4 rows",
+                      workspace_id="ws-a")
+        assert ac.load_baseline(target_a.key)["rows"] == 4
+        assert ac.load_baseline(target_b.key) == b_id_before
+        assert ac.load_baseline(host_key) == host_before  # B's view did not move
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
