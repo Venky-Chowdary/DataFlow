@@ -203,6 +203,9 @@ async def list_events(
     ),
     q: str | None = Query(None, max_length=200, description="Substring of action, resource or actor"),
     search: str | None = Query(None, max_length=200, description="Alias of q"),
+    before_seq: int | None = Query(
+        None, ge=0, description="Continue a truncated search below this chain_seq (search_resume_before_seq)"
+    ),
 ):
     from services.audit_log import list_audit_events
 
@@ -222,9 +225,11 @@ async def list_events(
         action=action,
         search=q or search,
         search_projection=masker,
+        before_seq=before_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
     search_truncated = bool(getattr(events, "search_truncated", False))
+    search_resume_before_seq = getattr(events, "search_resume_before_seq", None)
     from services.audit_actor_display import add_actor_display
 
     events, masked = _reader_view(masker, add_actor_display(events))
@@ -235,6 +240,7 @@ async def list_events(
             "key_ids_masked": masked,
             # A projected search stopped at its scan window: older matches may exist.
             "search_truncated": search_truncated,
+            "search_resume_before_seq": search_resume_before_seq,
             "workspace_id": workspace_id or None,
             "tenant_id": tenant_id or None,
             "next_after_seq": next_seq,

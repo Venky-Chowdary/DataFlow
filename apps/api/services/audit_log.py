@@ -572,12 +572,15 @@ SEARCH_SCAN_LIMIT = 20000
 class AuditEventPage(list):
     """Events, plus whether a projected search stopped at ``SEARCH_SCAN_LIMIT``.
 
-    ``search_truncated`` is True when the search walked the whole scan window
-    and found fewer than the page asked for: older matches may exist beyond it,
-    so "no more results" would be a claim the search did not check.
+    ``search_truncated`` is True when the window was full and more records lay
+    beyond it (probed with one extra record) while the page is not full: older
+    matches may exist, so "no more results" would be a claim the search did not
+    check. ``search_resume_before_seq`` is the chain_seq of the last record the
+    search SCANNED; pass it back as ``before_seq`` to continue.
     """
 
     search_truncated: bool = False
+    search_resume_before_seq: int | None = None
 
 
 def _search_matches(search: str, ev: dict[str, Any]) -> bool:
@@ -595,6 +598,7 @@ def list_audit_events(
     since: str | None = None,
     until: str | None = None,
     after_seq: int | None = None,
+    before_seq: int | None = None,
     workspace_filter: WorkspaceFilter | None = None,
     action: str | None = None,
     search: str | None = None,
@@ -653,6 +657,9 @@ def list_audit_events(
                     query["time"]["$gte"] = since
                 if until:
                     query["time"]["$lte"] = until
+            if before_seq is not None:
+                # Resume a newest-first search below the last record it scanned.
+                query["chain_seq"] = {"$lt": before_seq}
             if after_seq is not None:
                 query["chain_seq"] = {"$gt": after_seq}
                 sort_order = [("chain_seq", 1)]
@@ -661,14 +668,23 @@ def list_audit_events(
             if search and search.strip() and search_projection is not None:
                 found = AuditEventPage()
                 scanned = 0
-                for doc in coll.find(query).sort(sort_order).limit(SEARCH_SCAN_LIMIT):
+                last_scanned: dict[str, Any] | None = None
+                more_beyond = False
+                # One extra record proves there is more beyond the window.
+                for doc in coll.find(query).sort(sort_order).limit(SEARCH_SCAN_LIMIT + 1):
+                    if scanned >= SEARCH_SCAN_LIMIT:
+                        more_beyond = True
+                        break
                     scanned += 1
                     ev = {k: v for k, v in doc.items() if k != "_id"}
+                    last_scanned = ev
                     if _search_matches(search, search_projection(ev)):
                         found.append(ev)
                         if len(found) >= limit:
                             break
-                found.search_truncated = scanned >= SEARCH_SCAN_LIMIT and len(found) < limit
+                found.search_truncated = more_beyond and len(found) < limit
+                if found.search_truncated and last_scanned is not None:
+                    found.search_resume_before_seq = chain_seq_of(last_scanned)
                 return found
             cursor = (
                 coll.find(query)
@@ -702,6 +718,8 @@ def list_audit_events(
         ):
             continue
         if after_seq is not None and chain_seq_of(ev) <= after_seq:
+            continue
+        if before_seq is not None and chain_seq_of(ev) >= before_seq:
             continue
         if not _event_in_scope(
             ev, workspace_id=ws, tenant_id=tid, since=since, until=until,
