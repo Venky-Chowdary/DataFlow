@@ -1319,6 +1319,25 @@ def vector_payload_number(val: Any, declared_type: str) -> Any:
         return prepared
 
 
+def _vector_prepare_json_list(items: list[Any]) -> list[Any]:
+    """One JSON array for a JSONB metadata value: every element prepared in place."""
+    from services.value_serializer import is_reader_null_cell
+
+    out: list[Any] = []
+    for item in items:
+        if item is None or is_reader_null_cell(item):
+            out.append(None)
+        elif isinstance(item, dict):
+            out.append(vector_prepare_metadata(item, keep_null=True))
+        elif isinstance(item, list):
+            out.append(_vector_prepare_json_list(item))
+        elif isinstance(item, str):
+            out.append(item)
+        else:
+            out.append(vector_prepare_cell(item))
+    return out
+
+
 def vector_prepare_metadata(meta: Any, *, keep_null: bool = False) -> dict[str, Any]:
     """Walk a metadata mapping; omit reader-null. Always a dict.
 
@@ -1345,6 +1364,11 @@ def vector_prepare_metadata(meta: Any, *, keep_null: bool = False) -> dict[str, 
             continue
         if isinstance(val, list) and all(isinstance(item, str) for item in val):
             out[str(key)] = val
+            continue
+        if keep_null and isinstance(val, list):
+            # JSONB holds a nested array as an array (D216): [1, 2] stays a
+            # list of numbers, never the text "[1,2]".
+            out[str(key)] = _vector_prepare_json_list(val)
             continue
         prepared = vector_prepare_cell(val)
         if prepared is None:
