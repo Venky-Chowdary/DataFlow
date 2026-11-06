@@ -11,9 +11,10 @@ CREATE can never succeed, so Validate (G6) now reads the server variable and
 refuses before anything is written, naming the variable and the fixes; upsert
 and overwrite still create PRIMARY KEY (id) and run.
 
-The live half sets ``SET GLOBAL sql_require_primary_key=ON`` (restored after)
-and needs an account allowed to do so: ``DATAFLOW_TEST_MYSQL_ROOT_PASSWORD``
-(CI's mysql container has root). The planner half drives the same route with
+The live half sets ``SET GLOBAL sql_require_primary_key=ON`` (restored in a
+finally block) on a PRIVATE MySQL only — never the shared server other suites
+use: ``DATAFLOW_TEST_MYSQL_GLOBALS_HOST/_PORT/_USER/_PASSWORD/_ROOT_PASSWORD``
+(``tests.r4_route_harness.globals_mysql_server``). The planner half drives the same route with
 the server answer stubbed, so the rule is exercised without that privilege.
 """
 
@@ -95,45 +96,62 @@ def test_keyed_modes_are_not_refused(client, monkeypatch, mode):
         h.drop_table("mysql", t)
 
 
+# Server-global variables are flipped only on a PRIVATE MySQL server, never on
+# the shared one other suites use: DATAFLOW_TEST_MYSQL_GLOBALS_HOST / _PORT /
+# _USER / _PASSWORD (a DataFlow login) and _ROOT_PASSWORD (to SET GLOBAL).
+def _globals_server() -> dict:
+    return h.globals_mysql_server()
+
+
 def _root():
-    pymysql = pytest.importorskip("pymysql")
-    pw = os.environ.get("DATAFLOW_TEST_MYSQL_ROOT_PASSWORD", "")
-    if not pw or not h.port_up(3306):
-        pytest.skip("needs DATAFLOW_TEST_MYSQL_ROOT_PASSWORD to SET GLOBAL sql_require_primary_key")
-    return pymysql.connect(host="127.0.0.1", port=3306, user="root", password=pw,
-                           autocommit=True, connect_timeout=5)
+    return h.globals_mysql_root()
 
 
-def test_live_server_variable_on_refuses_append_and_lets_upsert_run(client):
-    root = _root()
+def _gq(sql: str) -> list[tuple]:
+    import pymysql
+
+    srv = _globals_server()
+    conn = pymysql.connect(host=srv["host"], port=srv["port"], user=srv["username"],
+                           password=srv["password"], database=srv["database"], autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def _g_exists(t: str) -> bool:
+    return bool(_gq("SELECT COUNT(*) FROM information_schema.tables WHERE "
+                    f"table_schema = DATABASE() AND table_name = '{t}'")[0][0])
+
+
+def _g_pk(t: str) -> list[str]:
+    return [r[0] for r in _gq("SELECT column_name FROM information_schema.key_column_usage "
+                              f"WHERE table_schema = DATABASE() AND table_name = '{t}' "
+                              "AND constraint_name = 'PRIMARY'")]
+
+
+def test_live_server_variable_on_refuses_append_and_lets_upsert_run(client, require_pk_on):
+    srv = _globals_server()
     t = _source_table()
-    with root.cursor() as cur:
-        cur.execute("SELECT @@GLOBAL.sql_require_primary_key")
-        before = cur.fetchone()[0]
-        cur.execute("SET GLOBAL sql_require_primary_key = ON")
     try:
         from services.dest_require_primary_key import server_requires_primary_key
 
-        assert server_requires_primary_key(_cfg("mysql")).variable == "sql_require_primary_key"
+        assert server_requires_primary_key(srv).variable == "sql_require_primary_key"
         for mode in ("full_refresh_append", "incremental_append"):
-            ok, out = _stage(client, t, mode)
+            ok, out = _stage_args(client, t, mode, dest_cfg=srv)
             assert not ok and "sql_require_primary_key=ON" in str(out), out
-            assert not _mysql_exists(t)
-        ok, out = _stage(client, t, "upsert")
+            assert not _g_exists(f"{t}_d")
+        ok, out = _stage_args(client, t, "upsert", dest_cfg=srv)
         assert ok, out
         job = h.confirm(client, out["ack_id"], reason="r14-d2-upsert")
         assert job.get("status") == "completed", job
-        pk = h.query("mysql", "SELECT column_name FROM information_schema.key_column_usage "
-                              f"WHERE table_schema = DATABASE() AND table_name = '{t}' "
-                              "AND constraint_name = 'PRIMARY'")
-        assert [r[0] for r in pk] == ["id"]
-        assert h.query("mysql", f"SELECT COUNT(*) FROM `{t}`")[0][0] == 4
+        assert _g_pk(f"{t}_d") == ["id"]
+        assert _gq(f"SELECT COUNT(*) FROM `{t}_d`")[0][0] == 4
     finally:
-        with root.cursor() as cur:
-            cur.execute(f"SET GLOBAL sql_require_primary_key = {int(before)}")
-        root.close()
         h.drop_table("postgresql", t)
-        h.drop_table("mysql", t)
+        _gq(f"DROP TABLE IF EXISTS `{t}_d`")
 
 
 def test_probe_reads_off_on_this_server():
@@ -181,9 +199,9 @@ def _keyless_source_table() -> str:
     return t
 
 
-def _stage_args(client, t: str, mode: str, **extra):
+def _stage_args(client, t: str, mode: str, dest_cfg: dict | None = None, **extra):
     src = _connector("postgresql", _pg_cfg(), "source")
-    dst = _connector("mysql", _cfg("mysql"), "destination")
+    dst = _connector("mysql", dest_cfg or _cfg("mysql"), "destination")
     args = {"source_connector_id": src, "dest_connector_id": dst, "source_table": t,
             "dest_table": f"{t}_d", "sync_mode": mode, "primary_key": "id",
             "validation_mode": "strict", **extra}
@@ -194,6 +212,7 @@ def _stage_args(client, t: str, mode: str, **extra):
 
 @pytest.fixture
 def require_pk_on():
+    """sql_require_primary_key=ON on the private server only; restored in finally."""
     root = _root()
     with root.cursor() as cur:
         cur.execute("SELECT @@GLOBAL.sql_require_primary_key")
@@ -224,28 +243,26 @@ _MODES = [
 def test_live_every_create_mode_is_judged_at_validate(client, require_pk_on, keyed, mode, extra,
                                                       refused):
     t = _source_table() if keyed else _keyless_source_table()
+    srv = _globals_server()
     try:
-        ok, out = _stage_args(client, t, mode, **extra)
+        ok, out = _stage_args(client, t, mode, dest_cfg=srv, **extra)
         if refused:
             assert not ok and "sql_require_primary_key=ON" in str(out), out
-            assert not _mysql_exists(f"{t}_d")
+            assert not _g_exists(f"{t}_d")
             return
         assert ok, out
         job = h.confirm(client, out["ack_id"], reason=f"r14-d2-{mode}")
         assert job.get("status") == "completed", job
-        pk = h.query("mysql", "SELECT column_name FROM information_schema.key_column_usage "
-                              f"WHERE table_schema = DATABASE() AND table_name = '{t}_d' "
-                              "AND constraint_name = 'PRIMARY'")
-        assert [r[0] for r in pk] == ["id"], pk
+        assert _g_pk(f"{t}_d") == ["id"]
     finally:
         h.drop_table("postgresql", t)
-        h.drop_table("mysql", f"{t}_d")
+        _gq(f"DROP TABLE IF EXISTS `{t}_d`")
 
 
 def test_live_query_source_overwrite_is_refused(client, require_pk_on):
     t = _keyless_source_table()
     try:
-        ok, out = _stage_args(client, "", "full_refresh_overwrite",
+        ok, out = _stage_args(client, "", "full_refresh_overwrite", dest_cfg=_globals_server(),
                               source_query=f'SELECT id, name FROM "{t}"')
         assert not ok and "sql_require_primary_key=ON" in str(out), out
     finally:

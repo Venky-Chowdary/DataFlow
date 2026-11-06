@@ -11,6 +11,9 @@ truth read from the server (``Ssl_cipher``):
   option) -> plaintext, only where the server allows it; a server with
   ``require_secure_transport=ON`` is re-dialled with TLS and that is recorded.
 
+``require_secure_transport`` is flipped only on a PRIVATE MySQL
+(``tests.r4_route_harness.globals_mysql_server``), never the shared one.
+
 Live MySQL 8 (:3306) and MariaDB (:3307), both of which offer TLS.
 """
 
@@ -112,29 +115,30 @@ def test_dsn_tls_options_never_reach_the_driver_and_proxies_keep_tls():
         mysql_tls_plan(ssl=False, connection_string="?ssl-mode=VERIFY_CA")
 
 
-def _root_conn():
-    pymysql = pytest.importorskip("pymysql")
-    pw = os.environ.get("DATAFLOW_TEST_MYSQL_ROOT_PASSWORD", "")
-    if not pw or not h.port_up(3306):
-        pytest.skip("needs DATAFLOW_TEST_MYSQL_ROOT_PASSWORD to SET GLOBAL require_secure_transport")
-    return pymysql.connect(host="127.0.0.1", port=3306, user="root", password=pw, autocommit=True)
-
-
 @pytest.fixture
 def secure_transport_on():
-    root = _root_conn()
+    """require_secure_transport=ON on the PRIVATE server only; restored in finally."""
+    root = h.globals_mysql_root()
     with root.cursor() as cur:
         cur.execute("SELECT @@GLOBAL.require_secure_transport")
         before = int(cur.fetchone()[0])
         cur.execute("SET GLOBAL require_secure_transport = ON")
     try:
-        yield
+        yield h.globals_mysql_server()
     finally:
         with root.cursor() as cur:
             cur.execute(f"SET GLOBAL require_secure_transport = {before}")
             cur.execute("SELECT @@GLOBAL.require_secure_transport")
             assert int(cur.fetchone()[0]) == before
         root.close()
+
+
+def _dial_cfg(cfg: dict, *, ssl: bool, dsn: str = ""):
+    from connectors.mysql_conn import get_connection
+
+    return get_connection(host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                          username=cfg["username"], password=cfg["password"],
+                          connection_string=dsn, ssl=ssl, purpose="probe")
 
 
 def test_disabled_on_a_server_requiring_tls_is_upgraded_on_every_path(secure_transport_on,
@@ -144,10 +148,11 @@ def test_disabled_on_a_server_requiring_tls_is_upgraded_on_every_path(secure_tra
     from connectors.mysql_conn import describe_session_encryption, session_encryption
     import pymysql
 
+    srv = secure_transport_on
     notes: list[str] = []
     monkeypatch.setattr("services.job_tls_note.record_job_tls_note", notes.append)
     # PyMySQL path (readers, writers, LOAD DATA, connector test).
-    conn = _dial("mysql", ssl=False, dsn="?ssl-mode=DISABLED")
+    conn = _dial_cfg(srv, ssl=False, dsn="?ssl-mode=DISABLED")
     try:
         enc = session_encryption(conn)
     finally:
@@ -155,7 +160,7 @@ def test_disabled_on_a_server_requiring_tls_is_upgraded_on_every_path(secure_tra
     assert enc["encrypted"] and "requires secure transport" in enc["note"], enc
     assert "session encrypted" in describe_session_encryption(enc)
     # SQLAlchemy path: the same dial, no raw 3159.
-    cfg = {**_cfg("mysql"), "type": "mysql", "ssl": False, "connection_string": "?ssl-mode=DISABLED"}
+    cfg = {**srv, "type": "mysql", "ssl": False, "connection_string": "?ssl-mode=DISABLED"}
     eng = _build_engine(cfg)
     try:
         with eng.connect() as cx:
