@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 from services.brand_env import getenv_brand
+from services.pii_hash_keys import KEY_UNAVAILABLE_MESSAGE
 import re
 import unicodedata
 import uuid as uuid_lib
@@ -1712,16 +1713,9 @@ def _parse_uuid(value: str) -> str | None:
         return None
 
 
-#: What a tenant is told when ``hash_pii`` cannot get its key. Validate raises
-#: it as a blocker and the write path refuses with it, so both say the same
-#: thing (D8). It names no environment variable, host or vendor: the key is a
-#: workspace secret the platform manages (``services.pii_hash_keys``).
-PII_HASH_KEY_SETUP = (
-    "hash_pii could not load this workspace's hashing key, so no row was hashed. "
-    "Try again in a moment, then re-run Validate; if it keeps happening, ask your "
-    "Datawrap administrator. Use mask_pii or redact if a keyed digest is not "
-    "required."
-)
+#: What a tenant is told when ``hash_pii`` cannot get its key — one sentence,
+#: owned by ``services.pii_hash_keys`` (Validate and the write path both say it).
+PII_HASH_KEY_SETUP = KEY_UNAVAILABLE_MESSAGE
 
 
 def _current_workspace() -> str:

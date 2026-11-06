@@ -643,6 +643,50 @@ async def rotate_pii_hash_key(request: Request):
     return status
 
 
+class PiiHashKeyBody(BaseModel):
+    key: str = Field(..., min_length=1, max_length=1024)
+
+
+@router.put("/pii-hash-key")
+async def set_pii_hash_key(body: PiiHashKeyBody, request: Request):
+    """Set this workspace's hash_pii key (a new active version; changes future digests).
+
+    Admin only (RBAC ``workspace.manage``). The key goes through the secret
+    vault and is never returned, logged or written to the audit record.
+    """
+    from services.audit_log import append_audit_event
+    from services.pii_hash_keys import (
+        PiiHashKeyRejected,
+        PiiHashKeyUnavailable,
+        key_status,
+        set_workspace_key,
+    )
+
+    workspace_id = tenant_scope(request).workspace_id
+    if key_status(workspace_id).get("managed_by_deployment"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This deployment uses one hashing key for every workspace, so a "
+                "workspace key would not be used. Ask your platform administrator."
+            ),
+        )
+    try:
+        status = set_workspace_key(workspace_id, body.key, actor=_actor(request))
+    except PiiHashKeyRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PiiHashKeyUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    append_audit_event(
+        action="workspace.pii_hash_key.set",
+        resource="/workspace/pii-hash-key",
+        actor=_actor(request),
+        level="warn",
+        details={"workspace_id": workspace_id, "active_version": status["active_version"]},
+    )
+    return status
+
+
 # Workspace creation, membership and accounts live in ``src.routers.team_router``.
 # Two routers owning the same collection meant the UI could add a member through
 # one authorization rule and read it back through another.

@@ -41,6 +41,7 @@ import type { ThemePreference } from "../lib/theme";
 import { auditExportFilename, API_KEY_LIFETIME_OPTIONS, filterWorkspaceApiKeys } from "../lib/iamAdmin";
 import { ServiceAccountsPanel } from "./settings/ServiceAccountsPanel";
 import { ScimSettings } from "./settings/ScimSettings";
+import { PiiHashKeyCard } from "./settings/PiiHashKeyCard";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
@@ -968,6 +969,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 </div>
                 <div className="df2-settings-section-body">
                   <TwoFactorCard />
+                  <PiiHashKeyCard />
                   {postureLoading && <p className="df2-cell-meta">Loading security posture…</p>}
                   {!postureLoading && posture && (
                     <>

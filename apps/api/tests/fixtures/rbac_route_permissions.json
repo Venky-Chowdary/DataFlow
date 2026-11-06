@@ -399,5 +399,6 @@
   "PUT /api/v1/schedules/{schedule_id}": "schedule.manage",
   "PUT /api/v1/scim/v2/Groups/{group_id}": "scim.provision",
   "PUT /api/v1/scim/v2/Users/{user_id}": "scim.provision",
-  "PUT /api/v1/shape/drafts": "job.plan"
+  "PUT /api/v1/shape/drafts": "job.plan",
+  "PUT /api/v1/workspace/pii-hash-key": "workspace.manage"
 }

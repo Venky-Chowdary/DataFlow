@@ -52,6 +52,7 @@ ADMIN_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("DELETE", "/api/v1/workspace/tenant/{tenant_id}", "workspace.tenant.delete"),
     ("POST", "/api/v1/workspace/jobs/retention/purge", "workspace.jobs.retention.purge"),
     ("POST", "/api/v1/workspace/pii-hash-key/rotate", "workspace.pii_hash_key.rotate"),
+    ("PUT", "/api/v1/workspace/pii-hash-key", "workspace.pii_hash_key.set"),
     ("POST", "/api/v1/iam/mfa/reset", "auth.mfa.reset"),
 )
 

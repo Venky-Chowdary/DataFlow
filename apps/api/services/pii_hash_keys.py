@@ -15,7 +15,11 @@ tenants.
 
 Rotation adds a new active version and keeps the old ones (marked retired), so
 an operator can tell which key produced historic digests. Rotating changes
-every future digest, which is why it is an explicit admin action.
+every future digest, which is why it is an explicit admin action. A workspace
+admin may also set the key (``set_workspace_key``) — to keep the digests
+another system already produced, or to recover a key that can no longer be
+read — from Settings → Security or ``PUT /api/v1/workspace/pii-hash-key``.
+The key material goes through the vault and is never returned.
 
 An operator who pins ``DATAFLOW_PII_HASH_KEY`` keeps exactly the digests they
 had: the pinned key wins (``transform_engine.pii_hash_key``).
@@ -40,6 +44,25 @@ _LOCK = threading.Lock()
 
 class PiiHashKeyUnavailable(RuntimeError):
     """The workspace key could not be read or created. Message is user-safe."""
+
+
+class PiiHashKeyRejected(ValueError):
+    """A key an admin tried to set is not acceptable. Message is user-safe."""
+
+
+#: Shortest key an admin may set: 32 characters (the generated key is 64 hex).
+MIN_KEY_LENGTH = 32
+MAX_KEY_LENGTH = 512
+
+#: What a tenant is told when ``hash_pii`` cannot get its key. Validate raises
+#: it as a blocker and the write path refuses with it, so both say the same
+#: thing (D8). It names no environment variable, path, host or vendor — only
+#: the action an operator can take (QA browser 2 / security 13).
+KEY_UNAVAILABLE_MESSAGE = (
+    "hash_pii could not load this workspace's hashing key, so no row was hashed. "
+    "A workspace admin can set or rotate the hashing key in Settings → Security, "
+    "then re-run Validate. Use mask_pii or redact if a keyed digest is not required."
+)
 
 
 def _now() -> str:
@@ -115,12 +138,12 @@ def _replace(scope: str, doc: dict[str, Any], *, expected_version: int) -> bool:
         return True
 
 
-def _new_version(version: int, actor: str) -> dict[str, Any]:
+def _new_version(version: int, actor: str, secret: str | None = None) -> dict[str, Any]:
     from services.secret_vault import encrypt_secret
 
     return {
         "version": version,
-        "key_enc": encrypt_secret(secrets.token_hex(32), label="pii_hash_key"),
+        "key_enc": encrypt_secret(secret or secrets.token_hex(32), label="pii_hash_key"),
         "created_at": _now(),
         "created_by": actor,
         "retired_at": None,
@@ -137,11 +160,7 @@ def _active_secret(doc: dict[str, Any]) -> str:
     return ""
 
 
-_UNAVAILABLE = (
-    "hash_pii could not load this workspace's hashing key, so no row was hashed. "
-    "Try again in a moment; if it keeps happening, ask your Datawrap administrator. "
-    "Use mask_pii or redact if a keyed digest is not required."
-)
+_UNAVAILABLE = KEY_UNAVAILABLE_MESSAGE
 
 
 def workspace_key(workspace_id: str) -> str:
@@ -169,10 +188,23 @@ def workspace_key(workspace_id: str) -> str:
     return secret
 
 
-def rotate_workspace_key(workspace_id: str, *, actor: str) -> dict[str, Any]:
-    """Start a new key version; earlier versions stay, marked retired."""
+def _add_version(workspace_id: str, *, actor: str, secret: str | None) -> dict[str, Any]:
+    """Make a new version active (generated, or the admin's ``secret``)."""
     scope = _scope_id(workspace_id)
-    workspace_key(workspace_id)  # make sure version 1 exists
+    if _load(scope) is None:
+        if secret is not None:
+            # First key for this workspace is the admin's own: no generated v1.
+            doc = _insert_if_absent(scope, {
+                "workspace_id": "" if scope == DEPLOYMENT_SCOPE else scope,
+                "active_version": 1,
+                "versions": [_new_version(1, actor, secret)],
+                "created_at": _now(),
+                "set_by_admin": True,
+            })
+            if _active_secret(doc) == secret:
+                return key_status(workspace_id)
+        else:
+            workspace_key(workspace_id)  # make sure version 1 exists
     for _attempt in range(3):
         doc = _load(scope) or {}
         current = int(doc.get("active_version") or 1)
@@ -180,20 +212,62 @@ def rotate_workspace_key(workspace_id: str, *, actor: str) -> dict[str, Any]:
         for version in versions:
             if int(version.get("version") or 0) == current:
                 version["retired_at"] = _now()
-        versions.append(_new_version(current + 1, actor))
+        versions.append(_new_version(current + 1, actor, secret))
         updated = {k: v for k, v in doc.items() if k != "_id"}
         updated.update({"active_version": current + 1, "versions": versions, "rotated_at": _now()})
+        if secret is not None:
+            updated["set_by_admin"] = True
         if _replace(scope, updated, expected_version=current):
             return key_status(workspace_id)
     raise PiiHashKeyUnavailable(_UNAVAILABLE)
 
 
+def rotate_workspace_key(workspace_id: str, *, actor: str) -> dict[str, Any]:
+    """Start a new generated key version; earlier versions stay, marked retired."""
+    return _add_version(workspace_id, actor=actor, secret=None)
+
+
+def set_workspace_key(workspace_id: str, secret: str, *, actor: str) -> dict[str, Any]:
+    """Make ``secret`` the workspace's active hash_pii key (a new version).
+
+    For an admin who must keep digests another system produced, or whose
+    stored key can no longer be read. Earlier versions stay, marked retired.
+    The key is stored through the vault and never returned or logged.
+    """
+    text = str(secret or "")
+    if text != text.strip() or not (MIN_KEY_LENGTH <= len(text) <= MAX_KEY_LENGTH):
+        raise PiiHashKeyRejected(
+            f"A hashing key must be {MIN_KEY_LENGTH}–{MAX_KEY_LENGTH} characters "
+            "with no leading or trailing spaces. Leave it to Datawrap (Rotate) "
+            "unless you must match digests produced elsewhere."
+        )
+    if len(set(text)) < 8:
+        raise PiiHashKeyRejected(
+            "That hashing key repeats too few characters to be secret. Use a "
+            "random value (for example 64 hex characters), or Rotate to have "
+            "Datawrap generate one."
+        )
+    try:
+        return _add_version(workspace_id, actor=actor, secret=text)
+    except PiiHashKeyUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the vault refused: same answer
+        logger.error("pii hash key set failed: %s", type(exc).__name__)
+        raise PiiHashKeyUnavailable(_UNAVAILABLE) from exc
+
+
 def key_status(workspace_id: str) -> dict[str, Any]:
     """Public facts about the key: versions and dates, never key material."""
+    from services.brand_env import getenv_brand
+
     doc = _load(_scope_id(workspace_id)) or {}
     return {
         "workspace_id": str(workspace_id or ""),
         "configured": bool(doc),
+        # The deployment pins one key for every workspace: setting or rotating
+        # the workspace key would not change any digest, so the UI says so.
+        "managed_by_deployment": bool(getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET")),
+        "set_by_admin": bool(doc.get("set_by_admin")),
         "active_version": int(doc.get("active_version") or 0),
         "versions": [
             {k: v.get(k) for k in ("version", "created_at", "created_by", "retired_at")}
