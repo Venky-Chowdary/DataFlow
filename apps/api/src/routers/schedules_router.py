@@ -1372,9 +1372,11 @@ async def run_pipeline_now(
 
 class RecoverDestinationRequest(BaseModel):
     #: ``rebaseline`` accepts the destination as it is now (or its removal);
-    #: ``rebuild`` reloads it from the source with a full re-sync.
-    action: str = Field(..., min_length=1, max_length=32)
-    reason: str = Field(..., min_length=1, max_length=2000)
+    #: ``rebuild`` reloads it from the source with a full re-sync. Both are
+    #: required, and checked after the schedule's workspace: another
+    #: workspace's caller is refused 403/404 before the body is judged.
+    action: str = Field(default="", max_length=32)
+    reason: str = Field(default="", max_length=2000)
 
 
 @router.post("/{schedule_id}/recover")
@@ -1399,6 +1401,13 @@ async def recover_schedule_destination_route(
 
     resolve_write_workspace(request, workspace_id)
     _bound_schedule(request, schedule_id, write=True)
+    missing = [k for k in ("action", "reason") if not str(getattr(body, k) or "").strip()]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{' and '.join(missing)} required: action is rebaseline or rebuild; "
+            "the reason is audited.",
+        )
     actor = _decider(request)
     try:
         result = await asyncio.to_thread(

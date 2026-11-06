@@ -138,8 +138,16 @@ def test_stored_acknowledgement_applies_and_the_approve_route_resumes(client):
         sid = resp.json()["id"]
         run = _beat(sid)
         assert run["job"].get("status") != "completed", run["job"].get("status")
-        view = _view(client, sid)
-        request = view.get("approval_request") or {}
+        import time
+
+        # The claim is released a moment before the finding is written.
+        deadline = time.monotonic() + 15
+        while True:
+            view = _view(client, sid)
+            request = view.get("approval_request") or {}
+            if request.get("status") == "open" or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
         assert request.get("status") == "open", view
         assert view["state"] == "stalled" and view["stalled_reason"], view
 

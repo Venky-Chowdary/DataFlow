@@ -59,8 +59,17 @@ def _completed(run, label):
 
 
 def _assert_parked_on_destination(client, sid: str, label: str) -> dict:
-    view = _view(client, sid)
-    req = view.get("approval_request") or {}
+    import time
+
+    # The run record is finalized (claim released) a moment before the finding
+    # is written; wait for the park itself, bounded.
+    deadline = time.monotonic() + 5
+    while True:
+        view = _view(client, sid)
+        req = view.get("approval_request") or {}
+        if req.get("status") == "open" or time.monotonic() > deadline:
+            break
+        time.sleep(0.2)
     assert view["enabled"] is True, (label, view)
     assert req.get("status") == "open" and req.get("code") == "DESTINATION_CONTINUITY", (label, req)
     assert view["state"] == "stalled", (label, view["state"])
@@ -68,6 +77,28 @@ def _assert_parked_on_destination(client, sid: str, label: str) -> dict:
     assert f"/api/v1/schedules/{sid}/recover" in view["stalled_reason"], view["stalled_reason"]
     assert view["next_run_at"] is None, (label, view["next_run_at"])
     return req
+
+
+def _drop_and_park(client, cur, sid: str, dest_table: str, label: str) -> dict:
+    """Drop the destination; the schedule parks on it within two beats.
+
+    A catalog that proves the table is gone parks on the first beat. One that
+    does not answer in time is "could not be re-read" — retried once (a blip is
+    not a drop, D266), and the identical second verdict parks.
+    """
+    cur.execute(f'DROP TABLE public."{dest_table}"')  # nosec B608
+    errors = []
+    for _attempt in (1, 2):
+        run = _beat(sid)
+        if run["started"]:
+            assert run["job"].get("status") == "failed", (label, run["job"].get("status"))
+            errors.append(str(run["job"].get("error") or "")[:160])
+        try:
+            return _assert_parked_on_destination(client, sid, label)
+        except AssertionError:
+            if _attempt == 2:
+                raise AssertionError((label, errors))
+    raise AssertionError(label)
 
 
 def _assert_firing(client, sid: str, label: str) -> None:
@@ -104,11 +135,8 @@ def test_dropped_destination_parks_once_and_each_recovery_resumes(client):
         _completed(_beat(sid), "first load")
         assert _dest(dest_table) == _NAMES
 
-        # 1. Dropped: the first beat parks with the recovery named.
-        cur.execute(f'DROP TABLE public."{dest_table}"')  # nosec B608
-        run = _beat(sid)
-        assert run["job"].get("status") == "failed", run["job"].get("status")
-        _assert_parked_on_destination(client, sid, "dropped")
+        # 1. Dropped: the schedule parks with the recovery named.
+        _drop_and_park(client, cur, sid, dest_table, "dropped")
         assert _beat(sid)["started"] == 0  # parked: no beat grinds the same refusal
 
         refused = client.post(f"/api/v1/schedules/{sid}/recover",
@@ -134,9 +162,7 @@ def test_dropped_destination_parks_once_and_each_recovery_resumes(client):
         _assert_firing(client, sid, "after append")
 
         # 2. Dropped again: MCP recover (rebaseline = accept the removal).
-        cur.execute(f'DROP TABLE public."{dest_table}"')  # nosec B608
-        _beat(sid)
-        _assert_parked_on_destination(client, sid, "dropped again")
+        _drop_and_park(client, cur, sid, dest_table, "dropped again")
         ok, staged = h.mcp_call(client, "recover_schedule_destination", {
             "schedule_id": sid, "action": "rebaseline", "reason": "accept the removal"})
         assert ok, staged
@@ -153,9 +179,7 @@ def test_dropped_destination_parks_once_and_each_recovery_resumes(client):
         assert _dest(dest_table) == {7: "new ✓", 8: ""}
 
         # 3. Dropped a third time: the route-level rebaseline releases it too.
-        cur.execute(f'DROP TABLE public."{dest_table}"')  # nosec B608
-        _beat(sid)
-        _assert_parked_on_destination(client, sid, "dropped a third time")
+        _drop_and_park(client, cur, sid, dest_table, "dropped a third time")
         ok, staged = h.mcp_call(client, "rebaseline_transfer", {
             "connector_id": dst.id, "table": dest_table, "reason": "accept the removal again"})
         assert ok, staged
