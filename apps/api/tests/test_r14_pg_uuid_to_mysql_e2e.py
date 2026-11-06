@@ -49,7 +49,9 @@ def test_pg_uuid_lands_as_char36_at_full_confidence_run1_and_run2(client):
     dst = _connector("mysql", _cfg("mysql"), "destination")
     args = {"source_connector_id": src, "dest_connector_id": dst, "dest_table": t,
             "source_table": t, "sync_mode": "full_refresh_overwrite", "primary_key": "id",
-            "validation_mode": "strict"}
+            "validation_mode": "strict",
+            # `customer_ref` is a PII-shaped name; the hold is not what is tested.
+            "pii_acknowledgement": {"approved_by": "qa-lead", "reason": "synthetic UUIDs"}}
     try:
         for run in (1, 2):
             ok, staged = h.mcp_call(client, "start_transfer", args)
