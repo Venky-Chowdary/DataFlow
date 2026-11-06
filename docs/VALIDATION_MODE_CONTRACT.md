@@ -43,7 +43,7 @@ applied mode and its confidence threshold.
 | Mode | File / object-store source | Database source |
 |---|---|---|
 | strict / maximum | holds nothing out; a refused cell blocks Validate, and Execute refuses a partial write | same |
-| balanced | holds out numeric cast refusals (`Invalid integer` / `Invalid decimal`, QA R4-D02) while at least half the sampled cells cast (`CAST_SHARE_RULE`), and invalid-calendar dates below one in five sampled values | holds nothing out |
+| balanced | holds out numeric cast refusals (`Invalid integer` / `Invalid decimal`, QA R4-D02) while at least half the sampled cells cast (`CAST_SHARE_RULE`), and dates the read cannot pin to one real day — an invalid calendar day (QA browser 3) or a slash date that is a different day under DMY and MDY in an ISO column (QA R5) — below one in five sampled values | holds nothing out |
 | lenient | holds out every per-cell cast refusal while at least half the sampled cells cast (`CAST_SHARE_RULE`) | same |
 
 Known value change: PostgreSQL `varchar(n)` / `char(n)` silently trims trailing

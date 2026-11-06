@@ -136,6 +136,29 @@ def is_invalid_calendar_refusal(reason: Any) -> bool:
     ) or (text.startswith("Invalid time: ") and "is not a real time of day" in text)
 
 
+def is_ambiguous_date_order_refusal(reason: Any) -> bool:
+    """Is ``reason`` the mixed-format refusal of a slash date valid under DMY and MDY?
+
+    ``transform_engine`` refuses ``01/02/2024`` in a date or datetime column whose
+    dates are ISO:
+    it is a different day under each order, so the read cannot pin one (QA R5).
+    """
+    text = str(reason or "")
+    return text.startswith(("Invalid date: ", "Invalid datetime: ")) and (
+        "is a different day under DMY and MDY" in text
+    )
+
+
+def is_date_holdout_refusal(reason: Any) -> bool:
+    """Is ``reason`` a date the read cannot pin to one real day?
+
+    The one date class balanced holds out on a file (``validation_mode_contract``):
+    an invalid calendar day (QA browser 3) or an ambiguous day/month order
+    (QA R5). Both are counted under the same share bound.
+    """
+    return is_invalid_calendar_refusal(reason) or is_ambiguous_date_order_refusal(reason)
+
+
 def invalid_calendar_share_holds_out(bad: int, total: int) -> bool:
     """``bad`` invalid-calendar cells out of ``total`` sampled are row holdouts."""
     return 0 < bad < total and bad < INVALID_CALENDAR_MAX_SHARE * total

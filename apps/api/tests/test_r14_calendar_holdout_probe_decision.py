@@ -43,12 +43,29 @@ def test_lenient_holds_out_every_cast_refusal_under_the_same_policy():
     assert col["holdout_kind"] == "cast_failure"
 
 
+AMBIGUOUS = (
+    "Invalid date: '01/02/2024' is a different day under DMY and MDY and this read's "
+    "dates are ISO (YYYY-MM-DD) — mixed date formats, so the day/month order is "
+    "ambiguous; set date locale DMY or MDY to load it"
+)
+
+
 @pytest.mark.parametrize("mode,reason,record_batch,held", [
     ("lenient", "Invalid integer: 'abc'", True, True),
     ("lenient", None, False, True),
     ("balanced", "Invalid date: '2024-02-30' is not a real calendar date (2024-02 has 29 days)", True, True),
     ("balanced", "Invalid date: '2024-02-30' is not a real calendar date (2024-02 has 29 days)", False, False),
-    ("balanced", "Invalid integer: 'abc'", True, False),
+    # QA R4-D02: balanced holds a numeric cast out on a file, never on a database.
+    ("balanced", "Invalid integer: 'abc'", True, True),
+    ("balanced", "Invalid integer: 'abc'", False, False),
+    # QA R5: a slash date that is a different day under DMY and MDY is held out
+    # on a file like an impossible day; a database extract holds nothing out.
+    ("balanced", AMBIGUOUS, True, True),
+    ("balanced", AMBIGUOUS, False, False),
+    ("strict", AMBIGUOUS, True, False),
+    ("balanced", AMBIGUOUS.replace("Invalid date:", "Invalid datetime:"), True, True),
+    # A whole column with no ISO context is a locale question, not a holdout.
+    ("balanced", "Invalid date: '01/02/2024' — day/month order is ambiguous; set date locale MDY or DMY", True, False),
     ("balanced", None, True, False),
     ("strict", "Invalid date: '2024-02-30' is not a real calendar date (2024-02 has 29 days)", True, False),
     ("maximum", "Invalid integer: 'abc'", True, False),

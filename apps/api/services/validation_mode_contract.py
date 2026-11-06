@@ -253,9 +253,10 @@ def mode_holds_out_refusal(
 
     * lenient — every per-cell cast refusal (``holds_out_bad_cells``);
     * balanced — on a record-batch (file) source only: a numeric cast refusal
-      (:func:`is_numeric_cast_refusal`, QA R4-D02) and an invalid-calendar
-      refusal (``connectors.sql_temporal.is_invalid_calendar_refusal``, QA
-      browser 3). A database extract holds nothing out;
+      (:func:`is_numeric_cast_refusal`, QA R4-D02) and a date the read cannot
+      pin to one real day (``connectors.sql_temporal.is_date_holdout_refusal``:
+      an invalid calendar day, QA browser 3, or an ambiguous DMY/MDY order,
+      QA R5). A database extract holds nothing out;
     * strict / maximum / review — nothing.
 
     ``reason=None`` asks for any reason, which only lenient answers yes to.
@@ -266,9 +267,9 @@ def mode_holds_out_refusal(
         return True
     if reason is None or not record_batch or not _is_balanced(mode):
         return False
-    from connectors.sql_temporal import is_invalid_calendar_refusal
+    from connectors.sql_temporal import is_date_holdout_refusal
 
-    return is_invalid_calendar_refusal(reason) or is_numeric_cast_refusal(reason)
+    return is_date_holdout_refusal(reason) or is_numeric_cast_refusal(reason)
 
 
 def mode_holds_out_numeric_casts(mode: str | None, *, record_batch: bool) -> bool:
@@ -285,13 +286,13 @@ def holdout_tally(
     mode: str | None, reasons: Any, *, record_batch: bool
 ) -> tuple[int, int]:
     """``(held, calendar)`` over refusal reasons, for :func:`mode_holdout_kind`."""
-    from connectors.sql_temporal import is_invalid_calendar_refusal
+    from connectors.sql_temporal import is_date_holdout_refusal
 
     held = calendar = 0
     for reason in reasons or ():
         if mode_holds_out_refusal(mode, reason, record_batch=record_batch):
             held += 1
-            calendar += int(is_invalid_calendar_refusal(reason))
+            calendar += int(is_date_holdout_refusal(reason))
     return held, calendar
 
 
@@ -308,7 +309,9 @@ def mode_holdout_kind(
 
     ``held`` counts the failures :func:`mode_holds_out_refusal` held out (every
     failure must be one); ``calendar`` how many of those are invalid-calendar
-    refusals (:func:`holdout_tally`). The share bounds are stated once:
+    refusals (:func:`holdout_tally`), counting every date the read cannot pin
+    to one day (invalid calendar or ambiguous order). The share bounds are
+    stated once:
 
     * a cast holdout (lenient; balanced numeric on a file) needs at least half
       the sampled cells to cast — :func:`cast_share_holds_out`, ``CAST_SHARE_RULE``;

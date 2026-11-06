@@ -64,7 +64,7 @@ from services.value_serializer import (
     is_missing_sentinel,
 )
 
-from connectors.sql_temporal import is_invalid_calendar_refusal
+from connectors.sql_temporal import is_date_holdout_refusal
 from services.validation_mode_contract import mode_holdout_kind, mode_holds_out_refusal
 
 _TEXTUAL_LOGICALS = {"string", "text"}
@@ -158,7 +158,7 @@ def samples_coerce_mapping(
             failed += 1
             if mode_holds_out_refusal(validation_mode, str(err), record_batch=record_batch):
                 held += 1
-                calendar += int(is_invalid_calendar_refusal(str(err)))
+                calendar += int(is_date_holdout_refusal(str(err)))
             continue
         checked += 1
     if not failed:
@@ -858,7 +858,7 @@ def analyze_coercion(
                     failed += 1
                     if mode_holds_out_refusal(mode, err, record_batch=file_row_quarantine):
                         held_failed += 1
-                        calendar_failed += int(is_invalid_calendar_refusal(err))
+                        calendar_failed += int(is_date_holdout_refusal(err))
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
                         raw_failure_values.append(cell[:120])

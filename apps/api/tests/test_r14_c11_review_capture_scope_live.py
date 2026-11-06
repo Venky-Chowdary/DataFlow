@@ -270,7 +270,12 @@ def test_s3_a_pre_registry_routes_publication_is_never_offered_and_resume_adopts
     # Not recorded: its publication is never guessed from the table stem
     # (that is how another route's publication got dropped, second review).
     assert item["ownership"] == "datawrap_named" and item["publication_name"] is None, item
-    assert not [c for c in listing["captures"] if c["state"] == "orphaned_publication"], listing
+    # Only publications this test made: the shared server may carry other
+    # tests' leftovers, which the listing rightly reports as orphaned.
+    assert not [
+        c for c in listing["captures"]
+        if c["state"] == "orphaned_publication" and c.get("publication_name") not in world.before_pubs
+    ], listing
     out = world.cleanup(world.ent.admin, world.x, publication_names=[pub], include_unregistered=True)
     assert out["dropped"] == [] and pub in _pubs(), out
     # A standalone look-alike publication is named for what it is.
