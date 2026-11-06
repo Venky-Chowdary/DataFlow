@@ -67,8 +67,19 @@ def _snowflake_schema(schema: str | None) -> str:
 
 
 def _table_ref(cur: Any, schema: str, table: str) -> str:
-    """Resolve + quote a Snowflake table (handles legacy lowercase quoted names)."""
-    resolved = resolve_or_fold_snowflake_table(cur, schema, table)
+    """Resolve + quote a Snowflake table (handles legacy lowercase quoted names).
+
+    A schema-qualified ``PUBLIC.HQ0609_SF`` is the schema and the table, not one
+    name: quoting it whole asked for ``"PUBLIC.HQ0609_SF"`` and every reader
+    (Execute, the g3f population walk) failed "table does not exist" (D288).
+    The table's own qualifier wins over the connector schema.
+    """
+    from connectors.sql_identifiers import split_qualified_table
+
+    own_schema, bare = split_qualified_table(table, schema)
+    if own_schema and own_schema != schema:
+        schema = _snowflake_schema(own_schema)
+    resolved = resolve_or_fold_snowflake_table(cur, schema, bare)
     return snowflake_qualified_table(schema, resolved)
 
 
