@@ -375,13 +375,16 @@ def _is_passport_mrz(text: str) -> bool:
     )
 
 
-def pii_value_category(value: Any, *, bare_digit_phones: bool = True) -> str:
+def pii_value_category(
+    value: Any, *, bare_digit_phones: bool = True, bare_digit_pans: bool = True
+) -> str:
     """The PII category one whole value is, or ``""``.
 
     Precedence: email, SSN, IP, passport MRZ, then a Luhn-valid 13-19 digit
     PAN (the phone shape matches card numbers, so PCI wins), phone, account.
     ``bare_digit_phones=False`` keeps an unformatted digit run from reading as
-    a phone (counts and order numbers look the same).
+    a phone (counts and order numbers look the same); ``bare_digit_pans=False``
+    does the same for a card number (one in ten integers passes Luhn).
     """
     text = str(value if value is not None else "").strip()
     if not text:
@@ -394,7 +397,7 @@ def pii_value_category(value: Any, *, bare_digit_phones: bool = True) -> str:
         return "ip_address"
     if _is_passport_mrz(text):
         return "passport"
-    if luhn_valid(text):
+    if luhn_valid(text) and (bare_digit_pans or not _is_bare_digits(text)):
         return "pci_pan"
     if _is_phone(text) and (bare_digit_phones or not _is_bare_digits(text)):
         return "phone"
@@ -440,10 +443,14 @@ def embedded_pii_categories(value: Any) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _value_hits(values: list[str], *, bare_digit_phones: bool = True) -> list[str]:
+def _value_hits(
+    values: list[str], *, bare_digit_phones: bool = True, bare_digit_pans: bool = True
+) -> list[str]:
     hits: list[str] = []
     for value in values:
-        category = pii_value_category(value, bare_digit_phones=bare_digit_phones)
+        category = pii_value_category(
+            value, bare_digit_phones=bare_digit_phones, bare_digit_pans=bare_digit_pans
+        )
         if category:
             hits.append(category)
     return list(dict.fromkeys(hits))
@@ -523,14 +530,17 @@ def detect_pii_fields(
         sample_values = [
             "" if value is None else str(value).strip() for value in raw_values
         ]
+        declared = str((column_types or {}).get(col) or "")
         value_hits = _value_hits(
             sample_values,
             bare_digit_phones=_bare_digits_may_be_phone(
-                name_hits,
-                sample_values,
-                raw_values,
-                str((column_types or {}).get(col) or ""),
-                col,
+                name_hits, sample_values, raw_values, declared, col,
+            ),
+            # A column that holds integers (declared BIGINT, or int cells) holds
+            # numbers: a Luhn-valid one is a key, not a card, unless the name
+            # says card (QA MySQL D7: ids that are multiples of 100000000007).
+            bare_digit_pans=(
+                "pci_pan" in name_hits or not _numeric_column(raw_values, declared)
             ),
         )
         # Plain digit strings (order ids, epochs, Kafka keys) read as phones

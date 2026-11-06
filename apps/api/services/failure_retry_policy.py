@@ -92,6 +92,12 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "or widen file_wait_seconds, then run the schedule again."),
     # D100: a watermark that outlived its destination can never self-heal —
     # park on the first beat and name the recovery, don't re-fail every tick.
+    # QA MySQL D7: the PII hold says the same thing to every attempt until a
+    # human attests. Park on the first beat with the compliance approval.
+    (r"pii/compliance review required",
+     "Review the flagged columns, then approve this finding with "
+     '"compliance": true and a reason, or store compliance_acknowledged '
+     "(with acknowledgment_actor / acknowledgment_reason) on the schedule."),
     (r"destination reset since the last incremental run",
      "The destination was reset or dropped after this cursor advanced — "
      f"clear the cursor to re-snapshot ({clear_cursor_remedy()}) "
