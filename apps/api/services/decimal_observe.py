@@ -1027,6 +1027,8 @@ def _cursor_type_code_is_text(type_code: Any, dialect: str = "") -> bool:
         family = _cursor_code_family(dialect)
         if family == _CODE_FAMILY_SQLSERVER:
             return _PYMSSQL_TYPE_CODES.get(type_code) == "VARCHAR"
+        if family == _CODE_FAMILY_SNOWFLAKE:
+            return _SNOWFLAKE_TYPE_CODES.get(type_code) == "VARCHAR"
         if family == _CODE_FAMILY_UNTRUSTED:
             return False
         return type_code in _TEXT_TYPE_CODES
@@ -1205,6 +1207,27 @@ _PYMSSQL_TYPE_CODES: dict[int, str] = {
 _CODE_FAMILY_MYSQL_PG = "mysql_pg"
 _CODE_FAMILY_SQLSERVER = "sqlserver"
 _CODE_FAMILY_UNTRUSTED = "untrusted"
+_CODE_FAMILY_SNOWFLAKE = "snowflake"
+# snowflake.connector.constants.FIELD_ID_TO_NAME. FIXED is DECIMAL whose
+# precision/scale come from the description (cursor_declared_numeric_types).
+# The connector used to stamp the raw integer code — TO_VARCHAR read back as
+# "2" or, after inference, INTEGER/TIMESTAMP (D17).
+_SNOWFLAKE_TYPE_CODES = {
+    0: "DECIMAL",
+    1: "DOUBLE",
+    2: "VARCHAR",
+    3: "DATE",
+    4: "TIMESTAMP",
+    5: "JSON",
+    6: "TIMESTAMPTZ",
+    7: "TIMESTAMPTZ",
+    8: "TIMESTAMP",
+    9: "JSON",
+    10: "JSON",
+    11: "VARBINARY",
+    12: "TIME",
+    13: "BOOLEAN",
+}
 _SQLALCHEMY_MYSQL_PG_BACKENDS = frozenset({"mysql", "mariadb", "postgresql", "postgres"})
 _PG_CATALOG_DIALECTS = frozenset({
     "postgresql",
@@ -1255,6 +1278,8 @@ def _cursor_code_family(dialect: str) -> str:
     d = (dialect or "").strip().lower()
     if not d or d == "generic_sql" or d in _PG_CATALOG_DIALECTS:
         return _CODE_FAMILY_MYSQL_PG
+    if d == "snowflake":
+        return _CODE_FAMILY_SNOWFLAKE
     try:
         from connectors.generic_sql import _drivername
     except ImportError:
@@ -1294,6 +1319,8 @@ def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
         family = _cursor_code_family(dialect)
         if family == _CODE_FAMILY_SQLSERVER:
             return _PYMSSQL_TYPE_CODES.get(type_code, "")
+        if family == _CODE_FAMILY_SNOWFLAKE:
+            return _SNOWFLAKE_TYPE_CODES.get(type_code, "")
         if family == _CODE_FAMILY_UNTRUSTED:
             logger.debug(
                 "cursor type code %r on dialect %r has no known table; sample decides",

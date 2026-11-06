@@ -286,6 +286,12 @@ def _sqlglot_identifiers(sql: str, dialect: str = "") -> set[str] | None:
         for t in tree.find_all(exp.Table)
         if getattr(t, "alias", None)
     )
+    for table_alias in tree.find_all(exp.TableAlias):
+        if table_alias.name:
+            query_defined.add(str(table_alias.name).lower())
+        query_defined.update(
+            str(c.name).lower() for c in (table_alias.columns or []) if c.name
+        )
     cte_names = {
         str(cte.alias).lower()
         for cte in tree.find_all(exp.CTE)
