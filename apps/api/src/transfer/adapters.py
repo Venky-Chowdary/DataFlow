@@ -623,6 +623,11 @@ def resolve_connector_config(
     cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
     if cfg.get("auth_role"):
         cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
+    # A key the operator declared (auth_mode=api_key) and pasted in the password
+    # field reaches every reader, writer and probe as the key (D274/D277).
+    from services.connector_auth import resolve_api_key
+
+    cfg["api_key"] = resolve_api_key(cfg, password_is_key=False)
     # OpenShift is a hosting plane — resolve Service DNS onto the real store.
     # Never a Kubernetes API write. See services.openshift_dest.
     from services.openshift_dest import apply_openshift_hosting

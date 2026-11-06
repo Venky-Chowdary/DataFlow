@@ -22,6 +22,7 @@ from services.value_serializer import (
 )
 
 from connectors.writer_common import WriteResult as _WriteResult
+from services.connector_auth import resolve_api_key
 
 
 def _requests_session() -> Any:
@@ -169,7 +170,7 @@ def scan_source_ids(
         return "unmeasured", []
     try:
         session = _requests_session()
-        key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        key = resolve_api_key(cfg)
         hdrs = _headers(key)
         stats = session.get(
             f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
@@ -289,7 +290,9 @@ def test_pinecone(
 ) -> tuple[bool, str]:
     """Quick connectivity check against a Pinecone index host."""
     url = _index_url(host, connection_string)
-    key = api_key or password or ""
+    key = resolve_api_key(
+        {"api_key": api_key, "password": password, "auth_mode": _kwargs.get("auth_mode", "")}
+    )
     if not url:
         return False, "Pinecone index host is required"
     if not key:
@@ -443,7 +446,14 @@ def write_mapped_rows(
         )
 
     index_url = _index_url(host, connection_string)
-    key = api_key or password or username or ""
+    key = resolve_api_key(
+        {
+            "api_key": api_key,
+            "password": password,
+            "username": username,
+            "auth_mode": _kwargs.get("auth_mode", ""),
+        }
+    )
     namespace = (table_name or schema or "").strip()
     if not index_url:
         return WriteResult(

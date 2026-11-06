@@ -24,6 +24,7 @@ from services.value_serializer import (
 )
 
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
+from services.connector_auth import resolve_api_key
 
 
 _RESERVED_PROPERTIES = ("id", "_id", "vector", "_additional", "class")
@@ -539,7 +540,7 @@ def scan_source_ids(
         return "unmeasured", []
     try:
         session = _requests_session()
-        api_key = str(cfg.get("api_key") or cfg.get("password") or "")
+        api_key = resolve_api_key(cfg)
         base_url = _base_url(
             str(cfg.get("host") or ""),
             int(cfg.get("port") or 8080),
@@ -606,7 +607,7 @@ def read_document_properties(
     Weaviate ``dataType``. Raises when the class cannot be listed completely.
     """
     session = _requests_session()
-    api_key = str(cfg.get("api_key") or cfg.get("password") or "")
+    api_key = resolve_api_key(cfg)
     base_url = _base_url(
         str(cfg.get("host") or ""),
         int(cfg.get("port") or 8080),
@@ -703,7 +704,14 @@ def write_mapped_rows(
         or []
     ) or None
     class_name = _class_name(table_name or database or "DataflowChunk")
-    key = api_key or password or username or ""
+    key = resolve_api_key(
+        {
+            "api_key": api_key,
+            "password": password,
+            "username": username,
+            "auth_mode": _kwargs.get("auth_mode", ""),
+        }
+    )
     base_url = _base_url(host, port, ssl, connection_string)
 
     # Probe live class properties before Map bind so text≠int invent is closed.

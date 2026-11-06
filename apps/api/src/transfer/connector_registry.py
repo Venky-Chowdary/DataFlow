@@ -825,7 +825,7 @@ def _mongodb_srv_form_hint(cfg: dict[str, Any], raw: Any) -> str:
 def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
-    from services.connector_auth import engine_login_role
+    from services.connector_auth import engine_login_role, resolve_api_key
     from services.egress_guard import metadata_endpoint_refusal
 
     refusal = metadata_endpoint_refusal(
@@ -881,7 +881,9 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "auth_mode": cfg.get("auth_mode", ""),
         "role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
         "auth_role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
-        "api_key": cfg.get("api_key", ""),
+        # A key declared by auth_mode and pasted in the password field is the key
+        # (one rule for every HTTP tile — D274/D277).
+        "api_key": resolve_api_key(cfg, password_is_key=False),
         "service_account": cfg.get("service_account", ""),
         "private_key": cfg.get("private_key", ""),
         "region": cfg.get("region", ""),

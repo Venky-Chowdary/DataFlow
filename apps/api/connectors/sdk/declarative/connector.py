@@ -228,14 +228,26 @@ class DeclarativeSource(BaseConnector):
             }
         }
 
+    def _probe_stream(self) -> tuple[int, Any, str]:
+        """The first declared stream this config can address, and its path.
+
+        A connector configured to the account level (an Airtable base with no
+        table yet) still proves its credential on a stream that needs only
+        what was given — the base's table list — instead of failing "missing
+        config value 'table_id'" before any request is sent (D277).
+        """
+        first_error: ManifestError | None = None
+        for index, stream in enumerate(self.manifest.streams):
+            try:
+                return index, stream, _render_config_template(
+                    stream.path, self.config, path=f"streams[{index}].path"
+                )
+            except ManifestError as exc:
+                first_error = first_error or exc
+        raise first_error or ManifestError("streams: none declared", path="streams")
+
     def test_connection(self) -> bool:
-        stream = self.manifest.streams[0]
-        index = 0
-        stream_path = _render_config_template(
-            stream.path,
-            self.config,
-            path=f"streams[{index}].path",
-        )
+        index, stream, stream_path = self._probe_stream()
         url = urljoin(self._base_url, stream_path.lstrip("/"))
         params = dict(self.auth.params)
         params.update(

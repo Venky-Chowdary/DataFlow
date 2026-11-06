@@ -217,6 +217,30 @@ def base_url(host: str, default: str) -> str:
     return host.rstrip("/")
 
 
+def absolute_http_url(host: str, *, port: int | None = 0, ssl: bool | None = None) -> str:
+    """An absolute HTTP(S) URL for a connector host field, URL-form or bare.
+
+    A bare SaaS host (``api.airtable.com``) with the HTTPS port is the
+    ``https://`` origin an API manifest expects; the message "only absolute
+    HTTP(S) URLs are allowed" was the manifest parser refusing the form's own
+    host (D277). A URL-form host is kept as typed; ``ssl=False`` with a
+    non-443 port names a plain-HTTP endpoint (a local stub).
+    """
+    text = (host or "").strip().rstrip("/")
+    if not text or "://" in text:
+        return text
+    try:
+        port_num = int(port or 0)
+    except (TypeError, ValueError):
+        port_num = 0
+    if ssl is None:
+        ssl = port_num in (0, 443)
+    scheme = "https" if ssl else "http"
+    if port_num and port_num not in (443 if ssl else 80,) and ":" not in text.split("@")[-1]:
+        text = f"{text}:{port_num}"
+    return f"{scheme}://{text}"
+
+
 def token(  # nosec B107
     api_key: str = "",
     connection_string: str = "",

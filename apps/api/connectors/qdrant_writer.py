@@ -22,6 +22,7 @@ from services.value_serializer import (
     sanitize_json_value,
 )
 from services.vectorization import vectorize_records
+from services.connector_auth import resolve_api_key
 
 from connectors.writer_common import WriteResult as _WriteResult
 
@@ -68,7 +69,7 @@ def _headers(api_key: str) -> dict[str, str]:
 def qdrant_rest(cfg: Mapping[str, Any]) -> tuple[Any, str, dict[str, str]]:
     """Session, base URL, and headers for one Qdrant REST call."""
     session = _requests_session()
-    api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+    api_key = resolve_api_key(cfg)
     connection_string = str(cfg.get("connection_string") or "").strip()
     base_url = (
         connection_string.rstrip("/")
@@ -407,7 +408,7 @@ def scan_source_ids(
         return "unmeasured", []
     try:
         session = _requests_session()
-        api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        api_key = resolve_api_key(cfg)
         connection_string = str(cfg.get("connection_string") or "").strip()
         base_url = connection_string.rstrip("/") if connection_string else _base_url(
             str(cfg.get("host") or ""),
