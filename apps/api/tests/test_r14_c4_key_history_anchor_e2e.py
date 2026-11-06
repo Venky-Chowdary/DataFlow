@@ -233,3 +233,67 @@ def test_f5_workers_starting_together_create_one_epoch(ent):
     assert len(results) == 6 and not [r for r in results if isinstance(r, Exception)], results
     assert len({tuple(sorted(r.items())) for r in results}) == 1, results
     assert ent.db["audit_events"].count_documents({"action": store.EPOCH_ACTION}) == 1
+
+
+# ── F6 ─────────────────────────────────────────────────────────────────────
+
+
+def test_f6_a_secrets_key_change_is_fixed_by_an_audited_admin_reanchor(ent, monkeypatch):
+    from services import audit_chain_keystore as store
+
+    monkeypatch.setenv("DATAFLOW_AUDIT_HMAC_KEY", "env-f6-" + secrets.token_urlsafe(24))
+    _forget_process_keys()
+    ws = ent.workspace("R14 C4 F6")
+    _write(3, action="r14c4.f6", workspace_id=ws)
+    assert _verify(ent, ws)["status"] == "verified"
+    for name in ("DATAFLOW_SECRETS_KEY", "DATAWRAP_SECRETS_KEY"):
+        monkeypatch.setenv(name, "rotated-secrets-key-" + secrets.token_urlsafe(16))
+    _forget_process_keys()
+    report = _verify(ent, ws)
+    assert "fails its MAC" in (report["key_history_tampered"] or ""), report
+    assert report["status"] == "findings"
+
+    route = "/api/v1/audit/chain/key-history/reanchor"
+    ws_admin = ent.member(email=f"f6-{secrets.token_hex(4)}@example.com", workspace_id=ws, role="admin")
+    assert ws_admin.post(route, json={"reason": "secrets key rotated", "dry_run": False}).status_code == 403
+    assert ent.admin.post(route, json={"reason": "short", "dry_run": False}).status_code == 422
+    plan = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06"})
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["dry_run"] is True and plan.json()["problem_before"]
+    assert _verify(ent, ws)["key_history_tampered"], "a dry run changes nothing"
+
+    applied = ent.admin.post(route, json={"reason": "secrets key rotated on 2026-11-06", "dry_run": False})
+    assert applied.status_code == 200, applied.text
+    receipt = ent.db["audit_events"].find_one({"action": store.REANCHOR_ACTION})
+    assert receipt is not None and receipt["details"]["reason"] == "secrets key rotated on 2026-11-06"
+    assert str(receipt["chain_seq"]) == applied.json()["epoch_after"]["head_seq"]
+    assert ent.db["audit_events"].find_one({"action": "audit.key_history.reanchor"}) is not None
+    _forget_process_keys()
+    after = _verify(ent, ws)
+    assert after["key_history_tampered"] is None and after["status"] == "verified", after["findings"][:3]
+
+    # Relabels after the re-anchor are still caught.
+    _write(2, action="r14c4.f6.after", workspace_id=ws)
+    _relabel(ent, _records(ent, "r14c4.f6.after")[0], NOBODY)
+    assert _tampered(_verify(ent, ws)) == ["unknown_key_after_keyring"]
+
+
+def test_f6_a_history_row_macd_for_another_database_is_not_accepted(ent, monkeypatch):
+    """Same secrets key, another database (staging beside production): a row
+    MAC'd there named a key with a far-future last_seen and excused a relabel."""
+    from services import audit_chain_keystore as store
+
+    ws = ent.workspace("R14 C4 F6 namespace")
+    _write(3, action="r14c4.f6ns", workspace_id=ws)
+    other = ent.db.client[ent.db.name + "_other"][store.HISTORY_COLLECTION]
+    first, last = "2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00"
+    with monkeypatch.context() as m:
+        m.setattr(store, "_history_coll", lambda: other)
+        mac = store._entry_mac("k-from-staging", "configured", first, last)
+    ent.db[store.HISTORY_COLLECTION].insert_one(
+        {"_id": "k-from-staging", "origin": "configured", "first_seen": first, "last_seen": last, "mac": mac}
+    )
+    _relabel(ent, _records(ent, "r14c4.f6ns")[1], "k-from-staging")
+    report = _verify(ent, ws)
+    assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
+    assert report["unverifiable_key_lost"]["count"] == 0

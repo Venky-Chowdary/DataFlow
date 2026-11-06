@@ -471,10 +471,12 @@ async def verify_audit_chain(
     holds (not configured, not retired, not in the persisted keyring) cannot be
     checked, so it is never counted as verified — and not as tampering when the
     deployment's sealed key history shows it signed with that key and the
-    record falls within that key's use, or the record predates the history (a
-    key an earlier deploy lost). A record naming any other key after a
-    verified record is tampering
-    (``unknown_key_after_keyring``). A chain whose only exceptions are lost keys reports
+    record falls within that key's use, or the record sits before the chain
+    position where the history began (a key an earlier deploy lost). A record
+    naming any other key after that position is tampering
+    (``unknown_key_after_keyring``), as is a history whose signed anchor
+    record was reset (``key_history_tampered``; see
+    ``POST /chain/key-history/reanchor`` after a secrets-key change). A chain whose only exceptions are lost keys reports
     ``status: verified_with_exceptions``, ``verified: false``,
     ``tampering_detected: false`` and ``unverifiable_key_lost`` (``count`` and
     ``by_key_id``); supplying that key as a retired audit key makes those
@@ -543,6 +545,47 @@ async def reanchor_audit_chain(body: ReanchorBody, request: Request):
         "audit.chain.reanchor", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
         details={"dry_run": body.dry_run, "accepted": len(result["accepted"])},
+    )
+    return result
+
+
+class KeyHistoryReanchorBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=500)
+    dry_run: bool = True
+
+
+@router.post("/chain/key-history/reanchor")
+async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Request):
+    """Platform admin: start the sealed audit key history over.
+
+    For a deployment whose ``DATAFLOW_SECRETS_KEY`` changed: the history's
+    MACs no longer verify, so ``/verify`` reports ``key_history_tampered``
+    until an administrator re-anchors it. Dry run by default (reports the
+    current problem and how many entries would be dropped). Applying it
+    writes the signed ``audit.key_history.reanchored`` chain record, moves
+    the history's epoch to it and drops entries whose MAC fails; records
+    before it naming a key off the history then read as lost keys, never
+    verified. A workspace admin cannot do this.
+    """
+    from services import audit_chain_keystore as keystore
+    from services.audit_log import actor_from_request
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted or scope.workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Re-anchoring the audit key history is a platform administrator action.",
+        )
+    try:
+        result = keystore.reanchor_key_history(
+            actor=actor_from_request(request), reason=body.reason, dry_run=body.dry_run,
+        )
+    except keystore.KeystoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail="The audit key history is not reachable.") from exc
+    record_security_event(
+        "audit.key_history.reanchor", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"dry_run": body.dry_run, "entries_dropped": result["entries_dropped"]},
     )
     return result
 

@@ -302,7 +302,9 @@ def _mac(*parts: str) -> str:
 
     from services.secret_vault import derive_subkey
 
-    msg = "\x1f".join(("v1",) + parts).encode("utf-8")
+    coll = _history_coll()
+    ns = str(getattr(coll, "full_name", "") or "")
+    msg = "\x1f".join(("v2", ns) + parts).encode("utf-8")
     return hmac.new(derive_subkey(_MAC_INFO), msg, hashlib.sha256).hexdigest()
 
 
@@ -534,6 +536,44 @@ def history_epoch() -> str | None:
     """When this deployment began keeping the key history (ISO time), or None."""
     rec = epoch_record()
     return rec["at"] if rec else None
+
+
+def reanchor_key_history(*, actor: str, reason: str, dry_run: bool = False) -> dict[str, Any]:
+    """Start the key history over (after a ``DATAFLOW_SECRETS_KEY`` change).
+
+    Platform-admin action (``POST /api/v1/audit/chain/key-history/reanchor``),
+    audited by the signed ``audit.key_history.reanchored`` chain record it
+    writes; the epoch moves to that record, and the verifier accepts the move
+    because that record verifies under a held key (an attacker without a
+    chain key cannot write one). Entries whose MAC no longer verifies are
+    dropped — they cannot be told from forged ones — so records before the
+    re-anchor naming a key off the history read as lost keys, and relabels
+    after it are still caught. ``dry_run`` reports what it would do.
+    """
+    coll = _history_coll()
+    if coll is None:
+        raise KeystoreUnavailable("no control-plane database holds the key history")
+    keys = _collection()
+    try:
+        before = epoch_record()
+        problem = ""
+    except HistoryTampered as exc:
+        before, problem = None, str(exc)
+    stale = [str(d["_id"]) for d in coll.find({"_id": {"$ne": _EPOCH_ID}}) if _valid(d) is None]
+    plan: dict[str, Any] = {
+        "dry_run": dry_run, "epoch_before": before, "problem_before": problem or None,
+        "entries_dropped": len(stale), "entries_kept": len(key_history()),
+    }
+    if dry_run:
+        return plan
+    at = _now()
+    seq, head = _anchor_in_chain(REANCHOR_ACTION, at, actor=actor, reason=reason)
+    for kid in stale:
+        coll.delete_one({"_id": kid})
+    _store_epoch(coll, keys, at, seq, head)
+    _epoch_cache.clear()
+    logger.warning("audit key history re-anchored at chain position %s by %s", seq, actor)
+    return {**plan, "epoch_after": {"at": at, "head_seq": seq, "head_hash": head}}
 
 
 def key_history() -> dict[str, dict[str, Any]]:

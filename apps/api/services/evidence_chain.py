@@ -230,6 +230,9 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         record its MAC'd epoch names. The epoch row failing its MAC, going
         missing, or naming a later anchor while an earlier one is still in
         the chain (history, copy and epoch wiped and recreated) is tampering.
+        After a ``DATAFLOW_SECRETS_KEY`` change a platform admin re-anchors it
+        (``POST /api/v1/audit/chain/key-history/reanchor``), which writes a
+        signed ``audit.key_history.reanchored`` record.
     ``broken_link``
         ``prev_hash`` does not name the previous record, nor any earlier one: a
         record between them was deleted, or the records were reordered.
