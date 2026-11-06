@@ -278,6 +278,31 @@ def evidence_scope(
     return scope
 
 
+def _calendar_holdout_only(probe: dict) -> bool:
+    """Every sampled refusal is the invalid-calendar rule, and some cells cast.
+
+    The predicate is the write path's own (``connectors.sql_temporal.
+    invalid_calendar_reason``): the cells Validate lets through here are the
+    cells the writer holds out. An all-bad column is not a holdout, and a
+    probe that stopped listing failures cannot prove the rest are dates.
+    """
+    failures = [f for f in (probe.get("sample_failures") or []) if isinstance(f, dict)]
+    failed = int(probe.get("failed") or 0)
+    sampled = int(probe.get("sampled") or 0)
+    if not failures or failed != len(failures) or sampled <= failed:
+        return False
+    return all(_invalid_calendar_cell(f.get("value")) for f in failures)
+
+
+def _invalid_calendar_cell(value: Any) -> bool:
+    """The write path's invalid-calendar rule (one predicate, not a copy)."""
+    try:
+        from connectors.sql_temporal import invalid_calendar_reason
+    except ImportError:
+        return False
+    return bool(invalid_calendar_reason(str(value if value is not None else "")))
+
+
 def _first_sample_reason(issues_detail: list[dict]) -> str:
     """The first sampled cell's own refusal, for the gate headline.
 
@@ -739,6 +764,14 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     except Exception:
         source_kind = ""
     mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
+    try:
+        from services.preflight_source_kind import source_is_record_batch
+
+        record_batch_source = bool(source_is_record_batch(
+            getattr(ctx.plan.source, "kind", ""), getattr(ctx.plan.source, "db_type", "")
+        ))
+    except ImportError:
+        record_batch_source = False
     # A lenient S3→S3 (or other object-store) file copy moves bytes. Cell
     # values are not a schema contract, and g3 must not block the copy on a
     # declared coercion (R8-003). Strict and database routes still type-check.
@@ -1471,6 +1504,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # out (warn) — do not re-lock Validate after the operator signed.
             if risk_ack and severity == "block":
                 severity = "warn"
+            # Balanced: a sampled cell refused only because it names no real
+            # calendar day is a row holdout, exactly as the same cell beyond
+            # the sample is at write (QA browser 3). Any other refusal blocks.
+            calendar_holdout = bool(
+                mode == "balanced"
+                and record_batch_source
+                and severity == "block"
+                and not force_block
+                and _calendar_holdout_only(probe)
+            )
+            if calendar_holdout:
+                severity = "warn"
             json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
                 "source": m.source,
@@ -1500,6 +1545,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "contracted_holdout": bool(
                     risk_ack and int(probe.get("failed") or 0) > 0
                 ),
+                "calendar_holdout": calendar_holdout,
                 "declared_lossy": bool(declared_lossy),
                 "probe_cast_only": bool(probe_only and not declared_lossy),
                 "fidelity_collapse": bool(
@@ -1531,6 +1577,12 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                         "Accept risk on Map if wrapping bare scalars as JSON "
                         "strings is intentional, or emit real JSON objects/arrays upstream."
                     )
+            elif calendar_holdout:
+                warnings.append(
+                    label
+                    + f" — {int(probe.get('failed') or 0)} sample row(s) name no real "
+                    "calendar date and will quarantine with that reason; the rest load"
+                )
             else:
                 warnings.append(label)
         elif value_aware:
@@ -3099,6 +3151,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         getattr(ctx.plan.source, "db_type", ""),
     )
     file_holdout_targets: set[str] = set()
+    balanced_mode = (
+        str(getattr(ctx.plan, "validation_mode", "") or "").strip().lower() == "balanced"
+    )
     if file_load:
         for probe in ctx.plan.mappings:
             if _is_intentional_omit_mapping(probe) or not probe.target:
@@ -3120,6 +3175,10 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 ):
                     ok_cells += 1
                 elif probe_err and _numeric_cast_failure(probe_err):
+                    cast_bad += 1
+                elif probe_err and balanced_mode and _invalid_calendar_cell(probe_raw):
+                    # Balanced: a cell naming no real calendar day is held out
+                    # like a bad number (QA browser 3); strict still refuses.
                     cast_bad += 1
                 elif probe_err:
                     other_bad += 1

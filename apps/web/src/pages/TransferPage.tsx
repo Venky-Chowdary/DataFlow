@@ -270,6 +270,8 @@ import {
   type StreamFieldContract,
 } from "../lib/streamContracts";
 import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
+import { fileSourceIssueHold, type FileSourceIssueHold } from "../lib/fileSourceIssueHold";
+import { FileSourceIssuePanel } from "../components/transfer/FileSourceIssuePanel";
 import { foreignKeysDestExtra, type ForeignKeysMode } from "../lib/foreignKeysMode";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
 import {
@@ -425,6 +427,8 @@ export function TransferPage({
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   /** Last transport / start failure — Validate must not look "Not run". */
   const [preflightError, setPreflightError] = useState("");
+  /** File values that do not fit, awaiting the Balanced-or-fix decision on Validate. */
+  const [fileIssueHold, setFileIssueHold] = useState<FileSourceIssueHold | null>(null);
   /** Fingerprint of Map/sync/PK that produced the current preflight result. */
   const [validatedContractKey, setValidatedContractKey] = useState<string | null>(null);
   /** Destination route of the run on screen. */
@@ -4717,18 +4721,12 @@ export function TransferPage({
       }));
     };
     const threshold = confidenceThresholdForMode(activeValidation);
-    if (
-      sourceKind === "file"
-      && parsed?.validation
-      && !parsed.validation.ok
-      && activeValidation !== "balanced"
-    ) {
-      toast({
-        title: "Source data issues detected",
-        message: `${parsed.validation.issue_count} CSV type issue(s) found — fix source data or switch to Balanced validation after review.`,
-        tone: "error",
-      });
-      setStep(STEP_SOURCE);
+    const fileHold = sourceKind === "file" ? fileSourceIssueHold(parsed?.validation, activeValidation) : null;
+    setFileIssueHold(fileHold);
+    if (fileHold) {
+      // Stay on Validate with the decision (QA browser 3): hold the rows out
+      // under Balanced, or fix the file — never a silent jump back to Source.
+      setStep(STEP_VALIDATE);
       return;
     }
     const pendingReview = activeMappings.filter((m) =>
@@ -5455,18 +5453,10 @@ export function TransferPage({
       setStep(STEP_VALIDATE);
       return;
     }
-    if (
-      sourceKind === "file"
-      && parsed?.validation
-      && !parsed.validation.ok
-      && validationMode !== "balanced"
-    ) {
-      toast({
-        title: "Source data issues block transfer",
-        message: `${parsed.validation.issue_count} CSV type issue(s) — fix source file before writing to production.`,
-        tone: "error",
-      });
-      setStep(STEP_SOURCE);
+    const executeFileHold = sourceKind === "file" ? fileSourceIssueHold(parsed?.validation, validationMode) : null;
+    if (executeFileHold) {
+      setFileIssueHold(executeFileHold);
+      setStep(STEP_VALIDATE);
       return;
     }
 
@@ -8315,6 +8305,20 @@ export function TransferPage({
       {(step === STEP_VALIDATE || (studioFlags.canvas && step === STEP_MAP && columnMappings.length > 0)) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
           <div className="df2-card-body df2-validate-body">
+          {fileIssueHold && (
+            <FileSourceIssuePanel
+              hold={fileIssueHold}
+              onHoldOut={() => {
+                setFileIssueHold(null);
+                setValidationMode("balanced");
+                void executePreflight(undefined, "balanced");
+              }}
+              onFixFile={() => {
+                setFileIssueHold(null);
+                setStep(STEP_SOURCE);
+              }}
+            />
+          )}
           <ValidateDashboard
             preflight={preflight}
             compactVerdict={studioFlags.canvas}

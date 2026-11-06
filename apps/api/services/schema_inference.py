@@ -514,6 +514,27 @@ def _refuses_numeric_inference(text: str) -> bool:
     return _CURRENCY_RE.search(text) is not None
 
 
+def _invalid_calendar_family(text: str) -> str:
+    """``DATE``/``TIMESTAMP`` for an ISO-shaped value naming no real day or clock.
+
+    ``2024-02-30`` is a date that does not exist, not a word. Reading it as
+    text demoted the whole column to VARCHAR when it fell inside the plan
+    sample, so the plan graded the column VARCHAR -> DATE as a lossy collapse
+    and refused it — while the same cell beyond the sample is held out alone
+    by the write path (``connectors.sql_temporal.invalid_calendar_reason``).
+    It votes for its temporal family; the cell itself is still refused and
+    quarantined, never written as NULL or a shifted date (QA browser 3).
+    """
+    from connectors.sql_temporal import _CLOCK_RE, _ISO_CIVIL_RE, invalid_calendar_reason
+
+    if _CLOCK_RE.match(text) is not None or not invalid_calendar_reason(text):
+        return ""
+    m = _ISO_CIVIL_RE.match(text)
+    if m is None:
+        return ""
+    return "TIMESTAMP" if m.group("clock") else "DATE"
+
+
 def classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -583,6 +604,10 @@ def classify_value(value: str, *, field_name: str | None = None) -> str:
             return "TIME"
         except ValueError:
             continue
+
+    invalid_calendar = _invalid_calendar_family(s)
+    if invalid_calendar:
+        return invalid_calendar
 
     # '45%' is a percentage token. Stripping the marker and inferring INTEGER
     # then blocks the same value as a lossy cast (QA R2-017). Keep the text.
