@@ -14,11 +14,14 @@ not touch. The conservation that does not lie:
 
 CDC / mirror / SCD2 stay on the row path. This module is ``upsert`` only.
 
-R14 witness: before the staging table is dropped, ``merge_staging_into_dest``
-reads it back onto the run's keyed write witness (bounded by the ladder
-budget), because no row of a COPY passes through this process on the write.
-The ladder uses it to tell a concurrent source update after the write from a
-destination loss (``services.keyed_write_witness``).
+No keyed write witness (``services.keyed_write_witness``) on this route. The
+staging table records what *landed*, not what the run read: a corruption in
+the COPY encoding or transport (escaping, '' -> NULL, numeric or timestamp
+rendering) is merged into dest too, so dest would equal such a witness while
+the source differs, and the corruption would be excused as concurrent drift.
+A sound COPY witness must hash what the run SENT (the COPY-OUT stream, or the
+source rows from the COPY's own snapshot); until then a batch-scoped re-read
+here stays unattributed and is disclosed as such.
 """
 
 from __future__ import annotations
@@ -160,12 +163,6 @@ def merge_staging_into_dest(
     join_count = int(dst_cur.fetchone()[0])
     dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
     dest_count = int(dst_cur.fetchone()[0])
-    # Per-key record of what the MERGE wrote, for the ladder's attribution of
-    # a concurrent source change (services.keyed_write_witness). Every staged
-    # key is on dest after the merge, so join_count is the staged row count.
-    from services.keyed_write_witness import witness_staged_rows
-
-    witness_staged_rows(dst_cur, staging_q, staged_rows=join_count)
     dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
     return preexisting, join_count, dest_count
 

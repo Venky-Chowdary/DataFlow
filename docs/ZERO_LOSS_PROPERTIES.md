@@ -309,11 +309,16 @@ where the source side came from:
   includes a value swapped between two written rows, which keeps every column
   aggregate.
 * **COPY upsert routes** (`copy_binary_server_to_server_upsert` and the other
-  staged-MERGE routes through `services/copy_upsert.merge_staging_into_dest`):
-  no row passes through the process on the write. Before the staging table is
-  dropped, it is read back onto the run's witness, within the ladder budget.
-  Staging holds exactly what the MERGE wrote, one row per key. The same
-  attribution then applies.
+  staged-MERGE routes through `services/copy_upsert.py`) carry **no witness**.
+  The staging table records what *landed*, not what the run read. A corruption
+  in the COPY encoding or transport (escaping, '' becoming NULL, numeric or
+  timestamp rendering) is merged into the destination too. The destination
+  would then equal such a witness while the source differs, and the corruption
+  would be excused as drift. A sound COPY witness must hash what the run sent
+  (the COPY-OUT stream, or the source rows read from the COPY's own snapshot).
+  Until then, a batch-scoped re-read on these routes stays unattributed and is
+  disclosed (above). A concurrent source update there still fails the run, as
+  it did before the witness existed.
 * **File sources** never reach this branch. The ladder cannot re-read a file
   source (`_read_verify_rows` returns no rows for a non-SQL engine), so the
   cell layers do not run against the source, and there is no post-write source

@@ -46,11 +46,9 @@ start one and says why.
 from __future__ import annotations
 
 import hashlib
-import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
 from typing import Any, Iterable
 
 #: Report key carrying the disclosed drift.
@@ -209,55 +207,6 @@ def begin_keyed_write_witness(
     if isinstance(summary, dict):
         summary[SUMMARY_KEY] = {"started": witness is not None, "reason": reason}
     return witness
-
-
-# --------------------------------------------------------------------------- #
-# COPY upsert routes: the staged table is exactly what the MERGE wrote.
-# --------------------------------------------------------------------------- #
-
-_COPY_WITNESS: ContextVar[KeyedWriteWitness | None] = ContextVar("copy_write_witness", default=None)
-_FETCH = 10_000
-
-
-def bind_copy_witness(witness: KeyedWriteWitness | None) -> Token:
-    """Bind the witness a COPY attempt fills (the stream resets it after)."""
-    return _COPY_WITNESS.set(witness)
-
-
-def reset_copy_witness(token: Token) -> None:
-    _COPY_WITNESS.reset(token)
-
-
-def witness_staged_rows(cursor: Any, staging_q: str, *, staged_rows: int) -> None:
-    """Record a COPY upsert's staged batch on the bound witness.
-
-    The rows never entered this process on the write. The staging table holds
-    one row per key exactly as the MERGE applies it, so reading it back (only
-    when it fits the ladder budget) is the per-key record of what was written.
-    Any failure gives the witness up; it never fails the write.
-    """
-    witness = _COPY_WITNESS.get()
-    if witness is None or not witness.complete or witness.encoder is None:
-        return
-    if int(staged_rows) > witness.max_rows:
-        witness._give_up("population_exceeds_ladder_budget")
-        return
-    try:
-        cursor.execute(f"SELECT * FROM {staging_q}")  # nosec B608 - our own staging ident
-        names = [str(d[0]) for d in cursor.description or []]
-        index = {n.lower(): i for i, n in enumerate(names)}
-        cols = witness.encoder.columns
-        if not cols or any(c.lower() not in index for c in cols):
-            witness._give_up("staged_columns_differ_from_mapped_targets")
-            return
-        while witness.complete:
-            batch = cursor.fetchmany(_FETCH)
-            if not batch:
-                break
-            witness.add_rows([{c: row[index[c.lower()]] for c in cols} for row in batch])
-    except Exception as exc:  # noqa: BLE001 - the witness is evidence, never the write
-        logging.getLogger(__name__).warning("COPY staging witness skipped: %s", exc)
-        witness._give_up("staging_not_witnessed")
 
 
 def take_keyed_write_witness(job_id: Any) -> KeyedWriteWitness | None:
