@@ -293,7 +293,9 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     findings = _walk(
         events, positions, _hmac_event_hash, truncations,
         link_field=link_field, prefix_explained=prefix_explained,
+        trusted_before=_trusted_time_before(events[0], _hmac_event_hash),
     )
+    history_tampered = _history_tamper_reason()
     head = events[-1]
     found = [f.as_dict() for f in findings]
     for f in found:
@@ -307,7 +309,13 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     for f in found:
         categories[f["category"]] += 1
     lost = _lost_key_summary(found, events)
-    if not found:
+    if history_tampered:
+        # The key history's anchor was removed or altered: the lost-key /
+        # relabel verdicts rest on it, so that alone is tampering.
+        categories["tampering"] += 1
+    if history_tampered:
+        status = "findings"
+    elif not found:
         status = "verified"
     elif categories["unverifiable_key_lost"] == len(found):
         status = "verified_with_exceptions"
@@ -339,8 +347,9 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     return present_verify_report(
         {
             **walk,
-            "verified": not found,
+            "verified": not found and not history_tampered,
             "status": status,
+            "key_history_tampered": history_tampered or None,
             "categories": categories,
             "unverifiable_key_lost": lost,
             "tampering_detected": categories["tampering"] > 0,
@@ -406,6 +415,7 @@ def _walk(
     *,
     link_field: str,
     prefix_explained: bool | None,
+    trusted_before: datetime | None = None,
 ) -> list[ChainFinding]:
     """Check each record at ``positions`` and the ``link_field`` line between them.
 
@@ -416,11 +426,16 @@ def _walk(
     from services.audit_chain_keys import check_signature, known_key_history
 
     history = known_key_history()
-    epoch = _as_time(keystore.history_epoch())
+    try:
+        epoch = _as_time(keystore.history_epoch())
+    except keystore.HistoryTampered:
+        epoch = None  # reported once on the whole report (_history_tamper_reason)
     # The time of the last record that verified under a held key: a trusted
     # clock for the records after it (an unverifiable record's own time is
     # whatever its editor wrote).
-    trusted_at: datetime | None = None
+    # A window (limit, workspace line) starts on the trusted clock of the
+    # verified record just before it, never on nothing (third review).
+    trusted_at: datetime | None = trusted_before
     verified_by_key: dict[str, datetime] = {}
     findings: list[ChainFinding] = []
     seen_prev: dict[str, int] = {}
@@ -443,7 +458,7 @@ def _walk(
         else:
             verdict, key_id = check_signature(event, hmac_of)
             relabel = (
-                _relabel_reason(key_id, history, trusted_at, epoch)
+                _relabel_reason(key_id, history, trusted_at, epoch, own_time=_as_time(event.get("time")))
                 if verdict == "unknown_key"
                 else ""
             )
@@ -588,6 +603,36 @@ def _walk(
     return findings
 
 
+def _history_tamper_reason() -> str:
+    from services import audit_chain_keystore as keystore
+
+    try:
+        keystore.history_epoch()
+    except keystore.HistoryTampered as exc:
+        return str(exc)
+    except Exception:  # noqa: BLE001 - an unreadable history is not a finding
+        return ""
+    return ""
+
+
+def _trusted_time_before(first: dict[str, Any], hmac_of: Any) -> datetime | None:
+    """The time of the nearest record before ``first`` that verifies (Mongo store)."""
+    try:
+        from services.audit_chain_keys import check_signature
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("audit_events")
+        seq = _position(first)
+        if coll is None or not seq:
+            return None
+        for doc in coll.find({"chain_seq": {"$lt": seq}}).sort("chain_seq", -1).limit(50):
+            if doc.get("event_hash") and check_signature(doc, hmac_of)[0] == "ok":
+                return _as_time(doc.get("time"))
+    except Exception:  # noqa: BLE001 - no anchor: the record's own time is used
+        return None
+    return None
+
+
 #: A lost key may have signed records this long after its sealed "last seen".
 RELABEL_SLACK = timedelta(hours=2)
 
@@ -607,6 +652,8 @@ def _relabel_reason(
     history: dict[str, dict[str, Any]],
     trusted_at: datetime | None,
     epoch: datetime | None,
+    *,
+    own_time: datetime | None = None,
 ) -> str:
     """Why an unknown-key record is a relabel, or "" when it may be a lost key.
 
@@ -618,7 +665,12 @@ def _relabel_reason(
     Before the history began (pre-upgrade deploys) an unknown key is a lost key.
     """
     if trusted_at is None:
-        return ""
+        # No verified record before it (the chain's first records): its own
+        # time is all there is — a time after the history began, or after the
+        # key last signed, is a relabel; only a pre-history time may be a lost key.
+        trusted_at = own_time
+        if trusted_at is None:
+            return ""
     entry = history.get(str(key_id or ""))
     if entry is not None:
         last = _as_time(entry.get("last_seen"))

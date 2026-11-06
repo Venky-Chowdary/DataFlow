@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import secrets
 
+import pytest
+
 from r8_ent_harness import ent  # noqa: F401
 from tests.test_r12_audit_key_persists_e2e import (  # noqa: F401 - autouse fixture
     _forget_process_keys,
@@ -189,3 +191,85 @@ def test_imported_file_keyring_flags_a_relabel(ent, monkeypatch):
     _relabel(ent, _records(ent, "r14c4.imported")[1], "k-nobody-ever-had")
     report = _verify(ent, ws)
     assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
+
+
+# ── Third review (22970aeba) ───────────────────────────────────────────────
+
+
+def test_a_vault_ciphertext_never_passes_as_a_history_seal(ent):
+    """The seal was encrypt_secret(label=...), whose label the Fernet vault
+    ignores: any ciphertext reading 'kid|origin|ts' (a connector password the
+    attacker chose) passed."""
+    from services.audit_chain_keystore import HISTORY_COLLECTION
+    from services.secret_vault import encrypt_secret
+
+    ws = ent.workspace("R14 C4 forged seal")
+    _write(3, action="r14c4.seal", workspace_id=ws)
+    forged = encrypt_secret("k-forged|configured|2999-01-01T00:00:00+00:00")
+    ent.db[HISTORY_COLLECTION].insert_one({
+        "_id": "k-forged", "origin": "configured", "first_seen": "2000-01-01T00:00:00+00:00",
+        "last_seen": "2999-01-01T00:00:00+00:00", "seal": forged, "mac": forged,
+    })
+    _relabel(ent, _records(ent, "r14c4.seal")[1], "k-forged")
+    report = _verify(ent, ws)
+    assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]
+
+
+@pytest.mark.parametrize("how", ["corrupt", "delete"])
+def test_the_history_epoch_cannot_be_reset_or_disabled(ent, how):
+    from services import audit_chain_keystore as store
+
+    ws = ent.workspace(f"R14 C4 epoch {how}")
+    _write(2, action=f"r14c4.epoch.{how}", workspace_id=ws)
+    assert _verify(ent, ws)["status"] == "verified"
+    coll = ent.db[store.HISTORY_COLLECTION]
+    if how == "corrupt":
+        coll.update_one({"_id": "__history_epoch__"}, {"$set": {"at": "2999-01-01T00:00:00+00:00"}})
+    else:
+        coll.delete_one({"_id": "__history_epoch__"})
+    _forget_process_keys()
+    report = _verify(ent, ws)
+    assert report["key_history_tampered"], report
+    assert report["status"] == "findings" and report["tampering_detected"] is True
+    assert report["verified"] is False
+
+
+def test_a_relabelled_first_record_and_a_window_start_are_tampering(ent):
+    ws = ent.workspace("R14 C4 leading relabel")
+    _write(4, action="r14c4.lead", workspace_id=ws)
+    ws_records = sorted(
+        ent.db["audit_events"].find({"workspace_id": ws}), key=lambda r: r["chain_seq"]
+    )
+    # The first record of this workspace's line: no verified record before it
+    # inside the walk.
+    _relabel(ent, ws_records[0], "k-nobody-ever-had")
+    report = _verify(ent, ws)
+    assert "unknown_key_after_keyring" in _tampered(report), report["findings"]
+    # The first record of a limited platform window is anchored on the record
+    # just before the window.
+    last = _records(ent, "r14c4.lead")[-1]
+    _relabel(ent, last, "k-nobody-ever-had")
+    after = ent.db["audit_events"].count_documents({"chain_seq": {"$gte": last["chain_seq"]}})
+    res = ent.admin.get("/api/v1/audit/verify", params={"limit": after})
+    assert res.status_code == 200, res.text
+    window = res.json()
+    assert [f["kind"] for f in window["findings"]] == ["unknown_key_after_keyring"], window
+
+
+def test_records_signed_with_a_node_local_key_during_a_keyring_outage_read_as_lost(ent, monkeypatch):
+    """When the shared keyring briefly failed, signing fell back to a
+    node-local key nobody recorded; once that node's disk was gone its records
+    read as tampering."""
+    from services import audit_chain_keystore as store
+
+    ws = ent.workspace("R14 C4 local outage")
+    _fresh_container(ent, monkeypatch, "outage-node")
+    with monkeypatch.context() as m:
+        m.setattr(store, "current_key", lambda *a, **k: (_ for _ in ()).throw(store.KeystoreUnavailable("down")))
+        _write(2, action="r14c4.outage", workspace_id=ws)
+    # The node (and its key file) is gone before the keyring could import it.
+    _fresh_container(ent, monkeypatch, "after-outage")
+    _write(1, action="r14c4.back", workspace_id=ws)
+    report = _verify(ent, ws)
+    assert _tampered(report) == [], report["findings"]
+    assert report["unverifiable_key_lost"]["count"] == 2, report["unverifiable_key_lost"]

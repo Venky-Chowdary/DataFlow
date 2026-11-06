@@ -281,40 +281,65 @@ def rotate(*, actor: str, local_key: bytes | None = None) -> dict[str, Any]:
 
 
 HISTORY_COLLECTION = "audit_chain_key_history"
-_HISTORY_LABEL = "audit_chain_key_history"
+_MAC_INFO = b"audit-key-history/v1"
 #: A configured key's "last signed" stamp is refreshed at most this often.
 HISTORY_REFRESH_S = 3600.0
 _noted: dict[str, float] = {}
+_EPOCH_ID = "__history_epoch__"
+_epoch_cache: dict[str, str] = {}
 
 
-def _seal(key_id: str, origin: str, last_seen: str) -> str:
-    from services.secret_vault import encrypt_secret
+def _mac(*parts: str) -> str:
+    """HMAC-SHA256 under a key HKDF-derived from the vault master key.
 
-    return encrypt_secret(f"{key_id}|{origin}|{last_seen}", label=_HISTORY_LABEL)
+    Integrity only: a database-level writer cannot compute it, and no vault
+    ciphertext (a connector password the attacker chose) can stand in for it
+    — the earlier seal was ``encrypt_secret``, whose label the Fernet vault
+    ignores (third review).
+    """
+    import hashlib
+    import hmac
+
+    from services.secret_vault import derive_subkey
+
+    msg = "\x1f".join(("v1",) + parts).encode("utf-8")
+    return hmac.new(derive_subkey(_MAC_INFO), msg, hashlib.sha256).hexdigest()
 
 
-def _unseal(doc: dict[str, Any]) -> dict[str, Any] | None:
-    """The entry when its vault seal matches its fields; None for a forged row."""
-    from services.secret_vault import decrypt_secret
+def _entry_mac(key_id: str, origin: str, first_seen: str, last_seen: str) -> str:
+    return _mac("entry", key_id, origin, first_seen, last_seen)
 
+
+def _valid(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The entry when its MAC matches its fields; None for a forged or edited row."""
+    import hmac
+
+    kid = str(doc.get("_id") or "")
+    origin = str(doc.get("origin") or "")
+    first = str(doc.get("first_seen") or "")
+    last = str(doc.get("last_seen") or "")
     try:
-        plain = decrypt_secret(str(doc.get("seal") or ""))
-    except Exception:  # noqa: BLE001 - unsealed / foreign rows are not history
+        expected = _entry_mac(kid, origin, first, last)
+    except Exception:  # noqa: BLE001 - no MAC key: nothing can be trusted
         return None
-    kid, origin, last_seen = (plain.split("|", 2) + ["", "", ""])[:3]
-    if kid != str(doc.get("_id")) or origin != str(doc.get("origin") or ""):
+    if not hmac.compare_digest(expected, str(doc.get("mac") or "")):
         return None
-    return {"key_id": kid, "origin": origin, "last_seen": last_seen}
+    return {"key_id": kid, "origin": origin, "first_seen": first, "last_seen": last}
+
+
+def _history_coll() -> Any | None:
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(HISTORY_COLLECTION)
 
 
 def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None:
     """Remember, tamper-evidently, that this deployment signed with ``key_id``.
 
-    Ids and times only, sealed with the vault key (a database-level writer
-    cannot add or move an entry: an unsealed or mismatched row is ignored).
-    ``last_seen`` is when the key last signed (refreshed at most hourly per
-    process) — a record naming the key after it stopped signing is a relabel,
-    not a lost key (C4 review). Never raises.
+    Ids and times only, each row MAC'd (``_mac``). ``last_seen`` is when the
+    key last signed (refreshed at most hourly per process) — a record naming
+    the key long after it stopped signing is a relabel, not a lost key. One
+    row per key, updated in place (no new secret per call). Never raises.
     """
     if not key_id:
         return
@@ -322,19 +347,20 @@ def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None
     if seen_at is None and now_mono - _noted.get(key_id, -HISTORY_REFRESH_S) < HISTORY_REFRESH_S:
         return
     try:
-        from services.control_plane_store import mongo_collection
-
-        coll = mongo_collection(HISTORY_COLLECTION)
+        coll = _history_coll()
         if coll is None:
             return
+        history_epoch()
         when = seen_at or _now()
-        current = _unseal(coll.find_one({"_id": key_id}) or {}) or {}
+        current = _valid(coll.find_one({"_id": key_id}) or {}) or {}
+        first = str(current.get("first_seen") or when)
         if current.get("last_seen") and str(current["last_seen"]) >= when:
             when = str(current["last_seen"])
+        first = min(first, when)
         coll.update_one(
             {"_id": key_id},
-            {"$set": {"origin": origin, "last_seen": when, "seal": _seal(key_id, origin, when)},
-             "$setOnInsert": {"first_seen": _now()}},
+            {"$set": {"origin": origin, "first_seen": first, "last_seen": when,
+                      "mac": _entry_mac(key_id, origin, first, when)}},
             upsert=True,
         )
         _noted[key_id] = now_mono
@@ -342,52 +368,84 @@ def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None
         logger.debug("audit key history not recorded: %s", exc)
 
 
-_EPOCH_ID = "__history_epoch__"
-_epoch_cache: dict[str, str] = {}
+class HistoryTampered(RuntimeError):
+    """The key history's epoch was removed or altered."""
+
+
+def _epoch_copy_in_keyring(coll_keys: Any) -> str | None:
+    """The second copy of the epoch, MAC'd, on the keyring document."""
+    import hmac
+
+    doc = coll_keys.find_one({"_id": DOC_ID}, {"history_epoch": 1}) if coll_keys is not None else None
+    copy = (doc or {}).get("history_epoch") or {}
+    at = str(copy.get("at") or "")
+    if at and hmac.compare_digest(_mac("epoch-copy", at), str(copy.get("mac") or "")):
+        return at
+    return None
 
 
 def history_epoch() -> str | None:
-    """When this deployment began keeping the sealed key history (ISO time).
+    """When this deployment began keeping the key history (ISO time), or None.
 
-    Records written before it may name a key nobody recorded (an earlier
-    deploy's lost key); records after it never legitimately do. Created once,
-    sealed like the entries; None without a control-plane database.
+    Kept twice — its own MAC'd row and a MAC'd copy on the keyring document —
+    and bounded by the earliest history entry. Raises :class:`HistoryTampered`
+    when the epoch row is present but fails its MAC, or is missing while MAC'd
+    history entries (or the keyring copy) exist: deleting or corrupting the
+    anchor must not reset it (third review). Created once on a fresh store.
     """
-    if "at" in _epoch_cache:
-        return _epoch_cache["at"]
-    try:
-        from services.control_plane_store import mongo_collection
+    import hmac
 
-        coll = mongo_collection(HISTORY_COLLECTION)
-        if coll is None:
-            return None
-        now = _now()
-        coll.update_one(
-            {"_id": _EPOCH_ID},
-            {"$setOnInsert": {"origin": "epoch", "last_seen": now, "seal": _seal(_EPOCH_ID, "epoch", now)}},
-            upsert=True,
-        )
-        entry = _unseal(coll.find_one({"_id": _EPOCH_ID}) or {})
-        if entry is None:
-            return None
-        _epoch_cache["at"] = entry["last_seen"]
-        return entry["last_seen"]
-    except Exception:  # noqa: BLE001
+    coll = _history_coll()
+    if coll is None:
         return None
+    ns = str(getattr(coll, "full_name", "") or id(coll))
+    if ns in _epoch_cache:
+        return _epoch_cache[ns]
+    keys = _collection()
+    doc = coll.find_one({"_id": _EPOCH_ID})
+    copy = _epoch_copy_in_keyring(keys)
+    entries = [e for e in (_valid(d) for d in coll.find({"_id": {"$ne": _EPOCH_ID}})) if e]
+    if doc is not None:
+        at = str(doc.get("at") or "")
+        if not at or not hmac.compare_digest(_mac("epoch", at), str(doc.get("mac") or "")):
+            raise HistoryTampered("the key history epoch fails its MAC")
+        if copy and copy != at:
+            raise HistoryTampered("the key history epoch disagrees with its keyring copy")
+    else:
+        if entries or copy:
+            raise HistoryTampered("the key history epoch was removed")
+        at = _now()
+        coll.update_one(
+            {"_id": _EPOCH_ID}, {"$setOnInsert": {"at": at, "mac": _mac("epoch", at)}}, upsert=True
+        )
+        doc = coll.find_one({"_id": _EPOCH_ID}) or {}
+        at = str(doc.get("at") or at)
+        if keys is not None:
+            keys.update_one(
+                {"_id": DOC_ID, "history_epoch": {"$exists": False}},
+                {"$set": {"history_epoch": {"at": at, "mac": _mac("epoch-copy", at)}}},
+            )
+    if copy is None and keys is not None:
+        keys.update_one(
+            {"_id": DOC_ID, "history_epoch": {"$exists": False}},
+            {"$set": {"history_epoch": {"at": at, "mac": _mac("epoch-copy", at)}}},
+        )
+    earliest = min((e["first_seen"] for e in entries if e.get("first_seen")), default=at)
+    at = min(at, earliest)
+    _epoch_cache[ns] = at
+    return at
 
 
 def key_history() -> dict[str, dict[str, Any]]:
-    """Sealed history entries by key id (forged or unsealed rows left out)."""
+    """MAC-valid history entries by key id (forged or edited rows left out)."""
     try:
-        from services.control_plane_store import mongo_collection
-
-        coll = mongo_collection(HISTORY_COLLECTION)
+        coll = _history_coll()
         if coll is None:
             return {}
         out: dict[str, dict[str, Any]] = {}
-        for doc in coll.find({}):
-            entry = _unseal(doc)
-            if entry is not None and entry["key_id"] != _EPOCH_ID:
+        for doc in coll.find({"_id": {"$ne": _EPOCH_ID}}):
+            entry = _valid(doc)
+            if entry is not None:
                 out[entry["key_id"]] = entry
         return out
     except Exception:  # noqa: BLE001
@@ -395,7 +453,7 @@ def key_history() -> dict[str, dict[str, Any]]:
 
 
 def noted_key_ids() -> set[str]:
-    """Every key id the sealed history holds."""
+    """Every key id the history holds."""
     return set(key_history())
 
 

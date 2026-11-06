@@ -170,7 +170,10 @@ def signing_key() -> tuple[str, bytes, str]:
     """
     from services import audit_chain_keystore as store
 
-    store.history_epoch()
+    try:
+        store.history_epoch()
+    except store.HistoryTampered as exc:  # the verify walk reports it; signing goes on
+        logger.error("audit key history: %s", exc)
     configured = _env(KEY_ENV)
     if configured:
         key = configured.encode("utf-8")
@@ -188,6 +191,9 @@ def signing_key() -> tuple[str, bytes, str]:
         # Process-local last resort; its records verify only in this process
         # and show elsewhere as unverifiable — still never the login secret.
         key = _generated.setdefault("<process>", secrets.token_urlsafe(48).encode("utf-8"))
+    # A node-local / per-process key is still this deployment's key: record it,
+    # so its records read as a lost key later, never as a relabel (third review).
+    store.note_key_id(key_id_for(key), origin="generated_local")
     path = str(_generated_key_path(create=False))
     if path not in _warned:
         _warned.add(path)
