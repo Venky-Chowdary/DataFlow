@@ -172,7 +172,9 @@ def copy_postgres_to_s3(
         fd, tmp_path = tempfile.mkstemp(prefix="df-pg-s3-", suffix=f".{ext}")
         os.close(fd)
         with open(tmp_path, "wb") as handle:
-            src_cur.copy_expert(copy_sql, handle)
+            from services.cancel_check import copy_expert_keeping_cancel
+
+            copy_expert_keeping_cancel(src_cur, copy_sql, handle)
         commit_local_object(dest_cfg, dest_table, tmp_path)
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:

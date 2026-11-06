@@ -386,22 +386,11 @@ def _fifo_copy_into_mysql(
     )
 
     def _produce(path: str) -> None:
-        class _CancelAwareWriter:
-            """D102: poll the job's cancel probe on every COPY write block."""
-
-            __slots__ = ("_writer",)
-
-            def __init__(self, writer):
-                self._writer = writer
-
-            def write(self, data):
-                from services.cancel_check import cancel_checkpoint
-
-                cancel_checkpoint()
-                return self._writer.write(data)
+        from services.cancel_check import copy_expert_keeping_cancel
 
         with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-            src_cur.copy_expert(copy_sql, _CancelAwareWriter(writer))
+            # D102: poll the job's cancel probe on every COPY write block.
+            copy_expert_keeping_cancel(src_cur, copy_sql, writer, poll=True)
 
     def _consume(path: str) -> None:
         apply_mysql_bulk_load_session(dst_cur)

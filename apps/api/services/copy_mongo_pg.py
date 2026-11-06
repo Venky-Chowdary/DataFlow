@@ -289,7 +289,9 @@ def copy_mongo_to_postgres(
             f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
             "(FORMAT text, DELIMITER E'\\t', NULL '\\N')"
         )
-        dst_cur.copy_expert(copy_sql, reader)
+        from services.cancel_check import copy_expert_keeping_cancel
+
+        copy_expert_keeping_cancel(dst_cur, copy_sql, reader)
         if swap_at_end:
             from services.dest_overwrite_swap import pg_swap_staged_dest
 

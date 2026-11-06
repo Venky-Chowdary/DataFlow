@@ -193,7 +193,9 @@ def copy_s3_to_postgres(
                 f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
             )
             with open(tmp_path, "r", encoding="utf-8") as handle:
-                dst_cur.copy_expert(copy_sql, handle)
+                from services.cancel_check import copy_expert_keeping_cancel
+
+                copy_expert_keeping_cancel(dst_cur, copy_sql, handle)
         dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
         dest_count = int(dst_cur.fetchone()[0])
         if dest_count != source_count:

@@ -122,7 +122,9 @@ def _copy_into_sqlserver(
         ddls=ddls,
     )
     try:
-        src_cur.copy_expert(copy_sql, sink)
+        from services.cancel_check import copy_expert_keeping_cancel
+
+        copy_expert_keeping_cancel(src_cur, copy_sql, sink)
     finally:
         sink.close()
     return sink.rows

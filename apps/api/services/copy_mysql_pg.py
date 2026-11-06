@@ -258,7 +258,9 @@ def _fifo_mysql_into_pg(
 
     def _consume(path: str) -> None:
         with open(path, "rb", buffering=_PIPE_CHUNK) as reader:
-            dst_cur.copy_expert(copy_sql, reader)
+            from services.cancel_check import copy_expert_keeping_cancel
+
+            copy_expert_keeping_cancel(dst_cur, copy_sql, reader)
 
     stream_between_cursors(
         prefix="df_mysql_pg_", producer=_produce, consumer=_consume

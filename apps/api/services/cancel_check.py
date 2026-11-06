@@ -108,6 +108,58 @@ _last_written: contextvars.ContextVar[int] = contextvars.ContextVar(
 )
 
 
+class _CancelKeepingFile:
+    """File proxy for a COPY callback that remembers a cancel raised inside it."""
+
+    def __init__(self, inner: Any, poll: bool) -> None:
+        self._inner = inner
+        self._poll = poll
+        self.cancelled: TransferCancelled | None = None
+
+    def _call(self, name: str, *args: Any) -> Any:
+        try:
+            if self._poll:
+                cancel_checkpoint()
+            return getattr(self._inner, name)(*args)
+        except TransferCancelled as exc:
+            self.cancelled = exc
+            raise
+
+    def read(self, *args: Any) -> Any:
+        return self._call("read", *args)
+
+    def readline(self, *args: Any) -> Any:
+        return self._call("readline", *args)
+
+    def write(self, *args: Any) -> Any:
+        return self._call("write", *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def copy_expert_keeping_cancel(cur: Any, sql: str, file: Any, *, poll: bool = False) -> None:
+    """``cursor.copy_expert`` that lets a job cancel out as ``TransferCancelled``.
+
+    A cancel probe that fires inside the COPY's ``read()`` / ``write()``
+    callback is caught by psycopg and re-raised as a driver error ("error in
+    .read() call: TransferCancelled ..."). The route then saw a COPY failure,
+    not a cancel: the job's record kept the progress meter's row count with no
+    cancel outcome, and the operator read "1,024 rows retained" for a COPY
+    that had rolled back (QA C16). ``poll`` also polls the probe on every
+    callback (the reader/writer does not poll itself).
+    """
+    proxy = _CancelKeepingFile(file, poll)
+    try:
+        cur.copy_expert(sql, proxy)
+    except TransferCancelled:
+        raise
+    except Exception as exc:
+        if proxy.cancelled is not None:
+            raise proxy.cancelled from exc
+        raise
+
+
 class ProgressMeter:
     """Accumulates committed rows and writes them to the job row, throttled."""
 

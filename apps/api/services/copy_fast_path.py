@@ -1201,35 +1201,25 @@ def _stream_copy(
     rather than accumulating rows. Both ends are closed on every exit path: an
     unclosed write end leaves the reader waiting for EOF that never comes.
     """
+    from services.cancel_check import copy_expert_keeping_cancel
+
     read_fd, write_fd = os.pipe()
     failure: list[BaseException] = []
 
     def _pump() -> None:
         try:
             with os.fdopen(write_fd, "wb", _PIPE_CHUNK) as writer:
-                source_cur.copy_expert(source_sql, writer)
+                copy_expert_keeping_cancel(source_cur, source_sql, writer)
         except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
             failure.append(exc)
 
     pump = thread_in_context(_pump, name="copy-fast-path")
     pump.start()
-    class _CancelAwareReader:
-        """D102: poll the job's cancel probe on every COPY read block."""
-
-        __slots__ = ("_reader",)
-
-        def __init__(self, reader: Any) -> None:
-            self._reader = reader
-
-        def read(self, size: int = -1) -> bytes:
-            from services.cancel_check import cancel_checkpoint
-
-            cancel_checkpoint()
-            return self._reader.read(size)
-
     try:
         with os.fdopen(read_fd, "rb", _PIPE_CHUNK) as reader:
-            dest_cur.copy_expert(dest_sql, _CancelAwareReader(reader))
+            # D102: poll the job's cancel probe on every COPY read block; C16:
+            # a cancel raised there leaves as TransferCancelled.
+            copy_expert_keeping_cancel(dest_cur, dest_sql, reader, poll=True)
     except BaseException:
         # Drain so the writer's blocked write() returns and the thread can exit
         # instead of holding the source transaction open.

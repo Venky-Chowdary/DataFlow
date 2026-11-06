@@ -648,53 +648,31 @@ def _fail_runtime_job(
         from services.job_status import cancel_outcome_for
 
         if getattr(exc, "destination_rows_now", None) is None and request is not None:
-            # A route that did not count its destination (COPY fast paths,
-            # adapters): at least show what the table holds beside the tally.
-            try:
-                from services.dest_precount import precount_table
-
-                from .adapters import resolve_connector_config, resolve_dest_table
-                from .connector_capabilities import resolve_driver_type
-
-                _dst = request.destination
-                if str(getattr(_dst, "kind", "") or "") == "database":
-                    _dtype = resolve_driver_type(str(_dst.format or ""))
-                    _src_name = str(
-                        getattr(request.source, "table", "")
-                        or getattr(request.source, "collection", "")
-                        or ""
-                    )
-                    _now = precount_table(
-                        _dtype,
-                        resolve_connector_config(_dst),
-                        resolve_dest_table(_dtype, _dst, _src_name),
-                    )
-                    if _now is not None:
-                        exc.destination_rows_now = int(_now)  # type: ignore[attr-defined]
-            except Exception as count_exc:  # noqa: BLE001 - the tally still stands
-                logger.debug("cancel destination count unavailable: %s", count_exc)
+            _measure_unmeasured_cancel(exc, request)
         outcome = cancel_outcome_for(
             status_kwargs.get("records_processed", prev.get("records_processed")),
             destination_rows_by_run=getattr(exc, "destination_rows_by_run", None),
             destination_rows_now=getattr(exc, "destination_rows_now", None),
+            destination_table_exists=getattr(exc, "destination_table_exists", None),
         )
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch
             # tally wherever the job reports it.
             status_kwargs["records_processed"] = outcome["rows_committed"]
-        if outcome["partial_write"]:
-            # The error text is the cancel message too: the exception's own
-            # "N row(s) were already written" is the tally, not the count.
-            display = outcome["message"]
-            status_kwargs["error"] = display
+        # The error text is the cancel message too: the exception's own
+        # "N row(s) were already written and were not removed" is the writer's
+        # tally, which a rollback (or a dropped run-created table) makes untrue
+        # (C16, MySQL D11). The record states the destination as measured.
+        display = outcome["message"]
+        status_kwargs["error"] = display
+        status_kwargs["message"] = display
         if outcome["partial_write"]:
             logger.warning(
                 "Job %s cancelled after %s row(s) committed; nothing was rolled back",
                 job_id,
                 outcome["rows_committed"],
             )
-            status_kwargs["message"] = outcome["message"]
     mongo.update_job_status(
         job_id,
         status,
@@ -713,6 +691,61 @@ def _fail_runtime_job(
             retriable=bool(error_details.get("retriable", False)),
         )
     return display, error_details
+
+
+def _measure_unmeasured_cancel(exc: BaseException, request: Any) -> None:
+    """Count the destination for a cancelled route that did not (C16, D11).
+
+    The row path measures its own landing (``stream.py``). A COPY fast path or
+    an adapter raises the cancel with only the writer's tally — the meter a
+    single-transaction COPY moved before it rolled back, or the rows of a
+    run-created table its undo dropped. The pre-run facts ride
+    ``destination.extra`` (``dest_table_existed_before``, ``dest_rows_before``),
+    so the same measurement applies here. A COPY route's overwrite is one
+    transaction or a staged swap on every SQL destination, so it is atomic; a
+    schemaless sink clears first.
+    """
+    try:
+        from services.job_status import measure_cancel_landing
+        from services.sync_cursor import resolve_effective_sync_mode, resolve_sync_contract
+
+        from .adapters import resolve_connector_config, resolve_dest_table
+        from .connector_capabilities import resolve_driver_type
+        from .engine_family import is_schemaless_family
+
+        _dst = request.destination
+        if str(getattr(_dst, "kind", "") or "") != "database":
+            return
+        _dtype = resolve_driver_type(str(_dst.format or ""))
+        _src_name = str(
+            getattr(request.source, "table", "")
+            or getattr(request.source, "collection", "")
+            or ""
+        )
+        contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+        sync = str(
+            resolve_effective_sync_mode(
+                getattr(request, "sync_mode", ""), contract.sync_mode if contract else None
+            )
+            or ""
+        )
+        extra = getattr(_dst, "extra", None) or {}
+        before = extra.get("dest_rows_before")
+        if not isinstance(before, int):
+            before = extra.get("overwrite_rows_before")
+        measure_cancel_landing(
+            exc,
+            dest_type=_dtype,
+            dest_cfg=resolve_connector_config(_dst),
+            table=resolve_dest_table(_dtype, _dst, _src_name),
+            sync_mode=sync,
+            rows_before=before,
+            table_existed_before=extra.get("dest_table_existed_before"),
+            keyed="upsert" in sync.lower() or "merge" in sync.lower(),
+            atomic_overwrite=not is_schemaless_family(_dtype),
+        )
+    except Exception as count_exc:  # noqa: BLE001 - the tally still stands
+        logger.debug("cancel destination count unavailable: %s", count_exc)
 
 
 def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
