@@ -74,3 +74,44 @@ def _luhn(d: str) -> bool:
         n = int(ch) * (2 if i % 2 else 1)
         total += n - 9 if n > 9 else n
     return total % 10 == 0
+
+
+# --- second review: every network that issues Luhn PANs ----------------------
+
+import random as _random  # noqa: E402
+
+_NETWORKS = {
+    "diners_36": ("36", 14), "diners_300": ("300", 14), "diners_305": ("305", 14),
+    "diners_38": ("38", 14), "diners_39": ("39", 14),
+    "maestro_6759": ("6759", 16), "maestro_50": ("50", 16), "maestro_56": ("56", 16),
+    "maestro_58": ("58", 16), "maestro_63": ("63", 16), "maestro_67": ("67", 19),
+    "mir_2200": ("2200", 16), "mir_2204": ("2204", 16),
+    "rupay_60": ("60", 16), "rupay_6521": ("6521", 16), "rupay_508": ("508", 16),
+    "unionpay_81": ("81", 16),
+}
+
+
+def _pan(rng, prefix: str, length: int) -> int:
+    body = prefix + "".join(str(rng.randint(0, 9)) for _ in range(length - len(prefix) - 1))
+    for check in "0123456789":
+        if _luhn(body + check):
+            return int(body + check)
+    raise AssertionError(body)
+
+
+@pytest.mark.parametrize("network", sorted(_NETWORKS))
+def test_twenty_pans_of_every_network_flag_a_neutral_bigint_column(network):
+    rng = _random.Random(network)
+    prefix, length = _NETWORKS[network]
+    values = [_pan(rng, prefix, length) for _ in range(20)]
+    assert "pci_pan" in _risk("value", values, "BIGINT").get("value", []), network
+
+
+def test_random_sixteen_digit_values_stay_below_the_threshold():
+    from services.compliance_guard import _card_iin
+
+    rng = _random.Random(16)
+    values = [rng.randint(10**15, 10**16 - 1) for _ in range(2000)]
+    share = sum(1 for v in values if _luhn(str(v)) and _card_iin(str(v))) / len(values)
+    assert share < NUMERIC_PAN_SHARE / 4, share
+    assert _risk("value", values[:200], "BIGINT") == {}

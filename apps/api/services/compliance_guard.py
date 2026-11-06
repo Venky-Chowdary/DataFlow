@@ -301,18 +301,31 @@ NUMERIC_PAN_SHARE = 0.8
 _INTEGRAL_DECIMAL = re.compile(r"^(\d+)\.0+$")
 
 
+#: Issuer prefixes of the card networks, as ``(low, high)`` on a prefix of
+#: ``len(str(low))`` digits. A PAN under a neutral name in a numeric column is
+#: recognised only through these, so every network that issues 13-19 digit
+#: Luhn PANs is listed.
+_CARD_IIN_RANGES: tuple[tuple[int, int], ...] = (
+    (4, 4),               # Visa
+    (51, 55), (2221, 2720),  # Mastercard
+    (34, 34), (37, 37),   # American Express
+    (6011, 6011), (644, 649), (65, 65),  # Discover (65 includes RuPay 6521)
+    (35, 35),             # JCB
+    (62, 62), (81, 81),   # UnionPay
+    (36, 36), (300, 305), (38, 39),  # Diners Club
+    (50, 50), (56, 58), (63, 63), (67, 67),  # Maestro (67 includes 6759; 50 RuPay 508)
+    (2200, 2204),         # Mir
+    (60, 60),             # RuPay
+)
+
+
 def _card_iin(digits: str) -> bool:
-    """The issuer prefix of a card network: Visa 4, Mastercard 51-55 / 2221-2720,
-    Amex 34/37, Discover 6011 / 644-649 / 65, JCB 35, UnionPay 62."""
-    two, four = int(digits[:2]), int(digits[:4])
-    return (
-        digits[0] == "4"
-        or 51 <= two <= 55
-        or 2221 <= four <= 2720
-        or two in (34, 37, 35, 62, 65)
-        or four == 6011
-        or 644 <= int(digits[:3]) <= 649
-    )
+    """True when ``digits`` starts with a card network's issuer prefix."""
+    for low, high in _CARD_IIN_RANGES:
+        width = len(str(low))
+        if len(digits) >= width and low <= int(digits[:width]) <= high:
+            return True
+    return False
 
 
 def _numeric_column_holds_pans(values: list[str]) -> bool:
