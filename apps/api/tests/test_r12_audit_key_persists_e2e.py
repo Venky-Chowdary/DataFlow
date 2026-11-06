@@ -107,6 +107,9 @@ def _start_from_an_empty_store(ent) -> None:
     """Drop what the harness's own login wrote, so the first writers really race."""
     ent.db["audit_events"].delete_many({})
     ent.db["audit_chain_keys"].delete_many({})
+    # The key history is anchored in the chain just wiped: an empty store
+    # starts it over too (otherwise the epoch names a record that is gone).
+    ent.db["audit_chain_key_history"].delete_many({})
     _forget_process_keys()
 
 

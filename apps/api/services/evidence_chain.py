@@ -222,6 +222,11 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         typically to hide an edit. A forged history row fails its seal and does
         not count. Every verify walk adds the keys it verified to the history,
         so an env key dropped later reads as lost, not as tampering.
+    ``key_history_tampered`` (report field; counted as tampering)
+        The history begins at a signed ``audit.key_history.began`` chain
+        record its MAC'd epoch names. The epoch row failing its MAC, going
+        missing, or naming a later anchor while an earlier one is still in
+        the chain (history, copy and epoch wiped and recreated) is tampering.
     ``broken_link``
         ``prev_hash`` does not name the previous record, nor any earlier one: a
         record between them was deleted, or the records were reordered.
@@ -290,12 +295,14 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         # the limit, not a deletion. A whole-store walk asks the checkpoints.
         prefix_explained = True if window.truncated_by_limit else None
         link_field = "prev_hash"
+    anchor = _key_history_anchor(_hmac_event_hash)
     findings = _walk(
         events, positions, _hmac_event_hash, truncations,
         link_field=link_field, prefix_explained=prefix_explained,
         trusted_before=_trusted_time_before(events[0], _hmac_event_hash),
+        anchor=anchor,
     )
-    history_tampered = _history_tamper_reason()
+    history_tampered = anchor["tampered"]
     head = events[-1]
     found = [f.as_dict() for f in findings]
     for f in found:
@@ -416,6 +423,7 @@ def _walk(
     link_field: str,
     prefix_explained: bool | None,
     trusted_before: datetime | None = None,
+    anchor: dict[str, Any] | None = None,
 ) -> list[ChainFinding]:
     """Check each record at ``positions`` and the ``link_field`` line between them.
 
@@ -426,12 +434,8 @@ def _walk(
     from services.audit_chain_keys import check_signature, known_key_history
 
     history = known_key_history()
-    try:
-        epoch = _as_time(keystore.history_epoch())
-    except keystore.HistoryTampered:
-        epoch = None  # reported once on the whole report (_history_tamper_reason)
-    except Exception:  # noqa: BLE001 - history unreadable: judged without it
-        epoch = None
+    if anchor is None:
+        anchor = _key_history_anchor(hmac_of)
     # The time of the last record that verified under a held key: a trusted
     # clock for the records after it (an unverifiable record's own time is
     # whatever its editor wrote).
@@ -460,7 +464,9 @@ def _walk(
         else:
             verdict, key_id = check_signature(event, hmac_of)
             relabel = (
-                _relabel_reason(key_id, history, trusted_at, epoch, own_time=_as_time(event.get("time")))
+                _relabel_reason(
+                    key_id, history, trusted_at, anchor["epoch"], own_time=_as_time(event.get("time"))
+                )
                 if verdict == "unknown_key"
                 else ""
             )
@@ -605,16 +611,92 @@ def _walk(
     return findings
 
 
-def _history_tamper_reason() -> str:
+_ANCHOR_INDEXED: set[str] = set()
+
+
+def _key_history_anchor(hmac_of: Any) -> dict[str, Any]:
+    """The key history's epoch, located in the chain (review of a350ff42a).
+
+    ``epoch`` (time) and ``history_seq`` (chain position) say where the sealed
+    key history begins; ``tampered`` is why it cannot be trusted, or "".
+
+    The epoch row names the signed ``audit.key_history.began`` (or, after an
+    admin re-anchor, ``audit.key_history.reanchored``) record it was created
+    with. That record must still be in the chain with that hash (F1). An
+    earlier verified "began" record after the last re-anchor means the
+    history, its copy and the epoch were wiped and recreated: tampering, and
+    the history is judged from that earlier record, so a relabel in between
+    still reads as one.
+    """
     from services import audit_chain_keystore as keystore
 
+    out: dict[str, Any] = {"epoch": None, "history_seq": 0, "tampered": ""}
     try:
-        keystore.history_epoch()
+        rec = keystore.epoch_record()
     except keystore.HistoryTampered as exc:
-        return str(exc)
-    except Exception:  # noqa: BLE001 - an unreadable history is not a finding
-        return ""
-    return ""
+        out["tampered"] = str(exc)
+        return out
+    except Exception:  # noqa: BLE001 - history unreadable: judged without it
+        return out
+    if not rec:
+        return out
+    out["epoch"] = _as_time(rec.get("at"))
+    head_seq = _position({"chain_seq": rec.get("head_seq")})
+    out["history_seq"] = head_seq
+    try:
+        from services.audit_chain_keys import check_signature
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("audit_events")
+        if coll is None or not head_seq:
+            return out
+        _ensure_anchor_index(coll)
+        anchors: list[tuple[int, str, str, Any]] = []
+        cursor = coll.find(
+            {"resource": "audit_chain_key_history",
+             "action": {"$in": [keystore.EPOCH_ACTION, keystore.REANCHOR_ACTION]}}
+        ).sort("chain_seq", 1).limit(1000)
+        for doc in cursor:
+            if doc.get("event_hash") and check_signature(doc, hmac_of)[0] == "ok":
+                anchors.append((_position(doc), str(doc.get("action")), str(doc.get("event_hash")),
+                                _as_time(doc.get("time"))))
+        head = [a for a in anchors if a[2] == str(rec.get("head_hash") or "")]
+        if not head or head[0][0] != head_seq:
+            purged = coll.find_one({"chain_seq": {"$lte": head_seq}}, {"_id": 1}) is None
+            if not purged:
+                out["tampered"] = (
+                    "the chain record that anchors the key history (position "
+                    f"{head_seq}) is missing or no longer verifies"
+                )
+            return out
+        reanchors = [a[0] for a in anchors if a[1] == keystore.REANCHOR_ACTION and a[0] <= head_seq]
+        since = max(reanchors) if reanchors else 0
+        earlier = [a for a in anchors if since <= a[0] < head_seq]
+        if earlier:
+            began = earlier[0]
+            out["history_seq"] = began[0]
+            out["epoch"] = began[3] or out["epoch"]
+            out["tampered"] = (
+                f"the key history was reset: it began at chain position {began[0]}, "
+                f"but its epoch now names position {head_seq} with no admin re-anchor between"
+            )
+    except Exception as exc:  # noqa: BLE001 - the chain walk still reports what it can
+        logger.warning("key history anchor not checked: %s", type(exc).__name__)
+    return out
+
+
+def _ensure_anchor_index(coll: Any) -> None:
+    ns = str(getattr(coll, "full_name", "") or id(coll))
+    if ns in _ANCHOR_INDEXED:
+        return
+    _ANCHOR_INDEXED.add(ns)
+    try:
+        coll.create_index(
+            [("action", 1), ("chain_seq", 1)], name="key_history_anchor",
+            partialFilterExpression={"resource": "audit_chain_key_history"},
+        )
+    except Exception as exc:  # noqa: BLE001 - the lookup works without it, slower
+        logger.warning("key history anchor index not created: %s", str(exc)[:200])
 
 
 def _trusted_time_before(first: dict[str, Any], hmac_of: Any) -> datetime | None:

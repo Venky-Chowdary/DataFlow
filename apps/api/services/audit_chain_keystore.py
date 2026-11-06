@@ -286,7 +286,7 @@ _MAC_INFO = b"audit-key-history/v1"
 HISTORY_REFRESH_S = 3600.0
 _noted: dict[str, float] = {}
 _EPOCH_ID = "__history_epoch__"
-_epoch_cache: dict[str, str] = {}
+_epoch_cache: dict[str, dict[str, str]] = {}
 
 
 def _mac(*parts: str) -> str:
@@ -369,71 +369,165 @@ def note_key_id(key_id: str, *, origin: str, seen_at: str | None = None) -> None
 
 
 class HistoryTampered(RuntimeError):
-    """The key history's epoch was removed or altered."""
+    """The key history's anchor was removed, reset or altered."""
 
 
-def _epoch_copy_in_keyring(coll_keys: Any) -> str | None:
+#: Chain actions that anchor the key history (written by this module).
+EPOCH_ACTION = "audit.key_history.began"
+REANCHOR_ACTION = "audit.key_history.reanchored"
+_creating = threading.local()
+
+
+def _epoch_mac(at: str, head_seq: str, head_hash: str) -> str:
+    return _mac("epoch", at, head_seq, head_hash)
+
+
+def _epoch_copy_in_keyring(coll_keys: Any) -> dict[str, str] | None:
     """The second copy of the epoch, MAC'd, on the keyring document."""
     import hmac
 
     doc = coll_keys.find_one({"_id": DOC_ID}, {"history_epoch": 1}) if coll_keys is not None else None
     copy = (doc or {}).get("history_epoch") or {}
-    at = str(copy.get("at") or "")
-    if at and hmac.compare_digest(_mac("epoch-copy", at), str(copy.get("mac") or "")):
-        return at
+    at, seq, head = (str(copy.get(k) or "") for k in ("at", "head_seq", "head_hash"))
+    if at and hmac.compare_digest(_mac("epoch-copy", at, seq, head), str(copy.get("mac") or "")):
+        return {"at": at, "head_seq": seq, "head_hash": head}
     return None
 
 
-def history_epoch() -> str | None:
-    """When this deployment began keeping the key history (ISO time), or None.
+def _anchor_in_chain(action: str, at: str, actor: str = "system", reason: str = "") -> tuple[str, str]:
+    """Write the signed chain record that anchors the history; ``(seq, hash)``."""
+    from services.audit_log import append_audit_event
 
-    Kept twice — its own MAC'd row and a MAC'd copy on the keyring document —
-    and bounded by the earliest history entry. Raises :class:`HistoryTampered`
-    when the epoch row is present but fails its MAC, or is missing while MAC'd
-    history entries (or the keyring copy) exist: deleting or corrupting the
-    anchor must not reset it (third review). Created once on a fresh store.
+    _creating.active = True
+    try:
+        event = append_audit_event(
+            action=action, resource="audit_chain_key_history", actor=actor,
+            details={"epoch_at": at, **({"reason": reason} if reason else {})},
+        )
+    finally:
+        _creating.active = False
+    return str(event.get("chain_seq") or ""), str(event.get("event_hash") or "")
+
+
+def _store_epoch(coll: Any, keys: Any, at: str, seq: str, head: str) -> None:
+    coll.update_one(
+        {"_id": _EPOCH_ID},
+        {"$set": {"at": at, "head_seq": seq, "head_hash": head, "mac": _epoch_mac(at, seq, head)},
+         "$unset": {"pending": ""}},
+        upsert=True,
+    )
+    if keys is not None:
+        keys.update_one(
+            {"_id": DOC_ID},
+            {"$set": {"history_epoch": {"at": at, "head_seq": seq, "head_hash": head,
+                                        "mac": _mac("epoch-copy", at, seq, head)}}},
+        )
+
+
+#: A pending epoch (its creator is writing the anchor record) is waited for this
+#: long; older than :data:`PENDING_STALE_S`, another process takes it over.
+PENDING_WAIT_S = 3.0
+PENDING_STALE_S = 15.0
+
+
+def _anchor_pending(coll: Any, keys: Any, at: str) -> dict[str, str]:
+    """This process holds the pending epoch row: anchor it in the chain."""
+    try:
+        seq, head = _anchor_in_chain(EPOCH_ACTION, at)
+    except Exception:
+        # Release the claim, so the next writer anchors it instead of waiting.
+        coll.delete_one({"_id": _EPOCH_ID, "pending": True, "at": at})
+        raise
+    _store_epoch(coll, keys, at, seq, head)
+    return {"at": at, "head_seq": seq, "head_hash": head}
+
+
+def epoch_record() -> dict[str, str] | None:
+    """``{at, head_seq, head_hash}`` of the history epoch, or None (no database).
+
+    The epoch is anchored IN the hash chain: creating it writes a signed
+    ``audit.key_history.began`` record whose position and hash the MAC'd epoch
+    row (and its MAC'd copy on the keyring document) store. Deleting the
+    history and the copy recreates the epoch at a later position, and the
+    verifier finds the earlier anchor record (review of a350ff42a, F1).
+
+    Creation is claimed by an atomic insert of a ``pending`` row; other
+    processes wait for it (a stale claim is taken over). Raises
+    :class:`HistoryTampered` when the row fails its MAC, disagrees with its
+    copy, or is missing while entries or the copy exist.
     """
     import hmac
 
+    if getattr(_creating, "active", False):
+        return None
     coll = _history_coll()
     if coll is None:
         return None
     ns = str(getattr(coll, "full_name", "") or id(coll))
     if ns in _epoch_cache:
-        return _epoch_cache[ns]
+        return dict(_epoch_cache[ns])
     keys = _collection()
-    doc = coll.find_one({"_id": _EPOCH_ID})
-    copy = _epoch_copy_in_keyring(keys)
-    entries = [e for e in (_valid(d) for d in coll.find({"_id": {"$ne": _EPOCH_ID}})) if e]
-    if doc is not None:
-        at = str(doc.get("at") or "")
-        if not at or not hmac.compare_digest(_mac("epoch", at), str(doc.get("mac") or "")):
+    started = time.monotonic()
+    while True:
+        doc = coll.find_one({"_id": _EPOCH_ID})
+        copy = _epoch_copy_in_keyring(keys)
+        if doc is None:
+            has_entries = any(_valid(d) for d in coll.find({"_id": {"$ne": _EPOCH_ID}}).limit(50))
+            if has_entries or copy:
+                raise HistoryTampered("the key history epoch was removed")
+            at = _now()
+            won = coll.update_one(
+                {"_id": _EPOCH_ID}, {"$setOnInsert": {"at": at, "pending": True}}, upsert=True
+            )
+            if getattr(won, "upserted_id", None) is None:
+                continue  # another process claimed it first: wait for its anchor
+            rec = _anchor_pending(coll, keys, at)
+            break
+        if doc.get("pending") and not doc.get("mac"):
+            at = str(doc.get("at") or "")
+            age = (datetime.now(timezone.utc) - _parse_time(at)).total_seconds() if at else 1e9
+            if age > PENDING_STALE_S:
+                taken = coll.update_one(
+                    {"_id": _EPOCH_ID, "pending": True, "at": doc.get("at"), "mac": {"$exists": False}},
+                    {"$set": {"at": _now()}},
+                )
+                if taken.modified_count == 1:
+                    fresh = coll.find_one({"_id": _EPOCH_ID}) or {}
+                    rec = _anchor_pending(coll, keys, str(fresh.get("at") or ""))
+                    break
+            elif time.monotonic() - started > PENDING_WAIT_S:
+                raise KeystoreUnavailable("the key history epoch is still being created")
+            time.sleep(0.1)
+            continue
+        at, seq, head = (str(doc.get(k) or "") for k in ("at", "head_seq", "head_hash"))
+        if not at or not hmac.compare_digest(_epoch_mac(at, seq, head), str(doc.get("mac") or "")):
             raise HistoryTampered("the key history epoch fails its MAC")
-        if copy and copy != at:
+        if copy and (copy["at"], copy["head_seq"], copy["head_hash"]) != (at, seq, head):
             raise HistoryTampered("the key history epoch disagrees with its keyring copy")
-    else:
-        if entries or copy:
-            raise HistoryTampered("the key history epoch was removed")
-        at = _now()
-        coll.update_one(
-            {"_id": _EPOCH_ID}, {"$setOnInsert": {"at": at, "mac": _mac("epoch", at)}}, upsert=True
-        )
-        doc = coll.find_one({"_id": _EPOCH_ID}) or {}
-        at = str(doc.get("at") or at)
-        if keys is not None:
+        if copy is None and keys is not None:
             keys.update_one(
                 {"_id": DOC_ID, "history_epoch": {"$exists": False}},
-                {"$set": {"history_epoch": {"at": at, "mac": _mac("epoch-copy", at)}}},
+                {"$set": {"history_epoch": {"at": at, "head_seq": seq, "head_hash": head,
+                                            "mac": _mac("epoch-copy", at, seq, head)}}},
             )
-    if copy is None and keys is not None:
-        keys.update_one(
-            {"_id": DOC_ID, "history_epoch": {"$exists": False}},
-            {"$set": {"history_epoch": {"at": at, "mac": _mac("epoch-copy", at)}}},
-        )
-    earliest = min((e["first_seen"] for e in entries if e.get("first_seen")), default=at)
-    at = min(at, earliest)
-    _epoch_cache[ns] = at
-    return at
+        rec = {"at": at, "head_seq": seq, "head_hash": head}
+        break
+    _epoch_cache[ns] = rec
+    return dict(rec)
+
+
+def _parse_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.fromtimestamp(0, timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def history_epoch() -> str | None:
+    """When this deployment began keeping the key history (ISO time), or None."""
+    rec = epoch_record()
+    return rec["at"] if rec else None
 
 
 def key_history() -> dict[str, dict[str, Any]]:
