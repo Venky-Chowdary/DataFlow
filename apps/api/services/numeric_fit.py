@@ -62,7 +62,10 @@ def _bare_token_is_dest_carrier(raw: str, dest_db: str) -> bool:
     from services.type_system import DDL_TYPES, LOGICAL_INTEGER, _normalize_dest_db
 
     carrier = str((DDL_TYPES.get(_normalize_dest_db(dest_db)) or {}).get(LOGICAL_INTEGER) or "")
-    return bool(carrier) and carrier.strip().lower() == raw.lower()
+    # The engine's own spelling, exactly: Weaviate writes ``int``; SQLite's
+    # carrier is ``INTEGER``, so a lower-case ``integer`` stamp there is still
+    # the logical token the Gate-8 remap materializes through ``ddl_type``.
+    return bool(carrier) and carrier.strip() == raw
 
 
 @lru_cache(maxsize=8192)
