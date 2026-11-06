@@ -1949,27 +1949,28 @@ def _check_mapping_confidence(
     }
 
 
-def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
+def _format_control_chars(
+    text: str, exempt: frozenset[str] = frozenset()
+) -> tuple[list[str], list[str]]:
     """U+XXXX codes of ``(control, format)`` characters in ``text``.
 
-    C0 controls (Cc below U+0080, minus tab/newline/CR — NUL, BEL, ESC …)
-    are rejected or corrupted by destinations. Format characters (Cf — U+200B,
-    ZWJ/ZWNJ, soft hyphen, BOM, bidi marks) are valid Unicode every UTF-8
-    destination stores verbatim; they only make visually equal text compare
-    unequal. C1 controls (U+0080–U+009F) are the second kind: they are what a
-    single-byte page legitimately decodes to — MySQL ``latin1`` stores bytes
-    0x81/0x8D/0x8F/0x90/0x9D and returns U+0081/U+008D/U+008F/U+0090/U+009D —
-    and every Unicode destination keeps them byte-for-byte, so blocking them
-    refused an exact copy of the source's own data (QA MySQL D1). Whether a
-    destination page can hold one is the encoding-capacity gate's question.
+    Controls (Cc, minus tab/newline/CR — NUL, BEL, ESC, and C1 U+0080–U+009F,
+    the classic mojibake residue) are rejected or corrupted by destinations
+    and block strict Validate. Format characters (Cf — U+200B, ZWJ/ZWNJ, soft
+    hyphen, BOM, bidi marks) are valid Unicode every UTF-8 destination stores
+    verbatim; they only make visually equal text compare unequal.
+
+    ``exempt`` controls are reported with the format characters (a warning):
+    only MySQL ``latin1``'s own five undefined-byte decodings in a column that
+    holds that page (:func:`mysql_latin1_exempt_controls`, QA MySQL D1).
     """
     controls: list[str] = []
     formats: list[str] = []
     for ch in text:
         cat = unicodedata.category(ch)
-        if cat == "Cc" and ch not in "\t\n\r" and ord(ch) < 0x80:
+        if cat == "Cc" and ch not in "\t\n\r" and ch not in exempt:
             bucket = controls
-        elif cat in {"Cf", "Cc"} and ch not in "\t\n\r":
+        elif cat == "Cf" or (cat == "Cc" and ch in exempt):
             bucket = formats
         else:
             continue
@@ -1981,11 +1982,41 @@ def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
     return controls, formats
 
 
+def mysql_latin1_exempt_controls(
+    source_db_type: str, source_types: dict[str, str] | None
+) -> dict[str, frozenset[str]]:
+    """Per source column, the C1 controls that are data, not damage.
+
+    MySQL ``latin1`` stores bytes 0x81/0x8D/0x8F/0x90/0x9D and returns
+    U+0081/U+008D/U+008F/U+0090/U+009D — the server's own decoding, which every
+    Unicode destination keeps byte for byte. Only those five, only on a
+    MySQL-family source, and only in a column that declares latin1 — or that
+    declares no charset at all (a query result carries none). Every other C1
+    control (mojibake such as 'Itâ\x80\x99s', an ESC-less CSI 0x9B) still blocks.
+    """
+    from services.encoding_capacity import (
+        MYSQL_LATIN1_UNDEFINED_CP1252_BYTES,
+        parse_declared_charset,
+    )
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(source_db_type or "") != "mysql":
+        return {}
+    five = frozenset(chr(b) for b in MYSQL_LATIN1_UNDEFINED_CP1252_BYTES)
+    out: dict[str, frozenset[str]] = {}
+    for col, declared in (source_types or {}).items():
+        charset = parse_declared_charset(str(declared or "")).strip().lower()
+        if charset in {"", "latin1"}:
+            out[str(col).lower()] = five
+    return out
+
+
 def _check_encoding_anomalies(
     rows: list[dict[str, Any]],
     *,
     validation_mode: str = "strict",
     mappings: list[dict] | None = None,
+    exempt_controls: dict[str, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
@@ -2028,7 +2059,9 @@ def _check_encoding_anomalies(
                     "blocking": True,
                 })
                 continue
-            controls, formats = _format_control_chars(text)
+            controls, formats = _format_control_chars(
+                text, (exempt_controls or {}).get(str(col).lower(), frozenset())
+            )
             bad = controls + formats
             if bad:
                 findings.append({
@@ -2469,7 +2502,10 @@ def run_integrity_audit(
 
     if rows:
         checks.append(
-            _check_encoding_anomalies(rows, validation_mode=validation_mode, mappings=mappings)
+            _check_encoding_anomalies(
+                rows, validation_mode=validation_mode, mappings=mappings,
+                exempt_controls=mysql_latin1_exempt_controls(source_db_type, source_types),
+            )
         )
 
     # Industry-standard expectation suite (dbt/GX patterns)

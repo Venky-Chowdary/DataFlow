@@ -268,11 +268,45 @@ def test_a_mysql_collation_never_reaches_postgresql_ddl():
     assert classify_capacity("postgresql", 'VARCHAR(255) COLLATE "latin1_swedish_ci"').form == "utf8"
 
 
-def test_c1_controls_warn_c0_controls_still_block():
-    from services.data_integrity import _check_encoding_anomalies
+def test_c1_controls_block_except_mysql_latin1s_own_five():
+    from services.data_integrity import _check_encoding_anomalies, mysql_latin1_exempt_controls
 
-    c1 = _check_encoding_anomalies([{"note": "A\u009dB"}, {"note": "\u008f"}],
-                                   validation_mode="strict")
-    assert c1["blocks_transfer"] is False and c1["warnings"], c1
+    mojibake = [{"note": "It\u00e2\u0080\u0099s"}, {"note": "esc\u009b[31m"}, {"note": "x\u0080y"}]
+    for src, types in (("postgresql", {"note": "text"}), ("mongodb", {"note": "VARCHAR"}),
+                       ("csv", {"note": "VARCHAR"}),
+                       ("mysql", {"note": "TEXT COLLATE utf8mb4_0900_ai_ci"})):
+        exempt = mysql_latin1_exempt_controls(src, types)
+        out = _check_encoding_anomalies(mojibake, validation_mode="strict", exempt_controls=exempt)
+        assert out["blocks_transfer"] is True, (src, out)
+        out = _check_encoding_anomalies([{"note": "A\u009dB"}], validation_mode="strict",
+                                        exempt_controls=exempt)
+        assert out["blocks_transfer"] is True, (src, "U+009D outside MySQL latin1")
+    for types in ({"note": "TEXT COLLATE latin1_swedish_ci"}, {"note": "LONGTEXT"}):
+        exempt = mysql_latin1_exempt_controls("mariadb", types)
+        ok = _check_encoding_anomalies([{"note": "A\u009dB"}, {"note": "\u008f\u0081\u0090\u008d"}],
+                                       validation_mode="strict", exempt_controls=exempt)
+        assert ok["blocks_transfer"] is False and ok["warnings"], ok
+        # Not one of the five: still blocks even in a latin1 column.
+        bad = _check_encoding_anomalies([{"note": "x\u0080y"}], validation_mode="strict",
+                                        exempt_controls=exempt)
+        assert bad["blocks_transfer"] is True
     c0 = _check_encoding_anomalies([{"note": "bell\u0007"}], validation_mode="strict")
     assert c0["blocks_transfer"] is True, c0
+
+
+def test_postgres_source_with_c1_mojibake_is_still_blocked_in_strict(client):
+    t = f"r14c1pg_{uuid.uuid4().hex[:8]}"
+    h.execute("postgresql", f'CREATE TABLE "{t}" (id int PRIMARY KEY, note text)')
+    h.execute("postgresql", f"INSERT INTO \"{t}\" VALUES (1, E'It\\u00e2\\u0080\\u0099s'), (2, 'ok')")
+    src = _connector("postgresql", _pg_cfg(), "source")
+    dst = _connector("mysql", _cfg("mysql"), "destination")
+    try:
+        ok, out = h.mcp_call(client, "start_transfer", {
+            "source_connector_id": src, "dest_connector_id": dst, "source_table": t,
+            "dest_table": t, "sync_mode": "full_refresh_overwrite", "primary_key": "id",
+            "validation_mode": "strict"})
+        assert not ok and ("U+0080" in str(out) or "Invisible" in str(out)
+                           or "control" in str(out)), out
+    finally:
+        h.drop_table("postgresql", t)
+        h.drop_table("mysql", t)
