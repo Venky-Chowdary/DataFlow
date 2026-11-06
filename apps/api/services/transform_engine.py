@@ -2443,6 +2443,13 @@ def infer_transform_for_mapping(
             return "none"
         return "datetime" if src == "datetime" or "epoch" in src_lower else "date"
     if tgt_name.endswith("_id") or tgt_name.endswith("id") or src_col.endswith("_ID"):
+        # A text sink stores the source token. Trimming an id-named text column
+        # rewrote a whitespace-only TINYTEXT ' ' to '' on one side of Gate-8
+        # while the writer stored ' ' (QA: Rfam clan previous_id, "source=''
+        # dest=' '"), and would silently change identity values. Same rule as
+        # the date-named branch above; a typed id target returned earlier.
+        if tgt in {"string", "text", "unknown"} or not tgt:
+            return "none"
         return "trim_id"
     if "qty" in tgt_name or "quantity" in tgt_name:
         # A text plan stays text. The name alone must not cast 'bad' as an
