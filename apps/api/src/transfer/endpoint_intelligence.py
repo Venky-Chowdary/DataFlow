@@ -280,6 +280,11 @@ def _specialty_object_list(
                 "collection",
                 f"Qdrant connected — {len(names)} collection(s)",
             )
+        if kind == "pinecone":
+            from connectors.pinecone_writer import list_namespaces
+
+            names = list_namespaces(cfg)
+            return True, names, "namespace", f"Pinecone connected — {len(names)} namespace(s)"
         if kind == "weaviate":
             from connectors.weaviate_writer import list_classes
 
@@ -297,6 +302,7 @@ def _specialty_object_list(
             "neo4j": "Neo4j label",
             "qdrant": "Qdrant collection",
             "weaviate": "Weaviate class",
+            "pinecone": "Pinecone namespace",
         }.get(kind, kind)
         return False, [], "object", f"{label} list failed: {exc}"
     return None

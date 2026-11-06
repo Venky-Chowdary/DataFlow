@@ -1200,6 +1200,33 @@ def source_only_destination_refusal(dest_type: str) -> str | None:
     )
 
 
+def destination_only_source_refusal(source_type: str) -> str | None:
+    """The one sentence for "this connector cannot be a source" (D273).
+
+    Pinecone, Milvus, Weaviate and the other writer-only drivers have no
+    reader. Planning a transfer out of one reached introspection and failed
+    "Schema introspection not implemented for pinecone" — true, but it named
+    an implementation gap instead of the connector's role.
+    """
+    raw = (source_type or "").strip().lower()
+    if not raw:
+        return None
+    driver = resolve_driver_type(raw)
+    if driver not in _DRIVER_CAPS:
+        return None
+    caps = get_capabilities(driver)
+    if caps.get("read") or not caps.get("dest_only"):
+        return None
+    label = {"pinecone": "Pinecone", "milvus": "Milvus", "weaviate": "Weaviate"}.get(
+        driver, driver.replace("_", " ").title()
+    )
+    return (
+        f"{label} is a destination-only connector: {PRODUCT_NAME} has no {label} "
+        "reader, so it cannot be a transfer source. Use it as the destination, or "
+        "choose a source such as PostgreSQL, MySQL, MongoDB or S3."
+    )
+
+
 def _driver_install_hint(driver: str) -> str:
     """Operator-facing package hint when a certified driver fails to load."""
     return {

@@ -984,7 +984,10 @@ def plan_transfer(
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
-    from src.transfer.connector_capabilities import source_only_destination_refusal
+    from src.transfer.connector_capabilities import (
+        destination_only_source_refusal,
+        source_only_destination_refusal,
+    )
 
     # D139: a source-only connector is not a destination; say so before any gate.
     not_a_destination = source_only_destination_refusal(
@@ -992,6 +995,12 @@ def plan_transfer(
     )
     if not_a_destination:
         return _tool_result(tool, success=False, error=not_a_destination)
+    # D273: nor is a destination-only connector a source.
+    not_a_source = destination_only_source_refusal(
+        str(src_conn.get("type") or src_conn.get("format") or "")
+    )
+    if not_a_source:
+        return _tool_result(tool, success=False, error=not_a_source)
 
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
