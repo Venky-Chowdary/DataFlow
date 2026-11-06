@@ -157,10 +157,14 @@ def test_workers_blocked_on_a_silent_source_end_at_the_deadline_and_the_pool_rec
     with concurrent.futures.ThreadPoolExecutor(max_workers=2 * WORKERS) as pool:
         futures = [pool.submit(_call, "run_query", stuck) for _ in range(2 * WORKERS)]
         results = [f.result(timeout=60) for f in futures]
+    started, queued = [], []
     for r in results:
         assert not r.success, r
-        # The source that went silent is the one named.
-        assert "127.0.0.1" in str(r.error), r.error
+        (queued if "never started" in str(r.error) else started).append(str(r.error))
+    # A call that reached the silent source names it; one that queued behind
+    # the busy workers says the pool held it and never blames a source.
+    assert started and all("127.0.0.1" in e for e in started), started
+    assert all("Nothing reached the source" in e for e in queued), queued
 
     # The abandoned workers are interrupted (their sockets shut), so they end
     # within seconds instead of holding the pool for hours.

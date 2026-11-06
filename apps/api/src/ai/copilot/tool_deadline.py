@@ -106,6 +106,12 @@ class _Progress:
     #: file descriptor: those are read from the live connection at interrupt
     #: time, so a closed connection whose descriptor was reused is left alone.
     connections: dict[int, dict[int, Any]] = field(default_factory=dict)
+    #: The call was abandoned (``True``) or these worker threads were: a
+    #: connection they open afterwards is interrupted as soon as it registers,
+    #: so a worker that carries on (a retry, the next step) cannot start new
+    #: blocking I/O nobody will end.
+    interrupted: bool = False
+    interrupted_threads: set[int] = field(default_factory=set)
 
     # Read-only views of the call's own (first) step, kept for callers that
     # inspect a single step.
@@ -282,8 +288,16 @@ def register_connection(conn: Any) -> None:
     progress = _progress.get()
     if progress is None or conn is None:
         return
+    thread = threading.get_ident()
     with progress.lock:
-        progress.connections.setdefault(threading.get_ident(), {})[id(conn)] = conn
+        late = progress.interrupted or thread in progress.interrupted_threads
+        if not late:
+            progress.connections.setdefault(thread, {})[id(conn)] = conn
+    if late:
+        try:
+            _interrupt_connection(conn)
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.debug("late connection interrupt skipped: %s", exc)
 
 
 def unregister_connection(conn: Any) -> None:
@@ -335,9 +349,11 @@ def interrupt_connections(progress: _Progress, thread: int | None = None) -> int
     """
     with progress.lock:
         if thread is None:
+            progress.interrupted = True
             conns = [c for bucket in progress.connections.values() for c in bucket.values()]
             progress.connections.clear()
         else:
+            progress.interrupted_threads.add(thread)
             conns = list(progress.connections.pop(thread, {}).values())
     done = 0
     for conn in conns:
@@ -600,8 +616,18 @@ def _on_recorded_thread(fn: Callable[[], Any], cell: dict[str, int]) -> Callable
     """Run ``fn`` and record the worker thread it ran on in ``cell``."""
 
     def run() -> Any:
-        cell["thread"] = threading.get_ident()
-        return fn()
+        thread = threading.get_ident()
+        cell["thread"] = thread
+        try:
+            return fn()
+        finally:
+            # This pool thread may serve another probe of the same call next:
+            # an interrupt meant for this probe must not follow it there.
+            progress = _progress.get()
+            if progress is not None:
+                with progress.lock:
+                    progress.interrupted_threads.discard(thread)
+                    progress.connections.pop(thread, None)
 
     return run
 

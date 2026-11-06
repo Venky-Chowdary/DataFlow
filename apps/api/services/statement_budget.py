@@ -98,6 +98,20 @@ def _on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
         logger.debug("statement budget not applied (%s): %s", family, exc)
 
 
+def _on_connect(dbapi_connection: Any, _record: Any) -> None:
+    """A new pooled connection is interruptible before its first query.
+
+    The engine's dialect initialize (server version, settings) runs from the
+    pool's ``connect`` event, before ``checkout``: a source that went silent
+    right after the handshake held that worker in ``recv`` with nothing able
+    to end it (D281). Class-level pool listeners run before the engine's own,
+    so registering here covers those queries. A no-op outside a tool call.
+    """
+    from src.ai.copilot.tool_deadline import register_connection
+
+    register_connection(dbapi_connection)
+
+
 def _on_checkin(dbapi_connection: Any, record: Any) -> None:
     from src.ai.copilot.tool_deadline import unregister_connection
 
@@ -131,6 +145,8 @@ def install() -> None:
             from sqlalchemy.pool import Pool
         except ImportError:  # pragma: no cover - SQLAlchemy is a dependency
             return
+        event.listen(Pool, "first_connect", _on_connect)
+        event.listen(Pool, "connect", _on_connect)
         event.listen(Pool, "checkout", _on_checkout)
         event.listen(Pool, "checkin", _on_checkin)
         _installed = True
