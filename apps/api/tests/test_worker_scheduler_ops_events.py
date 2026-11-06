@@ -197,7 +197,9 @@ def test_schedule_fire_started_and_held(monkeypatch, caplog):
 
     schedule = SimpleNamespace(
         id="schedule-fire-event",
+        name="schedule-fire-event",
         enabled=True,
+        workspace_id="",
         source_connector_id="source-event",
         dest_connector_id="destination-event",
     )
