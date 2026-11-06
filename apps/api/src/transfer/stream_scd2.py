@@ -543,12 +543,9 @@ def stream_scd2_mirror_transfer(
             # DELETE only when the stream contract declares it (QA demo 1030).
             from services.mirror_engine import resolve_mirror_delete_mode
 
+            # resolve_mirror_delete_mode validates against the one registry
+            # (transfer_policy_values.DELETE_MODE_CONSUMERS["mirror"]).
             mirror_delete_mode = resolve_mirror_delete_mode(contract, scd2_opts)
-            if mirror_delete_mode not in {"hard", "soft"}:
-                raise ValueError(
-                    f"Unknown mirror delete_mode {mirror_delete_mode!r} — "
-                    "declare 'hard' or 'soft' on the stream contract."
-                )
             engine = get_sqlalchemy_engine(dest_cfg)
             if contract and contract.primary_key:
                 pk_cols = [

@@ -42,11 +42,7 @@ SOFT_DELETE_AT_COLUMN = "_deleted_at"
 _KEY_SEP = "\x1f"
 
 
-#: The mirror / CDC-snapshot delete vocabulary: ``hard`` DELETEs destination keys
-#: the source no longer has, ``soft`` tombstones them (``_deleted``), ``off``
-#: keeps them and only reports the count. ``count`` is internal: measure, change
-#: nothing.
-MIRROR_DELETE_MODES = frozenset({"hard", "soft", "off"})
+#: Internal measure-only mode: count what a sweep would remove, change nothing.
 COUNT_ONLY = "count"
 
 
@@ -57,14 +53,18 @@ def resolve_mirror_delete_mode(contract: Any = None, options: Any = None) -> str
     promise a soft delete (``_deleted``; physical COUNT(*) stays). An
     undeclared contract defaulted to a hard DELETE, so QA's mirror dropped
     552 -> 540 rows with no ``_deleted`` column (QA demo 1030). ``hard`` is an
-    explicit opt-in on the stream contract (``delete_mode``).
+    explicit opt-in on the stream contract (``delete_mode``). The vocabulary
+    is ``transfer_policy_values`` (``delete_mode_for``): an unknown spelling,
+    or ``off`` (which a mirror does not offer), is refused with the list.
     """
-    declared = str(
+    from services.transfer_policy_values import DELETE_MODE_DEFAULTS, delete_mode_for
+
+    declared = (
         (getattr(contract, "delete_mode", "") if contract is not None else "")
         or (options or {}).get("delete_mode")
         or ""
-    ).strip().lower()
-    return declared or "soft"
+    )
+    return delete_mode_for(declared, "mirror") or DELETE_MODE_DEFAULTS["mirror"]
 
 
 def lattice_column_names(columns: Any) -> tuple[str, ...]:

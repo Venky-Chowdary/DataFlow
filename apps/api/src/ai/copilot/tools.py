@@ -752,11 +752,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "delete_mode": {
                     "type": "string",
-                    "enum": ["soft", "hard"],
+                    "enum": ["soft", "hard", "off"],
                     "description": (
-                        "Mirror sync only. 'soft' (default): destination rows whose "
-                        "key left the source are kept and flagged _deleted. 'hard': "
-                        "they are physically DELETEd; the plan warns before staging."
+                        "What happens to destination rows whose key left the source. "
+                        "Mirror: 'soft' (default) keeps them flagged _deleted, 'hard' "
+                        "DELETEs them; the plan warns before staging. CDC: the snapshot "
+                        "sweep removes them with 'hard' (the default when provably safe) "
+                        "or tombstones with 'soft'; 'off' keeps them and reports the "
+                        "count. Other sync modes do not take it."
                     ),
                 },
                 "ddl_acknowledgement": {
@@ -944,11 +947,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "delete_mode": {
                     "type": "string",
-                    "enum": ["soft", "hard"],
+                    "enum": ["soft", "hard", "off"],
                     "description": (
-                        "Mirror sync only. 'soft' (default): destination rows whose "
-                        "key left the source are kept and flagged _deleted. 'hard': "
-                        "they are physically DELETEd; the plan warns before staging."
+                        "What happens to destination rows whose key left the source. "
+                        "Mirror: 'soft' (default) keeps them flagged _deleted, 'hard' "
+                        "DELETEs them; the plan warns before staging. CDC: the snapshot "
+                        "sweep removes them with 'hard' (the default when provably safe) "
+                        "or tombstones with 'soft'; 'off' keeps them and reports the "
+                        "count. Other sync modes do not take it."
                     ),
                 },
             },

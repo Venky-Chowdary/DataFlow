@@ -129,21 +129,29 @@ def declare_contract_delete_mode(
 ) -> tuple[list[dict[str, Any]], str]:
     """Put an explicit ``delete_mode`` on the run's stream contracts (MCP route).
 
-    Returns ``(contracts, error)``. Only ``soft`` and ``hard`` exist, and only a
-    mirror run deletes anything.
+    Returns ``(contracts, error)``. The vocabulary and the per-sync subsets are
+    ``transfer_policy_values`` (mirror: soft|hard; cdc: hard|soft|off — the CDC
+    snapshot sweep's switch); any other sync mode has nothing to delete.
     """
-    out = [dict(c) for c in contracts or []]
-    declared = str(delete_mode or "").strip().lower()
-    if not declared:
-        return out, ""
-    if declared not in {"soft", "hard"}:
-        return out, f"delete_mode {delete_mode!r} is not one of 'soft' or 'hard'."
     from services.sync_cursor import normalize_sync_mode
+    from services.transfer_policy_values import (
+        DeleteModeNotAllowed,
+        PolicyValueError,
+        delete_mode_for,
+    )
 
-    if normalize_sync_mode(str(sync_mode or ""), default="") != "mirror":
-        return out, "delete_mode applies to mirror sync only."
+    out = [dict(c) for c in contracts or []]
+    if not str(delete_mode or "").strip():
+        return out, ""
+    normalized = normalize_sync_mode(str(sync_mode or ""), default="")
+    if normalized not in {"mirror", "cdc"}:
+        return out, "delete_mode applies to mirror and cdc sync only."
+    try:
+        declared = delete_mode_for(delete_mode, normalized)
+    except (PolicyValueError, DeleteModeNotAllowed) as exc:
+        return out, str(exc)
     if not out:
-        return out, "A mirror run needs a primary key before a delete_mode can apply."
+        return out, f"A {normalized} run needs a primary key before a delete_mode can apply."
     for contract in out:
         contract["delete_mode"] = declared
     return out, ""
