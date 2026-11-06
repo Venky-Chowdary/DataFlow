@@ -81,6 +81,11 @@ def _run_transfer(
             old = mongo.get_job(resume_from_job_id)
             if old and old.get("checkpoint"):
                 mongo.update_job_status(job_id, "pending", checkpoint=old["checkpoint"])
+        # D289: every path (first run, local or worker resume, retry, reclaim)
+        # dials the saved connectors' current hosts, audited when they moved.
+        from .endpoint_refresh import refresh_endpoints_for_run
+
+        refresh_endpoints_for_run(job_id, request, mongo)
         get_transfer_engine().execute_tracked(request, job_id, resume=resume)
     except Exception as exc:
         logger.exception("Background transfer failed job=%s", job_id)

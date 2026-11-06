@@ -86,6 +86,15 @@ class ContinuityTarget:
     table: str
     key: str
     path: str = ""
+    #: The same physical table under its other identity spelling. A job
+    #: started from a saved connector keys on ``id:<connector_id>``; an
+    #: endpoint rebuilt from that connector's host keys on ``host:<h>:<p>``.
+    #: Both name one table, so an audited rebaseline covers both (D204).
+    alt_keys: tuple[str, ...] = ()
+
+    @property
+    def all_keys(self) -> tuple[str, ...]:
+        return (self.key, *self.alt_keys)
 
 
 class ContinuityStoreCorrupt(RuntimeError):
@@ -160,18 +169,30 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
     # File engines are identified by their path alone: the engine fills a
     # placeholder host during a run, which must not change the key.
     ident = "" if db_type in _FILE_ENGINES else route_endpoint_identity(endpoint)
-    key = "|".join(
-        [
-            db_type,
-            ident,
-            _dsn_identity(str(cfg.get("connection_string") or "")),
-            database,
-            schema,
-            table,
-        ]
-    )
+    dsn = _dsn_identity(str(cfg.get("connection_string") or ""))
+
+    def _key(identity: str) -> str:
+        return "|".join([db_type, identity, dsn, database, schema, table])
+
+    alt_keys: tuple[str, ...] = ()
+    if ident.startswith("id:") and cfg.get("host"):
+        host_ident = route_endpoint_identity(
+            {
+                "host": cfg.get("host"),
+                "port": cfg.get("port"),
+                "format": getattr(endpoint, "format", "") or cfg.get("type"),
+            }
+        )
+        if host_ident and host_ident != ident:
+            alt_keys = (_key(host_ident),)
     return ContinuityTarget(
-        db_type, cfg, schema, table, key, database if db_type in _FILE_ENGINES else ""
+        db_type,
+        cfg,
+        schema,
+        table,
+        _key(ident),
+        database if db_type in _FILE_ENGINES else "",
+        alt_keys,
     )
 
 
@@ -654,7 +675,9 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         removal = True
     store_error = ""
     try:
-        previous = load_baseline(target.key)
+        previous = next(
+            (b for b in (load_baseline(k) for k in target.all_keys) if b), None
+        )
     except ContinuityStoreCorrupt as exc:
         # The whole point of rebaseline is recovery — a corrupt store is not a
         # reason to refuse it. The audit record must carry that the previous
@@ -701,10 +724,13 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             raise RebaselineError(
                 f"Continuity store could not be reset after audit: {exc}"
             ) from exc
-    if removal:
-        clear_baseline(target.key)
-    else:
-        save_baseline(target.key, current, rebaseline_id)
+    # Every spelling of this table's key moves together: the next append reads
+    # whichever one its door builds, and must find the accepted state (D204).
+    for key in target.all_keys:
+        if removal:
+            clear_baseline(key)
+        else:
+            save_baseline(key, current, rebaseline_id)
     logger.warning(
         "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
         target.db_type,

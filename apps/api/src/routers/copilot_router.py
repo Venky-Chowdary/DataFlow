@@ -30,6 +30,35 @@ def _confirm_failure(action: str, exc: BaseException) -> str:
     )
 
 
+
+def _saved_connector_endpoint(conn: Any, table: str = "") -> Any:
+    """The destination a saved connector names, keyed exactly as a job keys it.
+
+    D204 — the rebaseline Confirm rebuilt the endpoint from the connector's
+    fields but dropped its id, so the continuity key fell back to ``host:port``
+    while every job started from that connector keys on ``id:<connector_id>``.
+    The rebaseline then landed under a key no append ever reads ("previous":
+    null) and the route stayed stuck on the old baseline.
+    """
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
+
+    cfg = {
+        key: getattr(conn, key, None)
+        for key in (
+            "type", "host", "port", "database", "username", "password",
+            "schema", "connection_string", "ssl", "warehouse", "auth_mode",
+            "auth_role", "api_key", "service_account", "private_key",
+            "endpoint_url", "path_style", "auth_source",
+        )
+    }
+    cfg.update(getattr(conn, "extra", None) or {})
+    cfg["connector_id"] = str(getattr(conn, "id", "") or "")
+    table = str(table or "").strip()
+    if table:
+        cfg["table"] = table
+    return resolve_endpoint(EndpointConfig.from_dict("database", cfg))
+
 def _caller(request: Request) -> tuple[str, str]:
     """Return ``(role, actor)`` for the authenticated caller.
 
@@ -491,8 +520,6 @@ async def _run_lifecycle_confirm(
     if kind == "rebaseline_transfer":
         from services.append_continuity import RebaselineError, rebaseline
         from services.connector_store import get_connector, list_connectors
-        from ..transfer.adapters import resolve_endpoint
-        from ..transfer.models import EndpointConfig
 
         reason = str(payload.get("reason") or "").strip()
         if not reason:
@@ -517,21 +544,8 @@ async def _run_lifecycle_confirm(
             raise HTTPException(
                 status_code=404, detail="Destination connector not found"
             )
-        cfg = {
-            key: getattr(conn, key)
-            for key in (
-                "type", "host", "port", "database", "username", "password",
-                "schema", "connection_string", "ssl", "warehouse", "auth_mode",
-                "auth_role", "api_key", "service_account", "private_key",
-                "endpoint_url", "path_style", "auth_source",
-            )
-        }
-        cfg.update(conn.extra or {})
-        table = str(payload.get("table") or "").strip()
-        if table:
-            cfg["table"] = table
         role, actor = _caller(http_request)
-        dst = resolve_endpoint(EndpointConfig.from_dict("database", cfg))
+        dst = _saved_connector_endpoint(conn, str(payload.get("table") or ""))
         try:
             return await asyncio.to_thread(
                 rebaseline, dst, actor=actor or "", reason=reason

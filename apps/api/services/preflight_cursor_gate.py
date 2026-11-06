@@ -385,6 +385,10 @@ def dest_object_missing(
             dest_table, (dest_cfg.get("schema") or "").strip() or None
         )
         ident = resolve_object_identity(engine, table, schema)
+        if not ident.resolved:
+            # The catalog did not answer (connection refused, DNS blip, timeout):
+            # that is "unknown", never "dropped" (D266).
+            return None
         return not ident.exists
     except Exception:  # noqa: BLE001 — unknown stays unknown
         return None

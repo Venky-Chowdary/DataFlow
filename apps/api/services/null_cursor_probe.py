@@ -71,6 +71,11 @@ def _sql_null_count(
     ident = resolve_object_identity(
         engine, table, schema, columns=[cursor_column]
     )
+    if not ident.resolved:
+        raise ValueError(
+            f"source catalog could not be read for '{table}' — NULL-cursor "
+            "count is unmeasured, not zero"
+        )
     if not ident.exists:
         raise ValueError(
             f"source object '{table}' not found in catalog — NULL-cursor "
