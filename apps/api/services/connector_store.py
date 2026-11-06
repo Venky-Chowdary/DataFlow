@@ -1086,14 +1086,25 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
     return None
 
 
-def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
+def delete_connector(
+    connector_id: str, workspace_id: str | None = None, *, exact_workspace: bool = False
+) -> bool:
+    """Delete a saved connector. ``exact_workspace`` (workspace teardown) matches
+    ``workspace_id`` exactly — never an unscoped legacy row."""
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return False
+    if exact_workspace and not workspace_id:
+        raise ValueError("an exact-workspace delete needs a workspace")
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            result = coll.delete_one(_connector_id_query(connector_id, workspace_id))
+            query = (
+                {"$and": [{"$or": [{"_id": connector_id}, {"id": connector_id}]}, {"workspace_id": workspace_id}]}
+                if exact_workspace
+                else _connector_id_query(connector_id, workspace_id)
+            )
+            result = coll.delete_one(query)
             return result.deleted_count > 0
         except Exception as exc:
             raise _mongo_write_failed("delete", connector_id, exc) from exc
@@ -1105,7 +1116,11 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
             c for c in connectors
             if not (
                 c.id == connector_id
-                and (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
+                and (
+                    c.workspace_id == workspace_id
+                    if exact_workspace
+                    else (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
+                )
             )
         ]
         if len(filtered) == before:

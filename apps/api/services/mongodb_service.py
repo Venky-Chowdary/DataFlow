@@ -252,6 +252,15 @@ def _bound_connector_query(query: dict) -> dict:
         return query
     return {"$and": [query, scope.mongo_query()]}
 
+def _refuse_closing_workspace(job_data: dict) -> None:
+    """No job is created in a workspace a teardown has tombstoned (S3)."""
+    ws = str((job_data or {}).get("workspace_id") or "").strip()
+    if ws:
+        from services.team_store import assert_workspace_open
+
+        assert_workspace_open(ws)
+
+
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
 
@@ -535,6 +544,7 @@ class MongoDBService:
     # ═══════════════════════════════════════════════════════════════════════
 
     def create_transfer_job(self, job_data: dict) -> str:
+        _refuse_closing_workspace(job_data)
         """Create a new transfer job record.
 
         If MongoDB is unavailable, return a generated ObjectId-compatible id
@@ -1606,6 +1616,7 @@ class MemoryMongoDBService:
         return {"success": True, "document_count": 0, "sample_documents": []}
 
     def create_transfer_job(self, job_data: dict) -> str:
+        _refuse_closing_workspace(job_data)
         job = dict(job_data)
         oid = str(job.get("_id") or job.get("job_id") or self._new_id())
         job["_id"] = oid

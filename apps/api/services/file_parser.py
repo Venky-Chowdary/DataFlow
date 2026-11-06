@@ -2204,3 +2204,47 @@ def _count_xml_collapsed_table(root: Any) -> int | None:
         return None
     return None
 
+
+
+def delete_workspace_uploads(workspace_id: str, *, dry_run: bool = False) -> int:
+    """Remove ``workspace_id``'s uploads: the bytes on disk, the staged object, the registry row.
+
+    Matching is exact on the record's workspace (workspace teardown); another
+    workspace's or an unscoped upload is never touched. Returns the count.
+    """
+    ws = (workspace_id or "").strip()
+    if not ws:
+        raise ValueError("a workspace is required")
+    rows: dict[str, dict] = {
+        fid: r for fid, r in _file_registry.items() if str(r.get("workspace_id") or "") == ws
+    }
+    coll = None
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for doc in coll.find({"workspace_id": ws}):
+                fid = str(doc.get("file_id") or doc.get("_id") or "")
+                if fid:
+                    rows.setdefault(fid, {k: v for k, v in doc.items() if k != "_id"})
+    except Exception as exc:  # noqa: BLE001 — the in-process registry is still cleaned
+        logging.getLogger(__name__).warning("upload registry unreadable: %s", exc)
+    if dry_run or not rows:
+        return len(rows)
+    from services.object_store import delete_prefix
+
+    for fid, row in rows.items():
+        path = Path(str(row.get("path") or ""))
+        if str(path) and path.is_file() and UPLOAD_DIR in path.parents:
+            path.unlink(missing_ok=True)
+        try:
+            delete_prefix(f"uploads/{fid}/")
+        except Exception as exc:  # noqa: BLE001 — reported, the registry row still goes
+            logging.getLogger(__name__).warning("staged upload %s not removed: %s", fid, exc)
+        _file_registry.pop(fid, None)
+        if coll is not None:
+            coll.delete_one({"_id": fid})
+    if coll is None:
+        _save_registry()
+    return len(rows)

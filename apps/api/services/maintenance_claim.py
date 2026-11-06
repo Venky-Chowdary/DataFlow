@@ -47,6 +47,20 @@ def claim_run(name: str, interval: timedelta, *, now: datetime | None = None, fo
     return won is not None
 
 
+def complete_run(name: str, *, now: datetime | None = None) -> None:
+    """Record that the claimed period's work finished (``completed_at``).
+
+    A claim alone says a replica started; status reads ``completed_at`` so a
+    run that crashed after claiming is never reported as done.
+    """
+    db = durable_store()
+    if db is None:
+        return
+    db[COLLECTION].update_one(
+        {"_id": name}, {"$set": {"completed_at": now or datetime.now(timezone.utc)}}
+    )
+
+
 def claim_local(name: str, interval: timedelta, *, now: datetime | None = None) -> bool:
     """Per-process throttle for a step that may run without a durable store."""
     current = now or datetime.now(timezone.utc)

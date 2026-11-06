@@ -4065,8 +4065,31 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
   return (await res.json()).workspace;
 }
 
-export async function deleteWorkspace(workspaceId: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, { method: "DELETE" });
+/** What deleting a workspace would remove (nothing is changed). */
+export type WorkspaceDeletePreview = Record<string, number | boolean | string | string[] | null> & {
+  retained?: string[];
+  active_jobs?: number;
+};
+
+export async function previewWorkspaceDelete(workspaceId: string): Promise<WorkspaceDeletePreview> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}?dry_run=true`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to preview the workspace delete"));
+  return res.json();
+}
+
+/**
+ * Irreversible: the API removes the workspace's connectors, schedules, jobs,
+ * uploads and keys. It requires the workspace name typed back (`confirm`) or
+ * a `reason`; preview first with {@link previewWorkspaceDelete}.
+ */
+export async function deleteWorkspace(
+  workspaceId: string,
+  confirmation: { confirm?: string; reason?: string },
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (confirmation.confirm) params.set("confirm", confirmation.confirm);
+  if (confirmation.reason) params.set("reason", confirmation.reason);
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}?${params.toString()}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete workspace"));
 }
 

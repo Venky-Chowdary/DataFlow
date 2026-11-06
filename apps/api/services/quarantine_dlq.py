@@ -1457,3 +1457,35 @@ def replay_unique_index_failure(
         samples=samples,
         engine_error=text.strip().splitlines()[0] if text.strip() else "",
     )
+
+
+def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
+    """Remove every DLQ / quarantine event of ``workspace_id`` (workspace teardown).
+
+    Both stores: the Mongo collection and the JSONL fallback, which holds full
+    row bodies. Matching is exact on the event's workspace — unscoped legacy
+    rows and other workspaces' rows are never touched. Returns the count.
+    """
+    ws = (workspace_id or "").strip()
+    if not ws:
+        raise ValueError("a workspace is required")
+    removed = 0
+    coll = _dlq_coll()
+    if coll is not None:
+        query = {"workspace_id": ws}
+        removed += int(coll.count_documents(query) if dry_run else coll.delete_many(query).deleted_count)
+    if DLQ_PATH.exists():
+        kept: list[str] = []
+        hit = 0
+        for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
+            ev = load_dlq_event(line) if line.strip() else None
+            if ev is not None and str(ev.get("workspace_id") or "") == ws:
+                hit += 1
+                continue
+            kept.append(line)
+        removed += hit
+        if hit and not dry_run:
+            tmp = DLQ_PATH.with_suffix(DLQ_PATH.suffix + ".tmp")
+            tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            tmp.replace(DLQ_PATH)
+    return removed

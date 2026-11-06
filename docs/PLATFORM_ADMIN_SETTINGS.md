@@ -102,19 +102,39 @@ it is active. Audited as `team.sandbox.create` /
 
 `DELETE /api/v1/team/workspaces/{id}`, the sandbox teardown and the expiry
 sweep share `services/workspace_teardown.py` (`team_store.delete_workspace`
-delegates to it). It refuses while any job of the workspace is active (409),
-then removes schedules (CDC capture released, each deletion audited), saved
-connectors and their credentials, finished jobs and quarantine rows,
-transform projects and library recipes, tenant policy, notification
-channels, and revokes API keys / service accounts / SCIM tokens bound to it;
-then the workspace and its memberships. Idempotent. The audit trail, usage
-metering and data contracts are kept (evidence).
+delegates to it). It is irreversible, so:
+
+- `?dry_run=true` returns what would be removed (counts per store, active
+  jobs, what is retained) and changes nothing;
+- the real delete needs `?confirm=<workspace name>` or `?reason=<text>`
+  (422 otherwise); both are audited on `team.workspace.delete`.
+
+The cascade runs in system scope and names the target workspace on every
+store, matching it exactly (another workspace's or an unscoped legacy row is
+never touched). It refuses (409) while any job of the workspace is active or
+when the job store cannot say, then **tombstones** the workspace — writes to it
+answer 409, no job can be created in it and the beat claims none of its
+schedules — revokes its API keys, removes its memberships, releases each
+schedule's CDC capture and deletes the schedules, deletes saved connectors and
+credentials, finished jobs with their checkpoints, the incremental watermarks
+and quality-profile runs only its jobs produced, quarantine rows (Mongo and
+the JSONL fallback), uploads (file, staged object, registry row), transforms,
+tenant policy, notification channels, SCIM group mappings and "last used"
+pointers, the sandbox's own tester login (unless it became a real account —
+then it is kept and `team.sandbox.tester_login_kept` is audited) and logins
+that tester created; it re-checks active jobs and only then deletes the
+workspace row. Retained on purpose: the audit trail, usage metering and data
+contracts (evidence). A session token whose account no longer exists is
+refused by the auth middleware.
 
 **Legacy schedule zones (Sec-15).** A schedule row stored before zones were
 validated (e.g. `Mars/Olympus`) stays writable — pause, rename, back-off —
 because the zone is checked only when a write sets it or changes the
-cadence. The scheduler normalises such zones to UTC once at start-up,
-auditing each row as `schedule.timezone.normalized` (from, to).
+cadence. At start-up (throttled to once per 10 minutes) the scheduler
+normalises such zones to UTC — only when the host's zone database is complete
+(`tzdata` is in requirements.txt), each write conditional on the stored value —
+pauses a repaired enabled schedule (no next run, a note in its history),
+notifies the workspace's channels, and audits `schedule.timezone.normalized`.
 
 ## Who is a platform admin
 

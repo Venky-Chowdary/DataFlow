@@ -402,16 +402,47 @@ async def patch_workspace(workspace_id: str, body: WorkspaceBody, request: Reque
     return {"workspace": ws.to_dict()}
 
 
+def _confirmed_delete(ws_name: str, confirm: str, reason: str) -> str:
+    """An irreversible wipe needs the workspace's name typed back, or a reason (S6)."""
+    reason = " ".join((reason or "").split())
+    if (confirm or "").strip() == ws_name or reason:
+        return reason
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Deleting a workspace removes its connectors, schedules, jobs, uploads and keys "
+            "and cannot be undone. Preview it with ?dry_run=true, then confirm with "
+            f"?confirm=<the workspace name, {ws_name!r}> or give a ?reason=."
+        ),
+    )
+
+
 @router.delete("/workspaces/{workspace_id}")
-async def delete_workspace_route(workspace_id: str, request: Request):
+async def delete_workspace_route(
+    workspace_id: str,
+    request: Request,
+    dry_run: bool = False,
+    confirm: str = "",
+    reason: str = "",
+):
+    """Delete a workspace and everything scoped to it (``services.workspace_teardown``).
+
+    ``?dry_run=true`` returns the counts and changes nothing. The real delete
+    needs ``?confirm=<workspace name>`` or a ``?reason=``.
+    """
     from services.workspace_teardown import WorkspaceBusy, teardown_workspace
 
     actor = _require_platform_admin(request)
-    if not get_workspace(workspace_id):
+    ws = get_workspace(workspace_id)
+    if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    if dry_run:
+        try:
+            return {"ok": True, **teardown_workspace(workspace_id, actor=actor, dry_run=True)}
+        except WorkspaceBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    why = _confirmed_delete(ws.name, confirm, reason)
     try:
-        # The whole cascade (schedules, connectors, jobs, keys, tenant policy,
-        # channels, memberships) — the same one a sandbox teardown runs.
         summary = teardown_workspace(workspace_id, actor=actor)
     except WorkspaceBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -420,7 +451,7 @@ async def delete_workspace_route(workspace_id: str, request: Request):
         actor=actor,
         resource=f"/team/workspaces/{workspace_id}",
         level="warn",
-        details=summary,
+        details={**summary, "name": ws.name, "reason": why or None, "confirmed_by_name": not why},
     )
     return {"ok": True, **summary}
 
@@ -869,6 +900,11 @@ async def post_sandbox_workspace(body: SandboxCreateBody, request: Request):
     from services.sandbox_workspaces import SandboxError, create_sandbox
 
     actor = _require_platform_admin(request)
+    if not body.create_account:
+        raise HTTPException(
+            status_code=400,
+            detail="A sandbox tester is always a new synthetic login: create_account=false is not supported",
+        )
     if not " ".join(body.reason.split()):
         raise HTTPException(status_code=422, detail="A reason is required for a sandbox workspace")
     try:
@@ -894,12 +930,28 @@ async def get_sandbox_workspaces(request: Request):
 
 @router.delete("/sandbox-workspaces/{workspace_id}")
 async def delete_sandbox_workspace(
-    workspace_id: str, request: Request, body: SandboxDeleteBody | None = None
+    workspace_id: str,
+    request: Request,
+    body: SandboxDeleteBody | None = None,
+    dry_run: bool = False,
+    confirm: str = "",
+    reason: str = "",
 ):
-    from services.sandbox_workspaces import SandboxError, delete_sandbox
+    """Tear a sandbox down; ``?dry_run=true`` previews, the real delete needs a name or reason."""
+    from services.sandbox_workspaces import SandboxError, delete_sandbox, is_sandbox
+    from services.workspace_teardown import WorkspaceBusy, teardown_workspace
 
     actor = _require_platform_admin(request)
+    ws = get_workspace(workspace_id)
+    if ws is None or not is_sandbox(ws):
+        raise HTTPException(status_code=404, detail="Sandbox workspace not found")
+    if dry_run:
+        try:
+            return teardown_workspace(workspace_id, actor=actor, dry_run=True)
+        except WorkspaceBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    why = _confirmed_delete(ws.name, confirm, reason or (body.reason if body else ""))
     try:
-        return delete_sandbox(workspace_id, actor=actor, reason=body.reason if body else "")
+        return delete_sandbox(workspace_id, actor=actor, reason=why or "confirmed by name")
     except SandboxError as exc:
         raise _sandbox_error(exc) from exc

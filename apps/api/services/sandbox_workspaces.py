@@ -115,13 +115,15 @@ def create_sandbox(
     ws = team_store.create_workspace(
         name=NAME_PREFIX + label, created_by=actor, sandbox_expires_at=expires, sandbox_tester=tester
     )
+    minted_at = ""
     try:
         user, issued = user_store.create_user(
             email=tester, name="Security tester", role="member", created_by=actor
         )
         # From here on the login is this sandbox's: the fingerprint lets the
         # teardown (and only it) delete exactly this record (S2).
-        ws.sandbox_tester_created_at = str(user.get("created_at") or "")
+        minted_at = str(user.get("created_at") or "")
+        ws.sandbox_tester_created_at = minted_at
         team_store._write_workspace(ws)
         team_store.add_workspace_member(
             workspace_id=ws.id, email=tester, role="admin", added_by=actor, actor_is_platform_admin=True
@@ -134,6 +136,10 @@ def create_sandbox(
         # created it — a create that lost a race to a real account recorded no
         # fingerprint, so that account is never deleted.
         _teardown(ws.id, actor=actor)
+        if minted_at:
+            # The workspace write that records the fingerprint may itself have
+            # failed: delete the login this call minted from the in-memory copy.
+            user_store.delete_user_if_created_at(email=tester, created_at=minted_at)
         raise
     _audit("team.sandbox.create", actor, ws.id, {
         "workspace_id": ws.id,
@@ -217,6 +223,9 @@ def sweep_expired_sandboxes(*, now: datetime | None = None, force: bool = False)
             logger.info("Expired sandbox %s has an active job; the next sweep retries", ws.id)
         except Exception:  # noqa: BLE001 — one sandbox must not stop the sweep
             logger.exception("Expired sandbox %s could not be removed", ws.id)
+    from services.maintenance_claim import complete_run
+
+    complete_run(SWEEP_CLAIM)
     return removed
 
 

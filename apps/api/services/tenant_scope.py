@@ -234,6 +234,12 @@ class TenantScope:
             raise HTTPException(status_code=403, detail="No workspace membership")
         if write and not self.can_write(ws):
             raise HTTPException(status_code=403, detail="Write access to workspace denied")
+        if write:
+            from services.team_store import workspace_closing
+
+            if workspace_closing(ws):
+                # Tombstoned by a teardown in progress (S3): nothing new lands.
+                raise HTTPException(status_code=409, detail="This workspace is being deleted")
         return ws
 
     def narrowed(self, workspace_id: str) -> "TenantScope":

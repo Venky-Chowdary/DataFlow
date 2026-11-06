@@ -55,4 +55,4 @@ def provision(ent, *, ttl_hours: int = 24, name: str = "security retest") -> San
 def sandbox(ent):
     box = provision(ent)
     yield box
-    ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}")
+    ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params={"reason": "test teardown"})

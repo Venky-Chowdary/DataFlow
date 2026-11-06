@@ -346,6 +346,9 @@ class Workspace:
     #: a real account (a lost create race, or one re-created later under the
     #: same email) is never touched. Empty = this sandbox minted no login.
     sandbox_tester_created_at: str = ""
+    #: Set when deletion starts (``services.workspace_teardown``): a closing
+    #: workspace accepts no write, no new job and no schedule claim (S3).
+    deleting_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -361,6 +364,7 @@ class Workspace:
             sandbox_expires_at=str(data.get("sandbox_expires_at") or ""),
             sandbox_tester=str(data.get("sandbox_tester") or ""),
             sandbox_tester_created_at=str(data.get("sandbox_tester_created_at") or ""),
+            deleting_at=str(data.get("deleting_at") or ""),
         )
 
 
@@ -536,6 +540,54 @@ def _delete_membership(workspace_id: str, email: str) -> bool:
         ]
         removed = len(data["memberships"]) != before
     return removed
+
+
+def mark_workspace_closing(workspace_id: str) -> Workspace | None:
+    """Tombstone a workspace before its teardown (idempotent; keeps the first stamp)."""
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        return None
+    if not ws.deleting_at:
+        ws.deleting_at = _now()
+        _write_workspace(ws)
+    return ws
+
+
+def workspace_closing(workspace_id: str) -> bool:
+    """True while a teardown of ``workspace_id`` is under way (or was interrupted)."""
+    if not workspace_id:
+        return False
+    try:
+        ws = get_workspace(workspace_id)
+    except Exception:  # noqa: BLE001 — an unreadable store is not a tombstone
+        return False
+    return bool(ws is not None and ws.deleting_at)
+
+
+class WorkspaceClosing(PermissionError):
+    """A write, job or schedule claim aimed at a workspace being deleted."""
+
+    def __init__(self, workspace_id: str):
+        super().__init__(f"Workspace {workspace_id} is being deleted")
+        self.workspace_id = workspace_id
+
+
+def assert_workspace_open(workspace_id: str) -> None:
+    if workspace_closing(workspace_id):
+        raise WorkspaceClosing(workspace_id)
+
+
+def delete_workspace_memberships(workspace_id: str) -> int:
+    """Remove every membership of a workspace (teardown, before the workspace row)."""
+    db = _database()
+    if db is not None:
+        return int(db[MEMBERS_COLLECTION].delete_many({"workspace_id": workspace_id}).deleted_count)
+    with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
+        before = len(data.get("memberships", []))
+        data["memberships"] = [
+            m for m in data.get("memberships", []) if m.get("workspace_id") != workspace_id
+        ]
+        return before - len(data["memberships"])
 
 
 def _delete_workspace_rows(workspace_id: str) -> bool:

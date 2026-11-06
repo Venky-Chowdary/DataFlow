@@ -114,3 +114,27 @@ def landing_workspace_id(scope: Any) -> str:
 
 
 __all__ = ["landing_workspace_id", "last_used_workspace", "remember_workspace"]
+
+
+def forget_workspace(workspace_id: str, *, dry_run: bool = False) -> int:
+    """Clear every account's "last used" pointer at ``workspace_id`` (workspace teardown)."""
+    from services import team_store
+    from services.metadata_backend import json_doc_transaction, load_json_doc
+
+    ws = str(workspace_id or "").strip()
+    if not ws:
+        raise ValueError("a workspace is required")
+    db = team_store._database()
+    if db is not None:
+        query = {"last_workspace_id": ws}
+        coll = db[PREFERENCES_COLLECTION]
+        return int(coll.count_documents(query) if dry_run else coll.delete_many(query).deleted_count)
+    prefs = (load_json_doc(_file_path(), _EMPTY_FILE).get("preferences") or {})
+    hits = [k for k, row in prefs.items() if isinstance(row, dict) and row.get("last_workspace_id") == ws]
+    if hits and not dry_run:
+        with json_doc_transaction(_file_path(), _EMPTY_FILE) as data:
+            current = data.setdefault("preferences", {})
+            for key in hits:
+                if (current.get(key) or {}).get("last_workspace_id") == ws:
+                    current.pop(key, None)
+    return len(hits)

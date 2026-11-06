@@ -53,7 +53,7 @@ def test_only_platform_admins_create_list_or_delete_sandboxes(ent, sandbox):
         assert client.get("/api/v1/team/sandbox-workspaces").status_code == 403
         assert client.delete(f"/api/v1/team/sandbox-workspaces/{sandbox.workspace_id}").status_code == 403
     # A workspace that is not a sandbox is never deleted by this route.
-    assert ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{ws}").status_code == 404
+    assert ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{ws}", params={"reason": "test teardown"}).status_code == 404
     from services import team_store
 
     assert team_store.get_workspace(ws) is not None
@@ -107,7 +107,7 @@ def test_delete_tears_down_tenant_channels_and_keys(ent, one_proxy):
                   headers={"X-Forwarded-For": INSIDE})
     assert hook.status_code == 200, hook.text
 
-    gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}")
+    gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params={"reason": "test teardown"})
     assert gone.status_code == 200, gone.text
     summary = gone.json()
     assert summary["tenants_removed"] == 1 and summary["channels_removed"] == 1
@@ -191,7 +191,7 @@ def test_teardown_removes_login_schedule_connector_credentials_and_keys(ent, how
     assert key.status_code == 200, key.text
     assert box.tester.get("/api/v1/auth/me").status_code == 200
     if how == "delete":
-        gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}")
+        gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params={"reason": "test teardown"})
         assert gone.status_code == 200, gone.text
         summary = gone.json()
     else:
@@ -213,7 +213,7 @@ def test_plain_workspace_delete_runs_the_same_cascade(ent):
     assert box.tester.post("/api/v1/workspace/tenant",
                            json={"workspace_id": box.workspace_id, "name": "t"}).status_code == 200
     key = box.tester.post("/api/v1/workspace/api-keys", json={"name": "k", "role": "viewer", "expires_in": "7d"})
-    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}")
+    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params={"reason": "test teardown"})
     assert gone.status_code == 200, gone.text
     body = gone.json()
     assert body["tenants_removed"] == 1 and body["schedules_removed"] == 1
@@ -235,13 +235,13 @@ def test_active_job_makes_the_teardown_wait(ent):
     svc = get_mongodb_service()
     job_id = svc.create_transfer_job({"name": "c18-running", "workspace_id": box.workspace_id})
     svc.get_database()["transfer_jobs"].update_one({"name": "c18-running"}, {"$set": {"status": "running"}})
-    busy = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}")
+    busy = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params={"reason": "test teardown"})
     assert busy.status_code == 409, busy.text
     from services import team_store
 
     assert team_store.get_workspace(box.workspace_id) is not None  # nothing deleted
     svc.get_database()["transfer_jobs"].update_one({"name": "c18-running"}, {"$set": {"status": "cancelled"}})
-    assert ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}").status_code == 200
+    assert ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}", params={"reason": "test teardown"}).status_code == 200
     assert svc.get_database()["transfer_jobs"].count_documents({"workspace_id": box.workspace_id}) == 0
     assert job_id
 
@@ -289,7 +289,7 @@ def test_teardown_from_another_workspace_header_removes_the_targets_connectors(e
         else f"/api/v1/team/sandbox-workspaces/{box.workspace_id}"
     )
     # The web sends X-Workspace-Id on every call: here, a different workspace.
-    gone = ent.admin.delete(path, headers={"X-Workspace-Id": home})
+    gone = ent.admin.delete(path, headers={"X-Workspace-Id": home}, params={"reason": "test teardown"})
     assert gone.status_code == 200, gone.text
     assert gone.json()["connectors_removed"] == 1
     assert gone.json()["schedules_removed"] == 1
@@ -305,7 +305,7 @@ def test_plain_workspace_delete_of_a_sandbox_removes_the_tester_login(ent):
 
     box = provision(ent)
     assert box.tester.get("/api/v1/auth/me").status_code == 200
-    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}")
+    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}", params={"reason": "test teardown"})
     assert gone.status_code == 200, gone.text
     assert gone.json()["tester_login_removed"] is True
     assert user_store.get_user(box.tester_email) is None
