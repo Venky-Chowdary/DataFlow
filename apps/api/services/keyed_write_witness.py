@@ -31,9 +31,10 @@ time, per key:
 * a written key the destination no longer holds (or holds differently) while
   the source deleted it -> loss, vetoes (it is in neither compared population);
 * a source key this run never wrote and the destination does not hold ->
-  concurrent insert, a separate disclosed category; only when Gate-8's own
-  source count equals the witnessed rows (the key was not in the write-time
-  population). L1 and the census still grade the counts.
+  concurrent insert, a separate disclosed category; only when the probe COUNT
+  taken before the read equals the witnessed rows (the key was not in the
+  write-time population). Otherwise it stays compared. L1 and the census still
+  grade the counts.
 
 The witness lives in this process only, keyed by job id, and only a job inside
 ``keyed_write_witness_scope`` (``execute_tracked``) may register one. It is
@@ -134,6 +135,9 @@ class KeyedWriteWitness:
         self.encoder = encoder
         self.rows: dict[KeyCells, int] = {}
         self.rows_added = 0
+        #: An independent source count taken BEFORE the read (the stream's
+        #: probe COUNT), or 0 when the route had none.
+        self.expected_rows = 0
         self.complete = bool(self.key_columns) and encoder is not None
         self.reason = "" if self.complete else "no_key_columns_or_encoder"
 
@@ -203,6 +207,7 @@ def begin_keyed_write_witness(
                 key_columns or [], max_rows=MAX_LADDER_ROWS,
                 encoder=Encoder(columns or [], dest_db_type, dest_types),
             )
+            witness.expected_rows = max(int(expected_rows or 0), 0)
             _REGISTRY[jid] = witness
     if isinstance(summary, dict):
         summary[SUMMARY_KEY] = {"started": witness is not None, "reason": reason}
@@ -254,7 +259,6 @@ def split_concurrent_source_drift(
     target_rows: list[dict],
     key_columns: list[str],
     rows_written: int | None = None,
-    gate8_source_rows: int | None = None,
     full_target_rows: list[dict] | None = None,
     excluded_key_values: Iterable[tuple] = (),
     not_started_reason: str = "",
@@ -324,9 +328,13 @@ def split_concurrent_source_drift(
             deleted.append(k)  # the source deleted it after the write
         else:
             losses.append(k)  # in neither population and not as written
-    snapshot_ok = gate8_source_rows is not None and int(gate8_source_rows) == witness.rows_added
+    # A source key this run never wrote is a concurrent insert only when a
+    # count independent of the reader (the probe COUNT taken before the read)
+    # equals the rows the witness saw. The reader's own committed count is
+    # circular: a row the reader dropped lowers it and the witness alike.
+    snapshot_ok = witness.expected_rows > 0 and witness.expected_rows == witness.rows_added
     if inserted and not snapshot_ok:
-        inserted = set()  # cannot prove the key was not in the write-time population
+        inserted = set()  # unproven: the key stays in the compared populations
     excused = moved | inserted
 
     def _named(ks: Iterable[KeyCells], rows_by_key: dict) -> list[dict]:

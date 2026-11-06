@@ -229,12 +229,15 @@ def _witnessed(rows, cols):
 
 
 def _split(w, source, target, *, written=None, gate8=None, full=None):
+    """``gate8``: the probe COUNT taken before the read (witness.expected_rows)."""
     from services.keyed_write_witness import split_concurrent_source_drift
 
+    if w is not None and gate8 is not None:
+        w.expected_rows = gate8
     return split_concurrent_source_drift(
         witness=w, source_rows=source, target_rows=target, key_columns=["region", "id"],
         rows_written=w.rows_added if written is None and w is not None else written,
-        gate8_source_rows=gate8, full_target_rows=full,
+        full_target_rows=full,
     )
 
 
@@ -266,8 +269,8 @@ def test_review_probe_a_key_the_witness_lacks_is_never_drift():
     _s, _t, rec = _split(w, rows, rows[:2], written=3, gate8=3)
     assert rec["attributed"] is False and rec["reason"] == "witnessed_rows_differ_from_rows_written"
     # Even a witness that matches the writer's count never excuses key 3 as
-    # drift; without proof that 3 was absent at write time (Gate-8's count
-    # saw 3 rows) it is not excused as an insert either: it stays compared.
+    # drift; without proof that 3 was absent at write time (the probe COUNT
+    # before the read saw 3 rows) it is not excused as an insert either.
     s, t, rec = _split(w, rows, rows[:2], written=2, gate8=3)
     assert rec["attributed"] is True and rec["count"] == 0 and rec["inserted_count"] == 0
     assert [r["id"] for r in s] == [1, 2, 3] and [r["id"] for r in t] == [1, 2]

@@ -169,7 +169,7 @@ def test_should_fix3_attribution_renders_both_sides_with_the_witness_encoder():
     assert ladder_enc.row_digests(written)[0] != witness_enc.row_digests(written)[0]
     _s, _t, rec = split_concurrent_source_drift(
         witness=w, source_rows=source, target_rows=[dict(r) for r in written],
-        key_columns=["grp", "id"], rows_written=5, gate8_source_rows=5,
+        key_columns=["grp", "id"], rows_written=5,
     )
     assert rec["attributed"] is True and rec["count"] == 1 and rec["sample_keys"][0]["id"] == 2
 
@@ -268,3 +268,32 @@ def test_nit7_a_cell_cannot_pose_as_a_key(world, monkeypatch):
     assert not res.success, "the rewritten (eu, 4) was excused"
     rows = ((res.reconciliation or {}).get("verification_ladder") or {}).get("localization", {}).get("rows") or []
     assert any("eu" in str(r.get("pk")) and "4" in str(r.get("pk")) for r in rows), rows
+
+
+def test_review_s1_a_row_the_reader_dropped_is_never_a_concurrent_insert(world, monkeypatch):
+    """Reviewer repro: (eu, 99) is in the source before the run and is dropped
+    before the chunk handler. The reader's own count drops with it, so the old
+    "Gate-8 count == witnessed rows" check proved nothing and the missing row
+    read as a concurrent insert. The probe COUNT before the read saw 31."""
+    fake, conn, src, dst = world
+    assert _run(fake, src, dst).success
+    conn.cursor().execute(f"INSERT INTO \"{src}\" VALUES ('eu', 99, '99.50', 'new row')")
+    orig_chunk = stream_mod._process_db_chunk
+    dropped: list[int] = []
+
+    def _reader_drops(run, idx, batch):
+        cols = [str(h).lower() for h in batch.headers]
+        ri, ii = cols.index("region"), cols.index("id")
+        kept = [r for r in batch.rows if not (r[ri] == "eu" and str(r[ii]) == "99")]
+        dropped.append(len(batch.rows) - len(kept))
+        batch.rows = kept
+        return orig_chunk(run, idx, batch)
+
+    monkeypatch.setattr(stream_mod, "_process_db_chunk", _reader_drops)
+    res = _run(fake, src, dst)
+    assert sum(dropped) == 1, "the reader did not drop the row"
+    drift = (res.reconciliation or {}).get("concurrent_source_drift") or {}
+    assert not drift.get("inserted_count"), drift
+    assert not any("concurrent insert" in w for w in (res.reconciliation or {}).get("warnings") or [])
+    assert not res.success, "a row the reader dropped completed green"
+    assert ("eu", 99) not in _dest(conn, dst)
