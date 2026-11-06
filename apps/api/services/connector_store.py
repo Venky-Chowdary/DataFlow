@@ -11,11 +11,18 @@ import json
 import logging
 import os
 from services.brand_env import getenv_brand
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
 
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
@@ -570,6 +577,52 @@ def _load_all() -> list[SavedConnector]:
     return items
 
 
+_FILE_MUTATION_GUARD = threading.RLock()
+_FILE_MUTATION_STATE = threading.local()
+
+
+@contextmanager
+def _file_store_mutation() -> Iterator[None]:
+    """Serialize one read-modify-write cycle on the file-backed store.
+
+    Every mutation loads the whole list, changes one entry and writes the
+    list back. Two writers interleaving (a job's terminal stamp on its
+    connectors while a request saves a new one) each read the file, apply
+    their own change and write back, the later write silently dropping the
+    other's row: the connector a user had just saved was "not found" a
+    moment later (D195 run 2 in CI). The write itself stays the atomic
+    temp-file replace; this lock makes the cycle around it exclusive across
+    threads (RLock) and across worker processes sharing the file (``flock``
+    on a sidecar, POSIX only, as for the other JSON stores). Re-entrant, so
+    a mutation that calls another (``create_connector`` → ``update_connector``)
+    holds one lock.
+    """
+    depth = getattr(_FILE_MUTATION_STATE, "depth", 0)
+    if depth:
+        _FILE_MUTATION_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _FILE_MUTATION_STATE.depth = depth
+        return
+    with _FILE_MUTATION_GUARD:
+        _FILE_MUTATION_STATE.depth = 1
+        store_path = _store_path()
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = store_path.with_suffix(store_path.suffix + ".lock")
+        try:
+            with open(lock_path, "a+", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            _FILE_MUTATION_STATE.depth = 0
+
+
 def _save_all(connectors: list[SavedConnector]) -> None:
     store_path = _store_path()
     store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -849,9 +902,10 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         except Exception as exc:
             raise _mongo_write_failed("create", conn.id, exc) from exc
 
-    connectors = _load_all()
-    connectors.append(conn)
-    _save_all(connectors)
+    with _file_store_mutation():
+        connectors = _load_all()
+        connectors.append(conn)
+        _save_all(connectors)
     return conn
 
 
@@ -955,16 +1009,17 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
         except Exception as exc:
             raise _mongo_write_failed("update", connector_id, exc) from exc
 
-    connectors = _load_all()
-    for i, c in enumerate(connectors):
-        if c.id != connector_id:
-            continue
-        if workspace_id is not None and c.workspace_id not in (workspace_id, ""):
-            continue
-        updated = _merge(c)
-        connectors[i] = updated
-        _save_all(connectors)
-        return updated
+    with _file_store_mutation():
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id != connector_id:
+                continue
+            if workspace_id is not None and c.workspace_id not in (workspace_id, ""):
+                continue
+            updated = _merge(c)
+            connectors[i] = updated
+            _save_all(connectors)
+            return updated
     return None
 
 
@@ -980,19 +1035,32 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
         except Exception as exc:
             raise _mongo_write_failed("delete", connector_id, exc) from exc
 
-    connectors = _load_all()
-    before = len(connectors)
-    filtered = [
-        c for c in connectors
-        if not (
-            c.id == connector_id
-            and (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
-        )
-    ]
-    if len(filtered) == before:
-        return False
-    _save_all(filtered)
+    with _file_store_mutation():
+        connectors = _load_all()
+        before = len(connectors)
+        filtered = [
+            c for c in connectors
+            if not (
+                c.id == connector_id
+                and (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
+            )
+        ]
+        if len(filtered) == before:
+            return False
+        _save_all(filtered)
     return True
+
+
+def _patch_file_connector(connector_id: str, patch: dict[str, Any]) -> bool:
+    """Merge ``patch`` into one stored connector of the file store; False when absent."""
+    with _file_store_mutation():
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id == connector_id:
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
+                _save_all(connectors)
+                return True
+    return False
 
 
 def mark_tested(connector_id: str, ok: bool, *, tested_at: str | None = None) -> None:
@@ -1010,24 +1078,14 @@ def mark_tested(connector_id: str, ok: bool, *, tested_at: str | None = None) ->
             # Keep file mirror in sync when present so dual-backend reads cannot
             # resurrect a stale failed badge after a green probe.
             try:
-                connectors = _load_all()
-                for i, c in enumerate(connectors):
-                    if c.id == connector_id:
-                        connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                        _save_all(connectors)
-                        break
+                _patch_file_connector(connector_id, patch)
             except Exception as mirror_exc:
                 logger.debug("File mirror mark_tested skipped: %s", mirror_exc)
             return
         except Exception as exc:
             logger.warning("MongoDB mark_tested failed, falling back to file: %s", exc)
 
-    connectors = _load_all()
-    for i, c in enumerate(connectors):
-        if c.id == connector_id:
-            connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-            _save_all(connectors)
-            return
+    _patch_file_connector(connector_id, patch)
 
 
 def note_transfer_succeeded(*connector_ids: str | None) -> int:
@@ -1054,13 +1112,8 @@ def note_transfer_succeeded(*connector_ids: str | None) -> int:
                     continue
             except Exception as exc:  # noqa: BLE001 - file store is the fallback
                 logger.warning("MongoDB note_transfer_succeeded failed, falling back to file: %s", exc)
-        connectors = _load_all()
-        for i, c in enumerate(connectors):
-            if c.id == cid:
-                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                _save_all(connectors)
-                stamped += 1
-                break
+        if _patch_file_connector(cid, patch):
+            stamped += 1
     return stamped
 
 
@@ -1122,24 +1175,14 @@ def mark_used(*connector_ids: str | None) -> int:
                 if result.matched_count:
                     stamped += 1
                     try:
-                        connectors = _load_all()
-                        for i, c in enumerate(connectors):
-                            if c.id == cid:
-                                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                                _save_all(connectors)
-                                break
+                        _patch_file_connector(cid, patch)
                     except Exception as mirror_exc:
                         logger.debug("File mirror mark_used skipped: %s", mirror_exc)
                     continue
             except Exception as exc:
                 logger.warning("MongoDB mark_used failed, falling back to file: %s", exc)
-        connectors = _load_all()
-        for i, c in enumerate(connectors):
-            if c.id == cid:
-                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
-                _save_all(connectors)
-                stamped += 1
-                break
+        if _patch_file_connector(cid, patch):
+            stamped += 1
     return stamped
 
 
