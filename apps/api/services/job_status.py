@@ -164,6 +164,10 @@ def checkpoint_partial_chunk_on_cancel(
     dest_type: str,
     job_id: str,
     connector: str = "",
+    next_chunk_idx: int | None = None,
+    use_keyset: bool = False,
+    keyset_col: str = "",
+    incremental: bool = False,
 ) -> bool:
     """Make the committed prefix of a cancelled chunk a durable checkpoint.
 
@@ -180,8 +184,16 @@ def checkpoint_partial_chunk_on_cancel(
     prefix is exactly what landed (``destination_rows_by_run`` equals the
     applied tally plus this chunk's writes): a later chunk that also committed
     out of order, a keyed upsert (no row offset), or an overwrite (the resumed
-    run re-parks the collection) leave the checkpoint as it was. Returns True
-    when a checkpoint was saved.
+    run re-parks the collection) leave the checkpoint as it was.
+
+    The writer counts rows of the page it was handed, so the offset it implies
+    is a source-row offset only when the chunk is the next one to apply
+    (``next_chunk_idx``; a pool may have finished a later chunk first) and the
+    page was not shaped (a recipe that filters or expands rows breaks the
+    one-to-one mapping). Under keyset pagination the resume bookmark must be
+    the key after the consumed prefix, which the chunk stamps on the cancel;
+    an incremental run keeps its per-page watermark semantics and is left to
+    the existing resume. Returns True when a checkpoint was saved.
     """
     consumed = getattr(exc, "chunk_source_rows_consumed", None)
     rows_written = getattr(exc, "rows_written", None)
@@ -199,9 +211,16 @@ def checkpoint_partial_chunk_on_cancel(
 
     if str(write_mode or "").lower() == "upsert" or is_overwrite_sync(sync_mode):
         return False
-    if not is_schemaless_family(dest_type):
+    if incremental or not is_schemaless_family(dest_type):
         return False
     if int(by_run) != int(rows_applied) + int(rows_written):
+        return False
+    if next_chunk_idx is None or getattr(exc, "chunk_idx", None) != int(next_chunk_idx):
+        return False
+    if getattr(exc, "chunk_shaped", True):
+        return False
+    bookmark = getattr(exc, "chunk_keyset_bookmark", None)
+    if use_keyset and not bookmark:
         return False
     details = [
         d for d in (getattr(exc, "chunk_rejected_details", None) or []) if isinstance(d, dict)
@@ -219,6 +238,9 @@ def checkpoint_partial_chunk_on_cancel(
         )
     checkpoint.offset = int(committed_offset) + int(consumed)
     checkpoint.rows_processed = int(rows_applied) + int(rows_written)
+    if use_keyset:
+        checkpoint.cursor_value = bookmark
+        checkpoint.cursor_column = str(keyset_col or "") or checkpoint.cursor_column
     checkpoint.rejected_rows = int(rejected_applied) + len(details)
     checkpoint.phase = "writing"
     checkpoint.status = "cancelled"

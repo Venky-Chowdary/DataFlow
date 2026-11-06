@@ -1453,12 +1453,9 @@ def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: b
     conn = engine.connect()
     try:
         _apply_timeout(conn, spec.dialect or str(cfg.get("type") or ""), timeout)
-        if _is_mysql_family(spec.dialect or str(cfg.get("type") or "")):
-            # Same session as table mode: a TIMESTAMP's digits are then the
-            # UTC instant, whatever zone the server runs in (round-5 policy).
-            from services.timezone_policy import MYSQL_UTC_PIN_SQL
-
-            conn.exec_driver_sql(MYSQL_UTC_PIN_SQL)
+        # MySQL-family sessions are pinned to UTC when the engine connects
+        # (generic_sql._engine), so a TIMESTAMP's digits are the UTC instant
+        # here as in table mode.
         from services.sql_literals import escape_sqlalchemy_literal_colons
 
         # ``:1`` inside a JSON or time literal is not a bind (QA R2-004).

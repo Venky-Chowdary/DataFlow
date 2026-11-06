@@ -16,6 +16,7 @@ the real REST cancel, timed between two writer batches so the assertion
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -33,6 +34,10 @@ pytestmark = pytest.mark.timeout(900)
 # and the DECIMAL boundary at row 4,000 inside the uncommitted remainder.
 ROWS = 9_000
 CANCEL_AFTER_BATCHES = 3
+# Two engine chunks (20,000-row chunk): a cancel in the second chunk tests the
+# partial checkpoint against an already-applied chunk's keyset bookmark.
+ROWS_TWO_CHUNKS = 25_000
+CANCEL_AFTER_BATCHES_TWO_CHUNKS = 23
 
 
 def _name(i: int):
@@ -57,8 +62,7 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-@pytest.fixture
-def route():
+def _make_route(rows: int, *, with_tags: bool = False):
     if not h.port_up(27017):
         pytest.skip("MongoDB not reachable on :27017")
     h.pg_conn().close()
@@ -66,21 +70,34 @@ def route():
 
     token = uuid.uuid4().hex[:8]
     table = f"r12d5_src_{token}"
+    # ``tags`` exists only for the unnest recipe leg: a JSONB column into a
+    # Mongo ARRAY is a fidelity question of its own that the plain legs must
+    # not carry.
+    tags_col = ", tags JSONB" if with_tags else ""
     h.execute(
         "postgresql",
-        f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, name TEXT, amount NUMERIC(12,4))",
+        f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, name TEXT, amount NUMERIC(12,4)"
+        f"{tags_col})",
     )
     conn = h.pg_conn()
     try:
         with conn.cursor() as cur:
             from psycopg2.extras import execute_values
 
-            execute_values(
-                cur,
-                f"INSERT INTO {table} (id, name, amount) VALUES %s",  # nosec B608
-                [(i, _name(i), _amount(i)) for i in range(1, ROWS + 1)],
-                page_size=5000,
-            )
+            if with_tags:
+                execute_values(
+                    cur,
+                    f"INSERT INTO {table} (id, name, amount, tags) VALUES %s",  # nosec B608
+                    [(i, _name(i), _amount(i), '["a", "b"]') for i in range(1, rows + 1)],
+                    page_size=5000,
+                )
+            else:
+                execute_values(
+                    cur,
+                    f"INSERT INTO {table} (id, name, amount) VALUES %s",  # nosec B608
+                    [(i, _name(i), _amount(i)) for i in range(1, rows + 1)],
+                    page_size=5000,
+                )
         conn.commit()
     finally:
         conn.close()
@@ -88,15 +105,43 @@ def route():
                             **h.dest_config("postgresql")})
     mc = pymongo.MongoClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=3000)
     coll = mc["dataflow_test"][f"r12d5_dst_{token}"]
+    return {"src": src.id, "table": table, "coll": coll, "rows": rows, "_mc": mc}
+
+
+def _drop_route(env: dict) -> None:
+    env["coll"].drop()
+    env["_mc"].close()
+    h.drop_table("postgresql", env["table"])
+
+
+@pytest.fixture
+def route():
+    env = _make_route(ROWS)
     try:
-        yield {"src": src.id, "table": table, "coll": coll}
+        yield env
     finally:
-        coll.drop()
-        mc.close()
-        h.drop_table("postgresql", table)
+        _drop_route(env)
 
 
-def _form(env: dict, sync_mode: str) -> dict:
+@pytest.fixture
+def route_tags():
+    env = _make_route(ROWS, with_tags=True)
+    try:
+        yield env
+    finally:
+        _drop_route(env)
+
+
+@pytest.fixture
+def route_two_chunks():
+    env = _make_route(ROWS_TWO_CHUNKS)
+    try:
+        yield env
+    finally:
+        _drop_route(env)
+
+
+def _form(env: dict, sync_mode: str, recipe: dict | None = None) -> dict:
     form = {
         "source_kind": "database", "source_format": "postgresql",
         "source_connector_id": env["src"], "source_table": env["table"],
@@ -109,6 +154,8 @@ def _form(env: dict, sync_mode: str) -> dict:
     }
     if sync_mode == "incremental_upsert":
         form["stream_contracts_json"] = ""
+    if recipe is not None:
+        form["shape_recipe_json"] = json.dumps(recipe)
     return form
 
 
@@ -133,7 +180,7 @@ def _wait(job_id: str, timeout_s: float = 600.0) -> dict:
     return job
 
 
-def _cancel_between_batches(monkeypatch, client, coll):
+def _cancel_between_batches(monkeypatch, client, coll, after: int = CANCEL_AFTER_BATCHES):
     """Cancel through REST right after the Nth insert_many of the first run."""
     import connectors.mongodb_writer as writer
     from services.mongodb_service import get_mongodb_service
@@ -148,7 +195,7 @@ def _cancel_between_batches(monkeypatch, client, coll):
         n = real(target, docs)
         with lock:
             state["calls"] += 1
-            fire = state["armed"] and state["calls"] == CANCEL_AFTER_BATCHES
+            fire = state["armed"] and state["calls"] == after
             if fire:
                 state["armed"] = False
         if fire:
@@ -165,11 +212,13 @@ def _cancel_between_batches(monkeypatch, client, coll):
     return state
 
 
-def _assert_exact(coll) -> None:
+def _assert_exact(coll, rows: int = ROWS) -> None:
+    # Documents, not distinct ids: a resumed prefix re-written is a duplicate.
+    assert coll.count_documents({}) == rows, coll.count_documents({})
     got = {d["id"]: (d.get("name", "<missing>"), d.get("amount")) for d in coll.find({}, {"_id": 0})}
-    assert len(got) == ROWS, len(got)
+    assert len(got) == rows, len(got)
     bad = []
-    for i in range(1, ROWS + 1):
+    for i in range(1, rows + 1):
         name, amount = got[i]
         amount = amount.to_decimal() if hasattr(amount, "to_decimal") else Decimal(str(amount))
         if name != _name(i) or amount != _amount(i):
@@ -224,3 +273,79 @@ def test_cancel_stops_mongo_writer_and_retry_completes_exact(client, route, monk
         )
         assert retried.get("records_processed") == ROWS
     _assert_exact(coll)
+
+
+def _cancelled_run(client, route, monkeypatch, sync_mode, *, recipe=None, after=CANCEL_AFTER_BATCHES):
+    """Start, cancel between batches, and return (job, landed, state)."""
+    coll = route["coll"]
+    state = _cancel_between_batches(monkeypatch, client, coll, after=after)
+    resp = client.post("/api/v1/transfer/run", data=_form(route, sync_mode, recipe))
+    assert resp.status_code == 200, resp.text
+    job_id = resp.json()["job_id"]
+    job = _wait(job_id)
+    assert state["job_id"] == job_id
+    assert job["status"] == "cancelled", (job.get("status"), job.get("error"))
+    landed = coll.count_documents({})
+    assert landed - state["at_cancel"] <= 1000, (state["at_cancel"], landed, state.get("after"))
+    assert job.get("records_processed") == landed, (job.get("records_processed"), landed)
+    return job_id, landed
+
+
+_SHAPED = {
+    # Removes a row: the page the writer sees is shorter than the source page.
+    "filter": {"version": 1, "steps": [
+        {"op": "filter_rows", "options": {"condition": "[id] <> 2"}},
+    ]},
+    # Expands rows: two documents per source row.
+    "unnest": {"version": 1, "steps": [
+        {"op": "unnest_json", "column": "tags", "options": {"to": "tag"}},
+    ]},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SHAPED))
+def test_cancel_with_a_shaping_recipe_leaves_no_partial_checkpoint(client, request, monkeypatch, shape):
+    """A recipe that removes or expands rows breaks the written-documents ->
+    source-rows mapping, so the cancelled chunk's prefix is not checkpointed:
+    retry still knows the committed rows, resume is refused (no skipped source
+    rows, no duplicated prefix), and the collection is left as it was."""
+    route = request.getfixturevalue("route_tags" if shape == "unnest" else "route")
+    job_id, landed = _cancelled_run(
+        client, route, monkeypatch, "full_refresh_append", recipe=_SHAPED[shape]
+    )
+    resp = client.post(f"/api/v1/connectors/jobs/{job_id}/retry")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["rows_committed"] == landed
+    resp = client.post(f"/api/v1/connectors/jobs/{job_id}/resume")
+    assert resp.status_code == 409, resp.text
+    assert "No durable checkpoint" in json.dumps(resp.json()), resp.text
+    assert route["coll"].count_documents({}) == landed
+
+
+def test_cancel_in_the_second_chunk_keeps_the_prefix_and_refuses_a_keyless_resume(
+    client, route_two_chunks, monkeypatch
+):
+    """Chunk 1 (20,000 rows) is applied and checkpointed; the cancel lands three
+    batches into chunk 2. A keyless streaming insert is never resumed past a
+    chunk boundary (the engine's resume contract: set a primary key or re-run
+    with overwrite), so the committed prefix stays exactly as it is — nothing
+    is re-read from chunk 1's bookmark (duplicates) and nothing is skipped —
+    and retry still knows the committed count."""
+    route = route_two_chunks
+    job_id, landed = _cancelled_run(
+        client, route, monkeypatch, "full_refresh_append", after=CANCEL_AFTER_BATCHES_TWO_CHUNKS
+    )
+    assert 23_000 <= landed <= 24_000, landed
+    resp = client.post(f"/api/v1/connectors/jobs/{job_id}/retry")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["rows_committed"] == landed
+    resp = client.post(f"/api/v1/connectors/jobs/{job_id}/resume")
+    if resp.status_code == 200:
+        resumed = _wait(resp.json().get("job_id") or job_id)
+        assert resumed["status"] == "failed", (resumed.get("status"), resumed.get("error"))
+        assert "Cannot resume a streaming insert without a primary key" in str(resumed.get("error"))
+    else:
+        assert resp.status_code == 409, resp.text
+    coll = route["coll"]
+    assert coll.count_documents({}) == landed
+    assert len({d["id"] for d in coll.find({}, {"_id": 0, "id": 1})}) == landed

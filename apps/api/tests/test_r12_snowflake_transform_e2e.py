@@ -441,3 +441,34 @@ def test_d3_an_existing_uppercase_postgres_table_keeps_working(client):
             assert h.query("postgresql", f'SELECT count(*) FROM public."{dst}"')[0][0] == 4  # nosec B608
     finally:
         h.drop_table("postgresql", dst)
+
+
+def test_d3_plan_and_execute_share_one_create_new_name_rule():
+    """The fold lives in the mapping pipeline, which the plan (plan_transfer /
+    Validate) and Execute both call: the plan the operator approved and the
+    table Execute creates name the same columns. An existing table keeps its
+    live spelling; a non-Snowflake source is untouched."""
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    cols = ["ID", "AMOUNT", "MixedCase", "LABEL"]
+    schemas = [
+        {"name": c, "inferred_type": t, "samples": []}
+        for c, t in zip(cols, ["NUMBER(38,0)", "NUMBER(38,6)", "VARCHAR", "VARCHAR"])
+    ]
+
+    def targets(**kw) -> dict[str, str]:
+        out = run_mapping_pipeline(
+            cols, kw.pop("target_columns", []), source_schemas=schemas, use_llm=False,
+            source_db_type=kw.pop("source_db_type", "snowflake"),
+            destination_db_type="postgresql", **kw,
+        )
+        return {m["source"]: m["target"] for m in out["mappings"] if isinstance(m, dict)}
+
+    assert targets(destination_table_exists=False) == {
+        "ID": "id", "AMOUNT": "amount", "MixedCase": "MixedCase", "LABEL": "label",
+    }
+    live = [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in cols]
+    assert targets(target_columns=cols, target_schemas=live, destination_table_exists=True) == {
+        c: c for c in cols
+    }
+    assert targets(destination_table_exists=False, source_db_type="postgresql") == {c: c for c in cols}

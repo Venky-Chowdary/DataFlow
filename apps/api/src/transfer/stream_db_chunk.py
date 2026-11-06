@@ -209,9 +209,42 @@ def _process_db_chunk(run, idx: int, batch: Any) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         return _process_db_chunk_inner(run, idx, batch)
+    except BaseException as exc:
+        _stamp_cancelled_chunk(run, idx, batch, exc)
+        raise
     finally:
         cfg.phase_profile.add(
             PHASE_TRANSFORM_WRITE, time.perf_counter() - started, rows=rows
+        )
+
+
+def _stamp_cancelled_chunk(run, idx: int, batch: Any, exc: BaseException) -> None:
+    """Record, on a cancel, which chunk raised and what its page was.
+
+    The partial-chunk checkpoint (``job_status.checkpoint_partial_chunk_on_cancel``)
+    may only advance the offset when the writer's consumed-row count maps one
+    to one onto source rows: the raising chunk must be the next one to apply
+    (a pool runs several chunks at once), the page must be unshaped (a recipe
+    that removes or expands rows breaks the mapping), and under keyset
+    pagination the resume bookmark must be the key after the consumed prefix,
+    not the previous chunk's. Those facts live here, with the page.
+    """
+    from services.error_handling import TransferCancelled
+
+    if not isinstance(exc, TransferCancelled):
+        return
+    rows = list(getattr(batch, "rows", None) or [])
+    raw_rows = _raw_page_rows(batch)
+    exc.chunk_idx = int(idx)  # type: ignore[attr-defined]
+    exc.chunk_shaped = bool(  # type: ignore[attr-defined]
+        run.cfg.shape_runner is not None or raw_rows != len(rows)
+    )
+    consumed = int(getattr(exc, "chunk_source_rows_consumed", 0) or 0)
+    if run.cfg.use_keyset and not exc.chunk_shaped and 0 < consumed <= len(rows):
+        from services.keyset_pagination import max_keyset_bookmark
+
+        exc.chunk_keyset_bookmark = max_keyset_bookmark(  # type: ignore[attr-defined]
+            rows[:consumed], list(getattr(batch, "headers", None) or []), run.cfg.keyset_order_cols
         )
 
 

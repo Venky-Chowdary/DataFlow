@@ -864,6 +864,45 @@ def _with_declared_zones(
     return out
 
 
+def fold_identity_targets_for_create_new(
+    mappings: list[dict],
+    *,
+    source_db_type: str,
+    destination_db_type: str,
+    destination_table_exists: bool | None,
+) -> list[dict]:
+    """A Snowflake-folded ``ID`` lands as PostgreSQL's ``id`` on a new table (QA r12 SF D3).
+
+    Snowflake stores an unquoted name UPPER; PostgreSQL stores it lower. Copied
+    verbatim, every new PostgreSQL table had quoted ``"ID"``/``"AMOUNT"``
+    columns no unquoted query can reach. On a table proven absent, an identity
+    mapping of an all-upper name targets the lower-case name; a mixed-case name
+    was quoted on purpose and keeps its case. An existing table keeps the live
+    spelling (its columns are the contract). One seam for the plan
+    (``plan_transfer`` / Validate) and Execute, so Validate ≡ Execute.
+    """
+    if destination_table_exists is not False:
+        return mappings
+    from services.dialect_profiles import dialect_profile
+
+    src = str(source_db_type or "").strip().lower()
+    if src != "snowflake" or dialect_profile(destination_db_type).fold != "lower":
+        return mappings
+    out: list[dict] = []
+    for m in mappings:
+        if isinstance(m, dict):
+            tgt = str(m.get("target") or "")
+            if (
+                tgt
+                and tgt == str(m.get("source") or "")
+                and tgt == tgt.upper()
+                and tgt != tgt.lower()
+            ):
+                m = {**m, "target": tgt.lower()}
+        out.append(m)
+    return out
+
+
 def run_mapping_pipeline(
     source_columns: list[str],
     target_columns: list[str],
@@ -1651,6 +1690,12 @@ def run_mapping_pipeline(
 
         if renders_typed_wire_values(source_db_type) and not _active_number_locale():
             wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+    enriched_mappings = fold_identity_targets_for_create_new(
+        enriched_mappings,
+        source_db_type=source_db_type,
+        destination_db_type=destination_db_type,
+        destination_table_exists=destination_table_exists,
+    )
     try:
         enriched_mappings = refine_mappings_with_samples(
             enriched_mappings,

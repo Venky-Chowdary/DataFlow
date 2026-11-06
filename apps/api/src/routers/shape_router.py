@@ -175,11 +175,11 @@ async def profile_source(body: _ProfileBody) -> dict[str, Any]:
 
 
 def _preview_budget_seconds() -> float:
-    """Server-side time bound for one preview (D14)."""
-    import os
+    """Server-side time bound for one preview (D14): ``DATAFLOW_/DATAWRAP_SHAPE_PREVIEW_BUDGET_S``."""
+    from services.brand_env import getenv_brand
 
     try:
-        return max(1.0, float(os.environ.get("DATAFLOW_SHAPE_PREVIEW_BUDGET_S", "20")))
+        return max(1.0, float(getenv_brand("SHAPE_PREVIEW_BUDGET_S", "20") or "20"))
     except ValueError:
         return 20.0
 
@@ -191,8 +191,10 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     QA r12 D14: a preview once ran past Cloudflare's 100 s origin limit (524).
     It now runs off the event loop under a server-side budget: rows stop
     being shaped when the budget runs out and the answer says so
-    (``truncated``), and the live scd2 destination diff is abandoned with a
-    note rather than held open.
+    (``truncated``), and the live scd2 destination diff runs under the shared
+    connector deadline (``tool_deadline.run_with_deadline``): past it the
+    answer is a note and the destination connection is interrupted, not left
+    open on an abandoned thread.
     """
     import asyncio
     import time
@@ -310,24 +312,27 @@ def _bounded_call(deadline: float, fn: Any, *, timeout_answer: Any) -> Any:
     """Run ``fn`` until the preview deadline; past it, answer ``timeout_answer``.
 
     Only a call that leaves this process (the scd2 diff reads the live
-    destination) needs this; the thread is abandoned, never joined past the
-    deadline.
+    destination) needs this. It runs on the connector executor under the same
+    deadline every pilot tool uses, so at the deadline the connections the
+    call registered are interrupted and its worker returns (D281) — nothing is
+    abandoned holding a destination session.
     """
-    import threading
     import time
 
-    box: dict[str, Any] = {}
+    from src.ai.copilot.tool_deadline import run_with_deadline
 
-    def _run() -> None:
+    def _guarded() -> Any:
         try:
-            box["value"] = fn()
+            return fn()
         except Exception as exc:  # noqa: BLE001 — preview reports, never throws
-            box["value"] = {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc)}
 
-    worker = threading.Thread(target=_run, name="shape-preview-call", daemon=True)
-    worker.start()
-    worker.join(max(0.0, deadline - time.monotonic()))
-    return box["value"] if "value" in box else timeout_answer
+    return run_with_deadline(
+        "shape_preview_scd2",
+        _guarded,
+        lambda _message: timeout_answer,
+        seconds=max(1.0, deadline - time.monotonic()),
+    )
 
 
 # ---------------------------------------------------------------------------

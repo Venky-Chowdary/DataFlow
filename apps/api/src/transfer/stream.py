@@ -2689,6 +2689,10 @@ def _stream_database_transfer_impl(
                     or getattr(run.cfg.destination, "kind", None)
                     or ""
                 ),
+                next_chunk_idx=int(checkpoint.chunk_index or 0) + 1,
+                use_keyset=bool(run.cfg.use_keyset),
+                keyset_col=str(run.cfg.keyset_col or ""),
+                incremental=bool(run.cfg.incremental),
             )
         if not isinstance(_row_exc, TransferCancelled):
             _undo_failed_write(run, _row_exc)
