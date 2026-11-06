@@ -162,20 +162,99 @@ def test_a_rebuild_that_cannot_start_leaves_the_finding_open_and_audits_the_fail
             assert _parked(sid), get_schedule(sid).approval_request
             assert get_schedule(sid).next_run_at == before
             assert events[-1]["outcome"] == "failed", events[-1]
+        # Review 2: a generic exception is audited (and still surfaced), and a
+        # start that returns no job is a failed start — the finding stays open.
+        for refusal, status in ((RuntimeError("worker pool unavailable"), 500), ("", 409)):
+            def _odd(*_a, _r=refusal, **_k):
+                if isinstance(_r, BaseException):
+                    raise _r
+                return _r
+
+            monkeypatch.setattr(runner, "_run_schedule", _odd)
+            try:
+                resp = client.post(f"/api/v1/schedules/{sid}/recover", headers=_ACTOR,
+                                   json={"action": "rebuild", "reason": "rebuild it"})
+                got = resp.status_code
+            except RuntimeError:
+                got = 500  # TestClient re-raises an unhandled server error
+            assert got == status, got
+            assert _parked(sid)
+            assert events[-1]["outcome"] == "failed", events[-1]
         monkeypatch.setattr(runner, "_run_schedule", real_run)
 
-        # A rebuild that starts closes the finding and resumes the cadence at its
-        # next slot — not "now", which would race the rebuild for the claim.
+        # A rebuild that starts leaves the finding open until its job SUCCEEDS;
+        # then the runner closes it and the cadence resumes at its next slot —
+        # never "now", which would race the rebuild for the claim.
         resp = client.post(f"/api/v1/schedules/{sid}/recover", headers=_ACTOR,
                            json={"action": "rebuild", "reason": "rebuild it"})
         assert resp.status_code == 200 and resp.json()["job_id"], resp.text
         assert resp.json()["plan"]["destructive"] is False  # keyed: upsert, rows kept
+        assert (get_schedule(sid).approval_request or {}).get("status") == "open"
+        assert (get_schedule(sid).approval_request or {}).get("recovery", {}).get("job_id") == resp.json()["job_id"]
+        job = h.wait_job(resp.json()["job_id"])
+        assert job.get("status") == "completed", job.get("error")
+        _settle(sid)
+        assert not _parked_now(sid)
         nxt = datetime.fromisoformat(str(get_schedule(sid).next_run_at))
         if nxt.tzinfo is None:
             nxt = nxt.replace(tzinfo=timezone.utc)
         assert nxt > datetime.now(timezone.utc) + timedelta(minutes=30), nxt
-        job = h.wait_job(resp.json()["job_id"])
-        assert job.get("status") == "completed", job.get("error")
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
         h.drop_table("postgresql", dest)
+
+
+def _settle(sid: str) -> None:
+    import time
+
+    from services import schedule_runner
+    from services.schedule_store import get_schedule
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if not str(getattr(get_schedule(sid), "running_job_id", "") or "").strip():
+            return
+        schedule_runner._finalize_finished_schedule_claims()
+        time.sleep(0.2)
+
+
+def _parked_now(sid: str) -> bool:
+    from services.schedule_store import get_schedule, has_open_approval
+
+    return has_open_approval(get_schedule(sid))
+
+
+def test_a_rebuild_that_starts_and_then_fails_keeps_the_finding_open(client, monkeypatch):
+    """Review 2: the finding was closed when the rebuild STARTED, so a rebuild
+    that then failed left an armed schedule with nothing to recover. The failed
+    run is kept from opening a fresh park here, so only the original finding
+    can still hold the schedule."""
+    import services.schedule_runner as runner
+
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    sid, src_table, dest = _schedule(client, cur, token, keyed=True)
+    try:
+        _drop_and_park(cur, sid, dest)
+        original = _finding(sid)
+        cur.execute(f"DROP TABLE {src_table}")  # nosec B608 - the rebuild's read will fail
+        monkeypatch.setattr(runner, "_park_reason", lambda *_a, **_k: "")
+        resp = client.post(f"/api/v1/schedules/{sid}/recover", headers=_ACTOR,
+                           json={"action": "rebuild", "reason": "rebuild it"})
+        assert resp.status_code == 200 and resp.json()["job_id"], resp.text
+        job = h.wait_job(resp.json()["job_id"])
+        assert job.get("status") == "failed", job.get("status")
+        _settle(sid)
+        assert _parked(sid), "a failed rebuild must leave the schedule parked"
+        after = _finding(sid)
+        assert after.get("id") == original.get("id") and after.get("code") == "DESTINATION_CONTINUITY", after
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
+        h.drop_table("postgresql", dest)
+
+
+def _finding(sid: str) -> dict:
+    from services.schedule_store import get_schedule
+
+    return dict(get_schedule(sid).approval_request or {})

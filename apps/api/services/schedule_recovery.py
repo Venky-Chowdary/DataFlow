@@ -117,6 +117,21 @@ def _close_finding(sched: Any, *, action: str, actor: str, reason: str, due_now:
     return update_schedule(sched.id, patch)
 
 
+def _note_rebuild_on_finding(sched: Any, *, job_id: str, actor: str, reason: str) -> Any:
+    """Record the rebuild on the still-open finding; the run's success closes it."""
+    from services.schedule_store import get_schedule, update_schedule
+
+    fresh = get_schedule(sched.id) or sched
+    finding = _open_continuity_finding(fresh)
+    if finding is None:
+        return fresh
+    return update_schedule(sched.id, {"approval_request": {
+        **finding,
+        "recovery": {"action": ACTION_REBUILD, "job_id": job_id, "actor": actor,
+                     "reason": reason, "started_at": datetime.now(timezone.utc).isoformat()},
+    }})
+
+
 def _close_and_rearm(sched: Any, *, action: str, actor: str, reason: str) -> Any:
     return _close_finding(sched, action=action, actor=actor, reason=reason, due_now=True)
 
@@ -262,21 +277,36 @@ def recover_schedule_destination(
     else:
         from services.schedule_runner import ScheduleStartError, _run_schedule
 
-        # The run starts first: if it cannot (already running, committed rows
-        # that cannot be replayed, a refused start, a principal that may not use
-        # the endpoints), the finding stays open and the failure is the record.
+        # The run starts first, and the finding stays open until it SUCCEEDS:
+        # the runner closes it on a completed run (close_finding_after_successful_run)
+        # and sets the cadence; a run that starts and then fails leaves it
+        # open (or parks a fresh finding). A start that is refused, raises, or
+        # returns no job is a failed recovery: audited, finding untouched.
+        def _failed(exc: BaseException, status: int) -> None:
+            _audit(sched, action=action, actor=actor, reason=reason,
+                   details={**details, "error": str(exc)[:300]}, outcome="failed", status=status)
+
         try:
             job_id = str(
                 _run_schedule(schedule_id, manual=True, resync_mode="full",
                               triggered_by=actor or f"recover:{action}") or ""
             )
         except (ScheduleStartError, PermissionError) as exc:
-            status = int(getattr(exc, "http_status", 403 if isinstance(exc, PermissionError) else 409))
-            _audit(sched, action=action, actor=actor, reason=reason,
-                   details={**details, "error": str(exc)[:300]}, outcome="failed", status=status)
+            _failed(exc, int(getattr(exc, "http_status", 403 if isinstance(exc, PermissionError) else 409)))
             raise
-        details["job_id"] = job_id
-        updated = _close_finding(sched, action=action, actor=actor, reason=reason, due_now=False)
+        except Exception as exc:  # noqa: BLE001 - audited, then surfaced as it is
+            _failed(exc, 500)
+            raise
+        if not job_id:
+            refused = ScheduleStartError(
+                "The rebuild did not start (no job was created). The finding stays "
+                "open; check the schedule's connectors and try again.",
+                http_status=409, code="start_refused",
+            )
+            _failed(refused, 409)
+            raise refused
+        details.update(job_id=job_id, phase="rebuild_started")
+        updated = _note_rebuild_on_finding(sched, job_id=job_id, actor=actor, reason=reason)
         _audit(sched, action=action, actor=actor, reason=reason, details=details)
     return {
         **base,
