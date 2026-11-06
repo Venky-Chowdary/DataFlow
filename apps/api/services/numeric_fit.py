@@ -25,6 +25,7 @@ from functools import lru_cache
 _BARE_INT_STORAGE_WIDTH: dict[str, int | None] = {
     "sqlite": 64,      # INTEGER affinity holds up to 8 bytes
     "bigquery": 64,    # INT64
+    "weaviate": 64,    # the ``int`` dataType is int64
     "databricks": 32,
     "snowflake": None,
     "oracle": None,
@@ -45,6 +46,23 @@ _BARE_INT_STORAGE_WIDTH: dict[str, int | None] = {
     "notion": None,
     "": 32,            # SQL standard INT — Postgres/MySQL/SQL Server/DuckDB/…
 }
+
+
+def _bare_token_is_dest_carrier(raw: str, dest_db: str) -> bool:
+    """True when ``int``/``integer`` is this destination's own integer carrier.
+
+    On a SQL engine the bare word is a logical stamp the kernel invents from
+    (BIGINT), so its width is unknown. Where the engine itself spells its
+    integer carrier that way — Weaviate's ``int`` dataType, SQLite's
+    ``INTEGER`` affinity — the token is the physical column and
+    ``_BARE_INT_STORAGE_WIDTH`` says what it holds.
+    """
+    if not dest_db:
+        return False
+    from services.type_system import DDL_TYPES, LOGICAL_INTEGER, _normalize_dest_db
+
+    carrier = str((DDL_TYPES.get(_normalize_dest_db(dest_db)) or {}).get(LOGICAL_INTEGER) or "")
+    return bool(carrier) and carrier.strip().lower() == raw.lower()
 
 
 @lru_cache(maxsize=8192)
@@ -74,7 +92,9 @@ def integer_storage_bounds(
     if normalize_logical_type(inferred) != LOGICAL_INTEGER:
         return None
     raw = (inferred or "").strip()
-    if raw in {LOGICAL_INTEGER, "int", "integer"}:
+    if raw in {LOGICAL_INTEGER, "int", "integer"} and not _bare_token_is_dest_carrier(
+        raw, dest_db
+    ):
         # Bare *logical* stamp (not a physical carrier) — width unknown.
         return None
     upper = raw.upper()

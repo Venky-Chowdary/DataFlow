@@ -18,6 +18,7 @@ from services.type_system import (
     LOGICAL_INTEGER,
     float_mantissa_bits,
     integer_bit_width,
+    integer_storage_bounds,
     normalize_logical_type,
 )
 from services.dest_schema_authority import destination_schema_is_sampled
@@ -122,8 +123,12 @@ def test_full_case_matrix_dump_for_proof_artifact():
         assert len(set(cells.values())) == 1, (dest, logical, cells)
         rows.append((dest, logical, next(iter(cells.values())), ",".join(cells)))
     # Sanity: integer cells match DDL_TYPES never-narrower default.
-    # SQLite's affinity token is ``INTEGER`` but holds 64-bit values — allowed
-    # only when it is the table default, never as a silent INT32 invent.
+    # A token that *reads* 32-bit (INTEGER / INT / INT32 / SIGNED) is allowed
+    # only where it is the engine's own 64-bit carrier, which the runtime-fit
+    # SSOT (``integer_storage_bounds``) states per destination: SQLite's
+    # ``INTEGER`` affinity holds 8 bytes, Weaviate's ``int`` dataType is int64.
+    # Anywhere else such a token would be a silent INT32 invent.
+    int64 = (-(1 << 63), (1 << 63) - 1)
     for dest, logical, invented, _ in rows:
         if logical != "integer":
             continue
@@ -132,5 +137,5 @@ def test_full_case_matrix_dump_for_proof_artifact():
         if destination_schema_is_sampled(dest):
             continue
         if invented.strip().upper() in {"INTEGER", "INT", "INT32", "SIGNED"}:
-            assert dest == "sqlite", (dest, invented)
+            assert integer_storage_bounds(invented, dest_db=dest) == int64, (dest, invented)
     assert len(rows) == len(DDL_TYPES) * len(_LOGICAL_SPELLINGS)

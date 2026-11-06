@@ -424,3 +424,10 @@ def test_weaviate_plan_stamps_name_the_carrier_the_class_declares():
         {c: c for c in stamps},
     )
     assert declared == {c: ("int" if c in ("BIGINT", "INT4") else "text") for c in stamps}
+    # Weaviate's ``int`` is the engine's int64 carrier, and the runtime-fit SSOT
+    # says so; a bare ``int`` on a SQL engine stays a width-unknown logical stamp.
+    from services.type_system import integer_storage_bounds
+
+    assert integer_storage_bounds("int", dest_db="weaviate") == (-(1 << 63), (1 << 63) - 1)
+    assert integer_storage_bounds("int", dest_db="postgresql") is None
+    assert integer_storage_bounds("INTEGER", dest_db="sqlite") == (-(1 << 63), (1 << 63) - 1)
