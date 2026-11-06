@@ -638,11 +638,17 @@ class OrphanReconcileRequest(BaseModel):
 
 
 def _require_platform_admin(request: Request) -> str:
+    """Orphans belong to no workspace: platform admins only, the denial audited."""
+    from services.rbac import Permission
     from services.tenant_scope import resolve_tenant_scope
-    from services.workspace_access import actor_email
+    from services.workspace_access import actor_email, require_platform_admin
 
-    if not resolve_tenant_scope(request, "").unrestricted:
-        raise HTTPException(status_code=403, detail="Platform administrator role required")
+    require_platform_admin(
+        request,
+        resolve_tenant_scope(request, ""),
+        Permission.WORKSPACE_MANAGE,
+        detail="Platform administrator role required",
+    )
     return actor_email(request)
 
 
