@@ -3943,6 +3943,13 @@ export type Workspace = {
   member_count?: number;
 };
 
+export type WorkspaceView = {
+  id: string;
+  name: string;
+  kind?: string;
+  legacy_jobs?: number | null;
+};
+
 export type WorkspaceMember = {
   workspace_id: string;
   email: string;
@@ -3974,6 +3981,8 @@ export async function fetchWorkspaces(): Promise<{
   actor: string;
   /** Where this account lands when the browser names no workspace (D218). */
   defaultWorkspaceId: string;
+  /** A platform admin's All-workspaces / Unassigned views; [] for anyone else (D218). */
+  views: WorkspaceView[];
 }> {
   const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
@@ -3983,6 +3992,7 @@ export async function fetchWorkspaces(): Promise<{
     platformAdmin: !!data.platform_admin,
     actor: data.actor ?? "",
     defaultWorkspaceId: typeof data.default_workspace_id === "string" ? data.default_workspace_id : "",
+    views: Array.isArray(data.views) ? data.views : [],
   };
 }
 

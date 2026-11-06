@@ -34,7 +34,7 @@ import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/ai
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
 import { purgeConfirmCopy, RETENTION_HINT } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
-import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
+import { TENANT_SAVED_EVENT, concreteWorkspaceId, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
 import type { ThemePreference } from "../lib/theme";
@@ -148,7 +148,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   /** Only edit what was actually read: an unread value must not be re-saved. */
   const generalEditable = workspaceManage.allowed && settingsLoaded && !generalLock.locked;
   const generalTitle = (generalLock.locked ? generalLock.reason : workspaceManage.reason) || undefined;
-  const activeWorkspace = useActiveWorkspaceId();
+  const activeWorkspace = concreteWorkspaceId(useActiveWorkspaceId());
   const generalDirtyRef = useRef(false);
 
   const loadPosture = useCallback(() => {

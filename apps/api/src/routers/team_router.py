@@ -351,7 +351,16 @@ async def get_workspaces(request: Request):
         "actor": actor,
         # The list is oldest-first; this is where the caller should land (D218).
         "default_workspace_id": _landing_workspace_id(request),
+        # A platform admin's other views: every workspace, and the legacy rows
+        # with no workspace, which had no entry at all (D218).
+        "views": _workspace_views(platform_admin),
     }
+
+
+def _workspace_views(platform_admin: bool) -> list[dict]:
+    from services.tenant_scope import workspace_views
+
+    return workspace_views(platform_admin)
 
 
 def _landing_workspace_id(request: Request) -> str:

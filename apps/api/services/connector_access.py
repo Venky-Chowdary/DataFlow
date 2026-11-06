@@ -234,8 +234,11 @@ def caller_from_request(request: Any) -> ConnectorCaller | None:
         return None
     user = user if isinstance(user, dict) else {}
     actor = str(email or user.get("email") or "anonymous")
+    from services.workspace_filter import stored_workspace_id
+
     try:
-        requested = str(request.headers.get("x-workspace-id") or "").strip()
+        # A platform admin's view names no workspace (D218).
+        requested = stored_workspace_id(request.headers.get("x-workspace-id"))
     except Exception:
         requested = ""
     return ConnectorCaller(

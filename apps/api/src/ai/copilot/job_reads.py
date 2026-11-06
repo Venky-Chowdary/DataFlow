@@ -13,6 +13,7 @@ from typing import Any
 from services.job_list_scope import job_list_workspace_scope  # noqa: F401  # re-export
 from services.jobs import job_store
 from services.workspace_filter import (
+    UNASSIGNED_WORKSPACE,
     WorkspaceFilter,
     bound_allows,
     current_workspace_filter,
@@ -226,7 +227,14 @@ def list_transfer_jobs(
     # A Pilot/MCP turn reads only what its caller may see (D154); ``workspace_id``
     # narrows further only for system-scope callers.
     workspace_filter = current_workspace_filter()
-    if workspace_id == "":
+    if workspace_id == UNASSIGNED_WORKSPACE:
+        # The legacy rows with no workspace, within what the caller may read:
+        # a platform admin's bucket, empty for anyone isolation keeps out (D219).
+        workspace_filter = (workspace_filter or WorkspaceFilter.everything()).intersect(
+            WorkspaceFilter.only("")
+        )
+        workspace_id = ""
+    elif workspace_id == "":
         # "This workspace" is the one the turn acts in. A platform admin's tenant
         # filter is every workspace, which used to win over it (D219).
         stamp = current_workspace_stamp()

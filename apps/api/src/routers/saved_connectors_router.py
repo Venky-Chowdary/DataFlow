@@ -161,7 +161,7 @@ def _resolve_workspace(
     workspace they are not a member of. Which rows the caller then sees is
     ``_can_access_connector``'s job.
     """
-    return tenant_scope(request, x_workspace_id).requested_workspace_id
+    return tenant_scope(request, x_workspace_id).header_workspace_id
 
 
 def _to_ui(c) -> dict[str, Any]:

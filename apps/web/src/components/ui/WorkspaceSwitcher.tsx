@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { fetchWorkspaces, type Workspace } from "../../lib/api";
+import { fetchWorkspaces, type Workspace, type WorkspaceView } from "../../lib/api";
 import {
   WORKSPACE_CHANGED_EVENT,
   WORKSPACE_DIRECTORY_EVENT,
   getActiveWorkspaceId,
+  isKnownWorkspaceChoice,
   landingWorkspaceId,
   setActiveWorkspaceId,
   useActiveWorkspaceId,
+  workspaceChoices,
 } from "../../lib/workspace";
 
 /**
@@ -26,17 +28,19 @@ export function WorkspaceSwitcher({
 }) {
   const activeId = useActiveWorkspaceId();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [views, setViews] = useState<WorkspaceView[]>([]);
   const [loadError, setLoadError] = useState("");
 
   const reload = useCallback(() => {
     fetchWorkspaces()
-      .then(({ workspaces: rows, defaultWorkspaceId }) => {
+      .then(({ workspaces: rows, defaultWorkspaceId, views: adminViews }) => {
         setWorkspaces(rows);
+        setViews(adminViews);
         setLoadError("");
         const current = getActiveWorkspaceId();
-        if (rows.length === 0) return;
-        if (!current || !rows.some((w) => w.id === current)) {
-          setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId));
+        if (rows.length === 0 && adminViews.length === 0) return;
+        if (!isKnownWorkspaceChoice(current, rows, adminViews)) {
+          setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId, adminViews));
         }
       })
       .catch((err: unknown) => {
@@ -58,7 +62,9 @@ export function WorkspaceSwitcher({
     };
   }, [reload]);
 
-  const active = workspaces.find((w) => w.id === activeId);
+  const choices = workspaceChoices(workspaces, views);
+  const active = choices.find((c) => c.id === activeId);
+  const activeName = views.find((v) => v.id === activeId)?.name ?? workspaces.find((w) => w.id === activeId)?.name;
 
   return (
     <div className={`df2-workspace-switcher ${className}`.trim()}>
@@ -71,23 +77,27 @@ export function WorkspaceSwitcher({
           Active workspace
         </label>
       )}
-      {workspaces.length <= 1 ? (
+      {choices.length <= 1 ? (
         <strong className="df2-workspace-switcher-name" data-testid="workspace-switcher-name">
-          {active?.name || (loadError ? "Workspace unavailable" : "Workspace")}
+          {activeName || (loadError ? "Workspace unavailable" : "Workspace")}
         </strong>
       ) : (
         <select
           id={id}
           className="df2-workspace-switcher-select"
           data-testid="workspace-switcher"
-          value={activeId}
+          value={active ? activeId : ""}
           title={loadError || undefined}
           onChange={(e) => setActiveWorkspaceId(e.target.value)}
         >
-          {workspaces.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-              {typeof w.member_count === "number" ? ` · ${w.member_count}` : ""}
+          {active ? null : (
+            <option value="" disabled>
+              Choose a workspace
+            </option>
+          )}
+          {choices.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
             </option>
           ))}
         </select>

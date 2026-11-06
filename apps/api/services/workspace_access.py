@@ -56,9 +56,15 @@ def actor_is_platform_admin(request: Request) -> bool:
 
 
 def requested_workspace_id(request: Request) -> str:
-    """Return the requested header scope without authorizing it."""
+    """Return the requested header scope without authorizing it.
+
+    A platform admin's view (All workspaces / Unassigned) names no workspace
+    a row could be stamped with, so it reads as ``""`` here (D218).
+    """
+    from services.workspace_filter import stored_workspace_id
+
     try:
-        return str(request.headers.get("X-Workspace-Id") or "").strip()
+        return stored_workspace_id(request.headers.get("X-Workspace-Id"))
     except Exception:
         return ""
 

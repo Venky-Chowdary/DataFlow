@@ -207,7 +207,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         data_context = dict(request.data_context or {})
         # The workspace the turn works in is the actor's, never a bare header:
         # a workspace they do not belong to is a 403 (D162).
-        ws = tenant_scope(http_request).requested_workspace_id
+        ws = tenant_scope(http_request).header_workspace_id
         if ws:
             data_context["workspace_id"] = ws
         else:

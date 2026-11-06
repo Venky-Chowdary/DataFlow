@@ -13,7 +13,11 @@ deterministically, in this order:
    else its earliest membership (``tenant_scope.ordered_memberships``);
 3. only for an account that belongs to no workspace at all (a bootstrap
    platform admin on a fresh deployment): the workspace it created, else the
-   oldest one — there is nothing better to offer.
+   All-workspaces view — landing in the oldest workspace narrowed every
+   screen to one tenant the admin never chose ("Test · 2").
+
+A platform admin's last-used view (All workspaces / Unassigned) is
+remembered like a workspace.
 
 The preference lives next to the team store (same Mongo database, or a JSON
 file beside ``teams.json``), keyed by normalized email. It is a convenience:
@@ -83,21 +87,25 @@ def remember_workspace(email: str, workspace_id: str) -> None:
 def landing_workspace_id(scope: Any) -> str:
     """The workspace ``scope``'s actor should land in (see the module docstring)."""
     from services import team_store
+    from services.workspace_filter import ALL_WORKSPACES, WORKSPACE_VIEWS
 
     actor = str(getattr(scope, "actor", "") or "")
     members = [ws for ws, _role in getattr(scope, "memberships", ()) or ()]
     unrestricted = bool(getattr(scope, "unrestricted", False))
     last = last_used_workspace(actor) if actor and actor != "anonymous" else ""
+    if last and unrestricted and last in WORKSPACE_VIEWS:
+        return last
     if last and (last in members or unrestricted) and team_store.get_workspace(last) is not None:
         return last
     if members:
         return members[0]
     if not unrestricted:
         return ""
-    everything = team_store.list_workspaces()
-    own = [ws for ws in everything if ws.created_by == team_store.normalize_email(actor)]
-    pick = (own or everything)[:1]
-    return pick[0].id if pick else ""
+    own = [
+        ws for ws in team_store.list_workspaces()
+        if ws.created_by == team_store.normalize_email(actor)
+    ]
+    return own[0].id if own else ALL_WORKSPACES
 
 
 __all__ = ["landing_workspace_id", "last_used_workspace", "remember_workspace"]

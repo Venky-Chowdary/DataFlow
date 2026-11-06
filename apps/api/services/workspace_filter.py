@@ -19,6 +19,23 @@ def norm_workspace_id(workspace_id: Any) -> str:
     return str(workspace_id or "").strip()
 
 
+#: Reserved ``X-Workspace-Id`` values naming a platform administrator's views,
+#: not a workspace (D218). Workspace ids are uuid4, so neither collides.
+#: ``__all__`` is every workspace (the same as sending no header);
+#: ``__unassigned__`` is the legacy rows that carry no workspace at all, which
+#: otherwise had no switcher entry once the UI always names a workspace.
+ALL_WORKSPACES = "__all__"
+UNASSIGNED_WORKSPACE = "__unassigned__"
+WORKSPACE_VIEWS = frozenset({ALL_WORKSPACES, UNASSIGNED_WORKSPACE})
+
+
+def stored_workspace_id(header_value: Any) -> str:
+    """The workspace id a header value names as rows store it: a view names
+    none (``""``), so it is never stamped on, or looked up as, a row."""
+    ws = norm_workspace_id(header_value)
+    return "" if ws in WORKSPACE_VIEWS else ws
+
+
 _BLANK = re.compile(r"^\s+$")
 
 

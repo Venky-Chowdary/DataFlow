@@ -192,7 +192,7 @@ async def list_events(
     from services.audit_log import list_audit_events
 
     scope = tenant_scope(request)
-    workspace_id = scope.requested_workspace_id
+    workspace_id = scope.header_workspace_id
     tenant_id = _tenant_of(workspace_id)
     # Scope by the caller's workspaces (or the one they are looking at). Do not
     # AND tenant_id: events stamped with this workspace before a tenant existed

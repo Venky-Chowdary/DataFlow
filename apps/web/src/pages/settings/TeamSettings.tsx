@@ -21,7 +21,9 @@ import {
   type WorkspaceRole,
 } from "../../lib/api";
 import {
+  concreteWorkspaceId,
   getActiveWorkspaceId,
+  isKnownWorkspaceChoice,
   landingWorkspaceId,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
@@ -80,7 +82,9 @@ export function TeamSettings() {
   // disabled a control the API would have honoured for an editor.
   const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const membership = useWriteGate(PERMISSIONS.memberInvite);
-  const activeWorkspace = useActiveWorkspaceId();
+  // Members belong to a workspace; a platform admin's All / Unassigned view is
+  // not one, so the member tools ask for a workspace there (D218).
+  const activeWorkspace = concreteWorkspaceId(useActiveWorkspaceId());
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
@@ -103,12 +107,12 @@ export function TeamSettings() {
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
-    const { workspaces: rows, platformAdmin: isAdmin, defaultWorkspaceId } = await fetchWorkspaces();
+    const { workspaces: rows, platformAdmin: isAdmin, defaultWorkspaceId, views } = await fetchWorkspaces();
     setWorkspaces(rows);
     setPlatformAdmin(isAdmin);
     const current = getActiveWorkspaceId();
-    if (rows.length && (!current || !rows.some((w) => w.id === current))) {
-      setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId));
+    if (rows.length && !isKnownWorkspaceChoice(current, rows, views)) {
+      setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId, views));
     }
     return isAdmin;
   }, []);
@@ -140,7 +144,7 @@ export function TeamSettings() {
   const refreshAll = useCallback(async () => {
     try {
       const isAdmin = await loadWorkspaces();
-      await Promise.all([loadUsers(isAdmin), refreshMembers(getActiveWorkspaceId())]);
+      await Promise.all([loadUsers(isAdmin), refreshMembers(concreteWorkspaceId(getActiveWorkspaceId()))]);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Could not load team settings.");
     }
@@ -392,6 +396,11 @@ export function TeamSettings() {
                 disabled={workspaces.length === 0}
               >
                 {workspaces.length === 0 && <option value="">No workspace yet</option>}
+                {workspaces.length > 0 && !activeWorkspace && (
+                  <option value="" disabled>
+                    Choose a workspace
+                  </option>
+                )}
                 {workspaces.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}

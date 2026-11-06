@@ -360,9 +360,12 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "scope": {
                     "type": "string",
-                    "enum": ["workspace", "all"],
+                    "enum": ["workspace", "all", "unassigned"],
                     "default": "workspace",
-                    "description": "workspace = this workspace; all = every workspace",
+                    "description": (
+                        "workspace = this workspace; all = every workspace; "
+                        "unassigned = legacy jobs with no workspace (platform admins)"
+                    ),
                 },
             },
             "required": [],
@@ -2525,6 +2528,8 @@ class DataPilotTools:
         return ToolResult(name="confirm_action", success=True, output=body)
 
     def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
+        from services.workspace_filter import UNASSIGNED_WORKSPACE
+
         from .job_reads import (
             job_list_workspace_scope,
             list_transfer_jobs,
@@ -2565,7 +2570,11 @@ class DataPilotTools:
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
                 "store": source,
-                "scope": "all" if workspace_id is None else "workspace",
+                "scope": (
+                    "all" if workspace_id is None
+                    else "unassigned" if workspace_id == UNASSIGNED_WORKSPACE
+                    else "workspace"
+                ),
             },
         )
 
