@@ -901,6 +901,9 @@ def propose_dest_widens(
     if not target_schema:
         return []
     out: list[dict[str, Any]] = []
+    growing = growing_dest_carriers(
+        mappings, source_schema=source_schema, target_schema=target_schema, dest_db=dest_db
+    )
     for m in mappings or []:
         src = str(m.get("source") or "")
         tgt = str(m.get("target") or "")
@@ -912,10 +915,40 @@ def propose_dest_widens(
             continue
         widen = dest_widen_proposal(
             m, src, tgt, src_type, tgt_type, dest_db=dest_db,
-            key_groups=key_groups, live_types=target_schema,
+            key_groups=key_groups, live_types=target_schema, growing=growing,
         )
         if widen:
             out.append(widen)
+    return out
+
+
+def growing_dest_carriers(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
+    dest_db: str = "",
+) -> dict[str, str]:
+    """``target -> carrier`` for every column this run would widen (same family, wider).
+
+    The keyed rule budgets the growing parts of one key together, so the
+    proposal and the writer must both know which parts grow.
+    """
+    from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
+
+    out: dict[str, str] = {}
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        src, tgt = str(m.get("source") or ""), str(m.get("target") or "")
+        src_type = str(ci_get(source_schema or {}, src) or "") if src else ""
+        tgt_type = str(ci_get(target_schema or {}, tgt) or "") if tgt else ""
+        if (
+            src_type and tgt_type
+            and widen_keeps_logical_family(tgt_type, src_type)
+            and is_wider_type(tgt_type, src_type, dest_db=dest_db)
+        ):
+            out[tgt] = widened_dest_carrier(tgt_type, src_type)
     return out
 
 
@@ -967,6 +1000,7 @@ def dest_widen_proposal(
     dest_db: str = "",
     key_groups: list[list[str]] | None = None,
     live_types: dict[str, str] | None = None,
+    growing: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """The additive ``widen_type`` entry for one pair, or None: the one rule.
 
@@ -998,7 +1032,7 @@ def dest_widen_proposal(
 
         new_type, keep = keyed_widen_carrier(
             key_groups, tgt, new_type, {**(live_types or {}), tgt: tgt_type},
-            dialect=dest_db,
+            dialect=dest_db, growing=growing,
         )
         if keep:
             return None
@@ -1541,6 +1575,10 @@ def detect_schema_drift(
             mapping_has_clearing_risk_contract,
         )
 
+        _growing = growing_dest_carriers(
+            active_mappings, source_schema=source_schema, target_schema=target_schema,
+            dest_db=str(destination_db_type or dest_kind or ""),
+        )
         for m in active_mappings:
             src = str(m.get("source") or "")
             tgt = str(m.get("target") or "")
@@ -1623,6 +1661,7 @@ def detect_schema_drift(
             widen = dest_widen_proposal(
                 m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db,
                 key_groups=dest_key_groups, live_types=target_schema,
+                growing=_growing,
             )
             if widen:
                 widen_proposals.append(widen)

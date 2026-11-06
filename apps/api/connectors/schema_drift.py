@@ -828,6 +828,7 @@ def _mysql_keyed_widen_carrier(
     new_type: str,
     existing: dict[str, str],
     dialect: str,
+    growing: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening an indexed MySQL/MariaDB column.
 
@@ -840,7 +841,8 @@ def _mysql_keyed_widen_carrier(
         return new_type, False
     groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
     return mysql_keyed_widen_carrier(
-        groups, column, new_type, existing, dialect=dialect, table_name=table_name
+        groups, column, new_type, existing, growing=growing, dialect=dialect,
+        table_name=table_name,
     )
 
 
@@ -851,6 +853,7 @@ def keyed_widen_carrier(
     existing: dict[str, str],
     *,
     dialect: str = "",
+    growing: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening a column the destination holds in a key.
 
@@ -867,7 +870,9 @@ def keyed_widen_carrier(
 
     family = engine_family(dialect)
     if family == "mysql":
-        return mysql_keyed_widen_carrier(key_groups, column, new_type, existing, dialect=dialect)
+        return mysql_keyed_widen_carrier(
+            key_groups, column, new_type, existing, growing=growing, dialect=dialect
+        )
     budget_dialect = {"sqlserver": "mssql", "oracle": "oracle"}.get(family, "")
     per_char = full_value_key_char_bytes(budget_dialect)
     want = column.casefold()
@@ -893,72 +898,122 @@ def keyed_widen_carrier(
     return new_type, False
 
 
+def _mysql_growable(new_type: str) -> bool:
+    """A key widen the budget rule sizes: a LOB, or a width-bounded string."""
+    from services.schema_fidelity import mysql_index_requires_prefix
+    from services.type_system import parse_string_carrier_width
+
+    if mysql_index_requires_prefix(new_type):
+        return True
+    return bool(_mysql_string_carrier(new_type) and parse_string_carrier_width(new_type))
+
+
+def _mysql_key_group_width(
+    key_cols: list[str],
+    want: str,
+    grow: dict[str, str],
+    existing: dict[str, str],
+    table_name: str,
+) -> int | None:
+    """Width ``want`` gets when every growing part of one key is budgeted together.
+
+    Parts that ask for less than an even share keep their ask; the rest split
+    what is left, by ``mysql_key_compatible_types``' own split. Budgeting each
+    part alone gave PRIMARY KEY(a, b) 668 + 668 characters (5344 bytes): ``a``
+    was MODIFIED and ``b`` then failed with 1071, half-migrated. ``None``: the
+    key cannot hold any widen (refused).
+    """
+    from services.schema_fidelity import mysql_index_requires_prefix, mysql_key_compatible_types
+    from services.type_system import parse_string_carrier_width
+
+    folded = [c.casefold() for c in key_cols]
+
+    def ask(f: str) -> int | None:
+        t = grow[f]
+        return None if mysql_index_requires_prefix(t) else parse_string_carrier_width(t)
+
+    settled: dict[str, str] = {}
+    while True:
+        # A bounded ask is budgeted as a text key; a LOB keeps its own type, so a
+        # JSON / BLOB key is still refused rather than sized.
+        types = [
+            settled.get(f)
+            or (
+                (grow[f] if mysql_index_requires_prefix(grow[f]) else "TEXT")
+                if f in grow else existing.get(f, "")
+            )
+            for f in folded
+        ]
+        sized, refusal = mysql_key_compatible_types(
+            table_name=table_name, conflict_columns=list(key_cols), target_cols=list(key_cols),
+            target_types=types, mappings=[], column_types={},
+        )
+        if refusal:
+            logger.info("Widen of key (%s) on %s refused: %s", ", ".join(key_cols), table_name, refusal)
+            return None
+        open_parts = [f for f in folded if f in grow and f not in settled]
+        share = min(
+            (parse_string_carrier_width(t) or 0 for f, t in zip(folded, sized) if f in open_parts),
+            default=0,
+        )
+        if not share:
+            return None
+        newly = [f for f in open_parts if (n := ask(f)) is not None and n <= share]
+        if want in newly or not newly:
+            return ask(want) if want in newly else share
+        for f in newly:
+            settled[f] = f"VARCHAR({ask(f)})"
+
+
 def mysql_keyed_widen_carrier(
     key_groups: list[list[str]],
     column: str,
     new_type: str,
     existing: dict[str, str],
     *,
+    growing: dict[str, str] | None = None,
     dialect: str = "mysql",
     table_name: str = "",
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening a MySQL/MariaDB column held in a key.
 
     MySQL cannot hold a TEXT/BLOB/JSON column in a key without a prefix length
-    (error 1170; MariaDB quietly switches the key to HASH), nor a VARCHAR wider
-    than the 3072-byte key limit (error 1071: 2000 utf8mb4 characters is 8000
+    (error 1170; MariaDB quietly switches the key to HASH), nor a key wider
+    than the 3072-byte limit (error 1071: 2000 utf8mb4 characters is 8000
     bytes), and a prefix would enforce a different uniqueness rule than the
     source. Every string widen of a keyed column is therefore capped by the rule
     the create path applies to a key
-    (``services.schema_fidelity.mysql_key_compatible_types``): the widest
-    full-value VARCHAR the key budget allows across every key the column sits
-    in. A candidate within the budget is kept as asked. ``keep`` is True when the
-    column must stay as it is — the rule refused, or the budgeted carrier is no
-    wider than the existing one (the column already *is* the key's spelling of
-    TEXT). The writer's widen pass and the widen proposal
-    (``services.schema_drift.dest_widen_proposal``) both ask this, so a proposal
-    names exactly the ALTER the writer runs; values longer than that carrier are
-    the population-fit gate's to refuse by name.
+    (``services.schema_fidelity.mysql_key_compatible_types``), with every part
+    of the key that ``growing`` widens this run budgeted together
+    (:func:`_mysql_key_group_width`). A candidate within its share is kept as
+    asked. ``keep`` is True when the column must stay as it is — the rule
+    refused, or the budgeted carrier is no wider than the existing one (the
+    column already *is* the key's spelling of TEXT). The writer's widen pass
+    and the widen proposal (``services.schema_drift.dest_widen_proposal``) both
+    ask this with the same ``growing`` set, so a proposal names exactly the
+    ALTER the writer runs; values longer than that carrier are the
+    population-fit gate's to refuse by name.
     """
-    from services.schema_fidelity import (
-        mysql_index_requires_prefix,
-        mysql_key_compatible_types,
-    )
-    from services.type_system import parse_string_carrier_width
+    from services.schema_fidelity import mysql_index_requires_prefix
 
     want = column.casefold()
     groups = [g for g in key_groups or [] if any(c.casefold() == want for c in g)]
-    lob = mysql_index_requires_prefix(new_type)
-    asked = None if lob else parse_string_carrier_width(new_type)
-    if not groups or not (lob or (asked and _mysql_string_carrier(new_type))):
+    if not groups or not _mysql_growable(new_type):
         return new_type, False
     by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
     existing_type = by_fold.get(want, "")
-    # The budget question is asked of an unbounded text key, so a bounded
-    # VARCHAR candidate is capped by the same width a TEXT key would get.
-    probe = new_type if asked is None else "TEXT"
+    grow = {
+        str(k).casefold(): str(v)
+        for k, v in (growing or {}).items()
+        if str(k).casefold() in by_fold and _mysql_growable(str(v))
+    }
+    grow[want] = new_type
+    from services.type_system import parse_string_carrier_width
+
+    asked = None if mysql_index_requires_prefix(new_type) else parse_string_carrier_width(new_type)
     budget: int | None = None
     for key_cols in groups:
-        types = [
-            probe if c.casefold() == want else by_fold.get(c.casefold(), "")
-            for c in key_cols
-        ]
-        sized, refusal = mysql_key_compatible_types(
-            table_name=table_name,
-            conflict_columns=list(key_cols),
-            target_cols=list(key_cols),
-            target_types=types,
-            mappings=[],
-            column_types={},
-        )
-        if refusal:
-            logger.info(
-                "Widen of indexed %s.%s to %s kept at %s: %s",
-                table_name, column, new_type, existing_type, refusal,
-            )
-            return existing_type, True
-        carrier = next((t for c, t in zip(key_cols, sized) if c.casefold() == want), "")
-        width = parse_string_carrier_width(carrier)
+        width = _mysql_key_group_width(key_cols, want, grow, by_fold, table_name)
         if not width:
             return existing_type, True
         budget = width if budget is None else min(budget, width)
@@ -1027,6 +1082,16 @@ def widen_existing_columns_native(
         return []
 
     log: list[str] = []
+    # Every key part this run widens is budgeted together, and MySQL gets one
+    # ALTER TABLE for all of them: per-column MODIFYs committed ``a`` and then
+    # failed ``b`` with 1071, leaving the key half-migrated.
+    growing = {
+        col: new_type
+        for col, new_type in zip(target_cols, target_types)
+        if col not in skip and col in existing
+        and is_wider_type(existing[col], new_type, dest_db=dialect)
+    }
+    mysql_modifies: list[tuple[str, str, str, str]] = []
     for col, new_type in zip(target_cols, target_types):
         if col in skip:
             continue
@@ -1058,7 +1123,7 @@ def widen_existing_columns_native(
             # A keyed column never becomes a LOB (MySQL 1170); it widens to
             # the full-value key carrier the create path would have chosen.
             new_type, keep = _mysql_keyed_widen_carrier(
-                cursor, schema, table_name, col, new_type, existing, dialect
+                cursor, schema, table_name, col, new_type, existing, dialect, growing
             )
             if keep:
                 if suppressed_out is not None:
@@ -1084,6 +1149,8 @@ def widen_existing_columns_native(
                 ddl += _mysql_preserved_column_clause(
                     cursor, schema, table_name, col, new_type
                 )
+                mysql_modifies.append((ddl, col, existing_type, new_type))
+                continue
             cursor.execute(ddl)
             log.append(ddl)
             logger.debug(
@@ -1106,7 +1173,39 @@ def widen_existing_columns_native(
             )
             raise_widen_refusal(col, existing_type, new_type, exc)
             raise
+    if mysql_modifies:
+        log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
     return log
+
+
+def _execute_mysql_modifies(
+    cursor: Any, table_name: str, modifies: list[tuple[str, str, str, str]]
+) -> list[str]:
+    """One ``ALTER TABLE ... MODIFY a ..., MODIFY b ...`` for every MySQL widen of a table.
+
+    MySQL applies a single ALTER TABLE atomically, so a refusal (1071 on a key
+    that would be too long, a lock timeout) leaves the table exactly as it was
+    instead of half-migrated.
+    """
+    first = modifies[0][0]
+    head = first[: first.index(" MODIFY COLUMN ")]
+    ddl = head + " " + ", ".join(m[0][m[0].index(" MODIFY COLUMN ") + 1:] for m in modifies)
+    try:
+        cursor.execute(ddl)
+    except Exception as exc:
+        err = str(exc).lower()
+        if any(phrase in err for phrase in ("already", "not supported", "lock timeout")):
+            logger.debug("Widen skipped for %s: %s", table_name, exc, exc_info=exc)
+            return []
+        logger.warning("Widen failed for %s: %s (DDL: %s)", table_name, exc, ddl, exc_info=exc)
+        col = ", ".join(m[1] for m in modifies)
+        raise_widen_refusal(
+            col, ", ".join(m[2] for m in modifies), ", ".join(m[3] for m in modifies), exc
+        )
+        raise
+    for _ddl, col, old, new in modifies:
+        logger.debug("Widened %s.%s from %s to %s", table_name, col, old, new)
+    return [ddl]
 
 
 def add_missing_columns(

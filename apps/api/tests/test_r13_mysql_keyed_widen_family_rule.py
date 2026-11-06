@@ -132,6 +132,9 @@ def test_candidate_with_its_own_charset_is_not_restated_and_numeric_widens_take_
         backfill=True, source_types={"note": "VARCHAR(50)", "amount": "DECIMAL(12,2)"},
     )
     alters = _ddl(cur)
-    assert len(alters) == 2, cur.executed
-    assert alters[0].upper().count("CHARACTER SET") == 1 and "COLLATE utf8mb4_bin" in alters[0]
-    assert "CHARACTER SET" not in alters[1].upper() and "COLLATE" not in alters[1].upper()
+    # One ALTER TABLE for every MODIFY of the table (atomic: never half-migrated).
+    assert len(alters) == 1, cur.executed
+    clauses = alters[0].split(", MODIFY COLUMN ")
+    assert len(clauses) == 2, alters
+    assert clauses[0].upper().count("CHARACTER SET") == 1 and "COLLATE utf8mb4_bin" in clauses[0]
+    assert "CHARACTER SET" not in clauses[1].upper() and "COLLATE" not in clauses[1].upper()
