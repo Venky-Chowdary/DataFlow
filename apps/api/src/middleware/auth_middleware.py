@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -168,6 +169,36 @@ def _session_idled_out(token: str, email: str) -> bool:
     return False
 
 
+def _issued_before_deletion(email: str, issued_at: Any) -> bool:
+    """A session issued at or before its account was deleted (explicit marker).
+
+    Only a stored account that was *deleted* leaves a marker
+    (``user_store.mark_account_deleted``). An identity that never had a stored
+    record — SSO (domain allowlist / auto-provision), SCIM-provisioned users —
+    has none and is never refused for "no record" (B1, review 4).
+
+    During a MongoDB outage (L1): the session itself is verified from this
+    node's file copy only, so a session issued on another node is refused —
+    stored users fail closed; the marker is read from Mongo and this node's
+    mirror, whichever answers.
+    """
+    from services.user_store import account_deleted_since
+
+    try:
+        deleted_at = account_deleted_since(email)
+    except Exception:  # noqa: BLE001 — an unreadable marker store is not a deletion
+        logger.warning("deleted-account marker unreadable for a session check", exc_info=True)
+        return False
+    if deleted_at is None:
+        return False
+    try:
+        issued = int(issued_at) if issued_at is not None else 0
+    except (TypeError, ValueError):
+        issued = 0
+    # Unknown issue time on a deleted account: refuse (fail closed).
+    return issued <= deleted_at
+
+
 def _attach_user_reason(request: Request, token: str) -> str | None:
     email = verify_token(token)
     if email:
@@ -180,14 +211,14 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
             return "session_idle_timeout"
         _heal_rekey_if_pending(stored, email)
         user = lookup_user(email)
-        if user is None and stored is None:
-            from src.services.auth_service import token_jti
+        from services.auth_sessions import session_created_at
+        from src.services.auth_service import token_jti
 
-            if token_jti(token):
-                # A session token for an account that no longer exists (deleted,
-                # e.g. by a workspace teardown): its session row may outlive the
-                # account by a race, so the account is the authority (review 3).
-                return "user_not_found"
+        # Even when the email has an account again: a session issued before
+        # the old account's deletion belongs to that deleted account.
+        jti = token_jti(token)
+        if jti and _issued_before_deletion(email, session_created_at(jti)):
+            return "account_deleted"
         request.state.user_email = email
         if user:
             request.state.user = user
@@ -298,12 +329,13 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     # request: retry the membership/org move; the flag stays set if the
     # retry fails again, so this never swallows the failure.
     _heal_rekey_if_pending(stored, email)
+    if _issued_before_deletion(email, doc.get("created_at")):
+        return "account_deleted"
     user = lookup_user(email)
-    if user is None and stored is None:
-        # The cookie's session outlived its account (review 3): refused.
-        return "user_not_found"
     request.state.user_email = email
-    request.state.user = user
+    # Never None: an identity with no static/stored entry (SSO, SCIM) is a viewer
+    # at the gate, exactly as on the bearer path (M1).
+    request.state.user = user if user else {"email": email, "role": "viewer"}
     from services.auth_state import get_auth_state
     from services.session_policy import enforce_idle
 

@@ -613,8 +613,61 @@ def reset_password(*, email: str) -> tuple[dict[str, Any], str]:
     return public_user(doc), issued
 
 
+DELETED_ACCOUNTS_COLLECTION = "deleted_accounts"
+
+
+def _deleted_path() -> Path:
+    return _store_path().with_name("deleted_accounts.json")
+
+
+def mark_account_deleted(email: str, *, at: int | None = None) -> None:
+    """Record that ``email``'s stored account was deleted, and when.
+
+    The auth middleware refuses a session token issued at or before this
+    instant (``account_deleted_since``). An explicit marker — never "the
+    account has no stored record": SSO and SCIM identities sign in without one.
+    A later account under the same email signs in with sessions issued after
+    the marker, so it is unaffected.
+    """
+    import time
+
+    normalized = normalize_email(email)
+    if not normalized:
+        return
+    stamp = int(at if at is not None else time.time())
+    db = mongo_database()
+    if db is not None:
+        db[DELETED_ACCOUNTS_COLLECTION].update_one(
+            {"_id": normalized}, {"$max": {"deleted_at": stamp}}, upsert=True
+        )
+    # Mirrored on this node, like the session store, for a Mongo outage.
+    with json_doc_transaction(_deleted_path(), {"deleted": {}}) as data:
+        marks = data.setdefault("deleted", {})
+        marks[normalized] = max(int(marks.get(normalized) or 0), stamp)
+
+
+def account_deleted_since(email: str) -> int | None:
+    """Epoch seconds the stored account ``email`` was last deleted, or ``None``."""
+    normalized = normalize_email(email)
+    if not normalized:
+        return None
+    values: list[int] = []
+    db = mongo_database()
+    if db is not None:
+        row = db[DELETED_ACCOUNTS_COLLECTION].find_one({"_id": normalized}) or {}
+        if row.get("deleted_at"):
+            values.append(int(row["deleted_at"]))
+    local = (load_json_doc(_deleted_path(), {"deleted": {}}).get("deleted") or {}).get(normalized)
+    if local:
+        values.append(int(local))
+    return max(values) if values else None
+
+
 def delete_user(*, email: str) -> bool:
-    return _delete_one(normalize_email(email))
+    removed = _delete_one(normalize_email(email))
+    if removed:
+        mark_account_deleted(email)
+    return removed
 
 
 def delete_user_if_created_at(*, email: str, created_at: str) -> bool:
@@ -629,7 +682,10 @@ def delete_user_if_created_at(*, email: str, created_at: str) -> bool:
         return False
     db = mongo_database()
     if db is not None:
-        return db[COLLECTION].delete_one({"_id": normalized, "created_at": created_at}).deleted_count > 0
+        removed = db[COLLECTION].delete_one({"_id": normalized, "created_at": created_at}).deleted_count > 0
+        if removed:
+            mark_account_deleted(normalized)
+        return removed
     with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
         users = [u for u in data.get("users", []) if isinstance(u, dict)]
         kept = [
@@ -637,7 +693,10 @@ def delete_user_if_created_at(*, email: str, created_at: str) -> bool:
             if not (normalize_email(u.get("email", "")) == normalized and u.get("created_at") == created_at)
         ]
         data["users"] = kept
-        return len(kept) != len(users)
+        removed = len(kept) != len(users)
+    if removed:
+        mark_account_deleted(normalized)
+    return removed
 
 
 _BACKFILLED = False

@@ -158,6 +158,13 @@ def create_session(email: str, *, expires_at: int, amr: list[str] | None = None)
     return jti
 
 
+def session_created_at(jti: str) -> int | None:
+    """When the session was issued (epoch seconds), or ``None`` when unknown."""
+    row = _session_row(jti)
+    value = (row or {}).get("created_at")
+    return int(value) if value else None
+
+
 def session_amr(jti: str) -> list[str]:
     """Authentication methods recorded on a session ([] for rows that predate them)."""
     row = _session_row(jti)
