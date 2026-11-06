@@ -1667,7 +1667,7 @@ def detect_schema_drift(
         from services.coercion_probe import samples_coerce_mapping
         from services.validation_mode_contract import mode_holds_out_refusal
 
-        hold_out_text_cells = mode_holds_out_refusal(validation_mode)
+        hold_out_text_cells = mode_holds_out_refusal(validation_mode, record_batch=False)
         from services.migration_risk_contract import (
             mapping_has_clearing_risk_contract,
         )

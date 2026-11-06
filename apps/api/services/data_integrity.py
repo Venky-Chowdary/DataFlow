@@ -395,7 +395,7 @@ def _mixed_numeric_column_held(
             bad += 1
         else:
             ok += 1
-    held = bad if mode_holds_out_refusal(validation_mode) else 0
+    held = bad if mode_holds_out_refusal(validation_mode, record_batch=False) else 0
     return bool(mode_holdout_kind(validation_mode, failed=bad, held=held, cast_ok=ok, record_batch=True))
 
 
@@ -564,7 +564,7 @@ def _check_financial_precision(
 
         # The column's ONE verdict: the mode holds the unparseable amounts out
         # per row only within the share (strict and balanced never do).
-        held = len(unparseable) if mode_holds_out_refusal(validation_mode) else 0
+        held = len(unparseable) if mode_holds_out_refusal(validation_mode, record_batch=False) else 0
         if holdouts_contracted:
             contracted.extend(unparseable)
         elif not contract_present and unparseable and mode_holdout_kind(
@@ -2752,7 +2752,7 @@ def run_integrity_audit(
 
     from services.validation_mode_contract import mode_holds_out_refusal
 
-    if mode_holds_out_refusal(mode):
+    if mode_holds_out_refusal(mode, record_batch=False):
         # Cell and sample findings quarantine at write. They must not refuse
         # the load. A missing schema or an unreadable sample still blocks:
         # there is nothing to quarantine against. Neither does a column whose

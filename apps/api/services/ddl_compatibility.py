@@ -175,7 +175,7 @@ def _held_out_text_parse(
     """
     from services.validation_mode_contract import mode_holds_out_refusal
 
-    if not tgt_type or not sample_rows or not mode_holds_out_refusal(validation_mode):
+    if not tgt_type or not sample_rows or not mode_holds_out_refusal(validation_mode, record_batch=False):
         return False
     if normalize_logical_type(src_type) not in {"string", "text"}:
         return False

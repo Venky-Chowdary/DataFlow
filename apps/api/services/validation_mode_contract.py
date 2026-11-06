@@ -225,7 +225,7 @@ def cast_share_holds_out(failed: int, cast_ok: int) -> bool:
 
 
 def mode_holds_out_refusal(
-    mode: str | None, reason: str | None = None, *, record_batch: bool = True
+    mode: str | None, reason: str | None = None, *, record_batch: bool
 ) -> bool:
     """THE policy: does this validation mode hold out a cell its cast refused?
 
@@ -239,6 +239,8 @@ def mode_holds_out_refusal(
     * strict / maximum / review — nothing.
 
     ``reason=None`` asks for any reason, which only lenient answers yes to.
+    ``record_batch`` is required (review): a caller always says whether the
+    source is a file, so balanced can never hold out on a database by default.
     """
     if _holds_out_every_refusal(mode):
         return True

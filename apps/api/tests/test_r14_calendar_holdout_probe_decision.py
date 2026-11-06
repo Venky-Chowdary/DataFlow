@@ -92,3 +92,14 @@ def test_gates_no_longer_decide_on_the_value():
     assert gates.count('mode == "lenient"') == 1, gates.count('mode == "lenient"')
     probe = (Path(__file__).resolve().parents[1] / "services/coercion_probe.py").read_text()
     assert "mode_holds_out_refusal(mode, err" in probe
+
+
+def test_record_batch_is_required_by_the_policy():
+    import pytest as _pytest
+
+    from services.validation_mode_contract import mode_holds_out_refusal
+
+    with _pytest.raises(TypeError):
+        mode_holds_out_refusal(
+            "balanced", "Invalid date: '2024-02-30' is not a real calendar date (2024-02 has 29 days)"
+        )
