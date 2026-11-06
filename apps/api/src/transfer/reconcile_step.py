@@ -3418,7 +3418,17 @@ def _maybe_attach_verification_ladder(
             batch_scoped = True
     from services.primary_key import sync_collapses_in_file_duplicates
 
-    if pk_column and source_rows and sync_collapses_in_file_duplicates(sync_mode):
+    # The writer collapses on the WHOLE key (ON CONFLICT (region, id)); keying
+    # the survivor pick on pk_column — the first key column only — merged every
+    # row of one region into a single "survivor" (ACC-03 run 2). Use the full
+    # key, and only when every key column is on the rows.
+    _collapse_key = [str(c) for c in (pk_cols or ([pk_column] if pk_column else [])) if str(c or "")]
+    if (
+        _collapse_key
+        and source_rows
+        and all(c in source_rows[0] for c in _collapse_key)
+        and sync_collapses_in_file_duplicates(sync_mode)
+    ):
         # E2-023/D89: an upsert lands one row per key — the latest. The
         # window re-read (seeded inclusive at the watermark's tie group) still
         # holds the older versions, so compare the survivor only.
@@ -3434,7 +3444,7 @@ def _maybe_attach_verification_ladder(
             }.get(window.cursor, "")
             _cur = next((c for c in (window.cursor, _renamed) if c and c in source_rows[0]), "")
         source_rows = latest_version_per_key(
-            source_rows, cursor_column=_cur, key_columns=[pk_column]
+            source_rows, cursor_column=_cur, key_columns=_collapse_key
         )
     # D67/D95: rows the writer held out to quarantine are in the source
     # re-read but never entered the destination. Hashing them in the L3

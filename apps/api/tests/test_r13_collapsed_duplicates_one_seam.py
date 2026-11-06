@@ -183,3 +183,22 @@ def test_the_integrity_audit_passes_the_stream_name_through():
 
     assert "stream_name=stream_name" in inspect.getsource(di.run_integrity_audit)
     assert "stream_name=str(getattr(self.plan.source" in inspect.getsource(pc)
+
+
+
+def test_a_composite_key_keys_the_survivor_on_every_column():
+    """Shard 6 / ACC-03: the ladder keyed its survivor pick on the first key
+    column only, merging every row of one region into one. The writer collapses
+    on the whole (region, id) key; so does the pick."""
+    from services.duplicate_policy import latest_version_per_key
+
+    rows = [
+        {"region": "ap", "id": "1", "cur": "1", "v": "ap1-old"},
+        {"region": "ap", "id": "2", "cur": "1", "v": "ap2"},
+        {"region": "eu", "id": "1", "cur": "1", "v": "eu1"},
+        {"region": "ap", "id": "1", "cur": "2", "v": "ap1-new"},
+    ]
+    kept = latest_version_per_key(rows, cursor_column="cur", key_columns=["region", "id"])
+    assert sorted((r["region"], r["id"], r["v"]) for r in kept) == [
+        ("ap", "1", "ap1-new"), ("ap", "2", "ap2"), ("eu", "1", "eu1"),
+    ]
