@@ -37,6 +37,10 @@ def sqlite_conn(tmp_path):
         ("SELECT name AS label FROM t", "label", "TEXT"),
         ("SELECT * FROM t", "amt", "REAL"),
         ("SELECT upper(name) AS name FROM t", "name", None),
+        # Beside ``*`` the aggregate's output is de-duplicated to name__2; the
+        # base column keeps its catalog type, the aggregate is not given TEXT.
+        ("SELECT *, count(*) AS name FROM t", "name", "TEXT"),
+        ("SELECT *, count(*) AS name FROM t", "name__2", "INTEGER"),
     ],
 )
 def test_sqlite_catalog_types_apply_only_to_passthrough_columns(sqlite_conn, sql, col, expected):
@@ -62,11 +66,20 @@ def test_sqlite_catalog_types_apply_only_to_passthrough_columns(sqlite_conn, sql
         (13, None, None, "BOOLEAN"),
     ],
 )
-def test_snowflake_cursor_codes_are_read_as_snowflake_types(code, precision, scale, expected):
+def test_snowflake_cursor_codes_are_named_by_the_driver(code, precision, scale, expected):
+    """The Snowflake path names its driver's codes; the shared reader honours the name."""
+    from connectors.snowflake_conn import named_cursor_description
     from services.decimal_observe import cursor_declared_carriers
 
     desc = (("C", code, None, None, precision, scale, True),)
-    assert cursor_declared_carriers(["C"], desc, dialect="snowflake") == {"C": expected}
+    assert cursor_declared_carriers(["C"], named_cursor_description(desc), dialect="snowflake") == {"C": expected}
+
+
+def test_a_raw_snowflake_code_still_invents_nothing():
+    """MX2-07: an int whose table is unknown to the shared reader leaves the sample in charge."""
+    from services.decimal_observe import cursor_declared_carriers
+
+    assert cursor_declared_carriers(["C"], (("C", 2, None, None, None, None, True),), dialect="snowflake") == {}
 
 
 def test_snowflake_query_labels_to_varchar_as_text(monkeypatch):

@@ -1700,12 +1700,14 @@ def _run_snowflake_query(connector, body):
         # Snowflake's cursor description carries declared result types
         # (VARCHAR for TO_VARCHAR, NUMBER(p,s) for a SUM) — prefer it over
         # value inference (M11/M20). Its integer type codes are Snowflake's
-        # own; stamping them raw labelled TO_VARCHAR output "2" (D17).
+        # own: the driver names them (named_cursor_description) and the shared
+        # reader honours the name; a raw code is never read (D17, MX2-07).
+        from connectors.snowflake_conn import named_cursor_description
         from services.decimal_observe import cursor_declared_carriers
 
         declared = cursor_declared_carriers(
             columns,
-            tuple(tuple(desc) for desc in description),
+            named_cursor_description(description),
             dialect="snowflake",
         )
         if declared:

@@ -970,6 +970,61 @@ def _snowflake_connector_module() -> Any:
     return snowflake.connector
 
 
+# Snowflake's own type names (snowflake.connector.constants.FIELD_ID_TO_NAME)
+# -> the logical carrier a query result column declares.
+_SNOWFLAKE_TYPE_CARRIERS = {
+    "FIXED": "DECIMAL",  # precision/scale come from the description
+    "REAL": "DOUBLE",
+    "TEXT": "VARCHAR",
+    "DATE": "DATE",
+    "TIME": "TIME",
+    "TIMESTAMP": "TIMESTAMP",
+    "TIMESTAMP_NTZ": "TIMESTAMP",
+    "TIMESTAMP_LTZ": "TIMESTAMPTZ",
+    "TIMESTAMP_TZ": "TIMESTAMPTZ",
+    "VARIANT": "JSON",
+    "OBJECT": "JSON",
+    "ARRAY": "JSON",
+    "BINARY": "VARBINARY",
+    "BOOLEAN": "BOOLEAN",
+}
+
+
+def named_cursor_description(description: Any) -> tuple:
+    """Snowflake's cursor description with each type code named by the driver.
+
+    A Snowflake type code is a private integer that collides with the MySQL
+    and PostgreSQL code tables, so services.decimal_observe never reads one
+    (MX2-07: an untrusted int invents nothing; the sample decides). Here the
+    description is known to come from snowflake-connector-python, and the
+    driver's own FIELD_ID_TO_NAME names the code, so TO_VARCHAR output is
+    VARCHAR and a NUMBER(38,0) is DECIMAL(38,0) instead of the raw "2" or a
+    value-inferred INTEGER/TIMESTAMP (D17). The name rides the existing
+    explicit-carrier slot (CursorDeclaredType); an unknown code is left as
+    the driver reported it.
+    """
+    try:
+        from snowflake.connector.constants import FIELD_ID_TO_NAME
+    except ImportError:  # no driver: nothing names the codes
+        FIELD_ID_TO_NAME = {}
+    from services.decimal_observe import CursorDeclaredType
+
+    named: list[tuple] = []
+    for desc in description or ():
+        row = tuple(desc)
+        code = row[1] if len(row) > 1 else None
+        type_name = (
+            FIELD_ID_TO_NAME.get(code)
+            if isinstance(code, int) and not isinstance(code, bool)
+            else None
+        )
+        carrier = _SNOWFLAKE_TYPE_CARRIERS.get(str(type_name or "").upper())
+        if carrier:
+            row = (row[0], CursorDeclaredType(str(type_name), carrier), *row[2:])
+        named.append(row)
+    return tuple(named)
+
+
 _converter_class: type | None = None
 
 _SHORT_YEAR = re.compile(r"^(\d{1,3})(?=-)")
