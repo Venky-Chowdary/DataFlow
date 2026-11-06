@@ -220,6 +220,11 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "json_documents": "json",
     "parquet_lake": "parquet",
     "jsonl_stream": "jsonl",
+    # Zilliz Cloud is managed Milvus (REST v2, Bearer API key). The copy fast
+    # path already folds it onto Milvus (services.copy_milvus_common); the
+    # driver resolver answered "type=zilliz unsupported" (D274).
+    "zilliz": "milvus",
+    "zilliz_cloud": "milvus",
 }
 
 # Suggested lists — only connectors users can configure today

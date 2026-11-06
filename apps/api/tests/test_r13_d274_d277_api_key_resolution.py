@@ -194,3 +194,10 @@ def test_absolute_http_url_forms():
     assert absolute_http_url("http://127.0.0.1:8123", port=443) == "http://127.0.0.1:8123"
     assert absolute_http_url("127.0.0.1", port=8123, ssl=False) == "http://127.0.0.1:8123"
     assert absolute_http_url("", port=443) == ""
+
+
+def test_zilliz_is_the_milvus_driver():
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    assert resolve_driver_type("zilliz") == "milvus"
+    assert resolve_driver_type("zilliz_cloud") == "milvus"
