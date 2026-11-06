@@ -104,3 +104,77 @@ def test_lenient_note_on_a_table_names_the_table_routes():
     assert check["blocks_transfer"] is True
     assert DUPLICATE_KEY_ROUTES_TABLE in check["note"], check["note"]
     assert DUPLICATE_KEY_ROUTES not in check["note"] and "keep_last" not in check["note"]
+
+
+# ── 2. object-store sources (kind=database, record-batch) ───────────────────
+def test_keep_last_on_an_object_store_source_reads_whole_and_collapses():
+    from types import SimpleNamespace
+
+    from services.duplicate_policy import keep_last_reads_whole, keep_last_records
+    from src.transfer.engine import takes_streaming_route
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    rows = [{"sku": "A", "v": "1"}, {"sku": "B", "v": "2"}, {"sku": "A", "v": "3"}]
+    contracts = [{"name": "t", "sync_mode": "full_refresh_overwrite", "primary_key": "sku", "selected": True}]
+    for fmt in ("s3", "gcs", "adls", "sftp"):
+        req = SimpleNamespace(
+            source=EndpointConfig(kind="database", format=fmt, extra={"in_file_dedupe": "keep_last"}),
+            destination=EndpointConfig(kind="database", format="postgresql"),
+            stream_contracts=contracts,
+        )
+        assert keep_last_reads_whole(req), fmt
+        assert keep_last_records(req, rows) == [{"sku": "A", "v": "3"}, {"sku": "B", "v": "2"}], fmt
+    table = SimpleNamespace(
+        source=EndpointConfig(kind="database", format="postgresql", extra={"in_file_dedupe": "keep_last"}),
+        destination=EndpointConfig(kind="database", format="postgresql"),
+        stream_contracts=contracts,
+    )
+    assert not keep_last_reads_whole(table) and keep_last_records(table, rows) == rows
+    # The table stream does not collapse, so such a run takes the buffered route.
+    s3 = TransferRequest(
+        source=EndpointConfig(kind="database", format="s3", table="k.csv", extra={"in_file_dedupe": "keep_last"}),
+        destination=EndpointConfig(kind="database", format="postgresql", table="t"),
+        stream_contracts=contracts,
+        sync_mode="full_refresh_overwrite",
+    )
+    assert takes_streaming_route(s3) is False
+
+
+def test_s3_csv_with_keep_last_lands_one_row_per_key(tmp_path, monkeypatch, local_object_store):
+    if not local_object_store:
+        pytest.skip("no local object store endpoint (moto)")
+    from urllib.parse import urlparse
+
+    import boto3
+
+    from tests.conftest import LOCAL_OBJECT_STORE_BUCKET
+
+    h.isolate(tmp_path, monkeypatch)
+    monkeypatch.delenv("DATAFLOW_SEED_DEMO", raising=False)
+    key = f"r14/dups_{uuid.uuid4().hex[:6]}.csv"
+    body = "sku,name\n" + "".join(f"SKU-{i:02d},item {i}\n" for i in range(1, 11)) + "SKU-07,dup item\n"
+    boto3.client("s3", endpoint_url=local_object_store, aws_access_key_id="test",
+                 aws_secret_access_key="test", region_name="us-east-1").put_object(
+        Bucket=LOCAL_OBJECT_STORE_BUCKET, Key=key, Body=body.encode())
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    parsed = urlparse(local_object_store)
+    dst = f"r14s3_{uuid.uuid4().hex[:6]}"
+    contract = [{"name": key, "sync_mode": "full_refresh_overwrite", "primary_key": "sku", "selected": True}]
+    data = {"source_kind": "database", "dest_kind": "database", "source_format": "s3",
+            "source_host": parsed.hostname or "127.0.0.1", "source_port": str(parsed.port or 443),
+            "source_database": LOCAL_OBJECT_STORE_BUCKET, "source_username": "test",
+            "source_password": "test", "source_connection_string": local_object_store,
+            "source_table": key, "dest_table": dst, "async_mode": "false",
+            "validation_mode": "lenient", "sync_mode": "full_refresh_overwrite", **PG_DEST,
+            "stream_contracts_json": json.dumps(contract),
+            "source_extra_json": json.dumps({"in_file_dedupe": "keep_last"})}
+    try:
+        resp = TestClient(app).post("/api/v1/transfer/run", data=data)
+        assert resp.status_code == 200, resp.text[:1200]
+        got = h.query("postgresql", f'SELECT count(*), count(DISTINCT sku) FROM public."{dst}"')[0]  # nosec B608
+        assert got == (10, 10), got
+        assert h.query("postgresql", f'SELECT name FROM public."{dst}" WHERE sku = \'SKU-07\'') == [("dup item",)]  # nosec B608
+    finally:
+        h.drop_table("postgresql", dst)

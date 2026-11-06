@@ -102,22 +102,38 @@ def route_duplicate_options(*extras: Any) -> dict[str, str]:
     return out
 
 
+def keep_last_reads_whole(request: Any) -> bool:
+    """A record-batch source (file, S3/GCS/ADLS/SFTP object) asked for keep_last.
+
+    Object-store sources are ``kind=database`` and record-batch
+    (``preflight_source_kind.source_is_record_batch``), so Validate accepts
+    keep_last for them; the table stream does not collapse, so such a run
+    reads the batch whole on the buffered route, where
+    :func:`keep_last_records` collapses it (QA C2 review 3).
+    """
+    from services.preflight_source_kind import source_is_record_batch
+
+    source = getattr(request, "source", None)
+    if not source_is_record_batch(
+        str(getattr(source, "kind", "") or ""), str(getattr(source, "format", "") or "")
+    ):
+        return False
+    options = route_duplicate_options(
+        dict(getattr(source, "extra", None) or {}),
+        dict(getattr(getattr(request, "destination", None), "extra", None) or {}),
+    )
+    return options.get("in_file_dedupe") == "keep_last"
+
+
 def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
-    """The buffered file route's keep_last: the same collapse the file stream runs.
+    """The buffered route's keep_last: the same collapse the file stream runs.
 
     ``file_stream`` collapses through :func:`iter_keep_last`; a file the engine
     reads whole (priority/limit, staging, mirror) is collapsed here, before
     the write and before Gate-8 hashes ``records``. A table is never collapsed
     here — Validate refuses keep_last on one (``KEEP_LAST_TABLE_REFUSAL``).
     """
-    source = getattr(request, "source", None)
-    if str(getattr(source, "kind", "") or "").lower() != "file" or not records:
-        return records
-    options = route_duplicate_options(
-        dict(getattr(source, "extra", None) or {}),
-        dict(getattr(getattr(request, "destination", None), "extra", None) or {}),
-    )
-    if options.get("in_file_dedupe") != "keep_last":
+    if not records or not keep_last_reads_whole(request):
         return records
     from services.sync_cursor import resolve_sync_contract
 

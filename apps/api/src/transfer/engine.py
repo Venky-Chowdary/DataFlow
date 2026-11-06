@@ -707,7 +707,8 @@ def takes_streaming_route(request: Any) -> bool:
 
     if not supports_streaming(request.source, request.destination):
         return False
-    if request.priority_column or getattr(request, "write_via_staging", False):
+    from services.duplicate_policy import keep_last_reads_whole
+    if request.priority_column or getattr(request, "write_via_staging", False) or keep_last_reads_whole(request):
         return False
     contract = resolve_sync_contract(request.stream_contracts)
     sync = resolve_effective_sync_mode(
@@ -1719,7 +1720,6 @@ class UniversalTransferEngine:
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
             from services.duplicate_policy import keep_last_records
-
             records = keep_last_records(request, records)
             # The batch path reads the source whole, so an incremental mode has
             # to be bounded here or it re-delivers rows already at rest.
