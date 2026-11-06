@@ -8,6 +8,10 @@ values coerced to NULL, so dashboards, polling, and reconciliation stay honest.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 COMPLETED = "completed"
 COMPLETED_WITH_QUARANTINE = "completed_with_quarantine"
 # The load wrote nothing because today's file has not arrived. The job
@@ -144,6 +148,90 @@ def measure_cancel_landing(
         by_run = int(now)
     if by_run is not None:
         exc.destination_rows_by_run = by_run  # type: ignore[attr-defined]
+
+
+def checkpoint_partial_chunk_on_cancel(
+    exc: BaseException,
+    *,
+    checkpoint: Any,
+    checkpoint_service: Any,
+    committed_offset: int,
+    rows_applied: int,
+    rejected_applied: int,
+    write_mode: str,
+    sync_mode: str,
+    dest_type: str,
+    job_id: str,
+    connector: str = "",
+) -> bool:
+    """Make the committed prefix of a cancelled chunk a durable checkpoint.
+
+    A transactional writer rolls its chunk back on cancel, so the last saved
+    checkpoint already matches the destination. A schemaless destination
+    (MongoDB) commits every batch on its own: the documents a cancelled chunk
+    had written stay, while no checkpoint covered them. Retry was refused as
+    a duplicate and Resume as "No durable checkpoint" — the operator had no
+    way on (QA r12 Mongo D5).
+
+    The writer reports the source rows its committed batches covered
+    (``chunk_source_rows_consumed``) and the quarantine rows among them. The
+    checkpoint is advanced only when D199's destination count proves that
+    prefix is exactly what landed (``destination_rows_by_run`` equals the
+    applied tally plus this chunk's writes): a later chunk that also committed
+    out of order, a keyed upsert (no row offset), or an overwrite (the resumed
+    run re-parks the collection) leave the checkpoint as it was. Returns True
+    when a checkpoint was saved.
+    """
+    consumed = getattr(exc, "chunk_source_rows_consumed", None)
+    rows_written = getattr(exc, "rows_written", None)
+    by_run = getattr(exc, "destination_rows_by_run", None)
+    if (
+        checkpoint is None
+        or checkpoint_service is None
+        or not consumed
+        or rows_written is None
+        or by_run is None
+    ):
+        return False
+    from services.sync_cursor import is_overwrite_sync
+    from src.transfer.engine_family import is_schemaless_family
+
+    if str(write_mode or "").lower() == "upsert" or is_overwrite_sync(sync_mode):
+        return False
+    if not is_schemaless_family(dest_type):
+        return False
+    if int(by_run) != int(rows_applied) + int(rows_written):
+        return False
+    details = [
+        d for d in (getattr(exc, "chunk_rejected_details", None) or []) if isinstance(d, dict)
+    ]
+    if details and job_id:
+        from services.quarantine_dlq import persist_rejected_rows
+
+        # The chunk never finished, so its quarantine rows were not persisted
+        # with it; the resumed pass starts after them and would not see them.
+        persist_rejected_rows(
+            job_id=str(job_id),
+            rejected_details=details,
+            source="stream_batch_cancel",
+            connector=str(connector or ""),
+        )
+    checkpoint.offset = int(committed_offset) + int(consumed)
+    checkpoint.rows_processed = int(rows_applied) + int(rows_written)
+    checkpoint.rejected_rows = int(rejected_applied) + len(details)
+    checkpoint.phase = "writing"
+    checkpoint.status = "cancelled"
+    record = getattr(checkpoint_service, "record_cancelled_progress", None)
+    if not callable(record):
+        return False
+    try:
+        saved = bool(record(checkpoint))
+    except Exception as save_exc:  # noqa: BLE001 - the cancel itself still stands
+        logger.warning("partial-chunk checkpoint not saved on cancel: %s", save_exc)
+        return False
+    if saved:
+        exc.partial_chunk_checkpointed = True  # type: ignore[attr-defined]
+    return saved
 
 
 def cancel_outcome_for(

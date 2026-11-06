@@ -2797,6 +2797,28 @@ def _stream_database_transfer_impl(
                     )
                 ),
             )
+            # QA r12 D5 — a non-transactional writer's committed prefix of
+            # the cancelled chunk becomes a durable checkpoint when the count
+            # above proves it, so Resume continues after those documents.
+            from services.job_status import checkpoint_partial_chunk_on_cancel
+
+            checkpoint_partial_chunk_on_cancel(
+                _row_exc,
+                checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service,
+                committed_offset=int(committed_offset or 0),
+                rows_applied=int(run.tally.written or 0),
+                rejected_applied=int(run.tally.rejected_total or 0),
+                write_mode=str(run.cfg.write_mode or ""),
+                sync_mode=str(run.cfg.effective_sync or ""),
+                dest_type=str(run.cfg.dest_type or ""),
+                job_id=str(run.cfg.job_id or ""),
+                connector=str(
+                    getattr(run.cfg.destination, "format", None)
+                    or getattr(run.cfg.destination, "kind", None)
+                    or ""
+                ),
+            )
         if not isinstance(_row_exc, TransferCancelled):
             _undo_failed_write(run, _row_exc)
         _kafka_failure_offset_note(run.cfg.src_type, run.tally.dest_summary, _row_exc)

@@ -395,6 +395,37 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
         return len(docs)
 
 
+def _mongo_cancel_checkpoint(
+    rows_written: int,
+    *,
+    source_rows_consumed: int,
+    rejected_details: list[dict[str, Any]],
+) -> None:
+    """Poll the cancel flag between ``insert_many`` batches (QA r12 D5).
+
+    MongoDB commits every batch on its own, so a cancelled chunk is a committed
+    prefix nothing can roll back. The cancel therefore carries what that prefix
+    covers — the source rows consumed through the last committed batch and the
+    quarantine rows among them — for the engine to checkpoint, so Resume
+    continues after the committed documents instead of refusing for want of a
+    durable checkpoint (``services.job_status.checkpoint_partial_chunk_on_cancel``).
+    """
+    from services.cancel_check import cancel_checkpoint
+    from services.error_handling import TransferCancelled
+
+    try:
+        cancel_checkpoint(rows_written)
+    except TransferCancelled as exc:
+        consumed = int(source_rows_consumed or 0)
+        exc.chunk_source_rows_consumed = consumed  # type: ignore[attr-defined]
+        exc.chunk_rejected_details = [  # type: ignore[attr-defined]
+            d
+            for d in rejected_details
+            if isinstance(d, dict) and 0 < int(d.get("row") or 0) <= consumed
+        ]
+        raise
+
+
 def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
     """A sample DECIMAL(p,s) is not a Mongo catalog bound.
 
@@ -1151,6 +1182,9 @@ def write_mapped_rows(
                 )
 
         typed_rows: list[tuple] = []
+        # 1-based source row of each typed row: hold-outs leave gaps, and a
+        # cancel reports the source rows its committed batches covered.
+        typed_src_rows: list[int] = []
         for row_idx, row in enumerate(mapped_rows):
             cells: list[Any] = []
             hold_out = False
@@ -1186,6 +1220,7 @@ def write_mapped_rows(
             if hold_out:
                 continue
             typed_rows.append(tuple(cells))
+            typed_src_rows.append(row_idx + 1)
 
         _bson_abort = reject_on_strict_policy(
             policy, rejected_details, "MongoDB", transform_errors=None
@@ -1219,6 +1254,17 @@ def write_mapped_rows(
             batch = typed_rows[start : start + mongo_batch_size]
             if not batch:
                 break
+            # QA r12 D5: stop the NEXT insert_many when the job was cancelled,
+            # as the SQL writers do (D102 / D168). One engine chunk is twenty
+            # 1,000-document batches; without this a cancelled job kept
+            # writing to the end of the chunk. ``written`` is what this call
+            # already committed, so the cancel reports it (D199 then counts
+            # the collection itself).
+            _mongo_cancel_checkpoint(
+                written + skipped_total,
+                source_rows_consumed=typed_src_rows[start - 1] if start else 0,
+                rejected_details=rejected_details,
+            )
 
             # Convert row tuples to documents; omit Missing, bind reader-null
             # as None (shared present_field_bindings). Track sparse rows so
