@@ -454,6 +454,20 @@ async def verify_audit_chain(
     tenant's records can neither fail nor appear in the verdict (R7). With no
     header a platform admin gets the platform-wide walk, each finding naming
     its workspace.
+
+    The verdict (C4): ``verified`` is true only when every record in scope was
+    checked and holds up. A record signed under a key this deployment no longer
+    holds (not configured, not retired, not in the persisted keyring) cannot be
+    checked, so it is never counted as verified — and never as tampering. Such
+    a chain reports ``status: verified_with_exceptions``, ``verified: false``,
+    ``tampering_detected: false`` and ``unverifiable_key_lost`` (``count`` and
+    ``by_key_id``); supplying that key as a retired audit key makes those
+    records verify again. A record whose content no longer matches its
+    signature, or a record missing from the chain, is tampering (``status:
+    findings``, ``tampering_detected: true``) whatever else is lost; a fork
+    from concurrent writers is counted under ``categories.fork``.
+    ``verified: null`` means nothing was walked (``nothing_checked`` or
+    ``store_unavailable``).
     """
     from services.evidence_chain import verify_chain
 
