@@ -49,7 +49,15 @@ def auto_purge_enabled() -> bool:
     return safety_flag("retention_auto_purge")
 
 
-_warned_no_store = False
+_last_warned: dict[str, datetime] = {}
+
+
+def _warn_once_per_period(key: str, message: str, now: datetime) -> None:
+    """One warning per ``RUN_INTERVAL`` per reason — the beat ticks every second."""
+    last = _last_warned.get(key)
+    if last is None or now - last >= RUN_INTERVAL:
+        _last_warned[key] = now
+        logger.warning(message)
 
 
 class RetentionNeedsDurableStore(ValueError):
@@ -83,17 +91,16 @@ def retention_schedule_status() -> dict[str, Any]:
         doc = {}
     if not doc:
         status["warning"] = "no shared metadata database: the automatic purge cannot run"
-    for key in ("claimed_at", "next_due_at"):
+    # last_run_at is a run that FINISHED (completed_at), never a bare claim.
+    for key, label in (("completed_at", "last_run_at"), ("next_due_at", "next_run_at"),
+                       ("claimed_at", "last_claimed_at")):
         value = doc.get(key)
-        status["last_run_at" if key == "claimed_at" else "next_run_at"] = (
-            value.isoformat() if isinstance(value, datetime) else None
-        )
+        status[label] = value.isoformat() if isinstance(value, datetime) else None
     return status
 
 
 def run_due_retention(*, now: datetime | None = None, force: bool = False) -> dict[str, Any] | None:
     """Run the scheduled purge if it is enabled and due. ``None`` when it did not run."""
-    global _warned_no_store
     from services.job_retention import purge_expired_jobs
     from services.maintenance_claim import claim_run
     from services.team_store import list_workspaces
@@ -101,29 +108,35 @@ def run_due_retention(*, now: datetime | None = None, force: bool = False) -> di
 
     # One read of the shared settings for the flag and the window; a store that
     # is configured but unreachable skips the run — never a node-local copy.
+    current = now or datetime.now(timezone.utc)
     try:
         settings = get_workspace_settings()
     except SettingsUnavailable as exc:
-        logger.warning("Scheduled job retention skipped: %s", exc)
+        _warn_once_per_period("settings", f"Scheduled job retention skipped: {exc}", current)
         return None
     if not settings.get("retention_auto_purge"):
         return None
-    current = now or datetime.now(timezone.utc)
     claimed = claim_run(CLAIM_ID, RUN_INTERVAL, now=current, force=force)
     if claimed is None:
-        # File-backed deployment (or the database is down): degrade cleanly,
-        # say so once per process — GET /settings carries the warning too.
-        if not _warned_no_store:
-            logger.warning("Scheduled job retention is on but no shared metadata database is reachable; skipped")
-            _warned_no_store = True
+        # mongo_database() answered None: no metadata database is configured, or
+        # it is configured but unreachable right now. Either way nothing can be
+        # claimed across replicas, so the run is skipped — one warning per
+        # period, and GET /settings carries retention_enforcement.warning.
+        _warn_once_per_period(
+            "store",
+            "Scheduled job retention is on but no shared metadata database is reachable; skipped",
+            current,
+        )
         return None
-    _warned_no_store = False
     if not claimed:
         return None
+    from services.maintenance_claim import complete_run
+
     retention_days = int(settings["retention_days"])
     runs: list[dict[str, Any]] = []
     for ws in list_workspaces():
         runs.append(_purge_workspace(ws.id, retention_days, current, purge_expired_jobs))
+    complete_run(CLAIM_ID)
     return {"ran_at": current.isoformat(), "retention_days": retention_days, "workspaces": runs}
 
 

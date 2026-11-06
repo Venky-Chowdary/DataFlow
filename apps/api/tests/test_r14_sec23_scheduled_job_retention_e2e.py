@@ -147,7 +147,7 @@ def test_without_a_durable_store_the_setting_refuses_and_a_run_degrades_once(ent
     from services.workspace_store import update_workspace_settings
 
     update_workspace_settings(retention_auto_purge=True, actor="test")
-    job_retention_schedule._warned_no_store = False
+    job_retention_schedule._last_warned.clear()
     with caplog.at_level(logging.WARNING, logger="services.job_retention_schedule"):
         assert job_retention_schedule.run_due_retention(force=True) is None
         assert job_retention_schedule.run_due_retention(force=True) is None
@@ -155,3 +155,20 @@ def test_without_a_durable_store_the_setting_refuses_and_a_run_degrades_once(ent
     assert len(warnings) == 1
     status = ent.admin.get("/api/v1/workspace/settings").json()["retention_enforcement"]
     assert status["scheduled"] is True and "warning" in status
+
+
+def test_last_run_reports_a_finished_run_not_a_bare_claim(ent):
+    """Review nit: a claim alone made last_run_at report a run that never finished."""
+    from services import maintenance_claim
+    from services.job_retention_schedule import CLAIM_ID, RUN_INTERVAL, run_due_retention
+
+    ws = ent.workspace("Retention completion")
+    assert ent.admin.patch("/api/v1/workspace/settings", json={"retention_auto_purge": True},
+                           headers={"X-Workspace-Id": ws}).status_code == 200
+    # A replica claimed the period and crashed before finishing.
+    assert maintenance_claim.claim_run(CLAIM_ID, RUN_INTERVAL) is True
+    status = ent.admin.get("/api/v1/workspace/settings").json()["retention_enforcement"]
+    assert status["last_claimed_at"] and status["last_run_at"] is None
+    assert run_due_retention(force=True) is not None
+    status = ent.admin.get("/api/v1/workspace/settings").json()["retention_enforcement"]
+    assert status["last_run_at"]
