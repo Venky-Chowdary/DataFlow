@@ -169,6 +169,22 @@ def _cef_line(event: dict[str, object]) -> str:
     )
 
 
+_MASKED_NOTE = (
+    "API key, service-account and SCIM token ids are masked to their last four "
+    "characters for this reader; a workspace or platform admin's export carries "
+    "them whole. Masked records do not re-hash to event_hash."
+)
+
+
+def _reader_view(request: Request, workspace_id: str, events: list) -> tuple[list, bool]:
+    """Events as this reader may see them: key ids whole only for key managers (Browser 20)."""
+    from services.audit_actor_display import mask_key_ids, reader_sees_key_ids
+
+    if reader_sees_key_ids(request, workspace_id):
+        return events, False
+    return mask_key_ids(events), True
+
+
 @router.get("/events")
 async def list_events(
     request: Request,
@@ -202,10 +218,12 @@ async def list_events(
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
     from services.audit_actor_display import add_actor_display
 
+    events, masked = _reader_view(request, workspace_id, add_actor_display(events))
     return JSONResponse(
         {
-            "events": add_actor_display(events),
+            "events": events,
             "count": len(events),
+            "key_ids_masked": masked,
             "workspace_id": workspace_id or None,
             "tenant_id": tenant_id or None,
             "next_after_seq": next_seq,
@@ -254,8 +272,13 @@ async def export_events(
         after_seq=after_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    events, masked = _reader_view(request, workspace_id, events)
     tip = latest_event_hash()
     honesty = audit_export_honesty()
+    if masked:
+        honesty = {**honesty, "key_ids_masked": True, "key_ids_note": _MASKED_NOTE}
+        # Every format says so, NDJSON and CEF included (no envelope there).
+        cursor_headers = {**cursor_headers, "X-Datawrap-Key-Ids-Masked": "1"}
     attestation = {
         "official": honesty["official"],
         "kind": honesty["kind"],
@@ -267,7 +290,7 @@ async def export_events(
     record_security_event(
         "audit.export.read", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
-        details={"format": fmt, "row_count": len(events)},
+        details={"format": fmt, "row_count": len(events), "key_ids_masked": masked},
     )
     if fmt == "json":
         return JSONResponse(
@@ -280,6 +303,7 @@ async def export_events(
                 "hash_alg": "HMAC-SHA256",
                 "honesty": honesty,
                 "attestation": attestation,
+                "key_ids_masked": masked,
                 "next_after_seq": next_seq,
             },
             headers={
