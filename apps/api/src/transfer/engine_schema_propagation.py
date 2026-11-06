@@ -228,6 +228,7 @@ def _plan_schema_auto_propagate(
     )
     evolution = drift.get("schema_evolution") or {}
     from services.schema_drift import (
+        dest_key_charsets,
         dest_key_groups,
         dest_key_limit,
         execute_must_pause,
@@ -254,6 +255,7 @@ def _plan_schema_auto_propagate(
         dest_db=(getattr(request.destination, "format", "") or "").lower(),
         key_groups=_key_groups,
         max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
+        key_charsets=dest_key_charsets(_dest_extra.get("indexes_meta")),
     )
     if _widen_props:
         _additive = list(evolution.get("additive") or [])
@@ -302,6 +304,7 @@ def _plan_schema_auto_propagate(
             adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
             key_groups=_key_groups,
             max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
+            key_charsets=dest_key_charsets(_dest_extra.get("indexes_meta")),
             key_widens_approved=acknowledged,
         )
     if not evolution.get("should_propagate"):

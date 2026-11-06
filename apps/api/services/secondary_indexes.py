@@ -59,6 +59,9 @@ class IndexColumn:
     opclass: str = ""
     #: MySQL / MariaDB prefix length (``KEY ix (name(32))``); 0 = the whole column.
     prefix_length: int = 0
+    #: MySQL / MariaDB column character set (also when inherited from the table):
+    #: a key part costs its width times this charset's bytes per character.
+    charset: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"name": self.name, "descending": self.descending}
@@ -66,6 +69,8 @@ class IndexColumn:
             payload["opclass"] = self.opclass
         if self.prefix_length:
             payload["prefix_length"] = self.prefix_length
+        if self.charset:
+            payload["charset"] = self.charset
         return payload
 
 
@@ -397,6 +402,7 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
             (schema, table),
         )
         rows = [(*r[:6], None, *r[6:7]) for r in raw]
+    charsets = mysql_column_charsets(cursor, schema, table)
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         name, non_unique, _seq, column, collation, index_type, expression = row[:7]
@@ -411,6 +417,7 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         entry["cols"].append(IndexColumn(
             str(column), descending=str(collation or "A").upper() == "D",
             prefix_length=int(sub_part or 0),
+            charset=charsets.get(str(column).casefold(), ""),
         ))
     items = [
         SourceIndex(
@@ -429,6 +436,20 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         dialect="mysql", status="measured", items=tuple(items),
         row_format=mysql_row_format(cursor, schema, table),
     )
+
+
+def mysql_column_charsets(cursor: Any, schema: str | None, table: str) -> dict[str, str]:
+    """``column (casefolded) -> CHARACTER_SET_NAME`` (inherited ones included; ``{}`` unread)."""
+    try:
+        rows = _rows(
+            cursor,
+            "SELECT COLUMN_NAME, CHARACTER_SET_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s",
+            (schema or "", table),
+        )
+    except Exception:  # noqa: BLE001 — unread: utf8mb4 pricing is assumed
+        return {}
+    return {str(r[0]).casefold(): str(r[1]) for r in rows if r and r[0] and r[1]}
 
 
 def mysql_row_format(cursor: Any, schema: str | None, table: str) -> str:

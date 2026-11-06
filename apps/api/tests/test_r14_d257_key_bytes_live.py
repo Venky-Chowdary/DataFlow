@@ -169,3 +169,75 @@ def test_a_compact_two_part_key_gets_767_bytes_per_part(isolated, live):  # noqa
     finally:
         h.drop("postgresql", table)
         h.drop("mysql", out)
+
+
+def test_an_inherited_latin1_charset_costs_one_byte_per_character(isolated, live):  # noqa: F811
+    """S5: the column inherits latin1 from a latin1 database, so nothing spells its charset.
+
+    The default collation is not declared on the column (D275), so the only
+    evidence is information_schema.COLUMNS.CHARACTER_SET_NAME.
+    """
+    db = "df_r14_latin1"
+    table = f"ki_{h.token()}"
+    out = f"{table}_d"
+    try:
+        h.run_sql("mysql", f"CREATE DATABASE IF NOT EXISTS {db} DEFAULT CHARACTER SET latin1")
+    except Exception as exc:  # noqa: BLE001 — needs CREATE on that database
+        pytest.skip(f"cannot create a latin1 scratch database here: {exc}")
+    try:
+        h.run_sql("postgresql", f"CREATE TABLE {table} (c VARCHAR(5000) PRIMARY KEY, v INT, "
+                  "updated_at TIMESTAMP)")
+        h.run_sql("mysql", f"CREATE TABLE {db}.{out} (c VARCHAR(100) NOT NULL PRIMARY KEY, v INT, "
+                  "updated_at DATETIME(6))")
+        rows = [("abc", 1), ("", 2), ("z" * 2500, 3)]
+        h.run_sql("postgresql", f"INSERT INTO {table} VALUES (%s, %s, '2024-01-01')",  # nosec B608
+                  params=rows)
+
+        def run(**kw):
+            return h.execute(
+                isolated, h.endpoint("postgresql", table), h.endpoint("mysql", out, database=db),
+                sync_mode="incremental_upsert", stream_contracts=_contract(table, "c"), **kw,
+            )
+
+        refused = run()
+        assert "VARCHAR(3072)" in (refused.error or ""), refused.error
+        approved = run(schema_drift_acknowledged=True)
+        assert approved.success, approved.error
+        width = h.run_sql("mysql", "SELECT character_maximum_length FROM information_schema.columns "
+                          f"WHERE table_schema = '{db}' AND table_name = '{out}' "  # nosec B608
+                          "AND column_name = 'c'")
+        assert int(width[0][0]) == 3072
+        got = h.run_sql("mysql", f"SELECT c, v FROM {db}.{out} ORDER BY v")  # nosec B608
+        assert [tuple(r) for r in got] == rows
+    finally:
+        h.drop("postgresql", table)
+        h.run_sql("mysql", f"DROP DATABASE IF EXISTS {db}")
+
+
+def test_the_writer_prices_an_inherited_charset_from_the_catalog(live):
+    """S5, writer path: the live column spells no charset; CHARACTER_SET_NAME says latin1."""
+    from connectors.schema_drift import widen_existing_columns_native
+
+    db = "df_r14_latin1"
+    out = f"kw_{h.token()}"
+    try:
+        h.run_sql("mysql", f"CREATE DATABASE IF NOT EXISTS {db} DEFAULT CHARACTER SET latin1")
+    except Exception as exc:  # noqa: BLE001 — needs CREATE on that database
+        pytest.skip(f"cannot create a latin1 scratch database here: {exc}")
+    conn = h.connect("mysql")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"USE {db}")  # the writer's session is on its own database
+            cur.execute(f"CREATE TABLE {out} (c VARCHAR(100) NOT NULL PRIMARY KEY, v INT)")
+            ddl = widen_existing_columns_native(
+                cur, "mysql", db, out, ["c"], ["VARCHAR(5000)"], backfill=True,
+                source_types={"c": "VARCHAR(5000)"}, key_columns=["c"],
+            )
+            assert ddl and "VARCHAR(3072)" in ddl[0], ddl
+            cur.execute("SELECT character_maximum_length, character_set_name FROM "
+                        "information_schema.columns WHERE table_schema = %s AND "
+                        "table_name = %s AND column_name = 'c'", (db, out))
+            assert cur.fetchone() == (3072, "latin1")
+    finally:
+        conn.close()
+        h.run_sql("mysql", f"DROP DATABASE IF EXISTS {db}")

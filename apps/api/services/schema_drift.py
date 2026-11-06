@@ -898,6 +898,7 @@ def propose_dest_widens(
     dest_db: str = "",
     key_groups: list[list[str]] | None = None,
     max_part_bytes: int = 3072,
+    key_charsets: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """D107: destination-side widen proposals for a live destination table.
 
@@ -925,7 +926,7 @@ def propose_dest_widens(
         widen = dest_widen_proposal(
             m, src, tgt, src_type, tgt_type, dest_db=dest_db,
             key_groups=key_groups, live_types=target_schema, growing=growing,
-            max_part_bytes=max_part_bytes,
+            max_part_bytes=max_part_bytes, key_charsets=key_charsets,
         )
         if widen:
             out.append(widen)
@@ -964,6 +965,16 @@ def strip_client_widen_stamps(mappings: list[dict[str, Any]] | None) -> list[dic
         if str(clean.get("target_type_origin") or "").strip().lower() == "drift_widen":
             clean.pop("target_type_origin", None)
         out.append(clean)
+    return out
+
+
+def dest_key_charsets(indexes_meta: dict[str, Any] | None) -> dict[str, str]:
+    """``column -> charset`` of every indexed column, from the destination index catalog."""
+    out: dict[str, str] = {}
+    for ix in (indexes_meta or {}).get("items") or []:
+        for c in (ix or {}).get("columns") or [] if isinstance(ix, dict) else []:
+            if isinstance(c, dict) and c.get("name") and c.get("charset"):
+                out[str(c["name"])] = str(c["charset"])
     return out
 
 
@@ -1059,6 +1070,7 @@ def dest_widen_proposal(
     live_types: dict[str, str] | None = None,
     growing: dict[str, str] | None = None,
     max_part_bytes: int = 3072,
+    key_charsets: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """The additive ``widen_type`` entry for one pair, or None: the one rule.
 
@@ -1086,10 +1098,11 @@ def dest_widen_proposal(
         return None
     new_type = widened_dest_carrier(tgt_type, src_type)
     if key_groups:
-        from connectors.schema_drift import keyed_widen_carrier
+        from connectors.schema_drift import keyed_widen_carrier, with_key_charsets
 
         new_type, keep = keyed_widen_carrier(
-            key_groups, tgt, new_type, {**(live_types or {}), tgt: tgt_type},
+            key_groups, tgt, new_type,
+            with_key_charsets({**(live_types or {}), tgt: tgt_type}, key_charsets),
             dialect=dest_db, growing=growing, max_part_bytes=max_part_bytes,
         )
         if keep:
@@ -1200,6 +1213,7 @@ def plan_destination_evolution(
     key_groups: list[list[str]] | None = None,
     max_part_bytes: int = 3072,
     key_widens_approved: bool = False,
+    key_charsets: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     """Apply approved destination evolution to the plan, once.
 
@@ -1227,7 +1241,7 @@ def plan_destination_evolution(
 
     widens = propose_dest_widens(
         active, source_schema=source_schema, target_schema=types, dest_db=dest_db,
-        key_groups=key_groups, max_part_bytes=max_part_bytes,
+        key_groups=key_groups, max_part_bytes=max_part_bytes, key_charsets=key_charsets,
     )
     # A key widen is applied only on this run's explicit acknowledgement.
     widens = [w for w in widens if key_widens_approved or not w.get("key")]
@@ -1534,6 +1548,7 @@ def detect_schema_drift(
     dest_key_groups: list[list[str]] | None = None,
     validation_mode: str | None = None,
     dest_key_part_bytes: int = 3072,
+    dest_key_charsets: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan.
 
@@ -1744,6 +1759,7 @@ def detect_schema_drift(
                 m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db,
                 key_groups=dest_key_groups, live_types=target_schema,
                 growing=_growing, max_part_bytes=dest_key_part_bytes,
+                key_charsets=dest_key_charsets,
             )
             if widen:
                 widen_proposals.append(widen)

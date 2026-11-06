@@ -827,6 +827,22 @@ def _mysql_string_carrier(ddl: str) -> bool:
     }
 
 
+def with_key_charsets(existing: dict[str, str], charsets: dict[str, str] | None) -> dict[str, str]:
+    """Live types with each column's (possibly inherited) charset spelled for byte pricing.
+
+    A column that inherits the table's latin1 is spelled without a CHARACTER SET,
+    and was priced at utf8mb4's 4 bytes per character. Only the key budget reads
+    this copy; the spellings the writer DDLs from are unchanged.
+    """
+    folded = {str(k).casefold(): str(v) for k, v in (charsets or {}).items() if v}
+    out: dict[str, str] = {}
+    for col, spelling in (existing or {}).items():
+        cs = folded.get(str(col).casefold())
+        named = re.search(r"CHARACTER SET|CHARSET|COLLATE", str(spelling or ""), flags=re.I)
+        out[col] = f"{spelling} CHARACTER SET {cs}" if cs and spelling and not named else spelling
+    return out
+
+
 def key_part(name: str, prefix_length: int | None = None) -> str:
     """A key-group entry: the column, or ``name(N)`` for a MySQL prefix part."""
     return f"{name}({int(prefix_length)})" if prefix_length else str(name)
@@ -895,8 +911,12 @@ def _mysql_keyed_widen_carrier(
     groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
     if not groups:
         return new_type, False
+    from services.secondary_indexes import mysql_column_charsets
+
     return mysql_keyed_widen_carrier(
-        groups, column, new_type, existing, growing=growing, dialect=dialect,
+        groups, column, new_type,
+        with_key_charsets(existing, mysql_column_charsets(cursor, schema, table_name)),
+        growing=growing, dialect=dialect,
         table_name=table_name,
         max_part_bytes=mysql_key_part_limit(mysql_row_format(cursor, schema, table_name)),
     )
