@@ -1484,6 +1484,24 @@ def reject_on_strict_policy(
         rejected_details_require_job_abort,
     )
 
+    contract_abort = any(
+        str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES for d in details
+    )
+    if rejected_details_require_job_abort(details) and not contract_abort:
+        # D267: no signed contract asked for this abort — the strict job posture
+        # refused a cell on an unsigned column. Say so; never blame a contract.
+        posture = [
+            d
+            for d in details
+            if str(d.get("policy") or "").lower()
+            in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+        ]
+        return (
+            f"{label} rejected {len(posture)} cell finding(s) across "
+            f"{_distinct_reject_rows(posture) or len(posture)} row(s) on column(s) no "
+            "signed Risk Contract covers; strict error policy blocks partial write"
+            f"{summarize_reject_findings(posture)}"
+        )
     if rejected_details_require_job_abort(details):
         n = sum(
             1
@@ -2007,9 +2025,12 @@ def build_mapped_rows_with_details(
     _cell_memos: list[dict] = [dict() for _ in mapping_infos]
     _CELL_MEMO_CAP = 500_000
     _MEMO_MISS = object()
+    from connectors.contract_salvage import hold_row_under_signed_contract
+
     for row_number, raw in enumerate(data_rows, start=start_no):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
+        row_detail_start = len(rejected_details)
         # ok | fail | stop_table | abort_transaction | retry_then_fail |
         # quarantine | skip_row | stop_column | coerce_null
         row_action = "ok"
@@ -2250,6 +2271,12 @@ def build_mapped_rows_with_details(
                         converted = None
             if target_idx >= 0:
                 out[target_idx] = converted
+        if row_has_error and row_action == "fail":
+            # D267: a row a signed continue contract already holds out is not
+            # a partial write because another of its cells is unsigned.
+            held = hold_row_under_signed_contract(rejected_details[row_detail_start:])
+            if held:
+                row_action = held
         # Rows not written to primary: abort / quarantine / skip.
         if row_has_error and row_action in {
             "fail",
