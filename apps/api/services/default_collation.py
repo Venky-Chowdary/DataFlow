@@ -55,8 +55,9 @@ def default_collation_note(column: str, collation: str) -> str:
     """The disclosure a plan carries for a column at the database default."""
     return (
         f"'{column}' compares with the database default collation {collation} "
-        "(what a CREATE without a COLLATE clause gets, as DataFlow's earlier "
-        "carrier did); values land exactly, comparisons follow that default."
+        "(what a CREATE without a COLLATE clause gets, as tables made by "
+        "earlier Datawrap versions did); values land exactly, comparisons "
+        "follow that default."
     )
 
 
