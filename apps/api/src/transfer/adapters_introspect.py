@@ -381,3 +381,43 @@ def _introspect_table_schema(
         strict_namespace=strict_namespace,
     )
     return types
+
+
+def source_schema_catalog_for_endpoint(
+    source: Any, columns: list[str], *, fallback_types: dict[str, str] | None = None
+) -> dict[str, Any] | None:
+    """The create-new fidelity catalog for a source endpoint, or None.
+
+    The streaming path introspects the source once and hands the catalog to
+    the writer; the buffered path (mirror / SCD2 since D250, and every
+    non-streaming write) handed it nothing, so its CREATE TABLE took the
+    destination's server default collation. Run 1 then passed and run 2
+    refused DataFlow's own table as a collation collapse (D275).
+    """
+    from .connector_capabilities import resolve_driver_type, source_read_driver
+
+    read_type = source_read_driver(resolve_driver_type(getattr(source, "format", "") or ""))
+    if read_type not in _CATALOG_SOURCE_TYPES:
+        return None
+    try:
+        from .adapters import resolve_connector_config
+
+        table = str(getattr(source, "table", "") or "")
+        if not table:
+            return None
+        rich = _introspect_table_schema_rich(
+            read_type, resolve_connector_config(source), table, list(columns or [])
+        )
+        return source_schema_catalog_payload(
+            read_type, list(columns or []), rich, fallback_types=fallback_types
+        )
+    except Exception as exc:  # noqa: BLE001 - a catalog is advisory; CREATE still runs
+        logger.debug("source schema catalog for buffered write failed: %s", exc, exc_info=exc)
+        return None
+
+
+#: Sources whose catalog the rich introspection reads (the streaming path's set).
+_CATALOG_SOURCE_TYPES: frozenset[str] = frozenset({
+    "postgresql", "redshift", "mysql", "snowflake", "sqlserver", "oracle",
+    "sqlite", "generic_sql", "bigquery", "databricks",
+})

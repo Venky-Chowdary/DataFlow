@@ -1626,8 +1626,14 @@ def _write_destination_database(
     protect_landed_object: bool = False,
     empty_cells_as_null: bool = False,
     upsert_ddl_approved: bool = False,
+    source_endpoint: EndpointConfig | None = None,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
+
+    ``source_endpoint`` is the run's source. The source facts a writer needs
+    are derived from it here, once: file blanks are SQL NULL (D1), and the
+    create-new catalog (keys, nullability, collation) reaches CREATE TABLE
+    exactly as on the streaming path (D275).
 
     ``error_policy`` overrides the policy normally derived from
     ``validation_mode``. It exists for write targets whose contract differs from
@@ -1637,6 +1643,9 @@ def _write_destination_database(
     """
     from .connector_capabilities import effective_port, resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
+
+    from services.preflight_source_kind import source_is_record_batch
+    from src.transfer.adapters_introspect import source_schema_catalog_for_endpoint
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
@@ -1716,7 +1725,10 @@ def _write_destination_database(
         "protect_landed_object": protect_landed_object,
         # File/object-store blanks into typed columns are SQL NULL (D1): the
         # buffered engine path dropped the flag before writers ever saw it.
-        "empty_cells_as_null": empty_cells_as_null,
+        "empty_cells_as_null": empty_cells_as_null
+        or (source_endpoint is not None and source_is_record_batch(
+            getattr(source_endpoint, "kind", "") or "database", source_endpoint.format
+        )),
         # D101: writers may not create undisclosed DDL (upsert unique index)
         # on an operator's existing table unless Validate disclosed + approved.
         "upsert_ddl_approved": upsert_ddl_approved,
@@ -1735,7 +1747,12 @@ def _write_destination_database(
             or (getattr(endpoint, "extra", None) or {}).get("destination_column_types")
             or {}
         ),
-        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
+        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog")
+        or (
+            source_schema_catalog_for_endpoint(source_endpoint, list(columns), fallback_types=schema)
+            if source_endpoint is not None
+            else None
+        ),
     }
     if allow_equal_lsn:
         common["allow_equal_lsn"] = True

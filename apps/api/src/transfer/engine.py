@@ -2386,10 +2386,6 @@ class UniversalTransferEngine:
                             phase="writing",
                             message="Connecting to destination and creating table…",
                         )
-                    from services.preflight_source_kind import (
-                        source_is_record_batch,
-                    )
-
                     with _job_phase_heartbeat(
                         mongo,
                         job_id,
@@ -2410,13 +2406,10 @@ class UniversalTransferEngine:
                             job_id=job_id,
                             skip_preflight=request.skip_preflight,
                             sync_mode=request.sync_mode,
-                            # File/object-store blanks into typed columns are SQL
-                            # NULL (D1): the buffered path dropped the flag, so
-                            # Execute rejected blanks preflight accepted.
-                            empty_cells_as_null=source_is_record_batch(
-                                getattr(request.source, "kind", "") or "database",
-                                request.source.format,
-                            ),
+                            # Source facts (file blanks are NULL, D1; the
+                            # create-new catalog and collation, D275) are
+                            # derived by the writer from the source itself.
+                            source_endpoint=request.source,
                             upsert_ddl_approved=bool(
                                 getattr(
                                     request, "ddl_changes_acknowledged", False

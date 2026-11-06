@@ -338,18 +338,9 @@ from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstri
 
 #: SQL sources whose catalog (types, nullability, defaults, keys) is read for
 #: Property 6 create-new fidelity and keyset pagination.
-_PK_INTROSPECT_TYPES: tuple[str, ...] = (
-    "postgresql",
-    "redshift",
-    "mysql",
-    "snowflake",
-    "sqlserver",
-    "oracle",
-    "sqlite",
-    "generic_sql",
-    "bigquery",
-    "databricks",
-)
+from src.transfer.adapters_introspect import _CATALOG_SOURCE_TYPES  # noqa: E402
+
+_PK_INTROSPECT_TYPES: tuple[str, ...] = tuple(sorted(_CATALOG_SOURCE_TYPES))
 
 
 from .stream_catalog import fast_path_source_catalog as _fast_path_source_catalog  # noqa: E402
