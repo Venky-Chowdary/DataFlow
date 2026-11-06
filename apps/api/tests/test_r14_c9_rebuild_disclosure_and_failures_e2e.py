@@ -258,3 +258,52 @@ def _finding(sid: str) -> dict:
     from services.schedule_store import get_schedule
 
     return dict(get_schedule(sid).approval_request or {})
+
+
+def test_a_failed_rebuild_job_is_audited_and_its_recovery_survives_a_replacing_park(client, monkeypatch):
+    """Review 3: on the real path (no _park_reason patch) a failed rebuild's
+    run parks a replacing finding (source table missing), which lost
+    recovery.job_id, and nothing audited the failure after the start."""
+    import services.audit_coverage as audit_coverage
+
+    events: list[dict] = []
+    real = audit_coverage.record_security_event
+
+    def _capture(action, **kw):
+        if action == "schedule.destination.recovered":
+            events.append({"action": action, **kw})
+        return real(action, **kw)
+
+    monkeypatch.setattr(audit_coverage, "record_security_event", _capture)
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    sid, src_table, dest = _schedule(client, cur, token, keyed=True)
+    try:
+        _drop_and_park(cur, sid, dest)
+        continuity_id = _finding(sid).get("id")
+        cur.execute(f"DROP TABLE {src_table}")  # nosec B608 - the rebuild's read fails for real
+        resp = client.post(f"/api/v1/schedules/{sid}/recover", headers=_ACTOR,
+                           json={"action": "rebuild", "reason": "rebuild it"})
+        assert resp.status_code == 200 and resp.json()["job_id"], resp.text
+        job_id = resp.json()["job_id"]
+        assert h.wait_job(job_id).get("status") == "failed"
+        _settle(sid)
+        assert _parked(sid)
+
+        failed = [e for e in events if e["outcome"] == "failed"
+                  and (e.get("details") or {}).get("phase") == "rebuild_failed"]
+        assert failed and failed[-1]["details"]["job_id"] == job_id, events
+
+        now = _finding(sid)
+        if now.get("code") == "DESTINATION_CONTINUITY":
+            recovery = now.get("recovery") or {}
+        else:  # replaced (e.g. SOURCE_TABLE_MISSING): the context travels with it
+            context = (now.get("evidence") or {}).get("recovery_context") or {}
+            assert context.get("continuity_finding", {}).get("id") == continuity_id, now
+            assert context["continuity_finding"]["code"] == "DESTINATION_CONTINUITY"
+            recovery = context.get("recovery") or {}
+        assert recovery.get("job_id") == job_id and recovery.get("outcome") == "failed", now
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
+        h.drop_table("postgresql", dest)

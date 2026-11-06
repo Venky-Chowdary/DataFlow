@@ -1471,6 +1471,18 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     else str(failure_class or "other")
                 ),
             )
+        # A failed run that was the operator's destination rebuild: record the
+        # outcome on its finding, audit it, and carry the recovery into any
+        # finding that replaces it below (QA C9 review 3).
+        recovery_context = None
+        try:
+            from services.schedule_recovery import note_rebuild_failure
+
+            recovery_context = note_rebuild_failure(
+                schedule_id, job_id, str((job_doc or {}).get("error") or "")
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping never changes the verdict
+            logger.exception("Schedule %s rebuild failure was not recorded", schedule_id)
         park = _park_reason(sched, decision, entry)
         if park and _failure_kind(decision) == TRANSIENT and park in (
             "identical_failure_repeated",
@@ -1502,6 +1514,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     # The refusal's stable code (e.g. DESTINATION_CONTINUITY),
                     # so the park never classifies on wording.
                     "error_code": str((job_doc or {}).get("error_code") or ""),
+                    **({"recovery_context": recovery_context} if recovery_context else {}),
                 },
             )
     from services.schedule_run_lifecycle import default_reason

@@ -150,6 +150,42 @@ def _note_rebuild_on_finding(sched: Any, *, job_id: str, actor: str, reason: str
     }})
 
 
+def note_rebuild_failure(schedule_id: str, job_id: str, error: str) -> dict[str, Any] | None:
+    """A rebuild's job failed: record it on the finding, audit it, return the context.
+
+    Only for the job the open finding's ``recovery.job_id`` names. The returned
+    context (the continuity finding and the failed recovery) travels into the
+    evidence of any finding that replaces this one, so the rebuild is never lost.
+    """
+    from services.schedule_store import get_schedule, has_open_approval, update_schedule
+
+    sched = get_schedule(schedule_id)
+    if sched is None or not job_id or not has_open_approval(sched):
+        return None
+    req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    recovery = req.get("recovery") if isinstance(req.get("recovery"), dict) else {}
+    if str(recovery.get("job_id") or "") != str(job_id):
+        return None
+    failed = {**recovery, "outcome": "failed", "error": str(error or "")[:500],
+              "finished_at": datetime.now(timezone.utc).isoformat()}
+    update_schedule(schedule_id, {"approval_request": {**req, "recovery": failed}})
+    _audit(
+        sched,
+        action=str(recovery.get("action") or ACTION_REBUILD),
+        actor=str(recovery.get("actor") or ""),
+        reason=str(recovery.get("reason") or ""),
+        details={"dest_table": sched.dest_table, "job_id": job_id, "phase": "rebuild_failed",
+                 "error": str(error or "")[:300]},
+        outcome="failed",
+        status=409,
+    )
+    return {
+        "continuity_finding": {"id": req.get("id"), "code": req.get("code"),
+                               "finding": str(req.get("finding") or "")[:500]},
+        "recovery": failed,
+    }
+
+
 def _close_and_rearm(sched: Any, *, action: str, actor: str, reason: str) -> Any:
     return _close_finding(sched, action=action, actor=actor, reason=reason, due_now=True)
 
