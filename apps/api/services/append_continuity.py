@@ -786,10 +786,13 @@ def rebaseline(
         # starts a new history. Same audit path; the baseline is cleared, not
         # replaced with an invented fingerprint.
         removal = True
+    # Only keys this rebaseline owns are read and moved: a host key another
+    # workspace's connector also resolves to is that workspace's baseline.
+    owned_keys = _keys_this_rebaseline_owns(target, endpoint)
     store_error = ""
     try:
         previous = next(
-            (b for b in (load_baseline(k) for k in target.all_keys) if b), None
+            (b for b in (load_baseline(k) for k in owned_keys) if b), None
         )
     except ContinuityStoreCorrupt as exc:
         # The whole point of rebaseline is recovery — a corrupt store is not a
@@ -839,7 +842,7 @@ def rebaseline(
             ) from exc
     # Every spelling of this table's key moves together: the next append reads
     # whichever one its door builds, and must find the accepted state (D204).
-    for key in _keys_this_rebaseline_owns(target, endpoint):
+    for key in owned_keys:
         if removal:
             clear_baseline(key)
         else:

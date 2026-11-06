@@ -164,3 +164,42 @@ def test_workspace_a_rebaseline_does_not_move_workspace_b_baseline(client, monke
         assert ac.load_baseline(host_key) == host_before  # B's view did not move
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
+
+
+def test_a_rebaseline_reports_only_its_own_previous_baseline_and_names_the_shared_keys_it_left(
+    client, monkeypatch,
+):
+    """Review 3: ``previous`` was read from every key (so A's result could
+    report B's host-key baseline), and the shared host key left alone was not
+    reported — runs keyed on the inline host keep the old baseline."""
+    import services.audit_log as audit_log
+    from services import append_continuity as ac
+    from services.connector_store import create_connector
+    from src.transfer.models import EndpointConfig
+
+    events: list[dict] = []
+    monkeypatch.setattr(audit_log, "append_audit_event", lambda **kw: events.append(kw) or kw)
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    table = f"c9p_{token}"
+    try:
+        cur.execute(f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, name TEXT)")  # nosec B608
+        cur.executemany(f"INSERT INTO {table} VALUES (%s, %s)", [(1, "Ada"), (2, "")])  # nosec B608
+
+        def _endpoint(ws):
+            conn = create_connector({"name": f"c9p-{ws}-{token}", "role": "destination",
+                                     "workspace_id": ws, "ssl": False,
+                                     **h.dest_config("postgresql")})
+            return EndpointConfig(kind="database", format="postgresql", connector_id=conn.id,
+                                  table=table)
+
+        endpoint_b = _endpoint("ws-b")
+        ac.rebaseline(endpoint_b, actor="b@example.com", reason="B accepts 2", workspace_id="ws-b")
+        endpoint_a = _endpoint("ws-a")
+        out = ac.rebaseline(endpoint_a, actor="a@example.com", reason="A accepts 2",
+                            workspace_id="ws-a")
+        assert out["previous"] is None, out["previous"]  # A had none; B's is not A's
+        assert events[-1]["details"]["previous"] is None
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
