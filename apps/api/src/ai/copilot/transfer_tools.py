@@ -835,9 +835,15 @@ def _plan_source_types_authoritative(
     A procedure extract and an object store do not declare precision. Calling
     them authoritative made the plan bind TEXT while the integrity check
     expected the profiled DECIMAL. Warehouse catalogs stay authoritative.
+
+    A SQL query on a MySQL- or PostgreSQL-family engine is the exception: its
+    result types come from the driver's cursor description (``DECIMAL(p,s)``,
+    ``LONGTEXT``, ``TIMESTAMP``) and from the Python type the driver built, the
+    same declared evidence a catalog gives — and the REST plan, the plan
+    service and Execute's auto-map already treat it so. Profiling it instead
+    re-typed ``JSON_UNQUOTE(...)`` text as BIGINT off fifty digit samples and
+    Validate refused 'ü1' (QA MySQL D5).
     """
-    if callable_plan:
-        return False
     from services.data_profiler import source_types_are_authoritative
 
     kind = str(src_conn.get("kind") or "database")
@@ -847,6 +853,13 @@ def _plan_source_types_authoritative(
         or src_conn.get("db_type")
         or ""
     )
+    if callable_plan:
+        if str(callable_plan.get("mode") or "") != "query":
+            return False
+        from src.transfer.engine_family import family_or_kind
+
+        if family_or_kind(fmt) not in {"mysql", "postgresql"}:
+            return False
     return source_types_are_authoritative(kind, fmt)
 
 

@@ -1532,7 +1532,7 @@ def _execute_live(
     schema, _intel = peek_callable_schema(headers, rows, carriers)
     schema = _overlay_declared_numerics(
         headers, description, schema,
-        dialect=spec.dialect or str(cfg.get("type") or ""),
+        dialect=spec.dialect or str(cfg.get("type") or ""), carriers=carriers,
     )
     return headers, rows, schema
 
@@ -1602,12 +1602,11 @@ def _execute_to_jsonl(
         if engine is not None:
             release_engine(engine)
 
-    schema, _intel = peek_callable_schema(
-        headers, sample, python_carriers_of_rows(headers, raw_sample)
-    )
+    carriers = python_carriers_of_rows(headers, raw_sample)
+    schema, _intel = peek_callable_schema(headers, sample, carriers)
     schema = _overlay_declared_numerics(
         headers, description, schema,
-        dialect=spec.dialect or str(cfg.get("type") or ""),
+        dialect=spec.dialect or str(cfg.get("type") or ""), carriers=carriers,
     )
     return headers, total, schema
 
@@ -1679,15 +1678,24 @@ def _overlay_declared_numerics(
     description: Any,
     schema: dict[str, str],
     dialect: str = "",
+    carriers: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Driver type and precision win over the sample envelope.
 
     ``CAST(col AS DATE)`` and a MariaDB text column are in the cursor
-    description. Guessing from the peeked rows rewrote both.
+    description. Guessing from the peeked rows rewrote both. A MySQL LOB
+    result (``JSON_UNQUOTE`` is ``LONGTEXT``) takes its tier from the type
+    code and text-versus-binary from the driver's Python type.
     """
-    from services.decimal_observe import cursor_declared_carriers
+    from services.decimal_observe import cursor_declared_carriers, mysql_lob_carrier
 
     declared = cursor_declared_carriers(headers, description, dialect=dialect)
+    if description and carriers and _is_mysql_family(dialect):
+        for idx, header in enumerate(headers):
+            if idx < len(description) and declared.get(header, "VARCHAR") == "VARCHAR":
+                lob = mysql_lob_carrier(description[idx], carriers.get(header, ""))
+                if lob:
+                    declared[header] = lob
     if not declared:
         return schema
     return {**schema, **declared}

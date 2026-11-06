@@ -1006,6 +1006,9 @@ _TEXT_TYPE_CODES = frozenset(
     {
         15,  # MySQL VARCHAR
         245,  # JSON
+        249,  # TINY_BLOB / TINYTEXT
+        250,  # MEDIUM_BLOB / MEDIUMTEXT
+        251,  # LONG_BLOB / LONGTEXT (MySQL 8 JSON_UNQUOTE, GROUP_CONCAT)
         252,  # BLOB
         253,  # VAR_STRING
         254,  # STRING
@@ -1171,6 +1174,45 @@ _CURSOR_TEXT_CODES = frozenset({15, 18, 25, 247, 248, 253, 254, 1042, 1043})
 # Exact numeric type codes. Precision on any other code (DATE is 10, DATETIME
 # is 26,6) is a display width, not a DECIMAL.
 _CURSOR_EXACT_NUMERIC_CODES = frozenset({0, 246, 1700})
+# pymysql FIELD_TYPE TINY_BLOB / MEDIUM_BLOB / LONG_BLOB -> MySQL LOB tier.
+_MYSQL_LOB_TIER_CODES: dict[int, str] = {249: "TINY", 250: "MEDIUM", 251: "LONG"}
+
+
+def mysql_lob_carrier(col: Any, python_carrier: str) -> str:
+    """MySQL/MariaDB LOB result column -> its declared TEXT/BLOB tier.
+
+    The type code names the tier; the driver's Python type (``str`` or
+    ``bytes``) names text versus binary, because the charset number is not in
+    ``cursor.description``. ``JSON_UNQUOTE(...)`` is ``LONGTEXT``. Code 252
+    (``BLOB``/``TEXT``, and MariaDB's spelling of every LOB) is tiered by the
+    column's byte length. ``""`` when the column is not a LOB or the Python
+    type did not settle text versus binary.
+    """
+    if not col or len(col) < 2:
+        return ""
+    code = col[1]
+    if isinstance(code, bool) or not isinstance(code, int):
+        return ""
+    tier = _MYSQL_LOB_TIER_CODES.get(code)
+    if tier is None and code == 252:
+        try:
+            length = int(col[3] if len(col) > 3 and col[3] is not None else 0)
+        except (TypeError, ValueError):
+            length = 0
+        tier = (
+            "TINY" if 0 < length <= 255
+            else "" if 0 < length <= 65535
+            else "MEDIUM" if 0 < length <= 16777215
+            else "LONG"
+        )
+    if tier is None:
+        return ""
+    carrier = (python_carrier or "").upper()
+    if carrier == "VARCHAR":
+        return f"{tier}TEXT"
+    if carrier == "BYTEA":
+        return f"{tier}BLOB"
+    return ""
 _CURSOR_BINARY_CODES = {17: "BYTEA"}
 _CURSOR_UUID_CODES = {2950: "UUID"}
 _CURSOR_INTERVAL_CODES = {1186: "INTERVAL"}
@@ -1333,6 +1375,13 @@ def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
             return _CURSOR_INTEGER_CODES[type_code]
         if type_code in _CURSOR_FLOAT_CODES:
             return _CURSOR_FLOAT_CODES[type_code]
+        # MySQL LOB codes (TINY/MEDIUM/LONG BLOB) are TEXT or BLOB by charset,
+        # which PEP 249 does not carry: the driver's Python type decides (see
+        # ``mysql_lob_carrier``). Their 4294967295/31 size slots are not a
+        # DECIMAL — reading them as one typed JSON_UNQUOTE's text NUMERIC and
+        # Validate refused 'ü1' as INVALID_NUMERIC (QA MySQL D5).
+        if type_code in _MYSQL_LOB_TIER_CODES:
+            return ""
         # MariaDB TEXT shares the BLOB code. A real blob has no decimal
         # scale; precision 400 scale 39 is the text-column junk.
         if type_code == 252 and len(col) >= 6:
