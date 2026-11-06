@@ -240,6 +240,11 @@ def validate_ssl_mode(conn_type: str, data: Mapping[str, Any]) -> None:
             "ssl_mode 'disable' is supported for MySQL-family connectors only; "
             f"a {conn_type} connector cannot promise a plaintext session."
         )
+    if mode == "disable":
+        # Raises ValueError (naming ssl_mode) on a DSN asking for REQUIRED / VERIFY_*.
+        dial_connection_string(conn_type, mode, str(data.get("connection_string") or ""),
+                               data.get("extra") if isinstance(data.get("extra"), Mapping)
+                               else {k: data.get(k) for k in _MYSQL_TLS_OPTION_KEYS})
 
 
 def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
@@ -259,25 +264,57 @@ def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
     return bool(data.get("ssl", True)), mode
 
 
-def dial_connection_string(conn_type: str, ssl_mode: str, connection_string: str) -> str:
-    """The connection string a dial uses: the saved one, plus an explicit "disable".
+#: Form / saved-extra TLS options a MySQL dial reads from the DSN.
+_MYSQL_TLS_OPTION_KEYS = ("ssl_ca", "ssl_capath", "ssl_cert", "ssl_key",
+                          "ssl_verify_cert", "ssl_verify_identity")
 
-    Every MySQL path (PyMySQL and SQLAlchemy) already reads ``ssl-mode`` from
-    the DSN (``connectors.mysql_tls.mysql_tls_plan``), so the saved choice
-    rides there rather than as a second TLS parameter on every call site.
+
+def dial_connection_string(
+    conn_type: str, ssl_mode: str, connection_string: str, options: Mapping[str, Any] | None = None
+) -> str:
+    """The connection string a MySQL dial uses: one TLS plan input for every path.
+
+    PyMySQL, SQLAlchemy and the binlog reader all read TLS from the DSN
+    (``connectors.mysql_tls.mysql_tls_plan``). The saved connector's TLS
+    choice — ``ssl_mode`` "disable", and the form's CA / client certificate /
+    verify options (``options``, the saved ``extra``) — rides there, so the
+    three paths cannot disagree. A saved "disable" next to a DSN that asks
+    for REQUIRED / VERIFY_* is a contradiction and raises (422 at save).
     """
     raw = connection_string or ""
-    if ssl_mode != "disable" or not _is_mysql_family(conn_type):
+    if not _is_mysql_family(conn_type):
         return raw
-    from connectors.mysql_tls import TLS_DISABLED, TlsModeError, mysql_tls_plan
+    from urllib.parse import urlencode
 
-    try:
-        if mysql_tls_plan(ssl=False, connection_string=raw).mode == TLS_DISABLED:
-            return raw
-    except TlsModeError:
-        # The DSN states its own (unsatisfiable) mode; the dial reports it.
+    from connectors.mysql_tls import TLS_DISABLED, TlsModeError, mysql_tls_plan, tls_request
+
+    have = tls_request(raw)
+    extra: list[tuple[str, str]] = []
+    for key in _MYSQL_TLS_OPTION_KEYS:
+        value = (options or {}).get(key)
+        if value in (None, "", False):
+            continue
+        slot = key.removeprefix("ssl_")
+        if slot in {"verify_cert", "verify_identity"}:
+            if not have[slot]:
+                extra.append((key, "true"))
+        elif not have.get(slot):
+            extra.append((key, str(value)))
+    if ssl_mode == "disable":
+        try:
+            current = mysql_tls_plan(ssl=False, connection_string=raw, options=dict(options or {}))
+        except TlsModeError as exc:
+            raise ValueError(f"ssl_mode 'disable' contradicts the connection's TLS settings: {exc}") from exc
+        if current.mode != TLS_DISABLED:
+            if current.must_encrypt:
+                raise ValueError(
+                    f"ssl_mode 'disable' contradicts ssl-mode={current.mode.upper()} in the "
+                    "connection string; keep one of them."
+                )
+            extra.append(("ssl-mode", "DISABLED"))
+    if not extra:
         return raw
-    return f"{raw}{'&' if '?' in raw else '?'}ssl-mode=DISABLED"
+    return f"{raw}{'&' if '?' in raw else '?'}{urlencode(extra)}"
 
 
 @dataclass

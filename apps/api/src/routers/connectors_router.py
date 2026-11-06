@@ -233,12 +233,16 @@ class TransferRequest(BaseModel):
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _refuse_unhonourable_ssl_mode(conn_type: str, ssl_mode: Optional[str]) -> None:
-    """422 for a TLS mode the connector cannot honour (ssl_mode "disable" off MySQL)."""
+def _refuse_unhonourable_ssl_mode(
+    conn_type: str, ssl_mode: Optional[str], connection_string: Optional[str] = ""
+) -> None:
+    """422 for a TLS mode the connector cannot honour ("disable" off MySQL, or
+    "disable" against a connection string that asks for REQUIRED / VERIFY_*)."""
     from services.connector_store import validate_ssl_mode
 
     try:
-        validate_ssl_mode(conn_type, {"ssl_mode": ssl_mode})
+        validate_ssl_mode(conn_type, {"ssl_mode": ssl_mode,
+                                      "connection_string": connection_string or ""})
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -246,7 +250,7 @@ def _refuse_unhonourable_ssl_mode(conn_type: str, ssl_mode: Optional[str]) -> No
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
     require_admin_connector_access(http_request, request.type)
-    _refuse_unhonourable_ssl_mode(request.type, request.ssl_mode)
+    _refuse_unhonourable_ssl_mode(request.type, request.ssl_mode, request.connection_string)
     with connector_operation(
         "probe",
         driver_family="unknown",
@@ -333,7 +337,7 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "password": request.password or "",
             "schema": request.db_schema or "",
             "connection_string": dial_connection_string(
-                request.type, request.ssl_mode or "", request.connection_string or ""
+                request.type, request.ssl_mode or "", request.connection_string or "", extra_flat
             ),
             "ssl": (request.ssl_mode == "require") if request.ssl_mode
             else (bool(request.ssl) if request.ssl is not None else False),
@@ -406,7 +410,7 @@ async def create_connector(
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
-    _refuse_unhonourable_ssl_mode(config.type, config.ssl_mode)
+    _refuse_unhonourable_ssl_mode(config.type, config.ssl_mode, config.connection_string)
     connector_data = {
         "name": config.name,
         "type": config.type,

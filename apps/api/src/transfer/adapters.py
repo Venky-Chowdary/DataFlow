@@ -580,6 +580,16 @@ def resolve_connector_config(
         merged_cfg["destination_identity"] = identity.as_dict()
         sync_credentials_into_connection_string(merged_cfg)
         cfg = merged_cfg
+    # One TLS plan input for every MySQL dial (PyMySQL, SQLAlchemy, binlog): the
+    # endpoint's TLS options (form / extra: CA, client certificate, verify,
+    # ssl_mode) ride in the DSN every path reads (QA MySQL D10). Idempotent.
+    from services.connector_store import dial_connection_string
+
+    tls_extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    cfg["connection_string"] = dial_connection_string(
+        str(cfg.get("type") or fmt or ""), str(cfg.get("ssl_mode") or ""),
+        str(cfg.get("connection_string") or ""), {**tls_extra, **cfg},
+    )
     # Stamp connector_id so CDC fingerprints / incremental snapshots match adapters.
     if connector_id:
         cfg["connector_id"] = connector_id
@@ -755,7 +765,8 @@ def _lookup_saved_connector(
                 # An explicit ssl_mode "disable" rides to every MySQL dial as the
                 # DSN's ssl-mode option (connector_store.dial_connection_string).
                 "connection_string": dial_connection_string(
-                    conn.type, getattr(conn, "ssl_mode", ""), conn.connection_string
+                    conn.type, getattr(conn, "ssl_mode", ""), conn.connection_string,
+                    dict(getattr(conn, "extra", None) or {}),
                 ),
                 "warehouse": conn.warehouse,
                 "ssl": conn.ssl,
@@ -782,11 +793,14 @@ def _lookup_saved_connector(
     except Exception as exc:
         logger.debug("mongodb connector lookup failed: %s", exc, exc_info=exc)
         return None
-    if isinstance(doc, dict) and doc.get("ssl_mode") == "disable":
+    if isinstance(doc, dict) and (doc.get("ssl_mode") == "disable" or any(
+            (doc.get("extra") or {}).get(k) for k in ("ssl_ca", "ssl_cert", "ssl_key"))):
         from services.connector_store import dial_connection_string
 
         doc = {**doc, "connection_string": dial_connection_string(
-            str(doc.get("type") or ""), "disable", str(doc.get("connection_string") or ""))}
+            str(doc.get("type") or ""), str(doc.get("ssl_mode") or ""),
+            str(doc.get("connection_string") or ""),
+            dict(doc.get("extra") or {}))}
     return doc
 
 

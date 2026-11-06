@@ -308,3 +308,127 @@ def test_load_data_and_writer_dials_follow_the_same_plan(purpose):
             assert session_encryption(conn)["encrypted"] is encrypted, (purpose, ssl, dsn)
         finally:
             conn.close()
+
+
+# ------------------------------------- CA, mTLS, enforcement (second review)
+
+
+def _priv_tls() -> dict:
+    srv = h.globals_mysql_server()
+    ca = os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_CA", "")
+    cert = os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_CLIENT_CERT", "")
+    key = os.environ.get("DATAFLOW_TEST_MYSQL_GLOBALS_CLIENT_KEY", "")
+    if not (ca and cert and key and os.path.exists(ca)):
+        pytest.skip("private MySQL CA / client certificate not provided")
+    return {**srv, "ca": ca, "cert": cert, "key": key}
+
+
+def _three_paths(cfg: dict, dsn: str, options: dict | None = None):
+    """(encrypted, verified) on PyMySQL, SQLAlchemy and the binlog reader, one plan."""
+    import pymysql
+
+    from connectors.generic_sql import _build_engine
+    from connectors.mysql_change_stream import MySqlChangeStreamCdc
+    from connectors.mysql_conn import get_connection, session_encryption
+
+    out = []
+    conn = get_connection(host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                          username=cfg["username"], password=cfg["password"],
+                          connection_string=dsn, ssl=False, purpose="probe",
+                          tls_options=options)
+    try:
+        enc = session_encryption(conn)
+        out.append((enc["encrypted"], enc["verified"]))
+    finally:
+        conn.close()
+    eng = _build_engine({**cfg, "type": "mysql", "ssl": False, "connection_string": dsn,
+                         **(options or {})})
+    try:
+        with eng.connect() as cx:
+            raw = cx.connection.dbapi_connection
+            cipher = cx.exec_driver_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetchone()[1]
+            out.append((bool(cipher), bool(raw._dataflow_tls_verified)))
+    finally:
+        eng.dispose()
+    settings = MySqlChangeStreamCdc({**cfg, "type": "mysql", "ssl": False,
+                                     "connection_string": dsn, **(options or {})},
+                                    "t", "id")._binlog_connection_settings()
+    probe = pymysql.connect(**settings)
+    try:
+        with probe.cursor() as cur:
+            cur.execute("SHOW SESSION STATUS LIKE 'Ssl_cipher'")
+            out.append((bool(cur.fetchone()[1]),
+                        bool((settings.get("ssl") or {}).get("verify_mode"))))
+    finally:
+        probe.close()
+    return out
+
+
+def test_a_ca_alone_verifies_on_every_path():
+    tls = _priv_tls()
+    from connectors.mysql_tls import mysql_tls_plan
+
+    assert mysql_tls_plan(ssl=False, connection_string=f"?ssl_ca={tls['ca']}").mode == "verify_ca"
+    assert mysql_tls_plan(ssl=False, options={"ssl_ca": tls["ca"]}).mode == "verify_ca"
+    assert mysql_tls_plan(ssl=False, connection_string=f"?ssl_ca={tls['ca']}&ssl_verify_cert=true"
+                          ).mode == "verify_ca"
+    # DSN CA, and the form's CA (saved extra) — the same plan on all three paths.
+    assert _three_paths(tls, f"?ssl_ca={tls['ca']}") == [(True, True)] * 3
+    assert _three_paths(tls, "", {"ssl_ca": tls["ca"]}) == [(True, True)] * 3
+
+
+def test_mtls_user_requiring_x509_logs_in_on_every_path():
+    tls = _priv_tls()
+    user = os.environ.get("DATAFLOW_TEST_MYSQL_X509_USER", "")
+    if not user:
+        pytest.skip("no REQUIRE X509 user on the private server")
+    cfg = {**tls, "username": user, "password": os.environ["DATAFLOW_TEST_MYSQL_X509_PASSWORD"]}
+    dsn = f"?ssl_ca={tls['ca']}&ssl_cert={tls['cert']}&ssl_key={tls['key']}"
+    assert _three_paths(cfg, dsn) == [(True, True)] * 3
+    # Without the client certificate the server refuses the login (REQUIRE X509).
+    from connectors.mysql_conn import get_connection
+
+    with pytest.raises(Exception):
+        get_connection(host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                       username=cfg["username"], password=cfg["password"],
+                       connection_string=f"?ssl_ca={tls['ca']}", ssl=False, purpose="probe")
+
+
+def test_required_refuses_a_session_the_driver_left_in_plaintext(monkeypatch):
+    """A driver that ignores the TLS keywords (PyMySQL 1.1.x without CLIENT.SSL)."""
+    import connectors.mysql_tls as mt
+
+    real = mt.connect_kwargs_for
+    monkeypatch.setattr(mt, "connect_kwargs_for",
+                        lambda base, plan: {**real(base, mt.TlsPlan(mode=mt.TLS_DISABLED,
+                                                                    kwargs={"ssl_disabled": True}))})
+    with pytest.raises(mt.TlsModeError, match="not encrypted"):
+        _dial("mysql", ssl=True).close()
+
+
+def test_saved_disable_cannot_override_a_stricter_dsn(client):
+    cfg = _cfg("mysql")
+    body = {"name": "r14-tls-contra", "type": "mysql", "host": cfg["host"], "port": cfg["port"],
+            "database": cfg["database"], "username": cfg["username"],
+            "password": cfg["password"], "ssl": False, "ssl_mode": "disable",
+            "connection_string": "?ssl-mode=VERIFY_CA&ssl-ca=/tmp/ca.pem"}
+    assert client.post("/api/v1/connectors/saved", json=body).status_code == 422
+    assert client.post("/api/v1/connectors/test", json=body).status_code == 422
+    from services.connector_store import dial_connection_string
+
+    with pytest.raises(ValueError):
+        dial_connection_string("mysql", "disable", "?ssl-mode=REQUIRED")
+    assert dial_connection_string("mysql", "disable", "") == "?ssl-mode=DISABLED"
+
+
+def test_a_resolved_endpoint_carries_its_form_ca_into_every_dial():
+    tls = _priv_tls()
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.models import EndpointConfig
+
+    ep = EndpointConfig(kind="database", format="mysql", host=tls["host"], port=tls["port"],
+                        database=tls["database"], username=tls["username"],
+                        password=tls["password"], table="t", extra={"ssl_ca": tls["ca"]})
+    cfg = resolve_connector_config(ep)
+    assert "ssl_ca=" in cfg["connection_string"]
+    assert _three_paths(tls, cfg["connection_string"]) == [(True, True)] * 3

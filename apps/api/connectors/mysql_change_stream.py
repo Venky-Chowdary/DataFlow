@@ -511,8 +511,10 @@ class MySqlChangeStreamCdc:
         )
         base = {"host": ep["host"] or "localhost", "port": int(ep["port"] or 3306),
                 "user": ep["username"] or "", "password": ep["password"] or ""}
+        from connectors.generic_sql import connection_options
+
         plan = mysql_tls_plan(ssl=bool(self.cfg.get("ssl")), connection_string=dsn,
-                              host=base["host"])
+                              host=base["host"], options=connection_options(self.cfg))
         return resolved_kwargs_for_external_dial(base, plan, host=base["host"])
 
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:

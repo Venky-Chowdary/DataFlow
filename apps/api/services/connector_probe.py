@@ -43,7 +43,8 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         "password": get("password") or "",
         "schema": get("schema") or "",
         "connection_string": dial_connection_string(
-            str(get("type") or ""), str(get("ssl_mode") or ""), get("connection_string") or ""
+            str(get("type") or ""), str(get("ssl_mode") or ""), get("connection_string") or "",
+            extra,
         ),
         "warehouse": get("warehouse") or "",
         "ssl": bool(get("ssl")),

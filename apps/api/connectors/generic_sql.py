@@ -1215,7 +1215,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             )
             mysql_tls = mysql_tls_plan(
                 ssl=bool(cfg.get("ssl")), connection_string=str(cfg.get("connection_string") or ""),
-                host=str(dial.get("host") or ""), ssl_ca=str(cfg.get("ssl_ca") or ""),
+                host=str(dial.get("host") or ""), options=connection_options(cfg),
             )
             mysql_host = str(dial.get("host") or "")
         engine = create_engine(

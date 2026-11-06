@@ -35,8 +35,9 @@ TLS_VERIFY_CA = "verify_ca"
 TLS_VERIFY_IDENTITY = "verify_identity"
 ER_SECURE_TRANSPORT_REQUIRED = 3159
 
-#: DSN query keys that carry TLS intent (folded: lower case, '-' -> '_').
+#: DSN query keys that carry TLS intent or material (folded: lower case, '-' -> '_').
 _TLS_KEYS = frozenset({"ssl_mode", "sslmode", "ssl_disabled", "ssl_ca", "sslrootcert",
+                       "ssl_capath", "ssl_cert", "sslcert", "ssl_key", "sslkey",
                        "ssl_verify_cert", "ssl_verify_identity"})
 _MODE_WORDS = {
     "disabled": TLS_DISABLED, "disable": TLS_DISABLED,
@@ -46,6 +47,8 @@ _MODE_WORDS = {
     "verify_identity": TLS_VERIFY_IDENTITY, "verify-full": TLS_VERIFY_IDENTITY,
     "verify_full": TLS_VERIFY_IDENTITY,
 }
+_STRICTNESS = {TLS_DISABLED: 0, TLS_PREFERRED: 1, TLS_REQUIRED: 2, TLS_VERIFY_CA: 3,
+               TLS_VERIFY_IDENTITY: 4}
 
 
 class TlsModeError(ValueError):
@@ -63,6 +66,10 @@ class TlsPlan:
     def verified(self) -> bool:
         return self.mode in {TLS_VERIFY_CA, TLS_VERIFY_IDENTITY}
 
+    @property
+    def must_encrypt(self) -> bool:
+        return self.mode in {TLS_REQUIRED, TLS_VERIFY_CA, TLS_VERIFY_IDENTITY}
+
 
 def _dsn_query(connection_string: str) -> list[tuple[str, str]]:
     raw = connection_string or ""
@@ -72,58 +79,112 @@ def _dsn_query(connection_string: str) -> list[tuple[str, str]]:
                      keep_blank_values=True)
 
 
-def _truthy(value: str) -> bool:
+def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def mysql_tls_plan(
-    *, ssl: bool, connection_string: str = "", host: str = "", ssl_ca: str = ""
-) -> TlsPlan:
-    """The TLS plan for one dial. ``host`` is the resolved endpoint host."""
-    from connectors.write_resilience import is_public_proxy_host
-
-    asked = ""
-    ca = (ssl_ca or "").strip()
+def tls_request(connection_string: str = "", options: Any = None) -> dict[str, Any]:
+    """What the DSN and the form's TLS options ask for (mode word, material, verify flags)."""
+    req: dict[str, Any] = {"asked": "", "ca": "", "capath": "", "cert": "", "key": "",
+                           "verify_cert": False, "verify_identity": False}
+    opts = dict(options or {})
+    for name, slot in (("ssl_ca", "ca"), ("ssl_capath", "capath"), ("ssl_cert", "cert"),
+                       ("ssl_key", "key")):
+        if str(opts.get(name) or "").strip():
+            req[slot] = str(opts[name]).strip()
+    req["verify_cert"] = _truthy(opts.get("ssl_verify_cert", ""))
+    req["verify_identity"] = _truthy(opts.get("ssl_verify_identity", ""))
     for key, value in _dsn_query(connection_string):
         name = key.strip().lower().replace("-", "_")
+        val = value.strip()
         if name in {"ssl_mode", "sslmode"}:
-            asked = _MODE_WORDS.get(value.strip().lower(), asked)
-        elif name == "ssl_disabled" and _truthy(value) and not asked:
-            asked = TLS_DISABLED
-        elif name in {"ssl_ca", "sslrootcert"} and value.strip():
-            ca = value.strip()
-    if asked in {TLS_VERIFY_CA, TLS_VERIFY_IDENTITY}:
-        if not ca:
+            req["asked"] = _MODE_WORDS.get(val.lower(), req["asked"])
+        elif name == "ssl_disabled" and _truthy(val) and not req["asked"]:
+            req["asked"] = TLS_DISABLED
+        elif name in {"ssl_ca", "sslrootcert"} and val:
+            req["ca"] = val
+        elif name == "ssl_capath" and val:
+            req["capath"] = val
+        elif name in {"ssl_cert", "sslcert"} and val:
+            req["cert"] = val
+        elif name in {"ssl_key", "sslkey"} and val:
+            req["key"] = val
+        elif name == "ssl_verify_cert":
+            req["verify_cert"] = _truthy(val)
+        elif name == "ssl_verify_identity":
+            req["verify_identity"] = _truthy(val)
+    return req
+
+
+def mysql_tls_plan(
+    *, ssl: bool, connection_string: str = "", host: str = "", ssl_ca: str = "",
+    options: Any = None,
+) -> TlsPlan:
+    """The TLS plan for one dial. ``host`` is the resolved endpoint host.
+
+    Inputs: the ``ssl`` flag, the DSN's TLS keys, and the form's TLS options
+    (``ssl_ca`` / ``ssl_capath`` / ``ssl_cert`` / ``ssl_key`` /
+    ``ssl_verify_*``). A CA or a verify flag *raises* the mode to VERIFY_CA
+    (VERIFY_IDENTITY with ``ssl_verify_identity``); a client certificate
+    (mTLS) raises it to at least REQUIRED. Nothing lowers a stricter request.
+    """
+    from connectors.write_resilience import is_public_proxy_host
+
+    req = tls_request(connection_string, {**dict(options or {}),
+                                          **({"ssl_ca": ssl_ca} if ssl_ca else {})})
+    floor = TLS_PREFERRED
+    if ssl or is_public_proxy_host(host or ""):
+        floor = TLS_REQUIRED
+    if req["cert"]:
+        floor = max(floor, TLS_REQUIRED, key=_STRICTNESS.__getitem__)
+    if req["ca"] or req["capath"] or req["verify_cert"]:
+        floor = max(floor, TLS_VERIFY_CA, key=_STRICTNESS.__getitem__)
+    if req["verify_identity"]:
+        floor = TLS_VERIFY_IDENTITY
+    asked = req["asked"]
+    if asked == TLS_DISABLED:
+        if _STRICTNESS[floor] <= _STRICTNESS[TLS_PREFERRED]:
+            mode = TLS_DISABLED
+        elif ssl or is_public_proxy_host(host or ""):
+            mode = floor  # ssl=True / public proxy: TLS stays on
+        else:
+            # A CA / client certificate next to ssl-mode=DISABLED is a contradiction.
             raise TlsModeError(
-                f"ssl-mode={asked.upper()} verifies the server certificate and needs "
-                "ssl-ca=<path to the CA bundle> in the connection string."
+                "ssl-mode=DISABLED contradicts the TLS material (CA / client certificate) "
+                "or verification this connection also names; remove one of them."
             )
-        mode = asked
-    elif ssl or is_public_proxy_host(host or "") or asked == TLS_REQUIRED:
-        # A public proxy host always keeps TLS, whatever the DSN asks.
-        mode = TLS_REQUIRED
-    elif asked == TLS_DISABLED:
-        mode = TLS_DISABLED
+    elif asked:
+        mode = max(asked, floor, key=_STRICTNESS.__getitem__)
     else:
-        mode = TLS_PREFERRED
+        mode = floor
+    if mode in {TLS_VERIFY_CA, TLS_VERIFY_IDENTITY} and not (req["ca"] or req["capath"]):
+        raise TlsModeError(
+            f"ssl-mode={mode.upper()} verifies the server certificate and needs "
+            "ssl-ca=<path to the CA bundle> (or ssl_capath)."
+        )
     if mode == TLS_DISABLED:
         kwargs: dict[str, Any] = {"ssl_disabled": True}
-    elif mode == TLS_REQUIRED:
-        kwargs = {"ssl": {"ssl": {}}}
-    elif mode in {TLS_VERIFY_CA, TLS_VERIFY_IDENTITY}:
-        kwargs = {"ssl_ca": ca, "ssl_verify_cert": True,
-                  "ssl_verify_identity": mode == TLS_VERIFY_IDENTITY}
-    else:
+    elif mode == TLS_PREFERRED:
         kwargs = {}
-    return TlsPlan(mode=mode, ca=ca, kwargs=kwargs)
+    else:
+        sslp: dict[str, Any] = {
+            "verify_mode": mode in {TLS_VERIFY_CA, TLS_VERIFY_IDENTITY},
+            "check_hostname": mode == TLS_VERIFY_IDENTITY,
+        }
+        for slot in ("ca", "capath", "cert", "key"):
+            if req[slot]:
+                sslp[slot] = req[slot]
+        kwargs = {"ssl": sslp}
+    return TlsPlan(mode=mode, ca=req["ca"] or req["capath"], kwargs=kwargs)
 
 
 def strip_tls_params(connection_string: str) -> str:
     """The DSN without TLS keys, for drivers that would misread them.
 
-    The plan owns TLS; a SQLAlchemy URL that kept ``ssl_disabled=true`` turned
-    an ``ssl=True`` dial into plaintext. A DSN that was only TLS options
-    (``?ssl-mode=DISABLED``) becomes empty: host and port come from the form.
+    The plan owns TLS (and carries the CA / client certificate itself); a
+    SQLAlchemy URL that kept ``ssl_disabled=true`` turned an ``ssl=True`` dial
+    into plaintext. A DSN that was only TLS options becomes empty: host and
+    port come from the form.
     """
     raw = connection_string or ""
     if "?" not in raw:
@@ -172,13 +233,30 @@ def dial_pymysql(kwargs: dict[str, Any], *, plan: TlsPlan, host: str = "") -> An
         if not (plan.mode == TLS_DISABLED and exc.args
                 and exc.args[0] == ER_SECURE_TRANSPORT_REQUIRED):
             raise
-        args = connect_kwargs_for(kwargs, TlsPlan(mode=TLS_REQUIRED, kwargs={"ssl": {"ssl": {}}}))
+        args = connect_kwargs_for(kwargs, TlsPlan(mode=TLS_REQUIRED, kwargs={"ssl": {"verify_mode": False, "check_hostname": False}}))
         note = note_tls_upgrade(host)
         conn = pymysql.connect(**args)
+    if plan.must_encrypt and not _socket_encrypted(conn):
+        # A driver that fell back to plaintext (PyMySQL 1.1.x continued without
+        # CLIENT.SSL) must not hand a REQUIRED / VERIFY_* caller a clear session.
+        conn.close()
+        raise TlsModeError(
+            f"TLS is required ({plan.mode}) but the session to {host or 'the server'} "
+            "is not encrypted; refusing to send data in plaintext."
+        )
     conn._dataflow_tls_requested = plan.mode
     conn._dataflow_tls_verified = plan.verified
     conn._dataflow_tls_note = note
     return conn
+
+
+def _socket_encrypted(conn: Any) -> bool:
+    import ssl as _ssl
+
+    sock = getattr(conn, "_sock", None)
+    if isinstance(sock, _ssl.SSLSocket):
+        return True
+    return bool(session_encryption(conn).get("encrypted"))
 
 
 def resolved_kwargs_for_external_dial(base: dict[str, Any], plan: TlsPlan, host: str = "") -> dict[str, Any]:
@@ -197,7 +275,7 @@ def resolved_kwargs_for_external_dial(base: dict[str, Any], plan: TlsPlan, host:
         if not (exc.args and exc.args[0] == ER_SECURE_TRANSPORT_REQUIRED):
             raise
         note_tls_upgrade(host)
-        return connect_kwargs_for(base, TlsPlan(mode=TLS_REQUIRED, kwargs={"ssl": {"ssl": {}}}))
+        return connect_kwargs_for(base, TlsPlan(mode=TLS_REQUIRED, kwargs={"ssl": {"verify_mode": False, "check_hostname": False}}))
     probe.close()
     return connect_kwargs_for(base, plan)
 

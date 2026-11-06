@@ -20,7 +20,7 @@ anthropic>=0.18.0
 
 # Database Connectors
 pymongo>=4.6.0
-pymysql>=1.1.0
+pymysql>=1.2.0  # 1.2 refuses REQUIRED TLS without CLIENT.SSL (1.1.x went plaintext); connectors/mysql_tls also checks the session
 mysql-replication>=1.0.15
 psycopg2-binary>=2.9.9
 # 5.0.0 (2026-10-15) removed snowflake.connector.converter. fakesnow 0.11.22
