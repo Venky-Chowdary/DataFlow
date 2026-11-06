@@ -136,3 +136,40 @@ def test_mcp_and_rest_share_one_type_authority_decision(fmt, mode, declared, wan
         "procedure_result_schema": schema}}
     rest = source_types_are_authoritative_for("database", fmt, rest_src)
     assert mcp == rest == want, (mcp, rest)
+
+
+def test_a_procedure_at_execute_is_typed_by_its_cursor_and_stable_across_runs(client):
+    """At Execute the CALL has run: its cursor.description types the result the
+    way a query's does, so a saved procedure pipeline keeps its types run to run
+    (sample typing made 'ü1' beyond the peek an INVALID_NUMERIC BIGINT)."""
+    token = uuid.uuid4().hex[:8]
+    src_t, dst_t, proc = f"r14d5p_{token}", f"r14d5pd_{token}", f"r14d5proc_{token}"
+    # Run 1 holds only digit text: a sample would call it BIGINT. Run 2 adds 'ü1'.
+    _seed("mysql", src_t, [(i, str(i)) for i in range(1, 80)])
+    _sql("mysql", f"CREATE PROCEDURE `{proc}`() SELECT id, JSON_UNQUOTE(JSON_EXTRACT(doc, '$.v')) "
+                  f"AS v FROM `{src_t}`")
+    src = _connector("mysql", _cfg("mysql"), "source")
+    dst = _connector("postgresql", _pg_cfg(), "destination")
+    try:
+        for run in (1, 2):
+            resp = client.post("/api/v1/transfer/execute", json={
+                "source": {"kind": "database", "format": "mysql", "connector_id": src,
+                           "table": "", "source_read_mode": "procedure",
+                           "procedure_call": f"CALL {proc}()"},
+                "destination": {"kind": "database", "format": "postgresql", "connector_id": dst,
+                                "table": dst_t, "schema": "public"},
+                "sync_mode": "full_refresh_overwrite", "validation_mode": "strict",
+                "async_mode": False})
+            assert resp.status_code == 200, resp.text
+            job = h.wait_job(str(resp.json().get("job_id") or ""))
+            assert job.get("status") == "completed", (run, job.get("error"))
+            dtype = h.query("postgresql", "SELECT data_type FROM information_schema.columns "
+                                          f"WHERE table_name = '{dst_t}' AND column_name = 'v'")[0][0]
+            assert dtype == "text", (run, dtype)
+            if run == 1:
+                _sql("mysql", f"INSERT INTO `{src_t}` VALUES (500, %s)",
+                     (json.dumps({"v": "ü1"}, ensure_ascii=False),))
+    finally:
+        _sql("mysql", f"DROP PROCEDURE IF EXISTS `{proc}`")
+        _sql("mysql", f"DROP TABLE IF EXISTS `{src_t}`")
+        h.drop_table("postgresql", dst_t)
