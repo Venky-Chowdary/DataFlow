@@ -363,6 +363,7 @@ def run_transfer_policy_gates(
             source_config=source_config,
             mappings=mappings,
             dest_type=str(dest or ""),
+            catalog_primary_key_columns=catalog_primary_key_columns,
         )
         if leftover_gate:
             gates.append(leftover_gate)

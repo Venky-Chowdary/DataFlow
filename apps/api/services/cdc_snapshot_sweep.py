@@ -387,6 +387,7 @@ def build_snapshot_leftover_preflight_gate(
     source_config: dict[str, Any] | None,
     mappings: list[dict[str, Any]] | None,
     dest_type: str,
+    catalog_primary_key_columns: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Plan-time: say what the snapshot will do with keys the source no longer has.
 
@@ -394,6 +395,10 @@ def build_snapshot_leftover_preflight_gate(
     destination is an existing SQL table. ``warn`` names the count (when
     measurable), whether it will be removed, and the next action — before the
     job, not after it.
+
+    The key is the contract's, else the source catalog's (X-29: an API-created
+    CDC schedule declares none and the run binds the catalog key). With neither
+    there is no census to plan; the CDC capture gate names that refusal.
     """
     details = (snapshot_gate or {}).get("details") if isinstance(snapshot_gate, dict) else None
     if not isinstance(details, dict) or not details.get("run_snapshot"):
@@ -409,7 +414,11 @@ def build_snapshot_leftover_preflight_gate(
     if len(contracts) != 1 or destination_endpoint is None:
         return None
     contract = contracts[0]
-    pk_sources = _pk_columns(getattr(contract, "primary_key", None) or "")
+    declared = getattr(contract, "primary_key", None) or ""
+    catalog = [str(c).strip() for c in (catalog_primary_key_columns or []) if str(c).strip()]
+    if not (declared if isinstance(declared, (list, tuple)) else str(declared).strip()) and not catalog:
+        return None
+    pk_sources = _pk_columns(declared or catalog)
     maps = list(mappings or [])
     pk_targets = [map_source_to_target(c, maps) or c for c in pk_sources]
     try:
