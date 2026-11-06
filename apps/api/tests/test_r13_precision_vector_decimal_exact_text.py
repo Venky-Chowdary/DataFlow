@@ -310,7 +310,7 @@ def test_weaviate_mapped_property_types_follow_the_payload_rule():
         {"ID": "NUMBER(10,0)", "AMOUNT": "NUMBER(18,6)", "FLAG": "BOOLEAN", "RATIO": "BINARY_DOUBLE",
          "TS": "TIMESTAMP(6) WITH TIME ZONE", "id": "INTEGER"},
     )
-    assert types == {"ID": "int", "AMOUNT": "text", "FLAG": "text", "RATIO": "number", "TS": "text"}
+    assert types == {"ID": "int", "AMOUNT": "text", "FLAG": "text", "RATIO": "text", "TS": "text"}
 
 
 def test_confirm_note_names_only_the_columns_stored_as_text():
@@ -404,3 +404,23 @@ def test_pg_numeric_to_weaviate_class_is_text(pg_table, monkeypatch):
     assert props["amount"] == ["text"] and props["qty"] == ["int"], props
     stored = {o["properties"]["source_id"]: o["properties"] for o in fake.objects["PvPgWv"].values()}
     _check_payloads(stored)
+
+
+def test_weaviate_plan_stamps_name_the_carrier_the_class_declares():
+    """Round-13 review: the plan said TEXT for every column while the class
+    declared int / boolean / number. One rule now, from the stored value."""
+    from services.decision_kernel import InventContext, invent_dest_type
+
+    stamps = {
+        src: invent_dest_type(src, dest_db="weaviate", context=InventContext.CREATE_NEW)
+        for src in ("BIGINT", "INT4", "NUMERIC(18,6)", "DOUBLE PRECISION", "REAL", "BOOLEAN",
+                    "TIMESTAMPTZ", "UUID", "TEXT", "JSONB")
+    }
+    assert stamps == {"BIGINT": "int", "INT4": "int", "NUMERIC(18,6)": "text", "DOUBLE PRECISION": "text",
+                      "REAL": "text", "BOOLEAN": "text", "TIMESTAMPTZ": "text", "UUID": "text",
+                      "TEXT": "text", "JSONB": "text"}, stamps
+    declared = weaviate_writer.weaviate_mapped_property_types(
+        [{"source": c, "target": c, "target_type": stamps[c]} for c in stamps],
+        {c: c for c in stamps},
+    )
+    assert declared == {c: ("int" if c in ("BIGINT", "INT4") else "text") for c in stamps}

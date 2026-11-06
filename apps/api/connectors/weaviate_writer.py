@@ -297,10 +297,11 @@ def build_weaviate_objects(
     return objects, rejected
 
 
+# The payload stores an integer as a JSON int; every other cell is the exact
+# text the plan names (``DDL_TYPES["weaviate"]``), booleans and IEEE floats
+# included, so the class, the plan and the stored value agree.
 _WEAVIATE_DATA_TYPE_FOR_LOGICAL = {
     "integer": "int",
-    "boolean": "boolean",
-    "float": "number",
 }
 
 
@@ -316,9 +317,9 @@ def weaviate_mapped_property_types(
     a DECIMAL the plan carried as TEXT became ``number`` (float64) and
     ``99999999999.999999`` was stored as ``100000000000`` (D265/D285). The
     declaration follows the same rule the payload follows
-    (``vector_payload_declared_type``): integer -> ``int``, boolean ->
-    ``boolean``, IEEE float -> ``number``; decimal, temporal, UUID, JSON and
-    text are ``text``, the exact JSON text the plan names.
+    (``vector_payload_declared_type``): integer -> ``int``; decimal, IEEE
+    float, boolean, temporal, UUID, JSON and text are ``text``, the exact JSON
+    text the plan names (``DDL_TYPES["weaviate"]``).
     """
     from connectors.writer_common import vector_payload_declared_type
     from services.type_system import normalize_logical_type

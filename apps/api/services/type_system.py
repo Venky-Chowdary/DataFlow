@@ -590,6 +590,25 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "array",
         LOGICAL_BINARY: "string",
     },
+    # Weaviate properties carry what the writer stores: an integer is a JSON
+    # int (``int``, 64-bit); a decimal, float, boolean, temporal, UUID, JSON or
+    # text cell is the exact text the payload writes (``text``). The class the
+    # writer creates declares these same carriers, so the plan and the class
+    # agree (D265/D290 follow-up).
+    "weaviate": {
+        LOGICAL_STRING: "text",
+        LOGICAL_TEXT: "text",
+        LOGICAL_INTEGER: "int",
+        LOGICAL_DECIMAL: "text",
+        LOGICAL_BOOLEAN: "text",
+        LOGICAL_DATE: "text",
+        LOGICAL_DATETIME: "text",
+        LOGICAL_TIME: "text",
+        LOGICAL_UUID: "text",
+        LOGICAL_JSON: "text",
+        LOGICAL_ARRAY: "text",
+        LOGICAL_BINARY: "text",
+    },
     # Engines reached via generic_sql — keep DDL honest for preflight.
     "duckdb": {
         LOGICAL_STRING: "VARCHAR",
@@ -800,6 +819,9 @@ _FLOAT_DDL: Final[dict[str, str]] = {
     "clickhouse": "Float64",
     "trino": "double",
     "presto": "double",
+    # A Weaviate property holds the exact text the payload writes; the class the
+    # writer creates declares ``text`` for a float (D265/D290 follow-up).
+    "weaviate": "text",
 }
 for _dest, _map in DDL_TYPES.items():
     _map[LOGICAL_FLOAT] = _FLOAT_DDL.get(_dest, "DOUBLE PRECISION")
@@ -2692,6 +2714,12 @@ def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
+    mapped = str((DDL_TYPES.get(_normalize_dest_db(db) if db else "") or {}).get(LOGICAL_FLOAT) or "")
+    if mapped and normalize_logical_type(mapped) != LOGICAL_FLOAT:
+        # The dialect has no IEEE carrier of its own: its writer stores the
+        # exact text of the value (Weaviate ``text``), so the plan names that
+        # carrier instead of a DOUBLE/REAL the destination never creates.
+        return mapped
     upper = re.sub(
         r"\bUNSIGNED\b",
         "",
