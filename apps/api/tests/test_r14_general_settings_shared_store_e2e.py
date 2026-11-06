@@ -179,7 +179,11 @@ def test_a_down_store_fails_closed_never_a_stale_file(replicas, monkeypatch, ent
     assert json.loads(replicas.file("b").read_text(encoding="utf-8")) == stale
     # Through the real route: 503, nothing written anywhere.
     monkeypatch.setattr(mongodb_service, "_mongodb_service", replicas.svcs["b"])
+    # Turning the purge on is refused before any write (no reachable store:
+    # sec-23's 422, or this store's 503); any other change is a 503.
     res = ent.admin.patch("/api/v1/workspace/settings", json={"retention_auto_purge": True})
+    assert res.status_code in (422, 503), res.text
+    res = ent.admin.patch("/api/v1/workspace/settings", json={"org_name": "From b"})
     assert res.status_code == 503, res.text
     assert ent.admin.get("/api/v1/workspace/settings").status_code == 503
     replicas.use("a")
