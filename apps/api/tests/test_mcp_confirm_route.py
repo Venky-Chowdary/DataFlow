@@ -374,9 +374,12 @@ def test_confirm_runs_a_schedule_once(isolated, monkeypatch):
         "enabled": True,
     })
     calls: list[tuple[str, bool]] = []
+    triggers: list[str] = []
 
-    def _run(schedule_id: str, *, manual: bool = False) -> str:
+    def _run(schedule_id: str, *, manual: bool = False, triggered_by: str = "") -> str:
         calls.append((schedule_id, manual))
+        # D6: the confirming actor is the trigger, never "".
+        triggers.append(triggered_by)
         return "job-schedule-1"
 
     monkeypatch.setattr(runner, "_run_schedule", _run)
@@ -393,6 +396,7 @@ def test_confirm_runs_a_schedule_once(isolated, monkeypatch):
     assert first["job_id"] == "job-schedule-1"
     assert first["schedule_id"] == sched.id
     assert calls == [(sched.id, True)]
+    assert len(triggers) == 1 and triggers[0].strip(), triggers
 
     replay = _confirm(ack_id)
     assert replay["idempotent"] is True
