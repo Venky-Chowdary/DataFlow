@@ -501,11 +501,22 @@ def _shown_wire_cell(value: object) -> object:
     return unescape_wire_text(value)
 
 
+def _shown_wire_sample(rows: list) -> list:
+    """A stored key-aligned sample (``reconcile_sample``) as a person should
+    see it: every cell through :func:`_shown_wire_cell`, non-dict rows as is."""
+    return [
+        {str(k): _shown_wire_cell(v) for k, v in row.items()} if isinstance(row, dict) else row
+        for row in rows
+    ]
+
+
 def _project_operator_quarantine(job: dict) -> None:
     """Copy the job already. Show SQL NULL as null, not the transfer token.
 
     Replay reads the stored job, which still carries the token so NULL and
-    an empty string stay distinct on the write path.
+    an empty string stay distinct on the write path. The checkpoint carries
+    the same wire (its quarantine findings, and since D263 the reconcile
+    sample a restart resumes from), so it is projected the same way.
     """
     from services.dest_quarantine import project_operator_quarantine_details
 
@@ -517,15 +528,15 @@ def _project_operator_quarantine(job: dict) -> None:
             if isinstance(summary.get(key), list):
                 summary[key] = project_operator_quarantine_details(summary[key])
         if isinstance(summary.get("reconcile_sample"), list):
-            summary["reconcile_sample"] = [
-                {str(k): _shown_wire_cell(v) for k, v in row.items()} if isinstance(row, dict) else row
-                for row in summary["reconcile_sample"]
-            ]
+            summary["reconcile_sample"] = _shown_wire_sample(summary["reconcile_sample"])
     checkpoint = job.get("checkpoint")
-    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("rejected_details"), list):
-        checkpoint["rejected_details"] = project_operator_quarantine_details(
-            checkpoint["rejected_details"]
-        )
+    if isinstance(checkpoint, dict):
+        if isinstance(checkpoint.get("rejected_details"), list):
+            checkpoint["rejected_details"] = project_operator_quarantine_details(
+                checkpoint["rejected_details"]
+            )
+        if isinstance(checkpoint.get("reconcile_sample"), list):
+            checkpoint["reconcile_sample"] = _shown_wire_sample(checkpoint["reconcile_sample"])
 
 
 def _confined_source_path(raw: object) -> str:
