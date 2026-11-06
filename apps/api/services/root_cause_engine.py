@@ -320,7 +320,7 @@ def _non_narrowing_decimal_cast(details: dict[str, Any] | None) -> bool:
 _MISSING_VALUE_RE = re.compile(
     r"null/empty|null upsert key|null (?:primary |upsert |merge )?key|empty "
     r"(?:string )?(?:primary |upsert |merge )?key|expect_column_not_null|"
-    r"expect_column_values_to_not_be_null",
+    r"expect_column_values_to_not_be_null|not null contract|rejects null",
     re.I,
 )
 
@@ -418,6 +418,14 @@ def _is_fidelity_signal(
     # fidelity collapse" on a first MySQL → SQL Server load. A real narrowing
     # stays a fidelity signal.
     if _non_narrowing_decimal_cast(details):
+        return False
+    # A NULL bound for a NOT NULL column is a finding on one source row, on any
+    # gate (G3's "NOT NULL contract ... rejects NULL" as much as G9's). Titling
+    # it "fidelity collapse ... cust TEXT -> TEXT" named a type path that loses
+    # nothing and hid the row the operator can quarantine (D25).
+    if details.get("fidelity_collapse") is not True and _is_missing_value_signal(
+        message, details
+    ):
         return False
     if details.get("fidelity_collapse") is True:
         return True
