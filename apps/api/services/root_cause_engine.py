@@ -887,14 +887,38 @@ def _root_id(kind: str, columns: list[str], gate_ids: list[str]) -> str:
 #: Title of the root cause the engine raises for sample cast / transform failures.
 CAST_FAILURE_ROOT_TITLE = "Sample transform / cast failures"
 
-#: The way out that keeps the valid rows: load them and hold the failing ones out
-#: in quarantine instead of refusing the whole run (D170).
-QUARANTINE_REPLAN_FIX = (
-    "Re-plan with quarantine: pass risk_acceptance {execution_policy: "
-    "CAST_AND_CONTINUE, on_cast_failure: quarantine, approved_by, reason} to "
-    "plan_transfer / start_transfer, or to rerun_job, so the failing rows are held "
-    "out for review and the valid rows load"
+#: The acceptance object every surface takes (QA r12 D2).
+_QUARANTINE_ACCEPTANCE = (
+    "risk_acceptance {execution_policy: CAST_AND_CONTINUE, on_cast_failure: "
+    "quarantine, approved_by, reason}"
 )
+
+#: The way out that keeps the valid rows: load them and hold the failing ones out
+#: in quarantine instead of refusing the whole run (D170). Named per surface so
+#: every field it cites exists (QA r12 D2: REST had no such input).
+QUARANTINE_REPLAN_FIX = (
+    f"Re-plan with quarantine: pass {_QUARANTINE_ACCEPTANCE} to MCP plan_transfer "
+    "/ start_transfer, or as the risk_acceptance form field (JSON-encoded) on REST "
+    "POST /api/v1/transfer/run, so the failing rows are held out for review and "
+    "the valid rows load"
+)
+
+
+def quarantine_retry_fix(job_id: str) -> str:
+    """The same way out for a job that already *failed* on cast failures.
+
+    A failed job is retried, not re-run: ``rerun_job`` / ``/rerun`` refuse a
+    failed job, so naming them sent the operator to a dead end (QA r12 D2,
+    Snowflake D6). ``retry_job`` and ``/retry`` take the acceptance.
+    """
+    jid = str(job_id or "").strip() or "{job_id}"
+    return (
+        f"Retry with quarantine: pass {_QUARANTINE_ACCEPTANCE} to MCP retry_job, "
+        f"or in the JSON body of REST POST /api/v1/connectors/jobs/{jid}/retry "
+        '({"risk_acceptance": {...}}), so the failing rows are held out for review '
+        "and the valid rows load (a new run takes it as the risk_acceptance form "
+        "field on POST /api/v1/transfer/run)"
+    )
 
 
 def _pending_widen_paths(preflight: dict[str, Any]) -> dict[str, str]:

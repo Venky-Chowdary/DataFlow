@@ -242,6 +242,41 @@ def _fetch_mongo_physical_types(
     return physical, None
 
 
+def _absent_field_map_stamps(
+    mapped_data_cols: list[str],
+    physical: dict[str, str],
+    live_dest: Any,
+    target_cols: list[str],
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+) -> dict[str, str]:
+    """Map stamps for mapped fields no live probe or BSON sample carries."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live = live_dest if isinstance(live_dest, dict) else {}
+
+    def _known(col: str, types: dict) -> bool:
+        return any(
+            str(types.get(k) or "").strip() for k in (col, col.lower(), col.upper())
+        )
+
+    absent = [
+        c for c in mapped_data_cols if not _known(c, physical) and not _known(c, live)
+    ]
+    if not absent:
+        return {}
+    stamped = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types or {},
+        logical_types=logical_types,
+        live_types=None,
+        default="VARCHAR",
+    )
+    return {c: str(stamped.get(c) or "").strip() for c in absent if str(stamped.get(c) or "").strip()}
+
+
 def _mongo_rematerialize_if_physical_differs(
     *,
     physical: dict[str, str],
@@ -584,6 +619,31 @@ def write_mapped_rows(
                     ),
                 )
             mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+            if sample_exc is None and studio_err:
+                # A field neither the live probe nor the BSON sample holds is a
+                # new field (additive drift under propagate_columns): Map's
+                # stamp is its only carrier, there is no physical one to
+                # contradict. Treating it as a partial-Studio gap refused the
+                # run (QA r12 D10).
+                stamps = _absent_field_map_stamps(
+                    mapped_data_cols, physical, live_dest, target_cols,
+                    mappings, column_types, logical_types,
+                )
+                if stamps:
+                    physical = {**physical, **stamps}
+                    live_dest = {**dict(live_dest or {}), **stamps}
+                    dest_types, studio_err = resolve_studio_or_map_dest_types(
+                        target_cols,
+                        mappings,
+                        column_types,
+                        logical_types=logical_types,
+                        studio_types=live_dest,
+                        product="MongoDB",
+                    )
+                    dest_types = _widen_sampled_mongo_decimals(dest_types, mappings, _kwargs)
+                    row_column_types = _row_projection_column_types(
+                        mappings, column_types, dest_types
+                    )
             try:
                 doc_count = int(coll.estimated_document_count())
             except Exception:
@@ -623,6 +683,8 @@ def write_mapped_rows(
                     physical=effective_physical,
                     dialect_label="MongoDB",
                     target_cols=mapped_data_cols,
+                    destination_kind="mongodb",
+                    physical_sampled=sample_exc is None,
                 )
                 if phys_err:
                     return WriteResult(

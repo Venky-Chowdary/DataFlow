@@ -127,6 +127,97 @@ def explicit_mongodb_auth_source(connection_string: str = "", auth_source: str =
     return (qs.get("authSource") or qs.get("authsource") or [""])[0].strip()
 
 
+#: MongoDB Atlas publishes every cluster under ``*.mongodb.net``. The cluster
+#: name (``cluster0.abcde.mongodb.net``) is an SRV record, not an A record on
+#: :27017 — dialling it as ``host:27017`` times out (QA r12 Mongo D6).
+_ATLAS_SUFFIX = ".mongodb.net"
+_DEFAULT_PORT = 27017
+
+
+def _dns_srv_record_exists(name: str) -> bool:
+    """True when ``name`` has an SRV record (dnspython; ``False`` without it)."""
+    try:
+        import dns.resolver  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - dnspython ships in requirements.txt
+        return False
+    try:
+        answers = dns.resolver.resolve(name, "SRV", lifetime=3.0)
+        return bool(list(answers))
+    except Exception:
+        return False
+
+
+_srv_cache: dict[str, bool] = {}
+
+
+def mongodb_host_has_srv_record(host: str, *, resolver: Any = None) -> bool:
+    """Whether ``_mongodb._tcp.<host>`` resolves — the SRV seed list Atlas uses.
+
+    ``resolver(name) -> bool`` is injectable for tests; the default uses
+    dnspython with a 3s lifetime and caches per host for the process.
+    """
+    name = f"_mongodb._tcp.{host.strip().lower().rstrip('.')}"
+    if resolver is not None:
+        return bool(resolver(name))
+    if name not in _srv_cache:
+        _srv_cache[name] = _dns_srv_record_exists(name)
+    return _srv_cache[name]
+
+
+def _is_ip_or_local(host: str) -> bool:
+    import ipaddress
+
+    h = host.strip().strip("[]").lower()
+    if h in ("localhost", "") or "." not in h:
+        return True
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
+
+
+def is_atlas_host(host: str) -> bool:
+    return host.strip().lower().rstrip(".").endswith(_ATLAS_SUFFIX)
+
+
+def mongodb_host_wants_srv(host: str, port: int = 0, *, resolver: Any = None) -> bool:
+    """Should the host/port form dial ``host`` as ``mongodb+srv://``?
+
+    * An Atlas cluster name (``*.mongodb.net``) with no port or the form's
+      default 27017 — but not an Atlas per-node name (``...-shard-00-00...``),
+      which is a real host on 27017.
+    * Any other DNS name given with no port whose ``_mongodb._tcp`` SRV record
+      resolves.
+    """
+    h = (host or "").strip().lower().rstrip(".")
+    if not h or "://" in h or "," in h or _is_ip_or_local(h):
+        return False
+    if is_atlas_host(h):
+        if "-shard-" in h.split(".", 1)[0]:
+            return False
+        return int(port or 0) in (0, _DEFAULT_PORT)
+    if int(port or 0):
+        return False
+    return mongodb_host_has_srv_record(h, resolver=resolver)
+
+
+def mongodb_srv_hint(host: str, port: int = 0) -> str:
+    """Operator copy when a host/port dial to a cluster name fails."""
+    h = (host or "").strip()
+    if not h or "://" in h:
+        return ""
+    advice = (
+        "paste the cluster's mongodb+srv:// connection string (Atlas: Connect → "
+        f"Drivers), e.g. mongodb+srv://<user>:<password>@{h}/, instead of host and port."
+    )
+    if is_atlas_host(h):
+        return f"{h} is a MongoDB Atlas cluster name: {advice}"
+    if not int(port or 0) and not _is_ip_or_local(h):
+        return f"If {h} is a MongoDB Atlas / SRV cluster name, {advice}"
+    return ""
+
+
 def normalize_mongodb_connection_string(
     connection_string: str = "",
     *,
@@ -137,8 +228,13 @@ def normalize_mongodb_connection_string(
     password: str = "",
     ssl: bool = False,
     auth_source: str = "",
+    srv_resolver: Any = None,
 ) -> str:
     """Return a MongoDB URI that the driver can authenticate with.
+
+    A host/port form naming an Atlas cluster (``*.mongodb.net``) or a host
+    with no port that publishes an SRV record is built as ``mongodb+srv://``
+    with TLS on: dialling the cluster name on :27017 timed out (QA r12 D6).
 
     If a connection string is provided, it is used as the base.  When a database
     is supplied and the URI does not already include a database path, the
@@ -166,13 +262,23 @@ def normalize_mongodb_connection_string(
         uri = host.strip()
         connection_string = uri
     if not uri:
+        srv = mongodb_host_wants_srv(host, port, resolver=srv_resolver)
+        address = host.strip().rstrip(".") if srv else f"{host}:{port or 27017}"
         if username and password:
-            netloc = f"{quote_plus(username)}:{quote_plus(password)}@{host}:{port or 27017}"
+            netloc = f"{quote_plus(username)}:{quote_plus(password)}@{address}"
         elif username:
-            netloc = f"{quote_plus(username)}@{host}:{port or 27017}"
+            netloc = f"{quote_plus(username)}@{address}"
         else:
-            netloc = f"{host}:{port or 27017}"
-        uri = f"mongodb://{netloc}/"
+            netloc = address
+        if srv:
+            # SRV implies TLS in the driver; say so explicitly so a later
+            # ``ssl=false`` default can never strip it.
+            uri = f"mongodb+srv://{netloc}/?tls=true"
+        else:
+            uri = f"mongodb://{netloc}/"
+            if is_atlas_host(host):
+                # Atlas per-node hosts accept TLS connections only.
+                ssl = True
 
     if not uri.startswith(("mongodb://", "mongodb+srv://")):
         return uri
@@ -191,7 +297,7 @@ def normalize_mongodb_connection_string(
     ):
         return normalize_mongodb_connection_string(
             "", database=database, host=host, port=port, username=username, password=password,
-            ssl=ssl, auth_source=auth_source,
+            ssl=ssl, auth_source=auth_source, srv_resolver=srv_resolver,
         )
 
     user = username or authority.user

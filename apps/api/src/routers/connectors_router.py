@@ -702,12 +702,80 @@ async def sync_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RerunRequest(BaseModel):
+    """Optional body of a rerun or retry: what the operator accepts for this run."""
+
+    force: bool = False
+    #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
+    #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
+    #: Contract on the replayed mappings so rows that do not cast are
+    #: quarantined instead of refusing the run.
+    risk_acceptance: dict[str, Any] | None = None
+    #: Alias: the same object, or its JSON encoding (the form route's spelling).
+    risk_acceptance_json: dict[str, Any] | str | None = None
+
+    def acceptance(self) -> dict[str, Any] | None:
+        """The acceptance this body carries, shape-checked; ``ValueError`` if bad."""
+        from services.risk_acceptance import (
+            parse_risk_acceptance_form,
+            validate_risk_acceptance,
+        )
+
+        primary = validate_risk_acceptance(self.risk_acceptance)
+        alias_raw = self.risk_acceptance_json
+        alias = (
+            parse_risk_acceptance_form(alias_raw)
+            if isinstance(alias_raw, str)
+            else validate_risk_acceptance(alias_raw)
+        )
+        if primary and alias and primary != alias:
+            raise ValueError(
+                "Send risk_acceptance or risk_acceptance_json, not two different values."
+            )
+        return primary or alias
+
+
+#: Retry and rerun share one body model.
+RetryRequest = RerunRequest
+
+
+def _body_acceptance(body: RerunRequest | None) -> dict[str, Any] | None:
+    if body is None:
+        return None
+    try:
+        return body.acceptance()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> list[str]:
+    """Sign the operator's acceptance onto the replayed request's mappings (D170).
+
+    Returns the columns that gained a contract. Refuses (400) rather than
+    silently ignoring an acceptance that signs nothing.
+    """
+    from services.risk_acceptance import sign_request_risk_acceptance
+
+    try:
+        return sign_request_risk_acceptance(
+            xfer_req,
+            acceptance,
+            no_mappings_hint=(
+                "This job has no saved column mappings to attach a Risk Contract "
+                "to — re-plan with plan_transfer (risk_acceptance) instead."
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
     force: bool = False,
+    body: RetryRequest | None = None,
 ):
     """Re-run a failed transfer from the beginning as a new job (no checkpoint).
 
@@ -716,8 +784,13 @@ async def retry_transfer_job(
     failed attempt already committed rows under a sync mode that has no key to
     collapse a second copy. ``force=true`` is the operator's explicit
     acknowledgement that the duplicates are acceptable and is recorded on the
-    new job.
+    new job. An optional ``risk_acceptance`` body signs a continue-policy Risk
+    Contract on the replayed mappings, so the rows that failed to cast are
+    quarantined and the valid rows load (QA r12 D2) — the way out of a
+    cast-failure block for a job that failed.
     """
+    force = bool(force or (body is not None and body.force))
+    acceptance = _body_acceptance(body)
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -820,6 +893,9 @@ async def retry_transfer_job(
         # acknowledged — a blank triggered_by / null governance hides it.
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"retry of {job_id}"
+        risk_columns: list[str] = []
+        if acceptance:
+            risk_columns = _sign_rerun_risk_acceptance(xfer_req, acceptance)
         forced = bool(force and not retry_decision["allowed"])
         if forced:
             xfer_req.acknowledgment_actor = actor
@@ -843,6 +919,7 @@ async def retry_transfer_job(
             "action": "retry",
             "of": job_id,
             "forced": forced,
+            "risk_accepted_columns": risk_columns,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         mongo.update_job_status(
@@ -897,65 +974,6 @@ async def retry_transfer_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class RerunRequest(BaseModel):
-    """Optional body of a rerun: what the operator accepts for this run."""
-
-    force: bool = False
-    #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
-    #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
-    #: Contract on the replayed mappings so rows that no longer cast (the source
-    #: changed since the first run) are quarantined instead of refusing the run.
-    risk_acceptance: dict[str, Any] | None = None
-
-
-def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> list[str]:
-    """Sign the operator's acceptance onto the replayed request's mappings (D170).
-
-    Returns the columns that gained a contract. Refuses (400) rather than
-    silently ignoring an acceptance that signs nothing.
-    """
-    from ..ai.copilot.transfer_tools import _sign_required_risk_contracts
-
-    mappings = [dict(m) for m in (xfer_req.mappings or []) if isinstance(m, dict)]
-    if not mappings:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This job has no saved column mappings to attach a Risk Contract "
-                "to — re-plan with plan_transfer (risk_acceptance) instead."
-            ),
-        )
-    named = {
-        str(c).strip() for c in (acceptance.get("columns") or []) if str(c or "").strip()
-    }
-    table = str(
-        getattr(xfer_req.destination, "table", "")
-        or getattr(xfer_req.destination, "collection", "")
-        or ""
-    )
-    try:
-        signed = _sign_required_risk_contracts(
-            mappings, acceptance, table=table, force_columns=named or None
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    gained = [
-        str(new.get("source") or new.get("target") or "")
-        for old, new in zip(mappings, signed)
-        if new.get("risk_contract") and not old.get("risk_contract")
-    ]
-    if not gained:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "risk_acceptance signed nothing: no mapped column needs a Risk "
-                "Contract (name the columns that fail in risk_acceptance.columns)."
-            ),
-        )
-    xfer_req.mappings = signed
-    return gained
-
-
 @router.post("/jobs/{job_id}/rerun")
 async def rerun_transfer_job(
     job_id: str,
@@ -974,6 +992,7 @@ async def rerun_transfer_job(
     rows that no longer cast are quarantined instead of refusing the run (D170).
     """
     force = bool(force or (body is not None and body.force))
+    acceptance = _body_acceptance(body)
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -1037,8 +1056,8 @@ async def rerun_transfer_job(
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"rerun of {job_id}"
         risk_columns: list[str] = []
-        if body is not None and body.risk_acceptance:
-            risk_columns = _sign_rerun_risk_acceptance(xfer_req, body.risk_acceptance)
+        if acceptance:
+            risk_columns = _sign_rerun_risk_acceptance(xfer_req, acceptance)
         forced = bool(force and not decision["allowed"])
         if forced:
             xfer_req.acknowledgment_actor = actor

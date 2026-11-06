@@ -4028,10 +4028,15 @@ class DataPilotTools:
 
         return _job_tool("cancel_job", job_id, selector)
 
-    def _retry_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+    def _retry_job(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        risk_acceptance: dict | None = None,
+    ) -> ToolResult:
         from .lifecycle_tools import _job_tool
 
-        return _job_tool("retry_job", job_id, selector)
+        return _job_tool("retry_job", job_id, selector, risk_acceptance=risk_acceptance)
 
     def _rerun_job(
         self,

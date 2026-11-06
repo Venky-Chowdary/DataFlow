@@ -428,6 +428,7 @@ def recipe_output_schema(
     from services.shape_type_propagation import propagated_derive_types
 
     propagated = propagated_derive_types(recipe, prior)
+    cast_steps = _final_cast_steps(recipe)
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -439,11 +440,74 @@ def recipe_output_schema(
             out[column] = prior[origin]
             continue
         declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
+        cast = cast_steps.get(column)
+        if cast is not None:
+            declared = _cast_carrier(cast, declared, prior.get(column, ""))
         ceiling = ceilings.get(column)
         if ceiling is not None:
             declared = _capped_decimal(declared, ceiling)
         out[column] = declared
     return out
+
+
+def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
+    """Columns whose last writing step is ``cast_column``, with that step.
+
+    ``cast_column`` declares the column's logical type. The values it leaves
+    can still read as another type (``1`` cast to text is the string "1"), so
+    re-inferring the carrier from them undid the cast: PG -> MongoDB stored the
+    id as an int and PG -> PG created BIGINT (QA r12 D3).
+    """
+    last: dict[str, Any] = {}
+    for step in recipe.enabled_steps:
+        for column in step.writes:
+            if column:
+                last[column] = step
+    return {c: st for c, st in last.items() if st.op == "cast_column"}
+
+
+_CAST_FAMILIES: dict[str, frozenset[str]] = {
+    "text": frozenset({"string", "text"}),
+    "integer": frozenset({"integer"}),
+    "decimal": frozenset({"decimal"}),
+    "boolean": frozenset({"boolean"}),
+    "date": frozenset({"date"}),
+    "timestamp": frozenset({"datetime"}),
+}
+_CAST_DEFAULT_CARRIER: dict[str, str] = {
+    "integer": "BIGINT",
+    "decimal": "DECIMAL",
+    "boolean": "BOOLEAN",
+    "date": "DATE",
+    "timestamp": "TIMESTAMP",
+}
+
+
+def _cast_carrier(step: Any, declared: str, prior: str) -> str:
+    """The carrier a ``cast_column`` step declares.
+
+    An inferred carrier of the declared family is kept (it is the more precise
+    one: ``DECIMAL(7,2)``, ``TIMESTAMPTZ``); any other family yields the cast's.
+    """
+    from services.type_system import normalize_logical_type
+
+    options = getattr(step, "options", None) or {}
+    to_type = str(options.get("to_type") or "").strip().casefold()
+    if to_type == "decimal" and options.get("precision") is not None:
+        scale = options.get("scale")
+        return f"DECIMAL({int(options['precision'])},{int(scale or 0)})"
+    family = _CAST_FAMILIES.get(to_type)
+    if family is None:
+        return declared
+    try:
+        logical = normalize_logical_type(declared)
+    except (TypeError, ValueError):
+        logical = ""
+    if logical in family:
+        return declared
+    if to_type == "text":
+        return _text_carrier(prior)
+    return _CAST_DEFAULT_CARRIER[to_type]
 
 
 def _text_carrier(prior: str) -> str:

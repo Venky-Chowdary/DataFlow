@@ -350,27 +350,46 @@ def _proof_mongo_source_batches(
     src_cfg: dict[str, Any],
     read_cols: list[str],
     page: int = 5000,
+    absent_as_null: bool = False,
 ):
     """Raw Mongo collection pages, projected the way the transfer reader does.
 
     Used for both a Mongo source re-read and a Mongo destination read-back:
     one projection, so both sides of the proof see the same value shapes.
+    ``absent_as_null`` is the read-back's rule: a field the writer omitted
+    (Missing) and an explicit null both read back as NULL, the same as a SQL
+    destination's read-back.
     """
     from connectors.mongodb_common import _mongo_client
     from connectors.mongodb_reader import _connection_string, _page_docs_to_batch
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
-    database = str(src_cfg.get("database") or "")
-    coll = _mongo_client(_connection_string(src_cfg))[database][
-        str(source_endpoint.table or "")
-    ]
+    absent = {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL} if absent_as_null else set()
+
+    def _page(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+        if not absent:
+            return rows
+        return [{c: (None if v in absent else v) for c, v in row.items()} for row in rows]
+
+    # The stream reader's resolution (stream.py src_db / _source_table): a
+    # database named on the run wins over the connector's, and a collection
+    # named in ``collection`` is the same source as one named in ``table``.
+    database = str(
+        getattr(source_endpoint, "database", "") or src_cfg.get("database") or "test"
+    )
+    collection = str(
+        source_endpoint.table or getattr(source_endpoint, "collection", "") or ""
+    )
+    coll = _mongo_client(_connection_string(src_cfg))[database][collection]
     docs: list[dict[str, Any]] = []
     for doc in coll.find({}).sort("_id", 1).batch_size(page):
         docs.append(doc)
         if len(docs) >= page:
-            yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+            yield _page(docs)
             docs = []
     if docs:
-        yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+        yield _page(docs)
 
 
 def _mongo_page_dicts(docs, cfg, read_cols, to_batch) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
@@ -1438,7 +1457,9 @@ def _transform_applied_proof_impl(
         qs = "["
     else:
         qs = '"'
-    src_ref_sql = warehouse_sql_table_ref(
+    # A Mongo source has no SQL table: the SQL oracle and the tracked-equality
+    # join below are SQL-source only and already skip on an empty ref.
+    src_ref_sql = "" if src_type == "mongodb" else warehouse_sql_table_ref(
         src_type,
         src_cfg,
         str(
@@ -1700,14 +1721,16 @@ def _transform_applied_proof_impl(
                     dest_types=dest_types,
                 )
             elif dest_db_type == "mongodb":
-                # D228: a document store has no SQL dialect — read the
-                # written collection back through the Mongo reader.
+                # D228 / QA r12 D8: a document store has no SQL dialect — read
+                # the written collection back through the Mongo reader. A
+                # field the writer omitted reads back as NULL, as on SQL.
                 actual_checksum = canonical_checksum_from_iter(
                     _scoped_gen(
                         _proof_mongo_source_batches(
                             source_endpoint=endpoint,
                             src_cfg=dst_cfg0,
                             read_cols=sel_cols0,
+                            absent_as_null=True,
                         )
                     ),
                     digest_cols,

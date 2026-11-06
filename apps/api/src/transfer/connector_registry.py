@@ -800,6 +800,28 @@ def _name_protocol_mismatch(
     return (False, message) if message else result
 
 
+_MONGO_UNREACHABLE = re.compile(
+    r"timed out|timeout|serverselection|no servers|nodename|name or service|"
+    r"getaddrinfo|name resolution|connection refused|unreachable|dnspython|srv",
+    re.I,
+)
+
+
+def _mongodb_srv_form_hint(cfg: dict[str, Any], raw: Any) -> str:
+    """Name the mongodb+srv:// fix when a host/port form cannot reach a cluster.
+
+    QA r12 Mongo D6: an Atlas cluster name in the host field timed out with no
+    clue that Atlas is dialled through its SRV record.
+    """
+    if str(cfg.get("connection_string") or "").strip():
+        return ""
+    if not _MONGO_UNREACHABLE.search(str(raw or "")):
+        return ""
+    from connectors.mongodb_common import mongodb_srv_hint
+
+    return mongodb_srv_hint(str(cfg.get("host") or ""), int(cfg.get("port") or 0))
+
+
 def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
@@ -834,7 +856,9 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
             return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
         if ok:
             return True, raw
-        return False, humanize_connection_error(db_type, raw, auth_mode=_attempted_auth_mode)
+        message = humanize_connection_error(db_type, raw, auth_mode=_attempted_auth_mode)
+        hint = _mongodb_srv_form_hint(cfg, raw)
+        return False, (f"{message.rstrip()} {hint}" if hint else message)
 
     from services.dialect_profiles import default_schema_for, normalize_schema
 
