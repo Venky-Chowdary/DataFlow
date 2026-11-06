@@ -3109,6 +3109,59 @@ def _covered_keyed_noop_verify(
     return None
 
 
+def _ladder_key(row: Any, key_cols: list[str]) -> tuple[str, ...] | None:
+    """The whole key of one ladder row, each part spelled as the ladder spells it.
+
+    A composite key is the tuple of every key column — the key the writer
+    upserts on (``ON CONFLICT (region, id)``). Keying by the first column
+    alone scoped, collapsed and quarantine-excluded by ``region`` (ACC-03).
+    ``None`` when any part is absent or NULL: such a row is not addressable.
+    """
+    from services.verification_ladder import _pk_key
+
+    if not isinstance(row, dict) or not key_cols:
+        return None
+    parts = tuple(_pk_key(row.get(c)) for c in key_cols)
+    return None if any(p is None for p in parts) else parts  # type: ignore[return-value]
+
+
+def _rejected_key(detail: dict[str, Any], key_cols: list[str]) -> tuple[str, ...] | None:
+    """The whole key a quarantine finding names, or ``None`` when it names none.
+
+    Writers record a composite ``source_pk`` as the value list (positional to
+    the key columns), a ``pk_value`` mapping, or the row's own values.
+    """
+    from services.verification_ladder import _pk_key
+
+    if not key_cols:
+        return None
+    for field in ("source_pk", "destination_pk"):
+        raw = detail.get(field)
+        if raw is None:
+            continue
+        if isinstance(raw, dict):
+            return _ladder_key(raw, key_cols)
+        if isinstance(raw, (list, tuple)):
+            if len(raw) != len(key_cols):
+                continue
+            parts = tuple(_pk_key(v) for v in raw)
+            return None if any(p is None for p in parts) else parts  # type: ignore[return-value]
+        if len(key_cols) == 1:
+            part = _pk_key(raw)
+            return (part,) if part is not None else None
+    for field in ("pk_value", "row", "source_values", "values"):
+        found = _ladder_key(detail.get(field), key_cols)
+        if found is not None:
+            return found
+    row = detail.get("row")
+    if len(key_cols) == 1 and isinstance(row, (str, int, float)):
+        # Only a bare payload: writers also put the 1-based row number here,
+        # so the named key values above take precedence.
+        part = _pk_key(row)
+        return (part,) if part is not None else None
+    return None
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -3217,6 +3270,11 @@ def _maybe_attach_verification_ladder(
     # Identity maps often use `id` — accept when present on both sides.
     if not pk_column and "id" in {c.lower() for c in target_cols}:
         pk_column = next(c for c in target_cols if c.lower() == "id")
+    # The one key every row-addressing step below uses: the whole composite
+    # key, or the single resolved column. Never the first column of a
+    # composite (ACC-03: batch scope, survivor pick and quarantine exclusion
+    # all keyed by ``region`` alone).
+    key_cols: list[str] = [str(c) for c in (pk_cols or ([pk_column] if pk_column else [])) if str(c or "")]
 
     dest_cfg = resolve_connector_config(endpoint)
     source_rows: list[dict] = [r for r in (records or []) if isinstance(r, dict)]
@@ -3392,29 +3450,17 @@ def _maybe_attach_verification_ladder(
     if (
         census is not None
         and dest_before
-        and pk_column
+        and key_cols
         and source_rows
     ):
         key_rows = [r for r in (records or []) if isinstance(r, dict)] or source_rows
-        batch_keys = {
-            str(r.get(pk_column))
-            for r in key_rows
-            if isinstance(r, dict) and r.get(pk_column) is not None
-        }
+        batch_keys = {k for k in (_ladder_key(r, key_cols) for r in key_rows) if k is not None}
         if batch_keys:
-            target_rows = [
-                r
-                for r in target_rows
-                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
-            ]
+            target_rows = [r for r in target_rows if _ladder_key(r, key_cols) in batch_keys]
             # Same scope on the source side: an incremental re-read covers the
             # whole source table, and comparing it against the batch-keys-only
             # destination subset flags every legitimately-skipped source row.
-            source_rows = [
-                r
-                for r in source_rows
-                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
-            ]
+            source_rows = [r for r in source_rows if _ladder_key(r, key_cols) in batch_keys]
             batch_scoped = True
     from services.primary_key import sync_collapses_in_file_duplicates
 
@@ -3422,7 +3468,7 @@ def _maybe_attach_verification_ladder(
     # the survivor pick on pk_column — the first key column only — merged every
     # row of one region into a single "survivor" (ACC-03 run 2). Use the full
     # key, and only when every key column is on the rows.
-    _collapse_key = [str(c) for c in (pk_cols or ([pk_column] if pk_column else [])) if str(c or "")]
+    _collapse_key = key_cols
     if (
         _collapse_key
         and source_rows
@@ -3453,40 +3499,30 @@ def _maybe_attach_verification_ladder(
     # basis — the ladder then vetoed it and the job undid the 39 good rows).
     # Exclude the quarantined keys from the compared source population when
     # the pk resolves; residual detail stays honest via rejected_rows.
-    _rej_keys: set[str] | None = None
+    _rej_keys: set[tuple[str, ...]] | None = None
     if (
-        pk_column
+        key_cols
         and int(report.get("rejected_rows") or 0) > 0
         and source_rows
     ):
-        _rej_keys = set()
-        for _d in dest_summary.get("rejected_details") or []:
-            if not isinstance(_d, dict):
-                continue
-            _pk = _d.get("source_pk") or _d.get("destination_pk")
-            if _pk is not None:
-                _rej_keys.add(str(_pk))
-                continue
-            _row = _d.get("row")
-            _v = _row.get(pk_column) if isinstance(_row, dict) else None
-            if _v is None:
-                for _vals_key in ("source_values", "values"):
-                    _vals = _d.get(_vals_key)
-                    if isinstance(_vals, dict) and _vals.get(pk_column) is not None:
-                        _v = _vals.get(pk_column)
-                        break
-            if _v is None and isinstance(_row, (str, int, float)):
-                # Only a bare payload: writers also put the 1-based row number
-                # here, so the named key values above take precedence.
-                _v = _row
-            if _v is not None:
-                _rej_keys.add(str(_v))
+        # The whole key of each quarantined row: one held-out (ap, 1) must
+        # exclude (ap, 1) only — never every ``ap`` row (which hid a missing
+        # (ap, 2)) and never nothing (a composite source_pk list stringified
+        # matched no row, so a correct quarantining run failed L5).
+        _rej_keys = {
+            k
+            for k in (
+                _rejected_key(_d, key_cols)
+                for _d in dest_summary.get("rejected_details") or []
+                if isinstance(_d, dict)
+            )
+            if k is not None
+        }
         if _rej_keys:
             source_rows = [
                 r
                 for r in source_rows
-                if not isinstance(r, dict)
-                or str(r.get(pk_column)) not in _rej_keys
+                if not isinstance(r, dict) or _ladder_key(r, key_cols) not in _rej_keys
             ]
     # D205 — an append into an occupied table: grade the written batch, not
     # the rows earlier runs wrote (see ladder_batch_scope).
