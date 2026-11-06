@@ -2335,7 +2335,7 @@ async def rebaseline_append_continuity(
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
-    resolve_write_workspace(request, workspace_id)
+    write_ws = resolve_write_workspace(request, workspace_id)
     _assert_endpoint_connectors(request, write=(body.destination,))
     reason = (body.reason or "").strip()
     if not reason:
@@ -2350,7 +2350,9 @@ async def rebaseline_append_continuity(
     )
     try:
         return await asyncio.to_thread(
-            rebaseline, dst, actor=_actor_email(request), reason=reason
+            rebaseline, dst, actor=_actor_email(request), reason=reason,
+            # Only this caller's schedules are released (QA C9 review).
+            workspace_id=str(write_ws or ""),
         )
     except RebaselineError as exc:
         raise HTTPException(

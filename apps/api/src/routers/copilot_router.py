@@ -567,7 +567,8 @@ async def _run_lifecycle_confirm(
         dst = _saved_connector_endpoint(conn, str(payload.get("table") or ""))
         try:
             return await asyncio.to_thread(
-                rebaseline, dst, actor=actor or "", reason=reason
+                rebaseline, dst, actor=actor or "", reason=reason,
+                workspace_id=str(getattr(conn, "workspace_id", "") or workspace_id or ""),
             )
         except RebaselineError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

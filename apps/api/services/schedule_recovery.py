@@ -205,14 +205,23 @@ def recover_schedule_destination(
     }
 
 
-def release_continuity_parks(endpoint: Any, *, actor: str, reason: str) -> list[str]:
-    """Re-arm every schedule parked on a continuity finding for this table.
+def release_continuity_parks(
+    endpoint: Any, *, actor: str, reason: str, workspace_id: str | None = None
+) -> list[str]:
+    """Re-arm the caller's schedules parked on a continuity finding for this table.
 
     Called after a route-level rebaseline (REST or MCP ``rebaseline_transfer``)
-    so accepting the destination there also lets its schedules run. Never
-    raises: the rebaseline already happened and is audited.
+    so accepting the destination there also lets its schedules run. Only
+    schedules in ``workspace_id`` whose ``dest_connector_id`` is the
+    rebaselined endpoint's saved connector are released: a shared physical
+    table (same host/database/table under another workspace's connector) is
+    another workspace's decision. ``workspace_id=None`` releases nothing.
+    Never raises: the rebaseline already happened and is audited.
     """
     released: list[str] = []
+    connector_id = str(getattr(endpoint, "connector_id", "") or "").strip()
+    if workspace_id is None or not connector_id:
+        return released
     try:
         keys = _target_keys(endpoint)
         if not keys:
@@ -220,6 +229,10 @@ def release_continuity_parks(endpoint: Any, *, actor: str, reason: str) -> list[
         from services.schedule_store import _load_all
 
         for sched in _load_all():
+            if str(getattr(sched, "workspace_id", "") or "") != str(workspace_id or ""):
+                continue
+            if str(getattr(sched, "dest_connector_id", "") or "") != connector_id:
+                continue
             if _open_continuity_finding(sched) is None:
                 continue
             try:

@@ -649,22 +649,36 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
 ACCEPTED_RESET_PREFIX = "accepted_reset:"
 
 
+def _accepted_reset_key(target: ContinuityTarget) -> str:
+    """The marker's key: the saved connector's own identity, never a shared one.
+
+    Two workspaces' connectors can name one physical table, and both then
+    carry the same ``host:<h>:<p>`` alt key. Acceptance is one workspace's
+    decision about its own route, so it is keyed only on ``id:<connector>``
+    (or a file engine's own path). An inline host endpoint records none.
+    """
+    if target.db_type in _FILE_ENGINES or "|id:" in target.key:
+        return ACCEPTED_RESET_PREFIX + target.key
+    return ""
+
+
 def destination_reset_accepted(endpoint: Any) -> bool:
     """True when an audited rebaseline accepted this destination's removal or emptying."""
     try:
         target = resolve_target(endpoint)
         if target is None:
             return False
-        return any(load_baseline(ACCEPTED_RESET_PREFIX + k) for k in target.all_keys)
+        key = _accepted_reset_key(target)
+        return bool(key) and bool(load_baseline(key))
     except Exception:  # noqa: BLE001 - an unreadable marker accepts nothing
         return False
 
 
 def _clear_accepted_reset(target: ContinuityTarget) -> None:
-    for key in target.all_keys:
+    for key in [k for k in (_accepted_reset_key(target),) if k]:
         try:
-            if load_baseline(ACCEPTED_RESET_PREFIX + key):
-                clear_baseline(ACCEPTED_RESET_PREFIX + key)
+            if load_baseline(key):
+                clear_baseline(key)
         except Exception:  # noqa: BLE001
             logger.warning("accepted-reset marker not cleared for %s", key, exc_info=True)
 
@@ -674,15 +688,21 @@ class RebaselineError(ValueError):
 
 
 def rebaseline(
-    endpoint: Any, *, actor: str, reason: str, release_schedules: bool = True
+    endpoint: Any,
+    *,
+    actor: str,
+    reason: str,
+    release_schedules: bool = True,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """Operator accepts the current destination as the verified baseline.
 
     Explicit and audited: the audit event is written before the baseline
     moves, so an audit failure leaves the old baseline in force. With
-    ``release_schedules`` every schedule parked on a continuity finding for
-    this table is re-armed too (QA C9): accepting the destination at the route
-    is the decision the parked schedule was waiting for.
+    ``release_schedules`` the caller's own schedules (``workspace_id``) parked
+    on a continuity finding for this connector's table are re-armed too (QA
+    C9): accepting the destination at the route is the decision they were
+    waiting for. Another workspace's schedule is never touched.
     """
     reason = (reason or "").strip()
     if not reason:
@@ -765,14 +785,11 @@ def rebaseline(
             clear_baseline(key)
         else:
             save_baseline(key, current, rebaseline_id)
-        if removal or int((current or {}).get("rows") or 0) == 0:
-            save_baseline(
-                ACCEPTED_RESET_PREFIX + key,
-                # The entry's presence is the marker; job_id names the audited
-                # rebaseline that accepted the reset.
-                {"rows": 0, "checksum": "accepted-reset"},
-                rebaseline_id,
-            )
+    reset_key = _accepted_reset_key(target)
+    if reset_key and (removal or int((current or {}).get("rows") or 0) == 0):
+        # The entry's presence is the marker; job_id names the audited
+        # rebaseline that accepted the reset.
+        save_baseline(reset_key, {"rows": 0, "checksum": "accepted-reset"}, rebaseline_id)
     logger.warning(
         "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
         target.db_type,
@@ -786,7 +803,9 @@ def rebaseline(
     if release_schedules:
         from services.schedule_recovery import release_continuity_parks
 
-        released = release_continuity_parks(endpoint, actor=actor, reason=reason)
+        released = release_continuity_parks(
+            endpoint, actor=actor, reason=reason, workspace_id=workspace_id
+        )
     return {
         "rebaseline_id": rebaseline_id,
         "released_schedules": released,
