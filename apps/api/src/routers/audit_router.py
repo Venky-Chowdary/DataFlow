@@ -176,13 +176,18 @@ _MASKED_NOTE = (
 )
 
 
-def _reader_view(request: Request, workspace_id: str, events: list) -> tuple[list, bool]:
-    """Events as this reader may see them: key ids whole only for key managers (Browser 20)."""
-    from services.audit_actor_display import mask_key_ids, reader_sees_key_ids
+def _reader_masker(request: Request, workspace_id: str):
+    """The projection this reader is shown, or ``None`` for a key manager (Browser 20)."""
+    from services.audit_actor_display import KeyIdMasker, reader_sees_key_ids
 
-    if reader_sees_key_ids(request, workspace_id):
+    return None if reader_sees_key_ids(request, workspace_id) else KeyIdMasker()
+
+
+def _reader_view(masker, events: list) -> tuple[list, bool]:
+    """Events as this reader may see them: key ids whole only for key managers."""
+    if masker is None:
         return events, False
-    return mask_key_ids(events), True
+    return [masker(e) for e in events], True
 
 
 @router.get("/events")
@@ -204,9 +209,11 @@ async def list_events(
     scope = tenant_scope(request)
     workspace_id = scope.header_workspace_id
     tenant_id = _tenant_of(workspace_id)
+    masker = _reader_masker(request, workspace_id)
     # Scope by the caller's workspaces (or the one they are looking at). Do not
     # AND tenant_id: events stamped with this workspace before a tenant existed
     # would vanish, and a shared tenant must not pull sibling-workspace rows.
+    # A masked reader's search matches what it is shown, never a hidden key id.
     events = list_audit_events(
         limit=limit,
         level=level,
@@ -214,11 +221,12 @@ async def list_events(
         after_seq=after_seq,
         action=action,
         search=q or search,
+        search_projection=masker,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
     from services.audit_actor_display import add_actor_display
 
-    events, masked = _reader_view(request, workspace_id, add_actor_display(events))
+    events, masked = _reader_view(masker, add_actor_display(events))
     return JSONResponse(
         {
             "events": events,
@@ -272,7 +280,7 @@ async def export_events(
         after_seq=after_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
-    events, masked = _reader_view(request, workspace_id, events)
+    events, masked = _reader_view(_reader_masker(request, workspace_id), events)
     tip = latest_event_hash()
     honesty = audit_export_honesty()
     if masked:

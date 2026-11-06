@@ -124,3 +124,64 @@ def test_mask_helper_masks_only_issued_key_ids():
     assert masked["resource"] == f"/jobs/{job_id}"
     assert masked["details"]["job_id"] == job_id
     assert events[0]["actor_id"] == key_id  # input untouched
+
+
+def _oracle(reader, prefix_template: str) -> str:
+    """The reviewer's attack: extend q one hex character at a time while count > 0."""
+    recovered = ""
+    for _ in range(36):
+        for c in "0123456789abcdef-":
+            q = prefix_template + recovered + c
+            body = reader.get("/api/v1/audit/events", params={"limit": 500, "q": q}).json()
+            if body["count"]:
+                recovered += c
+                break
+        else:
+            break
+    return recovered
+
+
+@pytest.mark.parametrize("reader_kind", ["viewer_session", "operator_key"])
+def test_masked_reader_search_never_matches_hidden_key_id_characters(world, reader_kind):
+    """Search matches the masked projection: no prefix-extension oracle (review finding)."""
+    key = _key_activity(world)
+    if reader_kind == "viewer_session":
+        world.member("viewer-b20q@acme.test", "viewer")
+        reader = world.login("viewer-b20q@acme.test", PASSWORD)
+    else:
+        reader = world.as_key(world.mint_key("operator"))
+    # The machine actor is searchable as a kind, and by the last four it is shown.
+    assert reader.get("/api/v1/audit/events", params={"q": "api_key:"}).json()["count"] > 0
+    assert reader.get("/api/v1/audit/events", params={"q": key["id"][-4:]}).json()["count"] > 0
+    # Any hidden leading character matches nothing, in the actor and in resources.
+    for n in (1, 8, 32, 36):
+        for q in (f"api_key:{key['id'][:n]}",) + ((key["id"][:n],) if n >= 8 else ()):
+            listed = reader.get("/api/v1/audit/events", params={"q": q, "limit": 500})
+            assert listed.status_code == 200, listed.text
+            assert listed.json()["count"] == 0, (reader_kind, q)
+    assert _oracle(reader, "api_key:") == ""
+
+
+def test_admin_search_still_matches_the_full_key_id(world):
+    key = _key_activity(world)
+    found = world.owner.get("/api/v1/audit/events", params={"q": f"api_key:{key['id'][:8]}"}).json()
+    assert found["count"] > 0 and found["key_ids_masked"] is False
+
+
+def test_operator_key_reader_gets_masked_ids_in_list_and_export(world):
+    key = _key_activity(world)
+    operator = world.as_key(world.mint_key("operator"))
+    listed = operator.get("/api/v1/audit/events?limit=500")
+    assert listed.status_code == 200 and listed.json()["key_ids_masked"] is True
+    assert not _raw_ids_in(listed.text, key["id"])
+    exported = operator.get("/api/v1/audit/export?format=ndjson&limit=500")
+    assert exported.status_code == 200
+    assert not _raw_ids_in(exported.text, key["id"])
+
+
+def test_prefixed_key_reference_is_masked_even_for_a_key_missing_from_the_store():
+    from services.audit_actor_display import mask_key_ids
+
+    gone = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+    masked = mask_key_ids([{"id": "e", "resource": f"service_account:{gone}", "actor": "x@y"}])[0]
+    assert masked["resource"] == "service_account:…cb6d"

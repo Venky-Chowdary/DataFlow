@@ -100,17 +100,17 @@ def reader_sees_key_ids(request: Any, workspace_id: str) -> bool:
     return bool(principal.platform_admin or principal.has(Permission.WORKSPACE_MANAGE))
 
 
-def _known_key_ids(events: list[dict[str, Any]]) -> set[str]:
-    ids = set(_key_names())
-    for event in events:
-        ident = _machine_identity(event)
-        if ident is not None:
-            ids.add(ident[1])
-    return {i.lower() for i in ids if i}
+_PREFIXED_ID = re.compile(
+    r"(?i)\b(api_key|service_account|scim_token|scim)([:/])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
 
 
 def _mask_value(value: Any, ids: set[str]) -> Any:
     if isinstance(value, str):
+        # A machine-identity reference (``api_key:<uuid>``) is masked even
+        # when the key is gone from the store; any other UUID only when it is
+        # an issued key's id (job, schedule and record ids stay readable).
+        value = _PREFIXED_ID.sub(lambda m: f"{m.group(1)}{m.group(2)}{masked_id(m.group(3))}", value)
         return _UUID.sub(
             lambda m: masked_id(m.group(0)) if m.group(0).lower() in ids else m.group(0), value
         )
@@ -126,20 +126,35 @@ _EXACT_FIELDS = frozenset({"_id", "id", "seq", "event_hash", "prev_hash", "ws_pr
                            "workspace_id", "tenant_id", "correlation_id", "key_id"})
 
 
+class KeyIdMasker:
+    """The masked projection of audit events, for one read.
+
+    The key store's ids are read once; each event's own machine actor is
+    added as it is masked. The same projection serves the response *and* the
+    search (``audit_log.list_audit_events(search_projection=...)``): a masked
+    reader's ``q`` must match only what that reader is shown, or extending
+    ``q=api_key:<prefix>`` one character at a time recovers the hidden id.
+    """
+
+    def __init__(self) -> None:
+        self._ids = {i.lower() for i in _key_names() if i}
+
+    def __call__(self, event: dict[str, Any]) -> dict[str, Any]:
+        ids = self._ids
+        ident = _machine_identity(event)
+        if ident is not None and ident[1].lower() not in ids:
+            ids = ids | {ident[1].lower()}
+        return {k: (v if k in _EXACT_FIELDS else _mask_value(v, ids)) for k, v in event.items()}
+
+
 def mask_key_ids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Copies of ``events`` with every API-key id masked (``…`` + last four).
 
-    Only ids of keys this deployment issued (the key store, plus the actor of
-    a machine-authenticated record) are masked, wherever they appear — actor,
-    ``actor_id``, resource, details — so job, schedule and record ids stay
-    readable. ``key_id`` is the audit-chain signing key id, not an API key.
+    Ids of keys this deployment issued (the key store, plus the actor of a
+    machine-authenticated record) are masked wherever they appear — actor,
+    ``actor_id``, resource, details — as is any ``api_key:`` /
+    ``service_account:`` / ``scim:`` reference, so job, schedule and record
+    ids stay readable. ``key_id`` is the audit-chain signing key id.
     """
-    ids = _known_key_ids(events)
-    if not ids:
-        return [dict(e) for e in events]
-    out: list[dict[str, Any]] = []
-    for event in events:
-        out.append(
-            {k: (v if k in _EXACT_FIELDS else _mask_value(v, ids)) for k, v in event.items()}
-        )
-    return out
+    masker = KeyIdMasker()
+    return [masker(e) for e in events]

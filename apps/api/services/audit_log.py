@@ -16,7 +16,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from services.audit_chain_keys import hmac_hex, keyring, legacy_login_secret, signing_key
 from services.audit_chain_link import (
@@ -542,6 +542,15 @@ def _action_matches(action: str | None, value: str) -> bool:
     return value in exact or any(value.startswith(p) for p in prefixes)
 
 
+#: Records a projected search walks before it answers (newest first).
+SEARCH_SCAN_LIMIT = 20000
+
+
+def _search_matches(search: str, ev: dict[str, Any]) -> bool:
+    needle = search.strip().lower()
+    return any(needle in str(ev.get(field) or "").lower() for field in ("action", "resource", "actor"))
+
+
 def list_audit_events(
     *,
     limit: int = 100,
@@ -555,8 +564,15 @@ def list_audit_events(
     workspace_filter: WorkspaceFilter | None = None,
     action: str | None = None,
     search: str | None = None,
+    search_projection: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent events, or an ascending chain-sequence cursor page.
+
+    ``search_projection`` is the view the reader is shown (Browser 20: key ids
+    masked). When given, ``search`` matches that projection, never the stored
+    record, so a reader cannot probe hidden characters with ``q``; the match
+    then runs here instead of in the store, over at most ``SEARCH_SCAN_LIMIT``
+    records of the scope.
 
     ``action`` is a comma-separated list of exact action names; an entry
     ending in ``*`` (``team.member.*``) matches that prefix. ``search`` is a
@@ -585,7 +601,7 @@ def list_audit_events(
             action_query = _action_mongo_query(action)
             if action_query is not None:
                 query["action"] = action_query
-            if search and search.strip():
+            if search and search.strip() and search_projection is None:
                 needle = {"$regex": re.escape(search.strip()), "$options": "i"}
                 # Under $and: the workspace filter below may bring its own $or.
                 query["$and"] = [
@@ -608,6 +624,15 @@ def list_audit_events(
                 sort_order = [("chain_seq", 1)]
             else:
                 sort_order = [(key, -direction) for key, direction in CHAIN_ORDER]
+            if search and search.strip() and search_projection is not None:
+                found: list[dict[str, Any]] = []
+                for doc in coll.find(query).sort(sort_order).limit(SEARCH_SCAN_LIMIT):
+                    ev = {k: v for k, v in doc.items() if k != "_id"}
+                    if _search_matches(search, search_projection(ev)):
+                        found.append(ev)
+                        if len(found) >= limit:
+                            break
+                return found
             cursor = (
                 coll.find(query)
                 .sort(sort_order)
@@ -635,9 +660,8 @@ def list_audit_events(
             continue
         if not _action_matches(action, str(ev.get("action") or "")):
             continue
-        if search and search.strip() and not any(
-            search.strip().lower() in str(ev.get(field) or "").lower()
-            for field in ("action", "resource", "actor")
+        if search and search.strip() and not _search_matches(
+            search, search_projection(ev) if search_projection is not None else ev
         ):
             continue
         if after_seq is not None and chain_seq_of(ev) <= after_seq:
