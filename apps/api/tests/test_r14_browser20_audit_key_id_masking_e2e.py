@@ -185,3 +185,25 @@ def test_prefixed_key_reference_is_masked_even_for_a_key_missing_from_the_store(
     gone = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
     masked = mask_key_ids([{"id": "e", "resource": f"service_account:{gone}", "actor": "x@y"}])[0]
     assert masked["resource"] == "service_account:…cb6d"
+
+
+def test_verify_pack_masks_a_key_actor_for_a_non_admin_reader(world):
+    """S8 (second review): chain_record.actor carried the exporting key's full id."""
+    from services.signed_proof_pack import export_proof_pack_for_job
+
+    key = world.mint_key("admin", name="b20 pack exporter")
+    pack = export_proof_pack_for_job(
+        {"_id": "job-b20-pack", "workspace_id": world.workspace_id,
+         "reconciliation": {"passed": True, "phase": "sample_verified"}},
+        actor=f"api_key:{key['id']}",
+    )
+    editor = world.as_key(world.mint_key("editor"))
+    masked = editor.post("/api/v1/audit/verify-pack", json=pack)
+    assert masked.status_code == 200, masked.text
+    record = masked.json()["chain_record"]
+    assert record is not None
+    assert key["id"] not in masked.text
+    assert record["actor"] == f"api_key:…{key['id'][-4:]}"
+    # The workspace admin still reads the full id (forensics).
+    full = world.owner.post("/api/v1/audit/verify-pack", json=pack)
+    assert full.json()["chain_record"]["actor"] == f"api_key:{key['id']}"

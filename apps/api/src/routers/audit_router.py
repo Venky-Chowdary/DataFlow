@@ -565,6 +565,12 @@ async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)
     chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    if chain_record:
+        # The record's actor is an API-key id when a key exported the pack:
+        # the same reader view as /audit/events (S8, second review).
+        masker = _reader_masker(request, tenant_scope(request).header_workspace_id)
+        if masker is not None:
+            chain_record = masker(dict(chain_record))
     record_security_event(
         "audit.verify_pack.read", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
