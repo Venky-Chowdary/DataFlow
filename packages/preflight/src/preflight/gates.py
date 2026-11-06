@@ -2596,9 +2596,11 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     "duplicate rows only"
                 )
             elif collision_evidence["status"] == "ran":
+                probed = [k for k in (getattr(collision, "probed_keys", None) or []) if k]
+                keys = ", ".join(dict.fromkeys(probed)) if probed else key
                 collision_proven = (
                     f"Target DDL compatible — append batch probed against stored "
-                    f"{key} values, no collision"
+                    f"{keys} values, no collision"
                 )
             elif getattr(collision, "key_enforced", True):
                 collision_unproven = (

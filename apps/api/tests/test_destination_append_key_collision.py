@@ -456,3 +456,42 @@ def test_a_unique_index_enforces_like_a_unique_constraint(tmp_path: Path) -> Non
     g6 = _gate(result, "g6_target_ddl")
     assert g6["status"] == "block", g6
     assert "enforces uniqueness" in g6["message"], g6
+
+
+def _uq_jobs(tmp_path: Path) -> str:
+    db_path = tmp_path / "b2.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT UNIQUE, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES (?, ?)", ("a", "A"))
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+def test_an_enforced_key_collision_wins_over_a_contract_key_warning(tmp_path: Path) -> None:
+    """B2: contract key ``name`` collides (heap-like, warn) and UNIQUE(id) collides (abort)."""
+    result = _run(
+        db_path=_uq_jobs(tmp_path),
+        sample_rows=[{"id": "a", "name": "A"}],
+        sync_mode="append",
+        destination_pk_columns=[],
+        contract_primary_key="name",
+        destination_unique_keys=[{"name": "uq", "columns": ["id"], "primary": False}],
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "block", g6
+    assert "on id" in g6["message"] and "enforces uniqueness" in g6["message"], g6
+
+
+def test_a_clean_probe_names_every_key_it_checked(tmp_path: Path) -> None:
+    result = _run(
+        db_path=_uq_jobs(tmp_path),
+        sample_rows=[{"id": "b", "name": "B"}, {"id": "", "name": "東京"}],
+        sync_mode="append",
+        destination_pk_columns=[],
+        contract_primary_key="name",
+        destination_unique_keys=[{"name": "uq", "columns": ["id"], "primary": False}],
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "pass", g6
+    assert "name, id values, no collision" in g6["message"], g6

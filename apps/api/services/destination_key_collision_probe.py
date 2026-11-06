@@ -110,6 +110,8 @@ class DestinationCollisionResult:
     # ``destination_unique`` / ``source_key``, or ``full_row`` when no key is
     # declared anywhere and only exact duplicate rows were checked.
     identity_basis: str = "declared"
+    # Every identity the append was probed on (the clean verdict names them).
+    probed_keys: list[str] = field(default_factory=list)
 
     @property
     def ran(self) -> bool:
@@ -462,9 +464,11 @@ def probe_append_key_collisions(
     )
     if not identities:
         return None
-    # Every enforced destination key aborts the insert on a repeat, so each is
-    # probed; the first collision is the verdict. With none, the first probe
-    # that could not run is reported (never read as proof), else the first.
+    # Every identity is probed. A collision on a key the destination enforces
+    # aborts the insert, so it is the verdict even when an unenforced contract
+    # key also collides (that one only warns). With no collision, the first
+    # probe that could not run is reported (never read as proof), else the
+    # first, naming every key that was probed.
     results: list[DestinationCollisionResult] = []
     for pairs, basis in identities:
         result = _probe_identity(
@@ -478,10 +482,15 @@ def probe_append_key_collisions(
             incremental_tiebreak_column=incremental_tiebreak_column,
         )
         result.identity_basis = basis
-        if result.findings:
-            return result
         results.append(result)
-    return next((r for r in results if not r.ran), results[0])
+    chosen = (
+        next((r for r in results if r.findings and r.key_enforced), None)
+        or next((r for r in results if r.findings), None)
+        or next((r for r in results if not r.ran), None)
+        or results[0]
+    )
+    chosen.probed_keys = [r.key_column for r in results if r.ran and r.key_column]
+    return chosen
 
 
 def _probe_identity(

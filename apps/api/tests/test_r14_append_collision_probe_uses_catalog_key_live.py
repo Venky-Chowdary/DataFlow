@@ -120,3 +120,31 @@ def test_a_unique_index_on_the_declared_key_is_enforced(isolated):  # noqa: F811
     finally:
         h.drop("mysql", table)
         h.drop("postgresql", out)
+
+
+def test_an_enforced_unique_collision_is_not_masked_by_the_contract_key(isolated):  # noqa: F811
+    """B2: the contract key (note) only warns; UNIQUE(code) on the destination aborts."""
+    if not h._port_up(3306) or not h._port_up(5432):
+        pytest.skip("live MySQL / PostgreSQL not reachable")
+    table = f"b2_{h.token()}"
+    out = f"{table}_d"
+    try:
+        h.run_sql("mysql", f"CREATE TABLE {table} (code VARCHAR(10), note VARCHAR(20), "
+                  "updated_at DATETIME(6)) DEFAULT CHARSET=utf8mb4")
+        h.run_sql("postgresql", f"CREATE TABLE {out} (code VARCHAR(10) UNIQUE, note VARCHAR(20), "
+                  "updated_at TIMESTAMP)",
+                  f"INSERT INTO {out} VALUES ('a', 'same', '2024-01-01')")  # nosec B608
+        h.run_sql("mysql", f"INSERT INTO {table} VALUES ('a', 'same', '2024-02-01')")  # nosec B608
+        contract = [{"name": table, "sync_mode": "incremental_append", "primary_key": "note",
+                     "cursor_field": "updated_at", "cursor_semantics": "modification_timestamp",
+                     "selected": True}]
+        run = h.execute(
+            isolated, h.endpoint("mysql", table), h.endpoint("postgresql", out),
+            sync_mode="incremental_append", stream_contracts=contract,
+        )
+        assert not run.success
+        assert "on code" in (run.error or "") and "enforces uniqueness" in run.error, run.error
+        assert h.run_sql("postgresql", f"SELECT COUNT(*) FROM {out}")[0][0] == 1  # nosec B608
+    finally:
+        h.drop("mysql", table)
+        h.drop("postgresql", out)
