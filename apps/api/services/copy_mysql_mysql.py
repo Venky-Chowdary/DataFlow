@@ -56,25 +56,21 @@ from services.copy_range_proof import range_keys_match  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-def _identity_charset_tails(
-    cur: Any,
-    table: str,
-    *,
-    dest_dialect: str,
-    same_instance: bool,
-) -> dict[str, str]:
+def _identity_charset_tails(cur: Any, dst_cur: Any, table: str) -> dict[str, str]:
     """``CHARACTER SET … COLLATE …`` each source text column declares, by name.
 
     ``COLUMN_TYPE`` names no charset, so an identity CREATE from it put a
     latin1 ``TINYTEXT`` (255 characters) into the destination's utf8mb4
-    default (255 *bytes*, as few as 63 characters): 255 latin1 '’' are 765
-    UTF-8 bytes and the copy died with 1406 Data too long (QA MySQL D12). The
-    identity copy carries the source's charset, so every byte-bounded tier
-    holds what the source held. A collation is carried where the destination
-    server knows it (always on the same server).
+    default (255 *bytes*, as few as 63 characters) and the copy died with 1406
+    (QA MySQL D12). The identity copy carries the source's charset, and its
+    collation only where the destination server has that collation — asked of
+    its own ``information_schema.COLLATIONS``, not guessed from the name
+    (MySQL 8 ``utf8mb4_ja_0900_as_cs`` does not exist on MariaDB: 1273).
     """
-    from services.dest_dialect_facts import _collation_compatible_with_dest
-
+    dst_cur.execute("SELECT CHARACTER_SET_NAME FROM information_schema.CHARACTER_SETS")
+    dest_charsets = {str(r[0]).lower() for r in dst_cur.fetchall()}
+    dst_cur.execute("SELECT COLLATION_NAME FROM information_schema.COLLATIONS")
+    dest_collations = {str(r[0]).lower() for r in dst_cur.fetchall()}
     cur.execute(
         "SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME "
         "FROM information_schema.COLUMNS "
@@ -84,11 +80,11 @@ def _identity_charset_tails(
     tails: dict[str, str] = {}
     for name, charset, collation in cur.fetchall():
         cs = str(charset or "").strip()
-        if not cs or not cs.replace("_", "").isalnum():
+        if not cs or cs.lower() not in dest_charsets:
             continue
         tail = f"CHARACTER SET {cs}"
         coll = str(collation or "").strip()
-        if coll and (same_instance or _collation_compatible_with_dest(dest_dialect, coll)):
+        if coll and coll.lower() in dest_collations:
             tail += f" COLLATE {coll}"
         tails[str(name).lower()] = tail
     return tails
@@ -268,12 +264,7 @@ def copy_mysql_to_mysql(
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
             live_l = {k.lower(): v for k, v in live.items()}
-            charset_tails = _identity_charset_tails(
-                src_cur,
-                source_table,
-                dest_dialect=str(dest_cfg.get("type") or "mysql").strip().lower(),
-                same_instance=same_instance,
-            )
+            charset_tails = _identity_charset_tails(src_cur, dst_cur, source_table)
             create_ddls: list[str] = []
             for i, col in enumerate(source_cols):
                 declared = live_l.get(col.lower()) or mysql_ddls[i]

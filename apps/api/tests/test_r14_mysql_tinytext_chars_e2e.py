@@ -115,3 +115,41 @@ def test_tinytext_is_255_characters_on_every_character_counting_destination():
         assert ddl_type("postgresql", inferred) == "VARCHAR(255)"
         assert ddl_type("oracle", inferred) == "VARCHAR2(255 CHAR)"
         assert ddl_type("mysql", inferred).startswith("VARCHAR(255)")
+
+
+def test_mysql_to_mariadb_identity_copy_keeps_charset_and_only_known_collations(client):
+    """MySQL 8's utf8mb4_ja_0900_as_cs does not exist on MariaDB (1273): the
+    identity copy keeps CHARACTER SET, and COLLATE only where the destination's
+    information_schema.COLLATIONS has it."""
+    from tests.test_r14_mysql_latin1_cp1252_strict_e2e import _mariadb_conn
+
+    _mariadb_conn().close()  # skips without MariaDB
+    token = uuid.uuid4().hex[:8]
+    src_t = f"r14ja_{token}"
+    try:
+        _sql("mysql", f"CREATE TABLE `{src_t}` (pmid int PRIMARY KEY, "
+                      "title tinytext CHARACTER SET latin1 COLLATE latin1_swedish_ci, "
+                      "jp varchar(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_ja_0900_as_cs, "
+                      "bin varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin)")
+        for row in [(1, _LATIN1_255, "カタカナ", "Ab"), (2, None, "", "ab"), (3, "  ", None, " ")]:
+            _sql("mysql", f"INSERT INTO `{src_t}` VALUES (%s, %s, %s, %s)", row)
+        src = _connector("mysql", _cfg("mysql"), "source")
+        dst = _connector("mariadb", _cfg("mariadb"), "destination")
+        args = {"source_connector_id": src, "dest_connector_id": dst, "dest_table": src_t,
+                "source_table": src_t, "sync_mode": "full_refresh_overwrite",
+                "primary_key": "pmid", "validation_mode": "strict"}
+        for run in (1, 2):
+            ok, staged = h.mcp_call(client, "start_transfer", args)
+            assert ok, {"error": staged}
+            h.confirm(client, staged["ack_id"], reason=f"r14-d12-ja-{run}")
+        got = {r[0]: r for r in _sql("mariadb", f"SELECT pmid, title, jp, bin FROM `{src_t}`")}
+        want = {r[0]: r for r in _sql("mysql", f"SELECT pmid, title, jp, bin FROM `{src_t}`")}
+        assert got == want
+        cols = dict((r[0], (r[1], r[2])) for r in _sql(
+            "mariadb", "SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME FROM "
+                       "information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND "
+                       f"TABLE_NAME = '{src_t}'"))
+        assert cols["title"][0] == "latin1" and cols["bin"] == ("utf8mb4", "utf8mb4_bin"), cols
+    finally:
+        _sql("mysql", f"DROP TABLE IF EXISTS `{src_t}`")
+        _sql("mariadb", f"DROP TABLE IF EXISTS `{src_t}`")
