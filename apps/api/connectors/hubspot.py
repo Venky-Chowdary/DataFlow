@@ -62,8 +62,33 @@ def _access(cfg: dict[str, Any]) -> tuple[str, str]:
     return access_token, base_url(cfg.get("host", ""), DEFAULT_HOST)
 
 
-def list_object_types(cfg: dict[str, Any]) -> list[str]:
-    """Return HubSpot CRM object type ids (core + custom schemas when permitted)."""
+#: Operator copy when the token cannot read custom-object schemas (D270).
+CUSTOM_OBJECTS_UNAVAILABLE = (
+    "HubSpot custom objects unavailable: this token lacks the custom-object "
+    "schema scope (crm.schemas.custom.read), so only the standard CRM objects "
+    "are listed. Grant that scope to the private app to list custom objects."
+)
+
+
+def _is_scope_refusal(exc: Exception) -> bool:
+    """HTTP 403: the token is valid but not granted this API (not a bad token)."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return status == 403
+    text = str(exc).lower()
+    return "403" in text or "forbidden" in text
+
+
+def list_object_types(cfg: dict[str, Any], *, notes: list[str] | None = None) -> list[str]:
+    """Return HubSpot CRM object type ids (core + custom schemas when permitted).
+
+    ``/crm/v3/schemas`` is the custom-object schema API and needs its own
+    scope. A private app granted only contacts/companies/deals gets 403 there
+    while every standard object reads fine; that 403 used to fail every list,
+    plan and transfer (D270). It now lists the standard objects and appends
+    :data:`CUSTOM_OBJECTS_UNAVAILABLE` to ``notes``. A 401 (bad token) still
+    raises: that is not "no custom objects".
+    """
     access_token, url_base = _access(cfg)
     names = list(_CORE_OBJECTS)
     try:
@@ -79,6 +104,10 @@ def list_object_types(cfg: dict[str, Any]) -> list[str]:
             if oid and str(oid) not in names:
                 names.append(str(oid))
     except Exception as exc:
+        if _is_scope_refusal(exc):
+            if notes is not None:
+                notes.append(CUSTOM_OBJECTS_UNAVAILABLE)
+            return names
         # Core objects remain available; auth failures must not look like "no custom schemas".
         if is_auth_error(exc):
             raise

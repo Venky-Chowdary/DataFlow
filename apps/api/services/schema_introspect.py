@@ -4265,18 +4265,20 @@ def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
 
     cfg = _saas_cfg(**kwargs)
     table = (kwargs.get("table") or kwargs.get("database") or "").strip()
+    notes: list[str] = []
     try:
-        tables = list_object_types(cfg)
+        tables = list_object_types(cfg, notes=notes)
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    note = {"warning": " ".join(notes)} if notes else {}
 
     if not table:
-        return {"ok": True, "columns": [], "tables": tables, "schema": ""}
+        return {"ok": True, "columns": [], "tables": tables, "schema": "", **note}
 
     try:
         props = describe_properties(cfg, table)
     except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": tables}
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": tables, **note}
 
     columns = [
         {
@@ -4312,7 +4314,7 @@ def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
                 "label": p.get("label") or "",
             }
         )
-    return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+    return {"ok": True, "columns": columns, "tables": tables, "schema": table, **note}
 
 
 def _introspect_shopify(**kwargs: Any) -> dict[str, Any]:

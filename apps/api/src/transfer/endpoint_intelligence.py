@@ -1694,6 +1694,9 @@ def _saas_introspect(
     out["connected"] = True
     out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
     out["message"] = f"{fmt.title()} connected — {len(objects)} object(s)"
+    if info.get("warning"):
+        # e.g. HubSpot custom objects unavailable without their scope (D270).
+        out["message"] += f". {info['warning']}"
     if not obj:
         return out
 
