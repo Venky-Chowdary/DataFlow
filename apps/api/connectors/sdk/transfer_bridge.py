@@ -237,7 +237,10 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
             "api_key",
             config.get("access_token") or config.get("token") or "",
         )
-        config.setdefault("base_id", config.get("base") or config.get("base_id") or "")
+        # The connector form's database field is the base (``appXXXX``).
+        config.setdefault(
+            "base_id", config.get("base") or config.get("base_id") or config.get("database") or ""
+        )
         config.setdefault("table_id", config.get("table") or config.get("table_id") or "")
     elif driver == "clickup":
         config.setdefault(
@@ -292,12 +295,32 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
             "password",
             config.get("api_key") or config.get("token") or config.get("password") or "",
         )
+    if not config.get("api_key"):
+        # The MCP form has no api_key field: a key declared with auth_mode=api_key
+        # (or any key for a bearer/api-key-only connector) arrives in the password
+        # field. One rule with the vector and SaaS tiles (D274/D277).
+        from services.connector_auth import resolve_api_key
+
+        descriptor = getattr(get_sdk_connector(driver), "descriptor", None)
+        modes = set(getattr(descriptor, "auth_modes", ()) or ())
+        key = resolve_api_key(
+            config, password_is_key=bool(modes) and modes <= {"api_key", "bearer"}
+        )
+        if key:
+            config["api_key"] = key
     if not config.get("base_url"):
         # Templated manifests ({instance}/{domain}/{dc}/{store_hash}) take their
         # host piece from the named field above — feeding ``host`` into base_url
         # would bypass the template and drop the scheme.
         if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk", "freshservice", "woocommerce", "bigcommerce", "posthog", "confluence", "zendesk", "monday", "linear"}:
-            config["base_url"] = config.get("url") or config.get("host") or ""
+            from connectors.saas_common import absolute_http_url
+
+            # A bare host from the connector form is an https origin (D277).
+            config["base_url"] = config.get("url") or absolute_http_url(
+                str(config.get("host") or ""),
+                port=config.get("port"),
+                ssl=config.get("ssl") if "ssl" in config else None,
+            )
         else:
             config["base_url"] = config.get("url") or ""
     return config

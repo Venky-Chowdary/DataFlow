@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.brand import bigquery_dataset_of
+from services.connector_auth import resolve_api_key
 import logging
 from typing import Any
 
@@ -270,7 +271,7 @@ def _specialty_object_list(
             names = list_collections(
                 host=str(cfg.get("host") or ""),
                 port=int(cfg.get("port") or 6333),
-                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                api_key=resolve_api_key(cfg),
                 ssl=bool(cfg.get("ssl")),
             )
             return (
@@ -285,7 +286,7 @@ def _specialty_object_list(
             names = list_classes(
                 host=str(cfg.get("host") or ""),
                 port=int(cfg.get("port") or 8080),
-                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                api_key=resolve_api_key(cfg),
                 ssl=bool(cfg.get("ssl")),
                 connection_string=str(cfg.get("connection_string") or ""),
             )

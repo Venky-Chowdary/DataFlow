@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
+from services.connector_auth import resolve_api_key
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
 _PINECONE_FAMILY = frozenset({
@@ -99,7 +100,7 @@ def _pinecone_session(cfg: dict[str, Any]) -> tuple[Any, str, dict[str, str]]:
     from connectors.pinecone_writer import _headers, _index_url, _requests_session
 
     session = _requests_session()
-    key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+    key = resolve_api_key(cfg)
     index_url = _index_url(
         str(cfg.get("host") or ""),
         str(cfg.get("connection_string") or ""),
