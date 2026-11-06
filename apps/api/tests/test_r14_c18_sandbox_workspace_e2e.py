@@ -273,3 +273,27 @@ def test_sweep_is_claimed_once_per_period(ent):
     assert sweep_expired_sandboxes(now=later + timedelta(minutes=1)) == []
     next_period = sweep_expired_sandboxes(now=later + timedelta(minutes=16))
     assert [s["workspace_id"] for s in next_period] == [second_box.workspace_id]
+
+
+@pytest.mark.parametrize("route", ["team", "sandbox"])
+def test_teardown_from_another_workspace_header_removes_the_targets_connectors(ent, route):
+    """B1 (second review): the admin's bound workspace filter hid B's connectors."""
+    from services import connector_store
+
+    home = ent.workspace("Admin's current workspace")
+    box = provision(ent)
+    conn_id, sched_id = _seed_connector_and_schedule(box)
+    path = (
+        f"/api/v1/team/workspaces/{box.workspace_id}"
+        if route == "team"
+        else f"/api/v1/team/sandbox-workspaces/{box.workspace_id}"
+    )
+    # The web sends X-Workspace-Id on every call: here, a different workspace.
+    gone = ent.admin.delete(path, headers={"X-Workspace-Id": home})
+    assert gone.status_code == 200, gone.text
+    assert gone.json()["connectors_removed"] == 1
+    assert gone.json()["schedules_removed"] == 1
+    assert connector_store.get_connector(conn_id) is None
+    for name in ent.db.list_collection_names():
+        assert ent.db[name].count_documents({"id": conn_id}) == 0, name
+    assert not [c for c in connector_store.list_connectors() if c.workspace_id == box.workspace_id]

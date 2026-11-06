@@ -137,11 +137,27 @@ def _policy_channels_keys(workspace_id: str) -> tuple[int, int, int]:
 
 
 def teardown_workspace(workspace_id: str, *, actor: str = "system") -> dict[str, Any]:
-    """Run the cascade; returns what was removed. Raises :class:`WorkspaceBusy`."""
-    from services import team_store
+    """Run the cascade; returns what was removed. Raises :class:`WorkspaceBusy`.
+
+    Runs in system scope (``bound_workspace_filter(None)``) and names the
+    TARGET workspace on every store call. The route runs inside the admin's
+    request, whose bound filter is the workspace in the ``X-Workspace-Id``
+    header (the web sends it on every call): left bound, the connector store
+    saw only the admin's current workspace, so deleting workspace B from A
+    removed none of B's connectors or credentials (B1, second review), and the
+    CDC release could not find B's source connector to drop its slot.
+    """
+    from services.workspace_filter import bound_workspace_filter
 
     if not workspace_id:
         raise ValueError("The global workspace cannot be deleted")
+    with bound_workspace_filter(None):
+        return _teardown_unbound(workspace_id, actor=actor)
+
+
+def _teardown_unbound(workspace_id: str, *, actor: str) -> dict[str, Any]:
+    from services import team_store
+
     active = _active_jobs(workspace_id)
     if active:
         raise WorkspaceBusy(active)
