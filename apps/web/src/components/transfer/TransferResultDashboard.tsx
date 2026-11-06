@@ -16,7 +16,7 @@ import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8Ke
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
-import { formatStreamNames, presentStoredEventLog, presentStoredExplanation, readJobStreamNames, readJobStreams } from "../../lib/jobEvidence";
+import { formatStreamNames, presentStoredEventLog, presentStoredExplanation, readJobStreamNames, readJobStreams, readRejectedRows, type JobEvidenceCarrier } from "../../lib/jobEvidence";
 import { StreamHealthTable } from "../jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../jobs/RunCarryNotes";
@@ -120,11 +120,15 @@ export function TransferResultDashboard({
   const multiStream = streamNames.length >= 2;
   const rec = result.records_transferred ?? 0;
   const errDetails = (result.error_details || {}) as Record<string, unknown>;
-  const rejected = Number(
-    ds?.rejected_rows
-    ?? result.reconciliation?.rejected_rows
-    ?? errDetails.quarantine_row_count
-    ?? 0,
+  // The same reader as the job page: a summary stamped 0 must not hide the
+  // rows Gate-8 or the conservation ledger held out (QA browser 4).
+  const rejected = Math.max(
+    readRejectedRows({
+      destination_summary: ds as JobEvidenceCarrier["destination_summary"],
+      reconciliation: result.reconciliation,
+      row_accounting: result.row_accounting,
+    }),
+    Number(errDetails.quarantine_row_count ?? 0) || 0,
   );
   const issueFindings = Number(errDetails.quarantine_issue_count ?? 0);
   const coercedNull = ds?.coerced_null_rows ?? result.reconciliation?.coerced_null_rows ?? 0;
