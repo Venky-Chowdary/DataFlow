@@ -144,3 +144,26 @@ def test_a_one_message_kafka_sample_with_an_int_key_is_not_a_card():
 
 def test_five_card_hits_meet_the_minimum():
     assert "pci_pan" in _risk("value", _PANS[:5], "BIGINT")["value"]
+
+
+# --- review 3: masked / encrypted / tokenized PAN names (their only guard) ----
+
+_CARD_NAMES = ["masked_pan", "encrypted_pan", "pan_encrypted", "customer_pan", "stored_pan",
+               "tokenized_pan", "pan_number_enc", "pan_values", "pan", "card_pan", "pan_value",
+               "pan_masked", "pan_number", "customer_card_pan", "pan_hash"]
+_NOT_CARD_NAMES = ["pan_id", "pan_ids", "pan_african", "pan_region", "pan_india", "pan_tilt",
+                   "pan_x", "pan_tilt_speed", "japan", "span", "company", "panel", "expand",
+                   "panama"]
+
+
+@pytest.mark.parametrize("col", _CARD_NAMES)
+def test_a_pan_token_with_any_prefix_or_suffix_is_a_card_column(col):
+    # A masked / encrypted value is not Luhn-valid: only the name can flag it.
+    risk = detect_pii_fields([col], [{col: "enc:9f2c…"}]).get("field_risk", {})
+    assert "pci_pan" in risk.get(col, []), col
+
+
+@pytest.mark.parametrize("col", _NOT_CARD_NAMES)
+def test_known_non_card_pan_words_are_not_card_columns(col):
+    risk = detect_pii_fields([col], [{col: "x"}]).get("field_risk", {})
+    assert "pci_pan" not in risk.get(col, []), col

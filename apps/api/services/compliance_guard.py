@@ -40,6 +40,15 @@ _MRZ_LINE1_RE = re.compile(r"^P[A-Z<][A-Z][A-Z<]{2}[A-Z<]{39}$")
 _MRZ_LINE2_RE = re.compile(r"^[A-Z0-9<]{9}\d[A-Z][A-Z<]{2}\d{7}[MFX<]\d{7}[A-Z0-9<]{14}[0-9<]\d$")
 SSN_RE = SSN_VALUE_RE
 # Calendar shapes (ISO / slash) are not PII by themselves. DOB is name-gated
+#: Words after ``pan_`` that are not card data: identifiers, regions and the
+#: camera / chart sense of "pan". Everything else around a ``pan`` token is a
+#: card column (QA D7 review 3).
+_PAN_NON_CARD_WORDS = (
+    "id", "ids", "african", "africa", "american", "america", "asian", "asia",
+    "european", "europe", "india", "indian", "arab", "arabic", "region", "regional",
+    "tilt", "zoom", "x", "y", "offset", "left", "right", "level", "speed",
+)
+
 # in ``_NAME_PATTERN_GROUPS`` — Fivetran / Airbyte / Collibra classifiers treat
 # date-of-birth as a semantic class, not "any 01/02/2024". Value-only matching
 # invented a HIPAA hold on ``event_date`` / ``created_at``.
@@ -103,12 +112,15 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"credit_?card",
         r"debit_?card",
         r"payment_?card",
-        # A PAN in card context only: ``pan`` alone, card_pan, pan_value /
-        # pan_number / pan_no / pan_hash / pan_token — not pan_id or pan_african
-        # (``_`` is a word character, so ``\bpan\b`` missed card_pan).
-        r"^pan$",
+        # ``pan`` as a whole ``_``-separated token, any prefix or suffix:
+        # masked_pan, encrypted_pan, pan_encrypted, tokenized_pan, pan_values…
+        # Masked / encrypted / tokenized PANs are not Luhn-valid, so this name
+        # rule is their only guard. Only known non-card words are excluded
+        # (_PAN_NON_CARD_WORDS: pan_id, pan_african, pan-India, a camera's
+        # pan_tilt, a chart's pan_x …). ``_`` is a word character, so
+        # ``\bpan\b`` would miss card_pan.
+        r"(?:^|_)pan(?:_(?!(?:" + "|".join(_PAN_NON_CARD_WORDS) + r")(?:_|$))|$)",
         r"card_?pan",
-        r"(?:^|_)pan_(?:value|number|num|no|hash|token|last4|masked)\b",
         r"(?:^|_)cc_?(?:number|no|num)\b",
         r"\bcvv\b",
         r"card_?holder",
