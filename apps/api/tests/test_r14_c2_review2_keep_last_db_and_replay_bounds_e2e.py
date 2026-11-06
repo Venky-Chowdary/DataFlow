@@ -12,8 +12,9 @@
 4. Repeated NULL keys on a MERGE engine (SQL Server) are not a refused upsert.
 5. Lenient text into an operator NUMERIC(10,2): the rows that parse load and
    'abc' is quarantined; Gate-8 hashes on the kept table's carrier ('1' is
-   '1.00') and never keys the read-back on a held-out cell. A value the
-   column would round ('1.239') is still held out, never stored rounded.
+   '1.00') and never keys the read-back on a held-out cell. A value past the
+   sample that the column would round ('1.2391') is held out, never stored
+   rounded, and its reason says so; an ambiguous '1.239' is named as such.
 6. Lenient holds cells out only while at least half the sampled cells cast.
 7. job_quarantine counts rows through the shared finding-row key.
 """
@@ -280,17 +281,22 @@ def test_text_into_scaled_numeric_loads_and_quarantines_abc(client, layout):
 
 
 def test_a_value_the_column_would_round_is_never_stored_rounded(client):
+    """Past the preflight sample, so only the writer can catch it — and it must."""
     table = f"r14sr_{uuid.uuid4().hex[:6]}"
     h.execute("postgresql", f'CREATE TABLE public."{table}" (k text, v numeric(10,2))')  # nosec B608
-    lines = ["k,v", "bad,abc", "round,1.239", *[f"r{i},1" for i in range(300)]]
+    body = [f"r{i},1" for i in range(2000)]
+    lines = ["k,v", *body[:1500], "round,1.2391", "amb,1.239", *body[1500:]]
     try:
         resp = _scaled_run(client, table, lines)
-        stored = h.query("postgresql", f'SELECT v FROM public."{table}" WHERE k = \'round\'')  # nosec B608
-        assert stored in ([], None) or all(str(r[0]) != "1.24" for r in stored), (resp.status_code, stored)
-        if resp.status_code == 200:
-            job_id = str(resp.json().get("job_id"))
-            q = client.get(f"/api/v1/connectors/jobs/{job_id}/quarantine").json()
-            assert "1.239" in {str(d.get("value")) for d in q["quarantine"]}, q["quarantine"]
+        assert resp.status_code == 200, resp.text[:1000]
+        rows = dict(h.query("postgresql", f'SELECT k, v::text FROM public."{table}"'))  # nosec B608
+        assert len(rows) == 2000 and "round" not in rows and "amb" not in rows, len(rows)
+        job_id = str(resp.json().get("job_id"))
+        q = client.get(f"/api/v1/connectors/jobs/{job_id}/quarantine").json()
+        reasons = {str(d.get("value")): str(d.get("reason")) for d in q["quarantine"]}
+        assert set(reasons) == {"1.2391", "1.239"}, reasons
+        assert "would round to the column's scale" in reasons["1.2391"], reasons
+        assert "ambiguous" in reasons["1.239"], reasons
     finally:
         h.drop_table("postgresql", table)
 

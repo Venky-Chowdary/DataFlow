@@ -404,6 +404,26 @@ def strict_decimal_comma_reason(value: Any) -> str:
     )
 
 
+_LONE_GROUP_RE = re.compile(r"^[+-]?\d{1,3}([.,])\d{3}$")
+
+
+def ambiguous_grouping_reason(value: Any) -> str:
+    """Why ``1.239`` / ``1,239`` is refused: one 3-digit group reads two ways."""
+    text = str(value or "").strip()
+    match = _LONE_GROUP_RE.match(text)
+    if not match:
+        return ""
+    sep = match.group(1)
+    as_fraction = text.replace(",", ".")
+    as_thousands = text.replace(sep, "")
+    return (
+        f"'{text}' is ambiguous: one 3-digit group after '{sep}' reads as "
+        f"{as_fraction} or {as_thousands}. DataFlow never guesses a number "
+        "locale — set number locale in Destination → Advanced, or fix the "
+        "source value."
+    )
+
+
 def _implied_number_locale_from_currency(raw: str) -> str:
     """Currency marks that carry a grouping convention, or '' if mixed/absent.
 
@@ -2745,7 +2765,11 @@ def apply_transform(
         # a bare integer transform stays strict below.
         parsed = _parse_decimal(text, allow_markers=True)
         if parsed is None:
-            return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
+            return None, (
+                strict_decimal_comma_reason(text)
+                or ambiguous_grouping_reason(text)
+                or f"Invalid decimal: {text!r}"
+            )
         # Return Decimal so bind does not re-apply locale to the canonical
         # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
         # Extreme scientific stays a short string (never expand 1e1000000).

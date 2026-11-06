@@ -1422,6 +1422,7 @@ def _kept_table_carriers(
     target_cols: list[str],
     dest_type: str,
     sync_mode: str,
+    widened: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """Live column types of a table the run writes into and keeps.
 
@@ -1430,7 +1431,9 @@ def _kept_table_carriers(
     hash on that carrier too. A plan type inferred from the file ('VARCHAR' for
     a column with one 'abc') hashed '1' against the stored NUMERIC(10,2) '1.00'
     and failed a correct load after the overwrite (QA C2-neighbour review).
-    A recreating engine's table is replaced, so its live types are not used.
+    A recreating engine's table is replaced, so its live types are not used,
+    and a column with an approved ``dest_widen`` stamp (``widened``) is ALTERed
+    to its stamped type before rows bind, so that type is the carrier.
     """
     if not live_dest_types:
         return {}
@@ -1440,7 +1443,12 @@ def _kept_table_carriers(
     if is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(dest_type):
         return {}
     lowered = {str(k).lower(): str(v) for k, v in live_dest_types.items() if v}
-    return {c: lowered[c.lower()] for c in target_cols if c.lower() in lowered}
+    skip = {str(c).lower() for c in widened}
+    return {
+        c: lowered[c.lower()]
+        for c in target_cols
+        if c.lower() in lowered and c.lower() not in skip
+    }
 
 
 def stream_file_to_database(
@@ -1620,10 +1628,13 @@ def stream_file_to_database(
     # TEXT): the destination stores the stamped type, so the source digest has
     # to hash on it, not on the sample-inferred DECIMAL(17,2).
     _stamped_targets: set[str] = set()
+    _widened_targets: set[str] = set()
     for _m in mappings or []:
         if not isinstance(_m, dict):
             continue
         _t = str(_m.get("target") or _m.get("source") or "")
+        if _t and _m.get("dest_widen"):
+            _widened_targets.add(_t)
         if _t and _m.get("target_type"):
             _stamped_targets.add(_t)
             continue
@@ -1650,7 +1661,9 @@ def stream_file_to_database(
         ):
             fingerprint_dest_types[_tc] = str(_st)
     fingerprint_dest_types.update(
-        _kept_table_carriers(live_dest_types, target_cols, dest_type, sync_mode)
+        _kept_table_carriers(
+            live_dest_types, target_cols, dest_type, sync_mode, _widened_targets
+        )
     )
 
     try:

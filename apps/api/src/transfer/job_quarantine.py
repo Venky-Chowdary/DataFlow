@@ -9,7 +9,6 @@ plan for what already landed.
 
 from __future__ import annotations
 
-
 import logging
 from typing import Any
 

@@ -41,8 +41,10 @@ def _rows_a_keyed_write_compares(cols: list[Any]) -> Any:
     compare a key that holds a NULL, so many NULL keys are legal there. MERGE
     engines (Snowflake, SQL Server, Oracle, BigQuery, Databricks) build no
     index and key the write by equality; a NULL target key matches no source
-    row (a NULL source key is refused before the write, D46). So for every
-    engine a NULL-key row is not a duplicate of anything the write can hit.
+    row, because the writer itself refuses every NULL/empty source key before
+    the MERGE runs (``writer_common.partition_dense_upsert_rows`` quarantines
+    it, ``assert_dense_upsert_keys_present`` aborts a strict chunk). So for
+    every engine a NULL-key row is not a duplicate of anything the write can hit.
     """
     import sqlalchemy as sa
 

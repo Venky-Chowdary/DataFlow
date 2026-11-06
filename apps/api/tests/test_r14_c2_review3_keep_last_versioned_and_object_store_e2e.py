@@ -9,6 +9,8 @@
    NUMERIC(6,2) 12345.67): strict refuses with the prior rows intact, lenient
    quarantines the cells; the COPY overwrite swap never CASTs a value down to
    the column's width.
+8. An approved widen is the Gate-8 carrier; a scale-only overflow is
+   quarantined as rounding.
 """
 
 from __future__ import annotations
@@ -435,3 +437,25 @@ def test_the_overwrite_swap_never_casts_a_kept_column_down_to_its_width():
         h.drop_table("postgresql", live)
         h.drop_table("postgresql", stage)
 
+
+# ── 8. review nits ─────────────────────────────────────────────────────────
+def test_an_approved_widen_is_the_carrier_not_the_kept_column():
+    from src.transfer.file_stream import _kept_table_carriers
+
+    live = {"k": "TEXT", "c": "VARCHAR(3)", "n": "NUMERIC(10,2)"}
+    kept = _kept_table_carriers(live, ["k", "c", "n"], "postgresql", "full_refresh_overwrite")
+    assert kept == live
+    widened = _kept_table_carriers(live, ["k", "c", "n"], "postgresql", "full_refresh_overwrite", {"C"})
+    assert widened == {"k": "TEXT", "n": "NUMERIC(10,2)"}
+
+
+def test_a_scale_only_overflow_is_quarantined_as_rounding():
+    from connectors.writer_quarantine_unfit import quarantine_unfit_decimals
+
+    details: list[dict] = []
+    out = quarantine_unfit_decimals([("1.2391",), ("123456789.5",)], ["v"], ["NUMERIC(10,2)"], details, "quarantine",
+                                     dest_db="postgresql")
+    assert out == []
+    reasons = [d["reason"] for d in details]
+    assert "would round to the column's scale, 2 decimal place(s)" in reasons[0], reasons
+    assert "would truncate/overflow" in reasons[1], reasons

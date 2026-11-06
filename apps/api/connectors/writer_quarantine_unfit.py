@@ -453,7 +453,13 @@ def quarantine_unfit_decimals(
             from services.decimal_observe import (
                 decimal_scale_overflow_fix,
                 decimal_widen_carrier,
+                write_int_digits_and_scale,
             )
+
+            int_digits, cell_scale = write_int_digits_and_scale(cells[col_idx])
+            # The integer part fits and only the fraction is too long: the
+            # engine would ROUND it (PostgreSQL 1.2391 -> 1.24), not overflow.
+            rounds = cell_scale > scale and int_digits <= max(precision - scale, 0)
 
             suggested_type = decimal_widen_carrier(
                 cells[col_idx], dest_db=dest_db, current_type=declared_type
@@ -475,7 +481,12 @@ def quarantine_unfit_decimals(
                     "decimal does not fit "
                     f"{decimal_reason_label(dialect_label, dest_db, declared_type)}"
                     f"({precision},{scale}) "
-                    "— quarantined (would truncate/overflow on write)"
+                    + (
+                        f"— quarantined (would round to the column's scale, {scale} "
+                        "decimal place(s), on write)"
+                        if rounds
+                        else "— quarantined (would truncate/overflow on write)"
+                    )
                     ),
                     "policy": "write_quarantine",
                     "suggested_fix": suggested_fix,
