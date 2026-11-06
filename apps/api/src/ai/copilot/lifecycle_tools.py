@@ -870,16 +870,19 @@ def _resolved_connector_id(conn: dict[str, Any]) -> str:
     return ""
 
 
-def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
-    ctype = str(conn.get("type") or conn.get("format") or "")
-    # Role is the driver's declared topology, not a stale stored string —
-    # connectors saved before role normalization (pgvector with role=both)
-    # would keep reporting the wrong side forever (QA C09).
-    from services.connector_store import normalize_connector_role
+def connector_dial_endpoint(conn: dict[str, Any]) -> tuple[str, int, str]:
+    """``(host, port, source)`` a saved connector really dials.
 
+    One owner for every surface that shows a connector's endpoint (the
+    create/test brief and list_connectors). A URL-form host is dialed on its
+    own authority and a connection string overrides the host field; showing
+    the stored driver default (443 / 8086) or ``None`` for those misreported
+    the endpoint (D239). ``source`` is ``"connection_string"`` when the
+    endpoint came from it, else ``""``.
+    """
     host = str(conn.get("host") or "")
     port = int(conn.get("port") or 0)
-    effective_host, effective_port = host, port
+    effective_host, effective_port, source = host, port, ""
     if "://" in host:
         # A URL-form host is dialed on its own authority (D239).
         try:
@@ -905,8 +908,21 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
                     endpoint[0],
                     endpoint[1] or effective_port,
                 )
+                source = "connection_string"
         except Exception:
             pass
+    return effective_host, effective_port, source
+
+
+def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
+    ctype = str(conn.get("type") or conn.get("format") or "")
+    # Role is the driver's declared topology, not a stale stored string —
+    # connectors saved before role normalization (pgvector with role=both)
+    # would keep reporting the wrong side forever (QA C09).
+    from services.connector_store import normalize_connector_role
+
+    host = str(conn.get("host") or "")
+    effective_host, effective_port, source = connector_dial_endpoint(conn)
     brief = {
         "connector_id": _resolved_connector_id(conn),
         "name": str(conn.get("name") or ""),
@@ -917,7 +933,7 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
         "effective_host": effective_host,
         "effective_port": effective_port,
     }
-    if (effective_host, effective_port) != (host, port):
+    if source == "connection_string" and effective_host != host:
         brief["host_note"] = (
             f"Probe targets {effective_host}:{effective_port} from the "
             "connection string — the stored host field is not what is dialed."

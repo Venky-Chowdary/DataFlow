@@ -2053,6 +2053,8 @@ class DataPilotTools:
     ) -> ToolResult:
         summary = []
         errors: list[str] = []
+        from .lifecycle_tools import connector_dial_endpoint
+
         try:
             from services.connector_access import caller_workspace_id
             from services.connector_store import list_connectors as store_list
@@ -2069,6 +2071,9 @@ class DataPilotTools:
                     "name": d.get("name"),
                     "type": d.get("type") or d.get("format"),
                     "host": d.get("host"),
+                    # The port this connector dials: a URL-form host's own
+                    # port, never ``None`` (D239).
+                    "port": connector_dial_endpoint(d)[1],
                     "database": d.get("database"),
                     "status": d.get("status", "saved"),
                     "last_test_ok": d.get("last_test_ok"),
@@ -2089,6 +2094,7 @@ class DataPilotTools:
                         "name": c.get("name"),
                         "type": c.get("type"),
                         "host": c.get("host"),
+                        "port": connector_dial_endpoint(c)[1],
                         "database": c.get("database"),
                         "status": c.get("status", "unknown"),
                         "last_test_ok": c.get("last_test_ok"),
