@@ -200,6 +200,34 @@ def latest_wins_dedupe(
     return explicit
 
 
+def table_reads_latest_wins(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> bool:
+    """True when this read of a table/log defines "the last copy of a key".
+
+    The same answer :func:`latest_wins_dedupe` gives an unset policy: a
+    collapsing sync whose read is cursor-ordered (a versioned table, E2-023)
+    or offset-ordered (a changelog topic, D89). There an operator's explicit
+    ``keep_last`` is the automatic choice spelled out — schedules always
+    stamp ``block`` or ``keep_last``, so refusing it left a versioned-table
+    schedule no setting that runs (QA C2 review 3).
+    """
+    return (
+        latest_wins_dedupe(
+            None,
+            sync_mode,
+            stream_contracts=stream_contracts,
+            source_type=source_type,
+            stream_name=stream_name,
+        )
+        == "keep_last"
+    )
+
+
 def latest_wins_note(source_type: str = "") -> str:
     """The assumption behind a read-order collapse, for the finding text."""
     from src.transfer.engine_family import engine_family

@@ -1253,15 +1253,64 @@ DUPLICATE_KEY_ROUTES_TABLE = (
     "A table has no read order that picks one copy: remove the repeated keys "
     "at the source, or choose duplicate_policy=append to load every copy."
 )
-KEEP_LAST_TABLE_REFUSAL = (
-    "in_file_dedupe=keep_last keeps a file's last copy of a key in read order; "
-    "a database table has no read order, so it is not applied to this source. "
-    + DUPLICATE_KEY_ROUTES_TABLE
+#: A keyed sync (upsert / incremental_deduped) over a table: the latest version
+#: of a key is defined by the stream's cursor; append is not this sync's route.
+DUPLICATE_KEY_ROUTES_TABLE_KEYED = (
+    "A table has no read order that picks one copy: declare the stream's "
+    "cursor_field (the latest version of each key wins), or remove the repeated "
+    "keys at the source."
 )
-LENIENT_DUPLICATE_KEY_NOTE = (
-    "Lenient quarantines bad cells, not repeated primary keys: the second copy "
-    "of a declared key would be written twice. " + DUPLICATE_KEY_ROUTES
-)
+
+
+def table_duplicate_routes(sync_mode: str | None) -> str:
+    """The duplicate routes that work on a table source for this sync mode."""
+    from services.primary_key import sync_collapses_in_file_duplicates
+
+    if sync_collapses_in_file_duplicates(sync_mode):
+        return DUPLICATE_KEY_ROUTES_TABLE_KEYED
+    return DUPLICATE_KEY_ROUTES_TABLE
+
+
+def keep_last_table_refusal(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> str:
+    """Why keep_last cannot run on this table read, or "" when it is honoured.
+
+    One rule for Validate and schedule save: keep_last is honoured on a table
+    exactly where the read itself defines the last copy
+    (``primary_key.table_reads_latest_wins``: a cursor-ordered keyed sync, an
+    ordered log). Elsewhere a table has no read order and no route writes it
+    collapsed — refused, never silently ignored (QA C2 review: 21 rows).
+    """
+    from services.primary_key import table_reads_latest_wins
+
+    if table_reads_latest_wins(
+        sync_mode, stream_contracts=stream_contracts,
+        source_type=source_type, stream_name=stream_name,
+    ):
+        return ""
+    return (
+        "in_file_dedupe=keep_last keeps a file's last copy of a key in read order; "
+        "this table read has no order that defines it, so it is not applied. "
+        + table_duplicate_routes(sync_mode)
+    )
+
+
+#: Back-compat spelling of the overwrite/append refusal.
+KEEP_LAST_TABLE_REFUSAL = keep_last_table_refusal("full_refresh_overwrite")
+def lenient_duplicate_key_note(routes: str) -> str:
+    """Lenient's note on a repeated declared key, with the routes for this source."""
+    return (
+        "Lenient quarantines bad cells, not repeated primary keys: the second copy "
+        "of a declared key would be written twice. " + routes
+    )
+
+
+LENIENT_DUPLICATE_KEY_NOTE = lenient_duplicate_key_note(DUPLICATE_KEY_ROUTES)
 
 
 def _check_duplicate_keys(
@@ -2327,11 +2376,18 @@ def run_integrity_audit(
     # keep_last keeps a file's last copy of a key in read order. A table has
     # no read order and no route writes it collapsed, so asking for it there
     # is refused, not silently ignored (QA C2 review: 21 rows "verified").
-    keep_last_on_table = bool(database_extract) and (
+    keep_last_refusal = ""
+    if bool(database_extract) and (
         str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
-    )
+    ):
+        keep_last_refusal = keep_last_table_refusal(
+            sync_mode, stream_contracts=stream_contracts,
+            source_type=source_db_type, stream_name=stream_name,
+        )
+    keep_last_on_table = bool(keep_last_refusal)
     if keep_last_on_table:
         in_file_dedupe = "block"
+    table_routes = table_duplicate_routes(sync_mode) if database_extract else ""
     if not str(in_file_dedupe or "").strip():
         in_file_dedupe = latest_wins_dedupe(
             in_file_dedupe,
@@ -2349,7 +2405,7 @@ def run_integrity_audit(
             "check": "in_file_dedupe_unsupported",
             "passed": False,
             "blocks_transfer": True,
-            "issues": [KEEP_LAST_TABLE_REFUSAL],
+            "issues": [keep_last_refusal],
         })
 
     # Validation without a schema or a representative sample proves nothing.
@@ -2458,7 +2514,7 @@ def run_integrity_audit(
             and not checks[-1].get("probe_unavailable")
         ):
             # The routes that work on a table travel with the finding.
-            checks[-1]["issues"] = [*checks[-1].get("issues", []), DUPLICATE_KEY_ROUTES_TABLE]
+            checks[-1]["issues"] = [*checks[-1].get("issues", []), table_routes]
         if source_null_key_rows:
             checks.append(
                 _check_null_keys(
@@ -2563,7 +2619,11 @@ def run_integrity_audit(
                 # the second copy out, so "will quarantine" would land it
                 # twice (QA C2). The duplicate policy decides, not leniency.
                 # Only a key actually found repeated stays blocked here.
-                check["note"] = LENIENT_DUPLICATE_KEY_NOTE
+                check["note"] = (
+                    lenient_duplicate_key_note(table_routes)
+                    if table_routes
+                    else LENIENT_DUPLICATE_KEY_NOTE
+                )
                 continue
             if check.get("blocks_transfer"):
                 check["blocks_transfer"] = False
