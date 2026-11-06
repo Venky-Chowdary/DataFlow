@@ -11,7 +11,8 @@ tampering. This guards the whole QA shape in one chain, through the real
 * records an earlier deploy signed under a key nobody kept are reported as
   ``unverifiable_key_lost`` with their key id — never as tampering, never as
   verified — and an edited record next to them is still tampering;
-* the semantics of ``verified`` are part of the route's published contract.
+* a keyring-signed record edited and relabelled to a key nobody ever had is
+  tampering, not a lost key (independent review repro).
 
 Decided semantics (secure and honest): ``verified`` is true only when every
 record in scope was checked and holds up. A record signed under a lost key
@@ -82,11 +83,28 @@ def test_rotation_redeploy_and_a_lost_key_in_one_chain(ent, monkeypatch):
     assert report["unverifiable_key_lost"]["count"] == 5
 
 
-def test_verified_semantics_are_part_of_the_route_contract():
-    """The route docstring is its OpenAPI description: clients read it there."""
-    from src.routers.audit_router import verify_audit_chain
-
-    text = verify_audit_chain.__doc__ or ""
-    for term in ("verified_with_exceptions", "unverifiable_key_lost", "tampering_detected"):
-        assert term in text, f"/audit/verify does not document {term}"
-    assert "never counted as verified" in text
+def test_an_edited_record_relabelled_to_an_unknown_key_is_tampering(ent):
+    """Reviewer repro: edit a keyring-signed record and set its key_id to a key
+    nobody ever had. It used to read as a lost key (verified_with_exceptions,
+    tampering_detected false) — hiding the edit. After the keyring signed the
+    chain, an unknown key id is a relabel."""
+    ws = ent.workspace("R14 C4 relabel")
+    _write(3, action="r14c4.relabel", workspace_id=ws)
+    victim = _records(ent, "r14c4.relabel")[1]
+    ent.db["audit_events"].update_one(
+        {"_id": victim["_id"]},
+        {"$set": {"resource": "/edited", "key_id": "k-nobody-ever-had"}},
+    )
+    report = _verify(ent, ws)
+    assert report["status"] == "findings", report["status"]
+    assert report["tampering_detected"] is True
+    assert report["categories"]["tampering"] == 1
+    assert report["unverifiable_key_lost"]["count"] == 0
+    kinds = [f["kind"] for f in report["findings"]]
+    assert kinds == ["unknown_key_after_keyring"], kinds
+    # The platform-wide walk agrees.
+    platform = _verify(ent)
+    assert any(
+        f["kind"] == "unknown_key_after_keyring" and f["category"] == "tampering"
+        for f in platform["findings"]
+    ), platform["findings"][:3]

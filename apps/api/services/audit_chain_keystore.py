@@ -87,6 +87,7 @@ def reset_cache() -> None:
     """Forget the cached keyring (tests; a process re-reads on next use)."""
     with _lock:
         _cache.update({"ns": None, "doc": None, "keys": {}, "read_at": 0.0, "imported": set()})
+        _noted.clear()
 
 
 def _key_id(key: bytes) -> str:
@@ -276,6 +277,46 @@ def rotate(*, actor: str, local_key: bytes | None = None) -> dict[str, Any]:
             logger.warning("audit chain key rotated: %s -> %s by %s", previous, entry["key_id"], actor)
             return status()
     raise KeystoreUnavailable("audit chain key rotation lost three races; try again")
+
+
+HISTORY_COLLECTION = "audit_chain_key_history"
+_noted: set[str] = set()
+
+
+def note_key_id(key_id: str, *, origin: str) -> None:
+    """Remember that this deployment signed with ``key_id`` (an id, never material).
+
+    A configured (env) key is not in the keyring; if an operator later drops it
+    without moving it to the retired keys, its records must still read as a
+    lost key, not as a relabel (C4). Once per process per key; never raises.
+    """
+    if not key_id or key_id in _noted:
+        return
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection(HISTORY_COLLECTION)
+        if coll is None:
+            return
+        coll.update_one(
+            {"_id": key_id},
+            {"$setOnInsert": {"origin": origin, "first_seen": _now()}},
+            upsert=True,
+        )
+        _noted.add(key_id)
+    except Exception as exc:  # noqa: BLE001 - signing must never fail on bookkeeping
+        logger.debug("audit key history not recorded: %s", exc)
+
+
+def noted_key_ids() -> set[str]:
+    """Every key id this deployment recorded signing with outside the keyring."""
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection(HISTORY_COLLECTION)
+        return {str(d["_id"]) for d in coll.find({}, {"_id": 1})} if coll is not None else set()
+    except Exception:  # noqa: BLE001
+        return set()
 
 
 def status() -> dict[str, Any]:

@@ -171,6 +171,9 @@ def signing_key() -> tuple[str, bytes, str]:
     configured = _env(KEY_ENV)
     if configured:
         key = configured.encode("utf-8")
+        from services import audit_chain_keystore as store
+
+        store.note_key_id(key_id_for(key), origin="configured")
         return key_id_for(key), key, "env"
     persisted = _persisted_current()
     if persisted is not None:
@@ -277,6 +280,42 @@ def check_signature(record: dict[str, Any], hmac_of: Any = None) -> tuple[str, s
         if compute(record, key) == stored:
             return "ok", None
     return "mismatch", None
+
+
+#: Keyring origins of keys the shared keyring itself made (not a node-local
+#: file the old scheme left, imported later).
+_NATIVE_KEY_ORIGINS = frozenset({"generated", "rotation"})
+
+
+def known_key_history() -> set[str]:
+    """Every key id this deployment ever signed with: the keyring's entries and
+    the configured keys it recorded (``audit_chain_keystore.note_key_id``)."""
+    from services import audit_chain_keystore as store
+
+    try:
+        ids = {str(k.get("key_id")) for k in store.status().get("keys") or [] if k.get("key_id")}
+    except Exception:  # noqa: BLE001
+        ids = set()
+    return ids | store.noted_key_ids()
+
+
+def native_keyring_key_ids() -> set[str]:
+    """Ids of the keys the shared keyring created (first key and rotations).
+
+    Once a record signed with one of them exists, every later writer signs with
+    a keyring key (or the configured one): a later record naming a key this
+    deployment never held was relabelled, not signed by a lost key (C4).
+    """
+    from services import audit_chain_keystore as store
+
+    try:
+        keys = store.status().get("keys") or []
+    except Exception:  # noqa: BLE001 - no keyring: no anchor, nothing is reclassified
+        return set()
+    return {
+        str(k.get("key_id")) for k in keys
+        if k.get("key_id") and str(k.get("origin") or "") in _NATIVE_KEY_ORIGINS
+    }
 
 
 def sign(payload: dict[str, Any], *, field: str) -> dict[str, Any]:

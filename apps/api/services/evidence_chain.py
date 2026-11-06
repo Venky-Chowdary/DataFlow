@@ -209,7 +209,13 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         hold — not configured, not retired, not in the persisted keyring — so
         its HMAC cannot be checked. Not evidence of tampering, and not
         verified either: the record stays unverifiable until that key is
-        supplied again (D221, QA r12 #3).
+        supplied again (D221, QA r12 #3). Only records before the first one
+        signed with a key the shared keyring created can be lost-key records.
+    ``unknown_key_after_keyring`` (category ``tampering``)
+        A record written after the shared keyring signed the chain names a key
+        this deployment never signed with (not in the keyring, not a recorded
+        configured key). Every writer since then signs with a held key, so the
+        key id was changed — typically to hide an edit (C4).
     ``broken_link``
         ``prev_hash`` does not name the previous record, nor any earlier one: a
         record between them was deleted, or the records were reordered.
@@ -400,8 +406,20 @@ def _walk(
     For the workspace line only records that carry ``link_field`` are
     link-checked (older records predate it).
     """
-    from services.audit_chain_keys import check_signature
+    from services.audit_chain_keys import (
+        check_signature,
+        known_key_history,
+        native_keyring_key_ids,
+    )
 
+    native = native_keyring_key_ids()
+    history = known_key_history()
+    # The first record signed with a key the shared keyring created. From there
+    # on every writer signs with a held key, so an unknown key id is a relabel.
+    keyring_anchor = next(
+        (n for n, i in enumerate(positions) if str(events[i].get("key_id") or "") in native),
+        None,
+    )
     findings: list[ChainFinding] = []
     seen_prev: dict[str, int] = {}
     walked: dict[str, int] = {}
@@ -422,7 +440,26 @@ def _walk(
             )
         else:
             verdict, key_id = check_signature(event, hmac_of)
-            if verdict == "unknown_key":
+            if (
+                verdict == "unknown_key"
+                and key_id not in history
+                and keyring_anchor is not None
+                and n > keyring_anchor
+            ):
+                findings.append(
+                    ChainFinding(
+                        "unknown_key_after_keyring",
+                        index=index,
+                        event_id=event_id,
+                        detail=(
+                            f"Names key {key_id}, which this deployment never held, yet it "
+                            "was written after the shared keyring signed the chain: every "
+                            "writer since then signs with a held key, so the record's key "
+                            "id was changed. Counted as tampering."
+                        ),
+                    )
+                )
+            elif verdict == "unknown_key":
                 findings.append(
                     ChainFinding(
                         "key_mismatch",
