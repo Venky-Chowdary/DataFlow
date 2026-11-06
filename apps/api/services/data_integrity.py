@@ -731,6 +731,41 @@ def _unique_key_column_list(uk: dict[str, Any]) -> list[str]:
     return cols
 
 
+def _identity_cell(row: dict[str, Any], col: str) -> Any:
+    """A key cell by column name; the sample row may carry another case.
+
+    Oracle reports ``ID`` while the sample rows of an Oracle -> Mongo route are
+    keyed by the mapped field, so ``row.get("ID")`` missed every row and the
+    preflight warned that 30 unique keys collapsed into one (D279).
+    """
+    if not isinstance(row, dict):
+        return None
+    if col in row:
+        return row[col]
+    from services.db_type_utils import ci_get
+
+    return ci_get(row, str(col))
+
+
+def _first_repeated_key(
+    rows: list[dict[str, Any]], identity_cols: list[str], identity: Any
+) -> str:
+    """``(k1, k2)`` of the first key that really repeats, for the operator text.
+
+    The example used to be the last row of the file, which named a key that
+    had no duplicate at all (D279).
+    """
+    seen: set[tuple] = set()
+    for row in rows:
+        key = identity(row)
+        if any(part is None for part in key):
+            continue
+        if key in seen:
+            return "(" + ", ".join(str(_identity_cell(row, col)) for col in identity_cols) + ")"
+        seen.add(key)
+    return ""
+
+
 def _lookup_target_ddl(target_col: str, target_types: dict[str, str] | None) -> str:
     if not target_types:
         return ""
@@ -1317,18 +1352,20 @@ def _check_duplicate_keys(
         if identity_cols:
             from services.duplicate_policy import collapse_keep_last
             from services.type_system import unique_equality_key
+            from services.value_serializer import is_reader_null_cell
 
             def _equality_identity(row: dict[str, Any]) -> tuple:
-                parts = []
+                parts: list[Any] = []
                 for col in identity_cols:
+                    cell = _identity_cell(row, col)
+                    if cell is None or is_reader_null_cell(cell):
+                        # No key on this row: ``collapse_keep_last`` keeps it.
+                        # ``unique_equality_key(None)`` is ``''``, which made
+                        # every keyless row one key (D279 "(None)").
+                        parts.append(None)
+                        continue
                     ddl = _lookup_target_ddl(col, target_types) if target_types else ""
-                    parts.append(
-                        unique_equality_key(
-                            row.get(col),
-                            ddl or "",
-                            dest_kind=dest_kind,
-                        )
-                    )
+                    parts.append(unique_equality_key(cell, ddl or "", dest_kind=dest_kind))
                 return tuple(parts)
 
             collapsed_groups = []
@@ -1338,9 +1375,8 @@ def _check_duplicate_keys(
                 )
                 collapsed_extra += int(dropped or 0)
                 if dropped and not collapse_example and group:
-                    sample = group[-1]
-                    collapse_example = (
-                        "(" + ", ".join(str(sample.get(col)) for col in identity_cols) + ")"
+                    collapse_example = _first_repeated_key(
+                        group, identity_cols, _equality_identity
                     )
                 collapsed_groups.append(kept)
             rows = [row for group in collapsed_groups for row in group]
@@ -1577,7 +1613,7 @@ def _check_duplicate_keys(
             key = composite_unique_equality_key(
                 [
                     (
-                        row.get(col),
+                        _identity_cell(row, col),
                         comp_ddls[i],
                         comp_casefold[i],
                         None,
@@ -1639,7 +1675,7 @@ def _check_duplicate_keys(
             ):
                 continue
             # An absent cell is Missing (no key), never the '' key value (D53).
-            raw_cell = row.get(primary_key)
+            raw_cell = _identity_cell(row, primary_key)
             raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key = unique_equality_key(
                 None if raw_cell is None else raw,

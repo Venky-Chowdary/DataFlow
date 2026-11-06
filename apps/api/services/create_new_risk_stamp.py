@@ -115,9 +115,17 @@ def apply_create_new_risk_stamps(
             else ""
         )
         if db and stamped:
-            physical_from_stamp = create_new_mapping_target_type(
-                stamped, db, samples=col_samples, source_db=source_db_type
-            )
+            if physical_from_src and stamped.casefold() == physical_from_src.casefold():
+                # The stamp is exactly the carrier the kernel invents for this
+                # source, i.e. a destination token. Re-reading it under the
+                # *source* dialect turned MongoDB's integer carrier ``long`` into
+                # Oracle's text LOB ``LONG``: every Oracle NUMBER(p,0) landed in
+                # Mongo as a string and run 2 blocked below the floor (D279).
+                physical_from_stamp = stamped
+            else:
+                physical_from_stamp = create_new_mapping_target_type(
+                    stamped, db, samples=col_samples, source_db=source_db_type
+                )
             if reinvent_would_drop_dest_instant_carrier(
                 stamped, physical_from_stamp, dest_db=db
             ):
