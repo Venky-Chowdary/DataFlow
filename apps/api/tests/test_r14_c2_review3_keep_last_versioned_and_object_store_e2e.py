@@ -14,6 +14,7 @@
 g3f. Population fit asks the same verdict: a column the probe refuses is never
    forecast as "held out", and a mode holdout is not called a signed contract.
 A1. block with a cursor already declared offers keep_last, and it runs.
+A3. A topic's wording is not a table's; an append sync is not offered append.
 """
 
 from __future__ import annotations
@@ -520,3 +521,24 @@ def test_root_cause_names_the_cursor_route():
         "message": "k: duplicate key values (K3×2) " + DUPLICATE_KEY_ROUTES_TABLE_CURSOR,
     }])
     assert summary == "Key k repeats in the source (K3×2). " + DUPLICATE_KEY_ROUTES_TABLE_CURSOR
+
+
+# ── A3. a topic is not a table, and append is not offered to an append sync ─
+def test_duplicate_wording_is_source_and_sync_aware():
+    from services.data_integrity import (
+        DUPLICATE_KEY_ROUTES_LOG_APPEND,
+        DUPLICATE_KEY_ROUTES_LOG_ORDERED,
+        keep_last_table_refusal,
+        table_duplicate_routes,
+    )
+
+    kafka = keep_last_table_refusal("full_refresh_append", source_type="kafka")
+    assert kafka and "table" not in kafka and "message" in kafka, kafka
+    assert DUPLICATE_KEY_ROUTES_LOG_APPEND in kafka
+    for sync in ("full_refresh_append", "incremental_append"):
+        for source in ("postgresql", "kafka"):
+            routes = table_duplicate_routes(sync, source_type=source)
+            assert "duplicate_policy=append" not in routes, (sync, source, routes)
+            assert "keyed sync" in routes, routes
+    assert table_duplicate_routes("incremental_deduped", source_type="kafka") == DUPLICATE_KEY_ROUTES_LOG_ORDERED
+    assert "duplicate_policy=append" in table_duplicate_routes("full_refresh_overwrite")

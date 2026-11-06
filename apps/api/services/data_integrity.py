@@ -1338,12 +1338,39 @@ DUPLICATE_KEY_ROUTES_TABLE_CURSOR = (
     "(or leave it unset) so the latest version of each key wins, or remove the "
     "repeated keys at the source."
 )
+#: The same on a changelog topic, whose offset order picks the last message.
+DUPLICATE_KEY_ROUTES_LOG_ORDERED = (
+    "The topic's offset order already picks the last message per key: set "
+    "in_file_dedupe=keep_last (or leave it unset), or remove the repeated keys "
+    "at the source."
+)
+#: An append sync over a table or topic: append is the sync already chosen.
+DUPLICATE_KEY_ROUTES_APPEND = (
+    "This append sync writes every copy it reads: remove the repeated keys at "
+    "the source, or switch to a keyed sync (upsert / incremental_deduped) with "
+    "the stream's cursor_field so the latest version of each key wins."
+)
+DUPLICATE_KEY_ROUTES_LOG_APPEND = (
+    "This append sync writes every message it reads: remove the repeated keys "
+    "at the source, or switch to a keyed sync (upsert / incremental_deduped) "
+    "so the topic's offset order keeps the last message per key."
+)
 #: Every table/topic route text, most specific first, for the root-cause lookup.
 TABLE_DUPLICATE_ROUTE_TEXTS = (
     DUPLICATE_KEY_ROUTES_TABLE_CURSOR,
+    DUPLICATE_KEY_ROUTES_LOG_ORDERED,
+    DUPLICATE_KEY_ROUTES_LOG_APPEND,
+    DUPLICATE_KEY_ROUTES_APPEND,
     DUPLICATE_KEY_ROUTES_TABLE_KEYED,
     DUPLICATE_KEY_ROUTES_TABLE,
 )
+
+
+def _ordered_log_source(source_type: str) -> bool:
+    from services.primary_key import ORDERED_LOG_SOURCES
+    from src.transfer.engine_family import engine_family
+
+    return engine_family(source_type) in ORDERED_LOG_SOURCES
 
 
 def table_duplicate_routes(
@@ -1353,19 +1380,23 @@ def table_duplicate_routes(
     source_type: str = "",
     stream_name: str = "",
 ) -> str:
-    """The duplicate routes that work on a table source for this sync mode."""
+    """The duplicate routes that work on a table (or topic) for this sync."""
     from services.primary_key import (
         sync_collapses_in_file_duplicates,
         table_reads_latest_wins,
     )
+    from services.sync_cursor import is_append_sync
 
+    log = _ordered_log_source(source_type)
     if table_reads_latest_wins(
         sync_mode, stream_contracts=stream_contracts,
         source_type=source_type, stream_name=stream_name,
     ):
-        return DUPLICATE_KEY_ROUTES_TABLE_CURSOR
+        return DUPLICATE_KEY_ROUTES_LOG_ORDERED if log else DUPLICATE_KEY_ROUTES_TABLE_CURSOR
     if sync_collapses_in_file_duplicates(sync_mode):
         return DUPLICATE_KEY_ROUTES_TABLE_KEYED
+    if is_append_sync(sync_mode):
+        return DUPLICATE_KEY_ROUTES_LOG_APPEND if log else DUPLICATE_KEY_ROUTES_APPEND
     return DUPLICATE_KEY_ROUTES_TABLE
 
 
@@ -1395,6 +1426,12 @@ def keep_last_table_refusal(
         sync_mode, stream_contracts=stream_contracts,
         source_type=source_type, stream_name=stream_name,
     )
+    if _ordered_log_source(source_type):
+        return (
+            "in_file_dedupe=keep_last keeps the last message per key only on a "
+            "keyed sync (upsert / incremental_deduped); this sync writes every "
+            "message, so it is not applied. " + routes
+        )
     return (
         "in_file_dedupe=keep_last keeps a file's last copy of a key in read order; "
         "this table read has no order that defines it, so it is not applied. "
