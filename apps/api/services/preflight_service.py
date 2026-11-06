@@ -1949,40 +1949,10 @@ def run_file_preflight(
         )
         additive_stamp_blocked = True
 
-    # D8: hash_pii fails closed without its HMAC key. Refuse from the plan, not
-    # the sample — an all-NULL sample never runs the digest and a shape-recipe
-    # step is not in the mapping replay — so the run cannot be the first to say.
-    from services.transform_engine import PII_HASH_KEY_SETUP, pii_hash_key
+    # D8: hash_pii fails closed without its HMAC key (services.pii_hash_gate).
+    from services.pii_hash_gate import pii_hash_key_gate
 
-    hashed_columns = [pm.source for pm in plan_mappings if pm.transform == "hash_pii"]
-    for step in (shape_recipe or {}).get("steps") or []:
-        if (
-            isinstance(step, dict)
-            and step.get("enabled") is not False
-            and step.get("op") == "hash_pii"
-        ):
-            hashed_columns.append(str(step.get("column") or ""))
-    hashed_columns = list(dict.fromkeys(c for c in hashed_columns if c))
-    pii_hash_gate: dict[str, Any] | None = None
-    if hashed_columns:
-        key_missing = not pii_hash_key()
-        pii_hash_gate = {
-            "id": "g_pii_hash_key",
-            "status": "block" if key_missing else "pass",
-            "message": (
-                PII_HASH_KEY_SETUP if key_missing else "hash_pii HMAC key is configured"
-            ),
-            "duration_ms": 0,
-            "details": {"columns": hashed_columns[:20], "kind": "pii_hash_key"},
-        }
-        if key_missing:
-            blockers.append(
-                {
-                    "id": pii_hash_gate["id"],
-                    "message": PII_HASH_KEY_SETUP,
-                    "details": dict(pii_hash_gate["details"]),
-                }
-            )
+    pii_hash_gate = pii_hash_key_gate(plan_mappings, shape_recipe, blockers)
     pii_hash_blocked = bool(pii_hash_gate and pii_hash_gate["status"] == "block")
 
     # D243: execute refuses a pre-load recipe on a route that merges against
@@ -2671,6 +2641,9 @@ def run_file_preflight(
             dst_ep,
             schema=column_types,
         )
+        from services.pii_hash_gate import apply_key_change_warning
+
+        apply_key_change_warning(out, src_ep, dst_ep)
         # Module 17 — measured historical success (never invent a rate).
         from services.historical_success_contract import (
             measure_route_historical_success,

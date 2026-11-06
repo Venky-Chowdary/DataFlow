@@ -28,8 +28,12 @@ had: the pinned key wins (``transform_engine.pii_hash_key``).
 from __future__ import annotations
 
 import logging
+import math
+import re
 import secrets
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -227,6 +231,69 @@ def rotate_workspace_key(workspace_id: str, *, actor: str) -> dict[str, Any]:
     return _add_version(workspace_id, actor=actor, secret=None)
 
 
+#: What a key an admin sets must carry: about 128 bits. The rule, in the words
+#: Settings → Security shows (apps/web lib/piiHashKeyApi.ts PII_HASH_KEY_RULE).
+KEY_RULE = (
+    "Use at least 128 random bits: 32 or more hex characters, base64 of 16 or more "
+    "random bytes (24+ characters), or 32+ characters of random text — no repeated "
+    "or sequential runs, no spaces at the ends."
+)
+_HEX = re.compile(r"[0-9a-fA-F]+")
+_B64 = re.compile(r"[A-Za-z0-9+/_-]+={0,2}")
+
+
+def _sequential_run(text: str, length: int = 6) -> bool:
+    run = 1
+    for a, b in zip(text, text[1:]):
+        run = run + 1 if abs(ord(b) - ord(a)) == 1 else 1
+        if run >= length:
+            return True
+    return False
+
+
+def _patterned(text: str) -> bool:
+    """Repeated units, low 4-gram variety or ascending/descending runs."""
+    if (text + text).find(text, 1) < len(text):
+        return True  # the whole key is one unit repeated
+    grams = [text[i:i + 4] for i in range(len(text) - 3)]
+    if grams and len(set(grams)) < 0.75 * len(grams):
+        return True
+    return _sequential_run(text) or bool(re.search(r"(.)\1{4}", text))
+
+
+def _shannon_bits(text: str) -> float:
+    counts: dict[str, int] = {}
+    for ch in text:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(text)
+    return -n * sum((c / n) * math.log2(c / n) for c in counts.values()) if n else 0.0
+
+
+def key_strength_problem(text: str) -> str:
+    """Why ``text`` is not an acceptable hash_pii key, or ``""`` (QA review #6).
+
+    A weak HMAC key lets a dictionary recover the hashed PII, so the bar is the
+    generated key's: about 128 bits. Encoded random bytes (hex, base64) count
+    their encoding's bits; other text counts its Shannon estimate. Repeated or
+    sequential patterns are refused whatever their length.
+    """
+    if text != text.strip() or not text:
+        return "A hashing key cannot be empty or start or end with spaces. " + KEY_RULE
+    if len(text) > MAX_KEY_LENGTH:
+        return f"A hashing key is at most {MAX_KEY_LENGTH} characters."
+    if _HEX.fullmatch(text):
+        bits = 4 * len(text)
+    elif _B64.fullmatch(text):
+        bits = 6 * len(text.rstrip("="))
+        if len(text) < 24:
+            bits = 0
+    else:
+        bits = int(_shannon_bits(text)) if len(text) >= MIN_KEY_LENGTH else 0
+    if bits < 128 or _patterned(text):
+        return "That hashing key is too guessable. " + KEY_RULE + " Or press Rotate to have Datawrap generate one."
+    return ""
+
+
 def set_workspace_key(workspace_id: str, secret: str, *, actor: str) -> dict[str, Any]:
     """Make ``secret`` the workspace's active hash_pii key (a new version).
 
@@ -235,18 +302,9 @@ def set_workspace_key(workspace_id: str, secret: str, *, actor: str) -> dict[str
     The key is stored through the vault and never returned or logged.
     """
     text = str(secret or "")
-    if text != text.strip() or not (MIN_KEY_LENGTH <= len(text) <= MAX_KEY_LENGTH):
-        raise PiiHashKeyRejected(
-            f"A hashing key must be {MIN_KEY_LENGTH}–{MAX_KEY_LENGTH} characters "
-            "with no leading or trailing spaces. Leave it to Datawrap (Rotate) "
-            "unless you must match digests produced elsewhere."
-        )
-    if len(set(text)) < 8:
-        raise PiiHashKeyRejected(
-            "That hashing key repeats too few characters to be secret. Use a "
-            "random value (for example 64 hex characters), or Rotate to have "
-            "Datawrap generate one."
-        )
+    problem = key_strength_problem(text)
+    if problem:
+        raise PiiHashKeyRejected(problem)
     try:
         return _add_version(workspace_id, actor=actor, secret=text)
     except PiiHashKeyUnavailable:
@@ -258,19 +316,127 @@ def set_workspace_key(workspace_id: str, secret: str, *, actor: str) -> dict[str
 
 def key_status(workspace_id: str) -> dict[str, Any]:
     """Public facts about the key: versions and dates, never key material."""
-    from services.brand_env import getenv_brand
-
     doc = _load(_scope_id(workspace_id)) or {}
     return {
         "workspace_id": str(workspace_id or ""),
         "configured": bool(doc),
         # The deployment pins one key for every workspace: setting or rotating
         # the workspace key would not change any digest, so the UI says so.
-        "managed_by_deployment": bool(getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET")),
+        "managed_by_deployment": bool(pinned_key()),
         "set_by_admin": bool(doc.get("set_by_admin")),
         "active_version": int(doc.get("active_version") or 0),
         "versions": [
             {k: v.get(k) for k in ("version", "created_at", "created_by", "retired_at")}
             for v in doc.get("versions") or []
         ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# One key per job (QA review #7)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ``transform_engine`` resolved the key for every value, so a rotation while a
+# job ran gave one job two digests for the same value, and nothing recorded
+# which key a job used. A job now snapshots the key and its version once
+# (``job_key_scope``); every digest in the job uses it, the job records
+# ``pii_hash_key_version``, the route's load history keeps it, and Validate
+# warns when the workspace key changed since this route's last run (upserts
+# keyed on a hashed column would stop matching earlier rows).
+
+_JOB_KEY: ContextVar[dict[str, str] | None] = ContextVar("pii_hash_job_key", default=None)
+DEPLOYMENT_VERSION = "deployment"
+
+
+def pinned_key() -> str:
+    """The operator-pinned key that every workspace uses, or ``""``."""
+    from services.brand_env import getenv_brand
+
+    return getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET") or ""
+
+
+def active_key(workspace_id: str) -> tuple[str, str]:
+    """``(secret, version)`` in force now: the pinned key, else the workspace's."""
+    pinned = pinned_key()
+    if pinned:
+        return pinned, DEPLOYMENT_VERSION
+    secret = workspace_key(workspace_id)
+    doc = _load(_scope_id(workspace_id)) or {}
+    return secret, str(int(doc.get("active_version") or 1))
+
+
+def current_version(workspace_id: str) -> str:
+    """The version a run would hash with now, ``""`` when no key is readable."""
+    try:
+        return active_key(workspace_id)[1]
+    except PiiHashKeyUnavailable:
+        return ""
+
+
+def snapshot_secret(workspace_id: str) -> str | None:
+    """The key this job snapshotted for ``workspace_id``, or ``None`` outside a job."""
+    snap = _JOB_KEY.get()
+    if snap is None or snap["scope"] != _scope_id(workspace_id):
+        return None
+    return snap["secret"]
+
+
+def snapshot_version() -> str:
+    snap = _JOB_KEY.get()
+    return snap["version"] if snap else ""
+
+
+@contextmanager
+def job_key_scope(workspace_id: str, *, uses_hash_pii: bool):
+    """Hold one key for the whole job; yield its version (``""`` when unused)."""
+    if not uses_hash_pii:
+        yield ""
+        return
+    try:
+        secret, version = active_key(workspace_id)
+    except PiiHashKeyUnavailable:
+        secret, version = "", ""  # the transform still fails closed per value
+    token = _JOB_KEY.set({"scope": _scope_id(workspace_id), "secret": secret, "version": version})
+    try:
+        yield version
+    finally:
+        _JOB_KEY.reset(token)
+
+
+@contextmanager
+def transfer_job_scope(request: Any, job_id: str, *, store: Any):
+    """``job_key_scope`` for a transfer, stamping ``pii_hash_key_version`` on the job."""
+    import json
+
+    try:
+        from src.transfer.models import transfer_request_to_dict
+
+        uses = '"hash_pii"' in json.dumps(transfer_request_to_dict(request), default=str)
+    except Exception:  # noqa: BLE001 - unreadable request: resolve per value as before
+        uses = False
+    workspace_id = str(getattr(request, "workspace_id", "") or "")
+    with job_key_scope(workspace_id, uses_hash_pii=uses) as version:
+        if version:
+            try:
+                store().update_job_fields(
+                    job_id, {"pii_hash_key_version": version}, touch_updated_at=False
+                )
+            except Exception:  # noqa: BLE001 - the stamp is evidence, not the run
+                logger.warning("could not stamp pii_hash_key_version on %s", job_id, exc_info=True)
+        yield version
+
+
+def key_change_warning(workspace_id: str, last_version: str) -> dict[str, Any] | None:
+    """The Validate warning when the key changed since this route's last run."""
+    now = current_version(workspace_id)
+    if not last_version or not now or str(last_version) == now:
+        return None
+    return {
+        "id": "pii_hash_key_changed",
+        "message": (
+            f"hash_pii digests will differ from this route's last run: it used key "
+            f"version {last_version}, the workspace key is now version {now}. Rows "
+            "upserted or joined on a hashed column will not match the earlier rows."
+        ),
+        "details": {"last_version": str(last_version), "current_version": now},
     }

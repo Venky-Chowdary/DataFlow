@@ -548,13 +548,21 @@ def save_profile(
     rejected_details: list[dict[str, Any]] | None = None,
     rejected_rows: int = 0,
     row_count: int | None = None,
+    pii_hash_key_version: str | None = None,
 ) -> None:
     """Append a profile to the route ring buffer.
+
+    ``pii_hash_key_version`` defaults to the key the running job snapshotted
+    (``services.pii_hash_keys.snapshot_version``; empty outside a hashing job).
 
     Distinct ``job_id`` values stay as separate loads (last-N). The same
     ``job_id`` replaces its prior run — Execute retry / re-persist must not
     invent a second load and double ``rows_written_total``.
     """
+    if pii_hash_key_version is None:
+        from services.pii_hash_keys import snapshot_version
+
+        pii_hash_key_version = snapshot_version()
     store = _load_store(source, destination)
     runs = list(store.get("runs") or [])
     columns = _serialize_profile(profile)
@@ -571,8 +579,19 @@ def save_profile(
         "columns": columns,
         "quarantine_histogram": quarantine_histogram(rejected_details),
         "rejected_rows": int(rejected_rows or 0),
+        # The hash_pii key version this load digested with (QA review #7).
+        **({"pii_hash_key_version": str(pii_hash_key_version)} if pii_hash_key_version else {}),
     })
     _save_store(source, destination, {"runs": runs})
+
+
+def last_pii_hash_key_version(source: dict[str, Any], destination: dict[str, Any]) -> str:
+    """The hash_pii key version of this route's most recent load that recorded one."""
+    for run in reversed(load_run_history(source, destination)):
+        version = str((run or {}).get("pii_hash_key_version") or "")
+        if version:
+            return version
+    return ""
 
 
 def _median(values: list[Any]) -> Any:

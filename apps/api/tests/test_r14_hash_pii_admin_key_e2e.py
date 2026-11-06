@@ -139,3 +139,37 @@ def test_a_deployment_pinned_key_is_reported_not_overridden(keyed, monkeypatch):
     assert response.status_code == 409, response.text
     for leak in LEAKS:
         assert leak.lower() not in response.text.lower(), (leak, response.text)
+
+
+# ------------------------------------------------ review follow-up (#5, #6)
+
+@pytest.mark.parametrize("weak", ["abcdefgh" * 4, "password" + "12345678" * 3, "0123456789abcdef" * 2,
+                                  "abcdefghijklmnopqrstuvwxyz012345", "Passw0rd!" * 4])
+def test_guessable_keys_are_refused(keyed, weak):
+    response = keyed.owner.put("/api/v1/workspace/pii-hash-key", json={"key": weak})
+    assert response.status_code == 422, response.text
+    assert "128 random bits" in response.text
+    assert weak not in response.text
+
+
+def test_a_generated_random_key_is_accepted(keyed):
+    import base64
+    import secrets
+
+    for key in (secrets.token_hex(32), base64.b64encode(secrets.token_bytes(16)).decode()):
+        response = keyed.owner.put("/api/v1/workspace/pii-hash-key", json={"key": key})
+        assert response.status_code == 200, response.text
+        assert key not in response.text
+
+
+@pytest.mark.parametrize("body", [
+    {"key": "f" * 7 + "0123456789abcdef" * 69 + "e"},  # 1122 characters, over the limit
+    {"key": 12345678901234567890123456789012},          # not a string
+    {"secret": "4f1c9a7e2b8d03c5e6a1f9b7d2c4e8a0x"},     # wrong field
+])
+def test_a_refused_body_never_echoes_the_submitted_key(keyed, body):
+    response = keyed.owner.put("/api/v1/workspace/pii-hash-key", json=body)
+    assert 400 <= response.status_code < 500, response.text
+    submitted = str(next(iter(body.values())))
+    assert submitted not in response.text
+    assert submitted[:40] not in response.text

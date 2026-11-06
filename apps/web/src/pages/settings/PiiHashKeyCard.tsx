@@ -7,6 +7,8 @@ import {
   fetchPiiHashKeyStatus,
   piiHashKeyBadge,
   piiHashKeyInputProblem,
+  PII_HASH_KEY_CHANGE_WARNING,
+  PII_HASH_KEY_RULE,
   rotatePiiHashKey,
   setPiiHashKey,
   type PiiHashKeyStatus,
@@ -43,7 +45,7 @@ export function PiiHashKeyCard() {
   const rotate = async () => {
     const ok = await confirm({
       title: "Rotate the hashing key?",
-      message: "Every hash_pii digest written from now on changes. Digests already written keep the old key's value; the old version stays listed as retired.",
+      message: PII_HASH_KEY_CHANGE_WARNING,
       confirmLabel: "Rotate key",
       cancelLabel: "Keep current key",
       tone: "danger",
@@ -63,6 +65,15 @@ export function PiiHashKeyCard() {
   const save = async () => {
     const problem = piiHashKeyInputProblem(draft);
     if (problem) return void setFormError(problem);
+    // Same confirmation as Rotate: setting a key changes every future digest.
+    const ok = await confirm({
+      title: "Set this hashing key?",
+      message: PII_HASH_KEY_CHANGE_WARNING,
+      confirmLabel: "Set key",
+      cancelLabel: "Keep current key",
+      tone: "danger",
+    });
+    if (!ok) return;
     setBusy(true);
     setFormError("");
     try {
@@ -108,7 +119,7 @@ export function PiiHashKeyCard() {
                   onChange={(e) => setDraft(e.target.value)}
                 />
                 <p className="df2-settings-hint">
-                  At least 32 random characters. Only needed to match digests produced elsewhere — otherwise Rotate.
+                  {PII_HASH_KEY_RULE} Only needed to match digests produced elsewhere — otherwise Rotate.
                 </p>
                 {formError && <p className="df2-settings-hint" role="alert">{formError}</p>}
               </div>

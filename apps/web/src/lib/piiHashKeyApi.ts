@@ -23,8 +23,21 @@ export interface PiiHashKeyStatus {
   versions: PiiHashKeyVersion[];
 }
 
-/** The same minimum the API enforces (services/pii_hash_keys.MIN_KEY_LENGTH). */
-export const PII_HASH_KEY_MIN_LENGTH = 32;
+/** Shortest key worth sending: base64 of 16 random bytes. The API decides the rest. */
+export const PII_HASH_KEY_MIN_LENGTH = 24;
+
+/** The API's rule, word for word (services/pii_hash_keys.KEY_RULE). */
+export const PII_HASH_KEY_RULE =
+  "Use at least 128 random bits: 32 or more hex characters, base64 of 16 or more "
+  + "random bytes (24+ characters), or 32+ characters of random text — no repeated "
+  + "or sequential runs, no spaces at the ends.";
+
+/** What changes when a new key version becomes active (Rotate and Save alike). */
+export const PII_HASH_KEY_CHANGE_WARNING =
+  "Every hash_pii digest written from now on changes. Digests already written keep the old "
+  + "key's value, so rows upserted or joined on a hashed column will not match earlier rows; "
+  + "Validate warns on each route whose last run used the old version. The old version stays "
+  + "listed as retired.";
 
 const URL = `${API_BASE}/workspace/pii-hash-key`;
 
@@ -64,6 +77,6 @@ export function piiHashKeyBadge(status: PiiHashKeyStatus | null): string {
 export function piiHashKeyInputProblem(key: string): string {
   if (!key) return "Enter the key.";
   if (key !== key.trim()) return "Remove leading or trailing spaces.";
-  if (key.length < PII_HASH_KEY_MIN_LENGTH) return `Use at least ${PII_HASH_KEY_MIN_LENGTH} characters.`;
+  if (key.length < PII_HASH_KEY_MIN_LENGTH) return PII_HASH_KEY_RULE;
   return "";
 }

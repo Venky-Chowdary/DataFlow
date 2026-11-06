@@ -702,12 +702,8 @@ async def rotate_pii_hash_key(request: Request):
     return status
 
 
-class PiiHashKeyBody(BaseModel):
-    key: str = Field(..., min_length=1, max_length=1024)
-
-
 @router.put("/pii-hash-key")
-async def set_pii_hash_key(body: PiiHashKeyBody, request: Request):
+async def set_pii_hash_key(request: Request):
     """Set this workspace's hash_pii key (a new active version; changes future digests).
 
     Admin only (RBAC ``workspace.manage``). The key goes through the secret
@@ -721,6 +717,15 @@ async def set_pii_hash_key(body: PiiHashKeyBody, request: Request):
         set_workspace_key,
     )
 
+    # The body is read by hand, not through a pydantic model: FastAPI's 422
+    # echoes the submitted value, and here that value is the secret.
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON never echoes the body
+        payload = None
+    key = payload.get("key") if isinstance(payload, dict) else None
+    if not isinstance(key, str):
+        raise HTTPException(status_code=422, detail='Send {"key": "<hashing key>"} as JSON.')
     workspace_id = tenant_scope(request).workspace_id
     if key_status(workspace_id).get("managed_by_deployment"):
         raise HTTPException(
@@ -731,7 +736,7 @@ async def set_pii_hash_key(body: PiiHashKeyBody, request: Request):
             ),
         )
     try:
-        status = set_workspace_key(workspace_id, body.key, actor=_actor(request))
+        status = set_workspace_key(workspace_id, key, actor=_actor(request))
     except PiiHashKeyRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PiiHashKeyUnavailable as exc:

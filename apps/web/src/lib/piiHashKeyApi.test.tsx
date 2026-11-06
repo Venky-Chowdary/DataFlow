@@ -12,6 +12,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   PII_HASH_KEY_MIN_LENGTH,
+  PII_HASH_KEY_RULE,
   piiHashKeyBadge,
   piiHashKeyInputProblem,
   setPiiHashKey,
@@ -62,8 +63,8 @@ describe("Settings → Security: hash_pii key", () => {
   });
 
   it("checks a typed key the way the API does", () => {
-    assert.equal(PII_HASH_KEY_MIN_LENGTH, 32);
-    assert.match(piiHashKeyInputProblem("short"), /32/);
+    assert.equal(PII_HASH_KEY_MIN_LENGTH, 24);
+    assert.match(piiHashKeyInputProblem("short"), /128 random bits/);
     assert.match(piiHashKeyInputProblem(` ${"k".repeat(40)}`), /spaces/);
     assert.equal(piiHashKeyInputProblem("0123456789abcdef0123456789abcdef"), "");
   });
@@ -91,5 +92,16 @@ describe("Settings → Security: hash_pii key", () => {
       { status: 422, headers: { "Content-Type": "application/json" } },
     )) as typeof fetch;
     await assert.rejects(setPiiHashKey("x".repeat(40)), /32–512/);
+  });
+
+  it("states the API's key rule word for word, and Save confirms like Rotate", () => {
+    const api = readFileSync(path.join(here, "..", "..", "..", "api", "services", "pii_hash_keys.py"), "utf8");
+    const rule = api.slice(api.indexOf("KEY_RULE = ("), api.indexOf("\n)", api.indexOf("KEY_RULE = (")));
+    const apiText = [...rule.matchAll(/"([^"]*)"/g)].map((m) => m[1]).join("");
+    assert.equal(apiText, PII_HASH_KEY_RULE);
+    const card = readFileSync(path.join(here, "..", "pages", "settings", "PiiHashKeyCard.tsx"), "utf8");
+    assert.match(card, /\{PII_HASH_KEY_RULE\}/);
+    assert.equal((card.match(/message: PII_HASH_KEY_CHANGE_WARNING/g) || []).length, 2);
+    assert.match(card, /title: "Set this hashing key\?"/);
   });
 });

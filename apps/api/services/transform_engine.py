@@ -1733,13 +1733,16 @@ def pii_hash_key(workspace_id: str | None = None) -> str:
     Otherwise each workspace has its own key, generated on first use and
     stored encrypted — deterministic within a workspace, different across them.
     """
-    pinned = getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET") or ""
-    if pinned:
-        return pinned
-    from services.pii_hash_keys import PiiHashKeyUnavailable, workspace_key
+    from services.pii_hash_keys import PiiHashKeyUnavailable, active_key, snapshot_secret
 
+    scope = _current_workspace() if workspace_id is None else workspace_id
+    # Inside a job: the key the job snapshotted once (one digest per value per
+    # job, even across a rotation mid-run — QA review #7).
+    snap = snapshot_secret(scope)
+    if snap is not None:
+        return snap
     try:
-        return workspace_key(_current_workspace() if workspace_id is None else workspace_id)
+        return active_key(scope)[0]
     except PiiHashKeyUnavailable:
         return ""
 
