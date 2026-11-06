@@ -2450,6 +2450,17 @@ async def run_schedule_loop() -> None:
             "Startup schedule reclaim failed; the beat will continue"
         )
     try:
+        from services.schedule_store import normalize_invalid_timezones
+
+        repaired = await asyncio.get_running_loop().run_in_executor(
+            _executor,
+            functools.partial(contextvars.copy_context().run, normalize_invalid_timezones),
+        )
+        if repaired:
+            logger.warning("Normalised %s schedule zone(s) that were not IANA zones to UTC", len(repaired))
+    except Exception:  # noqa: BLE001 — a bad document must not kill the loop
+        logger.exception("Schedule time-zone normalisation failed; the beat will continue")
+    try:
         from services.schedule_store import import_file_schedules_into_mongo
 
         imported = await asyncio.get_running_loop().run_in_executor(

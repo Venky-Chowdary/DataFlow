@@ -1013,7 +1013,14 @@ def accepted_schedule_sync_mode(sync_mode: str) -> str:
     raise ValueError(f"Invalid sync_mode: {sync_mode}")
 
 
-def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
+def _validate_cadence(
+    interval: str, cron: str, tz: str, sync_mode: str, *, check_zone: bool = True
+) -> str:
+    """Refuse an unusable cadence. ``check_zone=False`` is an update that sets
+    neither the zone nor the cadence: a legacy row whose stored zone predates
+    validation stays writable (pause, back-off, baseline), and its cron horizon
+    is checked in UTC — the zone the scheduler normalises it to
+    (``normalize_invalid_timezones``)."""
     cron = (cron or "").strip()
     if interval == "cron":
         # The cadence *is* the expression — a stored preset would contradict
@@ -1026,9 +1033,15 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
     # The zone is checked for every cadence, not only cron: a preset schedule
     # stored ``Mars/Olympus`` (Security 15). One IANA validator for settings
     # and schedules (``workspace_store.validate_timezone``).
-    from services.workspace_store import validate_timezone
+    from services.workspace_store import InvalidTimezone, validate_timezone
 
-    validate_timezone(tz or "UTC")
+    if check_zone:
+        validate_timezone(tz or "UTC")
+    else:
+        try:
+            validate_timezone(tz or "UTC")
+        except InvalidTimezone:
+            tz = "UTC"
     if cron:
         try:
             validate_cron(cron)
@@ -1683,6 +1696,47 @@ _SOURCE_KEYS = frozenset(
 )
 
 
+TIMEZONE_NORMALIZED_ACTION = "schedule.timezone.normalized"
+
+
+def normalize_invalid_timezones(*, actor: str = "system:schedule-timezone") -> list[dict[str, str]]:
+    """One-time repair: a stored zone that is not an IANA zone becomes UTC, audited.
+
+    Rows written before zones were validated (Security 15) could hold
+    ``Mars/Olympus``; a cron schedule then could not compute its next run.
+    The scheduler calls this at start-up. Each repaired row files
+    ``schedule.timezone.normalized`` (from, to) in its workspace, so the
+    change is on the record rather than silent. Idempotent.
+    """
+    from services.audit_log import append_audit_event
+    from services.workspace_store import InvalidTimezone, validate_timezone
+
+    repaired: list[dict[str, str]] = []
+    for sched in list_schedules():
+        zone = (sched.timezone or "").strip()
+        if not zone:
+            continue
+        try:
+            validate_timezone(zone)
+            continue
+        except InvalidTimezone:
+            pass
+        if update_schedule(sched.id, {"timezone": "UTC"}) is None:
+            continue
+        row = {"schedule_id": sched.id, "from": zone, "to": "UTC"}
+        repaired.append(row)
+        append_audit_event(
+            action=TIMEZONE_NORMALIZED_ACTION,
+            resource=f"schedule:{sched.id}",
+            actor=actor,
+            level="warn",
+            outcome="succeeded",
+            workspace_id=sched.workspace_id or None,
+            details={**row, "reason": "stored zone is not an IANA time zone"},
+        )
+    return repaired
+
+
 def update_schedule(
     schedule_id: str,
     data: dict[str, Any],
@@ -1747,7 +1801,10 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         cron = cron_norm
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
-        sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
+        # The zone is checked when this write sets it or changes the cadence;
+        # pausing or backing off a legacy row must not trip on its stored zone.
+        cadence_changed = "timezone" in data or (interval, cron) != (s.interval, s.cron)
+        sync_mode = _validate_cadence(interval, cron, tz, sync_mode, check_zone=cadence_changed)
         data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
         # Pausing or renaming a schedule must work while taps are disabled; only
