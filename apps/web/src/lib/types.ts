@@ -624,6 +624,8 @@ export interface OpenedJournal extends ParsedUpload {
 }
 
 export interface JobProgress extends TransferJob {
+  /** True when the API recorded the count as unknown (null), e.g. a cancel it could not attribute. */
+  records_processed_unknown?: boolean;
   progress_pct: number;
   /** Capture-once journal outcome (opt-in per run). */
   journal?: JobJournalOutcome | null;

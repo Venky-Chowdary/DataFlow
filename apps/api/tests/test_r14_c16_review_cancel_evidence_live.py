@@ -112,3 +112,63 @@ def test_a_keyed_copy_that_only_updated_keys_is_not_no_rows_kept(table, sync_mod
     assert "No row of this run was kept" not in job["message"], job["message"]
     assert job["cancel_outcome"]["rows_committed_source"] == "unknown", job["cancel_outcome"]
     assert job.get("records_processed") is None
+
+
+def test_a_real_cancelled_keyed_copy_over_existing_rows_is_unknown(monkeypatch):
+    """The same repro through a real PostgreSQL -> PostgreSQL upsert COPY,
+    cancelled mid-copy from the job's own probe (second review: the earlier
+    legs injected the exception)."""
+    import threading
+
+    import services.cancel_check as cc
+    import services.mongodb_service as mongo_mod
+    import src.transfer.engine as engine_mod
+    from services.mongodb_service import MemoryMongoDBService
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    pg = h.dest_config("postgresql")
+    ep = {k: pg[k] for k in ("host", "port", "database", "username", "password")}
+    token = uuid.uuid4().hex[:8]
+    src, dst = f"r14c16k_s_{token}", f"r14c16k_d_{token}"
+    for t in (src, dst):
+        h.execute("postgresql", f'CREATE TABLE "{t}" (id INT PRIMARY KEY, v TEXT)')
+        h.execute("postgresql", f'INSERT INTO "{t}" SELECT g, \'v\' || g FROM generate_series(1, 60000) g')
+    store = MemoryMongoDBService()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: store)
+    monkeypatch.setattr(mongo_mod, "get_mongodb_service", lambda: store)
+    job_id = "r14c16k" + uuid.uuid4().hex[:10]
+    real = cc.cancel_checkpoint
+    polls = {"n": 0}
+
+    def probe(rows_written=None):
+        polls["n"] += 1
+        if polls["n"] == 5:
+            store.request_job_cancel(job_id)
+            store.update_job_status(job_id, "cancelled", operator_command=True)
+        return real(rows_written)
+
+    monkeypatch.setattr(cc, "cancel_checkpoint", probe)
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", schema="public", table=src, **ep),
+        destination=EndpointConfig(kind="database", format="postgresql", schema="public", table=dst, **ep),
+        sync_mode="upsert",
+        stream_contracts=[{"name": src, "selected": True, "primary_key": ["id"], "sync_mode": "upsert"}],
+        skip_preflight=True, validation_mode="balanced",
+    )
+    store.update_job_status(job_id, "pending", transfer_request={})
+    try:
+        worker = threading.Thread(target=lambda: UniversalTransferEngine().execute_tracked(request, job_id))
+        worker.start()
+        worker.join(300)
+        job = store.get_job(job_id) or {}
+        assert job.get("status") == "cancelled", (job.get("status"), job.get("error"))
+        assert polls["n"] >= 5, "the copy never reached the cancel"
+        assert "No row of this run was kept" not in str(job.get("message")), job.get("message")
+        out = job.get("cancel_outcome") or {}
+        assert out.get("rows_committed_source") in {"unknown", "committed_batches"}, out
+        if out.get("rows_committed_source") == "unknown":
+            assert job.get("records_processed") is None
+    finally:
+        for t in (src, dst):
+            h.drop_table("postgresql", t)

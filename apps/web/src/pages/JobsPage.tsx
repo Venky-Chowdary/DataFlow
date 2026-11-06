@@ -1,3 +1,4 @@
+import { formatRowsProcessed } from "../lib/jobRows";
 import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
@@ -1400,7 +1401,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                       <dd>{rejectedCount.toLocaleString()} — validation findings isolated, not the load-stop cause unless noted above</dd>
                                     </div>
                                   )}
-                                  {liveJob.records_processed != null && liveJob.records_processed > 0 && (
+                                  {liveJob.records_processed_unknown && (
+                                    <div>
+                                      <dt>Rows kept</dt>
+                                      <dd>Unknown — the destination count could not be attributed to this run</dd>
+                                    </div>
+                                  )}
+                                  {!liveJob.records_processed_unknown && liveJob.records_processed != null && liveJob.records_processed > 0 && (
                                     <div>
                                       <dt>Progress before failure</dt>
                                       <dd>{liveJob.records_processed.toLocaleString()} rows processed</dd>
@@ -1554,7 +1561,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               </JobOverviewNote>
                               <p className="df2-jobs-quarantine-meaning">
                                 <strong>What “quarantined” means:</strong>{" "}
-                                {(liveJob.records_processed ?? 0).toLocaleString()} row(s) were processed.
+                                {formatRowsProcessed(liveJob)} row(s) were processed.
                                 {" "}
                                 {rejectedCount > 0
                                   ? `Only ${rejectedCount.toLocaleString()} finding(s) failed type/integrity checks and were isolated — they were not written as clean destination rows. Inspect details for source row #, column, value, and reason. The rest of the load succeeded.`
@@ -1565,7 +1572,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               <div className="df2-jobs-quarantine-metrics">
                                 <article className="df2-jobs-quarantine-metric">
                                   <span>Processed</span>
-                                  <strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong>
+                                  <strong>{liveJob.records_processed_unknown ? "unknown" : (liveJob.records_processed ?? 0).toLocaleString()}</strong>
                                 </article>
                                 <article className={`df2-jobs-quarantine-metric${rejectedCount > 0 ? " is-warn" : ""}`}>
                                   <span>Quarantined</span>

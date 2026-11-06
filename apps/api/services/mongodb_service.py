@@ -833,7 +833,13 @@ class MongoDBService:
                 record_terminal_job_transition(
                     previous_status=previous_status,
                     status=status,
-                    records=int(updates.get("records_processed") or (prev_doc or {}).get("records_processed") or 0),
+                    # A write that sets records_processed (even to None: unknown
+                    # after a cancel, C16) is the number; never the old meter.
+                    records=int(
+                        (updates.get("records_processed") or 0)
+                        if "records_processed" in updates
+                        else ((prev_doc or {}).get("records_processed") or 0)
+                    ),
                     quarantined=int(updates.get("rejected_rows") or (prev_doc or {}).get("rejected_rows") or 0),
                     reconcile_ok=reconcile_ok,
                 )

@@ -906,7 +906,9 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "started_at": started_at.isoformat(),
         "finished_at": finished.isoformat(),
         "duration_seconds": round((finished - started_at).total_seconds(), 3),
-        "records_transferred": int(doc.get("records_processed", 0) or 0),
+        # None when the cancel could not attribute the destination to this run
+        # (C16): unknown is not zero.
+        "records_transferred": _records_or_unknown(doc),
         "rejected_rows": int(doc.get("rejected_rows", 0) or 0),
         "coerced_null_rows": int(doc.get("coerced_null_rows", 0) or 0),
         "error": (doc.get("error") or "")[:500],
@@ -1007,6 +1009,13 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
         log_job_notifications(job_id, results)
     except Exception:
         logger.exception("Failed to send schedule notification for %s", sched.id)
+
+
+def _records_or_unknown(doc: dict) -> int | None:
+    """``records_processed`` as recorded; None when the job says it is unknown."""
+    if "records_processed" in doc and doc.get("records_processed") is None:
+        return None
+    return int(doc.get("records_processed", 0) or 0)
 
 
 def _is_success(status: str | None) -> bool:

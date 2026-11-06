@@ -1,3 +1,4 @@
+import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
@@ -1784,6 +1785,7 @@ export function streamJobProgress(
       destination_collection: String(raw.destination_collection ?? ""),
       status: String(raw.status ?? "pending"),
       records_processed: Number(raw.records_processed ?? raw.rows_processed ?? 0),
+      records_processed_unknown: rowsProcessedUnknown(raw),
       total_rows: Number(raw.total_rows ?? 0),
       progress_pct: Number(raw.progress_pct ?? 0),
       progress_indeterminate: Boolean(raw.progress_indeterminate),
