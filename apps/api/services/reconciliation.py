@@ -1870,37 +1870,48 @@ def note_readback_failure(exc: BaseException) -> None:
     _READBACK_FAILURE.set(f"{type(exc).__name__}: {exc}"[:300])
 
 
-def verify_target_with_retry(
-    *args: Any, verify: Any = None, **kwargs: Any
-) -> tuple[int, str, str, bool]:
-    """:func:`verify_target` (or the caller's ``verify``), retrying a read-back
-    that failed transiently.
+def readback_with_retry(read: Any, *args: Any, **kwargs: Any) -> tuple[Any, str, bool]:
+    """Run one destination read-back, retrying a transient failure.
 
-    Returns ``(rows, checksum, failure_reason, transient)``. The reason is
-    ``""`` when the read succeeded (or the engine has no read-back at all).
-    Deterministic failures (grants, missing objects) are not retried.
+    ``read`` is any verify_* function whose first result element is the row
+    count (``-1`` on a swallowed failure). Returns ``(result, failure_reason,
+    transient)``; the reason is ``""`` when the read succeeded or the engine has
+    no read-back at all. Deterministic failures (grants, missing objects) are
+    not retried. The one seam for every Gate-8 read-back (D284): the full
+    table, each route table and the keyed batch proof.
     """
     from services.error_handling import RetryBudget, classify_error
 
-    read = verify or verify_target
     budget = RetryBudget()
     while True:
         _READBACK_FAILURE.set("")
-        rows, checksum = read(*args, **kwargs)
+        result = read(*args, **kwargs)
         reason = _READBACK_FAILURE.get()
-        if rows >= 0 or not reason:
-            return rows, checksum, "", False
+        rows = result[0] if isinstance(result, tuple) and result else -1
+        if (isinstance(rows, int) and rows >= 0) or not reason:
+            return result, "", False
         transient = bool(classify_error(reason).get("retriable"))
         if not transient or budget.attempts_made + 1 >= budget.max_attempts:
-            return rows, checksum, reason, transient
+            return result, reason, transient
         delay = budget.next_delay()
         logger.warning(
-            "Gate-8 full read-back failed transiently (attempt %d/%d); retrying in %.1fs: %s",
+            "Gate-8 read-back failed transiently (attempt %d/%d); retrying in %.1fs: %s",
             budget.attempts_made, budget.max_attempts, delay, reason,
         )
         import time as _t
 
         _t.sleep(delay)
+
+
+def verify_target_with_retry(
+    *args: Any, verify: Any = None, **kwargs: Any
+) -> tuple[int, str, str, bool]:
+    """:func:`verify_target` through :func:`readback_with_retry`:
+    ``(rows, checksum, failure_reason, transient)``."""
+    (rows, checksum), reason, transient = readback_with_retry(
+        verify or verify_target, *args, **kwargs
+    )
+    return rows, checksum, reason, transient
 
 
 def verify_postgres_table(

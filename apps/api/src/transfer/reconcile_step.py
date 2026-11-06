@@ -7062,9 +7062,13 @@ def _run_reconciliation_impl(
                 # One scan yields both the canonical digest and the additive
                 # multiset digest — the additive form proves an append into an
                 # occupied route table (post − pre == this run's rows, RT-6).
-                from services.reconciliation import verify_postgres_route_table
+                from services.reconciliation import (
+                    readback_with_retry,
+                    verify_postgres_route_table,
+                )
 
-                _r_rows, _r_checksum, _r_additive = verify_postgres_route_table(
+                (_r_rows, _r_checksum, _r_additive), _r_failure, _r_transient = readback_with_retry(
+                    verify_postgres_route_table,
                     host=str(cfg.get("host") or ""),
                     port=int(cfg.get("port") or 5432),
                     database=str(cfg.get("database") or ""),
@@ -7086,8 +7090,11 @@ def _run_reconciliation_impl(
                     ) or None,
                 )
             else:
+                from services.reconciliation import readback_with_retry
+
                 _r_additive = ""
-                _r_rows, _r_checksum = verify_target(
+                (_r_rows, _r_checksum), _r_failure, _r_transient = readback_with_retry(
+                    verify_target,
                     db_type,
                     cfg,
                     schema=schema,
@@ -7105,6 +7112,12 @@ def _run_reconciliation_impl(
                 "verified_rows": _r_rows,
                 "checksum": _r_checksum,
             }
+            if _r_failure:
+                # D284: the route read failed; carry the reason (and whether
+                # it was transient) to the verdict instead of "unavailable".
+                route_readback[_rname]["readback_error"] = _r_failure
+                readback_failure = readback_failure or f"route {_rname}: {_r_failure}"
+                readback_transient = readback_transient or _r_transient
             if _r_additive:
                 route_readback[_rname]["additive_checksum"] = _r_additive
             if isinstance(_r_rows, int) and _r_rows >= 0:
@@ -8033,7 +8046,10 @@ def _run_reconciliation_impl(
         and target_checksum
         and str(db_type) in KEYED_READBACK_ENGINES
     ):
-        _keyed_rows, keyed_checksum = verify_target(
+        from services.reconciliation import readback_with_retry
+
+        (_keyed_rows, keyed_checksum), _keyed_failure, _keyed_transient = readback_with_retry(
+            verify_target,
             db_type,
             cfg,
             schema=schema,
@@ -8046,6 +8062,11 @@ def _run_reconciliation_impl(
             written_ids=written_ids,
             pk_column=pk_column,
         )
+        if _keyed_failure and isinstance(dest_summary, dict):
+            # D284: a keyed read-back that still failed after retry is named,
+            # never read as "no rows for this batch".
+            dest_summary["keyed_readback_error"] = _keyed_failure
+            dest_summary["keyed_readback_transient"] = bool(_keyed_transient)
         # A key-scoped digest is only comparable when the key identifies *one*
         # destination row. An append (no merge, no enforced constraint) can put
         # the same key in twice: appending one batch twice left two rows per key,

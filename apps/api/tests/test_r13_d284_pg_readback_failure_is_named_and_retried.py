@@ -138,3 +138,112 @@ def test_unrecoverable_readback_failure_names_its_reason(tables, monkeypatch):
     assert "verifier unavailable" not in err
     assert "could not read the postgresql destination back" in err
     assert "permission denied" in err
+
+
+# --- the one retry seam, for every read-back shape ---------------------------
+
+
+def _flaky_read(shape, *, fail_times: int, reason: str):
+    """A verify_* stand-in: ``fail_times`` swallowed failures (``-1``), then a result."""
+    import services.reconciliation as reconciliation
+
+    calls = {"n": 0}
+
+    def read(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] <= fail_times:
+            reconciliation.note_readback_failure(RuntimeError(reason))
+            return (-1,) + tuple("" for _ in range(len(shape) - 1))
+        return shape
+
+    return read, calls
+
+
+def test_retry_seam_handles_full_route_and_keyed_shapes(monkeypatch):
+    import services.reconciliation as reconciliation
+
+    for prefix in ("DATAFLOW_", "DATAWRAP_"):
+        monkeypatch.setenv(f"{prefix}RETRY_BASE_DELAY_SECONDS", "0.001")
+        monkeypatch.setenv(f"{prefix}RETRY_JITTER", "false")
+    transient = "server closed the connection unexpectedly"
+    # Full table / keyed proof: (rows, checksum).
+    read, calls = _flaky_read((5, "abc"), fail_times=1, reason=transient)
+    assert reconciliation.readback_with_retry(read) == ((5, "abc"), "", False)
+    assert calls["n"] == 2
+    # Route table: (rows, checksum, additive).
+    read, calls = _flaky_read((3, "r", "add"), fail_times=1, reason=transient)
+    assert reconciliation.readback_with_retry(read) == ((3, "r", "add"), "", False)
+    assert calls["n"] == 2
+    # Deterministic: named once, not retried.
+    read, calls = _flaky_read((5, "abc"), fail_times=99, reason="permission denied for table x")
+    result, reason, is_transient = reconciliation.readback_with_retry(read)
+    assert result[0] == -1 and "permission denied" in reason and is_transient is False
+    assert calls["n"] == 1
+    # verify_target_with_retry is the same seam.
+    read, _ = _flaky_read((7, "z"), fail_times=0, reason="")
+    assert reconciliation.verify_target_with_retry(verify=read) == (7, "z", "", False)
+
+
+def test_keyed_batch_readback_is_retried_on_a_populated_upsert(monkeypatch):
+    """Upsert over existing rows takes the keyed batch proof (written_ids set)."""
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(host="localhost", port=5432, database="dataflow", user="dataflow",
+                                password="dataflow", connect_timeout=3)
+        conn.autocommit = True
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"PostgreSQL unavailable: {exc}")
+    for prefix in ("DATAFLOW_", "DATAWRAP_"):
+        monkeypatch.setenv(f"{prefix}RETRY_BASE_DELAY_SECONDS", "0.01")
+        monkeypatch.setenv(f"{prefix}RETRY_JITTER", "false")
+    fake = _Mongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    tag = uuid.uuid4().hex[:8]
+    src = str(__import__("tempfile").mkdtemp()) + "/src.db"
+    import sqlite3
+
+    lite = sqlite3.connect(src)
+    lite.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT)")
+    lite.executemany("INSERT INTO t VALUES (?,?)", [(i, ["a", "", "  ", None, "東京"][i % 5]) for i in range(1, 21)])
+    lite.commit()
+    lite.close()
+    dst = f"r13_d284_k_{tag}"
+    real = reconciliation.verify_postgres_table
+    seen = {"keyed": 0}
+
+    def _flaky(**kwargs):
+        if kwargs.get("written_ids") is not None and seen["keyed"] == 0:
+            seen["keyed"] += 1
+            reconciliation.note_readback_failure(
+                psycopg2.OperationalError("server closed the connection unexpectedly")
+            )
+            return -1, ""
+        return real(**kwargs)
+
+    monkeypatch.setattr(reconciliation, "verify_postgres_table", _flaky)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE TABLE public."{dst}" (id int PRIMARY KEY, label text)')
+            cur.executemany(f'INSERT INTO public."{dst}" VALUES (%s, %s)', [(i, "old") for i in range(1, 11)])
+        req = TransferRequest(
+            source=EndpointConfig(kind="database", format="sqlite", database=src, table="t"),
+            destination=_ep(dst),
+            mappings=[{"source": c, "target": c} for c in ("id", "label")],
+            sync_mode="incremental_deduped", skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{"name": "t", "primary_key": "id", "sync_mode": "incremental_deduped", "selected": True}],
+        )
+        job_id = uuid.uuid4().hex[:24]
+        result = UniversalTransferEngine().execute_tracked(req, job_id)
+        assert result.success is True, result.error
+        summary = fake.jobs[job_id].get("destination_summary") or {}
+        assert not summary.get("keyed_readback_error")
+        if seen["keyed"]:  # the keyed proof ran: it was retried, not read as "no rows"
+            assert "verifier unavailable" not in (result.error or "")
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT count(*), count(*) FILTER (WHERE label = \'old\') FROM public."{dst}"')
+            assert cur.fetchone() == (20, 0)
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{dst}"')
+        conn.close()
