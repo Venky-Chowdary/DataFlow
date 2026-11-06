@@ -3559,6 +3559,7 @@ def _maybe_attach_verification_ladder(
             rows_written=_as_count(dest_summary.get("rows_written")),
             full_target_rows=full_target_rows,
             excluded_key_values=sorted(_rej_keys or ()),
+            out_of_window_rows=[*after_window_rows, *before_window_rows],
             not_started_reason=str(
                 (dest_summary.get("keyed_write_witness") or {}).get("reason") or ""
             ),

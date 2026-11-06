@@ -27,7 +27,8 @@ time, per key:
 * source moved, destination equals what was written -> concurrent source
   update: advisory, named, never a veto (the key leaves the cell layers);
 * source deleted the written key, destination equals what was written ->
-  concurrent source delete: advisory, named;
+  concurrent source delete: advisory, named (a key a concurrent update moved
+  out of a windowed re-read's cursor window is named as moved, not deleted);
 * a written key the destination no longer holds (or holds differently) while
   the source deleted it -> loss, vetoes (it is in neither compared population);
 * a source key this run never wrote and the destination does not hold ->
@@ -267,6 +268,7 @@ def split_concurrent_source_drift(
     rows_written: int | None = None,
     full_target_rows: list[dict] | None = None,
     excluded_key_values: Iterable[tuple] = (),
+    out_of_window_rows: list[dict] | None = None,
     not_started_reason: str = "",
 ) -> tuple[list[dict], list[dict], dict[str, Any]]:
     """Remove from the cell layers exactly the keys the witness proves were
@@ -324,14 +326,18 @@ def split_concurrent_source_drift(
     held_out = {
         enc.key_cells(dict(zip(keys, vals)), keys) for vals in excluded_key_values
     }
+    # Source keys outside this run's cursor window (a windowed re-read): a
+    # written key found there was moved out by a concurrent update, not deleted.
+    outside = set(_index(out_of_window_rows)[0]) if out_of_window_rows else set()
     deleted: list[KeyCells] = []
+    moved_out: list[KeyCells] = []
     losses: list[KeyCells] = []
     for k, written in w.items():
         if k in src or k in held_out:
             continue
         held = full.get(k)
         if held is not None and held[1] == written:
-            deleted.append(k)  # the source deleted it after the write
+            (moved_out if k in outside else deleted).append(k)
         else:
             losses.append(k)  # in neither population and not as written
     # A source key this run never wrote is a concurrent insert only when a
@@ -358,6 +364,8 @@ def split_concurrent_source_drift(
         "inserted_sample_keys": _named(inserted, src),
         "deleted_count": len(deleted),
         "deleted_sample_keys": _named(deleted, full),
+        "moved_out_of_window_count": len(moved_out),
+        "moved_out_of_window_sample_keys": _named(moved_out, full),
         "losses": _named(losses, {}),
         "loss_count": len(losses),
     }
@@ -390,8 +398,9 @@ def attach_concurrent_drift(report: dict[str, Any], record: dict[str, Any]) -> d
     moved = int(record.get("count") or 0)
     ins = int(record.get("inserted_count") or 0)
     dele = int(record.get("deleted_count") or 0)
+    gone = int(record.get("moved_out_of_window_count") or 0)
     lost = int(record.get("loss_count") or 0)
-    if not (moved or ins or dele or lost):
+    if not (moved or ins or dele or gone or lost):
         return report
     out = dict(report)
     out[DRIFT_KEY] = {k: v for k, v in record.items() if k != "attributed"}
@@ -413,6 +422,13 @@ def attach_concurrent_drift(report: dict[str, Any], record: dict[str, Any]) -> d
             f"The source deleted {dele} key(s) {_render(record['deleted_sample_keys'], dele)} "
             "after this run wrote them (concurrent delete); the destination holds the "
             "values this run wrote."
+        ))
+    if gone:
+        out = _with_sentence(out, (
+            f"A concurrent source update moved {gone} key(s) "
+            f"{_render(record['moved_out_of_window_sample_keys'], gone)} out of this run's "
+            "cursor window after it wrote them; the destination holds the values this run "
+            "wrote. The next run picks up the change."
         ))
     if lost:
         out["passed"] = False

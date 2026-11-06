@@ -302,3 +302,48 @@ def test_review_s1_a_row_the_reader_dropped_is_never_a_concurrent_insert(world, 
     assert not any("concurrent insert" in w for w in (res.reconciliation or {}).get("warnings") or [])
     assert not res.success, "a row the reader dropped completed green"
     assert ("eu", 99) not in _dest(conn, dst)
+
+
+def test_review_m3_a_windowed_reread_never_starts_a_witness(monkeypatch):
+    """Why M3's label could not appear live: cursor windows exist on
+    incremental runs only, and those fingerprint their write pass inline, so
+    no keyed write witness starts there. Pins that precondition."""
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+    from tests.test_r14_ladder_composite_key_scope_live import _pg
+    import src.transfer.engine as engine_mod
+
+    fake = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    conn = _pg()
+    sfx = uuid.uuid4().hex[:8]
+    src, dst = f"r14w_src_{sfx}", f"r14w_dst_{sfx}"
+    cur = conn.cursor()
+    cur.execute(f'CREATE TABLE "{src}" (grp TEXT, id INT, amount TEXT, updated_at TIMESTAMP, PRIMARY KEY (grp, id))')
+    cur.executemany(
+        f'INSERT INTO "{src}" VALUES (%s, %s, %s, %s)',
+        [("g", i, f"{i}.50", f"2026-11-01 10:{i:02d}:00") for i in range(1, 11)],
+    )
+    try:
+        req = TransferRequest(
+            source=EndpointConfig(kind="database", format="postgresql", schema="public", table=src, **PG),
+            destination=EndpointConfig(kind="database", format="postgresql", schema="public", table=dst, **PG),
+            sync_mode="incremental_upsert",
+            stream_contracts=[{
+                "name": src, "cursor_field": "updated_at", "sync_mode": "incremental_upsert",
+                "primary_key": ["grp", "id"], "selected": True,
+            }],
+            skip_preflight=True, validation_mode="strict",
+        )
+        for _ in range(2):
+            jid = "r14w" + uuid.uuid4().hex[:8]
+            fake.update_job_status(jid, "pending", transfer_request={})
+            res = UniversalTransferEngine().execute_tracked(req, jid)
+            assert res.success, res.error
+            cur.execute(f"UPDATE \"{src}\" SET amount = 'x', updated_at = '2026-11-02' WHERE id = 3")
+        assert (res.destination_summary or {}).get("keyed_write_witness", {}).get("reason") == (
+            "write_pass_already_fingerprinted"
+        ), (res.destination_summary or {}).get("keyed_write_witness")
+    finally:
+        cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+        cur.execute(f'DROP TABLE IF EXISTS "{dst}" CASCADE')
+        conn.close()

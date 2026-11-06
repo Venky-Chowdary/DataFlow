@@ -287,6 +287,26 @@ def test_a_written_key_gone_from_both_populations_is_a_loss_or_a_disclosed_delet
     assert rec["loss_count"] == 1
 
 
+def test_review_m3_a_key_moved_out_of_the_window_is_not_called_deleted():
+    """A windowed re-read: a concurrent update moved (eu, 2)'s cursor past the
+    window after the write. It is outside the compared population but still
+    in the source; the old record named it a delete."""
+    from services.keyed_write_witness import split_concurrent_source_drift
+
+    cols = ["region", "id", "amount"]
+    written = [{"region": "eu", "id": i, "amount": f"{i}.50"} for i in range(1, 4)]
+    w = _witnessed(written, cols)
+    in_window = [written[0], written[2]]
+    after_window = [{"region": "eu", "id": 2, "amount": "2.99"}]
+    _s, _t, rec = split_concurrent_source_drift(
+        witness=w, source_rows=in_window, target_rows=in_window, key_columns=["region", "id"],
+        rows_written=3, full_target_rows=written, out_of_window_rows=after_window,
+    )
+    assert rec["deleted_count"] == 0 and rec["loss_count"] == 0
+    assert rec["moved_out_of_window_count"] == 1
+    assert [k["id"] for k in rec["moved_out_of_window_sample_keys"]] == [2]
+
+
 @pytest.mark.parametrize("case", ["none", "overflow", "scheme", "chunk_failed"])
 def test_without_a_usable_witness_nothing_is_excused(case):
     from services.keyed_write_witness import Encoder, KeyedWriteWitness
