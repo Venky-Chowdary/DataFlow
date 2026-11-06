@@ -28,7 +28,6 @@ from services.team_store import (
     add_workspace_member,
     break_glass_set_admin,
     create_workspace,
-    delete_workspace,
     get_workspace,
     get_workspace_role,
     list_memberships_for_user,
@@ -405,18 +404,25 @@ async def patch_workspace(workspace_id: str, body: WorkspaceBody, request: Reque
 
 @router.delete("/workspaces/{workspace_id}")
 async def delete_workspace_route(workspace_id: str, request: Request):
+    from services.workspace_teardown import WorkspaceBusy, teardown_workspace
+
     actor = _require_platform_admin(request)
-    members = list_workspace_members(workspace_id)
-    if not delete_workspace(workspace_id=workspace_id):
+    if not get_workspace(workspace_id):
         raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        # The whole cascade (schedules, connectors, jobs, keys, tenant policy,
+        # channels, memberships) — the same one a sandbox teardown runs.
+        summary = teardown_workspace(workspace_id, actor=actor)
+    except WorkspaceBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit(
         "team.workspace.delete",
         actor=actor,
         resource=f"/team/workspaces/{workspace_id}",
         level="warn",
-        details={"workspace_id": workspace_id, "members_removed": len(members)},
+        details=summary,
     )
-    return {"ok": True}
+    return {"ok": True, **summary}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -840,10 +846,9 @@ class SandboxCreateBody(BaseModel):
     tester_email: str = Field(..., max_length=254)
     reason: str = Field(..., min_length=1, max_length=500)
     ttl_hours: int = Field(default=24, ge=1, le=168)
-    create_account: bool = Field(
-        default=False,
-        description="Create a synthetic login for tester_email when none exists (one-time password returned once).",
-    )
+    # The tester is always a new synthetic login (one-time password returned
+    # once); an existing account is refused. Accepted for older clients.
+    create_account: bool = Field(default=True)
 
 
 class SandboxDeleteBody(BaseModel):
@@ -873,7 +878,6 @@ async def post_sandbox_workspace(body: SandboxCreateBody, request: Request):
             reason=body.reason,
             actor=actor,
             ttl_hours=body.ttl_hours,
-            create_account=body.create_account,
         )
     except (SandboxError, UserStoreError) as exc:
         raise _sandbox_error(exc) from exc

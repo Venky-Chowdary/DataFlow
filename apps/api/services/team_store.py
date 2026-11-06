@@ -339,6 +339,8 @@ class Workspace:
     #: Set only on a throwaway security-test workspace (C18,
     #: ``services.sandbox_workspaces``): when it is deleted automatically.
     sandbox_expires_at: str = ""
+    #: The synthetic tester login the sandbox created; removed with it.
+    sandbox_tester: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -352,6 +354,7 @@ class Workspace:
             created_by=data.get("created_by", ""),
             org_id=data.get("org_id", ""),
             sandbox_expires_at=str(data.get("sandbox_expires_at") or ""),
+            sandbox_tester=str(data.get("sandbox_tester") or ""),
         )
 
 
@@ -551,7 +554,14 @@ def _delete_workspace_rows(workspace_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def create_workspace(*, name: str, created_by: str, org_id: str = "") -> Workspace:
+def create_workspace(
+    *,
+    name: str,
+    created_by: str,
+    org_id: str = "",
+    sandbox_expires_at: str = "",
+    sandbox_tester: str = "",
+) -> Workspace:
     """Create a workspace and make its creator the first admin, as one unit.
 
     The workspace row and its first membership are two documents, so writing them
@@ -565,6 +575,10 @@ def create_workspace(*, name: str, created_by: str, org_id: str = "") -> Workspa
         name=name.strip()[:128] or "Workspace",
         created_by=normalize_email(created_by),
         org_id=org_id,
+        # Born marked: a sandbox whose set-up fails half-way is still
+        # recognisable — and deletable — as a sandbox (C18).
+        sandbox_expires_at=sandbox_expires_at,
+        sandbox_tester=normalize_email(sandbox_tester),
     )
     first_admin = Membership(
         workspace_id=ws.id,
@@ -613,10 +627,16 @@ def rename_workspace(*, workspace_id: str, name: str) -> Workspace | None:
     return ws
 
 
-def delete_workspace(*, workspace_id: str) -> bool:
+def delete_workspace(*, workspace_id: str, actor: str = "system") -> bool:
+    """Delete the workspace and everything scoped to it (``services.workspace_teardown``).
+
+    Raises ``workspace_teardown.WorkspaceBusy`` while a job of it is active.
+    """
     if not workspace_id:
         return False
-    return _delete_workspace_rows(workspace_id)
+    from services.workspace_teardown import teardown_workspace
+
+    return bool(teardown_workspace(workspace_id, actor=actor)["workspace_removed"])
 
 
 def get_workspace(workspace_id: str) -> Workspace | None:

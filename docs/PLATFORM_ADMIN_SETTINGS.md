@@ -58,7 +58,9 @@ run per deployment per day (Mongo claim `maintenance_runs/job_retention`), on
 the scheduler beat; each run files `workspace.jobs.retention.purge` with
 `mode: "scheduled"`, actor `system:retention`, per workspace.
 `GET /settings` -> `retention_enforcement` reports `scheduled`, `mode`,
-`last_run_at`, `next_run_at`.
+`last_run_at`, `next_run_at`. It needs the shared metadata database (MongoDB): without
+one, turning it on is refused (422), and a run that finds none skips with one
+warning (also shown as `retention_enforcement.warning`).
 
 **API-key ids in audit reads (Browser 20).** `GET /api/v1/audit/events` and
 `GET /api/v1/audit/export` (csv/json/ndjson/cef) return API-key /
@@ -81,16 +83,38 @@ GET    /api/v1/team/sandbox-workspaces
 DELETE /api/v1/team/sandbox-workspaces/{workspace_id}   {"reason": "..."}
 ```
 
-Creates `[sandbox] <name>` with the tester as its **only** admin (the
-platform admin is not a member), stamped `sandbox_expires_at`. With
-`create_account: true` a synthetic login is created and its one-time password
-returned once. The tester then sets MFA / session timeout / IP allowlist on
-that workspace's tenant (`POST /api/v1/workspace/tenant`) and retests without
-touching any real owner or workspace. `DELETE` (or expiry, swept on the
-scheduler beat as actor `system:sandbox-expiry`) removes its tenant policy,
-notification channels, API keys (revoked) and memberships; it refuses any
-workspace that is not a sandbox. Audited as `team.sandbox.create` /
+Creates `[sandbox] <name>` (marked as a sandbox from its first write, so a
+failed set-up is rolled back or still deletable as one) with a **new
+synthetic tester login** as its only admin; its one-time password is
+returned once. An existing account is refused: the sandbox's IP allowlist
+would also govern that person's header-less requests in their real
+workspaces. The platform admin is not a member. The tester then sets MFA /
+session timeout / IP allowlist on that workspace's tenant
+(`POST /api/v1/workspace/tenant`) and retests without touching any real owner
+or workspace. `DELETE` (or expiry: swept on the scheduler beat once per 15
+minutes per deployment, actor `system:sandbox-expiry`) runs the workspace
+cascade below and then deletes the synthetic login and revokes its sessions;
+it refuses any workspace that is not a sandbox, and waits (409) while a job of
+it is active. Audited as `team.sandbox.create` /
 `team.sandbox.delete`. Pytest fixture: `apps/api/tests/r14_sandbox_world.py`.
+
+### Deleting a workspace (one cascade)
+
+`DELETE /api/v1/team/workspaces/{id}`, the sandbox teardown and the expiry
+sweep share `services/workspace_teardown.py` (`team_store.delete_workspace`
+delegates to it). It refuses while any job of the workspace is active (409),
+then removes schedules (CDC capture released, each deletion audited), saved
+connectors and their credentials, finished jobs and quarantine rows,
+transform projects and library recipes, tenant policy, notification
+channels, and revokes API keys / service accounts / SCIM tokens bound to it;
+then the workspace and its memberships. Idempotent. The audit trail, usage
+metering and data contracts are kept (evidence).
+
+**Legacy schedule zones (Sec-15).** A schedule row stored before zones were
+validated (e.g. `Mars/Olympus`) stays writable — pause, rename, back-off —
+because the zone is checked only when a write sets it or changes the
+cadence. The scheduler normalises such zones to UTC once at start-up,
+auditing each row as `schedule.timezone.normalized` (from, to).
 
 ## Who is a platform admin
 

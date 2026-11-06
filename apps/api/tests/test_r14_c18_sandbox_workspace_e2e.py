@@ -60,8 +60,12 @@ def test_only_platform_admins_create_list_or_delete_sandboxes(ent, sandbox):
     # A reason is required; the tester must be another account.
     assert ent.admin.post("/api/v1/team/sandbox-workspaces",
                           json={"tester_email": "y-c18@example.test", "reason": "  "}).status_code == 422
-    assert ent.admin.post("/api/v1/team/sandbox-workspaces",
-                          json={"tester_email": "nobody-c18@example.test", "reason": "r"}).status_code == 400
+    # An existing login is never a sandbox tester (its other workspaces would
+    # fall under the sandbox's IP allowlist, and teardown deletes the login).
+    existing = ent.admin.post("/api/v1/team/sandbox-workspaces",
+                              json={"tester_email": "ws-admin-c18@example.com", "reason": "r"})
+    assert existing.status_code == 400, existing.text
+    assert "already has a login" in existing.json()["detail"]
 
 
 def test_ip_allowlist_and_session_policy_retest_inside_the_sandbox(ent, sandbox, one_proxy):
@@ -129,3 +133,143 @@ def test_expired_sandboxes_are_swept_and_live_ones_kept(ent):
     events = [e for e in ent.audit(action="team.sandbox.delete")
               if e["details"]["workspace_id"] == short.workspace_id]
     assert events and events[-1]["actor"] == "system:sandbox-expiry"
+
+
+# ── Review findings: the teardown removes everything the sandbox held ────────
+
+
+def _seed_connector_and_schedule(box) -> tuple[str, str]:
+    """A saved connector with a stored password, and an armed schedule, in the sandbox."""
+    import uuid
+
+    from services import connector_store
+    from services.schedule_store import PipelineSchedule, _load_all, _save_all
+
+    conn = connector_store.create_connector({
+        "name": f"sandbox pg {uuid.uuid4().hex[:6]}", "type": "postgresql",
+        "host": "db.sandbox.invalid", "port": 5432, "username": "qa",
+        "password": "Sandbox-Secret-c18", "database": "qa", "workspace_id": box.workspace_id,
+    })
+    assert conn.workspace_id == box.workspace_id
+    sched = PipelineSchedule(
+        id=f"c18-sched-{uuid.uuid4().hex[:6]}", name="sandbox nightly", source_connector_id=conn.id,
+        source_table="t", dest_connector_id=conn.id, dest_table="t_out", interval="hourly",
+        enabled=True, workspace_id=box.workspace_id, next_run_at="2000-01-01T00:00:00+00:00",
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+    )
+    _save_all(_load_all() + [sched])
+    return conn.id, sched.id
+
+
+def _assert_gone(ent, box, conn_id: str, sched_id: str, key_raw: str) -> None:
+    from services import connector_store, team_store, user_store
+    from services.schedule_store import get_schedule, list_schedules
+
+    assert team_store.get_workspace(box.workspace_id) is None
+    assert get_schedule(sched_id) is None
+    assert not [s for s in list_schedules() if s.workspace_id == box.workspace_id]
+    assert connector_store.get_connector(conn_id) is None
+    # No copy of the stored credential survives in any control-plane collection.
+    for name in ent.db.list_collection_names():
+        assert ent.db[name].count_documents({"id": conn_id}) == 0, name
+    assert ent.bearer(key_raw).get("/api/v1/connectors/saved").status_code == 401
+    # The synthetic tester's login is gone: its session and its password are refused.
+    assert user_store.get_user(box.tester_email) is None
+    assert box.tester.get("/api/v1/auth/me").status_code == 401
+    login = ent.anonymous().post("/api/v1/auth/login",
+                                 json={"email": box.tester_email, "password": box.created["temporary_password"]})
+    assert login.status_code in (401, 403), login.text
+
+
+@pytest.mark.parametrize("how", ["delete", "expire"])
+def test_teardown_removes_login_schedule_connector_credentials_and_keys(ent, how):
+    from services.sandbox_workspaces import sweep_expired_sandboxes
+
+    box = provision(ent, ttl_hours=1)
+    conn_id, sched_id = _seed_connector_and_schedule(box)
+    key = box.tester.post("/api/v1/workspace/api-keys", json={"name": "k", "role": "viewer", "expires_in": "7d"})
+    assert key.status_code == 200, key.text
+    assert box.tester.get("/api/v1/auth/me").status_code == 200
+    if how == "delete":
+        gone = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}")
+        assert gone.status_code == 200, gone.text
+        summary = gone.json()
+    else:
+        swept = sweep_expired_sandboxes(now=datetime.now(timezone.utc) + timedelta(hours=2), force=True)
+        assert [s["workspace_id"] for s in swept] == [box.workspace_id]
+        summary = swept[0]
+    assert summary["schedules_removed"] == 1 and summary["connectors_removed"] == 1
+    assert summary["api_keys_revoked"] == 1 and summary["tester_login_removed"] is True
+    _assert_gone(ent, box, conn_id, sched_id, key.json()["key"])
+
+
+def test_plain_workspace_delete_runs_the_same_cascade(ent):
+    """DELETE /team/workspaces/{id} left tenants, channels, keys, connectors and schedules."""
+    from services import tenant_store
+    from services.schedule_store import get_schedule
+
+    box = provision(ent)
+    conn_id, sched_id = _seed_connector_and_schedule(box)
+    assert box.tester.post("/api/v1/workspace/tenant",
+                           json={"workspace_id": box.workspace_id, "name": "t"}).status_code == 200
+    key = box.tester.post("/api/v1/workspace/api-keys", json={"name": "k", "role": "viewer", "expires_in": "7d"})
+    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}")
+    assert gone.status_code == 200, gone.text
+    body = gone.json()
+    assert body["tenants_removed"] == 1 and body["schedules_removed"] == 1
+    assert body["connectors_removed"] == 1 and body["api_keys_revoked"] == 1
+    assert tenant_store.get_tenant_for_workspace(box.workspace_id) is None
+    assert get_schedule(sched_id) is None
+    assert ent.bearer(key.json()["key"]).get("/api/v1/connectors/saved").status_code == 401
+    # Idempotent: a second cascade over the same id removes nothing and does not fail.
+    from services.workspace_teardown import teardown_workspace
+
+    again = teardown_workspace(box.workspace_id)
+    assert again["workspace_removed"] is False and again["schedules_removed"] == 0
+
+
+def test_active_job_makes_the_teardown_wait(ent):
+    from services.mongodb_service import get_mongodb_service
+
+    box = provision(ent)
+    svc = get_mongodb_service()
+    job_id = svc.create_transfer_job({"name": "c18-running", "workspace_id": box.workspace_id})
+    svc.get_database()["transfer_jobs"].update_one({"name": "c18-running"}, {"$set": {"status": "running"}})
+    busy = ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}")
+    assert busy.status_code == 409, busy.text
+    from services import team_store
+
+    assert team_store.get_workspace(box.workspace_id) is not None  # nothing deleted
+    svc.get_database()["transfer_jobs"].update_one({"name": "c18-running"}, {"$set": {"status": "cancelled"}})
+    assert ent.admin.delete(f"/api/v1/team/sandbox-workspaces/{box.workspace_id}").status_code == 200
+    assert svc.get_database()["transfer_jobs"].count_documents({"workspace_id": box.workspace_id}) == 0
+    assert job_id
+
+
+def test_failed_setup_rolls_back_and_leaves_no_login_or_workspace(ent, monkeypatch):
+    from services import sandbox_workspaces, team_store, user_store
+
+    def boom(**_kw):
+        raise RuntimeError("membership store down")
+
+    monkeypatch.setattr(team_store, "add_workspace_member", boom)
+    with pytest.raises(RuntimeError):
+        sandbox_workspaces.create_sandbox(
+            name="half", tester_email="half-c18@example.test", reason="r", actor="root-admin@example.com"
+        )
+    assert user_store.get_user("half-c18@example.test") is None
+    assert not [w for w in team_store.list_workspaces() if w.name == "[sandbox] half"]
+
+
+def test_sweep_is_claimed_once_per_period(ent):
+    from services.sandbox_workspaces import sweep_expired_sandboxes
+
+    box = provision(ent, ttl_hours=1)
+    later = datetime.now(timezone.utc) + timedelta(hours=2)
+    first = sweep_expired_sandboxes(now=later)
+    assert [s["workspace_id"] for s in first] == [box.workspace_id]
+    second_box = provision(ent, ttl_hours=1)
+    # Same period: another replica's beat does nothing, even with work waiting.
+    assert sweep_expired_sandboxes(now=later + timedelta(minutes=1)) == []
+    next_period = sweep_expired_sandboxes(now=later + timedelta(minutes=16))
+    assert [s["workspace_id"] for s in next_period] == [second_box.workspace_id]

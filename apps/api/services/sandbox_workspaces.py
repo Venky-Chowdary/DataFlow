@@ -11,15 +11,23 @@ provisions an isolated **sandbox workspace** for one named tester:
   admin (the platform admin who created it is *not* a member, so a policy the
   tester turns on — MFA, a short session timeout, an allowlist — can lock out
   nobody but the tester, in that workspace only), and stamps
-  ``sandbox_expires_at`` (default 24 h, at most 7 days). The tester may be an
-  existing login, or a synthetic one created here (``create_account``) whose
-  one-time password is returned once.
-* ``GET`` lists sandboxes; ``DELETE /{id}`` tears one down: its tenant
-  profile (MFA / session / IP policy), notification channels and API keys
-  (revoked, so a leaked test key dies with it) and the workspace with its
-  memberships. Only a workspace marked as a sandbox can be deleted this way.
+  ``sandbox_expires_at`` (default 24 h, at most 7 days) on the workspace row
+  as it is created, so a half-made sandbox is still recognisable and
+  deletable as one; a failed set-up is rolled back.
+* **The tester is always a synthetic login created here** (one-time
+  password returned once). An existing account is refused: a sandbox IP
+  allowlist would also govern that person's header-less requests in their
+  real workspaces (``ip_allowlist_policy._request_workspaces``), and the
+  teardown deletes the login.
+* ``GET`` lists sandboxes; ``DELETE /{id}`` tears one down with the one
+  workspace cascade (``services.workspace_teardown``: schedules, connectors
+  and their credentials, jobs, quarantine, transforms, tenant policy,
+  channels, API keys revoked, memberships), then deletes the synthetic
+  tester's login and revokes its sessions. Only a workspace marked as a
+  sandbox can be deleted this way; an active job makes it wait (409).
 * Expired sandboxes are torn down by the scheduler beat
-  (:func:`sweep_expired_sandboxes`), audited as actor ``system:sandbox-expiry``.
+  (:func:`sweep_expired_sandboxes`, claimed once per ``SWEEP_INTERVAL`` per
+  deployment), audited as actor ``system:sandbox-expiry``.
 
 Every step is an audit event (``team.sandbox.*``). Nothing here touches a
 workspace that is not a sandbox. Test fixture: ``tests/r14_sandbox_world.py``.
@@ -45,6 +53,10 @@ class SandboxError(ValueError):
 
 class SandboxNotFound(SandboxError):
     status = 404
+
+
+class SandboxBusy(SandboxError):
+    status = 409
 
 
 def _now() -> datetime:
@@ -84,49 +96,49 @@ def create_sandbox(
     reason: str,
     actor: str,
     ttl_hours: int = DEFAULT_TTL_HOURS,
-    create_account: bool = False,
-) -> tuple[dict[str, Any], str | None]:
-    """Create the sandbox; returns its description and a one-time password (or None)."""
+) -> tuple[dict[str, Any], str]:
+    """Create the sandbox; returns its description and the tester's one-time password."""
     from services import team_store, user_store
     from services.sign_in_capability import can_sign_in
 
     if not 1 <= int(ttl_hours) <= MAX_TTL_HOURS:
         raise SandboxError(f"ttl_hours must be between 1 and {MAX_TTL_HOURS}")
     tester = user_store.validate_email(tester_email)
-    if tester == user_store.normalize_email(actor):
+    if tester == user_store.normalize_email(actor) or can_sign_in(tester) or user_store.get_user(tester):
         raise SandboxError(
-            "The tester must be another account: the platform administrator stays "
-            "outside the sandbox so its policies cannot lock them out"
+            f"{tester} already has a login. A sandbox tester is a new synthetic account: "
+            "the sandbox's IP allowlist would also apply to an existing person's other "
+            "workspaces, and the teardown deletes the login"
         )
-    issued: str | None = None
-    if not can_sign_in(tester):
-        if not create_account:
-            raise SandboxError(
-                f"{tester} cannot sign in — pass create_account to create a synthetic test login"
-            )
+    label = " ".join((name or "security test").split())[: 128 - len(NAME_PREFIX)]
+    expires = (_now() + timedelta(hours=int(ttl_hours))).isoformat()
+    ws = team_store.create_workspace(
+        name=NAME_PREFIX + label, created_by=actor, sandbox_expires_at=expires, sandbox_tester=tester
+    )
+    try:
         _user, issued = user_store.create_user(
             email=tester, name="Security tester", role="member", created_by=actor
         )
-    label = " ".join((name or "security test").split())[: 128 - len(NAME_PREFIX)]
-    ws = team_store.create_workspace(name=NAME_PREFIX + label, created_by=actor)
-    ws.sandbox_expires_at = (_now() + timedelta(hours=int(ttl_hours))).isoformat()
-    team_store._write_workspace(ws)
-    team_store.add_workspace_member(
-        workspace_id=ws.id, email=tester, role="admin", added_by=actor, actor_is_platform_admin=True
-    )
-    team_store.remove_workspace_member(
-        workspace_id=ws.id, email=actor, removed_by=actor, actor_is_platform_admin=True
-    )
+        team_store.add_workspace_member(
+            workspace_id=ws.id, email=tester, role="admin", added_by=actor, actor_is_platform_admin=True
+        )
+        team_store.remove_workspace_member(
+            workspace_id=ws.id, email=actor, removed_by=actor, actor_is_platform_admin=True
+        )
+    except Exception:
+        # Roll back: no half-made sandbox, no orphaned synthetic login.
+        _teardown(ws.id, tester, actor=actor)
+        raise
     _audit("team.sandbox.create", actor, ws.id, {
         "workspace_id": ws.id,
         "name": ws.name,
         "tester": tester,
-        "tester_account_created": issued is not None,
-        "expires_at": ws.sandbox_expires_at,
+        "tester_account_created": True,
+        "expires_at": expires,
         "ttl_hours": int(ttl_hours),
         "reason": " ".join(reason.split()),
     })
-    return describe(ws), issued
+    return describe(team_store.get_workspace(ws.id) or ws), issued
 
 
 def list_sandboxes() -> list[dict[str, Any]]:
@@ -136,34 +148,34 @@ def list_sandboxes() -> list[dict[str, Any]]:
     return [describe(ws, now=now) for ws in list_workspaces() if is_sandbox(ws)]
 
 
+def _teardown(workspace_id: str, tester: str, *, actor: str) -> dict[str, Any]:
+    """The workspace cascade, then the synthetic login. Idempotent."""
+    from services import auth_sessions, user_store
+    from services.workspace_teardown import teardown_workspace
+
+    summary = teardown_workspace(workspace_id, actor=actor)
+    login_removed = False
+    if tester:
+        auth_sessions.revoke_all_for_email(tester)
+        login_removed = bool(user_store.delete_user(email=tester))
+    return {**summary, "tester": tester or None, "tester_login_removed": login_removed}
+
+
 def delete_sandbox(workspace_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
     """Tear a sandbox down. Refuses any workspace that is not a sandbox."""
-    from services import integrations_store, notification_store, team_store, tenant_store
+    from services import team_store
+    from services.workspace_teardown import WorkspaceBusy
 
     ws = team_store.get_workspace(workspace_id)
     if ws is None or not is_sandbox(ws):
         raise SandboxNotFound("Sandbox workspace not found")
-    tenants = [t.id for t in tenant_store.list_tenants() if t.workspace_id == workspace_id]
-    for tenant_id in tenants:
-        tenant_store.delete_tenant(tenant_id)
-    channels = [c.id for c in notification_store.list_channels(workspace_id=workspace_id)]
-    for channel_id in channels:
-        notification_store.delete_channel(channel_id)
-    keys = [
-        str(r["id"])
-        for r in integrations_store.load_api_key_records()
-        if str(r.get("workspace_id") or "") == workspace_id
-    ]
-    revoked = [k for k in keys if integrations_store.revoke_api_key(k)]
-    members = len(team_store.list_workspace_members(workspace_id))
-    team_store.delete_workspace(workspace_id=workspace_id)
+    try:
+        summary = _teardown(workspace_id, ws.sandbox_tester, actor=actor)
+    except WorkspaceBusy as exc:
+        raise SandboxBusy(str(exc)) from exc
     summary = {
-        "workspace_id": workspace_id,
+        **summary,
         "name": ws.name,
-        "tenants_removed": len(tenants),
-        "channels_removed": len(channels),
-        "api_keys_revoked": len(revoked),
-        "members_removed": members,
         "expires_at": ws.sandbox_expires_at,
         **({"reason": " ".join(reason.split())} if reason else {}),
     }
@@ -171,11 +183,27 @@ def delete_sandbox(workspace_id: str, *, actor: str, reason: str = "") -> dict[s
     return summary
 
 
-def sweep_expired_sandboxes(*, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Delete every sandbox past its expiry (scheduler beat). Never raises per sandbox."""
+SWEEP_INTERVAL = timedelta(minutes=15)
+SWEEP_CLAIM = "sandbox_expiry"
+
+
+def sweep_expired_sandboxes(*, now: datetime | None = None, force: bool = False) -> list[dict[str, Any]]:
+    """Delete every sandbox past its expiry — once per ``SWEEP_INTERVAL`` per deployment.
+
+    Claimed in Mongo like scheduled retention (``services.maintenance_claim``);
+    a file-backed deployment throttles per process instead. A sandbox with an
+    active job is left for the next sweep. Never raises per sandbox.
+    """
+    from services.maintenance_claim import claim_local, claim_run
     from services.team_store import list_workspaces
 
     current = now or _now()
+    if not force:
+        claimed = claim_run(SWEEP_CLAIM, SWEEP_INTERVAL, now=current)
+        if claimed is None:
+            claimed = claim_local(SWEEP_CLAIM, SWEEP_INTERVAL, now=current)
+        if not claimed:
+            return []
     removed: list[dict[str, Any]] = []
     for ws in list_workspaces():
         expires = _parse(ws.sandbox_expires_at) if is_sandbox(ws) else None
@@ -183,6 +211,8 @@ def sweep_expired_sandboxes(*, now: datetime | None = None) -> list[dict[str, An
             continue
         try:
             removed.append(delete_sandbox(ws.id, actor=EXPIRY_ACTOR, reason="expired"))
+        except SandboxBusy:
+            logger.info("Expired sandbox %s has an active job; the next sweep retries", ws.id)
         except Exception:  # noqa: BLE001 — one sandbox must not stop the sweep
             logger.exception("Expired sandbox %s could not be removed", ws.id)
     return removed

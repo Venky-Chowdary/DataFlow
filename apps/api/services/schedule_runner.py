@@ -2420,10 +2420,12 @@ def _clear_stale_running_schedules() -> None:
 
 
 async def _run_maintenance() -> None:
-    """Daily housekeeping on the beat: scheduled job retention, expired sandboxes.
+    """Housekeeping on the beat: scheduled job retention, expired sandboxes.
 
-    Each step claims its own run in Mongo (one per deployment per day) and is
-    a no-op when off or not due; a failure is logged, never raised into the beat.
+    The beat can tick every second on every replica; each step first claims
+    its period in Mongo (``services.maintenance_claim``: retention once a day,
+    the sandbox sweep every 15 minutes, one replica per period) and returns at
+    once when off or not due. A failure is logged, never raised into the beat.
     """
     from services.job_retention_schedule import run_due_retention
     from services.sandbox_workspaces import sweep_expired_sandboxes
