@@ -12,7 +12,9 @@ three into different PG tables, plus a second job into the same table as the
 first. Every job must reach a truthful terminal state with no aborted
 transaction, every completed destination must equal its source cell for cell,
 and the whole round is repeated (the brief asks for 5 consecutive clean runs:
-``DATAFLOW_R14_CONCURRENCY_ROUNDS``, default 2 to keep CI under a minute).
+``DATAFLOW_R14_CONCURRENCY_ROUNDS``, default 2). A round of four concurrent
+jobs takes about 50 s on the shared CI-class host (5 rounds: 242 s), so the
+default costs roughly 100 s.
 """
 
 from __future__ import annotations
