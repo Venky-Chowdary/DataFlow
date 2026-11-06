@@ -460,6 +460,18 @@ def build_schedule_request(
                 row["primary_key"] = schedule_pk
             stamped.append(row)
         stream_contracts = stamped
+    from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
+
+    # A schedule saved before keep_last was refused on a table read with no
+    # order: park it once on a decision (ValueError -> _park_on_decision)
+    # instead of failing the same Validate refusal on every beat.
+    keep_last_refusal = schedule_keep_last_refusal({
+        "in_file_dedupe": in_file, "source_type": str((src or {}).get("type") or ""),
+        "sync_mode": effective_mode, "stream_contracts": stream_contracts,
+        "source_table": sched.source_table, "cursor_column": getattr(sched, "cursor_column", ""),
+    })
+    if keep_last_refusal:
+        raise DuplicatePolicyError(f"Schedule cannot run as saved — {keep_last_refusal}")
     if policy in {"upsert", "dedupe_skip"} and not (
         schedule_pk or any(_declared_key(row) for row in stream_contracts)
     ):

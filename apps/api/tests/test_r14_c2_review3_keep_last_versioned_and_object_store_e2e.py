@@ -178,3 +178,72 @@ def test_s3_csv_with_keep_last_lands_one_row_per_key(tmp_path, monkeypatch, loca
         assert h.query("postgresql", f'SELECT name FROM public."{dst}" WHERE sku = \'SKU-07\'') == [("dup item",)]  # nosec B608
     finally:
         h.drop_table("postgresql", dst)
+
+
+# ── 4. a schedule's keep_last is judged at save, and a saved one parks ──────
+def _pg_connectors():
+    from services.connector_store import create_connector
+
+    sfx = uuid.uuid4().hex[:6]
+    common = {k: h.PG[k] for k in ("host", "port", "database", "username", "password")}
+    src = create_connector({"name": f"r14-src-{sfx}", "type": "postgresql", "schema": "public", **common})
+    dst = create_connector({"name": f"r14-dst-{sfx}", "type": "postgresql", "schema": "public", **common})
+    return src, dst
+
+
+def _schedule_payload(src, dst, table, **over):
+    payload = {
+        "name": f"r14-keep-last-{uuid.uuid4().hex[:6]}", "source_connector_id": src.id,
+        "source_table": table, "dest_connector_id": dst.id, "dest_table": f"r14ks_{uuid.uuid4().hex[:6]}",
+        "interval": "daily", "enabled": False, "primary_key": "k", "in_file_dedupe": "keep_last",
+        "mappings": [{"source": "k", "target": "k", "confidence": 1}],
+    }
+    payload.update(over)
+    return payload
+
+
+def test_schedule_save_refuses_keep_last_a_table_read_cannot_honour(tmp_path, monkeypatch):
+    from services import schedule_store
+    from services.duplicate_policy import DuplicatePolicyError
+
+    h.isolate(tmp_path, monkeypatch)
+    src, dst = _pg_connectors()
+    table = sfmod._seed_pg("k text, v text, n int", VERSIONS)
+    try:
+        with pytest.raises(DuplicatePolicyError) as refused:
+            schedule_store.create_schedule(_schedule_payload(src, dst, table, sync_mode="full_refresh_overwrite"))
+        assert "keep_last" in str(refused.value) and "append" in str(refused.value)
+        # A cursor-ordered keyed sync honours it: saved.
+        ok = schedule_store.create_schedule(_schedule_payload(
+            src, dst, table, sync_mode="incremental_deduped", cursor_column="n"))
+        assert ok.in_file_dedupe == "keep_last"
+        # ...and changing that schedule to a read with no order is refused too.
+        with pytest.raises(DuplicatePolicyError):
+            schedule_store.update_schedule(ok.id, {"sync_mode": "full_refresh_overwrite", "cursor_column": ""})
+    finally:
+        h.drop_table("postgresql", table)
+
+
+def test_a_saved_schedule_that_cannot_honour_keep_last_parks_once(tmp_path, monkeypatch):
+    import services.schedule_runner as runner
+    from services import schedule_store
+
+    h.isolate(tmp_path, monkeypatch)
+    src, dst = _pg_connectors()
+    table = sfmod._seed_pg("k text, v text, n int", VERSIONS)
+    try:
+        sched = schedule_store.create_schedule(_schedule_payload(
+            src, dst, table, sync_mode="incremental_deduped", cursor_column="n", enabled=True))
+        # Saved before the save-time rule existed: rewrite the stored row directly.
+        rows = schedule_store._load_all()
+        stale = next(s for s in rows if s.id == sched.id)
+        stale.sync_mode = "full_refresh_overwrite"
+        stale.cursor_column = ""
+        schedule_store._save_all(rows)
+        parked: list[str] = []
+        monkeypatch.setattr(runner, "_park_on_decision", lambda sid, exc, **kw: parked.append(str(exc)))
+        assert runner._dispatch_transfer(sched.id) is None
+        assert len(parked) == 1 and "Schedule cannot run as saved" in parked[0], parked
+        assert "keep_last" in parked[0] and "append" in parked[0]
+    finally:
+        h.drop_table("postgresql", table)

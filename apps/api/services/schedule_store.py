@@ -572,6 +572,15 @@ def uneven_minute_step(cron: str) -> int | None:
     return count
 
 
+def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
+    """Save-time twin of Validate's keep_last rule for a table (QA C2 review 3)."""
+    from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
+
+    refusal = schedule_keep_last_refusal(payload)
+    if refusal:
+        raise DuplicatePolicyError(refusal)
+
+
 def canonicalize_cadence(interval: str, cron: str) -> tuple[str, str]:
     """Land a spoken or gapped minute cadence on an anchored interval.
 
@@ -1494,6 +1503,7 @@ def create_schedule(
     )
     payload["duplicate_policy"] = policy
     payload["in_file_dedupe"] = dedupe
+    _refuse_keep_last_that_cannot_run(payload)
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
     interval, cron = canonicalize_cadence(
         str(payload.get("interval") or "daily"),
@@ -1980,6 +1990,11 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             )
             merged["duplicate_policy"] = policy
             merged["in_file_dedupe"] = dedupe
+        if any(
+            key in data
+            for key in ("in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts", "source_connector_id")
+        ):
+            _refuse_keep_last_that_cannot_run(merged)
         # Resume is the re-arm for a finding no signature can clear
         # (approvable is false: remap, fix the source, set a key). Pause then
         # resume used to leave needs_approval set, so the beat kept skipping

@@ -145,6 +145,45 @@ def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
     return collapsed
 
 
+def schedule_keep_last_refusal(payload: Any) -> str:
+    """Why a schedule's keep_last can never run, or "" — the same rule as Validate.
+
+    A schedule always stamps ``in_file_dedupe`` (``block`` / ``keep_last``) on
+    every run. keep_last on a table read that does not define a last copy
+    (``data_integrity.keep_last_table_refusal``) failed every beat; it is
+    refused at save instead (REST, MCP create_schedule and GitOps all save
+    through ``schedule_store``). A record-batch source, or one whose connector
+    cannot be resolved here, is left to Validate.
+    """
+    data = dict(payload or {})
+    dedupe = str(data.get("in_file_dedupe") or "").strip().lower().replace("-", "_")
+    if dedupe not in {"keep_last", "last", "last_wins"}:
+        return ""
+    from services.preflight_source_kind import source_is_record_batch
+
+    src_type = str(data.get("source_type") or "")
+    if not src_type and data.get("source_connector_id"):
+        try:
+            from services.connector_store import get_connector
+
+            found = get_connector(str(data["source_connector_id"]))
+            src_type = str(getattr(found, "type", "") or (found or {}).get("type", "") if found else "")
+        except Exception:  # noqa: BLE001 — unresolved: Validate decides
+            return ""
+    if not src_type or source_is_record_batch("database", src_type):
+        return ""
+    table = str(data.get("source_table") or "")
+    contracts = [c for c in data.get("stream_contracts") or [] if isinstance(c, dict)] or [{
+        "name": table, "selected": True, "cursor_field": str(data.get("cursor_column") or ""),
+    }]
+    from services.data_integrity import keep_last_table_refusal
+
+    return keep_last_table_refusal(
+        str(data.get("sync_mode") or "full_refresh_overwrite"),
+        stream_contracts=contracts, source_type=src_type, stream_name=table,
+    )
+
+
 def normalize_duplicate_policy(raw: str | None) -> str:
     text = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
