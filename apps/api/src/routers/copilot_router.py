@@ -43,21 +43,16 @@ def _saved_connector_endpoint(conn: Any, table: str = "") -> Any:
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
-    cfg = {
-        key: getattr(conn, key, None)
-        for key in (
-            "type", "host", "port", "database", "username", "password",
-            "schema", "connection_string", "ssl", "warehouse", "auth_mode",
-            "auth_role", "api_key", "service_account", "private_key",
-            "endpoint_url", "path_style", "auth_source",
+    # The connector id is the whole identity; resolve_endpoint expands it the
+    # way a job's own destination is expanded (adapters._lookup_saved_connector
+    # owns the field list).
+    return resolve_endpoint(
+        EndpointConfig(
+            kind="database",
+            connector_id=str(getattr(conn, "id", "") or ""),
+            table=str(table or "").strip(),
         )
-    }
-    cfg.update(getattr(conn, "extra", None) or {})
-    cfg["connector_id"] = str(getattr(conn, "id", "") or "")
-    table = str(table or "").strip()
-    if table:
-        cfg["table"] = table
-    return resolve_endpoint(EndpointConfig.from_dict("database", cfg))
+    )
 
 def _caller(request: Request) -> tuple[str, str]:
     """Return ``(role, actor)`` for the authenticated caller.
