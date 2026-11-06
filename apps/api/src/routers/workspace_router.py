@@ -218,16 +218,24 @@ def _retention_enforcement() -> dict[str, Any]:
     }
 
 
+#: Settings whose from/to the update audit records (cdc_orphan_auto_drop has
+#: its own event, cdc.capture.auto_drop.changed).
+_AUDITED_SETTINGS = (
+    "org_name", "timezone", "retention_days", "retention_auto_purge",
+    "studio_schema_browser", "studio_canvas",
+)
+
+
 @router.patch("/settings", dependencies=[Depends(platform_settings_guard("general", "update"))])
 async def patch_settings(body: WorkspaceSettingsBody, request: Request):
-    from services.workspace_store import update_workspace_settings
+    from services.workspace_store import update_workspace_settings_with_before
 
     from services.workspace_store import InvalidTimezone
 
     actor = _actor(request)
     toggle: tuple[dict[str, Any], dict[str, Any]] | None = None
     try:
-        updated = update_workspace_settings(
+        before, updated = update_workspace_settings_with_before(
             org_name=body.org_name,
             timezone=body.timezone,
             retention_days=body.retention_days,
@@ -257,6 +265,12 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             "studio_schema_browser": updated["studio_schema_browser"],
             "studio_canvas": updated["studio_canvas"],
             "cdc_orphan_auto_drop": updated["cdc_orphan_auto_drop"],
+            # From the shared store's own pre-image: what this write changed.
+            "changes": {
+                k: {"from": before.get(k), "to": updated.get(k)}
+                for k in _AUDITED_SETTINGS
+                if before.get(k) != updated.get(k)
+            },
         },
     )
     if toggle is not None and toggle[0]["enabled"] != toggle[1]["enabled"]:

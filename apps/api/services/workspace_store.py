@@ -1,4 +1,19 @@
-"""Persisted workspace preferences — org profile, retention, timezone."""
+"""The deployment's general settings — org profile, retention, timezone, studio flags.
+
+One document for the whole deployment (``services.platform_settings``). Where
+a control-plane database is configured it lives there
+(``workspace_settings`` / ``_id: general``), so every replica — API, worker,
+scheduler — reads and writes the same values; the retention purge beat and the
+settings audit read it there, uncached. Only a single-node or dev deployment
+with no control-plane database keeps it in ``data_dir()/workspace.json``
+(``STORE_PATH``), exactly as before.
+
+Migration: the first read on a deployment whose shared store has no document
+seeds it from this node's file, if one exists, with an insert-if-absent (the
+first replica wins; the others adopt its document), and audits it as
+``workspace.settings.migrated``. A file value is never dropped: every known
+key is carried over.
+"""
 
 from __future__ import annotations
 
@@ -81,27 +96,98 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_raw() -> dict[str, Any]:
+_COLLECTION = "workspace_settings"
+_DOC_ID = "general"
+
+
+def _shared():
+    """The shared control-plane collection, or None on a file-only deployment."""
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(_COLLECTION)
+
+
+def _known(raw: dict[str, Any]) -> dict[str, Any]:
+    # Attribution is stored beside the preferences. Filtering it out with the
+    # unknown keys made every read report updated_at/updated_by as null.
+    return {k: v for k, v in raw.items() if k in _DEFAULTS or k in _ATTRIBUTION or k.startswith("_")}
+
+
+def _read_file() -> dict[str, Any] | None:
     if not STORE_PATH.exists():
-        return dict(_DEFAULTS)
+        return None
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return dict(_DEFAULTS)
-        merged = dict(_DEFAULTS)
-        # Attribution is stored beside the preferences. Filtering it out with the
-        # unknown keys made every read report updated_at/updated_by as null.
-        merged.update(
-            {k: v for k, v in raw.items() if k in _DEFAULTS or k in _ATTRIBUTION or k.startswith("_")}
-        )
-        return merged
     except Exception:
-        return dict(_DEFAULTS)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _seed_from_file(coll: Any) -> dict[str, Any] | None:
+    """Insert this node's file into the empty shared store; first writer wins."""
+    raw = _read_file()
+    if raw is None:
+        return None
+    values = {k: v for k, v in _known(raw).items() if not k.startswith("_")}
+    result = coll.update_one(
+        {"_id": _DOC_ID},
+        {"$setOnInsert": {**values, "_migrated_from": str(STORE_PATH), "_migrated_at": _now()}},
+        upsert=True,
+    )
+    if getattr(result, "upserted_id", None) is not None:
+        try:
+            from services.audit_coverage import record_security_event
+
+            record_security_event(
+                "workspace.settings.migrated",
+                outcome="succeeded",
+                resource="workspace_settings",
+                actor="system",
+                details={"source": str(STORE_PATH), "values": values},
+            )
+        except Exception:  # noqa: BLE001 - the document is in place; the log says so
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "workspace settings migrated from %s; the audit record failed", STORE_PATH
+            )
+    return coll.find_one({"_id": _DOC_ID})
+
+
+def _load_raw() -> dict[str, Any]:
+    merged = dict(_DEFAULTS)
+    coll = _shared()
+    if coll is not None:
+        doc = coll.find_one({"_id": _DOC_ID}) or _seed_from_file(coll) or {}
+        merged.update(_known({k: v for k, v in doc.items() if k != "_id"}))
+        return merged
+    raw = _read_file()
+    if raw is not None:
+        merged.update(_known(raw))
+    return merged
 
 
 def _save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
+
+
+def _write(patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``patch``; returns the document as it was before (for the audit)."""
+    coll = _shared()
+    if coll is not None:
+        # Seed first so a migration never loses the file's other values.
+        if coll.find_one({"_id": _DOC_ID}, {"_id": 1}) is None:
+            _seed_from_file(coll)
+        before = coll.find_one_and_update({"_id": _DOC_ID}, {"$set": patch}, upsert=True) or {}
+        merged = dict(_DEFAULTS)
+        merged.update(_known({k: v for k, v in before.items() if k != "_id"}))
+        return merged
+    data = _load_raw()
+    before = dict(data)
+    data.update(patch)
+    _save(data)
+    return before
 
 
 def _cdc_orphan_auto_drop() -> bool:
@@ -111,7 +197,11 @@ def _cdc_orphan_auto_drop() -> bool:
 
 
 def get_workspace_settings() -> dict[str, Any]:
-    raw = _load_raw()
+    """The current settings, read from the store on every call (no cache)."""
+    return _present(_load_raw())
+
+
+def _present(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "org_name": str(raw.get("org_name") or _DEFAULTS["org_name"]),
         "timezone": str(raw.get("timezone") or _DEFAULTS["timezone"]),
@@ -139,24 +229,50 @@ def update_workspace_settings(
     retention_auto_purge: bool | None = None,
     cdc_orphan_auto_drop: bool | None = None,
 ) -> dict[str, Any]:
-    data = _load_raw()
+    return update_workspace_settings_with_before(
+        org_name=org_name, timezone=timezone, retention_days=retention_days,
+        studio_schema_browser=studio_schema_browser, studio_canvas=studio_canvas,
+        actor=actor, retention_auto_purge=retention_auto_purge,
+        cdc_orphan_auto_drop=cdc_orphan_auto_drop,
+    )[1]
+
+
+def update_workspace_settings_with_before(
+    *,
+    org_name: str | None = None,
+    timezone: str | None = None,
+    retention_days: int | None = None,
+    studio_schema_browser: bool | None = None,
+    studio_canvas: bool | None = None,
+    actor: str | None = None,
+    retention_auto_purge: bool | None = None,
+    cdc_orphan_auto_drop: bool | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Change only the named fields; ``(before, after)`` from the store itself.
+
+    The shared store applies the change with one ``$set`` of those fields and
+    hands back the document it replaced, so two replicas writing different
+    fields never clobber each other and the audit's from/to is the store's.
+    """
+    patch: dict[str, Any] = {}
     if org_name is not None:
-        data["org_name"] = org_name.strip()[:128] or _DEFAULTS["org_name"]
+        patch["org_name"] = org_name.strip()[:128] or _DEFAULTS["org_name"]
     if timezone is not None:
-        data["timezone"] = validate_timezone(timezone) if timezone.strip() else _DEFAULTS["timezone"]
+        patch["timezone"] = validate_timezone(timezone) if timezone.strip() else _DEFAULTS["timezone"]
     if retention_days is not None:
-        data["retention_days"] = max(1, min(3650, int(retention_days)))
+        patch["retention_days"] = max(1, min(3650, int(retention_days)))
     if retention_auto_purge is not None:
-        data["retention_auto_purge"] = bool(retention_auto_purge)
+        patch["retention_auto_purge"] = bool(retention_auto_purge)
+    if studio_schema_browser is not None:
+        patch["studio_schema_browser"] = bool(studio_schema_browser)
+    if studio_canvas is not None:
+        patch["studio_canvas"] = bool(studio_canvas)
     if cdc_orphan_auto_drop is not None:
         from services.cdc_capture_inventory import set_auto_drop
 
         set_auto_drop(bool(cdc_orphan_auto_drop), actor=actor or "system")
-    if studio_schema_browser is not None:
-        data["studio_schema_browser"] = bool(studio_schema_browser)
-    if studio_canvas is not None:
-        data["studio_canvas"] = bool(studio_canvas)
-    data["updated_at"] = _now()
-    data["updated_by"] = actor or "system"
-    _save(data)
-    return get_workspace_settings()
+    patch["updated_at"] = _now()
+    patch["updated_by"] = actor or "system"
+    raw_before = _write(patch)
+    before = _present(raw_before)
+    return before, get_workspace_settings()
