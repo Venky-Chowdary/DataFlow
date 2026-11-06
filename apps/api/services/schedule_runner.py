@@ -1653,6 +1653,7 @@ def _open_finding(
 
             unmapped_sentence = message_is_unmapped_column_drift(message)
             missing_table = _missing_source_table(sched, message)
+            from services.append_continuity import CONTINUITY_GATE_ID
             from services.schedule_recovery import (
                 DESTINATION_CONTINUITY_CODE,
                 continuity_corrective,
@@ -1662,7 +1663,11 @@ def _open_finding(
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
-            elif str((evidence or {}).get("error_code") or "") == DESTINATION_CONTINUITY_CODE:
+            elif (
+                str((evidence or {}).get("error_code") or "") == DESTINATION_CONTINUITY_CODE
+                # Refused by the Validate-time gate instead of the Execute check.
+                or CONTINUITY_GATE_ID in list((evidence or {}).get("gate_codes") or [])
+            ):
                 # No signature makes a dropped table hold its history again: the
                 # finding names the schedule's own recovery (QA C9).
                 code = DESTINATION_CONTINUITY_CODE

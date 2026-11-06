@@ -103,8 +103,12 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"credit_?card",
         r"debit_?card",
         r"payment_?card",
-        # ``_`` is a word character, so ``\bpan\b`` missed card_pan / pan_value.
-        r"(?:^|_|\b)pan(?:_|\b|$)",
+        # A PAN in card context only: ``pan`` alone, card_pan, pan_value /
+        # pan_number / pan_no / pan_hash / pan_token — not pan_id or pan_african
+        # (``_`` is a word character, so ``\bpan\b`` missed card_pan).
+        r"^pan$",
+        r"card_?pan",
+        r"(?:^|_)pan_(?:value|number|num|no|hash|token|last4|masked)\b",
         r"(?:^|_)cc_?(?:number|no|num)\b",
         r"\bcvv\b",
         r"card_?holder",

@@ -4134,7 +4134,8 @@ class DataPilotTools:
             "action": tool, "schedule_id": sched.id, "name": sched.name,
             "label": (f"Replace {sched.dest_table} and rebuild “{sched.name}”" if destructive
                       else f"Recover destination of “{sched.name}” ({action})"),
-            "risk": "mutate",
+            # A replacing rebuild is its own risk class, not an ordinary mutation.
+            "risk": "destructive" if destructive else "mutate",
             "destructive": destructive, "requires_confirm": True,
             "ack_id": ack_id, "preview": preview,
         })

@@ -43,6 +43,24 @@ class ScheduleRecoveryRefused(ValueError):
     """The recovery cannot apply; ``str()`` is operator text (HTTP 409)."""
 
 
+#: How a continuity refusal read before it carried DESTINATION_CONTINUITY.
+#: Only a finding parked then (code RUN_REFUSED) is read by wording, so a
+#: schedule parked on an older build keeps its /recover path.
+_LEGACY_CONTINUITY_WORDING = (
+    "the table no longer exists, but the last verified run",
+    "the destination changed since the last verified run",
+    "could not be re-read to prove it is unchanged",
+    "could not be fingerprinted after the last run",
+)
+
+
+def _legacy_continuity_finding(req: dict[str, Any]) -> bool:
+    if str(req.get("code") or "") != "RUN_REFUSED":
+        return False
+    text = str(req.get("finding") or "").lower()
+    return "verification failed for table" in text and any(w in text for w in _LEGACY_CONTINUITY_WORDING)
+
+
 def continuity_corrective(schedule_id: str) -> str:
     """What the parked schedule tells the operator to do, with both doors."""
     return (
@@ -86,7 +104,7 @@ def _open_continuity_finding(sched: Any) -> dict[str, Any] | None:
     if not has_open_approval(sched):
         return None
     req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
-    if str(req.get("code") or "") == DESTINATION_CONTINUITY_CODE:
+    if str(req.get("code") or "") == DESTINATION_CONTINUITY_CODE or _legacy_continuity_finding(req):
         return req
     return None
 

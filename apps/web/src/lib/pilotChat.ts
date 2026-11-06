@@ -75,7 +75,7 @@ export function applyPilotSafeActions(
   const asked = (toolsUsed || []).some((t) => t.name === "navigate" && t.success);
   if (!asked) return;
   for (const a of actions) {
-    if (a.risk === "mutate" || a.type === "studio") continue;
+    if (a.risk === "mutate" || a.risk === "destructive" || a.type === "studio") continue;
     const screen = a.screen || a.route;
     if ((a.type === "navigate" || !a.type) && isNavigableScreen(screen)) {
       onNavigate(screen);

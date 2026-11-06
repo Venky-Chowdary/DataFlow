@@ -950,6 +950,23 @@ def _fail_job_preflight(
     if ledger_dict is not None:
         status_fields["row_accounting"] = ledger_dict
         status_fields["sync_mode"] = str(sync_mode or "")
+    # A blocking gate that states a stable refusal code (e.g. g24's
+    # DESTINATION_CONTINUITY) carries it to the job, exactly as the Execute-time
+    # check does, so the retry policy and the schedule park read one code
+    # whichever door refused the run (QA C9 review 2).
+    coded = next(
+        (
+            b.get("details") for b in pf.get("blockers", [])
+            if isinstance(b, dict) and isinstance(b.get("details"), dict)
+            and str((b.get("details") or {}).get("error_code") or "").strip()
+        ),
+        None,
+    )
+    if coded:
+        status_fields["error_code"] = str(coded["error_code"])
+        error_details["error_code"] = str(coded["error_code"])
+        if coded.get("mismatch"):
+            error_details["mismatch"] = coded["mismatch"]
     from services.drift_approval import (
         build_source_drift_approval,
         gate_codes_from_preflight,
