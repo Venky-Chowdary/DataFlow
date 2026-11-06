@@ -51,7 +51,7 @@ _MAPS = [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}]
 def _plan(plan=_RECOVERY, **over):
     kw = dict(
         dest_type="postgresql", dest_absent_before=False, source_cfg={"type": "mysql"},
-        mappings=_MAPS, pk_sources=["id"], shared_destination=False, delete_mode="",
+        mappings=_MAPS, pk_sources=["id"], delete_mode="",
     )
     kw.update(over)
     return plan_snapshot_sweep(plan, **kw)
@@ -68,9 +68,11 @@ def test_a_query_source_is_refused_with_the_reason():
     assert "query/procedure extract" in sweep.reason and "delete_mode=off" in sweep.next_action
 
 
-def test_a_shared_destination_is_refused():
-    sweep = _plan(shared_destination=True)
-    assert not sweep.allowed and "more than one stream" in sweep.reason
+def test_the_run_finding_states_the_sole_writer_assumption():
+    """Cross-request sharing is undetectable (F7): the finding says what it assumes."""
+    from services.cdc_snapshot_sweep import SOLE_WRITER_ASSUMPTION
+
+    assert "no other route writes this table" in SOLE_WRITER_ASSUMPTION
 
 
 def test_a_transform_on_a_key_column_is_refused_naming_the_column():
@@ -103,6 +105,8 @@ def test_an_unknown_delete_mode_is_refused_with_the_vocabulary():
 
     with pytest.raises(PolicyValueError, match="hard, off, soft"):
         _plan(delete_mode="purge")
+    # delete_mode is validated by the one registry, canonical spelling included.
+    assert _plan(delete_mode="OFF").mode == "off"
 
 
 def test_no_snapshot_or_created_table_or_non_sql_destination_means_nothing_to_measure():
@@ -312,7 +316,8 @@ def test_plan_time_gate_names_the_count_and_the_action(isolated):
         src = EndpointConfig(kind="database", format="mysql", table=table, **_MY)
         dst = EndpointConfig(kind="database", format="postgresql", table=table, **_DESTS["postgresql"])
         snap_gate = {"id": "g18_cdc_snapshot_mode", "status": "pass",
-                     "details": {"run_snapshot": True, "snapshot_mode": "initial"}}
+                     "details": {"run_snapshot": True, "snapshot_mode": "initial",
+                                 "snapshot_plan_reason": "watermark_missing"}}
         gate = build_snapshot_leftover_preflight_gate(
             snapshot_gate=snap_gate,
             stream_contracts=[{"name": table, "selected": True, "sync_mode": "cdc", "primary_key": ["id"]}],
@@ -332,5 +337,83 @@ def test_plan_time_gate_names_the_count_and_the_action(isolated):
         assert build_snapshot_leftover_preflight_gate(
             snapshot_gate={"details": {"run_snapshot": False}}, stream_contracts=[], source_endpoint=src,
             destination_endpoint=dst, source_config={}, mappings=[], dest_type="postgresql") is None
+        assert "no other route writes this table" in gate["message"]
+
+        # F1: the REST / MCP / plan-service routes hand the policy gates plain
+        # dicts; the gate must fire there too, through run_transfer_policy_gates.
+        from services.preflight_transfer_policy import run_transfer_policy_gates
+
+        contracts = [{"name": table, "selected": True, "sync_mode": "cdc", "primary_key": ["id"]}]
+        src_dict = {"type": "mysql", "kind": "database", "table": table, **_MY}
+        dst_dict = {"type": "postgresql", "kind": "database", "table": table, **_DESTS["postgresql"]}
+        gates = run_transfer_policy_gates(
+            sync_mode="cdc", source_type="mysql", dest_type="postgresql", source_kind="database",
+            source_table=table, stream_contracts=contracts, source_endpoint=src_dict,
+            destination_endpoint=dst_dict, source_config=dict(src_dict),
+        )
+        by_id = {g.get("id"): g for g in gates}
+        assert by_id["g18_cdc_snapshot_mode"]["details"].get("snapshot_plan_reason") == "watermark_missing", by_id
+        leftover = by_id.get("g18b_cdc_snapshot_leftover")
+        assert leftover and leftover["status"] == "warn" and leftover["details"]["leftover_keys"] == 1, by_id
+
+        # F2: Validate reasons exactly as Execute will. snapshot_mode=always with
+        # a present position: the run refuses an undeclared sweep, so must the plan.
+        from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
+
+        always = [{"name": table, "selected": True, "sync_mode": "cdc", "primary_key": ["id"], "snapshot_mode": "always"}]
+        g18_always = build_snapshot_mode_preflight_gate(sync_mode="cdc", stream_contracts=always, watermark="0/16B3748")
+        assert g18_always["details"]["run_snapshot"] and g18_always["details"]["snapshot_plan_reason"] == "always"
+        plan_always = build_snapshot_leftover_preflight_gate(
+            snapshot_gate=g18_always, stream_contracts=always, source_endpoint=src_dict,
+            destination_endpoint=dst_dict, source_config=dict(src_dict), mappings=[], dest_type="postgresql",
+        )
+        assert plan_always["details"]["will_remove"] is False and "will NOT be removed" in plan_always["message"]
+        assert "snapshot_mode=always" in plan_always["message"]
+        # An open dump: Execute never sweeps after a resumed dump; the plan says nothing.
+        g18_open = build_snapshot_mode_preflight_gate(
+            sync_mode="cdc", stream_contracts=contracts, watermark={"phase": "snapshot", "table": table, "last_pk": "3"},
+        )
+        assert g18_open["details"]["snapshot_dump_open"] is True
+        assert build_snapshot_leftover_preflight_gate(
+            snapshot_gate=g18_open, stream_contracts=contracts, source_endpoint=src_dict,
+            destination_endpoint=dst_dict, source_config=dict(src_dict), mappings=[], dest_type="postgresql",
+        ) is None
     finally:
         _drop("mysql", table)
+
+
+def test_plan_time_census_states_its_real_bound(monkeypatch):
+    """F8: an unmeasured count names the census cap, which is the key-list cap."""
+    import services.cdc_snapshot_sweep as sweep
+    import services.preflight_cursor_gate as pcg
+    from services.dest_precount import _KEYSET_CENSUS_MAX
+    from src.transfer.models import EndpointConfig
+
+    assert sweep.plan_probe_key_cap() == _KEYSET_CENSUS_MAX
+    monkeypatch.setattr(sweep, "_plan_time_leftover", lambda *a, **k: None)
+    monkeypatch.setattr(pcg, "dest_object_missing", lambda *a, **k: False)
+    dst = EndpointConfig(kind="database", format="postgresql", host="h", port=5432, database="d", table="t")
+    gate = build_snapshot_leftover_preflight_gate(
+        snapshot_gate={"details": {"run_snapshot": True, "snapshot_plan_reason": "watermark_missing", "snapshot_mode": "initial"}},
+        stream_contracts=[{"name": "t", "selected": True, "sync_mode": "cdc", "primary_key": ["id"]}],
+        source_endpoint=dst, destination_endpoint=dst, source_config={"type": "postgresql"}, mappings=[], dest_type="postgresql",
+    )
+    assert gate["details"]["leftover_keys"] is None
+    assert f"census bounded to {_KEYSET_CENSUS_MAX:,} keys" in gate["message"]
+
+
+def test_an_unanswerable_existence_probe_is_unknown_not_populated(monkeypatch):
+    """F9: a probe that errors is None; plan_snapshot_sweep then measures nothing."""
+    import services.dest_precount as dp
+    from src.transfer.cdc_transfer import _dest_table_absent
+
+    def _boom(*a, **k):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(dp, "destination_table_exists", _boom)
+    assert _dest_table_absent("postgresql", {"type": "postgresql"}, "t") is None
+    monkeypatch.setattr(dp, "destination_table_exists", lambda *a, **k: None)
+    assert _dest_table_absent("postgresql", {"type": "postgresql"}, "t") is None
+    monkeypatch.setattr(dp, "destination_table_exists", lambda *a, **k: False)
+    assert _dest_table_absent("postgresql", {"type": "postgresql"}, "t") is True
+    assert _plan(dest_absent_before=None) is None

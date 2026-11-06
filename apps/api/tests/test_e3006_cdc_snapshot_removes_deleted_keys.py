@@ -171,7 +171,7 @@ def test_sweep_never_runs_after_a_partial_dump():
 
     def _plan(plan, **over):
         kw = dict(dest_type="postgresql", dest_absent_before=False, source_cfg={"type": "mysql"},
-                  mappings=[], pk_sources=["id"], shared_destination=False, delete_mode="")
+                  mappings=[], pk_sources=["id"], delete_mode="")
         kw.update(over)
         return plan_snapshot_sweep(plan, **kw)
 

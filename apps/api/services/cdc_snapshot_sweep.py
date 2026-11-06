@@ -45,8 +45,16 @@ RECOVERY_REASONS = frozenset(
     {"watermark_missing", "retention_gap", "retention_gap_when_needed"}
 )
 GATE_ID = "g18b_cdc_snapshot_leftover"
-#: Plan-time key census cap per side; larger tables report "unmeasured".
-PLAN_PROBE_MAX_KEYS = 200_000
+#: Plan-time key census cap: the destination key list is bounded by
+#: ``dest_precount._KEYSET_CENSUS_MAX`` (unlisted above it) and the source
+#: walk reads at most one key more than that; beyond either side the count is
+#: "unmeasured". The source walk runs under its own ``bounded_step`` budget.
+PLAN_PROBE_SECONDS = 20.0
+#: What no probe can prove: another job or route writing the same table.
+SOLE_WRITER_ASSUMPTION = (
+    "This assumes no other route writes this table; a key another job adds "
+    "between the snapshot and the sweep would be removed."
+)
 
 
 @dataclass(frozen=True)
@@ -108,7 +116,6 @@ def plan_snapshot_sweep(
     source_cfg: dict[str, Any] | None,
     mappings: list[dict[str, Any]] | None,
     pk_sources: list[str],
-    shared_destination: bool,
     delete_mode: str | None,
 ) -> SweepPlan | None:
     """The sweep decision, or ``None`` when there is nothing to measure.
@@ -119,7 +126,7 @@ def plan_snapshot_sweep(
     ``delete_mode`` raises :class:`services.transfer_policy_values.PolicyValueError`.
     """
     from services.procedure_source import is_callable_source
-    from services.transfer_policy_values import canonical_policy_value
+    from services.transfer_policy_values import delete_mode_for
     from src.transfer.engine_family import engine_family
 
     if not isinstance(plan, dict) or not plan.get("run_snapshot"):
@@ -131,7 +138,7 @@ def plan_snapshot_sweep(
         return None
     if engine_family(dest_type) not in SWEEP_FAMILIES:
         return None
-    declared = canonical_policy_value("delete_mode", delete_mode)
+    declared = delete_mode_for(delete_mode, "cdc")
     mode = declared or "hard"
     keep = "declare delete_mode=off on the stream contract to keep them"
     if mode == "off":
@@ -160,12 +167,6 @@ def plan_snapshot_sweep(
                 "so snapshot keys cannot be matched to destination keys"
             ),
             next_action=f"remove the transform from the key column(s), or {keep}",
-        )
-    if shared_destination:
-        return SweepPlan(
-            mode, bool(declared), False,
-            reason="the destination table is written by more than one stream of this request",
-            next_action=f"give each stream its own destination table, or {keep}",
         )
     if not declared and str(plan.get("reason") or "") not in RECOVERY_REASONS:
         return SweepPlan(
@@ -278,7 +279,8 @@ class SnapshotKeyCensus:
             verb = "removed" if mode == "hard" else "tombstoned"
             finding = (
                 f"CDC snapshot {verb} {removed} destination row(s) whose key the source "
-                f"no longer has (deleted while the stream was stopped; {self.plan.label()})."
+                f"no longer has (deleted while the stream was stopped; {self.plan.label()}). "
+                f"{SOLE_WRITER_ASSUMPTION}"
             )
             status = "removed"
         else:
@@ -297,6 +299,25 @@ class SnapshotKeyCensus:
             logger.debug("snapshot key spool close failed", exc_info=True)
 
 
+def _as_endpoint(endpoint: Any) -> Any:
+    """An ``EndpointConfig`` for a plan-time endpoint that may still be a dict.
+
+    REST Validate, MCP plan_transfer and transfer_plan_service hand the policy
+    gates plain dicts; the sibling continuity gate coerces the same way.
+    """
+    if endpoint is None or not isinstance(endpoint, dict):
+        return endpoint
+    from src.transfer.models import EndpointConfig
+
+    return EndpointConfig.from_dict(str(endpoint.get("kind") or "database"), endpoint)
+
+
+def plan_probe_key_cap() -> int:
+    from services.dest_precount import _KEYSET_CENSUS_MAX
+
+    return int(_KEYSET_CENSUS_MAX)
+
+
 def _plan_time_leftover(
     source_endpoint: Any,
     destination_endpoint: Any,
@@ -305,33 +326,53 @@ def _plan_time_leftover(
     pk_targets: list[str],
     dest_type: str,
 ) -> int | None:
-    """Destination keys not in the source, counted at plan time; ``None`` = unmeasured."""
+    """Destination keys not in the source, counted at plan time; ``None`` = unmeasured.
+
+    Bounded on both sides by :func:`plan_probe_key_cap` (the destination list
+    is unlisted above it; the source walk stops one key past it) and in time
+    by ``bounded_step`` inside the caller's tool deadline. Keys compare typed
+    (``type_system.unique_equality_key``), not as text.
+    """
     try:
         from services.dest_precount import destination_key_list
         from services.dialect_profiles import schema_from_cfg
+        from services.type_system import unique_equality_key
+        from src.ai.copilot.tool_deadline import bounded_step
         from src.transfer.adapters import resolve_connector_config, resolve_dest_table
         from src.transfer.source_peek import iter_stream_source_column_rows
 
+        cap = plan_probe_key_cap()
         dest_cfg = resolve_connector_config(destination_endpoint)
         table = resolve_dest_table(dest_type, destination_endpoint, "")
         if not table:
             return None
-        dest_keys = destination_key_list(
-            dest_type, dest_cfg, schema=str(schema_from_cfg(dest_type, dest_cfg) or ""),
-            table_name=str(table), key_columns=pk_targets,
-        )
-        if dest_keys is None or len(dest_keys) > PLAN_PROBE_MAX_KEYS:
-            return None
-        remaining = {tuple(str(v) for v in k) for k in dest_keys}
-        seen = 0
-        for row in iter_stream_source_column_rows(source_endpoint, list(pk_sources)):
-            seen += 1
-            if seen > PLAN_PROBE_MAX_KEYS:
+
+        def _typed(values: Any) -> tuple[str, ...]:
+            return tuple(str(unique_equality_key(v)) for v in values)
+
+        def _census() -> int | None:
+            dest_keys = destination_key_list(
+                dest_type, dest_cfg, schema=str(schema_from_cfg(dest_type, dest_cfg) or ""),
+                table_name=str(table), key_columns=pk_targets,
+            )
+            if dest_keys is None:  # unlisted above the cap
                 return None
-            remaining.discard(tuple(str(row.get(c)) for c in pk_sources))
-        if seen == 0:
-            return None  # cursor-paged source: the walk yields nothing, not "no rows"
-        return len(remaining)
+            remaining = {_typed(k) for k in dest_keys}
+            seen = 0
+            for row in iter_stream_source_column_rows(
+                source_endpoint, list(pk_sources), limit=cap + 1
+            ):
+                seen += 1
+                if seen > cap:
+                    return None
+                remaining.discard(_typed(row.get(c) for c in pk_sources))
+            if seen == 0:
+                return None  # cursor-paged source: the walk yields nothing, not "no rows"
+            return len(remaining)
+
+        step = bounded_step("cdc snapshot leftover census", _census, seconds=PLAN_PROBE_SECONDS)
+        value = getattr(step, "value", None)
+        return int(value) if isinstance(value, int) else None
     except Exception as exc:  # noqa: BLE001 — a plan-time probe never blocks
         logger.debug("snapshot leftover plan probe skipped: %s", exc)
         return None
@@ -357,9 +398,13 @@ def build_snapshot_leftover_preflight_gate(
     details = (snapshot_gate or {}).get("details") if isinstance(snapshot_gate, dict) else None
     if not isinstance(details, dict) or not details.get("run_snapshot"):
         return None
+    if details.get("snapshot_dump_open"):
+        return None  # Execute never sweeps after a resumed dump; Validate says nothing either
     from services.cdc_snapshot_window import _pk_columns
     from services.sync_cursor import map_source_to_target, resolve_selected_sync_contracts
 
+    source_endpoint = _as_endpoint(source_endpoint)
+    destination_endpoint = _as_endpoint(destination_endpoint)
     contracts = resolve_selected_sync_contracts(stream_contracts)
     if len(contracts) != 1 or destination_endpoint is None:
         return None
@@ -378,15 +423,18 @@ def build_snapshot_leftover_preflight_gate(
         missing = None
     if missing is not False:
         return None
+    # Validate ≡ Execute: the same kernel verdict the run will take
+    # (g18 stamps classify_snapshot_plan's reason), never a hardcoded one.
     plan = {
         "run_snapshot": True,
-        "reason": "watermark_missing",
+        "reason": str(details.get("snapshot_plan_reason") or ""),
         "snapshot_mode": details.get("snapshot_mode"),
+        "snapshot_dump_open": bool(details.get("snapshot_dump_open")),
     }
     try:
         sweep = plan_snapshot_sweep(
             plan, dest_type=dest_type, dest_absent_before=False, source_cfg=source_config,
-            mappings=maps, pk_sources=pk_sources, shared_destination=False,
+            mappings=maps, pk_sources=pk_sources,
             delete_mode=str(getattr(contract, "delete_mode", "") or ""),
         )
     except ValueError as exc:
@@ -397,14 +445,19 @@ def build_snapshot_leftover_preflight_gate(
         source_endpoint, destination_endpoint,
         pk_sources=pk_sources, pk_targets=pk_targets, dest_type=dest_type,
     )
-    n = "an unmeasured number of" if count is None else str(count)
+    n = (
+        f"an unmeasured number of (census bounded to {plan_probe_key_cap():,} keys a side)"
+        if count is None
+        else str(count)
+    )
     if count == 0:
         status, message = "pass", "Every destination key is in the source; the CDC snapshot removes nothing."
     elif sweep.allowed:
         status = "warn"
         message = (
             f"The CDC snapshot will remove {n} destination key(s) the source no longer has "
-            f"({sweep.label()}). Declare delete_mode=off on the stream contract to keep them."
+            f"({sweep.label()}). Declare delete_mode=off on the stream contract to keep them. "
+            f"{SOLE_WRITER_ASSUMPTION}"
         )
     else:
         status = "warn"

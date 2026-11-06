@@ -1002,8 +1002,6 @@ def _shared_snapshot_censuses(
         str(getattr(c, "name", "") or ""): str(getattr(c, "delete_mode", "") or "")
         for c in (selected or [])
     }
-    names = list(stream_cfg)
-    shared = len(set(names)) != len(names)
     out: dict[str, Any] = {}
     for name, cfg in stream_cfg.items():
         absent = _dest_table_absent(dest_type, dest_cfg, str(name))
@@ -1011,7 +1009,7 @@ def _shared_snapshot_censuses(
         sweep = plan_snapshot_sweep(
             plan, dest_type=dest_type, dest_absent_before=absent, source_cfg=src_cfg,
             mappings=list(cfg.get("mappings") or []), pk_sources=pk_source,
-            shared_destination=shared, delete_mode=delete_modes.get(name, ""),
+            delete_mode=delete_modes.get(name, ""),
         )
         if sweep is not None:
             out[name] = SnapshotKeyCensus(pk_source, sweep)
@@ -1063,27 +1061,29 @@ def _stamp_snapshot_leftover(summary: dict[str, Any], findings: dict[str, dict[s
         summary["snapshot_leftover_deleted"] = removed
 
 
-def _dest_table_absent(dest_type: str, dest_cfg: dict[str, Any], table: str) -> bool:
+def _dest_table_absent(dest_type: str, dest_cfg: dict[str, Any], table: str) -> bool | None:
     """True only when the destination table is provably absent before this run.
 
-    Unknown (a driver without a metadata probe, a probe that errored) is not
-    absent: a missed probe must never turn a failed run into a drop.
+    ``None`` when the probe could not answer (a driver without a metadata
+    probe, a probe that errored): unknown is neither "absent" (a missed probe
+    must never turn a failed run into a drop) nor "populated" (the snapshot
+    sweep must not take an unanswerable probe for an existing table).
     """
     from services.dest_precount import destination_table_exists
     from services.dialect_profiles import schema_from_cfg
 
     try:
-        return (
-            destination_table_exists(
-                dest_type,
-                dest_cfg,
-                schema=schema_from_cfg(dest_type, dest_cfg),
-                table_name=str(table or ""),
-            )
-            is False
+        exists = destination_table_exists(
+            dest_type,
+            dest_cfg,
+            schema=schema_from_cfg(dest_type, dest_cfg),
+            table_name=str(table or ""),
         )
-    except Exception:  # noqa: BLE001 - an unanswerable probe means "do not drop"
-        return False
+    except Exception:  # noqa: BLE001 - an unanswerable probe is unknown
+        return None
+    if exists is None:
+        return None
+    return exists is False
 
 
 def _drop_created_table_left_empty(
@@ -3887,7 +3887,6 @@ def _run_cdc_single_stream(
         source_cfg=src_cfg,
         mappings=list(mappings or []),
         pk_sources=list(pk_source_cols),
-        shared_destination=False,
         delete_mode=str(getattr(contract, "delete_mode", "") or "") if contract else "",
     )
     snapshot_census = SnapshotKeyCensus(pk_source_cols, sweep_plan) if sweep_plan else None
