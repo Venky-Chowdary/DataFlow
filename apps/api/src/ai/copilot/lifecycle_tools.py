@@ -208,6 +208,42 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "list_cdc_captures",
+        "description": (
+            "List the replication slots and publications on a saved PostgreSQL "
+            "source: which ones Datawrap created, the CDC schedules using each, "
+            "whether the captured table still exists, the WAL each retains, and "
+            "a warning for every orphaned slot (no live schedule, or source table "
+            "gone). Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"connector_id": {"type": "string"}, "name": {"type": "string"}},
+            "required": [],
+        },
+    },
+    {
+        "name": "cleanup_cdc_captures",
+        "description": (
+            "Stage dropping orphaned Datawrap replication slots / publications on a "
+            "saved PostgreSQL source (all cleanable ones, or the slot_names given). "
+            "Only slots Datawrap created, with no reader attached, that no live CDC "
+            "schedule uses or whose source table is gone. Destructive; pending "
+            "action until Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "slot_names": {"type": "array", "items": {"type": "string"}},
+                "include_unregistered": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "rebaseline_transfer",
         "description": (
             "Accept the current destination as the append-continuity baseline for "
@@ -455,6 +491,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "clear_cursor_resnapshot": "clear_cursor_resnapshot",
     "rebaseline_transfer": "rebaseline_transfer",
     "recover_schedule_destination": "recover_schedule_destination",
+    "cleanup_cdc_captures": "cleanup_cdc_captures",
 }
 
 
@@ -1880,4 +1917,95 @@ def stage_rebaseline_transfer(
             + (f".{table}" if table else "")
         ),
         destructive=False,
+    )
+
+
+def _pg_capture_source(tool: str, connector_id: str, name: str):
+    """The saved PostgreSQL source's full config, or a ToolResult refusal."""
+    conn, err = _connector(tool, connector_id, name)
+    if err:
+        return None, None, err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return None, None, _unresolved_id_error(tool, conn)
+    from services.connector_store import get_connector
+
+    saved = get_connector(brief["connector_id"], conn.get("workspace_id") or None)
+    if saved is None or (saved.type or "").lower() not in {"postgresql", "postgres"}:
+        return None, None, _tool_result(
+            tool, success=False, output=None,
+            error="Only a saved PostgreSQL source keeps CDC replication slots.",
+        )
+    return brief, saved, None
+
+
+def list_cdc_captures(connector_id: str = "", name: str = "") -> ToolResult:
+    """C11 ops listing: the same inventory as GET /api/v1/ops/cdc-captures."""
+    brief, saved, err = _pg_capture_source("list_cdc_captures", connector_id, name)
+    if err:
+        return err
+    from services.cdc_capture_inventory import inventory_pg_captures
+
+    try:
+        inv = inventory_pg_captures(
+            saved.to_dict(), connector_id=brief["connector_id"],
+            workspace_id=str(saved.workspace_id or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - name the source failure
+        return _tool_result(
+            "list_cdc_captures", success=False, output=None,
+            error=f"Could not read the source's replication slots: {exc}",
+        )
+    return _tool_result("list_cdc_captures", success=True, output={**brief, **inv})
+
+
+def stage_cleanup_cdc_captures(
+    connector_id: str = "",
+    name: str = "",
+    slot_names: list[str] | None = None,
+    include_unregistered: bool = False,
+    reason: str = "",
+) -> ToolResult:
+    """Stage the slot drop; the preview is a dry run on the source's current state."""
+    brief, saved, err = _pg_capture_source("cleanup_cdc_captures", connector_id, name)
+    if err:
+        return err
+    from services.cdc_capture_inventory import cleanup_pg_captures
+
+    try:
+        plan = cleanup_pg_captures(
+            saved.to_dict(), connector_id=brief["connector_id"],
+            workspace_id=str(saved.workspace_id or ""),
+            slot_names=list(slot_names or []), include_unregistered=bool(include_unregistered),
+            dry_run=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - name the source failure
+        return _tool_result(
+            "cleanup_cdc_captures", success=False, output=None,
+            error=f"Could not read the source's replication slots: {exc}",
+        )
+    would = [r for r in plan["results"] if r.get("action") == "would_drop"]
+    if not would:
+        return _tool_result(
+            "cleanup_cdc_captures", success=True,
+            output={**brief, **plan, "note": "Nothing on this source is safe to drop."},
+        )
+    return _stage(
+        "cleanup_cdc_captures",
+        payload={
+            "connector_id": brief["connector_id"],
+            "slot_names": [r["slot_name"] for r in would if r.get("slot_name")],
+            "publication_names": [
+                r["publication_name"] for r in would
+                if not r.get("slot_name") and r.get("publication_name")
+            ],
+            "include_unregistered": bool(include_unregistered),
+            "reason": str(reason or ""),
+        },
+        preview={**brief, "would_drop": would, "skipped": [
+            r for r in plan["results"] if r.get("action") != "would_drop"
+        ]},
+        label=f"Drop {len(would)} orphaned CDC capture(s) on “{brief['name']}”",
+        destructive=True,
     )

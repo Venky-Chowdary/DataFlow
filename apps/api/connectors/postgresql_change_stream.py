@@ -996,9 +996,25 @@ class PostgreSqlChangeStreamCdc:
                     lsn = self._read_slot_lsn(cur)
             conn.commit()
         self._slot_catalog_cache = None
+        if created_new:
+            self._record_ownership()
         if lsn and (created_new or not self.consistent_point_lsn):
             self.consistent_point_lsn = lsn
         return self.consistent_point_lsn
+
+    def _record_ownership(self) -> None:
+        """C11: Datawrap created this slot/publication — record that it owns it."""
+        from services.cdc_capture_inventory import record_pg_capture
+
+        record_pg_capture(
+            self.cfg,
+            slot_name=self.slot_name,
+            publication_name=self.publication_name if self.output_plugin == "pgoutput" else "",
+            cursor_key=self.cursor_key,
+            schema=self.schema,
+            tables=list(self.tables),
+            plugin=self.output_plugin,
+        )
 
     def _drop_replication_slot(self) -> None:
         """Drop an invalidated slot so snapshot can create a new consistent point."""
@@ -1542,7 +1558,8 @@ class PostgreSqlChangeStreamCdc:
                     "SELECT 1 FROM pg_publication WHERE pubname = %s",
                     (pub,),
                 )
-                if cur.fetchone() is None:
+                created_pub = cur.fetchone() is None
+                if created_pub:
                     tables_sql = ", ".join(qualified_list)
                     cur.execute(f"CREATE PUBLICATION {pub} FOR TABLE {tables_sql}")
                 else:
@@ -1555,6 +1572,8 @@ class PostgreSqlChangeStreamCdc:
                             except Exception as exc:
                                 _logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
             conn.commit()
+        if created_pub:
+            self._record_ownership()
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM pg_publication WHERE pubname = %s", (pub,))

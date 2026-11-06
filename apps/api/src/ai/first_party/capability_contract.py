@@ -1820,8 +1820,14 @@ def pause_cdc_card() -> CapabilityCard | None:
             "route resumes from the log and applies deletes made while it was "
             "stopped; the cancel response names the slot "
             "(cdc_slot_release.reason=resume_keeps_slot). An abandoned route "
-            "holds WAL until an operator runs "
-            "SELECT pg_drop_replication_slot('<name>') on the source. "
+            "holds WAL until it is cleaned up: Operations lists every slot "
+            "Datawrap created on a source with its owner, state and retained "
+            "WAL (GET /api/v1/ops/cdc-captures, MCP list_cdc_captures), and "
+            "an admin drops the orphaned ones (POST "
+            "/api/v1/ops/cdc-captures/cleanup, MCP cleanup_cdc_captures). A "
+            "slot whose source table was dropped is removed automatically "
+            "after a grace period; slots Datawrap did not create are never "
+            "touched. "
             "Deleting the CDC schedule also runs "
             "pg_drop_replication_slot. A failed one-shot CDC job drops the "
             "slot when the failure is not retriable and the worker has "
@@ -1830,7 +1836,8 @@ def pause_cdc_card() -> CapabilityCard | None:
         ),
         source_module=(
             "services/schedule_runner.py · _dispatch_transfer · "
-            "services/cdc_capture_release.py · services/cdc_catchup.py"
+            "services/cdc_capture_release.py · services/cdc_catchup.py · "
+            "services/cdc_capture_inventory.py"
         ),
         category="transfer",
     )

@@ -2316,6 +2316,14 @@ def _run_due_schedules() -> int:
             retry_pending_capture_releases()
         except Exception:  # noqa: BLE001 — cleanup must never stop the beat
             logger.exception("Pending CDC capture release retry failed")
+        try:
+            from services.cdc_capture_inventory import start_source_gone_sweep
+
+            # C11: a slot whose source table was dropped retains WAL for a
+            # table nothing can read; owned ones are dropped after a grace.
+            start_source_gone_sweep()
+        except Exception:  # noqa: BLE001 — cleanup must never stop the beat
+            logger.exception("CDC source-gone capture sweep failed to start")
         from services.schedule_store import unstick_completion_pinned_schedules
 
         unstick_completion_pinned_schedules()

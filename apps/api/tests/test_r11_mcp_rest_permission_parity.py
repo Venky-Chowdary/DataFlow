@@ -64,6 +64,8 @@ REST_TWIN: dict[str, tuple[str, str]] = {
     "resume_job": ("POST", "/api/v1/connectors/jobs/job-1/resume"),
     "replay_quarantine": ("POST", "/api/v1/connectors/jobs/job-1/quarantine/replay"),
     "clear_cursor_resnapshot": ("POST", "/api/v1/ops/cdc-cursors/clear"),
+    "list_cdc_captures": ("GET", "/api/v1/ops/cdc-captures"),
+    "cleanup_cdc_captures": ("POST", "/api/v1/ops/cdc-captures/cleanup"),
 }
 
 #: Tools deliberately stricter than their REST twin, and why.

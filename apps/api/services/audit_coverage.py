@@ -42,6 +42,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "schedule.compliance.acknowledged": "A schedule stored an operator's PII/compliance acknowledgement for its unattended runs.",
     "schedule.orphan.list": "A platform administrator listed pipeline registrations no workspace can see.",
     "schedule.orphan.reconcile": "Orphaned pipeline registrations were reconciled (dry run or applied).",
+    "cdc.capture.cleanup": "Orphaned Datawrap replication slots / publications were dropped on a PostgreSQL CDC source.",
     "schedule.gitops.apply": "A GitOps manifest was applied to schedules.",
     "schedule.approval.approved": "A schedule approval request was approved.",
     "schedule.approval.rejected": "A schedule approval request was rejected.",

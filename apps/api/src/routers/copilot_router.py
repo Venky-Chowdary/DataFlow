@@ -524,6 +524,18 @@ async def _run_lifecycle_confirm(
         if result.get("reason") == "missing_cursor_key":
             raise HTTPException(status_code=400, detail="cursor_key is required")
         return result
+    if kind == "cleanup_cdc_captures":
+        from .ops_router import CdcCaptureCleanupBody, post_cdc_captures_cleanup
+
+        body = CdcCaptureCleanupBody(
+            connector_id=str(payload.get("connector_id") or ""),
+            slot_names=list(payload.get("slot_names") or []),
+            publication_names=list(payload.get("publication_names") or []),
+            include_unregistered=bool(payload.get("include_unregistered")),
+            dry_run=False,
+            reason=str(payload.get("reason") or ""),
+        )
+        return await post_cdc_captures_cleanup(body, http_request, workspace_id)
     if kind == "rebaseline_transfer":
         from services.append_continuity import RebaselineError, rebaseline
         from services.connector_store import get_connector, list_connectors

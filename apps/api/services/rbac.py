@@ -432,6 +432,9 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("GET", "/api/v1/ops/cdc-leases", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-leases/list", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-leases/force-release", Permission.WORKSPACE_MANAGE),
+    # C11: listing dials the source; cleanup drops replication slots on it.
+    ("GET", "/api/v1/ops/cdc-captures", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/ops/cdc-captures/cleanup", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/metrics/json", Permission.WORKSPACE_MANAGE),
     # The platform mail outbox (D130): every tenant's auth mail, so the route
     # itself refuses anyone but a platform admin

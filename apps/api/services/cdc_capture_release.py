@@ -263,6 +263,7 @@ def _release_pg(
             continue
         for key in slot["cursor_keys"]:
             clear_watermark(key)
+        _forget_owned(cfg, slot["slot_name"])
     primary = next(
         (r for r in results if r.get("slot") in {"active", "unreachable", "dropped"}),
         results[0],
@@ -289,6 +290,13 @@ def _release_pg(
         for s in leftover
     )
     return _record_pending(sched, {"released": False, "reason": reason, **out}, slots=leftover)
+
+
+def _forget_owned(cfg: dict[str, Any], slot_name: str) -> None:
+    """The slot is gone from the source: close its ownership record (C11)."""
+    from services.cdc_capture_inventory import forget_capture
+
+    forget_capture(cfg, slot_name)
 
 
 # ── Durable pending-release ledger ──────────────────────────────────────────
@@ -445,6 +453,7 @@ def retry_pending_capture_releases(limit: int = 20) -> list[dict[str, Any]]:
                 continue
             for key in slot.get("cursor_keys") or []:
                 clear_watermark(key)
+            _forget_owned(cfg, slot["slot_name"])
         if remaining:
             _bump_pending(entry, error)
             outcomes.append({"id": entry["id"], "released": False, "error": error})

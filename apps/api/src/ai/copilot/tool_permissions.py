@@ -120,6 +120,9 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "prepare_cdc_source": (Permission.JOB_RUN, MUTATE),
     # POST /ops/cdc-cursors/clear is workspace administration.
     "clear_cursor_resnapshot": (Permission.WORKSPACE_MANAGE, MUTATE),
+    # GET /ops/cdc-captures and POST /ops/cdc-captures/cleanup (C11).
+    "list_cdc_captures": (Permission.WORKSPACE_MANAGE, READ),
+    "cleanup_cdc_captures": (Permission.WORKSPACE_MANAGE, MUTATE),
     "rebaseline_transfer": (Permission.JOB_MANAGE, MUTATE),
     "recover_schedule_destination": (Permission.SCHEDULE_MANAGE, MUTATE),
 }
@@ -149,6 +152,7 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "prepare_cdc_source": Permission.JOB_RUN,
     "studio_remediation": Permission.JOB_RUN,
     "clear_cursor_resnapshot": Permission.WORKSPACE_MANAGE,
+    "cleanup_cdc_captures": Permission.WORKSPACE_MANAGE,
     "rebaseline_transfer": Permission.JOB_MANAGE,
     "recover_schedule_destination": Permission.SCHEDULE_MANAGE,
 }

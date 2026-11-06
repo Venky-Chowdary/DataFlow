@@ -1941,6 +1941,8 @@ class DataPilotTools:
             "replay_quarantine": self._replay_quarantine,
             "repair_cdc_drift": self._repair_cdc_drift,
             "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
+            "list_cdc_captures": self._list_cdc_captures,
+            "cleanup_cdc_captures": self._cleanup_cdc_captures,
             "rebaseline_transfer": self._rebaseline_transfer,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
@@ -4191,6 +4193,25 @@ class DataPilotTools:
         from .lifecycle_tools import stage_clear_cursor_resnapshot
 
         return stage_clear_cursor_resnapshot(cursor_key, reason)
+
+    def _list_cdc_captures(self, connector_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import list_cdc_captures
+
+        return list_cdc_captures(connector_id, name)
+
+    def _cleanup_cdc_captures(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        slot_names: list[str] | None = None,
+        include_unregistered: bool = False,
+        reason: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_cleanup_cdc_captures
+
+        return stage_cleanup_cdc_captures(
+            connector_id, name, slot_names, include_unregistered, reason
+        )
 
     def _rebaseline_transfer(
         self,
