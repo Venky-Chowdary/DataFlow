@@ -13,6 +13,7 @@
    quarantined as rounding.
 g3f. Population fit asks the same verdict: a column the probe refuses is never
    forecast as "held out", and a mode holdout is not called a signed contract.
+A1. block with a cursor already declared offers keep_last, and it runs.
 """
 
 from __future__ import annotations
@@ -489,3 +490,33 @@ def test_a_scale_only_overflow_is_quarantined_as_rounding():
     reasons = [d["reason"] for d in details]
     assert "would round to the column's scale, 2 decimal place(s)" in reasons[0], reasons
     assert "would truncate/overflow" in reasons[1], reasons
+
+
+# ── A1. block with a cursor already declared: the remedy is keep_last ──────
+def test_block_on_a_cursor_ordered_table_offers_keep_last_and_it_runs(client):
+    from services.data_integrity import DUPLICATE_KEY_ROUTES_TABLE_CURSOR
+
+    src = sfmod._seed_pg("k text, v text, n int", VERSIONS)
+    dst = f"r14vb_{uuid.uuid4().hex[:6]}"
+    try:
+        blocked = _versioned_run(client, src, dst, "block")
+        assert blocked.status_code == 422, blocked.text[:800]
+        assert DUPLICATE_KEY_ROUTES_TABLE_CURSOR in blocked.text, blocked.text[:2000]
+        assert "declare the stream's cursor_field" not in blocked.text  # it is declared
+        followed = _versioned_run(client, src, dst, "keep_last")
+        assert followed.status_code == 200, followed.text[:1200]
+        got = dict(h.query("postgresql", f'SELECT k, v FROM public."{dst}"'))  # nosec B608
+        assert got == {"K1": "v1-1", "K2": "v2-1", "K3": "v2-3", "K4": "Zoë ✓"}, got
+    finally:
+        h.drop_table("postgresql", src)
+        h.drop_table("postgresql", dst)
+
+
+def test_root_cause_names_the_cursor_route():
+    from services.data_integrity import DUPLICATE_KEY_ROUTES_TABLE_CURSOR
+    from services.root_cause_engine import _repeated_key_summary
+
+    summary = _repeated_key_summary([{
+        "message": "k: duplicate key values (K3×2) " + DUPLICATE_KEY_ROUTES_TABLE_CURSOR,
+    }])
+    assert summary == "Key k repeats in the source (K3×2). " + DUPLICATE_KEY_ROUTES_TABLE_CURSOR

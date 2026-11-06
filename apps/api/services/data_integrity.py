@@ -1331,10 +1331,39 @@ DUPLICATE_KEY_ROUTES_TABLE_KEYED = (
 )
 
 
-def table_duplicate_routes(sync_mode: str | None) -> str:
-    """The duplicate routes that work on a table source for this sync mode."""
-    from services.primary_key import sync_collapses_in_file_duplicates
+#: A keyed sync whose read already defines the latest copy (a declared cursor):
+#: the block is the operator's explicit ``in_file_dedupe=block``.
+DUPLICATE_KEY_ROUTES_TABLE_CURSOR = (
+    "The stream's cursor already orders this read: set in_file_dedupe=keep_last "
+    "(or leave it unset) so the latest version of each key wins, or remove the "
+    "repeated keys at the source."
+)
+#: Every table/topic route text, most specific first, for the root-cause lookup.
+TABLE_DUPLICATE_ROUTE_TEXTS = (
+    DUPLICATE_KEY_ROUTES_TABLE_CURSOR,
+    DUPLICATE_KEY_ROUTES_TABLE_KEYED,
+    DUPLICATE_KEY_ROUTES_TABLE,
+)
 
+
+def table_duplicate_routes(
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+    stream_name: str = "",
+) -> str:
+    """The duplicate routes that work on a table source for this sync mode."""
+    from services.primary_key import (
+        sync_collapses_in_file_duplicates,
+        table_reads_latest_wins,
+    )
+
+    if table_reads_latest_wins(
+        sync_mode, stream_contracts=stream_contracts,
+        source_type=source_type, stream_name=stream_name,
+    ):
+        return DUPLICATE_KEY_ROUTES_TABLE_CURSOR
     if sync_collapses_in_file_duplicates(sync_mode):
         return DUPLICATE_KEY_ROUTES_TABLE_KEYED
     return DUPLICATE_KEY_ROUTES_TABLE
@@ -1362,10 +1391,14 @@ def keep_last_table_refusal(
         source_type=source_type, stream_name=stream_name,
     ):
         return ""
+    routes = table_duplicate_routes(
+        sync_mode, stream_contracts=stream_contracts,
+        source_type=source_type, stream_name=stream_name,
+    )
     return (
         "in_file_dedupe=keep_last keeps a file's last copy of a key in read order; "
         "this table read has no order that defines it, so it is not applied. "
-        + table_duplicate_routes(sync_mode)
+        + routes
     )
 
 
@@ -2456,7 +2489,14 @@ def run_integrity_audit(
     keep_last_on_table = bool(keep_last_refusal)
     if keep_last_on_table:
         in_file_dedupe = "block"
-    table_routes = table_duplicate_routes(sync_mode) if database_extract else ""
+    table_routes = (
+        table_duplicate_routes(
+            sync_mode, stream_contracts=stream_contracts,
+            source_type=source_db_type, stream_name=stream_name,
+        )
+        if database_extract
+        else ""
+    )
     if not str(in_file_dedupe or "").strip():
         in_file_dedupe = latest_wins_dedupe(
             in_file_dedupe,
