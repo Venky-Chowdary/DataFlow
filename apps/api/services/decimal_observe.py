@@ -1134,7 +1134,14 @@ def cursor_declared_numeric_types(
 # OIDs do not share these values. Code 16 is MySQL BIT and Postgres bool,
 # so it is left to the sample.
 _CURSOR_TEMPORAL_CODES: dict[int, str] = {
-    7: "TIMESTAMP",
+    # pymysql FIELD_TYPE: TIMESTAMP (7) is session-zone converted — an instant,
+    # declared TIMESTAMPTZ exactly as the catalog introspection declares the
+    # column (schema_introspect._mysql_to_logical) and as the readers wire it
+    # (mysql_timestamp_instant_wire). Declaring it zoneless made a query-mode
+    # extract plan an NTZ carrier for aware values: preflight blocked the run
+    # as a fidelity collapse (QA r12 strict checksum, query mode). DATETIME
+    # (12) is a wall clock and stays zoneless.
+    7: "TIMESTAMPTZ",
     10: "DATE",
     11: "TIME",
     12: "DATETIME",

@@ -1453,6 +1453,12 @@ def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: b
     conn = engine.connect()
     try:
         _apply_timeout(conn, spec.dialect or str(cfg.get("type") or ""), timeout)
+        if _is_mysql_family(spec.dialect or str(cfg.get("type") or "")):
+            # Same session as table mode: a TIMESTAMP's digits are then the
+            # UTC instant, whatever zone the server runs in (round-5 policy).
+            from services.timezone_policy import MYSQL_UTC_PIN_SQL
+
+            conn.exec_driver_sql(MYSQL_UTC_PIN_SQL)
         from services.sql_literals import escape_sqlalchemy_literal_colons
 
         # ``:1`` inside a JSON or time literal is not a bind (QA R2-004).
@@ -1492,6 +1498,9 @@ def _execute_live(
         description = _copy_cursor_description(result)
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
+        instants = _mysql_instant_indexes(description, spec.dialect or str(cfg.get("type") or ""))
+        if instants:
+            fetched = [_instant_row(row, instants) for row in fetched]
         carriers = python_carriers_of_rows(headers, fetched)
         rows = [[_cell(v) for v in row] for row in fetched]
         # The type lookup is a second statement. Close the extract first, or
@@ -1548,12 +1557,15 @@ def _execute_to_jsonl(
     try:
         engine, conn, result, headers = _open_callable_result(cfg, spec, peek=False)
         description = _copy_cursor_description(result)
+        instants = _mysql_instant_indexes(description, spec.dialect or str(cfg.get("type") or ""))
         with path.open("w", encoding="utf-8") as fh:
             while True:
                 chunk = result.fetchmany(2_000)
                 if not chunk:
                     break
                 for row in chunk:
+                    if instants:
+                        row = _instant_row(row, instants)
                     cells = [_cell(v) for v in row]
                     if len(sample) < PEEK_ROW_LIMIT:
                         sample.append(cells)
@@ -1612,6 +1624,43 @@ def _describe_resolved(conn: Any, description: tuple | None, dialect: str) -> tu
     from services.decimal_observe import annotate_unresolved_pg_types
 
     return annotate_unresolved_pg_types(conn, description, dialect=dialect)
+
+
+#: pymysql ``FIELD_TYPE.TIMESTAMP``. ``DATETIME`` (12) is a zoneless wall clock.
+_MYSQL_TIMESTAMP_TYPE_CODE = 7
+
+
+def _is_mysql_family(dialect: str) -> bool:
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dialect) == "mysql"
+
+
+def _mysql_instant_indexes(description: tuple | None, dialect: str) -> frozenset[int]:
+    """Result columns a MySQL/MariaDB extract returns as ``TIMESTAMP`` instants.
+
+    Table mode reads the catalog and wires a ``TIMESTAMP`` cell as a UTC
+    instant (``mysql_reader``). A query extract has no catalog, so the cell
+    went out as naive digits: Validate then took it for a wall clock, a
+    declared ``source_timezone`` re-zoned an instant that already had one, and
+    the plan collapsed ``TIMESTAMPTZ -> TIMESTAMP`` (QA round 12). The driver's
+    own column type says which columns are instants.
+    """
+    if not description or not _is_mysql_family(dialect):
+        return frozenset()
+    return frozenset(
+        i for i, col in enumerate(description)
+        if col and len(col) > 1 and col[1] == _MYSQL_TIMESTAMP_TYPE_CODE
+    )
+
+
+def _instant_row(row: Any, instants: frozenset[int]) -> tuple:
+    from services.timezone_policy import mysql_timestamp_instant_wire
+
+    return tuple(
+        mysql_timestamp_instant_wire(v) if i in instants else v
+        for i, v in enumerate(row)
+    )
 
 
 def _copy_cursor_description(result: Any) -> tuple | None:
