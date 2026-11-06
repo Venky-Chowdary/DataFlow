@@ -3174,6 +3174,10 @@ def _maybe_attach_verification_ladder(
     validation_mode: str,
 ) -> dict[str, Any]:
     """Property 5 — run L1–L5 when source+dest populations fit the row budget."""
+    from services.keyed_write_witness import take_keyed_write_witness
+
+    # Taken first so every exit drops it: the witness verifies one run once.
+    witness = take_keyed_write_witness((dest_summary or {}).get("job_id"))
     if is_no_op_report(report):
         # Nothing was read past the watermark, so there is no batch for the
         # ladder to verify: it would compare a zero-row write against a sink
@@ -3540,6 +3544,21 @@ def _maybe_attach_verification_ladder(
         )
         if _scoped is not None:
             target_rows = _scoped
+    # Both populations are "this run's written cells" only when the source
+    # side IS the written batch (buffered records) or when a re-read source
+    # was checked key by key against what this run wrote. A re-read alone is
+    # the source after the write: a concurrent UPDATE there is not a loss.
+    scoped_written = bool(batch_scoped and not source_reread)
+    drift_record: dict[str, Any] = {}
+    if batch_scoped and source_reread:
+        from services.keyed_write_witness import split_concurrent_source_drift
+
+        source_rows, target_rows, drift_record = split_concurrent_source_drift(
+            witness=witness, source_rows=source_rows, target_rows=target_rows,
+            columns=target_cols, key_columns=key_cols,
+            dest_db_type=dest_type, dest_types=dest_types,
+        )
+        scoped_written = bool(drift_record.get("attributed"))
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -3585,11 +3604,22 @@ def _maybe_attach_verification_ladder(
         l2_skip_reason=(
             "source_reread_is_pre_transform" if source_reread and rewrites else ""
         ),
-        # Both populations hold exactly this run's written keys (X-OW1): an
-        # L2 value miss is then this run's cell, never another run's row.
-        scoped_to_written_keys=bool(batch_scoped),
+        # Both populations are this run's written cells (see scoped_written).
+        scoped_to_written_keys=scoped_written,
     )
     out = attach_ladder_to_reconcile_report(report, ladder)
+    if batch_scoped and source_reread:
+        from services.keyed_write_witness import (
+            attach_concurrent_drift,
+            attach_unattributed_discrepancy,
+        )
+
+        if scoped_written:
+            out = attach_concurrent_drift(out, drift_record)
+        else:
+            out = attach_unattributed_discrepancy(
+                out, ladder, str(drift_record.get("reason") or "")
+            )
     if window_scoped_target:
         # Round 5 (D203 prov.) — the ladder allows the extra rows an append
         # table holds, so a window appended twice passed. Exactly-once is

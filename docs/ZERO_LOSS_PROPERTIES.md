@@ -255,6 +255,34 @@ identity; L3 skipped as whole_table_not_comparable; ladder does not
 veto a closed Gate-8 dest-before pass. migration_proven stays false.
 ```
 
+### Keyed runs into an occupied table, and concurrent source writers (R14)
+A keyed run into an occupied destination is graded on the keys it wrote
+(X-OW1 batch scope). Whether a difference found there is a loss depends on
+where the source side came from:
+
+* **Buffered route** (the ladder gets the written records): the source side
+  *is* what was written. L2 grades those cells, and any difference vetoes,
+  localized to key and column by L4/L5.
+* **Re-read route** (streaming SQL, `records == []`): the source side is a scan
+  taken *after* the write. A concurrent writer that updates the source between
+  the write and that scan makes source and destination differ on a key the
+  destination holds exactly as written. That is not a loss. The write pass keeps
+  a per-key witness of what it wrote (`services/keyed_write_witness.py`,
+  in-process, bounded by `VERIFICATION_LADDER_MAX_ROWS`). For each key:
+  * The source still equals what was written but the destination differs: a
+    real loss, so the ladder vetoes it.
+  * The source moved and the destination equals what was written: concurrent
+    source drift. It is advisory, named on the report (`concurrent_source_drift`,
+    with a warning listing the keys) and never a veto. The next run picks the
+    new value up.
+  * Neither side equals what was written: the destination is not what this run
+    wrote, so it stays compared and vetoes.
+* **Re-read route without a witness** (a run resumed at reconcile, a route that
+  does not record one, or a witness whose fingerprints do not match the
+  ladder's): the ladder cannot tell drift from loss. The L2 miss stays advisory,
+  as before. It is never silent: the report carries
+  `value_discrepancy_unattributed` and a warning naming the columns.
+
 ### NOT claimed / remaining for PROVEN
 * SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
 * UI copy sweep so no card says “proof” for sample screening

@@ -32,6 +32,7 @@ from connectors.writer_common import (  # noqa: E402
 )
 from services.keyset_pagination import header_column_index  # noqa: E402
 from services.column_digest import stamp_source as stamp_source_columns  # noqa: E402
+from services.keyed_write_witness import begin_keyed_write_witness  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -1866,6 +1867,14 @@ def _stream_database_transfer_impl(
         # max). Whether they are used is decided at reconcile time.
         and not run.cfg.incremental
     )
+    # What a keyed re-read route wrote, per key: the ladder's witness that
+    # tells a concurrent source update from a destination loss.
+    run.tally.keyed_write_witness = begin_keyed_write_witness(
+        job_id=run.cfg.job_id, key_columns=list(run.cfg.pk_target_cols or []),
+        sync_mode=str(run.cfg.effective_sync or ""), resumed=resumed_pass,
+        inline_fingerprints_used=run.tally.inline_fingerprints_used,
+        expected_rows=int(run.cfg.total_rows or 0),
+    )
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
     # the full population on resume, so these counters must be cumulative too or a
@@ -2404,8 +2413,10 @@ def _stream_database_transfer_impl(
         )
         last_checksum = result["last_checksum"] or last_checksum
         fps = result.get("fingerprints") or []
-        if fps:
+        if fps and run.tally.inline_fingerprints_used:
             write_pass_fp.add_many(fps)
+        elif fps and run.tally.keyed_write_witness is not None:
+            run.tally.keyed_write_witness.add_many(fps)
         warning_samples.extend(result["warnings"])  # bounded + deduped
         if len(reconcile_sample) < run.cfg._RECONCILE_SAMPLE_CAP:
             for row in result.get("reconcile_sample_rows") or []:

@@ -1113,14 +1113,22 @@ def run_five_layer_verification(
 
     L4/L5 run when L3 fails, or when ``always_localize`` is True (maximum mode).
 
-    ``scoped_to_written_keys``: the caller restricted BOTH populations to the
-    keys this run wrote (reconcile_step's X-OW1 batch scope). The
-    whole-table-not-comparable exemption — "aggregates cover rows this job did
-    not write" — then no longer holds: an L2 value discrepancy is a concrete
-    cell difference on this run's rows, so it fails the ladder and L4/L5 run to
-    name the key and column (the X-22 contract in ``signed_proof_pack``: a
-    keyed cell mismatch vetoes even on a row_count-assurance route). An
-    unscoped dest-before append stays advisory (ZERO_LOSS_PROPERTIES P5).
+    ``scoped_to_written_keys``: BOTH populations are this run's written
+    cells — restricted to the keys it wrote (X-OW1 batch scope) AND the source
+    side is what was written: the buffered batch, or a source re-read checked
+    key by key against the run's write witness with concurrent source drift
+    removed (``services.keyed_write_witness``). A batch-scoped re-read alone
+    is NOT this: it is the source *after* the write, so a concurrent UPDATE
+    there differs from a destination that holds exactly what was written.
+    When the flag holds, the whole-table-not-comparable exemption ("aggregates
+    cover rows this job did not write") no longer applies: an L2 value
+    discrepancy is a concrete cell difference on this run's rows, so it fails
+    the ladder and L4/L5 run to name the key and column (the X-22 contract in
+    ``signed_proof_pack``: a keyed cell mismatch vetoes even on a
+    row_count-assurance route). reconcile_step also clears ``checksum_scope``
+    for such populations so L3 hashes them (a value swapped between two
+    written rows keeps every column aggregate). An unscoped dest-before append,
+    or a re-read without a witness, stays advisory (ZERO_LOSS_PROPERTIES P5).
     """
     cols = [c for c in columns if c]
     pk = (pk_column or "").strip()
@@ -1342,7 +1350,7 @@ def run_five_layer_verification(
         # Whole-table aggregates cover rows this job did not write.
         passed = bool(l1.passed and l3.passed)
     elif incomparable:
-        # Both sides hold only this run's keys: L2 compares this run's cells.
+        # Both sides are this run's written cells: L2 compares those cells.
         passed = bool(l1.passed and l3.passed and not l2_failed)
     else:
         passed = bool(l1.passed and l3.passed and not l2_failed)

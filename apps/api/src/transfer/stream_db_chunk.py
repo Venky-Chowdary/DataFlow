@@ -826,7 +826,9 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
     # Tombstones are already stripped: hashing deleted keys as writes would
     # fail Gate-8 after a correct hard DELETE.
     inline_fps: list[Any] = []
-    if tally.inline_fingerprints_used and router_step is None:
+    if (
+        tally.inline_fingerprints_used or getattr(tally, "keyed_write_witness", None) is not None
+    ) and router_step is None:
         try:
             mapped_fp, _ = map_rows_for_fingerprint(
                 headers=batch.headers,

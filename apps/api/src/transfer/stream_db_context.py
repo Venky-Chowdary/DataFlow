@@ -115,6 +115,7 @@ class RunTally:
     ddl_state: Any = None
     inline_fingerprints_used: Any = None
     keyed_census_acc: Any = None
+    keyed_write_witness: Any = None
     overwrite_keys_acc: Any = None
     pg_conn_state: Any = None
     sf_conn_state: Any = None
