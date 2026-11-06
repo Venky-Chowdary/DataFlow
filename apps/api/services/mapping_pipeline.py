@@ -378,7 +378,11 @@ def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
     the leftover lossy review when the verdict says the write is lossless.
     False-friend / create-new / score-gap review kinds are untouched.
     """
-    from services.semantic_mapper import REVIEW_KIND_LOSSY, _stamp_review_kinds
+    from services.semantic_mapper import (
+        REVIEW_KIND_LOSSY,
+        _stamp_review_kinds,
+        name_identical,
+    )
 
     out: list[dict] = []
     for m in mappings:
@@ -401,6 +405,27 @@ def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
             )
             row["reasoning"] = cleaned
             row.pop("review_kind", None)
+            if name_identical(str(row.get("source") or ""), str(row.get("target") or "")):
+                # The lossy-pair demotion that capped this same-name mapping at
+                # 0.63 was graded on the declared types alone; the fidelity
+                # owner just measured the values and found the write lossless.
+                # Identity is not in doubt, so the demotion goes with the
+                # review. Leaving it parked TEXT -> NUMERIC amt/qty under the
+                # floor after every signed contract and in lenient mode (D26).
+                exact_type = normalize_logical_type(
+                    str(row.get("source_type") or "")
+                ) == normalize_logical_type(str(row.get("target_type") or ""))
+                row["confidence"] = max(
+                    float(row.get("confidence") or 0.0), 0.99 if exact_type else 0.97
+                )
+                from services.mapping_quality import CONFIDENCE_CLASS_LABELS
+
+                row["confidence_class"] = (
+                    "exact_name_type" if exact_type else "safe_type_promotion"
+                )
+                row["confidence_class_label"] = CONFIDENCE_CLASS_LABELS[
+                    row["confidence_class"]
+                ]
         out.append(row)
     return _stamp_review_kinds(out)
 

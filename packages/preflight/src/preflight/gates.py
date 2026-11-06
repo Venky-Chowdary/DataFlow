@@ -1833,19 +1833,23 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
+    # Every layer is judged on every run and reported together. Returning on
+    # the first one made the operator sign a contract for ``d`` only to be
+    # refused next on ``amt``/``qty`` below the floor (D26).
+    layers: list[tuple[str, str, list[str]]] = []
+
     # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
     risk_unacked = [
         m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
     ]
     if risk_unacked:
         names = [f"{m.source}→{m.target}" for m in risk_unacked]
-        return _block(
-            GateId.G4_MAPPING_CONFIDENCE,
+        layers.append((
+            "risk_unacknowledged",
             f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
             "with a continue execution policy (lossy/narrowing/mutate)",
-            start,
-            _with_scope({"risk_unacknowledged": names}, g4_scope),
-        )
+            names,
+        ))
 
     # STRUCT flatten / specialty — boolean ack alone is insufficient.
     structural_unacked = [
@@ -1859,13 +1863,12 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     ]
     if structural_unacked:
         names = [f"{m.source}→{m.target}" for m in structural_unacked]
-        return _block(
-            GateId.G4_MAPPING_CONFIDENCE,
+        layers.append((
+            "structural_unacknowledged",
             f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
             "signed Migration Risk Contract",
-            start,
-            _with_scope({"structural_unacknowledged": names}, g4_scope),
-        )
+            names,
+        ))
 
     # A verified continue-policy contract names this exact source → target
     # pair with an approver and a reason: an operator approval at least as
@@ -1883,17 +1886,18 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
         shown = ", ".join(names[:8])
         extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
-        return _block(
-            GateId.G4_MAPPING_CONFIDENCE,
+        layers.append((
+            "low_confidence",
             f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
-            start,
-            _with_scope({"low_confidence": names}, g4_scope),
-        )
+            names,
+        ))
 
+    flagged = {id(m) for m in low_confidence}
     ambiguous = [
         m
         for m in active
         if m.requires_review
+        and id(m) not in flagged
         and not m.user_override
         and not _requires_risk_ack(m)
         and not _is_structural_review_mapping(m)
@@ -1906,11 +1910,20 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         ]
         shown = ", ".join(names[:8])
         extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+        layers.append((
+            "ambiguous_mappings",
+            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
+            names,
+        ))
+
+    if layers:
+        head = layers[0][1]
+        rest = "; ".join(msg for _key, msg, _names in layers[1:])
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
+            head + (f" · also: {rest}" if rest else ""),
             start,
-            _with_scope({"ambiguous_mappings": names}, g4_scope),
+            _with_scope({key: names for key, _msg, names in layers}, g4_scope),
         )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
