@@ -180,7 +180,13 @@ def dest_char_is_unpadded(db_type: str | None) -> bool:
 # Engines verified to have no UUID type (nor a typed binary UUID form) for
 # any column to declare: the exact 36-char text wire is the strictest UUID
 # carrier they can spell. Add an engine only with a test that pins it.
-_UUID_TYPELESS_ENGINES = frozenset({"snowflake"})
+# MySQL has no UUID column type (``UUID_TO_BIN`` into ``BINARY(16)`` is an
+# opaque byte string that enforces nothing either); ``CHAR(36)`` is its
+# strictest UUID carrier (QA MySQL D6, pinned in
+# tests/test_r14_pg_uuid_to_mysql_e2e.py). MariaDB 10.7+ has a native ``UUID``
+# type, so a MariaDB destination keeps the remap chip.
+_UUID_TYPELESS_ENGINES = frozenset({"snowflake", "mysql"})
+_UUID_TYPED_MYSQL_TWINS = frozenset({"mariadb"})
 
 
 def dest_upsert_needs_unique_index(db_type: str | None) -> bool:
@@ -206,6 +212,8 @@ def dest_upsert_needs_unique_index(db_type: str | None) -> bool:
 
 def dest_has_no_uuid_type(db_type: str | None) -> bool:
     """True when no carrier on the engine can enforce a UUID domain."""
+    if str(db_type or "").strip().lower() in _UUID_TYPED_MYSQL_TWINS:
+        return False
     return _normalize_dest_db(db_type) in _UUID_TYPELESS_ENGINES
 
 

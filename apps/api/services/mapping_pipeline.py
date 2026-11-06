@@ -328,6 +328,17 @@ def _passthrough_identity_transform(
         same_family = tgt_logical in _TEXT_CARRIER_LOGICALS and bool(
             specialty_wire_preserves_value("OBJECTID", tgt_type)
         )
+    if not same_family and src_logical == "uuid":
+        # A UUID's defined text carrier is its canonical 36 characters
+        # (CHAR(36) on MySQL/MariaDB, VARCHAR2(36) on Oracle). The driver
+        # already renders that text, so the name-triggered ``uuid`` rewrite on
+        # a byte copy graded it ``mutate`` at 0.70 and held every PostgreSQL
+        # UUID -> MySQL create-new at G4 (QA MySQL D6).
+        from services.type_system import uuid_capacity_string_carrier
+
+        same_family = tgt_logical in _TEXT_CARRIER_LOGICALS and bool(
+            uuid_capacity_string_carrier(tgt_type)
+        )
     return "none" if same_family else transform
 
 
