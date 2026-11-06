@@ -2145,6 +2145,17 @@ def _samples_prefer_boolean_over_integer(samples: list[str] | None) -> bool:
     return (bool_ok / checked) >= 0.9 and (int_ok / checked) < 0.5
 
 
+_CLOCK_RE = re.compile(r"\d{1,2}:\d{2}|T\d{2}|\b(?:AM|PM)\b", re.I)
+
+
+def _samples_are_date_only(source_samples: list[str] | None) -> bool:
+    """True when the column is date-shaped and no cell carries a time of day."""
+    cells = [str(c).strip() for c in (source_samples or [])[:25] if str(c or "").strip()]
+    return bool(cells) and _samples_look_temporal(cells) and not any(
+        _CLOCK_RE.search(c) for c in cells
+    )
+
+
 def _samples_look_temporal(source_samples: list[str] | None) -> bool:
     """True when most non-empty samples look date/time-like (not status/enum text)."""
     if not source_samples:
@@ -2368,7 +2379,11 @@ def infer_transform_for_mapping(
         # currency / percentage on numeric tgt already handled above when tgt set
         return "none"
     if semantic == "timestamp":
-        return "datetime"
+        # Date-shaped text with no clock in any cell is a calendar day. A
+        # single unparseable cell kept the profiler from settling on DATE,
+        # and the datetime parse then created TIMESTAMP and landed every
+        # ``2024-01-01`` as ``2024-01-01 00:00:00`` (D291).
+        return "date" if _samples_are_date_only(source_samples) else "datetime"
 
     src_col = source_col.upper()
     # Calendar year number (FSI "Year", fiscal_year) is INTEGER — never invent
