@@ -292,3 +292,19 @@ def test_legacy_saved_connectors_keep_their_meaning():
     assert resolve_tls("postgresql", {"ssl": True}) == (False, "")  # PG keeps its rule
     doc = {"id": "x", "name": "n", "type": "mysql", "role": "source", "ssl": True}
     assert SavedConnector.from_dict(doc).ssl is True
+
+
+@pytest.mark.parametrize("purpose", ["bulk", "write", "reconcile"])
+def test_load_data_and_writer_dials_follow_the_same_plan(purpose):
+    """LOAD DATA (purpose=bulk), the row writer and Gate-8 dial via get_connection."""
+    from connectors.mysql_conn import get_connection, session_encryption
+
+    cfg = _cfg("mysql")
+    for ssl, dsn, encrypted in ((True, "", True), (False, "?ssl-mode=DISABLED", False)):
+        conn = get_connection(host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                              username=cfg["username"], password=cfg["password"],
+                              connection_string=dsn, ssl=ssl, purpose=purpose)
+        try:
+            assert session_encryption(conn)["encrypted"] is encrypted, (purpose, ssl, dsn)
+        finally:
+            conn.close()
