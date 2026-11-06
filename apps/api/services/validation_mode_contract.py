@@ -121,6 +121,9 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
             "label": "Lenient",
             "confidence_floor": 0.75,
             "allows_write": True,
+            # A text cell that does not parse into its typed column is held
+            # out with its reason; the rows that parse load (every gate).
+            "holds_out_bad_cells": True,
             "allows_approved_risks": True,
             "hard_block_fidelity": True,
             "warn_recoverable": True,
@@ -203,6 +206,16 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
 
 def confidence_floor_for_mode(mode: str | None) -> float:
     return float(mode_contract(mode)["confidence_floor"])
+
+
+def mode_holds_out_bad_cells(mode: str | None) -> bool:
+    """True when this mode quarantines a cell that fails its cast and loads the rest.
+
+    One answer for every gate that grades a text source into a typed column:
+    the integrity audit, Target DDL (G6) and schema drift. A create-new run
+    and a run into the table it created then reach the same verdict.
+    """
+    return bool(mode_contract(mode).get("holds_out_bad_cells"))
 
 
 def mode_allows_write(mode: str | None) -> bool:

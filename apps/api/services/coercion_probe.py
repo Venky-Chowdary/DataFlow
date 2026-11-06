@@ -87,11 +87,17 @@ def samples_coerce_mapping(
     source_types: dict[str, str],
     target_types: dict[str, str],
     rows: list[dict[str, Any]],
+    hold_out_failures: bool = False,
 ) -> bool:
     """True when every non-empty sample coerces via the write-path transform.
 
     Used by G5 integrity, G6 DDL, and schema-drift so declared VARCHAR→NUMBER
     (JSON/CSV numeric strings) does not false-block when values cast cleanly.
+
+    ``hold_out_failures`` is a mode that quarantines a cell its cast refuses
+    (``validation_mode_contract.mode_holds_out_bad_cells``): a refused or
+    blank cell is then that row's quarantine, and the pair coerces when at
+    least one sampled cell does. A column with no castable cell still fails.
     """
     src = str(mapping.get("source") or "")
     if not src or not rows:
@@ -129,12 +135,16 @@ def samples_coerce_mapping(
                 "time",
                 "timestamp",
             } or (specialty and specialty not in {"CITEXT", "TSVECTOR"}):
+                if hold_out_failures:
+                    continue
                 return False
             continue
-        checked += 1
         _val, err = apply_transform(raw, transform)
         if err:
+            if hold_out_failures:
+                continue
             return False
+        checked += 1
     return checked > 0
 
 

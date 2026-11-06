@@ -1406,8 +1406,13 @@ def detect_schema_drift(
     declared_source_schema: dict[str, str] | None = None,
     dest_recreated: bool = False,
     dest_key_groups: list[list[str]] | None = None,
+    validation_mode: str | None = None,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan.
+
+    ``validation_mode``: a text source whose sampled cells parse into the live
+    typed column is not a type change under a mode that holds the refused
+    cells out — the same verdict create-new reaches (G6 ``_held_out_text_parse``).
 
     Two different questions are asked of the source here, and an approved
     pre-load transform separates them:
@@ -1518,6 +1523,9 @@ def detect_schema_drift(
     widen_proposals: list[dict[str, Any]] = []
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
+        from services.validation_mode_contract import mode_holds_out_bad_cells
+
+        hold_out_text_cells = mode_holds_out_bad_cells(validation_mode)
         from services.migration_risk_contract import (
             mapping_has_clearing_risk_contract,
         )
@@ -1625,6 +1633,10 @@ def detect_schema_drift(
                 source_types=source_schema,
                 target_types=target_schema,
                 rows=sample_rows,
+                hold_out_failures=(
+                    hold_out_text_cells
+                    and normalize_logical_type(str(src_type)) in {"string", "text"}
+                ),
             ):
                 continue
             type_mismatches.append({

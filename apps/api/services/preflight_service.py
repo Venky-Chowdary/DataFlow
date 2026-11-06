@@ -1160,7 +1160,7 @@ def run_file_preflight(
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
         proven_width_narrowings=proven_string_narrowings,
-        population_fit_report=pre_gate_fit_report, destination_config=destination_config,
+        population_fit_report=pre_gate_fit_report, destination_config=destination_config, validation_mode=validation_mode,
     )
 
     # Two questions, two truths, and an approved pre-load transform separates
@@ -1190,7 +1190,7 @@ def run_file_preflight(
         cursor_fields=cursor_fields,
         schema_policy=schema_policy,
         table_exists=dest_table_exists,
-        dest_recreated=dest_recreated,
+        dest_recreated=dest_recreated, validation_mode=validation_mode,
         dest_key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                         contract_primary_key),
     )

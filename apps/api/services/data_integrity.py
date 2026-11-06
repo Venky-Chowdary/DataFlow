@@ -2472,7 +2472,9 @@ def run_integrity_audit(
     # Module 3: mapping_confidence never blocks_transfer (G4 is SSOT), so the
     # former balanced-mode "downgrade confidence blockers" path is gone.
 
-    if mode == "lenient":
+    from services.validation_mode_contract import mode_holds_out_bad_cells
+
+    if mode_holds_out_bad_cells(mode):
         # Cell and sample findings quarantine at write. They must not refuse
         # the load. A missing schema or an unreadable sample still blocks:
         # there is nothing to quarantine against.
