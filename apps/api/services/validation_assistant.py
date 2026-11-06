@@ -57,6 +57,10 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
             "suggested_fix": raw.get("suggested_fix"),
             "reason": raw.get("reason") or raw.get("unfit_reason"),
             "unfit_reason": raw.get("unfit_reason"),
+            # The hold-out remedy needs the failure class and whether the rows
+            # still block (services.population_fit_scan.is_transform_failure_finding).
+            "transform": raw.get("transform"),
+            "aborts_job": raw.get("aborts_job"),
         })
     coercion = pf.get("coercion_report") if isinstance(pf.get("coercion_report"), dict) else {}
     coercion_cols: list[dict[str, Any]] = []
@@ -369,28 +373,34 @@ def _is_type_mismatch_blocker(text: str) -> bool:
 def _row_value_holdout_actions(
     blockers: list[dict[str, Any]],
     population_findings: list[dict[str, Any]] | None = None,
+    rows_scanned: int = 0,
 ) -> list[dict[str, Any]]:
-    """``quarantine_and_rerun`` for G3f values that fail the declared transform.
+    """``quarantine_and_rerun`` for G3f values the declared transform cannot parse.
 
-    G3f names the rows and values the write path would refuse (an invalid
-    calendar date, a non-number). The remedy for a value in a row is to hold
-    that row out with its reason and load the others, or to correct the
-    source value — the column's type is right.
+    Only transform failures (an impossible date, a non-number — the column's
+    type is right) whose rows are still blocking the job, and only while some
+    scanned rows do fit: holding out every row is not a remedy for a column.
+    A value too wide for its carrier is fixed by widening, never offered here.
     """
+    from services.population_fit_scan import is_transform_failure_finding
+
     actions: list[dict[str, Any]] = []
     for blocker in blockers:
         if (blocker.get("id") or blocker.get("gate")) != "g3f_population_fit":
             continue
-        if "fail the declared transform" not in str(blocker.get("message") or ""):
-            continue
         details = blocker.get("details") if isinstance(blocker.get("details"), dict) else {}
+        scanned = int(details.get("rows_scanned") or rows_scanned or 0)
         for finding in details.get("findings") or population_findings or []:
             if not isinstance(finding, dict) or not finding.get("unfit_rows"):
+                continue
+            if not is_transform_failure_finding(finding) or finding.get("aborts_job") is False:
+                continue
+            count = int(finding.get("unfit_rows") or 0)
+            if scanned and count >= scanned:
                 continue
             column = str(finding.get("source") or "")
             rows = [r for r in finding.get("example_rows") or [] if r is not None][:5]
             values = list(finding.get("example_values") or [])[:5]
-            count = int(finding.get("unfit_rows") or len(rows) or 0)
             where = ", ".join(
                 f"row {r}" + (f" {values[i]!r}" if i < len(values) else "")
                 for i, r in enumerate(rows)
@@ -402,15 +412,17 @@ def _row_value_holdout_actions(
                 "rows": rows,
                 "values": values,
                 "row_count": count,
+                "rows_scanned": scanned,
                 "reason": str(finding.get("unfit_reason") or ""),
+                # One remedy, worded and applied the same way in Studio
+                # (apps/web lib/fileSourceIssueHold.ts HOLD_OUT_LABEL): Balanced
+                # validation holds these rows out, each with its reason.
                 "label": (
-                    f"Hold out {count} row(s) of '{column}' in quarantine ({where}) "
-                    "and load the rest — correct and replay them from Inspect Quarantine"
+                    f"Hold out {count} row(s) of '{column}' in quarantine (Balanced "
+                    f"validation) and load the rest — e.g. {where}; correct and replay "
+                    "them from Inspect quarantine"
                 ),
-                "risk_acceptance": {
-                    "execution_policy": "CAST_AND_CONTINUE",
-                    "on_cast_failure": "quarantine",
-                },
+                "validation_mode": "balanced",
                 "mapping_applyable": False,
             })
     return actions
@@ -420,6 +432,7 @@ def _suggested_actions(
     blockers: list[dict[str, Any]],
     column_fixes: list[dict[str, Any]],
     population_findings: list[dict[str, Any]] | None = None,
+    rows_scanned: int = 0,
 ) -> list[dict[str, Any]]:
     """Machine-readable next steps the UI can render as one-click actions."""
     actions: list[dict[str, Any]] = []
@@ -590,12 +603,16 @@ def _suggested_actions(
             "kind": "check_connection",
             "label": "Open Connectors — fix credentials / Auth source, then Test",
         })
-    holdouts = _row_value_holdout_actions(blockers, population_findings)
+    holdouts = _row_value_holdout_actions(blockers, population_findings, rows_scanned)
     if holdouts:
         # A bad value in named rows (31/02/2025, 'abc') is not a type defect:
         # hold those rows out and load the rest. "Review mappings" alone sent
         # the operator back to Source in a loop (QA browser 3).
-        actions = holdouts + [a for a in actions if a.get("kind") != "quarantine_and_rerun"]
+        # Merged, not replacing: other quarantine routes (encoding, PII) stay.
+        named = {(h["kind"], h["column"]) for h in holdouts}
+        actions = holdouts + [
+            a for a in actions if (a.get("kind"), a.get("column")) not in named
+        ]
     if "g3f_population_fit" in gate_ids and any(
         a.get("kind") == "change_target_type"
         and a.get("to_type")
@@ -823,10 +840,12 @@ def explain_validation(
                 "detail_messages": [],
             })
 
+    population = preflight.get("population_fit") or {}
     actions = _suggested_actions(
         blockers,
         column_fixes,
-        list((preflight.get("population_fit") or {}).get("findings") or []),
+        list(population.get("findings") or []),
+        int(population.get("rows_scanned") or 0),
     )
     deterministic = _deterministic_narrative(
         passed, issues, column_fixes, decision=decision,

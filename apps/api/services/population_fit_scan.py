@@ -155,6 +155,18 @@ class BoundedTarget:
         }
 
 
+def is_transform_failure_finding(finding: dict[str, Any]) -> bool:
+    """A declared transform could not parse the value (``cast_integer`` on '3O7',
+    an impossible date) — not a value too wide/large for the carrier.
+
+    The remedy differs: a bad value is held out (or corrected) row by row; a
+    carrier overflow is fixed by widening the column. One classifier for the
+    G3f headline and the explain remedies.
+    """
+    transform = str(finding.get("transform") or "")
+    return bool(transform) and str(finding.get("unfit_reason") or "").startswith(f"{transform}:")
+
+
 @dataclass(frozen=True)
 class ColumnFitFinding:
     """Values that the destination carrier provably cannot hold."""
@@ -1742,8 +1754,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         # from a value that does not fit the carrier — the old lumped wording
         # blamed the carrier for transform failures.
         def _is_transform_failure(f: ColumnFitFinding) -> bool:
-            t = f.target.transform
-            return bool(t) and f.unfit_reason.startswith(f"{t}:")
+            return is_transform_failure_finding(f.to_dict())
 
         transform_failures = [f for f in aborting if _is_transform_failure(f)]
         carrier_failures = [f for f in aborting if not _is_transform_failure(f)]

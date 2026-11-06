@@ -102,18 +102,31 @@ def _population_fit_cells(gate: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         rows = list(finding.get("example_rows") or [])
         values = list(finding.get("example_values") or [])
+        count = int(finding.get("unfit_rows") or 0)
+        group = f"g3f:{finding.get('source')}->{finding.get('target')}"
+        shown = [r for r in rows if r is not None]
         for i, row in enumerate(rows):
             if row is None:
                 continue
+            base = str(finding.get("unfit_reason") or finding.get("reason") or "")
+            # The scan lists a few examples of a finding that may cover
+            # thousands of rows: say so on every row it shows (review #8).
+            label = (
+                f" — example {shown.index(row) + 1} of {count} value(s) in "
+                f"'{finding.get('source')}' that do not fit"
+                if count > len(shown) else ""
+            )
             issue: dict[str, Any] = {
                 "row": row,
                 "source": finding.get("source"),
                 "column": finding.get("source"),
                 "target": finding.get("target"),
                 "target_type": finding.get("target_type"),
-                "reason": str(finding.get("unfit_reason") or finding.get("reason") or ""),
+                "reason": base + label,
                 "suggested_fix": finding.get("suggested_fix"),
                 "suggested_target_type": finding.get("suggested_target_type"),
+                "example_of_rows": count,
+                "example_group": group,
             }
             if i < len(values):
                 issue["value"] = values[i]
@@ -217,7 +230,14 @@ def preflight_quarantine_row_count(rows: list[dict[str, Any]]) -> int:
     """
     from services.quarantine_dlq import count_finding_rows
 
-    named = count_finding_rows(rows)
+    # A population-scan finding shows a few example rows of a count it knows
+    # (unfit_rows): count the finding, not its examples (review #8).
+    groups: dict[str, int] = {}
+    for d in rows:
+        if d.get("example_group"):
+            key = str(d["example_group"])
+            groups[key] = max(groups.get(key, 0), int(d.get("example_of_rows") or 0))
+    named = count_finding_rows([d for d in rows if not d.get("example_group")]) + sum(groups.values())
     if named:
         return named
     return sum(1 for d in rows if d.get("column"))
@@ -290,6 +310,9 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             "source_type": issue.get("source_type"),
             "target_type": issue.get("target_type"),
         }
+        if issue.get("example_group"):
+            detail["example_group"] = issue["example_group"]
+            detail["example_of_rows"] = issue.get("example_of_rows")
         if column:
             detail["values"] = {column: wired}
         rows.append(detail)

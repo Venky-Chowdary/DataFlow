@@ -27,6 +27,11 @@ export function slimPreflightForExplain(preflight: unknown): Record<string, unkn
       target_type: f.target_type,
       unfit_rows: f.unfit_rows,
       example_values: Array.isArray(f.example_values) ? f.example_values.slice(0, EXAMPLE_CAP) : [],
+      // Row numbers, the transform and whether the rows still block: the
+      // API's hold-out remedy names them (QA browser 3 / review #8).
+      example_rows: Array.isArray(f.example_rows) ? f.example_rows.slice(0, EXAMPLE_CAP) : [],
+      transform: f.transform,
+      aborts_job: f.aborts_job,
       suggested_target_type: f.suggested_target_type,
       suggested_fix: f.suggested_fix,
       reason: f.reason || f.unfit_reason,

@@ -145,14 +145,22 @@ def test_strict_names_row_642_and_offers_hold_out_not_only_review_mappings(studi
     assert actions[0]["kind"] == "quarantine_and_rerun", actions
     assert hold[0]["column"] == "order_date" and 642 in hold[0]["rows"], hold[0]
     assert "31/02/2025" in hold[0]["values"] and hold[0]["reason"], hold[0]
-    assert hold[0]["risk_acceptance"]["on_cast_failure"] == "quarantine"
+    assert hold[0]["validation_mode"] == "balanced" and "Balanced validation" in hold[0]["label"]
+    # The remedy works: the same plan under Balanced is not refused for the date.
+    body["validation_mode"] = "balanced"
+    balanced = client.post("/api/v1/preflight/run", json=body).json()
+    assert "31/02/2025" not in str(balanced.get("blockers")), balanced.get("blockers")
 
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
 
-    cells = [r for r in quarantine_rows_from_preflight(pf) if r.get("row") == 642]
-    assert cells, quarantine_rows_from_preflight(pf)
+    from services.quarantine_from_preflight import preflight_quarantine_row_count
+
+    qrows = quarantine_rows_from_preflight(pf)
+    cells = [r for r in qrows if r.get("row") == 642]
+    assert cells, qrows
     assert cells[0].get("value") == "31/02/2025" and cells[0].get("column") == "order_date", cells[0]
     assert str(cells[0].get("reason") or "").strip(), cells[0]
+    assert preflight_quarantine_row_count(qrows) >= 1
 
 
 # ------------------------------------- review follow-up: database sources, zones
