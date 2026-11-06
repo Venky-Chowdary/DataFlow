@@ -80,7 +80,7 @@ def run_plan_mapping(
         for c in plan.target_columns
     ]
 
-    from services.data_profiler import source_types_are_authoritative
+    from services.data_profiler import source_types_are_authoritative_for
 
     policies = getattr(plan, "policies", None) or {}
     dest = plan.destination if isinstance(plan.destination, dict) else {}
@@ -106,9 +106,10 @@ def run_plan_mapping(
         schema_policy=policies.get("schema_policy", "manual_review"),
         sync_mode=str(policies.get("sync_mode") or ""),
         destination_table_exists=table_exists,
-        source_types_authoritative=source_types_are_authoritative(
+        source_types_authoritative=source_types_are_authoritative_for(
             str(src.get("kind") or ""),
             str(src.get("format") or ""),
+            src,
         ),
         job_id=str(plan_id or "").strip(),
     )

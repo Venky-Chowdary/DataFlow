@@ -832,19 +832,11 @@ def _plan_source_types_authoritative(
 ) -> bool:
     """Whether Map may treat the peeked source types as declared DDL.
 
-    A procedure extract and an object store do not declare precision. Calling
-    them authoritative made the plan bind TEXT while the integrity check
-    expected the profiled DECIMAL. Warehouse catalogs stay authoritative.
-
-    A SQL query on a MySQL- or PostgreSQL-family engine is the exception: its
-    result types come from the driver's cursor description (``DECIMAL(p,s)``,
-    ``LONGTEXT``, ``TIMESTAMP``) and from the Python type the driver built, the
-    same declared evidence a catalog gives — and the REST plan, the plan
-    service and Execute's auto-map already treat it so. Profiling it instead
-    re-typed ``JSON_UNQUOTE(...)`` text as BIGINT off fifty digit samples and
-    Validate refused 'ü1' (QA MySQL D5).
+    The same decision REST makes (``data_profiler.source_types_are_authoritative_for``):
+    a table by its catalog, a query by whether its driver types the result,
+    a procedure only when its result schema was declared.
     """
-    from services.data_profiler import source_types_are_authoritative
+    from services.data_profiler import source_types_are_authoritative_for
 
     kind = str(src_conn.get("kind") or "database")
     fmt = str(
@@ -853,14 +845,17 @@ def _plan_source_types_authoritative(
         or src_conn.get("db_type")
         or ""
     )
+    source = None
     if callable_plan:
-        if str(callable_plan.get("mode") or "") != "query":
-            return False
-        from src.transfer.engine_family import family_or_kind
-
-        if family_or_kind(fmt) not in {"mysql", "postgresql"}:
-            return False
-    return source_types_are_authoritative(kind, fmt)
+        mode = str(callable_plan.get("mode") or "procedure")
+        source = {"extra": {
+            "source_read_mode": mode,
+            "source_query": callable_plan.get("text") if mode == "query" else "",
+            "procedure_call": callable_plan.get("text") if mode == "procedure" else "",
+            "procedure_result_schema": (src_conn.get("extra") or {}).get("procedure_result_schema")
+            or callable_plan.get("procedure_result_schema") or {},
+        }}
+    return source_types_are_authoritative_for(kind, fmt, source)
 
 
 def _engine_format(info: dict[str, Any]) -> str:

@@ -360,6 +360,44 @@ def _is_weak_declared(declared: str) -> bool:
     return t in _WEAK_DECLARED_TYPES
 
 
+#: Engines whose drivers declare a query result's column types in
+#: ``cursor.description`` (``decimal_observe.cursor_declared_carriers``: MySQL /
+#: PostgreSQL type codes, pymssql codes, oracledb DbType names). Other engines'
+#: query results are typed from samples.
+_CURSOR_TYPED_FAMILIES = frozenset({"mysql", "postgresql", "sqlserver", "oracle"})
+
+
+def source_types_are_authoritative_for(source_kind: str, source_format: str, source: Any) -> bool:
+    """The one plan-time decision, MCP and REST alike, given the source endpoint.
+
+    A table is decided by :func:`source_types_are_authoritative`. A SQL query
+    result is declared evidence when the driver types it (``_CURSOR_TYPED_FAMILIES``)
+    — profiling it instead re-typed ``JSON_UNQUOTE`` text BIGINT (QA MySQL D5).
+    A procedure result is declared only when the operator declared
+    ``procedure_result_schema``; otherwise it is a sample (a procedure may not
+    run before confirm, and its peek is not a catalog).
+    """
+    from services.procedure_source import (
+        MODE_PROCEDURE,
+        MODE_QUERY,
+        procedure_result_schema_of,
+        source_read_mode_of,
+    )
+
+    base = source_types_are_authoritative(source_kind, source_format)
+    mode = source_read_mode_of(source) if source is not None else ""
+    if not base or mode not in {MODE_QUERY, MODE_PROCEDURE}:
+        return base
+    if mode == MODE_PROCEDURE:
+        try:
+            return bool(procedure_result_schema_of(source))
+        except ValueError:
+            return False
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(source_format or "") in _CURSOR_TYPED_FAMILIES
+
+
 def source_types_are_authoritative(source_kind: str, source_format: str = "") -> bool:
     """True when the source declared its own types and inference must defer.
 

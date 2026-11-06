@@ -147,7 +147,7 @@ def _auto_map(
                 try:
                     from services.mapping_pipeline import run_mapping_pipeline
 
-                    from services.data_profiler import source_types_are_authoritative
+                    from services.data_profiler import source_types_are_authoritative_for
 
                     result = run_mapping_pipeline(
                         source_columns=columns,
@@ -165,9 +165,10 @@ def _auto_map(
                         destination_db_type=(request.destination.format or "").lower(),
                         source_db_type=(request.source.format or "").lower(),
                         destination_table_exists=dest_exists,
-                        source_types_authoritative=source_types_are_authoritative(
+                        source_types_authoritative=source_types_are_authoritative_for(
                             request.source.kind or "",
                             request.source.format or "",
+                            request.source,
                         ),
                         job_id=job_id,
                     )
@@ -219,7 +220,7 @@ def _auto_map(
                         }
                         for c in target_columns
                     ]
-                    from services.data_profiler import source_types_are_authoritative
+                    from services.data_profiler import source_types_are_authoritative_for
 
                     result = run_mapping_pipeline(
                         source_columns=columns,
@@ -241,9 +242,10 @@ def _auto_map(
                         destination_db_type=(request.destination.format or "").lower(),
                         source_db_type=(request.source.format or "").lower(),
                         destination_table_exists=dest_exists,
-                        source_types_authoritative=source_types_are_authoritative(
+                        source_types_authoritative=source_types_are_authoritative_for(
                             request.source.kind or "",
                             request.source.format or "",
+                            request.source,
                         ),
                         job_id=job_id,
                     )

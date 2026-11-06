@@ -112,13 +112,27 @@ def test_lob_type_codes_are_not_a_decimal_declaration():
     assert mysql_lob_carrier(desc[0], "") == ""
 
 
-def test_query_plans_on_typed_drivers_are_authoritative_procedures_are_not():
+@pytest.mark.parametrize("fmt, mode, declared, want", [
+    ("mysql", "", False, True), ("mysql", "query", False, True),
+    ("postgresql", "query", False, True), ("sqlserver", "query", False, True),
+    ("oracle", "query", False, True), ("snowflake", "query", False, False),
+    ("mysql", "procedure", False, False), ("mysql", "procedure", True, True),
+    ("postgresql", "procedure", False, False),
+])
+def test_mcp_and_rest_share_one_type_authority_decision(fmt, mode, declared, want):
+    """MCP (_plan_source_types_authoritative) and REST / Execute
+    (data_profiler.source_types_are_authoritative_for, used by transfer_plan_service
+    and engine_automap) answer the same question the same way."""
+    from services.data_profiler import source_types_are_authoritative_for
     from src.ai.copilot.transfer_tools import _plan_source_types_authoritative
 
-    db = {"kind": "database", "type": "mysql"}
-    assert _plan_source_types_authoritative(db, {"db_type": "mysql"}, {"mode": "query"})
-    assert _plan_source_types_authoritative(
-        {"kind": "database", "type": "postgresql"}, {"db_type": "postgresql"}, {"mode": "query"})
-    assert not _plan_source_types_authoritative(db, {"db_type": "mysql"}, {"mode": "procedure"})
-    assert not _plan_source_types_authoritative(
-        {"kind": "database", "type": "sqlserver"}, {"db_type": "sqlserver"}, {"mode": "query"})
+    schema = {"id": "INTEGER"} if declared else {}
+    plan = {"mode": mode, "text": "CALL p()" if mode == "procedure" else "SELECT 1",
+            "procedure_result_schema": schema} if mode else None
+    mcp = _plan_source_types_authoritative({"kind": "database", "type": fmt}, {"db_type": fmt}, plan)
+    rest_src = {"kind": "database", "format": fmt, "extra": {
+        "source_read_mode": mode, "source_query": "SELECT 1" if mode == "query" else "",
+        "procedure_call": "CALL p()" if mode == "procedure" else "",
+        "procedure_result_schema": schema}}
+    rest = source_types_are_authoritative_for("database", fmt, rest_src)
+    assert mcp == rest == want, (mcp, rest)
