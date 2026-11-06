@@ -79,21 +79,14 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
 def _absent_field_is_null_in_relational_dest(cfg, batch) -> None:
     """A field a full document does not carry is NULL in a relational table (D262).
 
-    A batch read returns whole documents, so a field one of them lacks — never
-    set, or ``$unset`` since the last run — is known absent. The missing
-    sentinel ("left alone on update") kept the previous run's value in a SQL
-    destination: the source dropped ``note`` and the table still said
-    ``note 12``. A relational row has one spelling of absent, NULL. A CDC page
-    (partial change images) and a schemaless destination (which can omit the
-    field itself) keep the sentinel.
+    The rule and its plan-time disclosure live in ``services.schemaless_absence``.
     """
-    from services.db_type_utils import SCHEMALESS_DESTS
-    from services.sync_cursor import normalize_sync_mode
+    from services.schemaless_absence import absent_attribute_nulls_column
     from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
-    if normalize_sync_mode(str(cfg.effective_sync or ""), default="") == "cdc":
-        return
-    if str(cfg.dest_type or "").strip().lower() in SCHEMALESS_DESTS:
+    if not absent_attribute_nulls_column(
+        str(cfg.src_type or ""), str(cfg.dest_type or ""), str(cfg.effective_sync or "")
+    ):
         return
     rows = batch.rows
     if not rows or not all(isinstance(r, list) for r in rows):

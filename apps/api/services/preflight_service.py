@@ -2977,15 +2977,14 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    from services.oracle_empty_string import attach_oracle_empty_string_warning
+    from services.preflight_notices import attach_plan_notices
 
-    attach_oracle_empty_string_warning(out, dest_kind, plan_mappings)
-    from services.file_pickup import attach_direct_dated_file_warning
-
-    attach_direct_dated_file_warning(out, source_table or source_filename)
-    from services.mirror_delete_notice import attach_mirror_delete_notice
-
-    attach_mirror_delete_notice(out, sync_mode, stream_contracts)
+    attach_plan_notices(
+        out, dest_kind=dest_kind, plan_mappings=plan_mappings,
+        source_object=source_table or source_filename, sync_mode=sync_mode,
+        stream_contracts=stream_contracts, source_format=source_format,
+        destination_db_type=destination_db_type,
+    )
     _lift_in_file_collapse_advisories(out)
     out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
