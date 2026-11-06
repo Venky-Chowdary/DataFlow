@@ -54,6 +54,33 @@ def _url(host: str, port: int, ssl: bool, database: str) -> str:
     return f"{scheme}://{netloc}/db/{db}/tx/commit"
 
 
+def _http_api_unreachable_message(url: str, exc: Exception) -> str:
+    """Why the HTTP Cypher API did not answer, naming Bolt when that is the cause.
+
+    This connector speaks Neo4j's HTTP API. A Bolt port (7687, or a tunnel
+    forwarded to Bolt) drops the HTTP request — "RemoteDisconnected" (D143).
+    """
+    from urllib.parse import urlparse
+
+    from services.brand import PRODUCT_NAME
+    from services.wire_protocol_sniff import speaks_bolt
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    port = parsed.port or (_HTTPS_PORT if parsed.scheme == "https" else 80)
+    http_ports = "7474, or 7473 with TLS"
+    if speaks_bolt(host, port):
+        return (
+            f"{host}:{port} is a Neo4j Bolt port. {PRODUCT_NAME}'s Neo4j connector uses "
+            f"Neo4j's HTTP API, not Bolt: set the port to the HTTP port ({http_ports})."
+        )
+    return (
+        f"Could not reach Neo4j's HTTP API at {host}:{port} ({type(exc).__name__}). "
+        f"{PRODUCT_NAME}'s Neo4j connector uses the HTTP API ({http_ports}), not the Bolt "
+        "port 7687: make sure the HTTP port is reachable and set it as the port."
+    )
+
+
 def _run_cypher(url: str, username: str, password: str, statement: str, timeout: float = 30.0) -> Any:
     payload = {"statements": [{"statement": statement, "resultDataContents": ["row"]}]}
     auth = (username, password) if username and password else None
@@ -196,7 +223,7 @@ def test_connection(
     except requests.exceptions.Timeout:
         return False, "Neo4j connection timed out. Check the host/port and network."
     except requests.exceptions.ConnectionError as exc:
-        return False, f"Could not reach Neo4j host: {exc}"
+        return False, _http_api_unreachable_message(url, exc)
     except requests.exceptions.HTTPError as exc:
         code = exc.response.status_code if exc.response else 0
         if code in (401, 403):

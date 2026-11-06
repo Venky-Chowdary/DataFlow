@@ -60,6 +60,48 @@ def sniff_wire(host: str, port: int, *, timeout: float = 2.0) -> str:
             pass
 
 
+# Bolt handshake: the magic preamble, then four protocol versions the client
+# accepts (5.x, 4.4, 4.3, 3.0). A Bolt server always answers four bytes (the
+# chosen version, or zeros for none) starting with two zero bytes.
+_BOLT_HANDSHAKE = bytes.fromhex("6060B017") + bytes.fromhex(
+    "00000005" "00000404" "00000304" "00000003"
+)
+
+
+def speaks_bolt(host: str, port: int, *, timeout: float = 2.0) -> bool:
+    """True when ``host:port`` answers the Neo4j Bolt handshake.
+
+    Neo4j's Bolt listener closes an HTTP request without a reply, which the
+    HTTP Cypher client reports as "RemoteDisconnected" (D143). Asking the port
+    the Bolt question turns that into "this is the Bolt port".
+    """
+    if not host or not port:
+        return False
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+    except OSError:
+        return False
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(_BOLT_HANDSHAKE)
+        answer = b""
+        while len(answer) < 4:
+            chunk = sock.recv(4 - len(answer))
+            if not chunk:
+                break
+            answer += chunk
+        # The agreed version (or 0 for none) is ``00 00 minor major``; an
+        # HTTP server's reply starts with text.
+        return len(answer) == 4 and answer[:2] == b"\x00\x00"
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 _LABEL = {POSTGRESQL: "PostgreSQL", MYSQL: "MySQL"}
 _TILE = {POSTGRESQL: "Amazon Aurora PostgreSQL", MYSQL: "Amazon Aurora MySQL"}
 
