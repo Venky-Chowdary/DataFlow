@@ -710,6 +710,44 @@ def _select_ci_shard(config, items):
         items[:] = keep
 
 
+# Datawrap's own logger namespaces. Tests observe their WARNING/DEBUG records
+# through caplog, so no test module may re-level or detach them at import time.
+_OWN_LOGGER_NAMESPACES = ("services", "src", "connectors", "preflight")
+
+
+def pytest_collection_finish(session):
+    """Fail fast when importing the test modules re-configured logging.
+
+    Collection imports every test module (all shards collect everything), so a
+    module-level ``logging.getLogger("services").setLevel(...)`` or
+    ``propagate = False`` silences caplog for every later test in the session:
+    ``assert "..." in caplog.text`` fails with ``''``. Pin such quieting to a
+    test with ``caplog.set_level(level, logger=name)`` in a fixture instead.
+    """
+    offenders = []
+    root = logging.getLogger()
+    if root.level != logging.WARNING:
+        offenders.append(f"root logger level is {logging.getLevelName(root.level)} (expected WARNING)")
+    if logging.root.manager.disable:
+        offenders.append(f"logging.disable({logging.root.manager.disable}) is active")
+    for name, lg in logging.Logger.manager.loggerDict.items():
+        if not isinstance(lg, logging.Logger):
+            continue
+        if name.split(".", 1)[0] not in _OWN_LOGGER_NAMESPACES:
+            continue
+        if lg.level != logging.NOTSET or not lg.propagate or lg.disabled:
+            offenders.append(
+                f"logger {name!r}: level={logging.getLevelName(lg.level)} "
+                f"propagate={lg.propagate} disabled={lg.disabled}"
+            )
+    if offenders:
+        raise pytest.UsageError(
+            "a test module re-configured logging at import time, which empties caplog for "
+            "the rest of the session: " + "; ".join(offenders)
+            + ". Quiet a logger inside a fixture with caplog.set_level(level, logger=name)."
+        )
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip live-service tests when emulators are absent or unauthenticated."""
     _select_ci_shard(config, items)

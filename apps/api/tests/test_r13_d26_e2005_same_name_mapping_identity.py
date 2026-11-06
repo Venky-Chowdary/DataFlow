@@ -23,7 +23,16 @@ import pytest
 
 from services.mapping_pipeline import run_mapping_pipeline
 
-logging.getLogger("services").setLevel(logging.ERROR)
+
+@pytest.fixture(autouse=True)
+def _quiet_mapping_warnings(caplog):
+    """Mute the mapper's per-column WARNINGs for this module only.
+
+    Scoped through ``caplog`` so the level is restored after each test: a
+    module-level ``setLevel`` runs at collection time and silenced every
+    ``services.*`` WARNING/DEBUG for the whole session (CI shards 3 and 4).
+    """
+    caplog.set_level(logging.ERROR, logger="services")
 
 
 def _S(name, typ, samples=None):
