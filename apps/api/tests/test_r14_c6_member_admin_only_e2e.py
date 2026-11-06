@@ -93,11 +93,10 @@ def test_admin_key_minted_by_an_editor_has_no_member_authority(world):
     minted = editor.post(
         "/api/v1/workspace/api-keys", json={"name": "esc", "role": "admin", "expires_in": "7d"}
     )
-    if minted.status_code == 200:
-        key = world.as_key(minted.json())
-        assert world.add_member(key, "esc-c6@example.com", "viewer").status_code == 403
-    else:
-        assert minted.status_code == 403, minted.text
+    # Minting keys is IAM administration: an editor gets no key at all.
+    assert minted.status_code == 403, minted.text
+    assert "key" not in minted.json()
+    assert world.add_member(editor, "esc-c6@example.com", "viewer").status_code == 403
     assert world.role_of("esc-c6@example.com") == ""
 
 
