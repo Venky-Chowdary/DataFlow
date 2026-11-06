@@ -52,7 +52,7 @@ _DRIVER_CAPS: dict[str, dict[str, Any]] = {
     # PRODUCTION_SKU dest — certified_dest stays False until execute + dest
     # COUNT on a named Stripe object.
     "stripe": {
-        "test": True, "read": True, "write": True, "introspect": False, "preflight": True,
+        "test": True, "read": True, "write": True, "introspect": True, "preflight": True,
         "certified_dest": False,
     },
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},

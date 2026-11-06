@@ -1305,7 +1305,10 @@ def declared_string_logical_type(
 # Engines whose every sampled value carries its own type, so a textual carrier
 # is the source's declaration rather than a header placeholder. Files / CSV
 # are absent on purpose: a header declares nothing.
-_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb"})
+# Stripe / Airtable / Notion answer JSON: a metadata value "3" arrives as a
+# JSON string because the API only stores strings there (D272). Their
+# readers keep the JSON scalar type (connectors.saas_typed_schema).
+_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb", "stripe", "airtable", "notion"})
 _UNTYPED_TEXT_TOKENS = frozenset({"TEXT", "VARCHAR", "STRING", "S"})
 
 
@@ -1331,15 +1334,19 @@ def honor_declared_strings(
         return dict(schema)
     out = dict(schema)
     for col, decl in declared.items():
-        if col not in out or str(decl or "").strip().upper() not in _UNTYPED_TEXT_TOKENS:
+        decl_text = str(decl or "").strip()
+        decl_base = decl_text.split("(", 1)[0].strip().upper()
+        if col not in out or decl_base not in _UNTYPED_TEXT_TOKENS:
             continue
         current = str(out.get(col) or "").split("(", 1)[0].strip().upper()
         if current in _UNTYPED_TEXT_TOKENS:
             continue
         samples = [str(v) for v in ((samples_by_field or {}).get(col) or []) if v is not None]
         out[col] = declared_string_logical_type(samples, field_name=col)
-        if out[col] == "VARCHAR" and str(decl).strip().upper() == "TEXT":
-            out[col] = "TEXT"
+        if out[col] == "VARCHAR" and decl_base in {"TEXT", "VARCHAR"}:
+            # Keep the source's own text carrier: TEXT, or a documented
+            # bound such as Stripe metadata's VARCHAR(500).
+            out[col] = decl_text.upper() if decl_base == "TEXT" else decl_text
     return out
 
 

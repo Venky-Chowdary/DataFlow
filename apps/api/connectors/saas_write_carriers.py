@@ -246,6 +246,11 @@ def _normalize_stripe_object(object_type: str) -> str:
     return aliases.get(obj, obj)
 
 
+def stripe_catalog_objects() -> list[str]:
+    """The Stripe list endpoints with documented write carriers (``/v1/<name>``)."""
+    return sorted(name for name in _STRIPE_BY_OBJECT if name.endswith("s"))
+
+
 def stripe_field_carriers(object_type: str = "customers") -> dict[str, str]:
     """Return documented Stripe write carriers for an object collection."""
     key = _normalize_stripe_object(object_type)

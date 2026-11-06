@@ -4129,14 +4129,23 @@ def _introspect_thin_saas(brand: str, **kwargs: Any) -> dict[str, Any]:
     connector as TRANSFER_READY / PRODUCTION_SKU.
     """
     table = (kwargs.get("table") or kwargs.get("database") or "").strip()
-    if not table:
-        return {"ok": True, "columns": [], "tables": [], "schema": ""}
-
     cfg = {
         **_saas_cfg(**kwargs),
         "type": brand,
         "format": brand,
     }
+    if not table and brand == "stripe":
+        # The catalog is the documented list endpoints; the key is proven by
+        # the same /v1/account call Test makes (D272).
+        from connectors.saas_write_carriers import stripe_catalog_objects
+        from connectors.stripe import test_stripe
+
+        ok, message = test_stripe(**{k: v for k, v in cfg.items() if k not in {"type", "format"}})
+        if not ok:
+            return {"ok": False, "error": message, "columns": [], "tables": []}
+        return {"ok": True, "columns": [], "tables": stripe_catalog_objects(), "schema": ""}
+    if not table:
+        return {"ok": True, "columns": [], "tables": [], "schema": ""}
     try:
         if brand == "stripe":
             from connectors.stripe import read_object
