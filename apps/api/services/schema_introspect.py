@@ -1262,13 +1262,9 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                     # information_schema.tables five times on SNOWFLAKE_SAMPLE_DATA.
                     target_table = snowflake_fold_identifier(str(target_table))
                 else:
-                    from connectors.snowflake_conn import (
-                        resolve_or_fold_snowflake_table,
-                        snowflake_schema_and_table,
-                    )
+                    from connectors.snowflake_conn import resolve_or_fold_snowflake_table
 
                     try:
-                        schema, target_table = snowflake_schema_and_table(schema, str(target_table))
                         target_table = resolve_or_fold_snowflake_table(
                             cur, schema, str(target_table)
                         )

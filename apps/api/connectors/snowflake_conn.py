@@ -547,6 +547,15 @@ def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | Non
     raw = (table or "").strip()
     if not raw:
         raise ValueError("Snowflake table name is empty")
+    # A schema-qualified name resolves inside its own schema (D288). When that
+    # schema is not the one the caller passed, the stored name is handed back
+    # re-qualified so snowflake_qualified_table() addresses the right schema.
+    own_schema, bare = snowflake_schema_and_table(schema, raw)
+    if bare != raw:
+        found = resolve_snowflake_table_name(cur, own_schema, bare)
+        if found is None:
+            return None
+        return found if own_schema == _folded_schema(schema) else f"{own_schema}.{found}"
 
     candidates: list[str] = []
     for c in (snowflake_fold_identifier(raw), raw, raw.upper(), raw.lower()):
@@ -595,13 +604,19 @@ def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | Non
 
 
 def resolve_or_fold_snowflake_table(cur: Any, schema: str, table: str) -> str:
-    """Resolve stored table name, or Snowflake-fold for a not-yet-created table."""
+    """Resolve stored table name, or Snowflake-fold for a not-yet-created table.
+
+    A qualified name resolves in its own schema and comes back re-qualified
+    when that differs from ``schema`` (see ``resolve_snowflake_table_name``).
+    """
     from connectors.sql_identifiers import snowflake_fold_identifier
 
     found = resolve_snowflake_table_name(cur, schema, table)
     if found:
         return found
-    return snowflake_fold_identifier((table or "").strip())
+    own_schema, bare = snowflake_schema_and_table(schema, (table or "").strip())
+    folded = snowflake_fold_identifier(bare)
+    return folded if own_schema == _folded_schema(schema) else f"{own_schema}.{folded}"
 
 
 def snowflake_physical_name_map(
@@ -783,7 +798,6 @@ def _snowflake_desc_column_rows(
     Second value is True when Snowflake said the table is absent — callers
     must not scan ``information_schema`` on ``SNOWFLAKE_SAMPLE_DATA``.
     """
-    schema, table = snowflake_schema_and_table(schema, table)
     try:
         cur.execute(f"DESC TABLE {snowflake_qualified_table(schema, table)}")
         rows = list(cur.fetchall() or [])
@@ -844,17 +858,26 @@ def use_snowflake_namespace(cur: Any, *, database_q: str, schema_q: str, create:
         cur.execute(f"USE {kind} {ident}")
 
 
-def snowflake_qualified_table(schema: str, table: str) -> str:
-    """Quote schema.table using the exact stored/folded names (no second fold)."""
-    from connectors.sql_identifiers import (
-        quote_sql_identifier,
-        snowflake_fold_identifier,
-    )
+def _folded_schema(schema: str) -> str:
+    from connectors.sql_identifiers import snowflake_fold_identifier
 
-    sch = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
-    # ``table`` must already be the resolved information_schema name, or a
+    return snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+
+
+def snowflake_qualified_table(schema: str, table: str) -> str:
+    """Quote schema.table using the exact stored/folded names (no second fold).
+
+    An unquoted ``schema.table`` in ``table`` is two identifiers: its own
+    schema wins over ``schema`` (D288 — quoting it whole named an object that
+    does not exist at every read-back, DESC and COUNT site).
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    own_schema, bare = snowflake_schema_and_table(schema, table)
+    sch = own_schema if bare != table else _folded_schema(schema)
+    # ``bare`` must already be the resolved information_schema name, or a
     # folded name for a table that does not exist yet.
-    return f"{quote_sql_identifier(sch)}.{quote_sql_identifier(table)}"
+    return f"{quote_sql_identifier(sch)}.{quote_sql_identifier(bare)}"
 
 
 def _fakesnow_db_path() -> str:

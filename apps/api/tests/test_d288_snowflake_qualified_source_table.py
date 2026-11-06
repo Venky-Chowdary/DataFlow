@@ -114,3 +114,58 @@ def test_desc_table_reads_the_qualified_name(snow):
     finally:
         conn.close()
     assert not missing and {str(r[0]).upper() for r in rows} >= {"ID", "AMT", "NAME"}
+
+
+def test_resolver_and_qualifier_split_inside_the_seam(snow):
+    """F6: the sites that call resolve_*/snowflake_qualified_table (ladder read-back,
+    COUNT, DESC, writer, table manager) get the split without touching each."""
+    from connectors.snowflake_conn import (
+        resolve_or_fold_snowflake_table,
+        resolve_snowflake_table_name,
+        snowflake_qualified_table,
+    )
+
+    conn = _fakesnow_connection()
+    try:
+        with conn.cursor() as cur:
+            assert resolve_snowflake_table_name(cur, "PUBLIC", "PUBLIC.HQ0609_SF") == "HQ0609_SF"
+            assert resolve_or_fold_snowflake_table(cur, "PUBLIC", "PUBLIC.HQ0609_SF") == "HQ0609_SF"
+            # A different qualifier comes back re-qualified so the quoted ref keeps it.
+            assert resolve_or_fold_snowflake_table(cur, "PUBLIC", "STAGING.NEW_T") == "STAGING.NEW_T"
+            cur.execute(f"SELECT COUNT(*) FROM {snowflake_qualified_table('PUBLIC', 'PUBLIC.HQ0609_SF')}")
+            assert cur.fetchone()[0] == 4
+    finally:
+        conn.close()
+    assert snowflake_qualified_table("PUBLIC", "PUBLIC.HQ0609_SF") == '"PUBLIC"."HQ0609_SF"'
+    assert snowflake_qualified_table("PUBLIC", "STAGING.NEW_T") == '"STAGING"."NEW_T"'
+    assert snowflake_qualified_table("PUBLIC", "HQ0609_SF") == '"PUBLIC"."HQ0609_SF"'
+
+
+def test_ladder_read_back_of_a_qualified_destination(snow, tmp_path, monkeypatch):
+    """F6: Snowflake as the destination with a schema-qualified table — the
+    Gate-8 read-back SELECT (reconcile_step) addresses schema and table."""
+    import sqlite3
+
+    import src.transfer.engine as engine_mod
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+
+    src_db = tmp_path / "src.db"
+    with sqlite3.connect(str(src_db)) as c:
+        c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+        c.executemany("INSERT INTO t VALUES (?, ?)", [(1, "a"), (2, None), (3, ""), (4, "東京 ✓")])
+    fake = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    dest_table = "PUBLIC.D288_OUT_" + uuid.uuid4().hex[:6].upper()
+    req = TransferRequest(
+        source=EndpointConfig(kind="database", format="sqlite", database=str(src_db), table="t"),
+        destination=EndpointConfig(kind="database", format="snowflake", table=dest_table,
+                                   **{k: v for k, v in CFG.items() if k != "type"}),
+        sync_mode="full_refresh_overwrite", skip_preflight=True, validation_mode="strict",
+    )
+    jid = uuid.uuid4().hex[:24]
+    fake.update_job_status(jid, "pending", transfer_request={})
+    res = UniversalTransferEngine().execute_tracked(req, jid)
+    assert res.success, res.error
+    assert res.reconciliation.get("passed") is True and res.reconciliation.get("target_rows") == 4

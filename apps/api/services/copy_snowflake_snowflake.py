@@ -109,10 +109,6 @@ def copy_snowflake_to_snowflake(
             snowflake_qualified_table,
         )
 
-        from connectors.snowflake_conn import snowflake_schema_and_table
-
-        src_schema, source_table = snowflake_schema_and_table(src_schema, source_table)
-        dest_schema, dest_table = snowflake_schema_and_table(dest_schema, dest_table)
         with conn.cursor() as cur:
             src_resolved = resolve_snowflake_table_name(cur, src_schema, source_table)
             if src_resolved is None:

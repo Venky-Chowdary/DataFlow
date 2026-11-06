@@ -76,10 +76,7 @@ def _table_ref(cur: Any, schema: str, table: str) -> str:
     (Execute, the g3f population walk) failed "table does not exist" (D288).
     The table's own qualifier wins over the connector schema.
     """
-    from connectors.snowflake_conn import snowflake_schema_and_table
-
-    schema, bare = snowflake_schema_and_table(schema, table)
-    resolved = resolve_or_fold_snowflake_table(cur, schema, bare)
+    resolved = resolve_or_fold_snowflake_table(cur, schema, table)
     return snowflake_qualified_table(schema, resolved)
 
 
