@@ -3506,6 +3506,7 @@ export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   org_name: string;
   timezone: string;
   retention_days: number;
+  retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
   updated_at?: string | null;
@@ -3525,12 +3526,14 @@ export async function updateWorkspaceSettings(body: {
   org_name?: string;
   timezone?: string;
   retention_days?: number;
+  retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
 }): Promise<{
   org_name: string;
   timezone: string;
   retention_days: number;
+  retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
 }> {

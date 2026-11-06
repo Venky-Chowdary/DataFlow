@@ -32,7 +32,7 @@ import { auditActorLabel } from "../lib/auditActor";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
-import { purgeConfirmCopy, RETENTION_HINT } from "../lib/jobRetention";
+import { purgeConfirmCopy, retentionHint } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
 import { TENANT_SAVED_EVENT, concreteWorkspaceId, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
@@ -76,6 +76,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [retention, setRetention] = useState("90");
   const [studioSchemaBrowser, setStudioSchemaBrowser] = useState(false);
   const [studioCanvas, setStudioCanvas] = useState(false);
+  const [retentionAutoPurge, setRetentionAutoPurge] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   /** Why General could not be read. Empty means the values below are the API's. */
@@ -193,6 +194,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setRetention(String(ws.retention_days));
         setStudioSchemaBrowser(ws.studio_schema_browser === true);
         setStudioCanvas(ws.studio_canvas === true);
+        setRetentionAutoPurge(ws.retention_auto_purge === true);
         setGeneralLock(platformLock(ws));
         setSettingsLoaded(true);
         setSettingsError("");
@@ -610,12 +612,14 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         org_name: orgName,
         timezone,
         retention_days: Number(retention) || 90,
+        retention_auto_purge: retentionAutoPurge,
         studio_schema_browser: studioSchemaBrowser,
         studio_canvas: studioCanvas,
       });
       setOrgName(ws.org_name);
       setTimezone(ws.timezone);
       setRetention(String(ws.retention_days));
+      setRetentionAutoPurge(ws.retention_auto_purge === true);
       setStudioSchemaBrowser(ws.studio_schema_browser === true);
       setStudioCanvas(ws.studio_canvas === true);
       try {
@@ -886,6 +890,24 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         />
                       </div>
                       <div className="df2-settings-field">
+                        <label htmlFor="retention-auto-purge">Purge automatically</label>
+                        <input
+                          id="retention-auto-purge"
+                          type="checkbox"
+                          data-testid="retention-auto-purge"
+                          checked={retentionAutoPurge}
+                          disabled={!generalEditable}
+                          title={generalTitle}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setRetentionAutoPurge(e.target.checked);
+                          }}
+                        />
+                        <p className="df2-label-hint">
+                          Off by default. On: finished jobs older than the retention window are deleted daily in every workspace.
+                        </p>
+                      </div>
+                      <div className="df2-settings-field">
                         <label htmlFor="studio-schema-browser">Schema browser</label>
                         <input
                           id="studio-schema-browser"
@@ -930,7 +952,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">{RETENTION_HINT} Write targets stay on each connector.</p>
+                    <p className="df2-settings-hint">{retentionHint(retentionAutoPurge)} Write targets stay on each connector.</p>
                     {workspaceManage.allowed && settingsLoaded && (
                       <button type="button" className="df2-btn df2-btn-ghost" data-testid="job-retention-purge" disabled={retentionBusy} onClick={() => void runRetentionPurge()}>
                         {retentionBusy ? "Checking…" : "Purge old jobs…"}

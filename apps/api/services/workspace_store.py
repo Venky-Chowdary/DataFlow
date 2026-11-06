@@ -15,6 +15,10 @@ _DEFAULTS: dict[str, Any] = {
     "org_name": "Datawrap",
     "timezone": "UTC",
     "retention_days": 90,
+    # Off by default: finished jobs older than retention_days are purged on a
+    # daily schedule only once a platform admin turns this on (Security 23,
+    # services.job_retention_schedule). Off, retention is the admin-run purge.
+    "retention_auto_purge": False,
     # Studio surfaces. Absent or false keeps the wizard. Both must be set
     # here and in the operator's browser before a new surface renders.
     "studio_schema_browser": False,
@@ -79,6 +83,7 @@ def get_workspace_settings() -> dict[str, Any]:
         "org_name": str(raw.get("org_name") or _DEFAULTS["org_name"]),
         "timezone": str(raw.get("timezone") or _DEFAULTS["timezone"]),
         "retention_days": int(raw.get("retention_days") or _DEFAULTS["retention_days"]),
+        "retention_auto_purge": bool(raw.get("retention_auto_purge")),
         "studio_schema_browser": bool(raw.get("studio_schema_browser")),
         "studio_canvas": bool(raw.get("studio_canvas")),
         "updated_at": raw.get("updated_at"),
@@ -94,6 +99,7 @@ def update_workspace_settings(
     studio_schema_browser: bool | None = None,
     studio_canvas: bool | None = None,
     actor: str | None = None,
+    retention_auto_purge: bool | None = None,
 ) -> dict[str, Any]:
     data = _load_raw()
     if org_name is not None:
@@ -102,6 +108,8 @@ def update_workspace_settings(
         data["timezone"] = validate_timezone(timezone) if timezone.strip() else _DEFAULTS["timezone"]
     if retention_days is not None:
         data["retention_days"] = max(1, min(3650, int(retention_days)))
+    if retention_auto_purge is not None:
+        data["retention_auto_purge"] = bool(retention_auto_purge)
     if studio_schema_browser is not None:
         data["studio_schema_browser"] = bool(studio_schema_browser)
     if studio_canvas is not None:

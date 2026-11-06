@@ -38,6 +38,60 @@ notification channels (per workspace), API keys / service accounts / SCIM
 tokens (`iam.manage`; governed by `DATAFLOW_WORKSPACE_ADMIN_IAM`), and the MCP
 tool policy (`PUT /api/v1/mcp/policy`, `workspace.manage`).
 
+## Round 14 security defaults (owner decisions taken as secure defaults)
+
+**Member administration (C6).** Only a workspace admin (the role older builds
+called `owner`) adds, removes or re-roles members — signed in or with an API
+key, judged by the key's own role (capped at its creator's), never the
+creator's. Editors, operators and viewers get `403 "Adding or removing members
+requires the workspace admin role"`, audited as `team.member.denied`. Granting
+or removing admin needs `workspace.manage`; the last admin who can sign in can
+be neither demoted nor removed (`409`); break-glass restores one.
+
+**Scheduled job retention (Security 23).** General -> *Purge automatically*
+(`retention_auto_purge`, **off by default**, platform admin only) runs the
+existing dry-run-then-apply job purge once a day for every workspace: finished
+jobs (completed / failed / cancelled) older than `retention_days` in
+`transfer_jobs`. Running/queued jobs, jobs with no workspace, audit records
+(audit retention) and quarantine rows (quarantine TTL) are never touched. One
+run per deployment per day (Mongo claim `maintenance_runs/job_retention`), on
+the scheduler beat; each run files `workspace.jobs.retention.purge` with
+`mode: "scheduled"`, actor `system:retention`, per workspace.
+`GET /settings` -> `retention_enforcement` reports `scheduled`, `mode`,
+`last_run_at`, `next_run_at`.
+
+**API-key ids in audit reads (Browser 20).** `GET /api/v1/audit/events` and
+`GET /api/v1/audit/export` (csv/json/ndjson/cef) return API-key /
+service-account / SCIM-token ids whole only to a workspace admin or a platform
+admin. Every other reader gets `…` + the last four characters, wherever the id
+appears (actor, `actor_id`, resource, details), `key_ids_masked: true` and the
+header `X-Datawrap-Key-Ids-Masked: 1`. Stored records are never rewritten; a
+masked export does not re-hash to `event_hash` (verify with an admin export or
+`/audit/verify`).
+
+### Throwaway workspaces for security retests (C18)
+
+Platform admins only (signed in, or a platform-wide admin key):
+
+```
+POST   /api/v1/team/sandbox-workspaces
+       {"tester_email": "...", "reason": "...", "name": "...",
+        "ttl_hours": 24 (1..168), "create_account": false}
+GET    /api/v1/team/sandbox-workspaces
+DELETE /api/v1/team/sandbox-workspaces/{workspace_id}   {"reason": "..."}
+```
+
+Creates `[sandbox] <name>` with the tester as its **only** admin (the
+platform admin is not a member), stamped `sandbox_expires_at`. With
+`create_account: true` a synthetic login is created and its one-time password
+returned once. The tester then sets MFA / session timeout / IP allowlist on
+that workspace's tenant (`POST /api/v1/workspace/tenant`) and retests without
+touching any real owner or workspace. `DELETE` (or expiry, swept on the
+scheduler beat as actor `system:sandbox-expiry`) removes its tenant policy,
+notification channels, API keys (revoked) and memberships; it refuses any
+workspace that is not a sandbox. Audited as `team.sandbox.create` /
+`team.sandbox.delete`. Pytest fixture: `apps/api/tests/r14_sandbox_world.py`.
+
 ## Who is a platform admin
 
 Platform admin is the **account** role, not a workspace membership role:

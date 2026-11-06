@@ -42,6 +42,8 @@ class WorkspaceSettingsBody(BaseModel):
     org_name: str | None = Field(default=None, max_length=128)
     timezone: str | None = Field(default=None, max_length=64)
     retention_days: int | None = Field(default=None, ge=1, le=3650)
+    # Purge finished jobs older than retention_days daily (off by default).
+    retention_auto_purge: bool | None = None
     studio_schema_browser: bool | None = None
     studio_canvas: bool | None = None
 
@@ -196,12 +198,20 @@ async def get_settings(request: Request):
         # One document for the whole deployment: only a platform admin changes it.
         **editability(request),
         # What retention_days does, stated by the API itself (QA enterprise #4).
-        "retention_enforcement": {
-            "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
-            "mode": "admin_purge",
-            "scheduled": False,
-            "purge_route": "POST /api/v1/workspace/jobs/retention/purge (dry run first)",
-        },
+        "retention_enforcement": _retention_enforcement(),
+    }
+
+
+def _retention_enforcement() -> dict[str, Any]:
+    from services.job_retention_schedule import retention_schedule_status
+
+    schedule = retention_schedule_status()
+    return {
+        "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
+        "mode": "scheduled_purge" if schedule["scheduled"] else "admin_purge",
+        **schedule,
+        "purge_route": "POST /api/v1/workspace/jobs/retention/purge (dry run first)",
+        "not_covered": "audit records (audit retention) and quarantine rows (quarantine TTL)",
     }
 
 
@@ -220,6 +230,7 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             studio_schema_browser=body.studio_schema_browser,
             studio_canvas=body.studio_canvas,
             actor=actor,
+            retention_auto_purge=body.retention_auto_purge,
         )
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -231,6 +242,7 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             "org_name": updated["org_name"],
             "timezone": updated["timezone"],
             "retention_days": updated["retention_days"],
+            "retention_auto_purge": updated["retention_auto_purge"],
             "studio_schema_browser": updated["studio_schema_browser"],
             "studio_canvas": updated["studio_canvas"],
         },
@@ -584,7 +596,8 @@ def purge_job_retention(body: JobRetentionPurgeBody, request: Request):
 
     Dry run first (default): returns the count and a ``confirm_token``; apply
     with ``dry_run: false`` and that token. Never touches unfinished jobs or
-    another workspace. Nothing runs on a schedule. See services.job_retention.
+    another workspace. The same purge runs daily for every workspace when
+    ``retention_auto_purge`` is on (services.job_retention_schedule).
     """
     from services.job_retention import RetentionTokenInvalid, purge_expired_jobs
     from services.workspace_store import get_workspace_settings

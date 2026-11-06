@@ -2396,6 +2396,24 @@ def _clear_stale_running_schedules() -> None:
             _save_all(schedules)
 
 
+async def _run_maintenance() -> None:
+    """Daily housekeeping on the beat: scheduled job retention, expired sandboxes.
+
+    Each step claims its own run in Mongo (one per deployment per day) and is
+    a no-op when off or not due; a failure is logged, never raised into the beat.
+    """
+    from services.job_retention_schedule import run_due_retention
+    from services.sandbox_workspaces import sweep_expired_sandboxes
+
+    for step in (run_due_retention, sweep_expired_sandboxes):
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                _executor, functools.partial(contextvars.copy_context().run, step)
+            )
+        except Exception:  # noqa: BLE001 — housekeeping must not stop the beat
+            logger.exception("Scheduler maintenance step %s failed", step.__name__)
+
+
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
@@ -2429,6 +2447,7 @@ async def run_schedule_loop() -> None:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:
             logger.exception("Schedule loop error")
+        await _run_maintenance()
         wait = float(CHECK_INTERVAL_SECONDS)
         try:
             from services.schedule_store import seconds_until_next_schedule
