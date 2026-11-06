@@ -816,7 +816,7 @@ def run_file_preflight(
                 adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
                 key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                            contract_primary_key, destination_indexes_meta),
-                max_key_bytes=dest_key_limit(destination_indexes_meta),
+                max_part_bytes=dest_key_limit(destination_indexes_meta),
                 key_widens_approved=bool(schema_drift_acknowledged),
             )
         )
@@ -1207,7 +1207,7 @@ def run_file_preflight(
         dest_recreated=dest_recreated, validation_mode=validation_mode,
         dest_key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                         contract_primary_key, destination_indexes_meta),
-        dest_key_bytes=dest_key_limit(destination_indexes_meta),
+        dest_key_part_bytes=dest_key_limit(destination_indexes_meta),
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.

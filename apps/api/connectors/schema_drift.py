@@ -883,7 +883,7 @@ def _mysql_keyed_widen_carrier(
     The key groups come from the live index catalog; the rule is
     :func:`mysql_keyed_widen_carrier`.
     """
-    from services.schema_fidelity import mysql_index_requires_prefix, mysql_max_key_bytes
+    from services.schema_fidelity import mysql_index_requires_prefix, mysql_key_part_limit
     from services.secondary_indexes import mysql_row_format
 
     if not (
@@ -898,7 +898,7 @@ def _mysql_keyed_widen_carrier(
     return mysql_keyed_widen_carrier(
         groups, column, new_type, existing, growing=growing, dialect=dialect,
         table_name=table_name,
-        max_key_bytes=mysql_max_key_bytes(mysql_row_format(cursor, schema, table_name)),
+        max_part_bytes=mysql_key_part_limit(mysql_row_format(cursor, schema, table_name)),
     )
 
 
@@ -910,7 +910,7 @@ def keyed_widen_carrier(
     *,
     dialect: str = "",
     growing: dict[str, str] | None = None,
-    max_key_bytes: int = 3072,
+    max_part_bytes: int = 3072,
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening a column the destination holds in a key.
 
@@ -929,7 +929,7 @@ def keyed_widen_carrier(
     if family == "mysql":
         return mysql_keyed_widen_carrier(
             key_groups, column, new_type, existing, growing=growing, dialect=dialect,
-            max_key_bytes=max_key_bytes,
+            max_part_bytes=max_part_bytes,
         )
     budget_dialect = {"sqlserver": "mssql", "oracle": "oracle"}.get(family, "")
     per_char = full_value_key_char_bytes(budget_dialect)
@@ -999,7 +999,7 @@ def _mysql_key_group_width(
     grow: dict[str, str],
     existing: dict[str, str],
     table_name: str,
-    max_key_bytes: int = 3072,
+    max_part_bytes: int = 3072,
 ) -> int | None:
     """Width ``want`` gets when every growing part of one key is budgeted together.
 
@@ -1043,10 +1043,12 @@ def _mysql_key_group_width(
             return prefix[f] * mysql_key_unit_bytes(existing.get(f, ""))
         return mysql_key_part_bytes(existing.get(f, ""))
 
-    remaining = max_key_bytes - sum(fixed_cost(f) for f in folded if f not in growing)
+    # The whole key is capped at 3072 bytes on every row format; COMPACT /
+    # REDUNDANT also cap each part at 767 (max_part_bytes).
+    remaining = 3072 - sum(fixed_cost(f) for f in folded if f not in growing)
     open_parts = list(growing)
     while open_parts:
-        share = remaining // len(open_parts)
+        share = min(remaining // len(open_parts), max_part_bytes)
         if share < 1:
             return None
         newly = [
@@ -1073,7 +1075,7 @@ def mysql_keyed_widen_carrier(
     growing: dict[str, str] | None = None,
     dialect: str = "mysql",
     table_name: str = "",
-    max_key_bytes: int = 3072,
+    max_part_bytes: int = 3072,
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening a MySQL/MariaDB column held in a key.
 
@@ -1116,7 +1118,7 @@ def mysql_keyed_widen_carrier(
     asked = None if mysql_index_requires_prefix(new_type) else _mysql_ask(new_type)
     budget: int | None = None
     for key_cols in groups:
-        width = _mysql_key_group_width(key_cols, want, grow, by_fold, table_name, max_key_bytes)
+        width = _mysql_key_group_width(key_cols, want, grow, by_fold, table_name, max_part_bytes)
         if not width:
             return existing_type, True
         budget = width if budget is None else min(budget, width)

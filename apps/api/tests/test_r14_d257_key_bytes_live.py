@@ -117,7 +117,7 @@ def test_a_compact_row_format_key_is_capped_at_767_bytes(isolated, live):  # noq
 
 def test_fixed_key_parts_cost_their_declared_storage():
     """DECIMAL by precision, ENUM / SET by value count, temporal by fsp (not a flat 8)."""
-    from services.schema_fidelity import mysql_key_part_bytes, mysql_key_unit_bytes, mysql_max_key_bytes
+    from services.schema_fidelity import mysql_key_part_bytes, mysql_key_unit_bytes, mysql_key_part_limit
 
     assert mysql_key_part_bytes("DECIMAL(18,4)") == 9
     assert mysql_key_part_bytes("DECIMAL(10,2)") == 5
@@ -127,4 +127,45 @@ def test_fixed_key_parts_cost_their_declared_storage():
     assert mysql_key_part_bytes("VARBINARY(100)") == 100
     assert mysql_key_part_bytes("VARCHAR(50) CHARACTER SET utf8mb3") == 150
     assert mysql_key_unit_bytes("VARCHAR(10) COLLATE latin1_swedish_ci") == 1
-    assert mysql_max_key_bytes("Compact") == 767 and mysql_max_key_bytes("DYNAMIC") == 3072
+    assert mysql_key_part_limit("Compact") == 767 and mysql_key_part_limit("DYNAMIC") == 3072
+
+
+
+def test_compact_767_is_a_per_part_limit_and_the_key_total_stays_3072():
+    """S2: two growing parts on COMPACT get 191 characters each (764 bytes per part), not 95."""
+    from connectors.schema_drift import mysql_keyed_widen_carrier
+
+    live = {"a": "VARCHAR(100)", "b": "VARCHAR(100)", "c": "VARCHAR(100)", "d": "VARCHAR(100)",
+            "e": "VARCHAR(100)"}
+    grow = {k: "VARCHAR(2000)" for k in live}
+    two = [["a", "b"]]
+    assert mysql_keyed_widen_carrier(two, "a", "VARCHAR(2000)", live, growing={"a": "VARCHAR(2000)",
+                                     "b": "VARCHAR(2000)"}, max_part_bytes=767) == ("VARCHAR(191)", False)
+    # Five parts: the 3072-byte total binds before the 767-byte part limit.
+    five = [list(live)]
+    assert mysql_keyed_widen_carrier(five, "a", "VARCHAR(2000)", live, growing=grow,
+                                     max_part_bytes=767) == ("VARCHAR(153)", False)
+
+
+def test_a_compact_two_part_key_gets_767_bytes_per_part(isolated, live):  # noqa: F811
+    """S2 live: COMPACT caps each key part at 767 bytes; the key total stays 3072."""
+    table = f"kp_{h.token()}"
+    out = f"{table}_d"
+    try:
+        h.run_sql("postgresql", f"CREATE TABLE {table} (a VARCHAR(2000), b VARCHAR(2000), v INT, "
+                  "updated_at TIMESTAMP, PRIMARY KEY (a, b))")
+        h.run_sql("mysql", f"CREATE TABLE {out} (a VARCHAR(100) NOT NULL, b VARCHAR(100) NOT NULL, "
+                  "v INT, updated_at DATETIME(6), PRIMARY KEY (a, b)) ROW_FORMAT=COMPACT "
+                  "DEFAULT CHARSET=utf8mb4")
+        rows = [("x", "", 1), ("a" * 191, "東京 🚀", 2)]
+        h.run_sql("postgresql", f"INSERT INTO {table} VALUES (%s, %s, %s, '2024-01-01')",  # nosec B608
+                  params=rows)
+        approved = _run(isolated, "postgresql", table, out, "a,b", schema_drift_acknowledged=True)
+        assert approved.success, approved.error
+        types = _types(out)
+        assert types["a"].startswith("VARCHAR(191)") and types["b"].startswith("VARCHAR(191)"), types
+        got = h.run_sql("mysql", f"SELECT a, b, v FROM {out} ORDER BY v")  # nosec B608
+        assert [tuple(r) for r in got] == rows
+    finally:
+        h.drop("postgresql", table)
+        h.drop("mysql", out)

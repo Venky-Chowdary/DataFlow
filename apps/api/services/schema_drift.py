@@ -897,7 +897,7 @@ def propose_dest_widens(
     target_schema: dict[str, str],
     dest_db: str = "",
     key_groups: list[list[str]] | None = None,
-    max_key_bytes: int = 3072,
+    max_part_bytes: int = 3072,
 ) -> list[dict[str, Any]]:
     """D107: destination-side widen proposals for a live destination table.
 
@@ -925,7 +925,7 @@ def propose_dest_widens(
         widen = dest_widen_proposal(
             m, src, tgt, src_type, tgt_type, dest_db=dest_db,
             key_groups=key_groups, live_types=target_schema, growing=growing,
-            max_key_bytes=max_key_bytes,
+            max_part_bytes=max_part_bytes,
         )
         if widen:
             out.append(widen)
@@ -969,9 +969,9 @@ def strip_client_widen_stamps(mappings: list[dict[str, Any]] | None) -> list[dic
 
 def dest_key_limit(indexes_meta: dict[str, Any] | None) -> int:
     """The destination's index key byte limit, from its index catalog's row format."""
-    from services.schema_fidelity import mysql_max_key_bytes
+    from services.schema_fidelity import mysql_key_part_limit
 
-    return mysql_max_key_bytes(str((indexes_meta or {}).get("row_format") or ""))
+    return mysql_key_part_limit(str((indexes_meta or {}).get("row_format") or ""))
 
 
 def growing_dest_carriers(
@@ -1058,7 +1058,7 @@ def dest_widen_proposal(
     key_groups: list[list[str]] | None = None,
     live_types: dict[str, str] | None = None,
     growing: dict[str, str] | None = None,
-    max_key_bytes: int = 3072,
+    max_part_bytes: int = 3072,
 ) -> dict[str, Any] | None:
     """The additive ``widen_type`` entry for one pair, or None: the one rule.
 
@@ -1090,7 +1090,7 @@ def dest_widen_proposal(
 
         new_type, keep = keyed_widen_carrier(
             key_groups, tgt, new_type, {**(live_types or {}), tgt: tgt_type},
-            dialect=dest_db, growing=growing, max_key_bytes=max_key_bytes,
+            dialect=dest_db, growing=growing, max_part_bytes=max_part_bytes,
         )
         if keep:
             return None
@@ -1198,7 +1198,7 @@ def plan_destination_evolution(
     dest_db: str = "",
     adopt_unmapped: bool = False,
     key_groups: list[list[str]] | None = None,
-    max_key_bytes: int = 3072,
+    max_part_bytes: int = 3072,
     key_widens_approved: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     """Apply approved destination evolution to the plan, once.
@@ -1227,7 +1227,7 @@ def plan_destination_evolution(
 
     widens = propose_dest_widens(
         active, source_schema=source_schema, target_schema=types, dest_db=dest_db,
-        key_groups=key_groups, max_key_bytes=max_key_bytes,
+        key_groups=key_groups, max_part_bytes=max_part_bytes,
     )
     # A key widen is applied only on this run's explicit acknowledgement.
     widens = [w for w in widens if key_widens_approved or not w.get("key")]
@@ -1533,7 +1533,7 @@ def detect_schema_drift(
     dest_recreated: bool = False,
     dest_key_groups: list[list[str]] | None = None,
     validation_mode: str | None = None,
-    dest_key_bytes: int = 3072,
+    dest_key_part_bytes: int = 3072,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan.
 
@@ -1743,7 +1743,7 @@ def detect_schema_drift(
             widen = dest_widen_proposal(
                 m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db,
                 key_groups=dest_key_groups, live_types=target_schema,
-                growing=_growing, max_key_bytes=dest_key_bytes,
+                growing=_growing, max_part_bytes=dest_key_part_bytes,
             )
             if widen:
                 widen_proposals.append(widen)

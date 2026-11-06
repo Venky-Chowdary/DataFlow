@@ -107,7 +107,7 @@ class SourceIndexes:
     detail: str = ""
     items: tuple[SourceIndex, ...] = ()
     # MySQL / MariaDB InnoDB row format: COMPACT / REDUNDANT cap a key at 767
-    # bytes, DYNAMIC / COMPRESSED at 3072 (schema_fidelity.mysql_max_key_bytes).
+    # bytes, DYNAMIC / COMPRESSED at 3072 (schema_fidelity.mysql_key_part_limit).
     row_format: str = ""
 
     def to_dict(self) -> dict[str, Any]:

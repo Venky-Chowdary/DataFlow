@@ -253,7 +253,7 @@ def _plan_schema_auto_propagate(
         target_schema=dest_schema_types or {},
         dest_db=(getattr(request.destination, "format", "") or "").lower(),
         key_groups=_key_groups,
-        max_key_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
+        max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
     )
     if _widen_props:
         _additive = list(evolution.get("additive") or [])
@@ -301,7 +301,7 @@ def _plan_schema_auto_propagate(
             dest_db=(getattr(request.destination, "format", "") or "").lower(),
             adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
             key_groups=_key_groups,
-            max_key_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
+            max_part_bytes=dest_key_limit(_dest_extra.get("indexes_meta")),
             key_widens_approved=acknowledged,
         )
     if not evolution.get("should_propagate"):

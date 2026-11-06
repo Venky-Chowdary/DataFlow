@@ -2576,8 +2576,11 @@ _MYSQL_FIXED_BYTES = {
 }
 
 
-def mysql_max_key_bytes(row_format: str | None) -> int:
-    """The InnoDB index key limit for a table's row format (767 on COMPACT / REDUNDANT)."""
+def mysql_key_part_limit(row_format: str | None) -> int:
+    """The InnoDB limit on ONE index key part for a row format (767 on COMPACT / REDUNDANT).
+
+    The whole key stays capped at 3072 bytes on every row format.
+    """
     fmt = str(row_format or "").strip().upper()
     return MYSQL_COMPACT_KEY_BYTES if fmt in {"COMPACT", "REDUNDANT"} else _MYSQL_MAX_KEY_BYTES
 
@@ -2641,7 +2644,7 @@ def mysql_key_compatible_types(
     target_types: list[str],
     mappings: list[dict],
     column_types: dict[str, str] | None,
-    max_key_bytes: int = _MYSQL_MAX_KEY_BYTES,
+    max_part_bytes: int = _MYSQL_MAX_KEY_BYTES,
 ) -> tuple[list[str], str | None]:
     """Key-indexable create-new carriers for an upsert key, or an operator refusal.
 
@@ -2691,7 +2694,10 @@ def mysql_key_compatible_types(
             if c not in widened and c not in budgeted
         )
         unit = max(mysql_key_unit_bytes(types[target_cols.index(c)]) for c in budgeted)
-        budget = (max_key_bytes - other_bytes) // unit // len(budgeted)
+        budget = min(
+            (_MYSQL_MAX_KEY_BYTES - other_bytes) // unit // len(budgeted),
+            max_part_bytes // unit,
+        )
         if budget < 1:
             unresolved.extend(f"{c} ({types[target_cols.index(c)]})" for c in budgeted)
         else:
@@ -2720,7 +2726,11 @@ def mysql_key_compatible_types(
     key_bytes = sum(
         w * mysql_key_unit_bytes(types[target_cols.index(c)]) for c, w in widened.items()
     )
-    if key_bytes > max_key_bytes:
+    widest_part = max(
+        (w * mysql_key_unit_bytes(types[target_cols.index(c)]) for c, w in widened.items()),
+        default=0,
+    )
+    if key_bytes > _MYSQL_MAX_KEY_BYTES or widest_part > max_part_bytes:
         logger.error(
             "MySQL upsert key too wide before CREATE: table=%s key=(%s) widths=%s",
             table_name, key_label, widened,
@@ -2728,7 +2738,8 @@ def mysql_key_compatible_types(
         return target_types, (
             f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
             f"the declared widths {widened} need {key_bytes} bytes "
-            f"in their character sets, above MySQL's {max_key_bytes}-byte key limit "
+            f"in their character sets, above MySQL's {_MYSQL_MAX_KEY_BYTES}-byte key "
+            f"limit or its {max_part_bytes}-byte limit per key part "
             "(error 1071). Narrow the key columns or pre-create the destination "
             "table with this key."
         )
