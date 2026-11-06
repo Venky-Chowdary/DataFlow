@@ -2246,6 +2246,11 @@ def run_integrity_audit(
         or destination_pk_columns
         or _stream_contracts_declare_identity(stream_contracts)
     )
+    from services.primary_key import latest_wins_dedupe
+
+    in_file_dedupe = latest_wins_dedupe(
+        in_file_dedupe, sync_mode, stream_contracts=stream_contracts, source_type=source_db_type
+    )
 
     checks: list[dict[str, Any]] = []
 

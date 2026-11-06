@@ -135,6 +135,42 @@ def sync_collapses_in_file_duplicates(sync_mode: str | None) -> bool:
     return _normalized_mode(sync_mode) in {"upsert", "incremental_deduped"}
 
 
+#: Sources whose read order IS the change order: an upsert keeps the last read
+#: copy of a key, which is its latest record (Kafka offsets).
+ORDERED_LOG_SOURCES = frozenset({"kafka"})
+
+
+def latest_wins_dedupe(
+    in_file_dedupe: str | None,
+    sync_mode: str | None,
+    *,
+    stream_contracts: list[dict] | None = None,
+    source_type: str = "",
+) -> str:
+    """``keep_last`` when an upsert's winner per key is defined by read order.
+
+    ``incremental_deduped`` keeps the latest version of each key. With a
+    declared cursor the incremental read is ordered by it, and a changelog
+    topic is read in offset order, so the last copy read IS the latest one.
+    Refusing a repeated key there blocked the normal shape of a changelog
+    (D89) and of a versioned table (E2-023: 3 versions per key). An explicit
+    operator policy (``block`` / ``keep_last``) always wins.
+    """
+    explicit = str(in_file_dedupe or "").strip()
+    if explicit or not sync_collapses_in_file_duplicates(sync_mode):
+        return explicit
+    from src.transfer.engine_family import engine_family
+
+    if engine_family(source_type) in ORDERED_LOG_SOURCES:
+        return "keep_last"
+    for contract in stream_contracts or []:
+        if not isinstance(contract, dict) or contract.get("selected") is False:
+            continue
+        if str(contract.get("cursor_field") or contract.get("cursor") or "").strip():
+            return "keep_last"
+    return explicit
+
+
 def operator_collapses_in_file_duplicates(
     sync_mode: str | None,
     in_file_dedupe: str | None = "",

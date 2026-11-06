@@ -2002,6 +2002,7 @@ def write_mapped_rows(
                 if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
                 else {},
                 source_row_count,
+                collapsed_duplicate_rows=write_acc.collapsed_duplicate_rows,
             ),
         )
     except TransferCancelled:

@@ -3366,6 +3366,27 @@ def _maybe_attach_verification_ladder(
                 if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
             ]
             batch_scoped = True
+    from services.primary_key import sync_collapses_in_file_duplicates
+
+    if pk_column and source_rows and sync_collapses_in_file_duplicates(sync_mode):
+        # E2-023/D89: an upsert lands one row per key — the latest. The
+        # window re-read (seeded inclusive at the watermark's tie group) still
+        # holds the older versions, so compare the survivor only.
+        from services.duplicate_policy import collapse_keep_last
+
+        _cur = window.cursor if window is not None else ""
+        if _cur:
+            try:  # natural order (numbers, datetimes); text only if mixed
+                source_rows = sorted(
+                    source_rows,
+                    key=lambda r: (r.get(_cur) is not None, r.get(_cur) or 0),
+                )
+            except TypeError:
+                source_rows = sorted(
+                    source_rows,
+                    key=lambda r: (r.get(_cur) is not None, str(r.get(_cur) or "")),
+                )
+        source_rows, _ = collapse_keep_last(source_rows, [pk_column])
     # D67/D95: rows the writer held out to quarantine are in the source
     # re-read but never entered the destination. Hashing them in the L3
     # source digest makes every correct quarantining run fail Gate-8 on its

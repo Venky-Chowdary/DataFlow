@@ -3177,6 +3177,20 @@ def _stream_database_transfer_impl(
         )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0
+        from services.primary_key import sync_collapses_in_file_duplicates
+
+        reread_pk_idx = [
+            run.cfg.target_cols.index(c)
+            for c in (run.cfg.pk_target_cols or [])
+            if c in run.cfg.target_cols
+        ]
+        reread_latest: dict[tuple, Any] | None = (
+            {}
+            if reread_pk_idx
+            and len(reread_pk_idx) == len(run.cfg.pk_target_cols or [])
+            and sync_collapses_in_file_duplicates(run.cfg.effective_sync)
+            else None
+        )
         try:
             while True:
                 read_limit = _batch_limit(run,
@@ -3303,14 +3317,19 @@ def _stream_database_transfer_impl(
                 )
                 reread_holdouts.extend(reread_rejected or [])
                 if mapped:
-                    fp_accumulator.add_many(
-                        row_fingerprints(
-                            mapped,
-                            run.cfg.target_cols,
-                            dest_db_type=run.cfg.dest_bind_dialect,
-                            dest_types=run.cfg.digest_dest_types,
-                        )
+                    _fps = row_fingerprints(
+                        mapped,
+                        run.cfg.target_cols,
+                        dest_db_type=run.cfg.dest_bind_dialect,
+                        dest_types=run.cfg.digest_dest_types,
                     )
+                    if reread_latest is not None:
+                        # One row per key lands (D89/E2-023); the read is in
+                        # cursor order, so the last copy is the survivor.
+                        for _row, _fp in zip(mapped, _fps):
+                            reread_latest[tuple(_row[i] for i in reread_pk_idx)] = _fp
+                    else:
+                        fp_accumulator.add_many(_fps)
                 checksum_rows_read += len(batch.rows)
                 if run.cfg.limit > 0 and checksum_rows_read >= run.cfg.limit:
                     break
@@ -3337,6 +3356,8 @@ def _stream_database_transfer_impl(
         finally:
             if reread_scan is not None:
                 close_table_scan(reread_scan)
+        if reread_latest:
+            fp_accumulator.add_many(list(reread_latest.values()))
         if reread_shaper is not None:
             # Buffering recipe steps emitted their winners on the write pass at
             # end-of-stream; the digest population must include the same tail
