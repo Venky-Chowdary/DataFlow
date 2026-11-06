@@ -695,6 +695,7 @@ _OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
     "presto": "varchar",
     "trino": "varchar",
     "iceberg": "string",
+    "weaviate": "text",
 }
 for _db_key, _map in DDL_TYPES.items():
     _map.setdefault(LOGICAL_OBJECTID, _OBJECTID_DDL_DEFAULTS.get(_db_key, "VARCHAR(24)"))
@@ -793,6 +794,7 @@ for _dest, _map in DDL_TYPES.items():
         "elasticsearch": "keyword",
         "sqlite": "TEXT",
         "generic_sql": "TEXT",
+        "weaviate": "text",
     }.get(_dest, "TEXT")
     for _logical in (LOGICAL_INTERVAL, LOGICAL_GEOGRAPHY, LOGICAL_VECTOR):
         _map[_logical] = _native.get(_logical, _fallback)
@@ -848,6 +850,9 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "clickhouse": "String",
     "trino": "varchar",
     "presto": "varchar",
+    # A Weaviate property that is not an integer holds the exact text the
+    # payload writes (``DDL_TYPES["weaviate"]``), so its fallback is ``text``.
+    "weaviate": "text",
 }
 
 # Destination fixed-point caps (precision, scale). When source scale exceeds the
