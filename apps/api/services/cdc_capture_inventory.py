@@ -530,11 +530,29 @@ def _live_jobs(entry: dict[str, Any]) -> list[dict[str, Any]]:
         [{"transfer_request.source.connector_id": connector_id}] if connector_id else []
     )
     coll = svc.get_database()["transfer_jobs"]
+    _ensure_live_job_indexes(coll)
     return list(coll.find(
         {"status": {"$in": sorted(_LIVE_JOB_STATUSES)}, "$or": either},
         {"cursor_key": 1, "status": 1, "sync_mode": 1, "transfer_request.source": 1,
          "transfer_request.sync_mode": 1, "transfer_request.stream_contracts": 1},
     ))
+
+
+_LIVE_JOB_INDEXED: set[str] = set()
+
+
+def _ensure_live_job_indexes(coll: Any) -> None:
+    """Index the two ways a capture's live jobs are looked up (once per process)."""
+    ns = str(getattr(coll, "full_name", "") or id(coll))
+    if ns in _LIVE_JOB_INDEXED:
+        return
+    _LIVE_JOB_INDEXED.add(ns)
+    for field, name in (("transfer_request.source.connector_id", "cdc_live_jobs_by_connector"),
+                        ("cursor_key", "cdc_live_jobs_by_cursor_key")):
+        try:
+            coll.create_index([(field, 1), ("status", 1)], name=name)
+        except Exception as exc:  # noqa: BLE001 - the lookup works without it, slower
+            _logger.warning("live-job index %s not created: %s", name, str(exc)[:200])
 
 
 def _bare(name: Any) -> str:

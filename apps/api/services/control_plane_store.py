@@ -3,6 +3,16 @@
 When Mongo is available, control-plane state must live here — not under
 ``apps/api/data/*.json`` — so API replicas and worker processes see the same
 repair proposals, CDC snapshot signals, and job queue.
+
+Fail-closed marker (``<data dir>/.control_plane_seen``): the first time this
+node reaches the shared store it writes this file. From then on
+:func:`control_plane_configured` is true on this node even when a later boot
+cannot connect and no Mongo URI is in its environment, so shared settings,
+safety flags and capture ownership fail closed (``ControlPlaneUnavailable``,
+503 on the settings API) instead of reading the node's stale local files.
+Deleting the marker on a node that is meant to run without a shared store
+(dev / single node) returns it to its local files; on a deployment with a
+shared store, never delete it to "fix" an outage — restore the store.
 """
 
 from __future__ import annotations

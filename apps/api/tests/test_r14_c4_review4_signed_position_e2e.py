@@ -311,3 +311,12 @@ def test_low_a_stale_pending_epoch_with_no_anchor_is_tampering(ent):
     _write(1, action="r14c4r4.stale", workspace_id=ws)
     report = _verify(ent)
     assert "unfinished" in (report["key_history_tampered"] or ""), report["key_history_tampered"]
+
+
+def test_low_live_jobs_are_looked_up_by_an_indexed_connector(ent):
+    from services.cdc_capture_inventory import _live_jobs
+
+    assert _live_jobs({"connector_id": "c-index-probe"}) == []
+    indexes = ent.db["transfer_jobs"].index_information()
+    keys = [tuple(k for k, _ in spec["key"]) for spec in indexes.values()]
+    assert ("transfer_request.source.connector_id", "status") in keys, indexes
