@@ -156,10 +156,13 @@ def _exact_name_unambiguous(
     ambiguous forever. Name equality is only genuinely ambiguous when a second
     destination column folds to the same identifier (``UserID`` vs ``userid``).
     """
-    src_fold = _folded_ident(source)
-    if not src_fold or _folded_ident(target) != src_fold:
+    # ``name_identical`` is the one owner of "this is the same column": case,
+    # separators (the pre-existing ``_folded_ident`` rule), transliteration
+    # and the sanitiser's spellings. Ambiguity is a second destination column
+    # that also carries the name.
+    if not name_identical(source, target):
         return False
-    return sum(1 for t in target_columns if _folded_ident(t) == src_fold) == 1
+    return sum(1 for t in target_columns if name_identical(source, t)) == 1
 
 
 def name_identical(source: str, target: str) -> bool:
@@ -1717,7 +1720,7 @@ def map_columns(
                 (
                     t
                     for t in target_columns
-                    if t not in used_targets and t.strip().lower() == source.strip().lower()
+                    if t not in used_targets and name_identical(source, t)
                 ),
                 "",
             )

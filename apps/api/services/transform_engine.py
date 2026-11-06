@@ -1054,6 +1054,15 @@ def _parse_date_worker(value: str, with_time: bool, date_locale: str) -> str | N
     return None
 
 
+def _non_midnight_clock(text: str) -> str:
+    """The ``HH:MM:SS`` a date-with-time literal carries past midnight, or ``""``."""
+    stamp = _parse_datetime(text)
+    if not stamp or "T" not in stamp:
+        return ""
+    clock = stamp.split("T", 1)[1][:8]
+    return "" if clock in {"00:00:00", ""} else clock
+
+
 def _parse_date(value: str, *, with_time: bool = False, date_locale: str = "") -> str | None:
     return _parse_date_worker(value, with_time, _active_date_locale(date_locale))
 
@@ -2149,8 +2158,12 @@ _CLOCK_RE = re.compile(r"\d{1,2}:\d{2}|T\d{2}|\b(?:AM|PM)\b", re.I)
 
 
 def _samples_are_date_only(source_samples: list[str] | None) -> bool:
-    """True when the column is date-shaped and no cell carries a time of day."""
-    cells = [str(c).strip() for c in (source_samples or [])[:25] if str(c or "").strip()]
+    """True when the column is date-shaped and no sampled cell carries a clock.
+
+    Every sample is read: one ``2024-01-01 10:30:00`` past a window of clean
+    dates is the cell that proves the column holds a time of day.
+    """
+    cells = [str(c).strip() for c in (source_samples or []) if str(c or "").strip()]
     return bool(cells) and _samples_look_temporal(cells) and not any(
         _CLOCK_RE.search(c) for c in cells
     )
@@ -2789,6 +2802,16 @@ def apply_transform(
         parsed = _parse_date(text, with_time=True)
         if parsed is None:
             return None, _calendar_reason(text) or f"Invalid date: {text!r}"
+        clock = _non_midnight_clock(text)
+        if clock:
+            # A DATE carrier cannot hold a time of day. Dropping it silently
+            # turned a planned DATE into a lossy write nothing reported (D291);
+            # the row is a finding the contract can hold out instead.
+            return None, (
+                f"Invalid date: {text!r} carries the time of day {clock}, which a "
+                "DATE column cannot hold — map to a TIMESTAMP column, or hold the "
+                "row out with QUARANTINE_ROW / CAST_AND_CONTINUE"
+            )
         return parsed, None
 
     if transform == "datetime":

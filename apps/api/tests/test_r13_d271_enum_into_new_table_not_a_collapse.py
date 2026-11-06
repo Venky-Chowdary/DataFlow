@@ -39,6 +39,20 @@ def test_enum_onto_the_dialects_only_carrier_is_not_lossy(dest, carrier):
     assert is_lossy_coercion(_ENUM, carrier, dest_db=dest, source_db="stripe") is False
 
 
+def test_set_is_sized_as_the_joined_value_and_oracle_counts_bytes():
+    from services.type_system import ddl_type
+
+    joined = "SET('alpha','beta','gamma')"
+    assert ddl_type("sqlserver", joined) == "NVARCHAR(16)"
+    # The longest single member fits NVARCHAR(5); 'alpha,beta' does not.
+    assert is_lossy_coercion(joined, "NVARCHAR(5)", dest_db="sqlserver") is True
+    assert is_lossy_coercion(joined, "NVARCHAR(16)", dest_db="sqlserver") is False
+    # Oracle VARCHAR2(n) is BYTE semantics: 'café' is 5 bytes.
+    assert ddl_type("oracle", "ENUM('café','x')") == "VARCHAR2(5)"
+    assert is_lossy_coercion("ENUM('café','x')", "VARCHAR2(4)", dest_db="oracle") is True
+    assert is_lossy_coercion("ENUM('café','x')", "VARCHAR2(5)", dest_db="oracle") is False
+
+
 def test_enum_into_open_text_where_the_engine_has_enums_stays_a_decision():
     assert is_lossy_coercion(_ENUM, "TEXT", dest_db="postgresql") is True
     assert is_lossy_coercion(_ENUM, "VARCHAR(32)", dest_db="mysql") is True

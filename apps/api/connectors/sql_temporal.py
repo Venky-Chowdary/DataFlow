@@ -400,10 +400,16 @@ def parse_sql_date(value: Any) -> date | None:
             return None
     else:
         return None
-    from services.transform_engine import apply_transform
+    # The same parser the ``date`` transform uses. The transform itself refuses
+    # a time of day (a planned DATE must not drop a clock silently, D291); a
+    # bind into a column the catalog declares DATE keeps the calendar day, as
+    # ``coerce_sql_temporal`` always has for a typed ``datetime``.
+    from services.transform_engine import _parse_date, mixed_date_format_reason
 
-    iso, err = apply_transform(text, "date")
-    if err or iso is None:
+    if mixed_date_format_reason(text):
+        return None
+    iso = _parse_date(text, with_time=True)
+    if iso is None:
         return None
     try:
         return date.fromisoformat(str(iso)[:10])

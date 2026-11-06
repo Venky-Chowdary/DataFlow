@@ -30,6 +30,24 @@ def test_clockless_date_text_infers_a_date_parse(samples, expected):
     assert infer_transform_for_mapping("d", "d", "VARCHAR", None, source_samples=samples) == expected
 
 
+def test_one_clocked_cell_past_a_window_of_dates_keeps_the_timestamp():
+    clean = [f"2024-01-{(i % 28) + 1:02d}" for i in range(40)]
+    assert infer_transform_for_mapping("d", "d", "VARCHAR", None, source_samples=clean) == "date"
+    assert infer_transform_for_mapping(
+        "d", "d", "VARCHAR", None, source_samples=clean + ["2024-01-01 10:30:00"]
+    ) == "datetime"
+
+
+def test_date_transform_refuses_a_time_of_day_instead_of_dropping_it():
+    from services.transform_engine import apply_transform
+
+    assert apply_transform("2024-01-01", "date") == ("2024-01-01", None)
+    assert apply_transform("2024-01-01 00:00:00", "date") == ("2024-01-01", None)
+    value, error = apply_transform("2024-01-01 10:30:00", "date")
+    assert value is None and "10:30:00" in error and "DATE column cannot hold" in error, error
+    assert "QUARANTINE_ROW" in error
+
+
 _D = ["2024-01-01", "2024-01-02", "2024-13-45", "", "2024-02-29"]
 
 

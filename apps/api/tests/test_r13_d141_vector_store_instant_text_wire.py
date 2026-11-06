@@ -37,3 +37,31 @@ def test_the_payload_wire_keeps_offset_and_microseconds():
 def test_typed_text_column_still_drops_the_offset_contract():
     assert is_lossy_coercion("TIMESTAMPTZ", "TEXT", dest_db="postgresql") is True
     assert is_lossy_coercion("TIMESTAMPTZ", "TEXT", dest_db="mysql") is True
+
+
+@pytest.mark.parametrize("dest", _VECTOR)
+def test_time_with_zone_rides_the_same_wire(dest):
+    from datetime import time
+
+    assert is_lossy_coercion("TIMETZ", "TEXT", dest_db=dest, source_db="postgresql") is False
+    aware = time(10, 0, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    assert vector_prepare_metadata({"t": aware}) == {"t": "10:00:00+05:30"}
+
+
+def test_weaviate_declares_the_text_stamp_so_autoschema_cannot_retype_it():
+    from connectors.weaviate_writer import weaviate_mapped_property_types
+
+    declared = weaviate_mapped_property_types(
+        [{"source": "tstz", "target": "tstz", "target_type": "TEXT"}],
+        {"tstz": "TIMESTAMPTZ"},
+    )
+    assert declared.get("tstz") == "text", declared
+
+
+@pytest.mark.parametrize("dest", _VECTOR)
+def test_timezone_policy_needs_no_contract_on_the_instant_text_wire(dest):
+    from services.timezone_policy import resolve_timezone_policy
+
+    policy = resolve_timezone_policy("TIMESTAMPTZ", "TEXT", dest_db=dest)
+    assert policy.instant_preserved and policy.offset_label_preserved
+    assert policy.requires_contract is False

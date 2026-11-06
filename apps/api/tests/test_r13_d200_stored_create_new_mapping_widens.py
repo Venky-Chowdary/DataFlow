@@ -30,7 +30,20 @@ def test_dataflow_projection_is_not_an_operator_ceiling():
     stored = {"source": "name", "target": "name", "target_type": "VARCHAR(20)",
               "create_new": True, "assignment_strategy": "identity_passthrough"}
     assert stamp_is_operator_ceiling(stored) is False
-    assert stamp_is_operator_ceiling({**stored, "user_override": True}) is True
+    # Approve / Accept risk in Map stamps user_override on the kernel-invented
+    # row (fixture shape: user_override + create_new +
+    # target_type_provenance="kernel_invent"); that approves the plan, it does
+    # not make DataFlow's type an operator ceiling.
+    approved = {**stored, "user_override": True, "target_type_provenance": "kernel_invent"}
+    assert stamp_is_operator_ceiling(approved) is False
+    assert stamp_is_operator_ceiling(
+        {"target": "name", "target_type": "VARCHAR(20)", "target_type_provenance": "kernel_invent",
+         "user_override": True}
+    ) is False
+    # An operator's own stamp on an existing column is a ceiling.
+    assert stamp_is_operator_ceiling(
+        {"target": "name", "target_type": "VARCHAR(20)", "user_override": True}
+    ) is True
 
 
 def _stored(name_type: str, amt_type: str) -> list[dict]:
@@ -39,6 +52,7 @@ def _stored(name_type: str, amt_type: str) -> list[dict]:
     return [
         {"source": c, "target": c, "source_type": t, "target_type": t,
          "create_new": True, "assignment_strategy": "identity_passthrough",
+         "target_type_provenance": "kernel_invent", "user_override": True,
          "confidence": 0.95}
         for c, t in cols
     ]

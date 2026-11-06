@@ -5545,9 +5545,11 @@ def _enum_set_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         "greenplum",
     }:
         return "TEXT[]"
-    width = max(len(m) for m in members)
+    # Oracle VARCHAR2(n) is BYTE semantics by default: 'café' is 5 bytes.
+    measure = (lambda m: len(m.encode("utf-8"))) if db == "oracle" else len
+    width = max(measure(m) for m in members)
     if kind == "SET":
-        width = sum(len(m) for m in members) + max(0, len(members) - 1)
+        width = sum(measure(m) for m in members) + max(0, len(members) - 1)
     width = max(1, min(width, 4000))
     if db == "sqlserver":
         return f"NVARCHAR({min(width, 4000)})"
@@ -5576,11 +5578,17 @@ def enum_domain_would_collapse(
     src = parse_enum_or_set_ordered_members(source_type)
     if src is None:
         return False
-    if dest_db and _enum_open_string_sink(src, ddl_type(dest_db, source_type)):
-        width = parse_string_carrier_width(target_type)
-        longest = max((len(str(m)) for m in src[1]), default=0)
-        if width is None or width >= longest:
-            return False
+    if dest_db:
+        own = ddl_type(dest_db, source_type)
+        if _enum_open_string_sink(src, own):
+            # The dialect's own carrier is sized by the same rule that creates
+            # it: a SET value is comma-joined, and Oracle VARCHAR2(n) counts
+            # bytes. Anything narrower than that carrier truncates or fails
+            # the batch and stays a collapse.
+            width = parse_string_carrier_width(target_type)
+            needed = parse_string_carrier_width(own)
+            if width is None or needed is None or width >= needed:
+                return False
     return _enum_open_string_sink(src, target_type)
 
 

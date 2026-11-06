@@ -2955,25 +2955,11 @@ def _cdc_source_schema_catalog(
     None when the source is not a SQL catalog or cannot be introspected; the
     writer then reports a types-only CREATE rather than claiming a carry.
     """
-    from .stream import _PK_INTROSPECT_TYPES
+    from .adapters_introspect import source_schema_catalog_for_table
 
-    if src_type not in _PK_INTROSPECT_TYPES or not (table_name or "").strip():
-        return None
-    try:
-        from .adapters import (
-            _introspect_table_schema_rich,
-            source_schema_catalog_payload,
-        )
-
-        rich = _introspect_table_schema_rich(
-            src_type, src_cfg, table_name, list(columns or [])
-        )
-        return source_schema_catalog_payload(
-            src_type, list(columns or []), rich, fallback_types=fallback_types
-        )
-    except Exception as exc:  # noqa: BLE001 - writer certifies types-only
-        logger.debug("CDC source schema catalog failed: %s", exc, exc_info=exc)
-        return None
+    return source_schema_catalog_for_table(
+        src_type, src_cfg, table_name, list(columns or []), fallback_types=fallback_types
+    )
 
 
 def _catalog_cdc_primary_key(

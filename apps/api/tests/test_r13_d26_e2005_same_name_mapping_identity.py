@@ -166,3 +166,18 @@ def test_dataflow_created_identifiers_map_at_the_exact_band(dest):
         assert m["target"].lower() == target.lower(), m
         assert float(m["confidence"]) >= 0.97, (source, m["confidence"], m["reasoning"])
         assert not m["requires_review"], m
+
+
+def test_one_name_predicate_owns_every_exact_name_decision():
+    from services.mapping_constraints import enforce_destination_constraints
+    from services.semantic_mapper import _exact_name_unambiguous, name_identical
+
+    assert name_identical("Café", "cafe") and name_identical("Order ID", "Order_ID")
+    assert name_identical("café", "caf_")  # the pre-transliteration sanitiser spelling
+    assert not name_identical("_id", "id")  # a leading underscore is a different column
+    assert _exact_name_unambiguous("Café", "cafe", ["cafe", "id"]) is True
+    assert _exact_name_unambiguous("UserID", "userid", ["userid", "user_id"]) is False
+    kept, _dropped, _blocked = enforce_destination_constraints(
+        [{"source": "Café", "target": "Café", "confidence": 0.99}], ["cafe", "id"]
+    )
+    assert kept and kept[0]["target"] == "cafe", kept
