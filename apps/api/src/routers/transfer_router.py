@@ -1014,6 +1014,19 @@ async def execute_transfer_json(
 
     workspace_id = resolve_write_workspace(request, workspace_id)
     _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
+    # Same door as POST /schedules: an upsert with no resolvable key is a 422
+    # here, not a job that the sync-contract gate refuses (MySQL D13 review).
+    from services.upsert_key_door import assert_upsert_key_resolvable
+
+    assert_upsert_key_resolvable(
+        sync_mode=body.sync_mode,
+        stream_contracts=body.stream_contracts,
+        destination_extra=dict(body.destination.extra or {}),
+        source_connector_id=str(body.source.connector_id or ""),
+        source_table=str(body.source.table or body.source.collection or ""),
+        source_schema=str(body.source.db_schema or ""),
+        source_database=str(body.source.database or ""),
+    )
     src = src_preview
     dst = dst_preview
     require_admin_for_endpoints(request, workspace_id, src, dst)

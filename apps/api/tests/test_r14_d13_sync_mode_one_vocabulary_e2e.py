@@ -91,3 +91,80 @@ def test_upsert_schedule_is_created_and_runs_like_the_one_off(client):
     finally:
         cur.execute(f"DROP TABLE IF EXISTS `{table}`")
         h.drop_table("postgresql", dest)
+
+
+def test_a_blank_patch_sync_mode_changes_nothing_and_a_keyless_upsert_is_refused_at_both_doors(client):
+    """Review of 80a29de37: PATCH {"sync_mode": ""} turned an incremental_append
+    schedule into a truncating full_refresh_overwrite. Blank means "not given".
+    And an upsert with no key anywhere is refused before it is stored/queued,
+    the same on POST /schedules and /transfer/execute."""
+    from services.connector_store import create_connector
+
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    keyed, keyless = f"d13k_{token}", f"d13n_{token}"
+    try:
+        cur.execute(f"CREATE TABLE {keyed} (id BIGINT PRIMARY KEY, name TEXT, seq BIGINT)")  # nosec B608
+        cur.execute(f"CREATE TABLE {keyless} (id BIGINT, name TEXT)")  # nosec B608
+        cur.execute(f"INSERT INTO {keyless} VALUES (1, 'Ada'), (2, '')")  # nosec B608
+        src = create_connector({"name": f"d13b-src-{token}", "type": "postgresql", "role": "source",
+                                "workspace_id": "", "ssl": False, **h.PG, "schema": "public"})
+        dst = create_connector({"name": f"d13b-dst-{token}", "role": "destination",
+                                "workspace_id": "", "ssl": False, **h.dest_config("postgresql")})
+        maps = [{"source": c, "target": c, "confidence": 0.99} for c in ("id", "name", "seq")]
+        resp = client.post("/api/v1/schedules/", json={
+            "name": f"ia {token}", "source_connector_id": src.id, "source_table": keyed,
+            "dest_connector_id": dst.id, "dest_table": f"{keyed}_o", "interval": "hourly",
+            "sync_mode": "incremental_append", "cursor_column": "seq",
+            "cursor_semantics": "monotonic_sequence", "primary_key": "id",
+            "mappings": maps, "enabled": False})
+        assert resp.status_code == 201, resp.text
+        sid = resp.json()["id"]
+        for blank in ("", "   "):
+            patched = client.patch(f"/api/v1/schedules/{sid}", json={"sync_mode": blank})
+            assert patched.status_code == 200, patched.text
+            assert patched.json()["sync_mode"] == "incremental_append", patched.json()["sync_mode"]
+        default = client.post("/api/v1/schedules/", json={
+            "name": f"default {token}", "source_connector_id": src.id, "source_table": keyed,
+            "dest_connector_id": dst.id, "dest_table": f"{keyed}_d", "interval": "hourly",
+            "sync_mode": "", "mappings": maps, "enabled": False})
+        assert default.status_code == 201 and default.json()["sync_mode"] == "full_refresh_overwrite"
+
+        two = [{"source": c, "target": c, "confidence": 0.99} for c in ("id", "name")]
+        refused = client.post("/api/v1/schedules/", json={
+            "name": f"nokey {token}", "source_connector_id": src.id, "source_table": keyless,
+            "dest_connector_id": dst.id, "dest_table": f"{keyless}_o", "interval": "hourly",
+            "sync_mode": "upsert", "mappings": two, "enabled": True})
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["error"]["code"] == "UPSERT_KEY_REQUIRED", refused.text
+        one_off = client.post("/api/v1/transfer/execute", json={
+            "source": {"kind": "database", "format": "postgresql", "connector_id": src.id,
+                       "table": keyless},
+            "destination": {"kind": "database", "format": "postgresql", "connector_id": dst.id,
+                            "table": f"{keyless}_x", "schema": "public"},
+            "mappings": two, "sync_mode": "upsert"})
+        assert one_off.status_code == 422, one_off.text
+        assert one_off.json()["error"]["code"] == "UPSERT_KEY_REQUIRED", one_off.text
+        # A declared key resolves it on both doors; a catalog key on the keyed table too.
+        declared = client.post("/api/v1/schedules/", json={
+            "name": f"declared {token}", "source_connector_id": src.id, "source_table": keyless,
+            "dest_connector_id": dst.id, "dest_table": f"{keyless}_k", "interval": "hourly",
+            "sync_mode": "upsert", "primary_key": "id", "mappings": two, "enabled": True})
+        assert declared.status_code == 201, declared.text
+        catalog = client.post("/api/v1/schedules/", json={
+            "name": f"catalog {token}", "source_connector_id": src.id, "source_table": keyed,
+            "dest_connector_id": dst.id, "dest_table": f"{keyed}_u", "interval": "hourly",
+            "sync_mode": "merge", "mappings": maps, "enabled": True})
+        assert catalog.status_code == 201, catalog.text
+        # PATCHing a keyless schedule into upsert is the same door.
+        nokey = client.post("/api/v1/schedules/", json={
+            "name": f"append {token}", "source_connector_id": src.id, "source_table": keyless,
+            "dest_connector_id": dst.id, "dest_table": f"{keyless}_a", "interval": "hourly",
+            "sync_mode": "full_refresh_append", "mappings": two, "enabled": False})
+        assert nokey.status_code == 201, nokey.text
+        to_upsert = client.patch(f"/api/v1/schedules/{nokey.json()['id']}", json={"sync_mode": "upsert"})
+        assert to_upsert.status_code == 422, to_upsert.text
+    finally:
+        for t in (keyed, keyless):
+            cur.execute(f"DROP TABLE IF EXISTS {t}")  # nosec B608

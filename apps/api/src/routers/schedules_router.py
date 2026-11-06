@@ -56,6 +56,19 @@ def _acknowledgment_fields(
     )
 
 
+def _assert_upsert_key(plan: dict[str, Any]) -> None:
+    """``sync_mode=upsert`` with no resolvable key is a 422 here, as on /transfer/execute."""
+    from services.upsert_key_door import assert_upsert_key_resolvable
+
+    assert_upsert_key_resolvable(
+        sync_mode=plan.get("sync_mode"),
+        primary_key=plan.get("primary_key") or "",
+        stream_contracts=plan.get("stream_contracts") or [],
+        source_connector_id=str(plan.get("source_connector_id") or ""),
+        source_table=str(plan.get("source_table") or ""),
+    )
+
+
 def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
     sched = get_schedule(schedule_id)
     if not sched:
@@ -69,11 +82,18 @@ def _bound_schedule(request: Request, schedule_id: str, *, write: bool = False) 
     assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=write)
     return sched
 
-def _schedule_sync_mode(value: Any) -> Any:
+#: What a create that names no sync mode gets (the model's declared default).
+DEFAULT_SCHEDULE_SYNC_MODE = "full_refresh_overwrite"
+
+
+def _schedule_sync_mode(value: Any, *, blank: Any) -> Any:
     """The one sync-mode vocabulary (services.transfer_policy_values), schedule spelling.
 
     A Literal copy of the modes here omitted ``upsert``, so a mode the one-off
     route and the store accept was a 422 on schedule create (QA MySQL D13).
+    Blank means "not given" (transfer_policy_values' rule): a create takes
+    ``blank`` (the documented default), a PATCH ``None`` — no change, never a
+    silent switch to a truncating overwrite.
     """
     if value is None:
         return None
@@ -81,7 +101,7 @@ def _schedule_sync_mode(value: Any) -> Any:
     from services.transfer_policy_values import canonical_sync_mode
 
     if not canonical_sync_mode(value):
-        return "full_refresh_overwrite"
+        return blank
     return accepted_schedule_sync_mode(str(value))
 
 
@@ -105,12 +125,12 @@ class ScheduleCreate(PolicyFieldsModel):
     interval: str = "daily"
     cron: str = ""
     timezone: str = "UTC"
-    sync_mode: str = "full_refresh_overwrite"
+    sync_mode: str = DEFAULT_SCHEDULE_SYNC_MODE
 
     @field_validator("sync_mode", mode="before")
     @classmethod
     def _sync_mode_vocabulary(cls, value: Any) -> Any:
-        return _schedule_sync_mode(value)
+        return _schedule_sync_mode(value, blank=DEFAULT_SCHEDULE_SYNC_MODE)
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
@@ -196,7 +216,7 @@ class ScheduleUpdate(PolicyFieldsModel):
     @field_validator("sync_mode", mode="before")
     @classmethod
     def _sync_mode_vocabulary(cls, value: Any) -> Any:
-        return _schedule_sync_mode(value)
+        return _schedule_sync_mode(value, blank=None)
     validation_mode: Optional[str] = None
     schema_policy: Optional[str] = None
     backfill_new_fields: Optional[bool] = None
@@ -753,6 +773,7 @@ async def create_pipeline_schedule(
     for key in ("dest_schema", "dest_database"):
         payload[key] = str(payload.get(key) or "").strip()
     warnings: list[str] = []
+    _assert_upsert_key(payload)
     try:
         payload.update(_acknowledgment_fields(request, payload))
         sched = create_schedule(
@@ -795,6 +816,8 @@ async def patch_pipeline_schedule(
             data[key] = str(data[key] or "").strip()
     if not data:
         return ScheduleResponse.from_schedule(existing)
+    if {"sync_mode", "primary_key", "stream_contracts", "source_table", "source_connector_id"} & set(data):
+        _assert_upsert_key({**existing.to_dict(), **data})
     warnings: list[str] = []
     try:
         if "compliance_acknowledged" in data or (
