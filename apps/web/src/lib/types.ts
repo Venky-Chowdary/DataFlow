@@ -800,6 +800,8 @@ export interface PreflightProofBundle {
     requires_review: boolean;
     tags: string[];
     details?: Record<string, unknown>;
+    /** Non-blocking notes, e.g. possible card numbers on too small a sample (QA D7). */
+    advisories?: ComplianceAdvisory[];
     acknowledged?: boolean;
     review_status?: string;
     acknowledgment?: {
@@ -1752,6 +1754,16 @@ export interface PipelineSchedule {
 }
 
 /** A single persisted run attempt from GET /schedules/{id}/history. */
+/** A compliance note that never holds a transfer (counted in no score). */
+export interface ComplianceAdvisory {
+  column: string;
+  category: string;
+  note: string;
+  card_values?: number;
+  sampled_values?: number;
+  blocking?: boolean;
+}
+
 export interface ScheduleRun {
   job_id: string;
   status: string;

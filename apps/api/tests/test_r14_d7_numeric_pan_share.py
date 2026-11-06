@@ -181,3 +181,60 @@ def test_a_sixteen_digit_number_starting_with_1_is_not_uatp():
 
     assert _card_iin("1" + "0" * 14) is True        # 15 digits: UATP
     assert _card_iin("1" + "0" * 15) is False       # 16 digits: not a network
+
+
+# --- review 3: a small PAN table is an advisory, never silent, never a hold ---
+
+
+@pytest.mark.parametrize("values", [
+    _PANS[:3],                                   # a 3-row card table
+    _PANS[:4],                                   # 4 rows
+    _PANS[:4] + [None] * 96,                     # 4 PANs among 100 rows of NULLs
+])
+def test_one_to_four_card_hits_are_a_non_blocking_advisory(values):
+    from services.compliance_guard import score_compliance_risk
+
+    report = score_compliance_risk(["value"], [{"value": v} for v in values],
+                                   column_types={"value": "BIGINT"})
+    assert report["field_risk"] == {} and report["requires_review"] is False
+    advisories = report["advisories"]
+    assert [a["category"] for a in advisories] == ["possible_pci_pan"], advisories
+    assert advisories[0]["blocking"] is False and "Small sample" in advisories[0]["note"]
+
+
+def test_ids_and_low_share_columns_get_no_advisory():
+    from services.compliance_guard import score_compliance_risk
+
+    assert score_compliance_risk(["id"], [{"id": v} for v in _IDS[:100]],
+                                 column_types={"id": "BIGINT"})["advisories"] == []
+    mixed = _PANS[:2] + _IDS[:20]  # 2 card numbers at 9% share
+    assert score_compliance_risk(["ref"], [{"ref": v} for v in mixed],
+                                 column_types={"ref": "BIGINT"})["advisories"] == []
+
+
+def test_the_advisory_reaches_the_preflight_evidence():
+    from services.preflight_service import run_file_preflight
+
+    result = run_file_preflight(
+        columns=["value"],
+        column_types={"value": "BIGINT"},
+        row_count=3,
+        mappings=[{"source": "value", "target": "value", "confidence": 0.99}],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="database",
+        source_format="postgresql",
+        sync_mode="full_refresh_append",
+        sample_rows=[{"value": v} for v in _PANS[:3]],
+        confidence_threshold=0.85,
+        validation_mode="strict",
+        destination_column_types={},
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+    )
+    compliance = (result.get("proof_bundle") or {}).get("compliance") or {}
+    assert [a["category"] for a in compliance.get("advisories") or []] == ["possible_pci_pan"], compliance
+    assert compliance.get("requires_review") is False

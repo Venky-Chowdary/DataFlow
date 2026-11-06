@@ -355,21 +355,48 @@ def _card_iin(digits: str) -> bool:
     return False
 
 
-def _numeric_column_holds_pans(values: list[str]) -> bool:
-    """A numeric column of card numbers, judged on the column, never per value."""
+def _numeric_column_card_counts(values: list[str]) -> tuple[int, int]:
+    """``(card_numbers, non_empty_values)`` for a numeric column's sample."""
     digits = []
     for value in values:
         if not value:
             continue
         match = _INTEGRAL_DECIMAL.match(value)
         digits.append(match.group(1) if match else value)
-    if not digits:
-        return False
     cards = sum(
         1 for d in digits
         if _is_bare_digits(d) and 13 <= len(d) <= 19 and luhn_valid(d) and _card_iin(d)
     )
-    return cards >= NUMERIC_PAN_MIN_HITS and cards / len(digits) >= NUMERIC_PAN_SHARE
+    return cards, len(digits)
+
+
+def _numeric_column_holds_pans(values: list[str]) -> bool:
+    """A numeric column of card numbers, judged on the column, never per value."""
+    cards, total = _numeric_column_card_counts(values)
+    return bool(total) and cards >= NUMERIC_PAN_MIN_HITS and cards / total >= NUMERIC_PAN_SHARE
+
+
+def _small_sample_pan_advisory(col: str, values: list[str]) -> dict[str, Any] | None:
+    """A non-blocking note for a numeric column that looks like card numbers on
+    too small a sample to call it one (1-4 hits at >= the share): a small PAN
+    table must not pass silently, and one id must not hold a transfer."""
+    cards, total = _numeric_column_card_counts(values)
+    if not (0 < cards < NUMERIC_PAN_MIN_HITS) or cards / total < NUMERIC_PAN_SHARE:
+        return None
+    return {
+        "column": col,
+        "category": "possible_pci_pan",
+        "card_values": cards,
+        "sampled_values": total,
+        "blocking": False,
+        "note": (
+            f"Small sample: {cards} of {total} sampled value(s) in '{col}' are "
+            f"card numbers (Luhn-valid, a card network's prefix). Fewer than "
+            f"{NUMERIC_PAN_MIN_HITS} hits cannot call the column card data, so this is "
+            "not a hold — review the column, and rename or mask it if it holds PANs."
+        ),
+    }
+
 
 _NUMERIC_TYPE_RE = re.compile(
     r"^(?:big|small|tiny|medium)?int(?:eger)?\d*\b|^(?:numeric|decimal|number|"
@@ -605,6 +632,7 @@ def detect_pii_fields(
     sampled_fields: list[str] = []
 
     field_evidence: dict[str, list[dict[str, str]]] = {}
+    advisories: list[dict[str, Any]] = []
 
     for col in columns:
         name_hits = _field_hits(col)
@@ -625,8 +653,13 @@ def detect_pii_fields(
             # a card column passes nearly all. A card-hinting name still flags.
             bare_digit_pans="pci_pan" in name_hits or not numeric,
         )
-        if numeric and "pci_pan" not in value_hits and _numeric_column_holds_pans(sample_values):
-            value_hits.append("pci_pan")
+        if numeric and "pci_pan" not in value_hits and "pci_pan" not in name_hits:
+            if _numeric_column_holds_pans(sample_values):
+                value_hits.append("pci_pan")
+            else:
+                advisory = _small_sample_pan_advisory(col, sample_values)
+                if advisory:
+                    advisories.append(advisory)
         # Plain digit strings (order ids, epochs, Kafka keys) read as phones
         # only by the share rule above; that is a warning, not an identifier
         # (D94 follow-up: a second Kafka run sampled one message and held).
@@ -714,6 +747,8 @@ def detect_pii_fields(
         "sensitive_count": len(sensitive_fields),
         "field_evidence": field_evidence,
         "sampled_fields": sorted(sampled_fields),
+        # Non-blocking notes (never counted in the risk score or the hold).
+        "advisories": advisories,
     }
 
 
@@ -862,4 +897,5 @@ def score_compliance_risk(
         "compliance_tags": sorted(set(compliance_tags)),
         "direct_identifier_columns": direct,
         "review_reason": review_reason,
+        "advisories": list(pii_report.get("advisories") or []),
     }
