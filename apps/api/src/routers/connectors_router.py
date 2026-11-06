@@ -2982,18 +2982,12 @@ async def transfer_data(
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
             # QA C3: a query/procedure key on a file transfer cannot run — refuse it
             # rather than store it unread and copy the whole file.
-            from services.procedure_source import (
-                CallablePlacementError,
-                resolve_callable_placements,
-            )
+            from services.callable_intake import apply_callable_intake
+            from services.procedure_source import ProcedureSourceError
 
             try:
-                resolve_callable_placements(
-                    form=None, source_extra=None,
-                    stream_contracts=list(request_obj.stream_contracts or []),
-                    source_kind="file",
-                )
-            except CallablePlacementError as exc:
+                apply_callable_intake(request_obj, source_kind="file")
+            except ProcedureSourceError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         if mappings_json.strip():
             try:

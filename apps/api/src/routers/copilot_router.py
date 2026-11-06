@@ -315,8 +315,14 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     src = dict(payload.get("source") or {})
     dst = dict(payload.get("destination") or {})
     require_admin_for_endpoints(None, src.get("workspace_id") or dst.get("workspace_id"), src, dst)
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
     try:
         request_obj = transfer_request_from_ack(payload)
+        apply_callable_intake(request_obj)
+    except ProcedureSourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     from ..transfer.contract_engine import stamp_bound_contract

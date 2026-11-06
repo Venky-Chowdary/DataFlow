@@ -992,6 +992,19 @@ async def execute_transfer_json(
     dst_preview = EndpointConfig.from_dict(
         body.destination.kind, body.destination.model_dump(by_alias=True)
     )
+    # QA C3: the one intake every route shares. One stream contract's CALL/SELECT
+    # becomes the endpoint's, and a mode this run cannot honour is a 422 here.
+    # Without it, a one-contract query copied the whole source.table, and an
+    # unknown word was a 500 from the first is_callable_source below.
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
+    try:
+        body.stream_contracts = list(
+            apply_callable_intake(src_preview, list(body.stream_contracts or [])) or []
+        )
+    except ProcedureSourceError as exc:
+        raise HTTPException(status_code=422, detail=redact_log_text(str(exc))) from exc
     try:
         # auto is the product default. select_route_delivery keeps an explicit
         # pin and resolves auto. assert_requested_cdc_delivery rejects auto,
@@ -1438,22 +1451,28 @@ async def run_universal_transfer(
                 status_code=422, detail="stream_contracts_json must be a JSON list."
             )
         form_contracts = loaded
-    from services.procedure_source import CallablePlacementError, resolve_callable_placements
+    from types import SimpleNamespace
 
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
+    # The same intake as /transfer/execute, schedules and preflight. The form
+    # route adds its own query/procedure form fields.
+    staged_source = SimpleNamespace(kind=source_kind, extra=source_extra)
     try:
-        source_extra, form_contracts = resolve_callable_placements(
+        form_contracts = apply_callable_intake(
+            staged_source,
+            form_contracts,
             form={
                 "source_read_mode": source_read_mode,
                 "source_query": source_query,
                 "procedure_call": procedure_call,
                 "procedure_params": procedure_params,
             },
-            source_extra=source_extra,
-            stream_contracts=form_contracts,
-            source_kind=source_kind,
         )
-    except CallablePlacementError as exc:
+    except ProcedureSourceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    source_extra = staged_source.extra
     stored_file_id = (source_file_id or "").strip() or str(source_extra.get("file_id") or "").strip()
     if stored_file_id:
         source_extra["file_id"] = stored_file_id

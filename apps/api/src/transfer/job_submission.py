@@ -9,6 +9,13 @@ def create_pending_job(engine: Any, request: Any) -> str:
     from src.transfer import engine as engine_module
 
     engine._resolve_saved_connectors(request)
+    # QA C3: every route that queues a job passes the same callable intake. The
+    # routes run it first so they can answer 422; running it here as well means
+    # a route that skipped it cannot queue an unresolved source. It is
+    # idempotent.
+    from services.callable_intake import apply_callable_intake
+
+    apply_callable_intake(request)
     if request.source.kind == "file":
         from services.transfer_file_staging import (
             hydrate_file_source,

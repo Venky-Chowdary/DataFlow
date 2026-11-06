@@ -636,6 +636,13 @@ def build_schedule_request(
         from services.sync_now import apply_resync_to_request
 
         apply_resync_to_request(request, resync_mode)
+    # QA C3: the same callable intake as every other route. A saved one-contract
+    # query runs that query, not source_table. A schedule stored with a mode it
+    # cannot honour raises CallablePlacementError (a ValueError), and the fire
+    # path parks it with that message instead of copying the table.
+    from services.callable_intake import apply_callable_intake
+
+    apply_callable_intake(request)
     return request
 
 

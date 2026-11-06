@@ -318,6 +318,37 @@ def _preflight_deadline_refusal(body: PreflightRequest, message: str, seconds: f
     )
 
 
+def _apply_callable_intake(body: PreflightRequest) -> None:
+    """QA C3: Validate reads the source the way Execute will run it.
+
+    This is the same intake as /transfer/execute, the form run and schedules.
+    One stream contract's CALL/SELECT moves onto ``source_config``, and an
+    unknown mode word, or a callable word with no statement, is a 422 rather
+    than a gate run against the table.
+    """
+    from services.callable_intake import apply_callable_intake
+    from services.procedure_source import ProcedureSourceError
+
+    cfg = dict(body.source_config or {})
+    if isinstance(cfg.get("extra"), dict):
+        cfg["extra"] = dict(cfg["extra"])
+    try:
+        contracts = apply_callable_intake(
+            cfg,
+            list(body.stream_contracts or []),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=str(body.source_file_id or ""),
+            ),
+        )
+    except ProcedureSourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if cfg != dict(body.source_config or {}):
+        body.source_config = cfg
+    body.stream_contracts = list(contracts or [])
+
+
 def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
     """The gates themselves: blocking I/O, run by :func:`run_preflight` off the loop."""
     from services.workspace_access import assert_connector_accessible
@@ -326,6 +357,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
     # credentials: authorize each against its own workspace first (404).
     assert_connector_accessible(http_request, body.connector_id)
     assert_connector_accessible(http_request, body.source_connector_id)
+    _apply_callable_intake(body)
     if not body.columns:
         raise HTTPException(status_code=400, detail="No columns provided for preflight")
     if not body.mappings:
