@@ -11,7 +11,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoSettings, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEventPage, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoSettings, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
   fetchSignupMetrics,
   type SignupMetrics,
 } from "../lib/api";
@@ -29,6 +29,7 @@ import {
   chainVerifiedWithExceptions,
 } from "../lib/auditChain";
 import { auditActorLabel } from "../lib/auditActor";
+import { KEY_IDS_MASKED_HINT, auditKeyIdHint, maskKeyIdsForDisplay } from "../lib/auditKeyIds";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
@@ -86,6 +87,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  /** The API masked key ids for this reader (non-admin); null until the first read. */
+  const [auditKeyIdsMasked, setAuditKeyIdsMasked] = useState<boolean | null>(null);
   const [auditExportFormat, setAuditExportFormat] = useState<AuditExportFormat>("csv");
   /** Last chain verification result. Null means nobody has asked yet — which is not "intact". */
   const [chainReport, setChainReport] = useState<AuditChainVerification | null>(null);
@@ -271,19 +274,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const loadAudit = useCallback(() => {
     setAuditLoading(true);
-    fetchAuditEvents(100, logFilter === "all" ? undefined : logFilter)
-      .then((events) =>
+    fetchAuditEventPage(100, logFilter === "all" ? undefined : logFilter)
+      .then(({ events, keyIdsMasked }) => {
+        setAuditKeyIdsMasked(keyIdsMasked);
         setAuditEvents(
           events.map((ev) => ({
             id: ev.id,
             time: new Date(ev.time).toLocaleString(),
-            actor: auditActorLabel(ev),
+            actor: maskKeyIdsForDisplay(auditActorLabel(ev)),
             action: ev.action,
-            resource: ev.resource,
+            resource: maskKeyIdsForDisplay(ev.resource),
             level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
           })),
-        ),
-      )
+        );
+      })
       .catch(() => setAuditEvents([]))
       .finally(() => setAuditLoading(false));
   }, [logFilter]);
@@ -676,7 +680,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const downloadAuditExport = async (format: AuditExportFormat) => {
     try {
-      const blob = await exportAuditLog(format);
+      const { blob, keyIdsMasked } = await exportAuditLog(format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -685,7 +689,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       URL.revokeObjectURL(url);
       toast({
         title: "Audit export ready",
-        message: `Workspace-scoped ${format.toUpperCase()} — not a SOC 2 letter.`,
+        message: `Workspace-scoped ${format.toUpperCase()} — not a SOC 2 letter.${keyIdsMasked ? ` ${KEY_IDS_MASKED_HINT}` : ""}`,
         tone: "success",
       });
     } catch (err) {
@@ -1637,6 +1641,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       </tbody>
                     </table>
                     </div>
+                    )}
+                    {auditKeyIdsMasked !== null && (
+                      <p className="df2-settings-hint" role="note" data-testid="audit-key-id-hint">
+                        {auditKeyIdHint(auditKeyIdsMasked)}
+                      </p>
                     )}
                   </div>
                 </div>

@@ -3603,22 +3603,35 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   level: string;
   details?: Record<string, unknown>;
 }>> {
+  return (await fetchAuditEventPage(limit, level)).events;
+}
+
+/** Audit events plus whether the API masked key ids for this reader (QA browser 20). */
+export async function fetchAuditEventPage(limit = 50, level?: string): Promise<{
+  events: Awaited<ReturnType<typeof fetchAuditEvents>>;
+  keyIdsMasked: boolean;
+}> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (level && level !== "all") params.set("level", level);
   const res = await apiFetch(`${API_BASE}/audit/events?${params}`);
-  if (!res.ok) return [];
+  if (!res.ok) return { events: [], keyIdsMasked: true };
   const data = await res.json();
-  return data.events ?? [];
+  return {
+    events: data.events ?? [],
+    keyIdsMasked: data.key_ids_masked === true || res.headers.get("X-Datawrap-Key-Ids-Masked") === "1",
+  };
 }
 
 export type AuditExportFormat = "csv" | "json" | "ndjson" | "cef";
 
 /** Server-side tenant-scoped audit download (not the last 100 table rows). */
-export async function exportAuditLog(format: AuditExportFormat = "csv"): Promise<Blob> {
+export async function exportAuditLog(
+  format: AuditExportFormat = "csv",
+): Promise<{ blob: Blob; keyIdsMasked: boolean }> {
   const params = new URLSearchParams({ format, limit: "5000" });
   const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
-  return res.blob();
+  return { blob: await res.blob(), keyIdsMasked: res.headers.get("X-Datawrap-Key-Ids-Masked") === "1" };
 }
 
 export type AuditChainFinding = {
