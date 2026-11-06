@@ -75,7 +75,7 @@ def _schedules(workspace_id: str, actor: str) -> int:
         release_schedule_cdc_capture(sched)
         if delete_schedule(sched.id):
             removed += 1
-            record_schedule_deleted(sched, via="workspace_teardown", actor=actor)
+            record_schedule_deleted(sched, actor=actor)
     return removed
 
 
