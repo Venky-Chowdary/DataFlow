@@ -314,6 +314,7 @@ def stream_scd2_mirror_transfer(
                         batch_size=batch_size,
                         validation_mode=validation_mode,
                         scd2_opts=scd2_opts,
+                        source_endpoint=source,
                     )
                     rejected_all.extend(list(summary.get("rejected_details") or []))
                     if summary.get("ok") is False:

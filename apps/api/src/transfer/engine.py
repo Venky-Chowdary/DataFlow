@@ -2509,6 +2509,7 @@ class UniversalTransferEngine:
                                 # so an unlimited read is the whole source population.
                                 complete_snapshot=not int(request.limit or 0),
                                 scd2_opts=_scd2_opts,
+                                source_endpoint=request.source,
                             ),
                             budget=RetryBudget(
                                 max_attempts=3,

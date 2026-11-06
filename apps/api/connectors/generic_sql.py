@@ -2322,6 +2322,13 @@ def _with_placement_suffix(ddl: str, suffix: str) -> str:
     return f"{ddl.rstrip().rstrip(';')} {clause}"
 
 
+def _collation_of_stamp(logical: str) -> str:
+    """The ``COLLATE`` name a destination type stamp spells, or ``""``."""
+    from services.type_system import parse_collation
+
+    return (parse_collation(str(logical or "")) or "").strip().strip('"').strip("`")
+
+
 def _build_table_for_write(
     engine: Any,
     table_name: str,
@@ -2483,7 +2490,12 @@ def _build_table_for_write(
         )
         if is_pk and col in unbounded_key_width:
             sa_type = unbounded_key_width[col]
-        collation = plan_collations.get(col)
+        # The planner certifies a collation it carries; a Map stamp that already
+        # spells one (``NVARCHAR(100) COLLATE Latin1_General_CI_AI``) is the
+        # same decision already taken, and ``_sa_type_for_logical`` drops the
+        # clause. The SCD2 history table was created types-only and refused
+        # DataFlow's own table on run 2 (D275).
+        collation = plan_collations.get(col) or _collation_of_stamp(logical)
         if collation and isinstance(sa_type, sa.String):
             # String-family types render ``… COLLATE <name>`` from this attribute
             # on every dialect that supports column collation.
