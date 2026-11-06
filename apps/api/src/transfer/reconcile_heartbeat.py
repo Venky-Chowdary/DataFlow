@@ -47,7 +47,7 @@ def reconcile_heartbeat_scope(dest_summary: Any) -> dict[str, Any]:
     return scope
 
 
-def _first_row_wait_phrase(elapsed: int) -> str:
+def _first_row_wait_phrase(elapsed: int, bound: int) -> str:
     """What the checksum is waiting on before its first destination row.
 
     The pulse used to promise "a metadata lock fails within 120s" for as long
@@ -56,9 +56,6 @@ def _first_row_wait_phrase(elapsed: int) -> str:
     (D280). The bound is the configured lock wait; past it the sentence says
     the destination has not answered instead of repeating the promise.
     """
-    from connectors.write_resilience import destination_lock_wait_seconds
-
-    bound = destination_lock_wait_seconds()
     if elapsed <= bound:
         return (
             " No destination row has been read yet; a lock wait on the "
@@ -140,6 +137,10 @@ def reconcile_phase_heartbeat(
             total_rows=total,
             message=enter_msg,
         )
+        from connectors.write_resilience import destination_lock_wait_seconds
+
+        # Resolved here, not in the pulse thread: the bound the sentence names.
+        lock_bound = destination_lock_wait_seconds()
         stop = threading.Event()
         started = time.monotonic()
 
@@ -167,7 +168,7 @@ def reconcile_phase_heartbeat(
                         f"not the whole job…{hashed_phrase}{checksum_phrase}"
                     )
                 else:
-                    waiting = _first_row_wait_phrase(elapsed) if hashed <= 0 else ""
+                    waiting = _first_row_wait_phrase(elapsed, lock_bound) if hashed <= 0 else ""
                     pulse = (
                         f"Reconciling data ({elapsed}s) — checksum scan still "
                         f"running for {processed:,} rows.{hashed_phrase}{waiting} "
