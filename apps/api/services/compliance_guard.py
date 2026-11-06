@@ -449,6 +449,18 @@ def _value_hits(values: list[str], *, bare_digit_phones: bool = True) -> list[st
     return list(dict.fromkeys(hits))
 
 
+def _phone_shape(values: list[str]) -> str:
+    """``formatted`` when at least one sampled phone has a phone shape
+    (separators, parentheses, a country code); ``bare_digits`` when every
+    phone-shaped value is a plain digit run (an order id, an epoch, a key).
+    A bare digit run is reported, never counted as a direct identifier."""
+    for value in values:
+        text = str(value).strip()
+        if text and not _is_bare_digits(text) and _is_phone(text):
+            return "formatted"
+    return "bare_digits"
+
+
 def _embedded_hits(values: list[str]) -> list[str]:
     """Categories found inside values that are not themselves an identifier."""
     hits: list[str] = []
@@ -521,6 +533,12 @@ def detect_pii_fields(
                 col,
             ),
         )
+        # Plain digit strings (order ids, epochs, Kafka keys) read as phones
+        # only by the share rule above; that is a warning, not an identifier
+        # (D94 follow-up: a second Kafka run sampled one message and held).
+        phone_shape = _phone_shape(sample_values) if "phone" in value_hits else ""
+        if phone_shape == "bare_digits" and "phone" in name_hits:
+            phone_shape = "name_hinted"
         if "name" in name_hits and _non_person_name(col, sample_values):
             _logger.info(
                 "Column %r: 'name' by spelling, but its sampled values are not "
@@ -569,12 +587,12 @@ def detect_pii_fields(
         field_evidence[col] = [
             # ``sampled`` False: the sample had no value for this column, so
             # the name is all the evidence there is (and the hold says so).
-            {"category": cat, "rule": "column_name", "sampled": bool(non_empty)}
+            {"category": cat, "rule": "column_name", **({} if non_empty else {"sampled": False})}
             for cat in dict.fromkeys(name_hits)
         ] + [
             # Content is evidence in its own right, also where the name agrees:
             # "phone by column name" alone read as a name-only detector (D94).
-            {"category": cat, "rule": "sample_value"}
+            {"category": cat, "rule": "sample_value", **({"shape": phone_shape} if cat == "phone" else {})}
             for cat in value_hits
         ] + [
             {"category": cat, "rule": "embedded_value"} for cat in embedded_hits
@@ -617,7 +635,9 @@ def direct_identifier_columns(pii_report: dict[str, Any]) -> list[str]:
     Content evidence only: ``email_opt_in`` holds booleans, not addresses,
     and an empty or sparse table has shown nothing yet. A name-only finding
     is still reported (marked "no sample" when the column had no value) but
-    never forces the review hold on its own.
+    never forces the review hold on its own. A phone needs a phone shape
+    (separators, a country code) or a phone-hinting name: a plain digit run
+    is an order id, an epoch or a key until something says otherwise.
     """
     evidence = pii_report.get("field_evidence") or {}
     out: list[str] = []
@@ -625,6 +645,7 @@ def direct_identifier_columns(pii_report: dict[str, Any]) -> list[str]:
         if any(
             str(item.get("category")) in _DIRECT_IDENTIFIER_CATEGORIES
             and str(item.get("rule")) in _CONTENT_RULES
+            and item.get("shape") != "bare_digits"
             for item in items
         ):
             out.append(col)

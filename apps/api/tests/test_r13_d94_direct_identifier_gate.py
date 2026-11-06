@@ -177,6 +177,37 @@ def test_the_profiler_and_the_sample_quality_check_agree_with_the_gate():
     assert not [i for i in (quality.get("issues") or []) if "invalid email" in str(i)], quality
 
 
+def test_plain_digit_strings_are_not_identifiers_even_when_the_sample_is_one_row():
+    """Kafka digit-string keys and fields (test_d190_d194_d197): the second
+    incremental run samples one message, so every digit column is 100%
+    "phone-shaped" and the density rule held the run. A plain digit run is an
+    order id, an epoch or a key: reported at most as a soft phone finding,
+    never a direct identifier."""
+    from services.preflight_proof_bundle import _finding_lines
+
+    cols = ["_kafka_key", "order_id", "ts_s", "code", "flag", "note"]
+    one = [{"_kafka_key": "20240102", "order_id": "20240102", "ts_s": "1700000003",
+            "code": "0100", "flag": "f", "note": " "}]
+    out = score_compliance_risk(cols, one)
+    assert out["direct_identifier_columns"] == [], out["findings"]
+    assert out["requires_review"] is False
+    assert out["review_reason"] == ""
+    for line in _finding_lines(out):
+        assert "(bare digits)" in line, line
+    three = one + [
+        {"_kafka_key": "20240101", "order_id": "20240101", "ts_s": "1700000000", "code": "0012", "flag": "t", "note": ""},
+        {"_kafka_key": "1700000000", "order_id": "20231231", "ts_s": "1700000000000", "code": "0007", "flag": "f", "note": None},
+    ]
+    assert score_compliance_risk(cols, three)["requires_review"] is False
+    # A phone shape, or a phone-hinting name, is what makes a phone column.
+    shaped = score_compliance_risk(
+        ["id", "contact", "mobile", "callback"],
+        [{"id": 1, "contact": "+1 415 555 0100", "mobile": "5551234000", "callback": "(212) 555-0199"}],
+    )
+    assert shaped["direct_identifier_columns"] == ["callback", "contact", "mobile"]
+    assert shaped["requires_review"] is True
+
+
 def test_the_mapper_reads_email_and_phone_through_the_same_classifier():
     from services.mapping_quality import analyze_column_profile
 
