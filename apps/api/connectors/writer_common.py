@@ -475,6 +475,15 @@ def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
         return False
     if mapping.get("user_override") or mapping.get("userOverride"):
         return True
+    if mapping.get("create_new") or str(mapping.get("assignment_strategy") or "") in {
+        "identity_passthrough",
+        "create_compatible_new",
+    }:
+        # DataFlow projected this carrier for the column it created; nobody
+        # drew it as a limit. A schedule or rerun replays that stored mapping,
+        # and reading it as a ceiling refused the approved widen of the
+        # product's own table (VARCHAR(20) -> VARCHAR(200), D200).
+        return False
     origin = str(mapping.get("target_type_origin") or "").strip().lower()
     # A sampled-profile origin is not a ceiling: the type was inferred from a
     # page of values, and the next wider page must be allowed to widen it (D1).
