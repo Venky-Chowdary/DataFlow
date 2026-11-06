@@ -1529,6 +1529,13 @@ def create_schedule(
             f"{EMPTY_MAPPING_REFUSAL[1:]} Send enabled: false to save a draft. "
             f"{EMPTY_MAPPING_CORRECTIVE}",
         )
+    if refuse_unrunnable_mappings:
+        # A mapping every run would refuse is refused now, by the same G4 floor
+        # and Execute review gate (QA C10) — on every create path, including
+        # the one that persists onto an existing draft below.
+        from services.schedule_mapping_contract import assert_schedule_mappings_executable
+
+        assert_schedule_mappings_executable(rows, str(payload.get("validation_mode") or "strict"))
     if rows:
         target = find_studio_replay_target(
             replay_id,
@@ -1552,7 +1559,9 @@ def create_schedule(
             patch["require_signed_contract"] = require_signed
             if "enabled" not in patch:
                 patch["enabled"] = True
-            updated = update_schedule(target.id, patch)
+            updated = update_schedule(
+                target.id, patch, refuse_unrunnable_mappings=refuse_unrunnable_mappings
+            )
             if updated:
                 return updated
     enabled = bool(payload.get("enabled", True))
@@ -1570,13 +1579,8 @@ def create_schedule(
         enabled_note = ""
     if enabled_note and warnings is not None:
         warnings.append(enabled_note)
-    from services.schedule_mapping_contract import assert_schedule_mappings_executable
     from services.schedule_source_probe import assert_schedule_source
 
-    if refuse_unrunnable_mappings:
-        # A mapping every run would refuse is refused now, by the same G4 floor
-        # and Execute review gate (QA C10), not on the first unattended run.
-        assert_schedule_mappings_executable(rows, str(payload.get("validation_mode") or "strict"))
     # Outside the name lock: a catalog round trip must not serialise saves.
     assert_schedule_source(payload, armed=enabled, warnings=warnings)
     with _NAME_LOCK:

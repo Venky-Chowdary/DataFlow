@@ -134,3 +134,46 @@ def test_findings_agree_with_the_g4_gate_on_the_same_rows():
     assert schedule_mapping_findings(
         [{"source": "x", "target": "", "intentional_omit": True, "confidence": 0.0},
          {"source": "a", "target": "a", "confidence": 0.99}], "strict") == []
+
+
+def test_a_create_that_persists_onto_an_existing_draft_is_judged_too(client):
+    """Review of 52de05a44: the Studio replay branch (an existing draft on the
+    same route, or an explicit replay_schedule_id) returned before the check."""
+    from services.connector_store import create_connector
+    from services.schedule_store import get_schedule
+
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    src_table, dest_table = f"c10r_src_{token}", f"c10r_dst_{token}"
+    try:
+        cur.execute(f"CREATE TABLE {src_table} (id BIGINT PRIMARY KEY, name TEXT)")  # nosec B608
+        src = create_connector({"name": f"c10r-src-{token}", "type": "postgresql", "role": "source",
+                                "workspace_id": "", "ssl": False, **h.PG, "schema": "public"})
+        dst = create_connector({"name": f"c10r-dst-{token}", "role": "destination",
+                                "workspace_id": "", "ssl": False, **h.dest_config("postgresql")})
+        base = {"source_connector_id": src.id, "source_table": src_table,
+                "dest_connector_id": dst.id, "dest_table": dest_table, "interval": "hourly",
+                "sync_mode": "full_refresh_overwrite"}
+        draft = client.post("/api/v1/schedules/", json={**base, "name": f"draft {token}",
+                                                        "mappings": [], "enabled": False})
+        assert draft.status_code == 201, draft.text
+        draft_id = draft.json()["id"]
+
+        _refusal(client.post("/api/v1/schedules/", json={**base, "name": f"adopt {token}",
+                                                         "mappings": _LOW, "enabled": True}),
+                 "id→id (0.30)")
+        _refusal(client.post("/api/v1/schedules/", json={**base, "name": f"replay {token}",
+                                                         "mappings": _LOW, "enabled": True,
+                                                         "replay_schedule_id": draft_id}),
+                 "id→id (0.30)")
+        stored = get_schedule(draft_id)
+        assert stored is not None and not stored.mappings and not stored.enabled, stored
+
+        reviewed = [{**m, "user_override": True} for m in _LOW]
+        ok = client.post("/api/v1/schedules/", json={**base, "name": f"replay ok {token}",
+                                                     "mappings": reviewed, "enabled": True,
+                                                     "replay_schedule_id": draft_id})
+        assert ok.status_code == 201 and ok.json()["id"] == draft_id, ok.text
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
