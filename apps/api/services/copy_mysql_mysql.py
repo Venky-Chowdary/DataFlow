@@ -56,6 +56,44 @@ from services.copy_range_proof import range_keys_match  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _identity_charset_tails(
+    cur: Any,
+    table: str,
+    *,
+    dest_dialect: str,
+    same_instance: bool,
+) -> dict[str, str]:
+    """``CHARACTER SET … COLLATE …`` each source text column declares, by name.
+
+    ``COLUMN_TYPE`` names no charset, so an identity CREATE from it put a
+    latin1 ``TINYTEXT`` (255 characters) into the destination's utf8mb4
+    default (255 *bytes*, as few as 63 characters): 255 latin1 '’' are 765
+    UTF-8 bytes and the copy died with 1406 Data too long (QA MySQL D12). The
+    identity copy carries the source's charset, so every byte-bounded tier
+    holds what the source held. A collation is carried where the destination
+    server knows it (always on the same server).
+    """
+    from services.dest_dialect_facts import _collation_compatible_with_dest
+
+    cur.execute(
+        "SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME "
+        "FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+        (table,),
+    )
+    tails: dict[str, str] = {}
+    for name, charset, collation in cur.fetchall():
+        cs = str(charset or "").strip()
+        if not cs or not cs.replace("_", "").isalnum():
+            continue
+        tail = f"CHARACTER SET {cs}"
+        coll = str(collation or "").strip()
+        if coll and (same_instance or _collation_compatible_with_dest(dest_dialect, coll)):
+            tail += f" COLLATE {coll}"
+        tails[str(name).lower()] = tail
+    return tails
+
+
 def mysql_mysql_insert_select_enabled() -> bool:
     raw = (getenv_brand("MYSQL_MYSQL_INSERT_SELECT", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -230,9 +268,17 @@ def copy_mysql_to_mysql(
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
             live_l = {k.lower(): v for k, v in live.items()}
+            charset_tails = _identity_charset_tails(
+                src_cur,
+                source_table,
+                dest_dialect=str(dest_cfg.get("type") or "mysql").strip().lower(),
+                same_instance=same_instance,
+            )
             create_ddls: list[str] = []
             for i, col in enumerate(source_cols):
                 declared = live_l.get(col.lower()) or mysql_ddls[i]
+                if col.lower() in live_l and col.lower() in charset_tails:
+                    declared = f"{declared} {charset_tails[col.lower()]}"
                 if use_insert_select:
                     create_ddls.append(declared)
                 else:
