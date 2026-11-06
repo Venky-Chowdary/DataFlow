@@ -130,13 +130,63 @@ def _numeric_cast_failure(err: str) -> bool:
     )
 
 
-def _holds_out(mode: str, reason: str | None = None, *, record_batch: bool = True) -> bool:
-    """The validation mode's holdout policy (``services.validation_mode_contract``)."""
+def _holds_out(mode: str, reason: str | None = None, *, record_batch: bool) -> bool:
+    """The validation mode's holdout policy (``services.validation_mode_contract``).
+
+    ``record_batch`` is required: balanced holds a calendar refusal out only
+    on a file. Without the policy module nothing is held out (fail closed).
+    """
     try:
         from services.validation_mode_contract import mode_holds_out_refusal
     except ImportError:
-        return str(mode or "").strip().lower() == "lenient"
+        return False
     return mode_holds_out_refusal(mode, reason, record_batch=record_batch)
+
+
+def _record_batch_source(ctx: Any) -> bool:
+    try:
+        from services.preflight_source_kind import source_is_record_batch
+    except ImportError:
+        return False
+    return bool(source_is_record_batch(
+        getattr(ctx.plan.source, "kind", ""), getattr(ctx.plan.source, "db_type", "")
+    ))
+
+
+def _probe_columns(ctx: Any) -> dict[str, dict]:
+    try:
+        return dict((ctx.coercion_report() or {}).get("by_source") or {})
+    except Exception:  # noqa: BLE001 - no probe: no per-column verdict
+        return {}
+
+
+def _column_holdout(by_source: dict[str, dict], source: str, mode: str, *, record_batch: bool) -> str:
+    """The probe's one per-column verdict (``holdout_kind``) — G3, G5 and G8 read it.
+
+    A column the probe did not grade (no row in ``by_source``) falls back to the
+    mode alone, as before: lenient holds its refusals out, nothing else does.
+    """
+    entry = by_source.get(source)
+    if isinstance(entry, dict):
+        return str(entry.get("holdout_kind") or "")
+    return "cast_failure" if _holds_out(mode, record_batch=record_batch) else ""
+
+
+def _probe_refused_columns(by_source: dict[str, dict]) -> set[str]:
+    """Columns whose refused cells the mode's policy does NOT hold out (wrong mapping)."""
+    return {
+        str(source)
+        for source, col in (by_source or {}).items()
+        if isinstance(col, dict)
+        and int(col.get("failed") or 0) > 0
+        and col.get("severity") == "block"
+        and not col.get("holdout_kind")
+    }
+
+
+def _lines_name_columns(lines: list[Any], columns: set[str]) -> bool:
+    text = [str(line) for line in lines]
+    return any(f"{col}→" in t or f"{col}->" in t for col in columns for t in text)
 
 
 def _mapping_contract_present(m: Any) -> bool:
@@ -1732,7 +1782,10 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     if issues:
         # Lenient quarantines the bad cells and still loads the good rows.
         # A missing destination stamp (examined == 0) already returned above.
-        if _holds_out(mode):
+        refused_by_probe = _probe_refused_columns(by_source) & {
+            str(d.get("source") or "") for d in issues_detail if isinstance(d, dict)
+        }
+        if _holds_out(mode, record_batch=_record_batch_source(ctx)) and not refused_by_probe:
             return _pass(
                 GateId.G3_SCHEMA_CONTRACT,
                 (
@@ -2060,7 +2113,12 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             if str(line).lower().startswith("source column missing")
             or "no sample" in str(line).lower()
         ]
-        if _holds_out(mode) and not structural:
+        refused_by_probe = _probe_refused_columns(_probe_columns(ctx))
+        if (
+            _holds_out(mode, record_batch=_record_batch_source(ctx))
+            and not structural
+            and not _lines_name_columns(hard_errors, refused_by_probe)
+        ):
             # Mixed or bad cells are holdouts. The writer quarantines them.
             # The gate must not refuse the load before that write runs.
             details["contracted_holdouts"] = list(hard_errors[:20])
@@ -3173,10 +3231,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     g8_mode = str(getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
     # The coercion probe's per-column decision (invalid-calendar holdout),
     # read here instead of re-deciding on the cell's value.
-    try:
-        probe_by_source = (ctx.coercion_report() or {}).get("by_source") or {}
-    except Exception:  # noqa: BLE001 - no probe: no calendar holdout
-        probe_by_source = {}
+    probe_by_source = _probe_columns(ctx)
     if file_load:
         for probe in ctx.plan.mappings:
             if _is_intentional_omit_mapping(probe) or not probe.target:
@@ -3274,7 +3329,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 elif str(m.target) in file_holdout_targets:
                     contracted_holdouts.append(line)
                     row_holdout = True
-                elif _holds_out(g8_mode, err):
+                elif _holds_out(g8_mode, err, record_batch=file_load) and _column_holdout(
+                    probe_by_source, m.source, g8_mode, record_batch=file_load
+                ):
                     # A bad cast is a quarantine holdout. The good rows stay
                     # in the write set and the gate does not block the load.
                     contracted_holdouts.append(line)
@@ -3547,7 +3604,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 # when transform is explicit; block when transform missing but types lossy.
         if mismatches:
             mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
-            if _holds_out(mode):
+            if _holds_out(mode, record_batch=file_load) and not _lines_name_columns(
+                mismatches, _probe_refused_columns(probe_by_source)
+            ):
                 return _pass(
                     GateId.G8_RECONCILIATION,
                     (
@@ -3618,7 +3677,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                                 "good rows still load"
                             )
                             if contracted_holdouts
-                            and _holds_out(g8_mode)
+                            and _holds_out(g8_mode, record_batch=file_load)
                             else (
                                 f"; {len(contracted_holdouts)} row(s) held out under "
                                 "quarantine/skip continue-policy"
