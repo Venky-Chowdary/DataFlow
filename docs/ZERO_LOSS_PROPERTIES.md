@@ -293,12 +293,26 @@ where the source side came from:
       key was not in the write-time population. L1 and the key census still
       grade the counts. A key the run did not write is never "drift".
     * Neither side equals what was written: the key stays compared and vetoes.
+* **Concurrent DataFlow writers** (review M2): a witness attributes only when
+  its job held the destination table's write lock exclusive, from before the
+  read until the job ended (`services/destination_write_lock.py`, PostgreSQL
+  session advisory lock keyed on `current_database().schema.table`). Without
+  the lock, job A could read V1, job B could read V2 and write it, and A could
+  then write V1 late and excuse the key as drift, leaving the table on a stale
+  value with both jobs green. Keyed upserts take the lock exclusive when it is
+  free. Every other DataFlow writer of the table takes it shared and waits
+  while an exclusive holder runs (bounded by
+  `DATAFLOW_DEST_WRITE_LOCK_WAIT_SECONDS`, default 3600). A keyed job that
+  finds the table busy runs without a witness. Non-PostgreSQL destinations
+  take no lock, so their witness never attributes.
 * **Re-read route without a usable witness** (one of the following):
   * a resumed attempt;
   * a routed write;
   * a chunk that was not fingerprinted;
   * a count mismatch;
   * all witness slots held by other in-flight jobs (it never evicts one);
+  * no exclusive destination write lock (a non-PostgreSQL destination, or
+    another job writing the table);
   * an encoder mismatch.
 
   In these cases the ladder cannot tell drift from loss, and nothing is excused.

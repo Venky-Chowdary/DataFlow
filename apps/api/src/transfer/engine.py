@@ -949,6 +949,9 @@ class UniversalTransferEngine:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
             ):
+                from services.destination_write_lock import hold_destination_write_lock
+
+                hold_destination_write_lock(request, job_id)  # released by tracked_job_scope
                 result = self._execute_tracked_inner(request, job_id, resume=resume)
         except BaseException as exc:
             lifecycle_events.emit_run_exception(logger, fields, started, exc)

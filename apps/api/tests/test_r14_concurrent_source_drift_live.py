@@ -374,6 +374,9 @@ def test_no_witness_outlives_its_job(world, monkeypatch, outcome):
 def test_the_job_scope_releases_the_witness_when_the_body_raises():
     import services.keyed_write_witness as kww
 
+    import services.destination_write_lock as dwl
+
+    dwl._HELD["scope-raise"] = (_NoSession(), dwl.EXCLUSIVE)  # as if held on the table
     with pytest.raises(KeyboardInterrupt):
         with kww.keyed_write_witness_scope("scope-raise"):
             witness = kww.begin_keyed_write_witness(
@@ -383,6 +386,12 @@ def test_the_job_scope_releases_the_witness_when_the_body_raises():
             assert witness is not None and "scope-raise" in kww.held_witness_job_ids()
             raise KeyboardInterrupt
     assert "scope-raise" not in kww.held_witness_job_ids()
+    dwl.release_destination_write_lock("scope-raise")
+
+
+class _NoSession:
+    def close(self) -> None:
+        pass
 
 
 def test_no_witness_is_registered_outside_a_tracked_job():

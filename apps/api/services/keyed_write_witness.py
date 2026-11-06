@@ -194,12 +194,18 @@ def begin_keyed_write_witness(
         reason = "not_a_keyed_upsert"
     elif int(expected_rows or 0) > MAX_LADDER_ROWS:
         reason = "population_exceeds_ladder_budget"
+    from services.destination_write_lock import EXCLUSIVE, destination_lock_mode
+
     witness: KeyedWriteWitness | None = None
     with _LOCK:
         _REGISTRY.pop(jid, None)
         if not reason and jid not in _ACTIVE_JOBS:
             # A caller outside execute_tracked: nothing would release it.
             reason = "outside_a_tracked_job"
+        if not reason and destination_lock_mode(jid) != EXCLUSIVE:
+            # Another DataFlow job may write the table inside this run's window
+            # and be overwritten late; the witness would excuse it (review M2).
+            reason = "no_exclusive_destination_lock"
         if not reason and len(_REGISTRY) >= _MAX_JOBS:
             reason = "witness_capacity_in_use_by_other_jobs"
         if not reason:

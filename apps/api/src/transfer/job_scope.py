@@ -10,7 +10,9 @@ enters this once; every scope here is left on every outcome of the job
 * the job's ``hash_pii`` key version;
 * the keyed write witness (``services.keyed_write_witness``): the ladder
   normally takes it, and a run that fails before the ladder must not keep a
-  ladder budget of digests in memory after the job.
+  ladder budget of digests in memory after the job;
+* the destination-table write lock (``services.destination_write_lock``),
+  taken once the connectors are resolved and held until the job ends.
 """
 
 from __future__ import annotations
@@ -27,9 +29,14 @@ def tracked_job_scope(request: Any, job_id: str, *, store: Callable[[], Any]) ->
     from services.keyed_write_witness import keyed_write_witness_scope
     from services.pii_hash_keys import transfer_job_scope
 
-    with keyed_write_witness_scope(job_id), egress_workspace(
-        str(request.workspace_id or "")
-    ), endpoint_session_scope(engines=("sftp",)), transfer_job_scope(
-        request, job_id, store=store
-    ):
-        yield
+    from services.destination_write_lock import release_destination_write_lock
+
+    try:
+        with keyed_write_witness_scope(job_id), egress_workspace(
+            str(request.workspace_id or "")
+        ), endpoint_session_scope(engines=("sftp",)), transfer_job_scope(
+            request, job_id, store=store
+        ):
+            yield
+    finally:
+        release_destination_write_lock(job_id)

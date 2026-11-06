@@ -196,9 +196,14 @@ def test_should_fix4_an_in_flight_witness_is_never_evicted(world, monkeypatch):
     from contextlib import ExitStack
 
     planted = [f"r14inflight{i}" for i in range(kww._MAX_JOBS)]
-    with ExitStack() as in_flight:  # other jobs, still running
+    import services.destination_write_lock as dwl
+    from tests.test_r14_concurrent_source_drift_live import _NoSession
+
+    with ExitStack() as in_flight:  # other jobs, still running (each on its own table)
         for jid in planted:
             in_flight.enter_context(kww.keyed_write_witness_scope(jid))
+            dwl._HELD[jid] = (_NoSession(), dwl.EXCLUSIVE)
+            in_flight.callback(dwl.release_destination_write_lock, jid)
             assert kww.begin_keyed_write_witness(
                 job_id=jid, key_columns=["id"], sync_mode="upsert",
                 inline_fingerprints_used=False, resumed=False,
