@@ -3555,8 +3555,14 @@ def _maybe_attach_verification_ladder(
 
         source_rows, target_rows, drift_record = split_concurrent_source_drift(
             witness=witness, source_rows=source_rows, target_rows=target_rows,
-            columns=target_cols, key_columns=key_cols,
-            dest_db_type=dest_type, dest_types=dest_types,
+            key_columns=key_cols,
+            rows_written=_as_count(dest_summary.get("rows_written")),
+            gate8_source_rows=_as_count(report.get("source_rows")),
+            full_target_rows=full_target_rows,
+            excluded_key_values=sorted(_rej_keys or ()),
+            not_started_reason=str(
+                (dest_summary.get("keyed_write_witness") or {}).get("reason") or ""
+            ),
         )
         scoped_written = bool(drift_record.get("attributed"))
     if scoped_written:

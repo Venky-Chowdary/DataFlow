@@ -1873,7 +1873,9 @@ def _stream_database_transfer_impl(
         job_id=run.cfg.job_id, key_columns=list(run.cfg.pk_target_cols or []),
         sync_mode=str(run.cfg.effective_sync or ""), resumed=resumed_pass,
         inline_fingerprints_used=run.tally.inline_fingerprints_used,
-        expected_rows=int(run.cfg.total_rows or 0),
+        expected_rows=int(run.cfg.total_rows or 0), columns=list(run.cfg.target_cols or []),
+        dest_db_type=str(run.cfg.dest_bind_dialect or ""), dest_types=run.cfg.digest_dest_types,
+        summary=run.tally.dest_summary,
     )
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
@@ -2413,10 +2415,8 @@ def _stream_database_transfer_impl(
         )
         last_checksum = result["last_checksum"] or last_checksum
         fps = result.get("fingerprints") or []
-        if fps and run.tally.inline_fingerprints_used:
+        if fps:
             write_pass_fp.add_many(fps)
-        elif fps and run.tally.keyed_write_witness is not None:
-            run.tally.keyed_write_witness.add_many(fps)
         warning_samples.extend(result["warnings"])  # bounded + deduped
         if len(reconcile_sample) < run.cfg._RECONCILE_SAMPLE_CAP:
             for row in result.get("reconcile_sample_rows") or []:

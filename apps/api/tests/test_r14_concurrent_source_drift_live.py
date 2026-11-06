@@ -221,17 +221,24 @@ def test_the_buffered_route_grades_the_written_records(world, tamper):
 # --------------------------------------------------------------------------- #
 
 def _witnessed(rows, cols):
-    from services.keyed_write_witness import KeyedWriteWitness
-    from services.reconciliation import _iter_fingerprints
+    from services.keyed_write_witness import Encoder, KeyedWriteWitness
 
-    w = KeyedWriteWitness(["region", "id"], max_rows=100)
-    w.add_many(_iter_fingerprints(rows, cols))
+    w = KeyedWriteWitness(["region", "id"], max_rows=100, encoder=Encoder(cols, "", None))
+    w.add_rows(rows)
     return w
 
 
-def test_the_witness_excuses_only_a_moved_source_whose_destination_is_as_written():
+def _split(w, source, target, *, written=None, gate8=None, full=None):
     from services.keyed_write_witness import split_concurrent_source_drift
 
+    return split_concurrent_source_drift(
+        witness=w, source_rows=source, target_rows=target, key_columns=["region", "id"],
+        rows_written=w.rows_added if written is None and w is not None else written,
+        gate8_source_rows=gate8, full_target_rows=full,
+    )
+
+
+def test_the_witness_excuses_only_a_moved_source_whose_destination_is_as_written():
     cols = ["region", "id", "amount"]
     written = [{"region": "eu", "id": i, "amount": f"{i}.50"} for i in range(1, 5)]
     w = _witnessed(written, cols)
@@ -242,34 +249,58 @@ def test_the_witness_excuses_only_a_moved_source_whose_destination_is_as_written
     target = [dict(r) for r in written]
     target[1]["amount"] = "7.77"
     target[2]["amount"] = "0"                         # source as written, dest differs -> stays
-    s, t, rec = split_concurrent_source_drift(
-        witness=w, source_rows=source, target_rows=target, columns=cols,
-        key_columns=["region", "id"], dest_db_type="", dest_types=None,
-    )
-    assert rec["attributed"] is True and rec["count"] == 2
-    assert sorted(k["id"] for k in rec["sample_keys"]) == [1, 9]
+    s, t, rec = _split(w, source, target, gate8=4)
+    assert rec["attributed"] is True and rec["count"] == 1 and rec["inserted_count"] == 1
+    assert [k["id"] for k in rec["sample_keys"]] == [1]
+    assert [k["id"] for k in rec["inserted_sample_keys"]] == [9]
     assert [r["id"] for r in s] == [2, 3, 4] and [r["id"] for r in t] == [2, 3, 4]
 
 
-@pytest.mark.parametrize("case", ["none", "overflow", "scheme"])
+def test_review_probe_a_key_the_witness_lacks_is_never_drift():
+    """Reviewer probe: witness {1, 2}, source {1, 2, 3}, destination {1, 2}
+    with row 3 lost. It used to read "concurrent source update", attributed."""
+    cols = ["region", "id", "amount"]
+    rows = [{"region": "eu", "id": i, "amount": f"{i}.50"} for i in range(1, 4)]
+    w = _witnessed(rows[:2], cols)
+    # The writer sent three rows; the witness saw two: no attribution at all.
+    _s, _t, rec = _split(w, rows, rows[:2], written=3, gate8=3)
+    assert rec["attributed"] is False and rec["reason"] == "witnessed_rows_differ_from_rows_written"
+    # Even a witness that matches the writer's count never excuses key 3 as
+    # drift; without proof that 3 was absent at write time (Gate-8's count
+    # saw 3 rows) it is not excused as an insert either: it stays compared.
+    s, t, rec = _split(w, rows, rows[:2], written=2, gate8=3)
+    assert rec["attributed"] is True and rec["count"] == 0 and rec["inserted_count"] == 0
+    assert [r["id"] for r in s] == [1, 2, 3] and [r["id"] for r in t] == [1, 2]
+
+
+def test_a_written_key_gone_from_both_populations_is_a_loss_or_a_disclosed_delete():
+    cols = ["region", "id", "amount"]
+    written = [{"region": "eu", "id": i, "amount": f"{i}.50"} for i in range(1, 4)]
+    w = _witnessed(written, cols)
+    source = written[:1]                                # 2 and 3 deleted at the source
+    full = [written[0], written[1], {"region": "eu", "id": 3, "amount": "0"}]
+    s, t, rec = _split(w, source, [written[0]], gate8=3, full=full)
+    assert rec["deleted_count"] == 1 and [k["id"] for k in rec["deleted_sample_keys"]] == [2]
+    assert rec["loss_count"] == 1
+
+
+@pytest.mark.parametrize("case", ["none", "overflow", "scheme", "chunk_failed"])
 def test_without_a_usable_witness_nothing_is_excused(case):
-    from services.keyed_write_witness import KeyedWriteWitness, split_concurrent_source_drift
+    from services.keyed_write_witness import Encoder, KeyedWriteWitness
 
     cols = ["region", "id", "amount"]
     rows = [{"region": "eu", "id": i, "amount": f"{i}.50"} for i in range(1, 4)]
     w = None
     if case == "overflow":
-        w = KeyedWriteWitness(["region", "id"], max_rows=1)
-        from services.reconciliation import _iter_fingerprints
-
-        w.add_many(_iter_fingerprints(rows, cols))
+        w = KeyedWriteWitness(["region", "id"], max_rows=1, encoder=Encoder(cols, "", None))
+        w.add_rows(rows)
     elif case == "scheme":
         w = _witnessed([{**r, "amount": r["amount"] + "0"} for r in rows], cols)
+    elif case == "chunk_failed":
+        w = _witnessed(rows, cols)
+        w._give_up("chunk_not_witnessed")
     src = [{**r, "amount": "1"} for r in rows]
-    s, t, rec = split_concurrent_source_drift(
-        witness=w, source_rows=src, target_rows=rows, columns=cols,
-        key_columns=["region", "id"], dest_db_type="", dest_types=None,
-    )
+    s, t, rec = _split(w, src, rows, written=3, gate8=3)
     assert rec["attributed"] is False and s == src and t == rows
 
 

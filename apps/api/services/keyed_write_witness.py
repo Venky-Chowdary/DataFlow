@@ -8,44 +8,60 @@ destination holds exactly as written; a destination that lost or rewrote a
 cell makes them differ too. Source and destination alone cannot tell the two
 apart: only what this run wrote can.
 
-The write pass already renders every row it sends through the Gate-8
-fingerprint (``row_fingerprints`` over the mapped, collapsed rows), and the
-ladder renders its source and destination populations through the same
-function. The witness keeps one small digest per written key. At verify time,
-for every key:
+The write pass renders every row it sends through the Gate-8 fingerprint
+(``row_fingerprints`` over the mapped, collapsed rows). The witness keeps, per
+written key, a digest of that fingerprint, together with the encoder that made
+it (columns, bind dialect, digest types). The ladder re-hashes its own
+populations with exactly that encoder, so both sides are rendered alike.
 
-* the source still equals what was written -> the source/destination
-  comparison stands; a destination that differs is a real loss and vetoes;
-* the source moved since the write, and the destination equals what was
-  written -> concurrent source drift: advisory, named on the report, never a
-  veto (the key leaves the compared populations);
-* the source moved and the destination does not equal what was written
-  either -> the destination is not what this run wrote: it stays compared.
+Keys are the row's key cells themselves (canonical per-cell renderings held as
+a tuple), never parsed back out of a joined fingerprint string, so a cell
+value can never pose as a key label.
 
-The witness lives in this process only (keyed by job id), is bounded by the
-ladder budget, and is released when the job ends (``keyed_write_witness_scope``
-in ``execute_tracked``), whatever the outcome. A run resumed at reconcile, or a route that never filled it,
-has no witness; the ladder then cannot attribute a difference and says so.
+A witness attributes nothing unless it is complete: every chunk was
+fingerprinted, the population fits the ladder budget, the run did not resume
+part-way, and the rows it saw equal the rows the writer reports. At verify
+time, per key:
+
+* source equals what was written, destination differs -> loss, vetoes;
+* source moved, destination equals what was written -> concurrent source
+  update: advisory, named, never a veto (the key leaves the cell layers);
+* source deleted the written key, destination equals what was written ->
+  concurrent source delete: advisory, named;
+* a written key the destination no longer holds (or holds differently) while
+  the source deleted it -> loss, vetoes (it is in neither compared population);
+* a source key this run never wrote and the destination does not hold ->
+  concurrent insert, a separate disclosed category; only when Gate-8's own
+  source count equals the witnessed rows (the key was not in the write-time
+  population). L1 and the census still grade the counts.
+
+The witness lives in this process only, keyed by job id. It is released when
+the job ends (``keyed_write_witness_scope`` in ``execute_tracked``) whatever the
+outcome, and when a resumed attempt declines to start one. An in-flight
+witness is never evicted: past ``_MAX_JOBS`` live witnesses a new run does not
+start one and says why.
 """
 
 from __future__ import annotations
 
 import hashlib
 import threading
-from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Iterable
 
-PART_SEP = "\x1f"
 #: Report key carrying the disclosed drift.
 DRIFT_KEY = "concurrent_source_drift"
 #: Report key carrying a discrepancy the ladder could not attribute.
 UNATTRIBUTED_KEY = "value_discrepancy_unattributed"
+#: dest_summary key: whether this run started a witness, and why not.
+SUMMARY_KEY = "keyed_write_witness"
 _SAMPLE = 20
 _MAX_JOBS = 4
 _LOCK = threading.Lock()
-_REGISTRY: "OrderedDict[str, KeyedWriteWitness]" = OrderedDict()
+_REGISTRY: dict[str, "KeyedWriteWitness"] = {}
+
+KeyCells = tuple[str, ...]
 
 
 def _h(text: str) -> int:
@@ -54,43 +70,90 @@ def _h(text: str) -> int:
     )
 
 
-def fingerprint_key(fingerprint: str, key_labels: tuple[str, ...]) -> int | None:
-    """Digest of the key cells inside a ``label=cell`` fingerprint, or None."""
-    cells: dict[str, str] = {}
-    for part in str(fingerprint or "").split(PART_SEP):
-        label, sep, cell = part.partition("=")
-        if sep and label in key_labels:
-            cells[label] = cell
-    if not key_labels or len(cells) != len(key_labels):
-        return None
-    return _h(PART_SEP.join(f"{lab}={cells[lab]}" for lab in key_labels))
+class Encoder:
+    """The exact Gate-8 fingerprint parameters one side was rendered with."""
+
+    __slots__ = ("columns", "dest_db_type", "dest_types", "_ddl")
+
+    def __init__(self, columns: Iterable[str], dest_db_type: str, dest_types: dict | None) -> None:
+        from services.reconciliation import _column_fingerprint_ddl
+
+        self.columns = [str(c) for c in columns]
+        self.dest_db_type = str(dest_db_type or "").strip().lower()
+        self.dest_types = dict(dest_types or {})
+        self._ddl = {
+            c: _column_fingerprint_ddl(c, self.dest_db_type, self.dest_types) for c in self.columns
+        }
+
+    def row_digests(self, rows: list[Any]) -> list[int]:
+        from services.reconciliation import _iter_fingerprints
+
+        return [
+            _h(fp)
+            for _rk, fp in _iter_fingerprints(
+                rows, self.columns, dest_db_type=self.dest_db_type, dest_types=self.dest_types
+            )
+        ]
+
+    def key_cells(self, row: Any, key_columns: list[str]) -> KeyCells | None:
+        """Canonical rendering of the row's own key cells (tuple or dict row)."""
+        from services.reconciliation import _fingerprint_with_ddl
+
+        out: list[str] = []
+        for col in key_columns:
+            if isinstance(row, dict):
+                if col in row:
+                    val = row[col]
+                else:
+                    hit = next((k for k in row if str(k).lower() == col.lower()), None)
+                    if hit is None:
+                        return None
+                    val = row[hit]
+            else:
+                idx = next((i for i, c in enumerate(self.columns) if c.lower() == col.lower()), -1)
+                if idx < 0 or idx >= len(row):
+                    return None
+                val = row[idx]
+            out.append(_fingerprint_with_ddl(val, self._ddl.get(col, ""), self.dest_db_type))
+        return tuple(out)
+
+    def describe(self) -> dict[str, Any]:
+        return {"dest_db_type": self.dest_db_type, "columns": len(self.columns)}
 
 
 class KeyedWriteWitness:
-    """``{key digest: row-fingerprint digest}`` of every row this run wrote."""
+    """``{key cells: row-fingerprint digest}`` of every row this run wrote."""
 
-    def __init__(self, key_columns: Iterable[str], *, max_rows: int) -> None:
-        self.key_labels = tuple(str(c).lower() for c in key_columns if str(c or ""))
+    def __init__(self, key_columns: Iterable[str], *, max_rows: int, encoder: Encoder | None = None) -> None:
+        self.key_columns = [str(c) for c in key_columns if str(c or "")]
         self.max_rows = int(max_rows)
-        self.rows: dict[int, int] = {}
-        self.complete = bool(self.key_labels)
-        self.reason = "" if self.complete else "no_key_columns"
+        self.encoder = encoder
+        self.rows: dict[KeyCells, int] = {}
+        self.rows_added = 0
+        self.complete = bool(self.key_columns) and encoder is not None
+        self.reason = "" if self.complete else "no_key_columns_or_encoder"
 
     def _give_up(self, reason: str) -> None:
         self.complete = False
-        self.reason = reason
+        self.reason = self.reason or reason
         self.rows = {}
 
-    def add_many(self, pairs: Iterable[tuple[str, str]]) -> None:
-        if not self.complete:
+    def add_rows(self, rows: list[Any], digests: list[int] | None = None) -> None:
+        """Record rows exactly as the writer is sent them (mapped, collapsed)."""
+        if not self.complete or self.encoder is None:
             return
-        for _row_key, fingerprint in pairs:
-            key = fingerprint_key(fingerprint, self.key_labels)
+        digests = digests if digests is not None else self.encoder.row_digests(rows)
+        if len(digests) != len(rows):
+            self._give_up("chunk_not_witnessed")
+            return
+        for row, digest in zip(rows, digests):
+            key = self.encoder.key_cells(row, self.key_columns)
             if key is None:
-                self._give_up("key_not_in_fingerprint")
+                self._give_up("key_not_on_row")
                 return
+            self.rows_added += 1
             # A later write of the same key is what the destination holds.
-            self.rows[key] = _h(str(fingerprint))
+            self.rows[key] = digest
             if len(self.rows) > self.max_rows:
                 self._give_up("population_exceeds_ladder_budget")
                 return
@@ -99,34 +162,43 @@ class KeyedWriteWitness:
 def begin_keyed_write_witness(
     *, job_id: Any, key_columns: list[str] | None, sync_mode: str,
     inline_fingerprints_used: bool, resumed: bool, expected_rows: int = 0,
+    columns: list[str] | None = None, dest_db_type: str = "",
+    dest_types: dict | None = None, summary: dict | None = None,
 ) -> KeyedWriteWitness | None:
     """Start (and register) a witness for a keyed re-read route, else None.
 
-    Only a route that does not already fingerprint its write pass, writes by
-    key, and is not resuming (a resumed session sees part of the population)
-    needs one. Overwrite routes replace the table, so there is no occupied
-    destination for the ladder to batch-scope.
+    Whenever this returns None the job's registry entry is dropped, so a stale
+    witness from a failed earlier attempt can never be taken by a resumed run.
     """
     from services.primary_key import sync_collapses_in_file_duplicates
     from services.sync_cursor import is_overwrite_sync
     from services.verification_ladder import MAX_LADDER_ROWS
 
-    if (
-        inline_fingerprints_used
-        or resumed
-        or not job_id
-        or not key_columns
-        or is_overwrite_sync(sync_mode)
-        or not sync_collapses_in_file_duplicates(sync_mode)
-        or int(expected_rows or 0) > MAX_LADDER_ROWS
-    ):
-        return None
-    witness = KeyedWriteWitness(key_columns, max_rows=MAX_LADDER_ROWS)
+    jid = str(job_id or "")
+    reason = ""
+    if inline_fingerprints_used:
+        reason = "write_pass_already_fingerprinted"
+    elif resumed:
+        reason = "resumed_attempt_sees_part_of_the_population"
+    elif not jid or not key_columns:
+        reason = "no_job_or_key"
+    elif is_overwrite_sync(sync_mode) or not sync_collapses_in_file_duplicates(sync_mode):
+        reason = "not_a_keyed_upsert"
+    elif int(expected_rows or 0) > MAX_LADDER_ROWS:
+        reason = "population_exceeds_ladder_budget"
+    witness: KeyedWriteWitness | None = None
     with _LOCK:
-        _REGISTRY[str(job_id)] = witness
-        _REGISTRY.move_to_end(str(job_id))
-        while len(_REGISTRY) > _MAX_JOBS:
-            _REGISTRY.popitem(last=False)
+        _REGISTRY.pop(jid, None)
+        if not reason and len(_REGISTRY) >= _MAX_JOBS:
+            reason = "witness_capacity_in_use_by_other_jobs"
+        if not reason:
+            witness = KeyedWriteWitness(
+                key_columns or [], max_rows=MAX_LADDER_ROWS,
+                encoder=Encoder(columns or [], dest_db_type, dest_types),
+            )
+            _REGISTRY[jid] = witness
+    if isinstance(summary, dict):
+        summary[SUMMARY_KEY] = {"started": witness is not None, "reason": reason}
     return witness
 
 
@@ -147,27 +219,15 @@ def held_witness_job_ids() -> list[str]:
 @contextmanager
 def keyed_write_witness_scope(job_id: Any) -> Iterator[None]:
     """Job scope: whatever the outcome (completed, failed, cancelled, raised),
-    the job's witness leaves memory when the job ends. The ladder normally
-    takes it first; a run that fails before the ladder would otherwise keep
-    up to a ladder budget of digests alive until four later jobs evict it."""
+    the job's witness leaves memory when the job ends."""
     try:
         yield
     finally:
         take_keyed_write_witness(job_id)
 
 
-def _indexed(rows: list[dict], columns: list[str], labels: tuple[str, ...], **fp_kw: Any):
-    """``({key: (row, row digest)}, [key of each row in order])``."""
-    from services.reconciliation import _iter_fingerprints
-
-    out: dict[int, tuple[dict, int]] = {}
-    order: list[int | None] = []
-    for row, (_rk, fp) in zip(rows, _iter_fingerprints(rows, columns, **fp_kw)):
-        key = fingerprint_key(fp, labels)
-        order.append(key)
-        if key is not None:
-            out[key] = (row, _h(fp))
-    return out, order
+def _not_attributed(reason: str, source_rows, target_rows):
+    return source_rows, target_rows, {"attributed": False, "reason": reason}
 
 
 def split_concurrent_source_drift(
@@ -175,81 +235,161 @@ def split_concurrent_source_drift(
     witness: KeyedWriteWitness | None,
     source_rows: list[dict],
     target_rows: list[dict],
-    columns: list[str],
     key_columns: list[str],
-    dest_db_type: str,
-    dest_types: dict[str, str] | None,
+    rows_written: int | None = None,
+    gate8_source_rows: int | None = None,
+    full_target_rows: list[dict] | None = None,
+    excluded_key_values: Iterable[tuple] = (),
+    not_started_reason: str = "",
 ) -> tuple[list[dict], list[dict], dict[str, Any]]:
-    """Remove keys whose source moved after the write while the destination
-    holds what was written. Returns the populations and an attribution record.
-
-    ``attribution["attributed"]`` is True only when the witness was usable, so
-    the caller may treat the populations as "this run's written cells".
+    """Remove from the cell layers exactly the keys the witness proves were
+    changed at the source after the write. Returns the populations and an
+    attribution record; ``record["attributed"]`` is True only for a usable,
+    complete witness. ``record["losses"]`` lists written keys lost outside
+    both compared populations (the caller must fail the run on them).
     """
-    if witness is None or not witness.complete or not witness.rows:
-        return source_rows, target_rows, {
-            "attributed": False,
-            "reason": "no_write_witness" if witness is None else (witness.reason or "empty"),
-        }
-    labels = witness.key_labels
-    if {str(c).lower() for c in key_columns} != set(labels):
-        return source_rows, target_rows, {"attributed": False, "reason": "key_columns_differ"}
-    fp_kw: dict[str, Any] = {"dest_db_type": dest_db_type, "dest_types": dest_types}
-    src, src_order = _indexed(source_rows, columns, labels, **fp_kw)
-    dst, dst_order = _indexed(target_rows, columns, labels, **fp_kw)
-    if len(src) != len(source_rows):
-        return source_rows, target_rows, {"attributed": False, "reason": "key_not_in_fingerprint"}
-    agree = 0
-    drifted: set[int] = set()
-    for key, (_row, s_digest) in src.items():
-        written = witness.rows.get(key)
-        d_digest = dst[key][1] if key in dst else None
-        if written is not None and (s_digest == written or d_digest == written):
-            agree += 1
-        if s_digest == written:
-            continue  # the source is what was written: the comparison stands
-        if d_digest == written:  # both None: written after the run, absent in dest
-            drifted.add(key)
-    if src and not agree and not drifted:
-        # Neither side equals the witness on any key: the two fingerprint
-        # schemes disagree (or every row was rewritten twice). Do not guess.
-        return source_rows, target_rows, {"attributed": False, "reason": "witness_scheme_mismatch"}
-    record: dict[str, Any] = {"attributed": True, "count": len(drifted)}
-    if drifted:
-        sample = [src[k][0] for k in list(drifted)[:_SAMPLE]]
-        record["sample_keys"] = [
-            {c: r.get(c) for c in key_columns} for r in sample
-        ]
-        source_rows = [r for r, k in zip(source_rows, src_order) if k not in drifted]
-        target_rows = [r for r, k in zip(target_rows, dst_order) if k not in drifted]
+    if witness is None:
+        return _not_attributed(not_started_reason or "no_write_witness", source_rows, target_rows)
+    if not witness.complete or witness.encoder is None:
+        return _not_attributed(witness.reason or "witness_incomplete", source_rows, target_rows)
+    if [c.lower() for c in key_columns] != [c.lower() for c in witness.key_columns]:
+        return _not_attributed("key_columns_differ", source_rows, target_rows)
+    if rows_written is None or int(rows_written) != witness.rows_added:
+        # The writer sent rows the witness did not see (or the reverse).
+        return _not_attributed("witnessed_rows_differ_from_rows_written", source_rows, target_rows)
+    enc = witness.encoder
+    keys = witness.key_columns
+
+    def _index(rows: list[dict]) -> tuple[dict[KeyCells, tuple[dict, int]], list[KeyCells | None]]:
+        out: dict[KeyCells, tuple[dict, int]] = {}
+        order: list[KeyCells | None] = []
+        for row, digest in zip(rows, enc.row_digests(rows)):
+            k = enc.key_cells(row, keys)
+            order.append(k)
+            if k is not None:
+                out[k] = (row, digest)
+        return out, order
+
+    src, src_order = _index(source_rows)
+    dst, dst_order = _index(target_rows)
+    if len(src) != len(source_rows) or len(dst) != len(target_rows):
+        return _not_attributed("key_not_on_row", source_rows, target_rows)
+    full = dst if full_target_rows is None else _index(full_target_rows)[0]
+    w = witness.rows
+    agree = sum(
+        1 for k, (_r, d) in src.items() if w.get(k) is not None and (d == w[k] or dst.get(k, (None, None))[1] == w[k])
+    )
+    if src and w and not agree:
+        # Neither side equals the witness on any key: the renderings disagree
+        # (or every row was rewritten twice). Do not guess.
+        return _not_attributed("witness_scheme_mismatch", source_rows, target_rows)
+    moved: set[KeyCells] = set()
+    inserted: set[KeyCells] = set()
+    for k, (_row, s_digest) in src.items():
+        written = w.get(k)
+        if written is None:
+            if k not in dst:
+                inserted.add(k)
+            continue  # never drift: a key this run did not write
+        if s_digest != written and dst.get(k, (None, None))[1] == written:
+            moved.add(k)
+    # Keys held out to quarantine never entered the destination by design.
+    held_out = {
+        enc.key_cells(dict(zip(keys, vals)), keys) for vals in excluded_key_values
+    }
+    deleted: list[KeyCells] = []
+    losses: list[KeyCells] = []
+    for k, written in w.items():
+        if k in src or k in held_out:
+            continue
+        held = full.get(k)
+        if held is not None and held[1] == written:
+            deleted.append(k)  # the source deleted it after the write
+        else:
+            losses.append(k)  # in neither population and not as written
+    snapshot_ok = gate8_source_rows is not None and int(gate8_source_rows) == witness.rows_added
+    if inserted and not snapshot_ok:
+        inserted = set()  # cannot prove the key was not in the write-time population
+    excused = moved | inserted
+
+    def _named(ks: Iterable[KeyCells], rows_by_key: dict) -> list[dict]:
+        out = []
+        for k in list(ks)[:_SAMPLE]:
+            row = rows_by_key.get(k, (None,))[0]
+            out.append({c: (row.get(c) if isinstance(row, dict) else cell) for c, cell in zip(keys, k)})
+        return out
+
+    record: dict[str, Any] = {
+        "attributed": True,
+        "count": len(moved),
+        "sample_keys": _named(moved, src),
+        "inserted_count": len(inserted),
+        "inserted_sample_keys": _named(inserted, src),
+        "deleted_count": len(deleted),
+        "deleted_sample_keys": _named(deleted, full),
+        "losses": _named(losses, {}),
+        "loss_count": len(losses),
+    }
+    if excused:
+        source_rows = [r for r, k in zip(source_rows, src_order) if k not in excused]
+        target_rows = [r for r, k in zip(target_rows, dst_order) if k not in excused]
     return source_rows, target_rows, record
 
 
-def _render_keys(record: dict[str, Any]) -> str:
-    keys = record.get("sample_keys") or []
+def _render(keys: list[dict], total: int) -> str:
     shown = ", ".join(
         "(" + ", ".join(f"{k}={v!r}" for k, v in key.items()) + ")" for key in keys[:5]
     )
-    more = int(record.get("count") or 0) - min(len(keys), 5)
+    more = total - min(len(keys), 5)
     return shown + (f" and {more} more" if more > 0 else "")
 
 
-def attach_concurrent_drift(report: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
-    """Disclose drift on the report: a warning naming the keys, never a veto."""
-    if not record or not int(record.get("count") or 0):
-        return report
-    out = dict(report)
-    out[DRIFT_KEY] = {k: v for k, v in record.items() if k != "attributed"}
-    sentence = (
-        f"The source changed after this run wrote {int(record['count'])} key(s) "
-        f"{_render_keys(record)}; the destination holds the values this run wrote, "
-        "so the difference is a concurrent source update, not a loss. The next run "
-        "picks it up."
-    )
+def _with_sentence(out: dict[str, Any], sentence: str) -> dict[str, Any]:
     out["warnings"] = [*list(out.get("warnings") or []), sentence]
     base = str(out.get("message") or "").rstrip()
     if sentence not in base:
         out["message"] = f"{base} {sentence}".strip() if base else sentence
+    return out
+
+
+def attach_concurrent_drift(report: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """Disclose drift on the report (warnings naming the keys); fail on losses."""
+    if not record or not record.get("attributed"):
+        return report
+    moved = int(record.get("count") or 0)
+    ins = int(record.get("inserted_count") or 0)
+    dele = int(record.get("deleted_count") or 0)
+    lost = int(record.get("loss_count") or 0)
+    if not (moved or ins or dele or lost):
+        return report
+    out = dict(report)
+    out[DRIFT_KEY] = {k: v for k, v in record.items() if k != "attributed"}
+    if moved:
+        out = _with_sentence(out, (
+            f"The source changed after this run wrote {moved} key(s) "
+            f"{_render(record['sample_keys'], moved)}; the destination holds the values "
+            "this run wrote, so the difference is a concurrent source update, not a loss. "
+            "The next run picks it up."
+        ))
+    if ins:
+        out = _with_sentence(out, (
+            f"{ins} source key(s) {_render(record['inserted_sample_keys'], ins)} appeared "
+            "after this run read the source (concurrent insert); this run did not write "
+            "them. Row counts are still graded by the key census."
+        ))
+    if dele:
+        out = _with_sentence(out, (
+            f"The source deleted {dele} key(s) {_render(record['deleted_sample_keys'], dele)} "
+            "after this run wrote them (concurrent delete); the destination holds the "
+            "values this run wrote."
+        ))
+    if lost:
+        out["passed"] = False
+        out = _with_sentence(out, (
+            f"{lost} key(s) this run wrote {_render(record['losses'], lost)} are missing "
+            "from the destination or differ from what was written, and the source no "
+            "longer holds them: a destination loss."
+        ))
     return out
 
 

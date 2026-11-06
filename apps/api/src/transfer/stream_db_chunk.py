@@ -826,9 +826,10 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
     # Tombstones are already stripped: hashing deleted keys as writes would
     # fail Gate-8 after a correct hard DELETE.
     inline_fps: list[Any] = []
-    if (
-        tally.inline_fingerprints_used or getattr(tally, "keyed_write_witness", None) is not None
-    ) and router_step is None:
+    witness = getattr(tally, "keyed_write_witness", None)
+    if witness is not None and router_step is not None:
+        witness._give_up("routed_write_not_witnessed")
+    if (tally.inline_fingerprints_used or witness is not None) and router_step is None:
         try:
             mapped_fp, _ = map_rows_for_fingerprint(
                 headers=batch.headers,
@@ -852,7 +853,10 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                     mapped_fp = dedupe_rows(
                         list(mapped_fp), list(cfg.pk_target_cols), list(cfg.target_cols)
                     )
-            if mapped_fp:
+            if mapped_fp and witness is not None:
+                # The witness renders with its own encoder (the same parameters).
+                witness.add_rows(list(mapped_fp))
+            elif mapped_fp:
                 inline_fps = row_fingerprints(
                     mapped_fp,
                     cfg.target_cols,
@@ -860,6 +864,9 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                     dest_types=cfg.digest_dest_types,
                 )
         except Exception as exc:
+            if witness is not None:
+                # A chunk the witness did not see must not look witnessed.
+                witness._give_up("chunk_not_witnessed")
             _stream.logger.warning(
                 "Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc
             )
