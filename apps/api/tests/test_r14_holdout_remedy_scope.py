@@ -21,7 +21,7 @@ def _finding(source, *, transform, reason, unfit, aborts=True):
     }
 
 
-def _preflight(findings, scanned=1000, extra_blockers=()):
+def _preflight(findings, scanned=1000, extra_blockers=(), record_batch=True):
     return {
         "passed": False,
         "gates": [{"id": "g3f_population_fit", "status": "block", "message": "values fail", "details": {}}],
@@ -31,6 +31,7 @@ def _preflight(findings, scanned=1000, extra_blockers=()):
             *extra_blockers,
         ],
         "population_fit": {"rows_scanned": scanned, "findings": findings},
+        "source_record_batch": record_batch,
     }
 
 
@@ -83,4 +84,48 @@ def test_the_remedy_is_balanced_validation_not_a_second_mechanism():
     holds = _holds(explain_validation(_preflight([_finding("order_date", unfit=1, **BAD_DATE)]), use_llm=False))
     assert holds[0]["validation_mode"] == "balanced"
     assert "risk_acceptance" not in holds[0]
-    assert "Balanced validation" in holds[0]["label"]
+    assert "switches the whole run to Balanced validation" in holds[0]["label"]
+    assert holds[0]["balanced_holds_out"] is True
+
+
+# ---------------------------------------------- review B4 / S5 / nits
+
+BAD_INT = dict(transform="cast_integer", reason="cast_integer: Invalid integer: 'abc'")
+
+
+def test_a_bad_number_is_offered_lenient_not_balanced():
+    holds = _holds(explain_validation(_preflight([_finding("qty", unfit=1, **BAD_INT)]), use_llm=False))
+    assert holds and holds[0]["validation_mode"] == "lenient", holds
+    assert holds[0]["balanced_holds_out"] is False
+    assert "switches the whole run to Lenient validation" in holds[0]["label"]
+
+
+def test_an_impossible_date_on_a_database_source_is_not_a_balanced_holdout():
+    pf = _preflight([_finding("order_date", unfit=1, **BAD_DATE)], record_batch=False)
+    holds = _holds(explain_validation(pf, use_llm=False))
+    assert holds and holds[0]["validation_mode"] == "lenient", holds
+
+
+def test_an_unknown_scan_is_never_offered():
+    pf = _preflight([_finding("order_date", unfit=1, **BAD_DATE)], scanned=0)
+    pf["population_fit"]["rows_scanned"] = 0
+    assert not _holds(explain_validation(pf, use_llm=False))
+
+
+def test_not_offered_beside_a_blocker_the_switch_would_not_clear():
+    other = {"id": "g15_dest_exists_shape", "message": "destination column type differs", "details": {}}
+    pf = _preflight([_finding("order_date", unfit=1, **BAD_DATE)], extra_blockers=[other])
+    assert not [h for h in _holds(explain_validation(pf, use_llm=False)) if h.get("column") == "order_date"]
+
+
+def test_the_csv_report_says_which_mode_holds_every_issue_out():
+    from services.csv_validator import validate_csv_content
+
+    dates = b"id,d\n1,2024-01-01\n2,2024-02-30\n3,2024-01-03\n"
+    assert validate_csv_content(dates, ["id", "d"], {"id": "INTEGER", "d": "DATE"})["holdout_modes"] == {
+        "balanced": True, "lenient": True,
+    }
+    nums = b"id,q\n1,5\n2,abc\n"
+    assert validate_csv_content(nums, ["id", "q"], {"id": "INTEGER", "q": "INTEGER"})["holdout_modes"] == {
+        "balanced": False, "lenient": True,
+    }

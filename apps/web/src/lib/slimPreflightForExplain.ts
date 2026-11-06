@@ -79,6 +79,8 @@ export function slimPreflightForExplain(preflight: unknown): Record<string, unkn
   return {
     passed: Boolean(pf.passed),
     run_id: pf.run_id,
+    // Which hold-out policy applies (the API's mode_holds_out_refusal record_batch).
+    source_record_batch: Boolean(pf.source_record_batch),
     blockers,
     coercion_report: coercionCols.length ? { columns: coercionCols } : {},
     population_fit: Object.keys(pop).length

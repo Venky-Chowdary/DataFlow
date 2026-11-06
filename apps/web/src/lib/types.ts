@@ -672,6 +672,8 @@ export interface JobProgress extends TransferJob {
 
 export interface CsvValidationReport {
   ok: boolean;
+  /** Which validation mode holds EVERY listed issue out (the API's one policy). */
+  holdout_modes?: { balanced?: boolean; lenient?: boolean };
   rows_scanned: number;
   total_rows?: number;
   full_scan?: boolean;

@@ -15,7 +15,8 @@ import { FileSourceIssuePanel } from "../components/transfer/FileSourceIssuePane
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = readFileSync(path.join(here, "..", "pages", "TransferPage.tsx"), "utf8");
 const REPORT = {
-  ok: false, rows_scanned: 1000, issues: ["Row 642, column d: '31/02/2025' is not a real calendar date"], issue_count: 1,
+  ok: false, rows_scanned: 1000, issues: ["row 642 · d: expected date, got '2024-02-30'"], issue_count: 1,
+  holdout_modes: { balanced: true, lenient: true },
 };
 
 describe("file values that do not fit (QA browser 3)", () => {
@@ -24,6 +25,7 @@ describe("file values that do not fit (QA browser 3)", () => {
     assert.ok(hold);
     assert.match(hold.title, /1 value/);
     assert.match(hold.issues[0], /642/);
+    assert.equal(hold.holdoutMode, "balanced");
     assert.match(hold.message, /Balanced/);
   });
 
@@ -39,8 +41,8 @@ describe("file values that do not fit (QA browser 3)", () => {
       hold: fileSourceIssueHold(REPORT, "strict")!, onHoldOut: () => {}, onFixFile: () => {},
     }));
     assert.match(html, /role="alert"/);
-    assert.match(html, /31\/02\/2025/);
-    assert.match(html, /Hold out these rows in quarantine \(Balanced validation\)/);
+    assert.match(html, /2024-02-30/);
+    assert.match(html, /switches the whole run to Balanced validation/);
     assert.match(html, /Fix the file/);
   });
 
@@ -59,22 +61,21 @@ describe("file values that do not fit (QA browser 3)", () => {
     assert.ok(at > 0 && at < page.indexOf("if (looksLikeBadMapping && !encodingOnly)"), "checked before the remap branch");
   });
 
-  it("offers Balanced only when Balanced holds every issue out", () => {
-    const num = { ...REPORT, issues: ["row 3 · qty: Invalid integer: 'abc'"], issue_count: 1 };
-    assert.equal(fileSourceIssueHold(num, "strict")?.canHoldOut, true);
-    const word = { ...REPORT, issues: ["row 3 · flag: Invalid boolean: 'maybe'"], issue_count: 1 };
-    const hold = fileSourceIssueHold(word, "strict")!;
+  it("offers Balanced only when the API says Balanced holds every issue out", () => {
+    const num = { ...REPORT, issues: ["row 3 · qty: expected integer, got 'abc'"], holdout_modes: { balanced: false, lenient: true } };
+    const hold = fileSourceIssueHold(num, "strict")!;
     assert.equal(hold.canHoldOut, false);
-    assert.doesNotMatch(hold.message, /Balanced validation holds/);
+    assert.match(hold.message, /only Lenient validation, from the API or MCP/);
     const html = renderToStaticMarkup(createElement(FileSourceIssuePanel, { hold, onHoldOut: () => {}, onFixFile: () => {} }));
-    assert.doesNotMatch(html, /Balanced validation\)/);
+    assert.doesNotMatch(html, /switches the whole run/);
     assert.match(html, /Fix the file/);
-    // Issues we cannot see (count above the listed ones) are not assumed holdable.
-    assert.equal(fileSourceIssueHold({ ...REPORT, issue_count: 40 }, "strict")?.canHoldOut, false);
+    // No API answer is no offer (a capped list, an older API).
+    assert.equal(fileSourceIssueHold({ ...REPORT, holdout_modes: undefined }, "strict")?.canHoldOut, false);
+    assert.doesNotMatch(readFileSync(path.join(here, "fileSourceIssueHold.ts"), "utf8"), /invalid \(\?:integer/);
   });
 
   it("the panel's remedy is worded as the API's explain action", () => {
     const api = readFileSync(path.join(here, "..", "..", "..", "api", "services", "validation_assistant.py"), "utf8");
-    assert.match(api, /in quarantine \(Balanced "\s*\n\s*f?"validation\) and load the rest/);
+    assert.match(api, /switches the whole "\s*\n\s*f"run to \{label_mode\} validation\) and load the rest/);
   });
 });

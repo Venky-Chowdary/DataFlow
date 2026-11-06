@@ -145,11 +145,16 @@ def test_strict_names_row_642_and_offers_hold_out_not_only_review_mappings(studi
     assert actions[0]["kind"] == "quarantine_and_rerun", actions
     assert hold[0]["column"] == "order_date" and 642 in hold[0]["rows"], hold[0]
     assert "31/02/2025" in hold[0]["values"] and hold[0]["reason"], hold[0]
-    assert hold[0]["validation_mode"] == "balanced" and "Balanced validation" in hold[0]["label"]
-    # The remedy works: the same plan under Balanced is not refused for the date.
-    body["validation_mode"] = "balanced"
-    balanced = client.post("/api/v1/preflight/run", json=body).json()
-    assert "31/02/2025" not in str(balanced.get("blockers")), balanced.get("blockers")
+    # '31/02/2025' is refused as "Invalid datetime" (a slash layout, not the
+    # ISO invalid-calendar rule), so the one policy names Lenient, not
+    # Balanced, and says the switch covers the whole run (review B4).
+    mode = hold[0]["validation_mode"]
+    assert mode == "lenient" and hold[0]["balanced_holds_out"] is False, hold[0]
+    assert "switches the whole run to Lenient validation" in hold[0]["label"]
+    # The remedy works: the same plan under the offered mode is not refused for the date.
+    body["validation_mode"] = mode
+    offered = client.post("/api/v1/preflight/run", json=body).json()
+    assert "31/02/2025" not in str(offered.get("blockers")), offered.get("blockers")
 
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
 

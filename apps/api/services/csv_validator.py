@@ -45,6 +45,24 @@ def _check_value(value: str, inferred: str) -> str | None:
     return None
 
 
+def _write_refusal(value: str, err: str) -> str:
+    """The refusal the write path gives this cell (the calendar rule names its own)."""
+    from connectors.sql_temporal import invalid_calendar_reason
+
+    return invalid_calendar_reason((value or "").strip()) or err
+
+
+def _holdout_modes(refusals: list[str], *, capped: bool) -> dict[str, bool]:
+    from services.validation_mode_contract import mode_holds_out_refusal
+
+    def every(mode: str) -> bool:
+        return bool(refusals) and not capped and all(
+            mode_holds_out_refusal(mode, r, record_batch=True) for r in refusals
+        )
+
+    return {"balanced": every("balanced"), "lenient": every("lenient")}
+
+
 def _parse_csv_rows(text: str, delimiter: str) -> tuple[list[str], list[list[str]]]:
     """RFC 4180-aware CSV parsing via stdlib csv module."""
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
@@ -78,6 +96,8 @@ def validate_csv_content(
 
     col_index = {h: i for i, h in enumerate(header_row)}
     issues: list[str] = []
+    #: The write path's own refusal for each issue, for the hold-out policy.
+    refusals: list[str] = []
     limit = scan_limit_rows if scan_limit_rows is not None else len(data_rows)
     rows_scanned = 0
 
@@ -92,6 +112,7 @@ def validate_csv_content(
             err = _check_value(parts[idx], inferred)
             if err and len(issues) < max_issues:
                 issues.append(f"row {line_no} · {col}: {err}")
+                refusals.append(_write_refusal(parts[idx], err))
         if len(issues) >= max_issues:
             break
 
@@ -103,6 +124,10 @@ def validate_csv_content(
         "full_scan": scan_limit_rows is None or scan_limit_rows >= total_data_rows,
         "issues": issues,
         "issue_count": len(issues),
+        # Which validation mode holds EVERY listed issue out — the API's one
+        # policy, so Studio offers only a switch that clears them (review B4).
+        # A capped list (more issues than listed) proves nothing: no mode.
+        "holdout_modes": _holdout_modes(refusals, capped=len(issues) >= max_issues),
         "parser": "csv_stdlib",
     }
 

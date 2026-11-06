@@ -1,4 +1,4 @@
-import { HOLD_OUT_LABEL, type FileSourceIssueHold } from "../../lib/fileSourceIssueHold";
+import { holdOutLabel, type FileSourceIssueHold } from "../../lib/fileSourceIssueHold";
 
 /** Validate-step decision for file values that do not fit (QA browser 3). */
 export function FileSourceIssuePanel({
@@ -23,10 +23,10 @@ export function FileSourceIssuePanel({
           </ul>
         )}
         <div className="df2-vd-exec-until">
-          {hold.canHoldOut && (
+          {hold.holdoutMode && (
             <>
               <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onHoldOut}>
-                {HOLD_OUT_LABEL}
+                {holdOutLabel(hold.holdoutMode)}
               </button>{" "}
             </>
           )}

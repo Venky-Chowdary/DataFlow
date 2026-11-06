@@ -2278,6 +2278,8 @@ def run_file_preflight(
         + extra_gates,
         "blockers": enriched_blockers,
         "population_fit": fit_report_payload,
+        # Which hold-out policy applies (validation_mode_contract record_batch).
+        "source_record_batch": bool(is_file_source or source_is_record_batch(source_kind, source_format)),
         # Echo Kernel-stamped additive types so Map/Execute share Validate authority.
         "stamped_mappings": [
             {
@@ -2631,6 +2633,7 @@ def run_file_preflight(
         logger.debug("snowflake warehouse advice skipped: %s", sf_exc, exc_info=sf_exc)
 
     # Multi-load intelligence: compare sample to last N loads of this route.
+    src_ep = dst_ep = None
     try:
         from services.data_quality_history import compare_route_to_history
 
@@ -2655,9 +2658,6 @@ def run_file_preflight(
             dst_ep,
             schema=column_types,
         )
-        from services.pii_hash_gate import apply_key_change_warning
-
-        apply_key_change_warning(out, src_ep, dst_ep)
         # Module 17 — measured historical success (never invent a rate).
         from services.historical_success_contract import (
             measure_route_historical_success,
@@ -2696,6 +2696,15 @@ def run_file_preflight(
         except Exception:
             pass
 
+    if src_ep is not None and dst_ep is not None:
+        # Its own guard (review S4): a failed history compare above must not
+        # drop the hash_pii key-change warning, and this must not drop that.
+        try:
+            from services.pii_hash_gate import apply_key_change_warning
+
+            apply_key_change_warning(out, src_ep, dst_ep)
+        except Exception:  # noqa: BLE001
+            logger.warning("hash_pii key-change check failed during preflight", exc_info=True)
     if destination_evolution:
         out["destination_evolution"] = destination_evolution
         out["effective_mappings"] = mappings

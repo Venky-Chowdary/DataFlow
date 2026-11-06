@@ -12,26 +12,25 @@ export interface FileSourceIssueHold {
   message: string;
   issues: string[];
   issueCount: number;
-  /** Balanced can hold every one of these out (numeric / calendar refusals). */
+  /** Studio's mode that holds every issue out ("" = none): the API decides (review B4). */
+  holdoutMode: "balanced" | "";
   canHoldOut: boolean;
 }
 
 /**
  * Modes whose run holds a refused cell's row out instead of refusing the load —
  * the API's one policy (services/validation_mode_contract.mode_holds_out_refusal):
- * lenient holds out every per-cell cast refusal; balanced holds out numeric and
- * invalid-calendar refusals on a file. Neither is sent back to Source. (Before
+ * lenient holds out every per-cell cast refusal; balanced holds out a
+ * non-existent date or time on a file. Neither is sent back to Source. (Before
  * round 14 Studio sent lenient back to Source too, although lenient's own gates
  * pass these cells — the two disagreed.)
  */
 const HOLDS_OUT = new Set(["balanced", "lenient"]);
 
 /** The remedy, worded as the API's explain action words it (one remedy, not two). */
-export const HOLD_OUT_LABEL = "Hold out these rows in quarantine (Balanced validation) and load the rest";
-
-/** A refusal Balanced holds out on a file: a bad number or a non-existent date/time. */
-export function isBalancedHoldoutIssue(issue: string): boolean {
-  return /invalid (?:integer|decimal|number)\b/i.test(issue) || isCalendarHoldoutFinding(issue);
+export function holdOutLabel(mode: "balanced"): string {
+  const name = mode === "balanced" ? "Balanced" : mode;
+  return `Hold out these rows in quarantine (switches the whole run to ${name} validation) and load the rest`;
 }
 
 export function fileSourceIssueHold(
@@ -43,19 +42,26 @@ export function fileSourceIssueHold(
   const listed = (validation.issues || []).filter(Boolean);
   const issueCount = Number(validation.issue_count) || listed.length || 0;
   const issues = listed.slice(0, 5);
-  // Only when every issue is one Balanced holds out — and every issue is listed,
-  // so none we cannot see is a different kind.
-  const canHoldOut = listed.length > 0 && listed.length >= issueCount && listed.every(isBalancedHoldoutIssue);
+  // The API's per-report answer (csv_validator.holdout_modes), never a second rule here.
+  const modes = validation.holdout_modes || {};
+  // Studio offers the modes it runs; Lenient is an API / MCP mode.
+  const holdoutMode: "balanced" | "" = modes.balanced ? "balanced" : "";
+  const canHoldOut = holdoutMode !== "";
   return {
     title: `${issueCount.toLocaleString()} value(s) in the file do not fit their column`,
     message: canHoldOut
       ? "Strict validation refuses the whole file for them. Balanced validation holds exactly "
         + "these rows out in quarantine, each with its reason, and loads the rest — or fix the "
         + "file and upload it again."
-      : "Strict validation refuses the whole file for them, and holding the rows out does not "
-        + "apply to every one of these values. Fix the file and upload it again, or remap the column.",
+      : modes.lenient
+        ? "Strict validation refuses the whole file for them, and Balanced does not hold these "
+          + "values out (only Lenient validation, from the API or MCP, does). Fix the file and "
+          + "upload it again, or remap the column."
+        : "Strict validation refuses the whole file for them, and no validation mode holds every "
+          + "one of these values out. Fix the file and upload it again, or remap the column.",
     issues,
     issueCount,
+    holdoutMode,
     canHoldOut,
   };
 }
