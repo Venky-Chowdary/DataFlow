@@ -279,6 +279,12 @@ _FULL_VALUE_KEY_BUDGET: dict[str, tuple[int, int]] = {
 }
 
 
+def full_value_key_char_bytes(dialect: str) -> int:
+    """Bytes per character the engine's full-value key carrier spends (0: no budget)."""
+    budget = _FULL_VALUE_KEY_BUDGET.get((dialect or "").strip().lower())
+    return int(budget[1]) if budget else 0
+
+
 def full_value_key_width(dialect: str, *, unbounded_keys: int, other_key_bytes: int = 0) -> int:
     """Characters an unbounded text key column gets, or 0 when none fit."""
     budget = _FULL_VALUE_KEY_BUDGET.get((dialect or "").strip().lower())

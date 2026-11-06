@@ -212,7 +212,11 @@ def _plan_schema_auto_propagate(
         dest_recreated=dest_recreated,
     )
     evolution = drift.get("schema_evolution") or {}
-    from services.schema_drift import execute_must_pause, propose_dest_widens
+    from services.schema_drift import (
+        dest_key_groups,
+        execute_must_pause,
+        propose_dest_widens,
+    )
 
     # D107: detect_schema_drift ran without table_exists above, so its
     # live-contract lane never emitted destination-widen proposals. Emit them
@@ -223,6 +227,11 @@ def _plan_schema_auto_propagate(
         source_schema=schema,
         target_schema=dest_schema_types or {},
         dest_db=(getattr(request.destination, "format", "") or "").lower(),
+        key_groups=dest_key_groups(
+            list((getattr(request.destination, "extra", None) or {}).get("primary_key_columns") or []),
+            None,
+            contract.primary_key if contract else None,
+        ),
     )
     if _widen_props:
         _additive = list(evolution.get("additive") or [])

@@ -888,6 +888,7 @@ def propose_dest_widens(
     source_schema: dict[str, str],
     target_schema: dict[str, str],
     dest_db: str = "",
+    key_groups: list[list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """D107: destination-side widen proposals for a live destination table.
 
@@ -909,10 +910,42 @@ def propose_dest_widens(
         tgt_type = str(ci_get(target_schema, tgt) or "")
         if not src_type or not tgt_type:
             continue
-        widen = dest_widen_proposal(m, src, tgt, src_type, tgt_type, dest_db=dest_db)
+        widen = dest_widen_proposal(
+            m, src, tgt, src_type, tgt_type, dest_db=dest_db,
+            key_groups=key_groups, live_types=target_schema,
+        )
         if widen:
             out.append(widen)
     return out
+
+
+def dest_key_groups(
+    pk_columns: list[str] | None = None,
+    unique_keys: list[dict[str, Any]] | None = None,
+    contract_key: str | list[str] | None = None,
+) -> list[list[str]]:
+    """The column sets this run holds in a key on the destination.
+
+    The catalog's primary key and unique keys, plus the stream contract's
+    identity key (single column or comma-separated composite), which the
+    writer enforces with a unique index.
+    """
+    groups: list[list[str]] = []
+    if isinstance(contract_key, str):
+        contract_cols = [c.strip() for c in contract_key.split(",") if c.strip()]
+    else:
+        contract_cols = [str(c).strip() for c in contract_key or [] if str(c).strip()]
+    candidates = [
+        [str(c) for c in pk_columns or [] if str(c or "").strip()],
+        *([str(c) for c in (uk or {}).get("columns") or []] for uk in unique_keys or []),
+        contract_cols,
+    ]
+    for cols in candidates:
+        if cols and sorted(c.casefold() for c in cols) not in [
+            sorted(c.casefold() for c in g) for g in groups
+        ]:
+            groups.append(cols)
+    return groups
 
 
 def dest_widen_proposal(
@@ -923,6 +956,8 @@ def dest_widen_proposal(
     tgt_type: str,
     *,
     dest_db: str = "",
+    key_groups: list[list[str]] | None = None,
+    live_types: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """The additive ``widen_type`` entry for one pair, or None: the one rule.
 
@@ -931,6 +966,13 @@ def dest_widen_proposal(
     logical family (``widen_keeps_logical_family``: retyping a numeric column
     to text is a family change - a true narrow stays fail-closed, D107), a
     strictly wider source carrier and a stamp that is not an operator ceiling.
+
+    A column held in a key (``key_groups``) widens only by the keyed rule
+    (``connectors.schema_drift.keyed_widen_carrier``): a TEXT source onto the
+    full-value string DataFlow sized for that key (MySQL VARCHAR(768), SQL
+    Server NVARCHAR(450), whatever its collation) is the key's planned spelling
+    of TEXT, not source growth, so nothing is proposed. On MySQL a key with
+    budget left is offered the budgeted VARCHAR, as the writer would ALTER.
     """
     from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
     from connectors.writer_common import stamp_is_operator_ceiling
@@ -941,12 +983,22 @@ def dest_widen_proposal(
         return None
     if stamp_is_operator_ceiling(mapping):
         return None
+    new_type = widened_dest_carrier(tgt_type, src_type)
+    if key_groups:
+        from connectors.schema_drift import keyed_widen_carrier
+
+        new_type, keep = keyed_widen_carrier(
+            key_groups, tgt, new_type, {**(live_types or {}), tgt: tgt_type},
+            dialect=dest_db,
+        )
+        if keep:
+            return None
     return {
         "kind": "widen_type",
         "column": src,
         "target": tgt,
         "old_type": tgt_type.upper(),
-        "new_type": widened_dest_carrier(tgt_type, src_type),
+        "new_type": new_type.upper(),
         "reason": "dest_widen_available",
     }
 
@@ -1353,6 +1405,7 @@ def detect_schema_drift(
     declared_source_columns: list[str] | None = None,
     declared_source_schema: dict[str, str] | None = None,
     dest_recreated: bool = False,
+    dest_key_groups: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan.
 
@@ -1549,7 +1602,8 @@ def detect_schema_drift(
             # An explicit operator Map stamp is a ceiling — that pair stays a
             # real fidelity finding.
             widen = dest_widen_proposal(
-                m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db
+                m, src, tgt, str(src_type), str(tgt_type), dest_db=dest_db,
+                key_groups=dest_key_groups, live_types=target_schema,
             )
             if widen:
                 widen_proposals.append(widen)

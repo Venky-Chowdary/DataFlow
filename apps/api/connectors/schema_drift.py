@@ -831,14 +831,90 @@ def _mysql_keyed_widen_carrier(
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening an indexed MySQL/MariaDB column.
 
+    The key groups come from the live index catalog; the rule is
+    :func:`mysql_keyed_widen_carrier`.
+    """
+    from services.schema_fidelity import mysql_index_requires_prefix
+
+    if not mysql_index_requires_prefix(new_type):
+        return new_type, False
+    groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
+    return mysql_keyed_widen_carrier(
+        groups, column, new_type, existing, dialect=dialect, table_name=table_name
+    )
+
+
+def keyed_widen_carrier(
+    key_groups: list[list[str]],
+    column: str,
+    new_type: str,
+    existing: dict[str, str],
+    *,
+    dialect: str = "",
+) -> tuple[str, bool]:
+    """``(carrier, keep)`` for widening a column the destination holds in a key.
+
+    An engine that cannot index unbounded text (MySQL 1170, SQL Server 1919,
+    ORA-02329) carries a text key as the widest full-value string its key
+    budget allows (``services.upsert_identity.full_value_key_width``). A column
+    already at that width *is* the key's spelling of TEXT, so a TEXT source onto
+    it is not growth: ``keep``. MySQL / MariaDB use the writer's own keyed widen
+    rule (:func:`mysql_keyed_widen_carrier`); other engines keep the asked type.
+    """
+    from services.type_system import parse_string_carrier_width
+    from services.upsert_identity import full_value_key_char_bytes, full_value_key_width
+    from src.transfer.engine_family import engine_family
+
+    family = engine_family(dialect)
+    if family == "mysql":
+        return mysql_keyed_widen_carrier(key_groups, column, new_type, existing, dialect=dialect)
+    budget_dialect = {"sqlserver": "mssql", "oracle": "oracle"}.get(family, "")
+    per_char = full_value_key_char_bytes(budget_dialect)
+    want = column.casefold()
+    groups = [g for g in key_groups or [] if any(c.casefold() == want for c in g)]
+    unbounded_text = _is_string_like(normalize_logical_type(new_type)) and not (
+        parse_string_carrier_width(new_type)
+    )
+    if not per_char or not groups or not unbounded_text:
+        return new_type, False
+    by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
+    current = parse_string_carrier_width(by_fold.get(want, ""))
+    for key_cols in groups:
+        other_bytes = sum(
+            (parse_string_carrier_width(by_fold.get(c.casefold(), "")) or 0) * per_char or 8
+            for c in key_cols
+            if c.casefold() != want
+        )
+        width = full_value_key_width(
+            budget_dialect, unbounded_keys=1, other_key_bytes=other_bytes
+        )
+        if current and width and current >= width:
+            return by_fold.get(want, ""), True
+    return new_type, False
+
+
+def mysql_keyed_widen_carrier(
+    key_groups: list[list[str]],
+    column: str,
+    new_type: str,
+    existing: dict[str, str],
+    *,
+    dialect: str = "mysql",
+    table_name: str = "",
+) -> tuple[str, bool]:
+    """``(carrier, keep)`` for widening a MySQL/MariaDB column held in a key.
+
     MySQL cannot hold a TEXT/BLOB/JSON column in a key without a prefix length
     (error 1170; MariaDB quietly switches the key to HASH), and a prefix would
     enforce a different uniqueness rule than the source. A keyed column is
     therefore widened by the rule the create path already applies to a key
     (``services.schema_fidelity.mysql_key_compatible_types``): the widest
-    full-value VARCHAR the 3072-byte key budget allows across every index the
+    full-value VARCHAR the 3072-byte key budget allows across every key the
     column sits in. ``keep`` is True when the column must stay as it is — the
-    rule refused, or the budgeted carrier is no wider than the existing one.
+    rule refused, or the budgeted carrier is no wider than the existing one
+    (the column already *is* the key's spelling of TEXT). The writer's widen
+    pass and the widen proposal (``services.schema_drift.dest_widen_proposal``)
+    both ask this, so a proposal never offers an ALTER the writer would not run.
     """
     from services.schema_fidelity import (
         mysql_index_requires_prefix,
@@ -846,16 +922,16 @@ def _mysql_keyed_widen_carrier(
     )
     from services.type_system import parse_string_carrier_width
 
-    if not mysql_index_requires_prefix(new_type):
+    want = column.casefold()
+    groups = [g for g in key_groups or [] if any(c.casefold() == want for c in g)]
+    if not mysql_index_requires_prefix(new_type) or not groups:
         return new_type, False
-    groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
-    if not groups:
-        return new_type, False
-    existing_type = existing.get(column) or ""
+    by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
+    existing_type = by_fold.get(want, "")
     budget: int | None = None
     for key_cols in groups:
         types = [
-            new_type if c.casefold() == column.casefold() else str(existing.get(c) or "")
+            new_type if c.casefold() == want else by_fold.get(c.casefold(), "")
             for c in key_cols
         ]
         sized, refusal = mysql_key_compatible_types(
@@ -872,9 +948,7 @@ def _mysql_keyed_widen_carrier(
                 table_name, column, new_type, existing_type, refusal,
             )
             return existing_type, True
-        carrier = next(
-            (t for c, t in zip(key_cols, sized) if c.casefold() == column.casefold()), ""
-        )
+        carrier = next((t for c, t in zip(key_cols, sized) if c.casefold() == want), "")
         width = parse_string_carrier_width(carrier)
         if not width:
             return existing_type, True
