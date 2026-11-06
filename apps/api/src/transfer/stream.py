@@ -32,7 +32,9 @@ from connectors.writer_common import (  # noqa: E402
 )
 from services.keyset_pagination import header_column_index  # noqa: E402
 from services.column_digest import stamp_source as stamp_source_columns  # noqa: E402
-from services.keyed_write_witness import begin_keyed_write_witness  # noqa: E402
+from services.keyed_write_witness import (  # noqa: E402
+    begin_keyed_write_witness, bind_copy_witness, reset_copy_witness,
+)
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -745,6 +747,14 @@ def _stream_database_transfer_impl(
             dest_table=resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
             job_id=str(run.cfg.job_id or ""),
         )
+    # A COPY upsert fills this witness from its staging table (keyed_write_witness).
+    _copy_witness = bind_copy_witness(begin_keyed_write_witness(
+        job_id=run.cfg.job_id, key_columns=list(run.cfg.pk_target_cols or []),
+        sync_mode=str(run.cfg.effective_sync or ""), inline_fingerprints_used=False,
+        resumed=bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0),
+        columns=[str(m["target"]) for m in run.cfg.mappings or [] if m.get("target")],
+        dest_db_type=str(run.cfg.dest_bind_dialect or ""), summary=run.tally.dest_summary,
+    ))
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     from services.cancel_check import progress_mark, progress_rewind
@@ -792,6 +802,7 @@ def _stream_database_transfer_impl(
                 job_id=run.cfg.job_id,
             )
     finally:
+        reset_copy_witness(_copy_witness)
         if fast is None:
             progress_rewind(_progress_mark)
         reset_copy_decline_capture(_decline_token)

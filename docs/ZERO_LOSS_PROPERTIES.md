@@ -308,6 +308,17 @@ where the source side came from:
   (`value_discrepancy_unattributed` and a warning naming the columns). That
   includes a value swapped between two written rows, which keeps every column
   aggregate.
+* **COPY upsert routes** (`copy_binary_server_to_server_upsert` and the other
+  staged-MERGE routes through `services/copy_upsert.merge_staging_into_dest`):
+  no row passes through the process on the write. Before the staging table is
+  dropped, it is read back onto the run's witness, within the ladder budget.
+  Staging holds exactly what the MERGE wrote, one row per key. The same
+  attribution then applies.
+* **File sources** never reach this branch. The ladder cannot re-read a file
+  source (`_read_verify_rows` returns no rows for a non-SQL engine), so the
+  cell layers do not run against the source, and there is no post-write source
+  scan that a concurrent writer could disagree with. The file was staged
+  before the write (`hydrate_file_source`).
 
 ---
 
