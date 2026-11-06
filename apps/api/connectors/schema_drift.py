@@ -155,6 +155,21 @@ def mysql_temporal_fsp_is_wider(old_type: str, new_type: str, *, dest_db: str = 
     return new_p > old_p
 
 
+def widen_keeps_logical_family(old_type: str, new_type: str) -> bool:
+    """True when retyping ``old_type`` to ``new_type`` keeps what the column means.
+
+    The one family rule every widen asks (D107 proposals, D257 write-time
+    widens). TEXT is "wider" than every carrier on the lattice, but INTEGER ->
+    TEXT changes the column's meaning and stays fail-closed. VARCHAR(n) and
+    TEXT are one string family, as :func:`is_wider_type` already reads them.
+    """
+    old_logical = normalize_logical_type(old_type)
+    new_logical = normalize_logical_type(new_type)
+    if _is_string_like(old_logical) and _is_string_like(new_logical):
+        return True
+    return bool(old_logical == new_logical)
+
+
 def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"

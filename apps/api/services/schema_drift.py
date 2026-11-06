@@ -928,15 +928,14 @@ def dest_widen_proposal(
 
     Both widen lanes (the live-contract loop in ``detect_schema_drift`` and
     the engine's ``propose_dest_widens``) ask this. A proposal needs the same
-    logical family (TEXT is a universal carrier the lattice calls "wider" than
-    NUMERIC, but retyping a numeric column to text is a family change - a true
-    narrow stays fail-closed, D107), a strictly wider source carrier and a
-    stamp that is not an operator ceiling.
+    logical family (``widen_keeps_logical_family``: retyping a numeric column
+    to text is a family change - a true narrow stays fail-closed, D107), a
+    strictly wider source carrier and a stamp that is not an operator ceiling.
     """
-    from connectors.schema_drift import is_wider_type
+    from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
     from connectors.writer_common import stamp_is_operator_ceiling
 
-    if normalize_logical_type(src_type) != normalize_logical_type(tgt_type):
+    if not widen_keeps_logical_family(tgt_type, src_type):
         return None
     if not is_wider_type(tgt_type, src_type, dest_db=dest_db):
         return None

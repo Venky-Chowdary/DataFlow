@@ -573,10 +573,12 @@ def desired_types_honoring_map_stamps(
     ``target_type`` onto non-explicit widen proposals). When omitted, a column
     is explicit iff its mapping carries ``target_type``.
 
-    A candidate in another logical family is not a widen (the D107 rule
-    ``schema_drift.propose_dest_widens`` applies): TEXT is "wider" than every
-    carrier on the lattice, but retyping INTEGER to TEXT changes what the
-    column means. Once a DataFlow-projected stamp stopped being a ceiling
+    A candidate in another logical family is not a widen
+    (``connectors.schema_drift.widen_keeps_logical_family``, the rule D107
+    proposals apply too): TEXT is "wider" than every carrier on the lattice,
+    but retyping INTEGER to TEXT changes what the column means; VARCHAR(n) ->
+    TEXT stays one string family. An explicit stamp is judged first: it
+    refuses any wider candidate and records the refusal. Once a DataFlow-projected stamp stopped being a ceiling
     (D200) a CSV ``age`` stamped INTEGER was MODIFIED to TEXT because its
     source type was ``string``, ``not-a-number`` landed instead of being held
     out, and the append failed its own checksum.
@@ -584,9 +586,8 @@ def desired_types_honoring_map_stamps(
     Returns ``(desired_types, refusals)`` where each refusal is audit evidence:
     ``{column, mapped_type, refused_wider, reason}``.
     """
-    from connectors.schema_drift import is_wider_type
+    from connectors.schema_drift import is_wider_type, widen_keeps_logical_family
     from services.mapping_constraints import write_mappings
-    from services.type_system import normalize_logical_type
 
     candidates = candidate_by_col or {}
     by_tgt: dict[str, dict[str, Any]] = {}
@@ -603,14 +604,6 @@ def desired_types_honoring_map_stamps(
         mapping = by_tgt.get(col) or {}
         candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
         ceiling = str(cur_type or "").strip() or candidate
-        if (
-            candidate
-            and cur_type
-            and candidate != str(cur_type)
-            and normalize_logical_type(candidate) != normalize_logical_type(str(cur_type))
-        ):
-            desired.append(str(cur_type))
-            continue
         if explicit_columns is not None:
             is_explicit = col in explicit_columns
         else:
@@ -627,7 +620,11 @@ def desired_types_honoring_map_stamps(
                 )
             desired.append(ceiling)
             continue
-        if candidate and is_wider_type(ceiling, candidate):
+        if (
+            candidate
+            and is_wider_type(ceiling, candidate)
+            and widen_keeps_logical_family(ceiling, candidate)
+        ):
             desired.append(candidate)
         else:
             desired.append(ceiling)
