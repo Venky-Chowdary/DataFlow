@@ -306,3 +306,31 @@ def test_a_schedule_stamps_its_source_with_the_one_vocabulary():
     assert _stamp(source_read_mode="table", procedure_call="CALL p()") == {}
     with pytest.raises(UnknownReadModeError):
         _stamp(source_read_mode="tabel", source_query="SELECT 1")
+
+
+# ------------------------------- explicit table next to a leftover statement (review 4)
+
+
+@pytest.mark.parametrize("leftover", ["source_query", "procedure_call"])
+def test_an_explicit_table_contract_ignores_a_leftover_statement(leftover):
+    from services.procedure_source import resolve_callable_placements, source_read_mode_of
+
+    stmt = "SELECT id, v FROM b WHERE id = 2" if leftover == "source_query" else "CALL p()"
+    extra, contracts = resolve_callable_placements(
+        form={}, source_extra={},
+        stream_contracts=[{"name": "a", "source_read_mode": "table", leftover: stmt}])
+    assert source_read_mode_of({"extra": extra}) == "table", extra
+    assert leftover not in extra and leftover not in contracts[0], (extra, contracts)
+
+
+def test_json_execute_explicit_table_contract_copies_the_table(client, two_tables):
+    a, b = two_tables
+    src, dst = _connector("mysql", "source"), _connector("postgresql", "destination")
+    contract = {"name": a, "selected": True, "primary_key": "id", "source_read_mode": "table",
+                "source_query": f"SELECT id, v FROM {b} WHERE id = 2"}
+    resp = client.post("/api/v1/transfer/execute", json=_execute_body(src, dst, a,
+                                                                       contracts=[contract]))
+    assert resp.status_code == 200, resp.text
+    job = _wait(str(resp.json().get("job_id") or ""))
+    assert job.get("status") == "completed", {k: job.get(k) for k in ("status", "error")}
+    assert _pg_rows(a) == [(1, "x"), (2, None), (3, ""), (4, " 日本 ")]

@@ -513,6 +513,16 @@ def resolve_callable_placements(
     if len(selected) == 1:
         i = selected[0]
         contract = dict(contracts[i])  # type: ignore[index]
+        explicit_table = bool(str(contract.get("source_read_mode") or "").strip()) and (
+            canonical_read_mode(contract.get("source_read_mode")) == MODE_TABLE
+        )
+        if explicit_table:
+            # An explicit table read next to a leftover CALL/SELECT is a table
+            # read (the rule schedule fire follows too). Lifting the stale
+            # statement made source_read_mode_of infer a query on the endpoint.
+            for key in ("source_query", "procedure_call", "source_procedure", "procedure_params"):
+                contract.pop(key, None)
+    if len(selected) == 1:
         for key in _PLACEMENT_KEYS:
             value = contract.get(key)
             if key == "source_read_mode" and canonical_read_mode(value) == MODE_TABLE:
