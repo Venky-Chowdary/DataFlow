@@ -172,9 +172,25 @@ def _probe_refused_columns(by_source: dict[str, dict]) -> set[str]:
     }
 
 
+def _line_names_column(line: Any, columns: set[str]) -> bool:
+    """A dry-run / reconcile line about one of ``columns`` ("[row N ][holdout ]src→tgt: …")."""
+    import re
+
+    text = str(line)
+    return any(re.search(rf"(?:^|\s){re.escape(col)}\s*(?:→|->)", text) for col in columns)
+
+
 def _lines_name_columns(lines: list[Any], columns: set[str]) -> bool:
-    text = [str(line) for line in lines]
-    return any(f"{col}→" in t or f"{col}->" in t for col in columns for t in text)
+    return bool(columns) and any(_line_names_column(line, columns) for line in lines)
+
+
+def _split_refused(lines: list[Any], refused: set[str]) -> tuple[list[Any], list[Any]]:
+    """``(still_held, refused_lines)``: a holdout line about a probe-refused column
+    is a refusal — a gate never says "will quarantine" for it (review)."""
+    if not refused:
+        return list(lines), []
+    held = [line for line in lines if not _line_names_column(line, refused)]
+    return held, [line for line in lines if _line_names_column(line, refused)]
 
 
 def _mapping_contract_present(m: Any) -> bool:
@@ -2070,6 +2086,10 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
         list(errors or []),
         list(ctx.plan.mappings or []),
     )
+    # The engine routes its own holdout lines ("holdout src→tgt") to
+    # ``contracted``; a column the probe refused is never one of them.
+    contracted, refused_lines = _split_refused(contracted, _probe_refused_columns(_probe_columns(ctx)))
+    hard_errors = [*hard_errors, *refused_lines]
     details: dict[str, Any] = {
         "errors": list(hard_errors[:20]),
         "contracted_holdouts": list(contracted[:20]),
@@ -3222,6 +3242,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     # The coercion probe's per-column decision (invalid-calendar holdout),
     # read here instead of re-deciding on the cell's value.
     probe_by_source = _probe_columns(ctx)
+    g8_refused = _probe_refused_columns(probe_by_source)
     # Each column's ONE verdict (validation_mode_contract.mode_holdout_kind,
     # share-bounded; strict holds nothing out) decides the pre-write holdout
     # targets — the any-mode "one cell casts" file rule held a strict 1-of-40
@@ -3305,7 +3326,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     else:
                         contracted_holdouts.append(line)
                         row_holdout = True
-                elif str(m.target) in file_holdout_targets:
+                elif str(m.target) in file_holdout_targets and m.source not in g8_refused:
                     contracted_holdouts.append(line)
                     row_holdout = True
                 elif _holds_out(g8_mode, err, record_batch=file_load) and _column_holdout(

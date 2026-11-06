@@ -51,3 +51,45 @@ def test_the_g8_policy_needs_record_batch_and_reads_the_probe_verdict():
     # A column the probe did not grade falls back to the mode alone.
     assert gates._column_holdout({}, "x", "lenient", record_batch=False) == "cast_failure"
     assert gates._column_holdout({}, "x", "balanced", record_batch=True) == ""
+
+
+def _ctx(errors, by_source, mode="lenient"):
+    from types import SimpleNamespace
+
+    plan = SimpleNamespace(
+        mappings=[SimpleNamespace(source="d", target="d", transform="date_iso", user_override=False)],
+        validation_mode=mode,
+        source=SimpleNamespace(kind="file", db_type="csv"),
+    )
+    return SimpleNamespace(
+        plan=plan,
+        run_dry_run=lambda: (False, list(errors)),
+        coercion_report=lambda: {"by_source": by_source},
+        _last_dry_run_meta={"sample_rows_scanned": 40},
+    )
+
+
+def test_g5_never_says_will_quarantine_for_an_engine_holdout_line_the_probe_refused():
+    """The engine routes "holdout src→tgt" lines to ``contracted`` (risk_contract);
+    G5 must not pass them for a column the probe's one verdict refused."""
+    from preflight import gates
+
+    line = "holdout d→d: 39 sample row(s) will quarantine and the rest will load (Invalid date: 'word2')"
+    refused = {"d": {"failed": 39, "severity": "block", "holdout_kind": ""}}
+    result = gates.gate_g5_dry_run(_ctx([line], refused))
+    status = getattr(result, "status", None)
+    status = getattr(status, "value", status)
+    assert status == "block", (status, getattr(result, "message", ""))
+    assert "will quarantine" not in str(getattr(result, "message", "")).split("Dry-run failed")[0]
+
+    held = {"d": {"failed": 1, "severity": "block", "holdout_kind": "cast_failure"}}
+    ok = gates.gate_g5_dry_run(_ctx([line], held))
+    ok_status = getattr(ok.status, "value", ok.status)
+    assert ok_status == "pass", (ok_status, ok.message)
+
+
+def test_the_column_match_is_exact_not_a_suffix():
+    from preflight import gates
+
+    assert gates._lines_name_columns(["holdout order_id→order_id: bad"], {"id"}) is False
+    assert gates._lines_name_columns(["row 3 id→id: bad"], {"id"}) is True
