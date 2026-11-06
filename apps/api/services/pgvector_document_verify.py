@@ -19,6 +19,8 @@ from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.instant_text import parse_iso_instant
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,17 +85,10 @@ def _canon_numeric(value: Any) -> str:
 
 
 def _parse_instant(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if text.endswith(("Z", "z")):
-            text = text[:-1] + "+00:00"
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return None
-    return None
+    """The shared ISO parser, zone kept as written (naive stays naive)."""
+    if not isinstance(value, (str, datetime)):
+        return None
+    return parse_iso_instant(value)
 
 
 def _canon_instant(value: Any) -> str:

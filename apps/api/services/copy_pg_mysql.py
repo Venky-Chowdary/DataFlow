@@ -380,7 +380,7 @@ def _fifo_copy_into_mysql(
     """Overlap PG COPY writes with MySQL LOCAL INFILE reads. No full tempfile."""
     from connectors.mysql_load_data import (
         apply_mysql_bulk_load_session,
-        blocking_load_data_warnings,
+        fetch_load_data_warnings,
         execute_load_data_local,
         restore_mysql_bulk_load_session,
     )
@@ -416,14 +416,11 @@ def _fifo_copy_into_mysql(
                 table_q=table_q,
                 columns=columns,
             )
-            dst_cur.execute("SHOW WARNINGS")
-            # Read them before the session restore below: its SET statements
-            # replace this cursor's result set, and every truncation /
-            # clamp warning was then judged "none" (E1-018).
-            warnings = list(dst_cur.fetchall() or [])
+            # Read before the session restore below: its SET statements
+            # replace this cursor's result set (E1-018).
+            blocked = fetch_load_data_warnings(dst_cur)
         finally:
             restore_mysql_bulk_load_session(dst_cur)
-        blocked = blocking_load_data_warnings(warnings)
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 

@@ -60,7 +60,7 @@ def _load_delimited_into_mysql(
     ext: str,
 ) -> None:
     from connectors.mysql_load_data import (
-        blocking_load_data_warnings,
+        fetch_load_data_warnings,
         execute_load_data_local,
         mysql_load_data_session_ready,
     )
@@ -78,8 +78,7 @@ def _load_delimited_into_mysql(
         optionally_enclosed=csv_mode,
         ignore_lines=1,
     )
-    dst_cur.execute("SHOW WARNINGS")
-    blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
+    blocked = fetch_load_data_warnings(dst_cur)
     if blocked:
         raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 

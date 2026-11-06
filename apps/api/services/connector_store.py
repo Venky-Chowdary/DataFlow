@@ -1118,16 +1118,9 @@ def note_transfer_succeeded(*connector_ids: str | None) -> int:
 
 
 def _parse_instant(raw: Any) -> datetime | None:
-    if isinstance(raw, datetime):
-        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    from services.instant_text import parse_iso_instant
+
+    return parse_iso_instant(raw, assume_utc=True)
 
 
 def connector_health(conn: Any) -> str:

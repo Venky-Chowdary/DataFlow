@@ -108,7 +108,7 @@ def _load_tsv_into_mysql(
     columns: list[str],
 ) -> None:
     from connectors.mysql_load_data import (
-        blocking_load_data_warnings,
+        fetch_load_data_warnings,
         execute_load_data_local,
         mysql_load_data_session_ready,
     )
@@ -126,8 +126,7 @@ def _load_tsv_into_mysql(
         table_q=table_q,
         columns=columns,
     )
-    dst_cur.execute("SHOW WARNINGS")
-    blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
+    blocked = fetch_load_data_warnings(dst_cur)
     if blocked:
         raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 
