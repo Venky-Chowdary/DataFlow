@@ -167,6 +167,8 @@ def test_audit_store_failure_does_not_break_sensitive_request(audit_app, monkeyp
     def fail_append(**_kwargs):
         raise OSError("audit store unavailable")
 
+    # The counter is process-wide: count from zero, whatever ran before.
+    monkeypatch.setattr(audit_coverage, "_AUDIT_ACCESS_FAILURES", 0)
     monkeypatch.setattr(audit_app["audit_log"], "append_audit_event", fail_append)
     response = audit_app["client"].get(
         "/api/v1/workspace/sso", headers=_headers(audit_app)
