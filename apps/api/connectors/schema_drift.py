@@ -673,16 +673,22 @@ def _mysql_preserved_column_clause(
     schema: str | None,
     table_name: str,
     column: str,
+    new_type: str = "",
 ) -> str:
-    """Nullability, default, and ON UPDATE to restate on a MySQL MODIFY.
+    """Collation, nullability, default, and ON UPDATE to restate on a MySQL MODIFY.
 
     ``MODIFY COLUMN col <type>`` replaces the column definition. Omitting
-    ``NOT NULL`` and ``DEFAULT`` drops them. A row that is not an
-    information_schema nullability probe (callers' test doubles) adds nothing.
+    ``NOT NULL`` and ``DEFAULT`` drops them, and a string carrier without a
+    ``COLLATE`` falls back to the table default — a carried case-sensitive
+    ``utf8mb4_bin`` key became ``_ai_ci`` and two source keys collided
+    (1062). The column's own CHARACTER SET / COLLATE are restated unless
+    ``new_type`` already names one. A row that is not an information_schema
+    probe (callers' test doubles) adds nothing.
     """
     try:
         cursor.execute(
-            """SELECT is_nullable, column_default, extra
+            """SELECT is_nullable, column_default, extra,
+                      character_set_name, collation_name
                FROM information_schema.columns
                WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
                  AND table_name = %s AND column_name = %s""",
@@ -698,10 +704,22 @@ def _mysql_preserved_column_clause(
     if not row or len(row) < 3:
         return ""
     nullable, default, extra = row[0], row[1], row[2]
+    charset = str(row[3] or "").strip() if len(row) > 3 else ""
+    collation = str(row[4] or "").strip() if len(row) > 4 else ""
     flag = str(nullable or "").strip().upper()
     if flag not in {"YES", "NO"}:
         return ""
     parts: list[str] = []
+    if (
+        collation
+        and "COLLATE" not in str(new_type or "").upper()
+        and _mysql_string_carrier(new_type)
+        and re.fullmatch(r"[A-Za-z0-9_]+", collation)
+        and (not charset or re.fullmatch(r"[A-Za-z0-9_]+", charset))
+    ):
+        if charset:
+            parts.append(f"CHARACTER SET {charset}")
+        parts.append(f"COLLATE {collation}")
     if flag == "NO":
         parts.append("NOT NULL")
     extra_s = str(extra or "")
@@ -732,6 +750,108 @@ def _mysql_preserved_column_clause(
     if re.search(r"auto_increment", extra_s, flags=re.IGNORECASE):
         parts.append("AUTO_INCREMENT")
     return (" " + " ".join(parts)) if parts else ""
+
+
+def _mysql_string_carrier(ddl: str) -> bool:
+    base = re.sub(r"\(.*$", "", str(ddl or "")).strip().split()
+    return bool(base) and base[0].upper() in {
+        "CHAR", "VARCHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET",
+    }
+
+
+def _mysql_indexed_key_groups(
+    cursor: Any, schema: str | None, table_name: str, column: str
+) -> list[list[str]]:
+    """Column lists of every MySQL/MariaDB index (PRIMARY, UNIQUE, plain) that holds ``column``."""
+    try:
+        cursor.execute(
+            """SELECT index_name, column_name
+               FROM information_schema.statistics
+               WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
+                 AND table_name = %s
+               ORDER BY index_name, seq_in_index""",
+            (schema or "", table_name),
+        )
+        rows = cursor.fetchall() or []
+    except Exception as exc:  # noqa: BLE001 — no catalog answer: not indexed as far as we know
+        logger.debug("MySQL index probe failed for %s: %s", table_name, exc)
+        return []
+    groups: dict[str, list[str]] = {}
+    for row in rows:
+        if not row or len(row) < 2:
+            continue
+        groups.setdefault(str(row[0]), []).append(str(row[1]))
+    want = column.casefold()
+    return [cols for cols in groups.values() if any(c.casefold() == want for c in cols)]
+
+
+def _mysql_keyed_widen_carrier(
+    cursor: Any,
+    schema: str | None,
+    table_name: str,
+    column: str,
+    new_type: str,
+    existing: dict[str, str],
+    dialect: str,
+) -> tuple[str, bool]:
+    """``(carrier, keep)`` for widening an indexed MySQL/MariaDB column.
+
+    MySQL cannot hold a TEXT/BLOB/JSON column in a key without a prefix length
+    (error 1170; MariaDB quietly switches the key to HASH), and a prefix would
+    enforce a different uniqueness rule than the source. A keyed column is
+    therefore widened by the rule the create path already applies to a key
+    (``services.schema_fidelity.mysql_key_compatible_types``): the widest
+    full-value VARCHAR the 3072-byte key budget allows across every index the
+    column sits in. ``keep`` is True when the column must stay as it is — the
+    rule refused, or the budgeted carrier is no wider than the existing one.
+    """
+    from services.schema_fidelity import (
+        mysql_index_requires_prefix,
+        mysql_key_compatible_types,
+    )
+    from services.type_system import parse_string_carrier_width
+
+    if not mysql_index_requires_prefix(new_type):
+        return new_type, False
+    groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
+    if not groups:
+        return new_type, False
+    existing_type = existing.get(column) or ""
+    budget: int | None = None
+    for key_cols in groups:
+        types = [
+            new_type if c.casefold() == column.casefold() else str(existing.get(c) or "")
+            for c in key_cols
+        ]
+        sized, refusal = mysql_key_compatible_types(
+            table_name=table_name,
+            conflict_columns=list(key_cols),
+            target_cols=list(key_cols),
+            target_types=types,
+            mappings=[],
+            column_types={},
+        )
+        if refusal:
+            logger.info(
+                "Widen of indexed %s.%s to %s kept at %s: %s",
+                table_name, column, new_type, existing_type, refusal,
+            )
+            return existing_type, True
+        carrier = next(
+            (t for c, t in zip(key_cols, sized) if c.casefold() == column.casefold()), ""
+        )
+        width = parse_string_carrier_width(carrier)
+        if not width:
+            return existing_type, True
+        budget = width if budget is None else min(budget, width)
+    carrier = f"VARCHAR({budget})"
+    if not is_wider_type(existing_type, carrier, dest_db=dialect):
+        return existing_type, True
+    logger.info(
+        "Widen of indexed %s.%s sized to the full-value key budget: %s -> %s (asked %s)",
+        table_name, column, existing_type, carrier, new_type,
+    )
+    return carrier, False
 
 
 def widen_existing_columns_native(
@@ -811,6 +931,16 @@ def widen_existing_columns_native(
                 source_type,
             )
             continue
+        if dialect in ("mysql", "mariadb"):
+            # A keyed column never becomes a LOB (MySQL 1170); it widens to
+            # the full-value key carrier the create path would have chosen.
+            new_type, keep = _mysql_keyed_widen_carrier(
+                cursor, schema, table_name, col, new_type, existing, dialect
+            )
+            if keep:
+                if suppressed_out is not None:
+                    suppressed_out[col] = existing_type
+                continue
         try:
             ddl = _build_widen_ddl(
                 dialect, schema, table_name, col, new_type, existing_type
@@ -829,7 +959,7 @@ def widen_existing_columns_native(
             # so ALTER COLUMN cannot hang forever on a contended table lock.
             if dialect in ("mysql", "mariadb"):
                 ddl += _mysql_preserved_column_clause(
-                    cursor, schema, table_name, col
+                    cursor, schema, table_name, col, new_type
                 )
             cursor.execute(ddl)
             log.append(ddl)
