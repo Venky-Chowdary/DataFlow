@@ -256,8 +256,10 @@ def apply_constraint_findings(
                 # Confirm on the raw CheckViolation (or, while overwrite still
                 # rebuilt the table, land the row with the CHECK gone — D195).
                 sev = "error"
+                # row_index is the probe's 0-based position; every refusal
+                # names rows from 1 (D112: "row 3" was the 4th source row).
                 offenders = "; ".join(
-                    f"row {v.get('row_index')}: {v.get('constraint')} "
+                    f"row {int(v.get('row_index') or 0) + 1}: {v.get('constraint')} "
                     f"{v.get('values')}"
                     for v in (check_report.get("violations") or [])[:3]
                 )
