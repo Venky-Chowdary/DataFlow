@@ -620,7 +620,6 @@ def _read_destination_sample(
 
         if db_type == "redis":
             from connectors.redis_reader import _decode, _redis_client, redis_json_row
-            from connectors.sql_identifiers import sanitize_identifier
 
             prefix = table_name or "dataflow"
             cfg = {
@@ -637,10 +636,9 @@ def _read_destination_sample(
                 rows_out: list[dict[str, Any]] = []
                 if keys and sort_key:
                     # Writer stores keys as ``prefix:<sanitized_id>``.
-                    key_names = [
-                        f"{prefix}:{sanitize_identifier(str(k), preserve_case=True)}"
-                        for k in keys
-                    ]
+                    from src.transfer.writer_column_spelling import physical_column
+
+                    key_names = [f"{prefix}:{physical_column(str(k))}" for k in keys]
                     for raw in client.mget(key_names):
                         text = _decode(raw)
                         if not text:
@@ -755,6 +753,9 @@ def _read_destination_sample(
                 )
                 from connectors.sql_identifiers import require_safe_identifier
 
+                from connectors.snowflake_conn import snowflake_schema_and_table
+
+                schema, table_name = snowflake_schema_and_table(schema or "PUBLIC", table_name)
                 with conn.cursor() as cur:
                     resolved = resolve_or_fold_snowflake_table(
                         cur, schema or "PUBLIC", table_name

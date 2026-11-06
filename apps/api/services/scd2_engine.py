@@ -760,7 +760,6 @@ def _scd2_map_context(
 ) -> dict[str, Any]:
     """Shared Map / dest-type / policy facts for prepare and apply."""
     from connectors.writer_common import (
-        sanitize_identifier,
         transform_error_policy_for_validation_mode,
     )
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -781,7 +780,9 @@ def _scd2_map_context(
         stamped = str(m.get("target_type") or m.get("dest_type") or "").strip()
         if not tgt_raw or not stamped:
             continue
-        tgt = sanitize_identifier(tgt_raw, preserve_case=True)
+        from src.transfer.writer_column_spelling import physical_column
+
+        tgt = physical_column(tgt_raw)
         dest_types[tgt] = stamped
         if tgt_raw != tgt:
             dest_types.pop(tgt_raw, None)

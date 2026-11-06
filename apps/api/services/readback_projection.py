@@ -64,9 +64,9 @@ def project_readback(
             # source digest names the column as the Map does, so the read-back
             # must find it under the writer's spelling and label it the Map's
             # way, or identical data hashes differently (D269).
-            from connectors.sql_identifiers import sanitize_identifier
+            from src.transfer.writer_column_spelling import physical_column
 
-            pos = index.get(sanitize_identifier(name, preserve_case=True).lower())
+            pos = index.get(physical_column(name).lower())
             aliased = pos is not None
         if pos is None:
             # Mapped column absent from the destination read-back — keep the
