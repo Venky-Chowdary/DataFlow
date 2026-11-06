@@ -384,10 +384,9 @@ def _failed_batch_undo_note_impl(
         backup_name = str(extra.get("overwrite_backup") or "")
         restored = _engine._settle_overwrite_backup(destination, restore=True)
         if restored:
-            note = (
-                "The previous destination table was restored. "
-                "This run's replacement was removed."
-            )
+            from src.transfer.engine_finish import OVERWRITE_RESTORED_NOTE
+
+            note = OVERWRITE_RESTORED_NOTE
             dest_summary["partial_batch_undo"] = "restored"
         else:
             note = (
