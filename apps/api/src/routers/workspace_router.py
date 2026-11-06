@@ -192,12 +192,37 @@ def _named_workspace_id(request: Request) -> str:
     return workspace_id_from_request_headers(request.headers)
 
 
+def _store_down_types() -> tuple[type[BaseException], ...]:
+    from services.control_plane_store import ControlPlaneUnavailable
+    from services.workspace_store import SettingsUnavailable
+
+    return (SettingsUnavailable, ControlPlaneUnavailable)
+
+
+_STORE_DOWN = _store_down_types()
+
+
+def _store_down(exc: BaseException) -> HTTPException:
+    """503: the shared settings store is configured but unreachable (fails closed)."""
+    return HTTPException(
+        status_code=503,
+        detail=(
+            "The deployment settings store is unreachable; nothing was read from or "
+            f"written to a node-local copy. Try again shortly. ({exc})"
+        ),
+    )
+
+
 @router.get("/settings")
 async def get_settings(request: Request):
     from services.workspace_store import get_workspace_settings
 
+    try:
+        settings = get_workspace_settings()
+    except _STORE_DOWN as exc:
+        raise _store_down(exc) from exc
     return {
-        **get_workspace_settings(),
+        **settings,
         # One document for the whole deployment: only a platform admin changes it.
         **editability(request),
         # What retention_days does, stated by the API itself (QA enterprise #4).
@@ -260,6 +285,8 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             updated = {**updated, "cdc_orphan_auto_drop": toggle[1]["enabled"]}
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except _STORE_DOWN as exc:
+        raise _store_down(exc) from exc
     record_admin_change(
         request,
         "workspace.settings.update",
@@ -654,7 +681,10 @@ def purge_job_retention(body: JobRetentionPurgeBody, request: Request):
         raise HTTPException(status_code=400, detail="Name the workspace (X-Workspace-Id) to purge its jobs")
     if not _can_admin_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
-    retention_days = int(get_workspace_settings()["retention_days"])
+    try:
+        retention_days = int(get_workspace_settings()["retention_days"])
+    except _STORE_DOWN as exc:
+        raise _store_down(exc) from exc
     try:
         result = purge_expired_jobs(
             workspace_id=workspace_id,

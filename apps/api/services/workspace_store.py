@@ -1,18 +1,28 @@
 """The deployment's general settings — org profile, retention, timezone, studio flags.
 
-One document for the whole deployment (``services.platform_settings``). Where
-a control-plane database is configured it lives there
-(``workspace_settings`` / ``_id: general``), so every replica — API, worker,
-scheduler — reads and writes the same values; the retention purge beat and the
-settings audit read it there, uncached. Only a single-node or dev deployment
-with no control-plane database keeps it in ``data_dir()/workspace.json``
-(``STORE_PATH``), exactly as before.
+One document for the whole deployment (``services.platform_settings``).
 
-Migration: the first read on a deployment whose shared store has no document
-seeds it from this node's file, if one exists, with an insert-if-absent (the
-first replica wins; the others adopt its document), and audits it as
-``workspace.settings.migrated``. A file value is never dropped: every known
-key is carried over.
+* **Control-plane database configured** (``control_plane_store``): the
+  settings live there, read on every call (no cache) by the API, the
+  retention purge beat and the settings audit. If the database is configured
+  but unreachable, reads raise :class:`SettingsUnavailable` — routes answer
+  503, safety flags read as off (:func:`safety_flag`), beats skip — and the
+  node-local file is never used instead: it may hold another replica's stale
+  value (independent review: a down client read ``retention_auto_purge=True``
+  from a stale file and the purge beat ran while the shared setting was off).
+* **No control-plane database** (single node / dev / in-memory job store):
+  ``data_dir()/workspace.json`` (``STORE_PATH``), exactly as before.
+
+Migration (deterministic, no boot-order winner). Each replica that still has
+a local file contributes it once to ``workspace_settings_sources`` (keyed by
+its content hash; audited ``workspace.settings.migrated``) and renames it to
+``workspace.json.migrated`` so it can never re-arm. The effective document is
+``defaults`` ← the merge of every contributed file ← every field written
+through the shared store. The merge is per field, newest file ``updated_at``
+wins, except: a destructive toggle (``retention_auto_purge``) never seeds on
+— a platform admin turns it on in the shared store, audited — and
+``retention_days`` seeds as the longest window any file held. A write never
+discards a contribution: fields it does not name keep their merged value.
 """
 
 from __future__ import annotations
@@ -97,14 +107,28 @@ def _now() -> str:
 
 
 _COLLECTION = "workspace_settings"
+_SOURCES = "workspace_settings_sources"
 _DOC_ID = "general"
+#: Flags whose "on" runs something destructive: on only when every source agrees.
+SAFETY_FLAGS = ("retention_auto_purge",)
+
+
+class SettingsUnavailable(RuntimeError):
+    """The shared settings store is configured but cannot be read or written."""
+
+
+def _migrated_path():
+    return STORE_PATH.with_name(STORE_PATH.name + ".migrated")
 
 
 def _shared():
-    """The shared control-plane collection, or None on a file-only deployment."""
-    from services.control_plane_store import mongo_collection
+    """The shared collection, None in file mode; raises SettingsUnavailable when down."""
+    from services.control_plane_store import ControlPlaneUnavailable, shared_collection
 
-    return mongo_collection(_COLLECTION)
+    try:
+        return shared_collection(_COLLECTION)
+    except ControlPlaneUnavailable as exc:
+        raise SettingsUnavailable(str(exc)) from exc
 
 
 def _known(raw: dict[str, Any]) -> dict[str, Any]:
@@ -123,44 +147,89 @@ def _read_file() -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
-def _seed_from_file(coll: Any) -> dict[str, Any] | None:
-    """Insert this node's file into the empty shared store; first writer wins."""
+def _contribute_local_file(coll: Any) -> None:
+    """Add this node's file to the merge sources once, audit it, retire the file."""
     raw = _read_file()
     if raw is None:
-        return None
+        return
+    import hashlib
+
     values = {k: v for k, v in _known(raw).items() if not k.startswith("_")}
-    result = coll.update_one(
-        {"_id": _DOC_ID},
-        {"$setOnInsert": {**values, "_migrated_from": str(STORE_PATH), "_migrated_at": _now()}},
+    source_id = hashlib.sha256(
+        json.dumps(values, sort_keys=True, default=json_default).encode("utf-8")
+    ).hexdigest()
+    sources = coll.database[_SOURCES]
+    result = sources.update_one(
+        {"_id": source_id},
+        {"$setOnInsert": {"values": values, "file": str(STORE_PATH), "contributed_at": _now()}},
         upsert=True,
     )
     if getattr(result, "upserted_id", None) is not None:
-        try:
-            from services.audit_coverage import record_security_event
+        from services.audit_coverage import record_security_event
 
-            record_security_event(
-                "workspace.settings.migrated",
-                outcome="succeeded",
-                resource="workspace_settings",
-                actor="system",
-                details={"source": str(STORE_PATH), "values": values},
-            )
-        except Exception:  # noqa: BLE001 - the document is in place; the log says so
-            import logging
+        record_security_event(
+            "workspace.settings.migrated",
+            outcome="succeeded",
+            resource="workspace_settings",
+            actor="system",
+            details={"source": str(STORE_PATH), "source_id": source_id, "values": values},
+        )
+    try:
+        STORE_PATH.replace(_migrated_path())
+    except OSError as exc:  # the source is recorded; the file is re-read harmlessly
+        import logging
 
-            logging.getLogger(__name__).warning(
-                "workspace settings migrated from %s; the audit record failed", STORE_PATH
-            )
-    return coll.find_one({"_id": _DOC_ID})
+        logging.getLogger(__name__).warning("could not retire %s: %s", STORE_PATH, exc)
+
+
+#: Fields a file seeds conservatively: destructive toggles never seed on, and
+#: the retention window never seeds shorter than the longest any file held.
+_SEED_MAX = ("retention_days",)
+
+
+def _merge_sources(sources: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per field, the newest file wins — except what can delete data.
+
+    A destructive toggle (``SAFETY_FLAGS``) always seeds off: a replica's
+    stale file must never arm a deployment-wide purge (second review); a
+    platform admin turns it on through the shared store, audited. The
+    retention window seeds as the longest any file held.
+    """
+    ordered = sorted(
+        (dict(s.get("values") or {}) for s in sources),
+        key=lambda v: (str(v.get("updated_at") or ""), json.dumps(v, sort_keys=True, default=json_default)),
+    )
+    merged: dict[str, Any] = {}
+    for values in ordered:
+        merged.update({k: v for k, v in values.items() if k in _DEFAULTS or k in _ATTRIBUTION})
+    for flag in SAFETY_FLAGS:
+        merged.pop(flag, None)
+    for field in _SEED_MAX:
+        carried = [int(v[field]) for v in ordered if isinstance(v.get(field), int)]
+        if carried:
+            merged[field] = max(carried)
+    return merged
+
+
+def _shared_effective(coll: Any, written: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = dict(_DEFAULTS)
+    merged.update(_merge_sources(list(coll.database[_SOURCES].find({}))))
+    doc = written if written is not None else (coll.find_one({"_id": _DOC_ID}) or {})
+    merged.update(_known({k: v for k, v in doc.items() if k != "_id"}))
+    return merged
 
 
 def _load_raw() -> dict[str, Any]:
-    merged = dict(_DEFAULTS)
     coll = _shared()
     if coll is not None:
-        doc = coll.find_one({"_id": _DOC_ID}) or _seed_from_file(coll) or {}
-        merged.update(_known({k: v for k, v in doc.items() if k != "_id"}))
-        return merged
+        try:
+            _contribute_local_file(coll)
+            return _shared_effective(coll)
+        except SettingsUnavailable:
+            raise
+        except Exception as exc:  # pymongo errors: the store is configured but failing
+            raise SettingsUnavailable(f"shared settings store unreadable: {exc}") from exc
+    merged = dict(_DEFAULTS)
     raw = _read_file()
     if raw is not None:
         merged.update(_known(raw))
@@ -173,21 +242,35 @@ def _save(data: dict[str, Any]) -> None:
 
 
 def _write(patch: dict[str, Any]) -> dict[str, Any]:
-    """Apply ``patch``; returns the document as it was before (for the audit)."""
+    """Apply ``patch``; returns the effective document as it was before."""
     coll = _shared()
     if coll is not None:
-        # Seed first so a migration never loses the file's other values.
-        if coll.find_one({"_id": _DOC_ID}, {"_id": 1}) is None:
-            _seed_from_file(coll)
-        before = coll.find_one_and_update({"_id": _DOC_ID}, {"$set": patch}, upsert=True) or {}
-        merged = dict(_DEFAULTS)
-        merged.update(_known({k: v for k, v in before.items() if k != "_id"}))
-        return merged
+        try:
+            # This node's file joins the merge before anything is written, so a
+            # first write never leaves its values out.
+            _contribute_local_file(coll)
+            before_doc = coll.find_one_and_update({"_id": _DOC_ID}, {"$set": patch}, upsert=True) or {}
+            return _shared_effective(coll, written=before_doc)
+        except SettingsUnavailable:
+            raise
+        except Exception as exc:
+            raise SettingsUnavailable(f"shared settings store unwritable: {exc}") from exc
     data = _load_raw()
     before = dict(data)
     data.update(patch)
     _save(data)
     return before
+
+
+def safety_flag(name: str) -> bool:
+    """A destructive automation's switch: off whenever the store cannot be read."""
+    try:
+        return bool(get_workspace_settings().get(name))
+    except SettingsUnavailable as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("%s reads as off: %s", name, exc)
+        return False
 
 
 def _cdc_orphan_auto_drop() -> bool:

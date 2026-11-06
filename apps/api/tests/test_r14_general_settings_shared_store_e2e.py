@@ -95,25 +95,95 @@ def test_two_replicas_over_one_store_see_one_value(replicas):
     assert not replicas.file("a").exists() and not replicas.file("b").exists()
 
 
-def test_migration_seeds_the_store_from_the_file_once_first_writer_wins(replicas):
+def test_migration_merges_every_file_deterministically_and_retires_them(replicas):
+    """Second review (S3): the first writer's file won (boot order), a replica
+    with no file that wrote first kept every other file out, and a file could
+    re-arm after the fact. Now each file is a merge source: per field the
+    newest file wins, a destructive toggle never seeds on, the retention window
+    seeds as the longest any file held, writes
+    keep the merge for fields they do not name, and a contributed file is
+    renamed so it can never be read again."""
+    from services.workspace_store import get_workspace_settings, update_workspace_settings
+
+    newer = {
+        "org_name": "Contoso", "timezone": "Europe/Berlin", "retention_days": 30,
+        "retention_auto_purge": True, "studio_schema_browser": True, "studio_canvas": False,
+        "updated_at": "2026-10-02T00:00:00+00:00", "updated_by": "new-admin@example.com",
+    }
+    older = {
+        "org_name": "Old name", "timezone": "Asia/Tokyo", "retention_days": 365,
+        "retention_auto_purge": False, "studio_canvas": True,
+        "updated_at": "2026-09-01T00:00:00+00:00", "updated_by": "old-admin@example.com",
+    }
+    replicas.file("a").write_text(json.dumps(newer), encoding="utf-8")
+    replicas.file("b").write_text(json.dumps(older), encoding="utf-8")
+    # A replica with no file writes first: it must not keep the files out.
+    (replicas.tmp / "c").mkdir()
+    replicas.svcs["c"] = replicas.svcs["a"]
+    replicas.use("c")
+    update_workspace_settings(studio_schema_browser=False, actor="admin-c@example.com")
+    for order in (("b", "a"), ("a", "b")):
+        for name in order:
+            replicas.use(name)
+            seen = get_workspace_settings()
+    assert seen["org_name"] == "Contoso" and seen["timezone"] == "Europe/Berlin"
+    assert seen["retention_days"] == 365, "the retention window seeded shorter than a file held"
+    assert seen["retention_auto_purge"] is False, "a stale file armed the deployment-wide purge"
+    assert seen["studio_canvas"] is False  # newest file wins
+    assert seen["studio_schema_browser"] is False  # the shared write wins over the files
+    for name in ("a", "b"):
+        assert not replicas.file(name).exists()
+        assert (replicas.tmp / name / "workspace.json.migrated").exists()
+    migrated = list(replicas.db["audit_events"].find({"action": "workspace.settings.migrated"}))
+    assert len(migrated) == 2, migrated
+    assert {m["details"]["values"]["org_name"] for m in migrated} == {"Contoso", "Old name"}
+
+
+def test_a_single_stale_file_never_arms_the_purge(replicas):
+    """Second review: whichever replica's file was read first could turn on
+    retention_auto_purge deployment-wide."""
+    from services.job_retention_schedule import auto_purge_enabled
     from services.workspace_store import get_workspace_settings
 
-    values = {
-        "org_name": "Contoso", "timezone": "Europe/Berlin", "retention_days": 30,
-        "retention_auto_purge": True, "studio_schema_browser": True, "studio_canvas": True,
-        "updated_at": "2026-10-01T00:00:00+00:00", "updated_by": "old-admin@example.com",
-    }
-    replicas.file("a").write_text(json.dumps(values), encoding="utf-8")
-    replicas.file("b").write_text(json.dumps({**values, "org_name": "Other node"}), encoding="utf-8")
-    replicas.use("a")
-    seeded = get_workspace_settings()
-    for key, value in values.items():
-        assert seeded[key] == value, (key, seeded[key], value)
+    replicas.file("b").write_text(
+        json.dumps({"retention_auto_purge": True, "retention_days": 1, "org_name": "Stale"}),
+        encoding="utf-8",
+    )
     replicas.use("b")
-    assert get_workspace_settings()["org_name"] == "Contoso", "a second replica re-seeded"
-    migrated = list(replicas.db["audit_events"].find({"action": "workspace.settings.migrated"}))
-    assert len(migrated) == 1, migrated
-    assert migrated[0]["details"]["values"]["org_name"] == "Contoso"
+    seen = get_workspace_settings()
+    assert seen["org_name"] == "Stale"
+    assert seen["retention_auto_purge"] is False and auto_purge_enabled() is False
+
+
+def test_a_down_store_fails_closed_never_a_stale_file(replicas, monkeypatch, ent):
+    """Second review (BLOCKING): with replica b's client down, b read its old
+    file (auto_purge on, 1 day) and the purge beat ran on it; a PATCH landed in
+    b's file only."""
+    from services import mongodb_service, workspace_store
+    from services.job_retention_schedule import auto_purge_enabled, run_due_retention
+    from services.workspace_store import SettingsUnavailable, update_workspace_settings
+
+    monkeypatch.setenv("MONGODB_URI", MONGO_URI)
+    replicas.use("a")
+    update_workspace_settings(retention_auto_purge=False, retention_days=365, actor="a@example.com")
+    replicas.use("b")
+    stale = {"retention_auto_purge": True, "retention_days": 1}
+    replicas.file("b").write_text(json.dumps(stale), encoding="utf-8")
+    replicas.svcs["b"].client = None  # the connection is down
+    with pytest.raises(SettingsUnavailable):
+        workspace_store.get_workspace_settings()
+    assert auto_purge_enabled() is False
+    assert run_due_retention(force=True) is None
+    with pytest.raises(SettingsUnavailable):
+        update_workspace_settings(retention_auto_purge=True, actor="b@example.com")
+    assert json.loads(replicas.file("b").read_text(encoding="utf-8")) == stale
+    # Through the real route: 503, nothing written anywhere.
+    monkeypatch.setattr(mongodb_service, "_mongodb_service", replicas.svcs["b"])
+    res = ent.admin.patch("/api/v1/workspace/settings", json={"retention_auto_purge": True})
+    assert res.status_code == 503, res.text
+    assert ent.admin.get("/api/v1/workspace/settings").status_code == 503
+    replicas.use("a")
+    assert workspace_store.get_workspace_settings()["retention_auto_purge"] is False
 
 
 def test_file_only_deployment_behaves_as_before(tmp_path, monkeypatch):

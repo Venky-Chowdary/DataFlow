@@ -43,9 +43,10 @@ AUDIT_ACTION = "workspace.jobs.retention.purge"
 
 
 def auto_purge_enabled() -> bool:
-    from services.workspace_store import get_workspace_settings
+    """Off whenever the shared settings store cannot be read (fails closed)."""
+    from services.workspace_store import safety_flag
 
-    return bool(get_workspace_settings().get("retention_auto_purge"))
+    return safety_flag("retention_auto_purge")
 
 
 _warned_no_store = False
@@ -93,13 +94,20 @@ def retention_schedule_status() -> dict[str, Any]:
 def run_due_retention(*, now: datetime | None = None, force: bool = False) -> dict[str, Any] | None:
     """Run the scheduled purge if it is enabled and due. ``None`` when it did not run."""
     global _warned_no_store
-    if not auto_purge_enabled():
-        return None
     from services.job_retention import purge_expired_jobs
     from services.maintenance_claim import claim_run
     from services.team_store import list_workspaces
-    from services.workspace_store import get_workspace_settings
+    from services.workspace_store import SettingsUnavailable, get_workspace_settings
 
+    # One read of the shared settings for the flag and the window; a store that
+    # is configured but unreachable skips the run — never a node-local copy.
+    try:
+        settings = get_workspace_settings()
+    except SettingsUnavailable as exc:
+        logger.warning("Scheduled job retention skipped: %s", exc)
+        return None
+    if not settings.get("retention_auto_purge"):
+        return None
     current = now or datetime.now(timezone.utc)
     claimed = claim_run(CLAIM_ID, RUN_INTERVAL, now=current, force=force)
     if claimed is None:
@@ -112,7 +120,7 @@ def run_due_retention(*, now: datetime | None = None, force: bool = False) -> di
     _warned_no_store = False
     if not claimed:
         return None
-    retention_days = int(get_workspace_settings()["retention_days"])
+    retention_days = int(settings["retention_days"])
     runs: list[dict[str, Any]] = []
     for ws in list_workspaces():
         runs.append(_purge_workspace(ws.id, retention_days, current, purge_expired_jobs))
