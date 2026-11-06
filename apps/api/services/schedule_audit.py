@@ -39,11 +39,27 @@ def schedule_audit_details(sched: Any, **extra: Any) -> dict[str, Any]:
     return details
 
 
+#: The reviewed field set of a ``schedule.definition.create`` / ``.delete``
+#: record (tests/test_security_events.py pins it). The workspace is on the
+#: event envelope, the door it came through is its ``route_template``, and a
+#: PII attestation is its own ``schedule.compliance.acknowledged`` record, so
+#: none of those is restated in the definition's details.
+DEFINITION_DETAIL_FIELDS = (
+    "id", "source_connector_id", "source_table", "dest_connector_id",
+    "dest_table", "sync_mode", "enabled",
+)
+
+
+def schedule_definition_details(sched: Any) -> dict[str, Any]:
+    details = schedule_audit_details(sched)
+    return {key: details[key] for key in DEFINITION_DETAIL_FIELDS}
+
+
 def _workspace(sched: Any) -> str | None:
     return str(getattr(sched, "workspace_id", "") or "") or None
 
 
-def record_schedule_created(sched: Any, *, request: Any = None, via: str = "rest", status: int = 201) -> None:
+def record_schedule_created(sched: Any, *, request: Any = None, status: int = 201) -> None:
     record_security_event(
         "schedule.definition.create",
         outcome="succeeded",
@@ -51,11 +67,11 @@ def record_schedule_created(sched: Any, *, request: Any = None, via: str = "rest
         resource=f"schedule:{getattr(sched, 'id', '')}",
         status=status,
         workspace_id=_workspace(sched),
-        details=schedule_audit_details(sched, via=via),
+        details=schedule_definition_details(sched),
     )
 
 
-def record_schedule_deleted(sched: Any, *, request: Any = None, via: str = "rest", actor: str | None = None) -> None:
+def record_schedule_deleted(sched: Any, *, request: Any = None, actor: str | None = None) -> None:
     record_security_event(
         "schedule.definition.delete",
         outcome="succeeded",
@@ -64,7 +80,7 @@ def record_schedule_deleted(sched: Any, *, request: Any = None, via: str = "rest
         resource=f"schedule:{getattr(sched, 'id', '')}",
         status=200,
         workspace_id=_workspace(sched),
-        details=schedule_audit_details(sched, via=via),
+        details=schedule_definition_details(sched),
     )
 
 

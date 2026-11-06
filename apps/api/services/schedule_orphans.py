@@ -292,7 +292,6 @@ def _audit_applied(applied: list[dict[str, Any]], *, actor: str, request: Any) -
             record_schedule_deleted(
                 SimpleNamespace(**{**row, "workspace_id": row.get("workspace_id") or ""}),
                 request=request,
-                via="orphan_reconcile",
                 actor=actor,
             )
             continue

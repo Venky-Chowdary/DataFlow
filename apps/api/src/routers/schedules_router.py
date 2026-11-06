@@ -769,7 +769,7 @@ async def create_pipeline_schedule(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    record_schedule_created(sched, request=request, via="rest")
+    record_schedule_created(sched, request=request)
     audit_schedule_acknowledgment(sched, request=request, via="rest")
     return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
@@ -951,7 +951,7 @@ async def remove_pipeline_schedule(
     capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
-    record_schedule_deleted(sched, request=request, via="rest")
+    record_schedule_deleted(sched, request=request)
     return {"success": True, "capture_release": capture}
 
 

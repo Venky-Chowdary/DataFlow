@@ -968,7 +968,7 @@ async def copilot_confirm(
             record_schedule_created,
         )
 
-        record_schedule_created(sched, request=http_request, via="pilot_confirm")
+        record_schedule_created(sched, request=http_request)
         audit_schedule_acknowledgment(sched, request=http_request, via="pilot_confirm")
         _finalize(result)
         return {"ok": True, "idempotent": False, "kind": kind, **result}
