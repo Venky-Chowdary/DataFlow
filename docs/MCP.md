@@ -145,7 +145,6 @@ DataFlow CORS settings and optional `CORS_ORIGIN_REGEX`.
   `/api/...` path is proxied to the API, `/.well-known/oauth-protected-resource`
   (the discovery a client runs after a 401) is proxied to the API root, and any
   other `/.well-known/...` document, `/api`, and nginx's own 502/504 answer
-  JSON (`deploy/nginx.conf.template`). Every `/api/v1/mcp/...` path also
-  answers with a trailing slash instead of redirecting. If the error persists,
+  JSON (`deploy/nginx.conf.template`). If the error persists,
   check that the client URL ends in `/api/v1/mcp` (not `/mcp`) and that the web
   service's `DATAWRAP_API_BASE` points at the API.

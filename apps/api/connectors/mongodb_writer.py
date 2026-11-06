@@ -1152,11 +1152,20 @@ def write_mapped_rows(
         skipped_total = 0
         key_index_ready = False
 
+        from services.cancel_check import cancel_checkpoint
+
         for chunk_idx in range(chunks):
             start = chunk_idx * mongo_batch_size
             batch = typed_rows[start : start + mongo_batch_size]
             if not batch:
                 break
+            # QA r12 D5: stop the NEXT insert_many when the job was cancelled,
+            # as the SQL writers do (D102 / D168). One engine chunk is twenty
+            # 1,000-document batches; without this a cancelled job kept
+            # writing to the end of the chunk. ``written`` is what this call
+            # already committed, so the cancel reports it (D199 then counts
+            # the collection itself).
+            cancel_checkpoint(written + skipped_total)
 
             # Convert row tuples to documents; omit Missing, bind reader-null
             # as None (shared present_field_bindings). Track sparse rows so

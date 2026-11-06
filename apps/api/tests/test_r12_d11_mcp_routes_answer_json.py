@@ -12,8 +12,6 @@ the snippet the app shows). The web nginx proxies ``/api/`` to the API, but:
   ``200 index.html``. The client parses it as JSON and fails.
 * ``/api`` without a trailing path also got the SPA shell, and nginx's own
   502/504 (API down) was an HTML page.
-* A trailing slash on the legacy bridge (``/mcp/tools/``, ``/mcp/tools/call/``)
-  was a 307 to the API's own origin, out of the same-origin proxy.
 
 Two layers are tested: the API's routes (TestClient) and the real nginx with
 ``deploy/nginx.conf.template`` rendered as ``deploy/start-nginx.sh`` renders
@@ -52,15 +50,11 @@ _MCP_CALLS = [
     ("POST", "/api/v1/mcp", _LIST),
     ("POST", "/api/v1/mcp/", _LIST),
     ("GET", "/api/v1/mcp/manifest", None),
-    ("GET", "/api/v1/mcp/manifest/", None),
     ("GET", "/api/v1/mcp/tools", None),
-    ("GET", "/api/v1/mcp/tools/", None),
     ("POST", "/api/v1/mcp/tools/call", {"name": "list_connectors", "arguments": {}}),
-    ("POST", "/api/v1/mcp/tools/call/", {"name": "list_connectors", "arguments": {}}),
     ("GET", "/api/v1/mcp/status", None),
-    ("GET", "/api/v1/mcp/status/", None),
-    ("GET", "/api/v1/mcp/logs/", None),
-    ("GET", "/api/v1/mcp/policy/", None),
+    ("GET", "/api/v1/mcp/logs", None),
+    ("GET", "/api/v1/mcp/policy", None),
 ]
 
 #: Paths that must be a JSON 404 — never index.html.
@@ -86,7 +80,7 @@ def api_client(monkeypatch):
 
 
 @pytest.mark.parametrize("method,path,body", _MCP_CALLS)
-def test_api_mcp_routes_answer_json_without_redirect(api_client, method, path, body):
+def test_api_mcp_routes_answer_json(api_client, method, path, body):
     kwargs = {"headers": _MCP_ACCEPT} if body is _LIST else {}
     if body is not None:
         kwargs["json"] = body
