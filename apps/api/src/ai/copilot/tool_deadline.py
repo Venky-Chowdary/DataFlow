@@ -21,6 +21,7 @@ import contextlib
 import contextvars
 import logging
 import os
+import socket
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -100,6 +101,11 @@ class _Progress:
     limit: float = 0.0
     slots: dict[int, _Slot] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    #: Driver connections opened for this call, per worker thread, so an
+    #: abandoned worker can be interrupted (D281). Never stores a socket or
+    #: file descriptor: those are read from the live connection at interrupt
+    #: time, so a closed connection whose descriptor was reused is left alone.
+    connections: dict[int, dict[int, Any]] = field(default_factory=dict)
 
     # Read-only views of the call's own (first) step, kept for callers that
     # inspect a single step.
@@ -264,6 +270,96 @@ def _clear_step() -> None:
         progress.slots.pop(threading.get_ident(), None)
 
 
+def register_connection(conn: Any) -> None:
+    """Remember a driver connection this thread opened for the current tool call.
+
+    A call abandoned at its deadline is interrupted through these: a worker
+    blocked on a connected socket that never answers (a tunnel that accepted
+    and went silent) has no server-side timeout that can reach it, and such
+    workers filled the connector pool for hours (D281). A no-op outside a tool
+    call, so transfer jobs' sessions are never touched.
+    """
+    progress = _progress.get()
+    if progress is None or conn is None:
+        return
+    with progress.lock:
+        progress.connections.setdefault(threading.get_ident(), {})[id(conn)] = conn
+
+
+def unregister_connection(conn: Any) -> None:
+    """Forget a connection handed back to a pool (another consumer owns it now)."""
+    progress = _progress.get()
+    if progress is None or conn is None:
+        return
+    with progress.lock:
+        for thread_conns in progress.connections.values():
+            thread_conns.pop(id(conn), None)
+
+
+def _shutdown_descriptor(fd: int) -> None:
+    # ``shutdown`` acts on the kernel socket, so a duplicate descriptor ends
+    # the recv the worker thread is blocked in without owning its object.
+    dup = socket.socket(fileno=os.dup(fd))
+    try:
+        dup.shutdown(socket.SHUT_RDWR)
+    finally:
+        dup.close()
+
+
+def _interrupt_connection(conn: Any) -> bool:
+    """End the blocking I/O of one driver connection from another thread."""
+    # pymysql keeps the socket object; a closed connection has none.
+    sock = getattr(conn, "_sock", None)
+    if sock is not None and hasattr(sock, "shutdown"):
+        sock.shutdown(socket.SHUT_RDWR)
+        return True
+    # psycopg2 (and anything else with a live descriptor): closed ones raise.
+    fileno = getattr(conn, "fileno", None)
+    if callable(fileno) and not getattr(conn, "closed", False):
+        _shutdown_descriptor(int(fileno()))
+        return True
+    # python-oracledb: break the call in flight on the connection.
+    cancel = getattr(conn, "cancel", None)
+    if callable(cancel):
+        cancel()
+        return True
+    return False
+
+
+def interrupt_connections(progress: _Progress, thread: int | None = None) -> int:
+    """Interrupt the connections a call (or one of its threads) still holds.
+
+    Returns how many were interrupted. Best effort: a connection that is
+    already closed, or a driver with no reachable socket (pyodbc carries the
+    call's budget as its own ``timeout`` instead), is skipped.
+    """
+    with progress.lock:
+        if thread is None:
+            conns = [c for bucket in progress.connections.values() for c in bucket.values()]
+            progress.connections.clear()
+        else:
+            conns = list(progress.connections.pop(thread, {}).values())
+    done = 0
+    for conn in conns:
+        try:
+            if _interrupt_connection(conn):
+                done += 1
+        except Exception as exc:  # noqa: BLE001 - best effort, per connection
+            logger.debug("connection interrupt skipped: %s", exc)
+    return done
+
+
+def stuck_label(tool: str, progress: _Progress) -> str:
+    """``tool: step (role host:port)`` for the pool's own messages."""
+    with progress.lock:
+        slots = [s for s in progress.slots.values() if s.step]
+    if not slots:
+        return tool
+    slot = slots[0]
+    where = f" ({slot.role or 'source'} {slot.target})" if slot.target else ""
+    return f"{tool}: {slot.step}{where}"
+
+
 def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
     with progress.lock:
         slots = [s for s in progress.slots.values() if s.step]
@@ -384,6 +480,10 @@ def run_with_deadline(
             workspace=current_workspace_stamp(),
             seconds=limit,
             describe_timeout=lambda: _timeout_message(tool, limit, progress),
+            label=lambda: stuck_label(tool, progress),
+            # The worker that outlives the deadline is blocked in a driver:
+            # end its I/O so it returns and frees its pool worker (D281).
+            interrupt=lambda: interrupt_connections(progress),
         )
     except (ConnectorCallTimeout, ConnectorCapacityExceeded) as exc:
         return on_timeout(str(exc))
@@ -466,8 +566,13 @@ def parallel_steps(
         own = progress.slots.get(threading.get_ident())
     futures: list[concurrent.futures.Future | None] = [None] * len(steps)
     results: list[StepResult | None] = [None] * len(steps)
+    threads: list[dict[str, int]] = [{} for _ in steps]
     for index, step in enumerate(steps[1:], start=1):
-        futures[index] = pool.spawn(f"step:{step.label}", lambda s=step: _run_step(s))
+        futures[index] = pool.spawn(
+            f"step:{step.label}",
+            _on_recorded_thread(lambda s=step: _run_step(s), threads[index]),
+            label=lambda s=step: _step_label(s),
+        )
     try:
         results[0] = _run_step(steps[0])
         for index in range(1, len(steps)):
@@ -481,6 +586,7 @@ def parallel_steps(
                 results[index] = future.result(timeout=max(0.0, deadline - time.monotonic()))
             except concurrent.futures.TimeoutError:
                 results[index] = StepResult(timed_out=True, seconds=budget or 0.0)
+                _abandon_step(pool, future, progress, threads[index])
     finally:
         with progress.lock:
             if own is not None:
@@ -488,6 +594,42 @@ def parallel_steps(
             else:
                 progress.slots.pop(threading.get_ident(), None)
     return [r if r is not None else StepResult(timed_out=True) for r in results]
+
+
+def _on_recorded_thread(fn: Callable[[], Any], cell: dict[str, int]) -> Callable[[], Any]:
+    """Run ``fn`` and record the worker thread it ran on in ``cell``."""
+
+    def run() -> Any:
+        cell["thread"] = threading.get_ident()
+        return fn()
+
+    return run
+
+
+def _step_label(step: Step) -> str:
+    target = describe_target(step.conn) if step.conn is not None else ""
+    where = f" ({step.role or 'source'} {target})" if target else ""
+    return f"{step.label}{where}"
+
+
+def _abandon_step(
+    pool: Any,
+    future: concurrent.futures.Future,
+    progress: _Progress,
+    cell: dict[str, int],
+) -> None:
+    """A probe that outlived its budget: count it stuck and end its I/O.
+
+    Only that probe's own connections are interrupted; the call that started
+    it goes on with a partial answer on its other connections.
+    """
+    thread = cell.get("thread")
+    pool.abandon(
+        future,
+        interrupt=(
+            (lambda: interrupt_connections(progress, thread)) if thread is not None else None
+        ),
+    )
 
 
 def _under_step_deadline(fn: Callable[[], Any], deadline: float) -> Callable[[], Any]:
@@ -532,7 +674,13 @@ def bounded_step(
         finally:
             _step_deadline.reset(token)
 
-    future = get_executor().spawn(f"step:{label}", inner)
+    cell: dict[str, int] = {}
+    pool = get_executor()
+    future = pool.spawn(
+        f"step:{label}",
+        _on_recorded_thread(inner, cell),
+        label=lambda: _step_label(Step(label, fn, conn, role)),
+    )
     started_by = time.monotonic() + 0.25
     while not (future.running() or future.done()) and time.monotonic() < started_by:
         time.sleep(0.005)
@@ -543,6 +691,9 @@ def bounded_step(
     try:
         return future.result(timeout=budget)
     except concurrent.futures.TimeoutError:
+        progress = _progress.get()
+        if progress is not None:
+            _abandon_step(pool, future, progress, cell)
         return StepResult(timed_out=True, seconds=budget)
 
 

@@ -776,15 +776,18 @@ async def health_check():
     other route stays closed until they are fixed.
     """
     errors = list(getattr(app.state, "config_errors", None) or [])
+    # Cheap in-memory counters (D181): liveness stays liveness, but the
+    # numbers show a pool held by stuck connector calls, and ``ready`` says
+    # whether a connector call can start at all (D281: "healthy and ready"
+    # while every row read hung).
+    pool = connector_executor.readiness()
     return {
         "status": "misconfigured" if errors else "healthy",
         "liveness": True,
         "version": "1.0.0",
         "commit": _BUILD_COMMIT,
-        "ready": bool(getattr(app.state, "ready", False)) and not errors,
-        # Cheap in-memory counters (D181): liveness stays liveness, but the
-        # numbers show a pool held by stuck connector calls.
-        "connector_pool": connector_executor.snapshot(),
+        "ready": bool(getattr(app.state, "ready", False)) and not errors and pool["ok"],
+        "connector_pool": pool,
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
         "features": {

@@ -66,11 +66,17 @@ def _execute(dbapi_connection: Any, statement: str, *, outside_transaction: bool
 
 
 def _on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
-    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+    from src.ai.copilot.tool_deadline import (
+        register_connection,
+        statement_timeout_seconds,
+    )
 
     seconds = statement_timeout_seconds()
     if seconds is None:
         return
+    # The call's deadline can end this connection's blocked I/O if the call
+    # is abandoned (D281); checkin takes it back out below.
+    register_connection(dbapi_connection)
     family = _family(dbapi_connection)
     millis = int(seconds * 1000)
     try:
@@ -93,6 +99,9 @@ def _on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
 
 
 def _on_checkin(dbapi_connection: Any, record: Any) -> None:
+    from src.ai.copilot.tool_deadline import unregister_connection
+
+    unregister_connection(dbapi_connection)
     family = record.info.pop(_FLAG, None) if record is not None else None
     if not family or dbapi_connection is None:
         return
