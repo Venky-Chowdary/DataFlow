@@ -23,9 +23,15 @@ slots). Abandoned workers themselves end on their own: every statement sent
 during a tool call carries the call's remaining budget as its server-side
 timeout (``tool_deadline.statement_timeout_seconds``).
 
-``abandoned`` / ``abandoned_total`` are the abandoned calls whose worker is
-still running (they return to 0 when those workers end);
-``abandoned_lifetime`` counts every abandon since start.
+``abandoned`` / ``abandoned_total`` are the abandoned *calls* (a tool call
+that answered at its deadline) whose worker is still running (they return to 0
+when those workers end); ``abandoned_lifetime`` counts every abandoned call
+since start. An optional probe that outlived its own step budget is not a
+failed call (the tool answered with a labelled partial result): it is counted
+apart, as ``abandoned_probes`` (still running) and
+``abandoned_probes_lifetime``. Both kinds hold a worker while they run, so
+both count toward replacement workers, saturation and readiness
+(``stuck_workers``).
 
 A server-side statement timeout cannot end a worker that is blocked on a
 connected socket that never answers (a tunnel that accepts and goes silent,
@@ -166,6 +172,7 @@ class ConnectorExecutor:
         self._spawned: dict[concurrent.futures.Future, _Call] = {}
         self._rejected_total = 0
         self._abandoned_total = 0
+        self._abandoned_probes_total = 0
 
     def run(
         self,
@@ -275,7 +282,10 @@ class ConnectorExecutor:
         if call.abandoned:
             return
         call.abandoned = True
-        self._abandoned_total += 1
+        if call.child:
+            self._abandoned_probes_total += 1
+        else:
+            self._abandoned_total += 1
         self._resize_locked()
 
     @staticmethod
@@ -299,7 +309,7 @@ class ConnectorExecutor:
             return ""
         return (
             f"{tool} was not started: all {cap} connector pool workers are held by "
-            f"{len(stuck)} abandoned calls that are still waiting on their systems "
+            f"{len(stuck)} abandoned calls or probes that are still waiting on their systems "
             f"({self._stuck_summary(stuck)}). Nothing reached the source. The pool "
             "frees them as they end; check those hosts, then try again."
         )
@@ -309,7 +319,7 @@ class ConnectorExecutor:
         stuck = self._stuck_locked()
         cap = self._pool._max_workers
         detail = (
-            f", {len(stuck)} of them abandoned calls still waiting on their systems "
+            f", {len(stuck)} of them abandoned calls or probes still waiting on their systems "
             f"({self._stuck_summary(stuck)})"
             if stuck
             else ""
@@ -391,8 +401,9 @@ class ConnectorExecutor:
                 if c.child or c.abandoned:
                     continue
                 per_workspace[c.workspace] = per_workspace.get(c.workspace, 0) + 1
-            stuck_calls = [c for c in running if c.abandoned]
-            stuck = len(stuck_calls)
+            stuck_workers = [c for c in running if c.abandoned]
+            stuck = sum(1 for c in stuck_workers if not c.child)
+            stuck_probes = len(stuck_workers) - stuck
             cap = self._pool._max_workers
             return {
                 "max_workers": self.max_workers,
@@ -403,11 +414,17 @@ class ConnectorExecutor:
                 # Every worker the pool may run is held: no new call can start
                 # (QA D281 read this as "every row read hangs").
                 "saturated": len(running) >= cap,
-                "stuck_calls": [c.describe(now) for c in stuck_calls[:8]],
+                # Workers held by an abandoned call or probe, oldest first.
+                "stuck_workers": len(stuck_workers),
+                "stuck_calls": [c.describe(now) for c in stuck_workers[:8]],
                 # Abandoned calls whose worker still runs: back to 0 once they
                 # end. The lifetime count is ``abandoned_lifetime``.
                 "abandoned_total": stuck,
                 "abandoned_lifetime": self._abandoned_total,
+                # Optional probes that outlived their step budget (the call
+                # itself answered): counted apart from failed calls.
+                "abandoned_probes": stuck_probes,
+                "abandoned_probes_lifetime": self._abandoned_probes_total,
                 "rejected_total": self._rejected_total,
                 "oldest_in_flight_seconds": round(oldest, 1),
                 "per_workspace": per_workspace,
@@ -419,15 +436,15 @@ class ConnectorExecutor:
             "DATAFLOW_CONNECTOR_READY_MAX_AGE_SECONDS", DEFAULT_READY_MAX_AGE_SECONDS
         )
         reason = ""
-        live = snap["in_flight"] - snap["abandoned"]
+        live = snap["in_flight"] - snap["stuck_workers"]
         if (
             snap["saturated"]
             or live >= snap["max_workers"]
-            or snap["abandoned"] >= snap["max_workers"]
+            or snap["stuck_workers"] >= snap["max_workers"]
         ):
             reason = (
                 f"connector pool saturated: {snap['in_flight']} of "
-                f"{snap['max_workers']} workers busy ({snap['abandoned']} abandoned "
+                f"{snap['max_workers']} workers busy ({snap['stuck_workers']} abandoned "
                 f"and still running), {snap['queued']} queued"
             )
         elif snap["oldest_in_flight_seconds"] > max_age:

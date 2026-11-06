@@ -286,13 +286,61 @@ def test_a_probe_that_outlives_its_step_budget_is_abandoned_and_interrupted():
         with tool_deadline.deadline_context_for_tests(30):
             result = tool_deadline.bounded_step("count rows", probe, seconds=0.2)
         assert result.timed_out is True
-        # The overrun probe is counted as abandoned (so the pool grows a
-        # replacement) and its connection is interrupted, so it ends. On the
-        # old code it stays an uncounted, never-ending worker.
-        assert executor.snapshot()["abandoned_lifetime"] == 1, executor.snapshot()
+        # The overrun probe is counted as an abandoned *probe* (so the pool
+        # grows a replacement) and its connection is interrupted, so it ends.
+        # It is not an abandoned call: the tool answered. On the old code it
+        # stays an uncounted, never-ending worker.
+        snap = executor.snapshot()
+        assert snap.get("abandoned_probes_lifetime") == 1, snap
+        assert snap["abandoned_lifetime"] == 0, snap
         assert _wait_until(lambda: conn.interrupted, 2)
         assert _wait_until(lambda: executor.snapshot()["in_flight"] == 0, 5), executor.snapshot()
     finally:
         wake.set()
+        os.environ.pop("DATAFLOW_CONNECTOR_POOL_WORKERS", None)
+        connector_executor.reset_for_tests()
+
+
+def test_an_optional_probe_overrun_is_not_an_abandoned_call_but_still_holds_capacity():
+    """CI 90f60d46b (D187 e2e on a slow runner): a plan that *succeeded* left
+    ``abandoned_lifetime`` at 1 because an optional probe overran its step
+    budget and was counted like a call that missed its deadline. The public
+    ``abandoned*`` gauges are abandoned calls (QA's leak gauge); probe
+    overruns are counted apart, and a probe still running keeps counting
+    toward saturation and readiness."""
+    from services import connector_executor
+    from src.ai.copilot import tool_deadline
+
+    os.environ["DATAFLOW_CONNECTOR_POOL_WORKERS"] = "2"
+    connector_executor.reset_for_tests()
+    release = threading.Event()
+    try:
+        executor = connector_executor.get_executor()
+        with tool_deadline.deadline_context_for_tests(30):
+            first = tool_deadline.bounded_step("count rows", release.wait, seconds=0.2)
+        assert first.timed_out is True
+        snap = executor.snapshot()
+        # The call answered with a labelled partial result: no call abandoned.
+        assert snap["abandoned"] == 0 and snap["abandoned_total"] == 0, snap
+        assert snap["abandoned_lifetime"] == 0, snap
+        assert snap.get("abandoned_probes") == 1, snap
+        assert snap.get("abandoned_probes_lifetime") == 1, snap
+
+        with tool_deadline.deadline_context_for_tests(30):
+            second = tool_deadline.bounded_step("probe uniqueness", release.wait, seconds=0.2)
+        assert second.timed_out is True
+        snap = executor.snapshot()
+        # Two stuck probes hold both workers: readiness says so although no
+        # call was abandoned.
+        assert snap.get("stuck_workers") == 2, snap
+        assert executor.readiness()["ok"] is False, executor.readiness()
+
+        release.set()
+        assert _wait_until(lambda: executor.snapshot()["in_flight"] == 0, 5), executor.snapshot()
+        snap = executor.snapshot()
+        assert snap["abandoned_probes"] == 0 and snap["abandoned_lifetime"] == 0, snap
+        assert executor.readiness()["ok"] is True
+    finally:
+        release.set()
         os.environ.pop("DATAFLOW_CONNECTOR_POOL_WORKERS", None)
         connector_executor.reset_for_tests()
