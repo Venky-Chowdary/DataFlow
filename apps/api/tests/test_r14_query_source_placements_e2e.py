@@ -277,3 +277,83 @@ def test_stream_patches_normalise_mode_words_and_params():
     with pytest.raises(CallablePlacementError):
         resolve_callable_placements(form={}, source_extra={}, stream_contracts=[
             {"name": "a", "procedure_params": "[1]"}, {"name": "b"}])
+
+
+# ------------------------------------------------- one mode vocabulary (review 3)
+
+_CALLABLE_WORDS = {"sql": "query", "custom_query": "query", "query": "query", "select": "query",
+                   "call": "procedure", "procedure": "procedure",
+                   "stored_procedure": "procedure", "sp": "procedure", "exec": "procedure"}
+
+
+def test_every_mode_word_with_no_statement_is_refused_and_unknown_words_too():
+    from services.multi_stream_plan import review_stream_procedures
+    from services.procedure_source import canonical_read_mode
+
+    for word, mode in _CALLABLE_WORDS.items():
+        assert canonical_read_mode(word) == mode
+        out = review_stream_procedures(
+            None, None, [{"name": "a", "source_read_mode": word}, {"name": "b"}], ["a", "b"])
+        assert f"set to {mode} but has no CALL or SELECT" in out, (word, out)
+        with pytest.raises(CallablePlacementError):
+            resolve_callable_placements(form={}, source_extra={}, stream_contracts=[
+                {"name": "a", "source_read_mode": word}, {"name": "b"}])
+        with pytest.raises(CallablePlacementError):
+            resolve_callable_placements(form={"source_read_mode": word}, source_extra={},
+                                        stream_contracts=None)
+    for word in ("tabel", "stored_proc", "sproc"):
+        # A typo next to a stale statement must not run that statement.
+        out = review_stream_procedures(
+            None, None, [{"name": "a", "source_read_mode": word, "source_query": "SELECT 1"},
+                         {"name": "b"}], ["a", "b"])
+        assert "unknown source_read_mode" in out, (word, out)
+        with pytest.raises(CallablePlacementError, match="unknown source_read_mode"):
+            resolve_callable_placements(form={}, source_extra={"source_read_mode": word,
+                                                               "source_query": "SELECT 1"},
+                                        stream_contracts=None)
+    assert canonical_read_mode("") == canonical_read_mode("table") == "table"
+
+
+def test_text_binds_reach_the_review_on_json_and_schedule_paths():
+    """The JSON execute, schedule and preflight paths call review_stream_procedures
+    directly (no resolver): text procedure_params are binds there too, and a
+    stream without its own binds uses the endpoint's."""
+    from services.multi_stream_plan import patches_for_stream, review_stream_procedures
+
+    class _Src:
+        format = "mysql"
+        extra = {"procedure_params": {"n": 5}}
+
+    contracts = [{"name": "a", "source_query": "SELECT :n AS x", "procedure_params": '{"n": 1}'},
+                 {"name": "b", "source_query": "SELECT :n AS x"}]
+    assert review_stream_procedures(_Src(), None, contracts, ["a", "b"]) == ""
+    src_b, _ = patches_for_stream(contracts[1])
+    assert "procedure_params" not in src_b  # keeps the endpoint's binds
+    out = review_stream_procedures(None, None, [
+        {"name": "a", "source_query": "SELECT :n AS x"}, {"name": "b", "source_query": "SELECT 2"}],
+        ["a", "b"])
+    assert ":n" in out, out  # a missing bind is refused before any stream runs
+    out = review_stream_procedures(None, None, [
+        {"name": "a", "source_query": "SELECT 1", "procedure_params": "[1]"}, {"name": "b"}],
+        ["a", "b"])
+    assert "Stream source settings refused" in out, out
+
+
+def test_a_call_word_with_an_empty_statement_never_copies_the_table(client, two_tables):
+    a, b = two_tables
+    src, dst = _connector("mysql", "source"), _connector("postgresql", "destination")
+    contracts = [_contract(a, source_read_mode="call", procedure_call=""),
+                 _contract(b, source_read_mode="query", source_query=f"SELECT id, v FROM {b}")]
+    resp = client.post("/api/v1/transfer/run", data=_multi_form(src, dst, "mysql", contracts))
+    assert resp.status_code == 422 and "set to procedure" in resp.text, resp.text
+    # The JSON execute route (no form resolver) refuses at the review.
+    resp = client.post("/api/v1/transfer/execute", json={
+        "source": {"kind": "database", "format": "mysql", "connector_id": src, "table": a},
+        "destination": {"kind": "database", "format": "postgresql", "connector_id": dst,
+                        "table": a, "schema": "public"},
+        "stream_contracts": contracts, "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict", "async_mode": False})
+    job = _wait(str(resp.json().get("job_id") or "")) if resp.status_code == 200 else {}
+    text = resp.text + str(job.get("error") or "")
+    assert "set to procedure" in text, (resp.status_code, text[:400])
+    assert not h.query("postgresql", f"SELECT to_regclass('public.\"{a}\"')")[0][0]

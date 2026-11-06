@@ -298,28 +298,25 @@ def _source_sql(extra: Mapping[str, Any]) -> tuple[str, str]:
     still on the endpoint. ``dest_dml`` and ``select`` are refusals: that
     statement is not an extract.
     """
-    mode = str(extra.get("source_read_mode") or "").strip().lower()
-    if mode not in {"table", "query", "procedure"}:
-        # A word the engine does not name ("sql", "select", ...) is inferred
-        # from the statement present, exactly as procedure_source.source_read_mode_of
-        # reads it; dropping it made a per-stream SELECT copy the whole table (C3).
-        mode = ""
+    from services.procedure_source import source_read_mode_of
+
+    # One vocabulary with the single-stream reader (READ_MODE_ALIASES): "sql"
+    # is a query, "call" a procedure; an unknown word raises
+    # UnknownReadModeError, which the review turns into a refusal. Folding
+    # unknown words to "" made the stream a whole-table copy (C3).
+    mode = source_read_mode_of({"extra": dict(extra)})
     call = str(extra.get("procedure_call") or extra.get("source_procedure") or "").strip()
     query = str(extra.get("source_query") or "").strip()
     if mode == "table":
         return "", ""
-    if mode == "procedure" or (not mode and call):
-        if call:
-            return _align_source("procedure", call)
-    if mode == "query" or (not mode and query and not call):
-        if query:
-            return _align_source("query", query)
-    if mode in {"procedure", "query"}:
-        text = call or query
-        if text:
-            return _align_source(mode, text)
-        return mode, ""
-    return "", ""
+    text = call if mode == "procedure" else query
+    if mode == "procedure" and not text:
+        text = query
+    if mode == "query" and not text:
+        text = call
+    if text:
+        return _align_source(mode, text)
+    return mode, ""
 
 
 def _dest_sql(extra: Mapping[str, Any]) -> tuple[str, str]:
@@ -547,7 +544,28 @@ def review_stream_procedures(
     """Refuse a CALL that would be replayed onto every selected table.
 
     One stream is the existing source/dest procedure path — this returns ''.
+    Every route that runs several streams (form, JSON execute, schedules,
+    preflight) reaches this review, so an unknown mode word or malformed
+    ``procedure_params`` is refused here, before any stream runs.
     """
+    from services.procedure_source import ProcedureSourceError
+
+    try:
+        return _review_stream_procedures(
+            source, destination, contracts, stream_names, sync_mode=sync_mode
+        )
+    except ProcedureSourceError as exc:
+        return f"Stream source settings refused: {exc}"
+
+
+def _review_stream_procedures(
+    source: Any,
+    destination: Any,
+    contracts: list[Mapping[str, Any]] | None,
+    stream_names: list[str],
+    *,
+    sync_mode: str = "",
+) -> str:
     names = [str(name).strip() for name in stream_names if str(name).strip()]
     if len(names) < 2:
         return ""
@@ -579,12 +597,13 @@ def review_stream_procedures(
                     f"{name} is set to {mode} but has no CALL or SELECT. "
                     "Paste one statement, or switch that stream back to the table."
                 )
-            params = contract.get("procedure_params")
+            # The binds this stream will run with: the endpoint's, overlaid by
+            # the stream's own (text or object) — exactly what its patch applies.
             proved = _prove_source(
                 mode,
                 sql,
                 source,
-                params if isinstance(params, Mapping) else {},
+                {**_stream_params(source_extra), **_stream_params(contract)},
             )
             if proved:
                 return f"{name}: {proved}"
@@ -643,8 +662,11 @@ def patches_for_stream(
             "source_read_mode": mode,
             "procedure_call": sql if mode == "procedure" else "",
             "source_query": sql if mode == "query" else "",
-            "procedure_params": dict(params),
         }
+        if params:
+            # A stream without binds of its own keeps the endpoint's (the
+            # review proved the statement with endpoint ∪ stream binds).
+            source_patch["procedure_params"] = dict(params)
 
     dest_patch: dict[str, Any] | None = None
     dest_mode, dest_sql = _dest_sql(raw)

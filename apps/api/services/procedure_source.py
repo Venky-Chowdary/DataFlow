@@ -309,8 +309,42 @@ def stamp_callable_job_id(cfg: dict[str, Any], job_id: str | None) -> dict[str, 
     return out
 
 
+#: The one vocabulary for ``source_read_mode`` (endpoint extra, form fields,
+#: stream contracts). Every reader — single stream and several — goes through
+#: :func:`canonical_read_mode`; a word outside it is refused, never guessed
+#: from whatever statement happens to be left on the endpoint (a typo "tabel"
+#: next to a stale source_query must not run that query).
+READ_MODE_ALIASES: dict[str, str] = {
+    "": MODE_TABLE, "table": MODE_TABLE,
+    "query": MODE_QUERY, "sql": MODE_QUERY, "custom_query": MODE_QUERY, "select": MODE_QUERY,
+    "procedure": MODE_PROCEDURE, "call": MODE_PROCEDURE, "stored_procedure": MODE_PROCEDURE,
+    "sp": MODE_PROCEDURE, "exec": MODE_PROCEDURE,
+}
+
+
+class UnknownReadModeError(ProcedureSourceError):
+    """A ``source_read_mode`` word outside :data:`READ_MODE_ALIASES` (HTTP 422)."""
+
+
+def canonical_read_mode(raw: Any) -> str:
+    """``table`` / ``query`` / ``procedure`` for an operator's mode word, or raise."""
+    word = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    mode = READ_MODE_ALIASES.get(word)
+    if mode is None:
+        raise UnknownReadModeError(
+            f"unknown source_read_mode {str(raw).strip()!r}; use table, query or procedure."
+        )
+    return mode
+
+
 def source_read_mode_of(source: Any) -> str:
-    """Resolve ``table`` | ``query`` | ``procedure`` from endpoint or cfg dict."""
+    """Resolve ``table`` | ``query`` | ``procedure`` from endpoint or cfg dict.
+
+    An explicit word is read through :func:`canonical_read_mode` (unknown words
+    raise). Only when no word was given at all does the one statement present
+    name the mode — the shape a caller that sends just ``source_query`` uses;
+    both a CALL and a SELECT with no word is ambiguous and refused.
+    """
     extra: Mapping[str, Any] = {}
     if source is None:
         return MODE_TABLE
@@ -323,12 +357,19 @@ def source_read_mode_of(source: Any) -> str:
         extra = root
     else:
         return MODE_TABLE
-    raw = str(extra.get("source_read_mode") or "").strip().lower()
-    if raw in {MODE_TABLE, MODE_QUERY, MODE_PROCEDURE}:
-        return raw
-    if extra.get("procedure_call") or extra.get("source_procedure"):
+    raw = str(extra.get("source_read_mode") or "").strip()
+    if raw:
+        return canonical_read_mode(raw)
+    has_call = bool(str(extra.get("procedure_call") or extra.get("source_procedure") or "").strip())
+    has_query = bool(str(extra.get("source_query") or "").strip())
+    if has_call and has_query:
+        raise UnknownReadModeError(
+            "both procedure_call and source_query are set and source_read_mode is not; "
+            "say which one to run (query or procedure)."
+        )
+    if has_call:
         return MODE_PROCEDURE
-    if extra.get("source_query"):
+    if has_query:
         return MODE_QUERY
     return MODE_TABLE
 
@@ -380,7 +421,7 @@ def merge_callable_source_extra(dst: Mapping[str, Any] | None, src: Any) -> dict
     return out
 
 
-class CallablePlacementError(ValueError):
+class CallablePlacementError(ProcedureSourceError):
     """A query/procedure setting arrived where it cannot be honoured (HTTP 422)."""
 
 
@@ -424,8 +465,13 @@ def resolve_callable_placements(
     def _note(where: str, key: str, value: Any) -> None:
         if key == "procedure_params":
             value = _parsed_params(value)
-        if key == "source_read_mode" and str(value or "").strip().lower() == MODE_TABLE:
-            return
+        if key == "source_read_mode" and str(value or "").strip():
+            try:
+                value = canonical_read_mode(value)
+            except UnknownReadModeError as exc:
+                raise CallablePlacementError(f"{where}: {exc}") from exc
+            if value == MODE_TABLE:
+                return
         if value in (None, "", {}, []):
             return
         found.setdefault(key, []).append((where, value))
@@ -439,17 +485,37 @@ def resolve_callable_placements(
         if isinstance(c, Mapping) and c.get("selected", True) is not False
     ]
     for i, c in enumerate(contracts or []):
+        if not isinstance(c, Mapping):
+            continue
         # Each stream's own binds, parsed once here so a malformed one is a 422
         # and stream_multi binds the same object the request named.
-        if isinstance(c, Mapping) and isinstance(c.get("procedure_params"), str):
+        if isinstance(c.get("procedure_params"), str):
             parsed = _parsed_params(c["procedure_params"])
-            contracts[i] = {**dict(c), "procedure_params": parsed or {}}  # type: ignore[index]
+            c = {**dict(c), "procedure_params": parsed or {}}
+            contracts[i] = c  # type: ignore[index]
+        # Each stream's mode word: one vocabulary, and a callable word needs
+        # its statement (multi_stream_plan reads the same table).
+        name = str(c.get("name") or f"stream {i + 1}")
+        try:
+            stream_mode = source_read_mode_of({"extra": dict(c)})
+        except UnknownReadModeError as exc:
+            raise CallablePlacementError(f"{name}: {exc}") from exc
+        if stream_mode == MODE_QUERY and not str(c.get("source_query") or "").strip():
+            raise CallablePlacementError(
+                f"{name}: source_read_mode is set to query but no source_query was sent."
+            )
+        if stream_mode == MODE_PROCEDURE and not str(
+            c.get("procedure_call") or c.get("source_procedure") or ""
+        ).strip():
+            raise CallablePlacementError(
+                f"{name}: source_read_mode is set to procedure but no procedure_call was sent."
+            )
     if len(selected) == 1:
         i = selected[0]
         contract = dict(contracts[i])  # type: ignore[index]
         for key in _PLACEMENT_KEYS:
             value = contract.get(key)
-            if key == "source_read_mode" and str(value or "").strip().lower() == MODE_TABLE:
+            if key == "source_read_mode" and canonical_read_mode(value) == MODE_TABLE:
                 continue
             if value not in (None, "", {}, []):
                 _note("stream_contracts_json", key, contract.pop(key))
@@ -463,7 +529,10 @@ def resolve_callable_placements(
                 "Send it once."
             )
         extra[key] = values[0][1]
-    callable_mode = source_read_mode_of({"extra": extra})
+    try:
+        callable_mode = source_read_mode_of({"extra": extra})
+    except UnknownReadModeError as exc:
+        raise CallablePlacementError(str(exc)) from exc
     if callable_mode != MODE_TABLE:
         if str(source_kind or "").strip().lower() in {"file", "file_export", "upload", "object_store"}:
             raise CallablePlacementError(
