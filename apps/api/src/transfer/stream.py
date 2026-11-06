@@ -704,6 +704,31 @@ def _stream_database_transfer_impl(
             + ", ".join(risk_contract_columns)
             + ") need per-row quarantine/skip on the row path"
         )
+    # D101 — a staged server-side merge into an existing table that has no
+    # unique key on the upsert columns fails raw (ON CONFLICT) or duplicates
+    # (ON DUPLICATE KEY). The row writer discloses, and once approved runs, the
+    # CREATE UNIQUE INDEX that merge needs; send those runs there.
+    keyless_merge_target = False
+    if run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols:
+        try:
+            from services.upsert_ddl_gate import existing_merge_target_lacks_unique_key
+
+            keyless_merge_target = existing_merge_target_lacks_unique_key(
+                run.cfg.dest_cfg,
+                resolve_dest_table(
+                    run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)
+                ),
+                list(run.cfg.pk_target_cols),
+                run.cfg.dest_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown keeps the existing route
+            logger.debug("merge-target unique-key probe skipped: %s", exc)
+    if keyless_merge_target:
+        copy_decline.append(
+            "COPY fast path declined: the existing destination has no unique key on "
+            f"({', '.join(run.cfg.pk_target_cols)}); the row path owns the disclosed "
+            "CREATE UNIQUE INDEX"
+        )
     # D111/D122 — the strict keyed backup is the rollback for *either* write
     # path. Armed here, a COPY upsert is undone exactly like the row path
     # instead of leaving its rejected batch live; the row path reuses it.
@@ -745,6 +770,7 @@ def _stream_database_transfer_impl(
                 or dest_proc_plan is not None
                 or run.cfg.fk_orphan_guard is not None
                 or bool(risk_contract_columns)
+                or keyless_merge_target
             ) else _try_copy_fast_path(
                 source=run.cfg.source,
                 destination=run.cfg.destination,

@@ -121,8 +121,11 @@ def destination_unique_covering(
 ) -> bool | None:
     """Live check: does the destination already enforce uniqueness on columns?
 
-    Returns None when the inspection cannot run — caller treats that as
-    "unproven", not as "enforced".
+    The same rule as Validate (:func:`dest_unique_covering_columns`): a primary
+    key or unique constraint / index on exactly this column set — the arbiter an
+    ``ON CONFLICT (cols)`` merge needs. Returns None when the inspection cannot
+    run — caller treats that as "unproven", not as "enforced". A table that
+    does not exist enforces nothing (``False``).
     """
     import sqlalchemy as sa
 
@@ -141,24 +144,51 @@ def destination_unique_covering(
         if not ident.exists:
             return False
         insp = sa.inspect(engine)
-        want = {c.lower() for c in columns}
-        for uc in insp.get_unique_constraints(
-            ident.table, schema=ident.schema
-        ):
-            cols = {str(c).lower() for c in (uc.get("column_names") or [])}
-            if cols and cols <= want or want <= cols:
-                if want <= cols:
-                    return True
-        for idx in insp.get_indexes(ident.table, schema=ident.schema):
-            if not idx.get("unique"):
-                continue
-            cols = {str(c).lower() for c in (idx.get("column_names") or [])}
-            if want <= cols:
-                return True
+        unique_keys = [
+            {"columns": list(uc.get("column_names") or [])}
+            for uc in insp.get_unique_constraints(ident.table, schema=ident.schema)
+        ] + [
+            {"columns": list(idx.get("column_names") or [])}
+            for idx in insp.get_indexes(ident.table, schema=ident.schema)
+            if idx.get("unique")
+        ]
         pk = insp.get_pk_constraint(ident.table, schema=ident.schema)
-        pk_cols = {
-            str(c).lower() for c in (pk.get("constrained_columns") or [])
-        }
-        return bool(pk_cols) and want <= pk_cols
+        return dest_unique_covering_columns(
+            list(pk.get("constrained_columns") or []), unique_keys, list(columns)
+        )
     except Exception:  # noqa: BLE001 — unproven, not "enforced"
         return None
+
+
+def existing_merge_target_lacks_unique_key(
+    cfg: dict[str, Any],
+    table: str,
+    columns: list[str],
+    dialect: str,
+) -> bool:
+    """True only when the table exists and provably has no unique key on ``columns``.
+
+    A server-side staged merge (``ON CONFLICT`` / ``ON DUPLICATE KEY``) into such
+    a table fails raw on PostgreSQL / SQLite and silently duplicates on MySQL.
+    The row writer is the one path that discloses — and, once approved, runs —
+    the ``CREATE UNIQUE INDEX`` the merge needs (D101). A new table, or a
+    catalog that cannot be read, answers False.
+    """
+    if not [c for c in columns if str(c or "").strip()]:
+        return False
+    return destination_unique_covering(cfg, table, columns, dialect) is False and (
+        _table_exists(cfg, table)
+    )
+
+
+def _table_exists(cfg: dict[str, Any], table: str) -> bool:
+    from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+    from services.sql_object_identity import resolve_object_identity
+
+    try:
+        schema, name = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
+        ident = resolve_object_identity(_engine(cfg), name, schema)
+        return bool(ident.resolved and ident.exists)
+    except Exception:  # noqa: BLE001 — unknown is not "exists"
+        return False
