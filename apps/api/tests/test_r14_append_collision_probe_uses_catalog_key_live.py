@@ -90,3 +90,33 @@ def test_no_key_append_into_a_destination_unique_key_is_refused_at_validate(isol
     finally:
         h.drop("mysql", table)
         h.drop("postgresql", out)
+
+
+def test_a_unique_index_on_the_declared_key_is_enforced(isolated):  # noqa: F811
+    """B1: PostgreSQL lists CREATE UNIQUE INDEX only among the indexes; the repeat still aborts."""
+    if not h._port_up(3306) or not h._port_up(5432):
+        pytest.skip("live MySQL / PostgreSQL not reachable")
+    table = f"ux_{h.token()}"
+    out = f"{table}_d"
+    try:
+        h.run_sql("mysql", f"CREATE TABLE {table} (code VARCHAR(10), note VARCHAR(20), "
+                  "updated_at DATETIME(6)) DEFAULT CHARSET=utf8mb4")
+        h.run_sql("postgresql", f"CREATE TABLE {out} (code VARCHAR(10), note VARCHAR(20), "
+                  "updated_at TIMESTAMP)", f"CREATE UNIQUE INDEX {out}_ux ON {out} (code)",
+                  f"INSERT INTO {out} VALUES ('a', 'stored', '2024-01-01')")  # nosec B608
+        h.run_sql("mysql", f"INSERT INTO {table} VALUES (%s, %s, %s)",  # nosec B608
+                  params=[("a", "again", "2024-02-01"), ("", None, "2024-02-02")])
+        contract = [{"name": table, "sync_mode": "incremental_append", "primary_key": "code",
+                     "cursor_field": "updated_at", "cursor_semantics": "modification_timestamp",
+                     "selected": True}]
+        run = h.execute(
+            isolated, h.endpoint("mysql", table), h.endpoint("postgresql", out),
+            sync_mode="incremental_append", stream_contracts=contract,
+        )
+        assert not run.success
+        assert "Blocking issues detected" in (run.error or "") and "code" in run.error, run.error
+        assert "enforces uniqueness" in run.error, run.error
+        assert h.run_sql("postgresql", f"SELECT COUNT(*) FROM {out}")[0][0] == 1  # nosec B608
+    finally:
+        h.drop("mysql", table)
+        h.drop("postgresql", out)

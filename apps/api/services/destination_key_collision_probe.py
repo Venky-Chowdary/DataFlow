@@ -468,7 +468,7 @@ def probe_append_key_collisions(
     results: list[DestinationCollisionResult] = []
     for pairs, basis in identities:
         result = _probe_identity(
-            pairs,
+            pairs, basis=basis,
             sample_rows=sample_rows, destination_config=destination_config,
             destination_db_type=destination_db_type, destination_table=destination_table,
             destination_pk_columns=destination_pk_columns,
@@ -487,6 +487,7 @@ def probe_append_key_collisions(
 def _probe_identity(
     pairs: list[tuple[str, str]],
     *,
+    basis: str = "",
     sample_rows: list[dict[str, Any]] | None,
     destination_config: Mapping[str, Any] | None,
     destination_db_type: str,
@@ -511,7 +512,13 @@ def _probe_identity(
     # single column. A composite key is not a single-column reject, so the
     # plan answer stands. A catalog miss returns no names and does not invent
     # a blocker; the engine still rejects a real duplicate at insert time.
-    if (
+    if basis == "destination_unique":
+        # The identity *is* a UNIQUE key read from the destination catalog
+        # (pg_index / STATISTICS): it rejects a repeat however the live
+        # single-column read spells it. A plan's PK list is not that proof - it
+        # can be the source key copied forward onto a heap (DEF-B2-001).
+        enforced = True
+    elif (
         destination_config
         and destination_table
         and len(target_columns) == 1
@@ -1018,7 +1025,55 @@ def live_single_column_unique_keys(
         cols = [str(c) for c in (item.get("column_names") or []) if c]
         if len(cols) == 1 and cols[0] not in names:
             names.append(cols[0])
+    # A UNIQUE INDEX enforces exactly like a UNIQUE constraint, but PostgreSQL
+    # and SQLite list it only among the indexes: the collision was found and
+    # graded a warning, then the insert aborted.
+    for col in _live_single_column_unique_indexes(engine, insp, table_name, schema):
+        if col not in names:
+            names.append(col)
     return names
+
+
+_PG_UNIQUE_INDEX_COLUMNS_SQL = (
+    "SELECT a.attname FROM pg_index i "
+    "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] "
+    "WHERE i.indrelid = to_regclass(%(rel)s) AND i.indisunique AND i.indisvalid "
+    "AND i.indisready AND i.indnkeyatts = 1 AND i.indexprs IS NULL AND i.indpred IS NULL"
+)
+
+
+def _live_single_column_unique_indexes(
+    engine: Any, insp: Any, table_name: str, schema: str | None
+) -> list[str]:
+    """Columns a single-column, whole-column, enforcing UNIQUE INDEX covers.
+
+    Partial (``WHERE``) and expression indexes do not reject every repeat, and a
+    PostgreSQL index that is invalid or not yet ready (a failed or running
+    CREATE INDEX CONCURRENTLY) enforces nothing.
+    """
+    try:
+        if engine.dialect.name == "postgresql":
+            from connectors.sql_identifiers import quote_table_ref
+
+            rel = quote_table_ref(table_name, schema, dialect="postgresql", sanitize=False,
+                                  preserve_case=True)
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql(_PG_UNIQUE_INDEX_COLUMNS_SQL, {"rel": rel}).fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
+        out: list[str] = []
+        for ix in insp.get_indexes(table_name, schema=schema) or []:
+            cols = list(ix.get("column_names") or [])
+            options = dict(ix.get("dialect_options") or {})
+            partial = any(k.endswith("_where") and v is not None for k, v in options.items())
+            if (
+                ix.get("unique") and len(cols) == 1 and cols[0]
+                and not ix.get("expressions") and not partial
+            ):
+                out.append(str(cols[0]))
+        return out
+    except Exception as exc:  # noqa: BLE001 — constraints alone still stand
+        logger.debug("unique index catalog read failed: %s", exc)
+        return []
 
 
 #: What to do about an append that re-delivers stored keys (one wording for

@@ -435,3 +435,24 @@ def test_no_key_append_into_a_heap_checks_exact_rows_only_and_says_so(tmp_path: 
     assert g6["status"] == "pass", g6
     assert "no declared key; checked for exact duplicate rows only" in g6["message"], g6
     assert "no collision" not in g6["message"]
+
+
+def test_a_unique_index_enforces_like_a_unique_constraint(tmp_path: Path) -> None:
+    """B1: CREATE UNIQUE INDEX is not in get_unique_constraints(); it still aborts a repeat."""
+    db_path = tmp_path / "ux.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.execute("CREATE UNIQUE INDEX ux_jobs_id ON jobs (id)")
+    conn.execute("INSERT INTO jobs VALUES (?, ?)", ("a", "A"))
+    conn.commit()
+    conn.close()
+    result = _run(
+        db_path=str(db_path),
+        sample_rows=[{"id": "a", "name": "A2"}, {"id": "東京", "name": ""}],
+        sync_mode="append",
+        destination_pk_columns=[],
+        contract_primary_key="id",
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "block", g6
+    assert "enforces uniqueness" in g6["message"], g6
