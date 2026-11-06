@@ -96,7 +96,7 @@ def _keys_from_keyring(coll: ReadOnlyCollection) -> dict[str, Any]:
     An entry that cannot be decrypted (another secrets key) or whose material
     does not match its id is listed as unreadable, never guessed.
     """
-    from services.audit_chain_keystore import DOC_ID
+    from services.audit_chain_keystore import DOC_ID, derive_key
     from services.secret_vault import decrypt_secret
 
     out: dict[str, Any] = {"current_key_id": None, "keys": {}, "unreadable": []}
@@ -104,10 +104,15 @@ def _keys_from_keyring(coll: ReadOnlyCollection) -> dict[str, Any]:
     if not isinstance(doc, dict):
         return out
     out["current_key_id"] = doc.get("current_key_id")
+    ns = str(getattr(coll._coll, "full_name", "") or "")
     for entry in doc.get("keys") or []:
         kid = str(entry.get("key_id") or "")
         try:
-            plain = decrypt_secret(str(entry.get("key_enc") or "")).encode("utf-8")
+            if entry.get("generation"):
+                # A derived key: re-derived from the vault master, never stored.
+                plain = derive_key(int(entry["generation"]), ns)
+            else:
+                plain = decrypt_secret(str(entry.get("key_enc") or "")).encode("utf-8")
         except Exception:  # noqa: BLE001 - reported, not fatal
             plain = b""
         if plain and key_id_for(plain) == kid:

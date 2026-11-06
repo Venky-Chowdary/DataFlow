@@ -30,7 +30,6 @@ with; reports carry key ids only.
 from __future__ import annotations
 
 import logging
-import secrets
 import threading
 import time
 from datetime import datetime, timezone
@@ -99,7 +98,50 @@ def _key_id(key: bytes) -> str:
     return key_id_for(key)
 
 
+#: Derived keyring keys: generation N of this deployment's chain key is
+#: HKDF(vault master, "audit-chain/v1/<keyring namespace>/N"). The keyring
+#: document stores metadata only, so deleting or pulling an entry loses
+#: nothing — the verifier re-derives every generation (fifth review).
+DERIVED_SCAN = 64
+KEYRING_SEAL_ACTION = "audit.keyring.sealed"
+_derived_cache: dict[str, Any] = {"fp": None, "ids": {}}
+_pending_seal: dict[str, Any] = {"keys": None}
+
+
+def _ns(coll: Any) -> str:
+    return str(getattr(coll, "full_name", "") or "")
+
+
+def derive_key(generation: int, ns: str) -> bytes:
+    """Generation ``generation`` of the derived chain key (urlsafe text bytes)."""
+    import base64
+
+    from services.secret_vault import derive_subkey
+
+    raw = derive_subkey(f"audit-chain/v1/{ns}/{int(generation)}".encode("utf-8"))
+    return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+
+def derived_keys(ns: str, upto: int = 0) -> dict[str, bytes]:
+    """Every derived generation 1..max(DERIVED_SCAN, upto) by key id (cached per master)."""
+    from services.secret_vault import derive_subkey
+
+    try:
+        fp = (ns, derive_subkey(b"audit-chain/v1/fingerprint")[:8])
+    except Exception:  # noqa: BLE001 - no vault key: nothing can be derived
+        return {}
+    top = max(DERIVED_SCAN, int(upto or 0))
+    if _derived_cache["fp"] != fp or len(_derived_cache["ids"]) < top:
+        ids: dict[str, bytes] = {}
+        for gen in range(1, top + 1):
+            key = derive_key(gen, ns)
+            ids[_key_id(key)] = key
+        _derived_cache.update({"fp": fp, "ids": ids})
+    return dict(_derived_cache["ids"])
+
+
 def _entry(key: bytes, *, origin: str, actor: str) -> dict[str, Any]:
+    """A legacy (random / imported) key, kept encrypted on the document."""
     from services.secret_vault import encrypt_secret
 
     return {
@@ -112,12 +154,57 @@ def _entry(key: bytes, *, origin: str, actor: str) -> dict[str, Any]:
     }
 
 
-def _decrypt_all(doc: dict[str, Any]) -> dict[str, bytes]:
+def _derived_entry(generation: int, ns: str, *, origin: str, actor: str) -> dict[str, Any]:
+    """A derived key: metadata only, no key material on the document."""
+    return {
+        "key_id": _key_id(derive_key(generation, ns)),
+        "generation": int(generation),
+        "origin": origin,
+        "created_at": _now(),
+        "created_by": actor,
+        "retired_at": None,
+    }
+
+
+def _meta(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {k: e.get(k) for k in ("key_id", "generation", "origin", "created_at", "retired_at", "lost")}
+        for e in sorted(doc.get("keys") or [], key=lambda e: str(e.get("key_id") or ""))
+    ]
+
+
+def keyring_seal(doc: dict[str, Any], ns: str) -> str:
+    """MAC over the keyring's metadata (ids, generations, origins, dates, current id)."""
+    import json
+
+    body = json.dumps({"ns": ns, "current": doc.get("current_key_id"), "keys": _meta(doc)},
+                      sort_keys=True, separators=(",", ":"), default=str)
+    return _mac("keyring", body, ns=ns)
+
+
+def _derive_or_none(generation: Any, ns: str, kid: str) -> bytes | None:
+    try:
+        return derive_key(int(generation), ns)
+    except Exception as exc:  # noqa: BLE001 - reported per entry; the others still load
+        logger.error("audit chain key %s could not be derived: %s", kid, type(exc).__name__)
+        return None
+
+
+def _decrypt_all(doc: dict[str, Any], ns: str = "") -> dict[str, bytes]:
     from services.secret_vault import decrypt_secret
 
     keys: dict[str, bytes] = {}
     for entry in doc.get("keys") or []:
         kid = str(entry.get("key_id") or "")
+        if entry.get("generation"):
+            key = _derive_or_none(entry["generation"], ns, kid)
+            if key is None:
+                continue
+            if _key_id(key) == kid:
+                keys[kid] = key
+            else:
+                logger.error("derived audit chain key %s does not match its id (secrets key changed?)", kid)
+            continue
         try:
             plain = decrypt_secret(str(entry.get("key_enc") or ""))
         except Exception as exc:  # noqa: BLE001 - one unreadable entry must not hide the rest
@@ -130,34 +217,163 @@ def _decrypt_all(doc: dict[str, Any]) -> dict[str, bytes]:
     return keys
 
 
+def _queue_seal_record(doc: dict[str, Any]) -> None:
+    """Sign the keyring's key set into the chain (written after the append lock)."""
+    _pending_seal["keys"] = [
+        {k: e.get(k) for k in ("key_id", "generation", "origin")} for e in _meta(doc)
+    ]
+
+
+def flush_seal_record() -> None:
+    """Write a queued ``audit.keyring.sealed`` record (audit_log, outside its lock)."""
+    keys = _pending_seal["keys"]
+    if not keys or getattr(_creating, "active", False):
+        return
+    _pending_seal["keys"] = None
+    from services.audit_log import append_audit_event
+
+    _creating.active = True
+    try:
+        append_audit_event(action=KEYRING_SEAL_ACTION, resource="audit_chain_keys",
+                           details={"keys": keys})
+    except Exception as exc:  # noqa: BLE001 - re-queued for the next write
+        _pending_seal["keys"] = keys
+        logger.warning("audit keyring seal record not written: %s", type(exc).__name__)
+    finally:
+        _creating.active = False
+
+
+def _reseal(coll: Any) -> dict[str, Any] | None:
+    """Re-MAC the document after one of this module's own changes."""
+    doc = coll.find_one({"_id": DOC_ID})
+    if not isinstance(doc, dict):
+        return None
+    coll.update_one({"_id": DOC_ID, "revision": doc.get("revision")},
+                    {"$set": {"seal": keyring_seal(doc, _ns(coll))}})
+    _queue_seal_record(doc)
+    return coll.find_one({"_id": DOC_ID})
+
+
 def _read(coll: Any) -> dict[str, Any] | None:
     doc = coll.find_one({"_id": DOC_ID})
     if not isinstance(doc, dict):
         return None
     doc = dict(doc)
+    import hmac
+
+    if not doc.get("seal"):
+        doc = _upgrade(coll, doc) or doc
+    seal_ok = bool(doc.get("seal")) and hmac.compare_digest(
+        keyring_seal(doc, _ns(coll)), str(doc.get("seal") or ""))
     with _lock:
-        _cache.update({"doc": doc, "keys": _decrypt_all(doc), "read_at": time.monotonic()})
+        _cache.update({"doc": doc, "keys": _decrypt_all(doc, _ns(coll)), "read_at": time.monotonic(),
+                       "seal_ok": seal_ok})
     return doc
+
+
+def _upgrade(coll: Any, doc: dict[str, Any]) -> dict[str, Any] | None:
+    """A keyring from before derived keys: seal it, and sign with a derived key from now on.
+
+    Its random keys stay decryptable from ``key_enc``; their ids are sealed
+    and signed into the chain (``audit.keyring.sealed``, signed by the new
+    derived key), so pulling one later reads as tampering, not a lost key.
+    """
+    ns = _ns(coll)
+    keys = [dict(e) for e in doc.get("keys") or []]
+    if not any(e.get("generation") for e in keys):
+        when = _now()
+        for e in keys:
+            if not e.get("retired_at"):
+                e["retired_at"] = when
+        gen = 1
+        entry = _derived_entry(gen, ns, origin="derived_upgrade", actor="system")
+        keys.append(entry)
+        updated = {**{k: v for k, v in doc.items() if k != "_id"}, "keys": keys,
+                   "current_key_id": entry["key_id"], "revision": int(doc.get("revision") or 0) + 1}
+    else:
+        updated = {k: v for k, v in doc.items() if k != "_id"}
+    updated["seal"] = keyring_seal(updated, ns)
+    result = coll.replace_one({"_id": DOC_ID, "revision": doc.get("revision"), "seal": {"$exists": False}},
+                              {"_id": DOC_ID, **updated})
+    if result.matched_count == 1:
+        _queue_seal_record(updated)
+        logger.warning("audit chain keyring upgraded to derived keys and sealed")
+    return coll.find_one({"_id": DOC_ID})
+
+
+def keyring_state() -> dict[str, Any]:
+    """What the verifier needs about the keyring: presence, seal, per-entry checks."""
+    import hmac
+
+    coll = _collection()
+    if coll is None:
+        return {"configured": False}
+    ns = _ns(coll)
+    doc = coll.find_one({"_id": DOC_ID})
+    if not isinstance(doc, dict):
+        return {"configured": True, "present": False, "ns": ns}
+    keys = _decrypt_all(doc, ns)
+    entries = _meta(doc)
+    return {
+        "configured": True, "present": True, "ns": ns,
+        "seal_ok": bool(doc.get("seal")) and hmac.compare_digest(
+            keyring_seal(doc, ns), str(doc.get("seal") or "")),
+        "entries": entries,
+        "readable": sorted(keys),
+        "unreadable": sorted(e["key_id"] for e in entries if e["key_id"] not in keys and not e.get("lost")),
+        "max_generation": max([int(e.get("generation") or 0) for e in entries] or [0]),
+    }
+
+
+def rekey_after_secrets_change(*, actor: str) -> dict[str, Any]:
+    """After a vault secrets-key change (re-anchor only): every entry that no
+    longer derives or decrypts is marked lost, and a new derived generation
+    under the new master becomes current. Sealed and signed like any change."""
+    coll = _collection()
+    if coll is None:
+        raise KeystoreUnavailable("no control-plane database to keep the keyring in")
+    doc = coll.find_one({"_id": DOC_ID})
+    if not isinstance(doc, dict):
+        return {}
+    ns = _ns(coll)
+    readable = _decrypt_all(doc, ns)
+    keys = [dict(e) for e in doc.get("keys") or []]
+    when = _now()
+    for e in keys:
+        if e.get("key_id") not in readable and not e.get("lost"):
+            e["lost"] = "secrets_key_changed"
+            e["retired_at"] = e.get("retired_at") or when
+    gen = max([int(e.get("generation") or 0) for e in keys] or [0]) + 1
+    entry = _derived_entry(gen, ns, origin="rekey_after_secrets_change", actor=actor)
+    updated = {**{k: v for k, v in doc.items() if k != "_id"}, "keys": [*keys, entry],
+               "current_key_id": entry["key_id"], "revision": int(doc.get("revision") or 0) + 1}
+    updated["seal"] = keyring_seal(updated, ns)
+    coll.replace_one({"_id": DOC_ID, "revision": doc.get("revision")}, {"_id": DOC_ID, **updated})
+    _queue_seal_record(updated)
+    reset_cache()
+    return {"current_key_id": entry["key_id"],
+            "lost": sorted(str(e["key_id"]) for e in keys if e.get("lost"))}
 
 
 def _create(coll: Any, local_key: bytes | None) -> dict[str, Any]:
     """Create the keyring once; a racing process adopts whichever insert won."""
     from pymongo.errors import DuplicateKeyError
 
+    ns = _ns(coll)
+    keys = []
     if local_key:
-        first = _entry(local_key, origin="imported_local_file", actor="system")
-    else:
-        first = _entry(secrets.token_urlsafe(48).encode("utf-8"), origin="generated", actor="system")
+        # The old node-local key file: imported (retired), still verifiable.
+        legacy = _entry(local_key, origin="imported_local_file", actor="system")
+        legacy["retired_at"] = legacy["created_at"]
+        keys.append(legacy)
+    first = _derived_entry(1, ns, origin="derived", actor="system")
+    keys.append(first)
+    doc = {"_id": DOC_ID, "current_key_id": first["key_id"], "keys": keys,
+           "revision": 1, "created_at": _now()}
+    doc["seal"] = keyring_seal(doc, ns)
     try:
-        coll.insert_one(
-            {
-                "_id": DOC_ID,
-                "current_key_id": first["key_id"],
-                "keys": [first],
-                "revision": 1,
-                "created_at": _now(),
-            }
-        )
+        coll.insert_one(doc)
+        _queue_seal_record(doc)
     except DuplicateKeyError:
         pass
     doc = _read(coll)
@@ -170,10 +386,12 @@ def _import(coll: Any, key: bytes, *, origin: str) -> None:
     """Add ``key`` as a retired key unless the keyring already holds it (atomic)."""
     entry = _entry(key, origin=origin, actor="system")
     entry["retired_at"] = entry["created_at"]
-    coll.update_one(
+    result = coll.update_one(
         {"_id": DOC_ID, "keys.key_id": {"$ne": entry["key_id"]}},
         {"$push": {"keys": entry}, "$inc": {"revision": 1}},
     )
+    if result.modified_count:
+        _reseal(coll)
 
 
 def _fresh(max_age: float) -> dict[str, Any] | None:
@@ -186,10 +404,11 @@ def _fresh(max_age: float) -> dict[str, Any] | None:
 def current_key(local_key: bytes | None = None) -> tuple[str, bytes] | None:
     """``(key_id, key)`` new records are signed with, or ``None`` without a database.
 
-    Creates the keyring on first use; imports ``local_key`` (the old node-local
-    key file, if this node still has one) the first time this process sees it.
-    Raises :class:`KeystoreUnavailable` when the database is configured but the
-    keyring cannot be read or created and no cached copy exists.
+    Creates the keyring on first use (a derived generation-1 key); imports
+    ``local_key`` (the old node-local key file, if this node still has one)
+    the first time this process sees it. Raises :class:`KeystoreUnavailable`
+    when the database is configured but the keyring cannot be read or created
+    and no cached copy exists.
     """
     coll = _collection()
     if coll is None:
@@ -199,7 +418,9 @@ def current_key(local_key: bytes | None = None) -> tuple[str, bytes] | None:
         doc = _fresh(CACHE_TTL_S)
         if doc is None:
             doc = _read(coll) or _create(coll, local_key)
-        if local_key:
+        if local_key and _cache.get("seal_ok", True):
+            # Never into a keyring whose seal fails: re-sealing it would bless
+            # whatever broke it (an edit, or a changed vault master).
             kid = _key_id(local_key)
             if kid not in _cache["imported"]:
                 if kid not in _cache["keys"]:
@@ -224,8 +445,10 @@ def current_key(local_key: bytes | None = None) -> tuple[str, bytes] | None:
 
 
 def all_keys(*, missing: str | None = None) -> dict[str, bytes]:
-    """Every persisted key by id. ``missing`` names an id a caller could not
-    find; the keyring is then re-read (at most every :data:`MISS_REFRESH_S`)."""
+    """Every persisted key by id, plus every derived generation (re-derived,
+    so a pulled or deleted keyring entry still verifies). ``missing`` names an
+    id a caller could not find; the keyring is then re-read (at most every
+    :data:`MISS_REFRESH_S`)."""
     coll = _collection()
     if coll is None:
         return {}
@@ -240,22 +463,32 @@ def all_keys(*, missing: str | None = None) -> dict[str, bytes]:
                     _cache["read_at"] = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - verification reports unknown keys instead
             logger.warning("audit chain keyring unreadable: %s", type(exc).__name__)
-    return dict(_cache["keys"])
+    upto = max([int(e.get("generation") or 0) for e in (_cache["doc"] or {}).get("keys") or []] or [0])
+    out = derived_keys(_ns(coll), upto)
+    out.update(_cache["keys"])
+    return out
 
 
 def rotate(*, actor: str, local_key: bytes | None = None) -> dict[str, Any]:
-    """Start a new current key; the previous one stays in the keyring, retired."""
+    """Start a new current key (the next derived generation); the previous one
+    stays on the keyring, retired, and keeps verifying."""
     coll = _collection()
     if coll is None:
         raise KeystoreUnavailable("no control-plane database to keep the keyring in")
     _bound(coll)
-    current_key(local_key)
+    try:
+        current_key(local_key)
+    except KeystoreUnavailable:
+        if _read(coll) is None:
+            raise
+    ns = _ns(coll)
     for _attempt in range(3):
         doc = _read(coll) or {}
         previous = str(doc.get("current_key_id") or "")
-        entry = _entry(secrets.token_urlsafe(48).encode("utf-8"), origin="rotation", actor=actor)
-        when = entry["created_at"]
         keys = [dict(e) for e in doc.get("keys") or []]
+        gen = max([int(e.get("generation") or 0) for e in keys] or [0]) + 1
+        entry = _derived_entry(gen, ns, origin="rotation", actor=actor)
+        when = entry["created_at"]
         for old in keys:
             if old.get("key_id") == previous and not old.get("retired_at"):
                 old["retired_at"] = when
@@ -269,6 +502,7 @@ def rotate(*, actor: str, local_key: bytes | None = None) -> dict[str, Any]:
                 "revision": revision + 1,
             }
         )
+        updated["seal"] = keyring_seal(updated, ns)
         # Compare-and-swap on the revision: a concurrent rotation or import
         # makes this match nothing, and the loop re-reads instead of losing it.
         result = coll.replace_one(
@@ -276,6 +510,7 @@ def rotate(*, actor: str, local_key: bytes | None = None) -> dict[str, Any]:
             {"_id": DOC_ID, **updated},
         )
         if result.matched_count == 1:
+            _queue_seal_record(updated)
             _read(coll)
             logger.warning("audit chain key rotated: %s -> %s by %s", previous, entry["key_id"], actor)
             return status()
@@ -291,7 +526,7 @@ _EPOCH_ID = "__history_epoch__"
 _epoch_cache: dict[str, dict[str, str]] = {}
 
 
-def _mac(*parts: str) -> str:
+def _mac(*parts: str, ns: str | None = None) -> str:
     """HMAC-SHA256 under a key HKDF-derived from the vault master key.
 
     Integrity only: a database-level writer cannot compute it, and no vault
@@ -304,8 +539,9 @@ def _mac(*parts: str) -> str:
 
     from services.secret_vault import derive_subkey
 
-    coll = _history_coll()
-    ns = str(getattr(coll, "full_name", "") or "")
+    if ns is None:
+        coll = _history_coll()
+        ns = str(getattr(coll, "full_name", "") or "")
     msg = "\x1f".join(("v2", ns) + parts).encode("utf-8")
     return hmac.new(derive_subkey(_MAC_INFO), msg, hashlib.sha256).hexdigest()
 
@@ -433,6 +669,16 @@ def _epoch_copy_in_keyring(coll_keys: Any) -> dict[str, str] | None:
     return None
 
 
+def _signed_key_set() -> list[dict[str, Any]]:
+    """The keyring's key ids, generations and origins, as the anchor records sign them."""
+    try:
+        coll = _collection()
+        doc = coll.find_one({"_id": DOC_ID}) if coll is not None else None
+    except Exception:  # noqa: BLE001
+        doc = None
+    return [{k: e.get(k) for k in ("key_id", "generation", "origin")} for e in _meta(doc or {})]
+
+
 def _anchor_in_chain(
     action: str, at: str, epoch_id: str, actor: str = "system", reason: str = "",
     extra: dict[str, Any] | None = None,
@@ -450,7 +696,7 @@ def _anchor_in_chain(
         event = append_audit_event(
             action=action, resource="audit_chain_key_history", actor=actor,
             details={"epoch_at": at, "epoch_id": epoch_id, **({"reason": reason} if reason else {}),
-                     **(extra or {})},
+                     "keyring": _signed_key_set(), **(extra or {})},
             key_history_anchor=epoch_id,
         )
     finally:

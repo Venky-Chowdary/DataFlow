@@ -255,7 +255,10 @@ def test_f6_a_secrets_key_change_is_fixed_by_an_audited_admin_reanchor(ent, monk
     _forget_process_keys()
     report = _verify(ent, ws)
     assert "fails its MAC" in (report["key_history_tampered"] or ""), report
-    assert report["status"] == "findings"
+    # Every keyring and history check fails together: a real secrets-key
+    # change, inconclusive (not tampering, not verified) until re-anchored.
+    assert report["secrets_key_changed"] is True
+    assert report["status"] == "inconclusive" and report["verified"] is False
 
     route = "/api/v1/audit/chain/key-history/reanchor"
     ws_admin = ent.member(email=f"f6-{secrets.token_hex(4)}@example.com", workspace_id=ws, role="admin")

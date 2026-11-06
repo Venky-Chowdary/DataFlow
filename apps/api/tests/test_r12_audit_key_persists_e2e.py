@@ -199,7 +199,10 @@ def test_every_process_and_redeploy_without_env_key_signs_with_one_persisted_key
     assert len(docs) == 1, "the keyring was created more than once"
     entry = docs[0]["keys"][0]
     assert entry["key_id"] == written[0]["key_id"]
-    assert str(entry["key_enc"]).startswith("enc:v1:"), "the key must be stored encrypted"
+    # A derived key (fifth review): the document holds metadata only, no key
+    # material that deleting it could lose; the generation re-derives it.
+    assert entry["generation"] == 1 and "key_enc" not in entry, entry
+    assert docs[0]["seal"], "the keyring metadata must be sealed"
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +271,10 @@ def test_old_node_local_key_file_is_imported_and_its_records_keep_verifying(
     assert key_id_for(file_key) in by_id
     assert by_id[key_id_for(file_key)]["origin"] == "imported_local_file"
     if not keyring_exists:
-        # No keyring yet: the file key becomes the shared key, so signing continues unchanged.
-        assert doc["current_key_id"] == key_id_for(file_key)
+        # No keyring yet: the file key is imported (retired, still verifying)
+        # and a derived key signs from now on (fifth review).
+        current = by_id[doc["current_key_id"]]
+        assert current["generation"] == 1 and "key_enc" not in current, current
 
     # Next deploy: the file is gone with its container.
     _fresh_container(ent, monkeypatch, "next-deploy")
@@ -409,5 +414,6 @@ def test_rotation_script_is_admin_only_audited_and_the_check_holds_keyring_keys(
     assert hmac["verified_under_keyring_key"] >= 2, hmac   # the old key's records
     assert hmac["verified_under_current_key"] >= 3, hmac   # rotation event + 2 writes
     for doc in ent.db["audit_chain_keys"].find({}):
-        assert doc["keys"][0]["key_enc"] not in check.stdout
+        for entry in doc["keys"]:
+            assert not entry.get("key_enc") or entry["key_enc"] not in check.stdout
     assert _snapshot(ent) == before, "the check wrote to the database"

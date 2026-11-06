@@ -188,7 +188,8 @@ def test_imported_file_keyring_flags_a_relabel(ent, monkeypatch):
     _forget_process_keys()
     _write(3, action="r14c4.imported", workspace_id=ws)
     doc = ent.db[store.COLLECTION].find_one({"_id": store.DOC_ID})
-    assert {k["origin"] for k in doc["keys"]} == {"imported_local_file"}, doc["keys"]
+    # The node file key is imported (retired); a derived key signs from then on.
+    assert {k["origin"] for k in doc["keys"]} == {"imported_local_file", "derived"}, doc["keys"]
     _relabel(ent, _records(ent, "r14c4.imported")[1], "k-nobody-ever-had")
     report = _verify(ent, ws)
     assert _tampered(report) == ["unknown_key_after_keyring"], report["findings"]

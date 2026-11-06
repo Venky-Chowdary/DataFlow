@@ -179,6 +179,9 @@ def signing_key() -> tuple[str, bytes, str]:
         return key_id_for(key), key, "env"
     persisted = _persisted_current()
     if persisted is not None:
+        # A keyring key on the sealed history: missing from the keyring later
+        # reads as a removed key (tampering), never as a lost one.
+        store.note_key_id(persisted[0], origin="keyring")
         return persisted[0], persisted[1], "persisted"
     try:
         key = _generated_key(create=True)

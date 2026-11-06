@@ -389,7 +389,18 @@ def append_audit_event(
             raise
         if tracker is not None and not action.startswith("http."):
             tracker["named"] = int(tracker.get("named", 0)) + 1
-        return persisted
+    _after_append(persisted)
+    return persisted
+
+
+def _after_append(persisted: dict[str, Any]) -> None:
+    """Keyring seal records and the chain's high-water mark, outside the append lock."""
+    try:
+        from services import audit_chain_keystore as store
+
+        store.flush_seal_record()
+    except Exception:  # noqa: BLE001 - bookkeeping never fails the write
+        logging.getLogger(__name__).debug("audit keyring seal not flushed", exc_info=True)
 
 
 def _key_history_position() -> dict[str, Any] | None:

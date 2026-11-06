@@ -309,6 +309,7 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         anchor=anchor,
     )
     history_tampered = anchor["tampered"]
+    keyring_tampered = anchor["keyring_tampered"]
     history_unreadable = anchor["unreadable"]
     # A workspace sees its own records' prior findings and history-level ones.
     prior = [
@@ -330,13 +331,18 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     for f in found:
         categories[f["category"]] += 1
     lost = _lost_key_summary(found, events)
-    if history_tampered:
+    if history_tampered and not anchor["secrets_key_changed"]:
         # The key history's anchor was removed or altered: the lost-key /
         # relabel verdicts rest on it, so that alone is tampering.
         categories["tampering"] += 1
+    if keyring_tampered:
+        categories["tampering"] += 1
+    if anchor["secrets_key_changed"]:
+        # Nothing keyed by the old vault master can be judged until a re-anchor.
+        categories["inconclusive"] += 1
     # Tampering an admin re-anchor acknowledged stays tampering (review 4, HIGH 3).
     categories["tampering"] += len(prior)
-    if history_tampered or categories["tampering"]:
+    if categories["tampering"]:
         status = "findings"
     elif categories["inconclusive"]:
         status = "inconclusive"
@@ -372,10 +378,13 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     return present_verify_report(
         {
             **walk,
-            "verified": not found and not history_tampered and not prior,
+            "verified": (not found and not history_tampered and not keyring_tampered and not prior
+                         and not anchor["secrets_key_changed"]),
             "status": status,
             "key_history_tampered": history_tampered or None,
             "key_history_unreadable": history_unreadable or None,
+            "keyring_tampered": keyring_tampered or None,
+            "secrets_key_changed": anchor["secrets_key_changed"],
             "prior_tampering": prior,
             "key_history_resolved": anchor["resolved"],
             "key_history_seq": anchor["history_seq"] or None,
@@ -512,7 +521,11 @@ def _walk(
                     trusted_at = stamp
                     if key_id and (key_id not in verified_by_key or stamp > verified_by_key[key_id]):
                         verified_by_key[key_id] = stamp
-            if judged == "inconclusive":
+            if judged == "removed":
+                findings.append(
+                    ChainFinding("keyring_key_removed", index=index, event_id=event_id, detail=relabel)
+                )
+            elif judged == "inconclusive":
                 findings.append(
                     ChainFinding("unknown_key_unjudged", index=index, event_id=event_id, detail=relabel)
                 )
@@ -701,16 +714,13 @@ def _key_history_state(hmac_of: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         "epoch": None, "history_seq": 0, "tampered": "", "unreadable": "", "history": {},
         "prior_tampering": [], "resolved": [], "configured": True, "signed_kh": [],
+        "keyring_tampered": "", "accountable": set(), "secrets_key_changed": False,
     }
     rec: dict[str, str] | None = None
     try:
         rec = keystore.epoch_record(fresh=True)
     except keystore.HistoryTampered as exc:
         out["tampered"] = str(exc)
-        if "MAC" in str(exc) or "disagrees" in str(exc):
-            # The MAC key changed (a secrets-key change) or the row was edited:
-            # no entry can be trusted, so no unknown key can be judged.
-            out["unreadable"] = f"the key history cannot be trusted ({exc})"
     except Exception as exc:  # noqa: BLE001 - unreadable: inconclusive, never "judged without"
         out["unreadable"] = f"the key history epoch could not be read ({type(exc).__name__})"
     try:
@@ -719,7 +729,29 @@ def _key_history_state(hmac_of: Any) -> dict[str, Any]:
         out["unreadable"] = out["unreadable"] or (
             f"the key history entries could not be read ({type(exc).__name__})"
         )
-    if rec is None and not out["tampered"] and not out["unreadable"]:
+    ring: dict[str, Any] = {}
+    try:
+        ring = keystore.keyring_state()
+    except Exception as exc:  # noqa: BLE001
+        out["unreadable"] = out["unreadable"] or f"the keyring could not be read ({type(exc).__name__})"
+    out["secrets_key_changed"] = _secrets_key_changed(ring, out["tampered"])
+    if out["secrets_key_changed"]:
+        # Every derived and decrypted key and every MAC fails together: the
+        # vault master changed. Nothing keyed by it can be judged until a
+        # platform admin re-anchors (inconclusive, never lost, never tampering).
+        out["unreadable"] = (
+            "the vault secrets key changed: every keyring key and history MAC fails "
+            "together; re-anchor the key history"
+        )
+    elif ring.get("present"):
+        if not ring.get("seal_ok"):
+            out["keyring_tampered"] = "the keyring's sealed metadata fails its MAC"
+        elif ring.get("unreadable"):
+            out["keyring_tampered"] = (
+                f"keyring key(s) {', '.join(ring['unreadable'][:5])} can no longer be "
+                "derived or decrypted while the others can"
+            )
+    if rec is None and not out["tampered"] and not out["unreadable"] and not ring.get("configured"):
         out["configured"] = False  # no control-plane database: no history kept
         return out
     head_seq = _position({"chain_seq": (rec or {}).get("head_seq")}) if rec else 0
@@ -746,6 +778,31 @@ def _key_history_state(hmac_of: Any) -> dict[str, Any]:
             d for d in coll.find({"action": keystore.REANCHOR_ACTION}).sort("chain_seq", 1).limit(1000)
             if verified(d) and _position({"chain_seq": d.get("kh_seq")}) == _position(d)
         ]
+        # Keys the chain itself says the keyring held (signed key sets).
+        sealed = {
+            str(k.get("key_id")) for d in coll.find(
+                {"action": {"$in": [keystore.KEYRING_SEAL_ACTION, keystore.EPOCH_ACTION,
+                                    keystore.REANCHOR_ACTION]}}
+            ).sort("chain_seq", 1).limit(5000)
+            if verified(d)
+            for k in ((d.get("details") or {}).get("keys") or (d.get("details") or {}).get("keyring") or [])
+            if isinstance(k, dict) and k.get("key_id")
+        }
+        sealed |= {kid for kid, e in out["history"].items() if e.get("origin") == "keyring"}
+        if ring.get("seal_ok"):
+            # A re-anchor after a vault secrets-key change marked these lost
+            # on the sealed keyring: they are lost keys, not removed ones.
+            sealed -= {str(e.get("key_id")) for e in ring.get("entries") or [] if e.get("lost")}
+        out["accountable"] = sealed
+        on_ring = {str(e.get("key_id")) for e in ring.get("entries") or []}
+        missing = sorted(sealed - on_ring) if ring.get("configured") else []
+        if missing and not out["secrets_key_changed"] and not out["keyring_tampered"]:
+            out["keyring_tampered"] = (
+                f"key(s) {', '.join(missing[:5])} the chain's signed key sets list are "
+                "missing from the keyring"
+                if ring.get("present")
+                else "the keyring document was removed while the chain's signed key sets list keys"
+            )
         if head_seq:
             anchor = next((d for d in coll.find({"chain_seq": head_seq}).limit(5)
                            if str(d.get("event_hash") or "") == str(rec.get("head_hash") or "")), None)
@@ -807,6 +864,17 @@ def _key_history_state(hmac_of: Any) -> dict[str, Any]:
         )
         logger.warning("key history anchor not checked: %s", type(exc).__name__)
     return out
+
+
+def _secrets_key_changed(ring: dict[str, Any], history_problem: str) -> bool:
+    """True only when EVERY keyring check fails together: no entry derives or
+    decrypts, the keyring seal fails, and the history epoch (if any) fails its
+    MAC — what a changed vault master looks like. One failing alone is an edit."""
+    entries = ring.get("entries") or []
+    if not ring.get("present") or not entries:
+        return False
+    return (not ring.get("readable") and not ring.get("seal_ok")
+            and (not history_problem or "fails its MAC" in history_problem))
 
 
 def _ensure_kh_index(coll: Any) -> None:
@@ -884,12 +952,16 @@ def _relabel_reason(
             "the record's key id was changed. Counted as tampering."
         )
     if anchor.get("unreadable"):
-        # A tampered history is still judged by position (failing toward
-        # tampering); only one that could not be read is not judged at all.
         why = anchor.get("unreadable")
         return "inconclusive", (
             f"Names key {key_id}, which this deployment does not hold, and {why}: whether "
             "it is a lost key or a relabel cannot be judged, so it is neither excused nor verified."
+        )
+    if str(key_id or "") in (anchor.get("accountable") or set()):
+        return "removed", (
+            f"Names key {key_id}, which the chain's signed keyring key sets list, but the "
+            "keyring no longer holds it: the key was removed from the keyring, so its "
+            "records cannot be checked. Counted as tampering."
         )
     epoch = anchor.get("epoch")
     history_seq = int(anchor.get("history_seq") or 0)

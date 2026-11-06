@@ -602,11 +602,13 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
         for f in report.get("findings") or [] if f.get("category") == "tampering"
     ]
     problem = str(report.get("key_history_tampered") or "")
-    if report.get("tampering_detected") and not body.acknowledge_findings:
+    inconclusive = int((report.get("categories") or {}).get("inconclusive") or 0)
+    if (report.get("tampering_detected") or inconclusive) and not body.acknowledge_findings:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"The audit chain reports tampering ({len(tampering)} record finding(s)"
+                f"The audit chain reports tampering or inconclusive records "
+                f"({len(tampering)} tampering, {inconclusive} inconclusive"
                 f"{'; key history: ' + problem if problem else ''}). Re-anchoring records "
                 "them as prior tampering; send acknowledge_findings=true to proceed."
             ),
@@ -618,6 +620,10 @@ async def reanchor_audit_key_history(body: KeyHistoryReanchorBody, request: Requ
             superseded=list(report.get("key_history_signed_positions") or []),
             history_problem=problem,
         )
+        if report.get("secrets_key_changed") and not body.dry_run:
+            result["keyring_rekeyed"] = keystore.rekey_after_secrets_change(
+                actor=actor_from_request(request)
+            )
     except keystore.KeystoreUnavailable as exc:
         raise HTTPException(status_code=503, detail="The audit key history is not reachable.") from exc
     record_security_event(
