@@ -2562,11 +2562,75 @@ def _mysql_text_carrier(ddl: str) -> bool:
     return bool(base) and base[0].upper() in {"TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT"}
 
 
-def _mysql_fixed_key_bytes(ddl: str) -> int:
+# InnoDB COMPACT / REDUNDANT row formats cap an index key at 767 bytes.
+MYSQL_COMPACT_KEY_BYTES = 767
+
+_MYSQL_CHARSET_BYTES = {
+    "latin1": 1, "ascii": 1, "binary": 1, "latin2": 1, "cp1250": 1, "cp1251": 1,
+    "cp1252": 1, "greek": 1, "hebrew": 1, "latin5": 1, "latin7": 1, "koi8r": 1,
+    "ucs2": 2, "utf8": 3, "utf8mb3": 3, "utf16": 4, "utf16le": 4, "utf32": 4, "utf8mb4": 4,
+}
+_MYSQL_FIXED_BYTES = {
+    "TINYINT": 1, "BOOL": 1, "BOOLEAN": 1, "SMALLINT": 2, "MEDIUMINT": 3, "INT": 4,
+    "INTEGER": 4, "BIGINT": 8, "FLOAT": 4, "DOUBLE": 8, "REAL": 8, "DATE": 3, "YEAR": 1,
+}
+
+
+def mysql_max_key_bytes(row_format: str | None) -> int:
+    """The InnoDB index key limit for a table's row format (767 on COMPACT / REDUNDANT)."""
+    fmt = str(row_format or "").strip().upper()
+    return MYSQL_COMPACT_KEY_BYTES if fmt in {"COMPACT", "REDUNDANT"} else _MYSQL_MAX_KEY_BYTES
+
+
+def mysql_key_unit_bytes(ddl: str) -> int:
+    """Key bytes per declared unit: 1 for BINARY / VARBINARY / a 1-byte charset, else the charset's maximum."""
+    u = re.sub(r"\s+", " ", str(ddl or "")).strip().upper()
+    if re.match(r"^(VAR)?BINARY\b|^(TINY|MEDIUM|LONG)?BLOB\b", u):
+        return 1
+    named = re.search(r"(?:CHARACTER SET|CHARSET)\s+([A-Z0-9_]+)", u)
+    if named:
+        return _MYSQL_CHARSET_BYTES.get(named.group(1).lower(), _MYSQL_UTF8MB4_CHAR_BYTES)
+    # A collation names its charset (latin1_swedish_ci -> latin1, binary -> binary).
+    collate = re.search(r"COLLATE\s+([A-Z0-9]+)", u)
+    if collate:
+        return _MYSQL_CHARSET_BYTES.get(collate.group(1).lower(), _MYSQL_UTF8MB4_CHAR_BYTES)
+    return _MYSQL_UTF8MB4_CHAR_BYTES
+
+
+def _mysql_decimal_bytes(precision: int, scale: int) -> int:
+    """InnoDB DECIMAL storage: 4 bytes per 9 digits, the leftover digits packed."""
+    def part(digits: int) -> int:
+        return (digits // 9) * 4 + (0, 1, 1, 2, 2, 3, 3, 4, 4, 4)[digits % 9]
+
+    return part(max(0, precision - scale)) + part(max(0, scale))
+
+
+def mysql_key_part_bytes(ddl: str) -> int:
+    """Bytes one key part takes from the index budget, by its declared type."""
     from services.type_system import parse_string_carrier_width
 
-    width = parse_string_carrier_width(ddl)
-    return width * _MYSQL_UTF8MB4_CHAR_BYTES if width else 8
+    u = re.sub(r"\s+", " ", str(ddl or "")).strip().upper()
+    base = re.split(r"[\s(]", u, maxsplit=1)[0] if u else ""
+    if base in {"CHAR", "VARCHAR", "BINARY", "VARBINARY"}:
+        width = parse_string_carrier_width(ddl) or int(
+            (re.search(r"\(\s*(\d+)", u) or [None, "1"])[1]
+        )
+        return width * mysql_key_unit_bytes(ddl)
+    if base in {"DECIMAL", "NUMERIC", "DEC", "FIXED"}:
+        m = re.search(r"\(\s*(\d+)\s*(?:,\s*(\d+))?", u)
+        precision, scale = (int(m.group(1)), int(m.group(2) or 0)) if m else (10, 0)
+        return _mysql_decimal_bytes(precision, scale)
+    if base in {"ENUM", "SET"}:
+        values = len(re.findall(r"'(?:[^']|'')*'", str(ddl or "")))
+        return (1 if values <= 255 else 2) if base == "ENUM" else max(1, min(8, (values + 7) // 8))
+    if base in {"DATETIME", "TIMESTAMP", "TIME"}:
+        fsp = int((re.search(r"\(\s*(\d+)", u) or [None, "0"])[1])
+        return {"DATETIME": 5, "TIMESTAMP": 4, "TIME": 3}[base] + (fsp + 1) // 2
+    return _MYSQL_FIXED_BYTES.get(base, 8)
+
+
+def _mysql_fixed_key_bytes(ddl: str) -> int:
+    return mysql_key_part_bytes(ddl)
 
 
 def mysql_key_compatible_types(
@@ -2577,6 +2641,7 @@ def mysql_key_compatible_types(
     target_types: list[str],
     mappings: list[dict],
     column_types: dict[str, str] | None,
+    max_key_bytes: int = _MYSQL_MAX_KEY_BYTES,
 ) -> tuple[list[str], str | None]:
     """Key-indexable create-new carriers for an upsert key, or an operator refusal.
 
@@ -2618,12 +2683,15 @@ def mysql_key_compatible_types(
         widened[col] = width
         types[idx] = f"VARCHAR({width})"
     if budgeted and not unresolved:
-        other_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES + sum(
+        other_bytes = sum(
+            w * mysql_key_unit_bytes(types[target_cols.index(c)]) for c, w in widened.items()
+        ) + sum(
             _mysql_fixed_key_bytes(types[target_cols.index(c)])
             for c in keys
             if c not in widened and c not in budgeted
         )
-        budget = (_MYSQL_MAX_KEY_BYTES - other_bytes) // _MYSQL_UTF8MB4_CHAR_BYTES // len(budgeted)
+        unit = max(mysql_key_unit_bytes(types[target_cols.index(c)]) for c in budgeted)
+        budget = (max_key_bytes - other_bytes) // unit // len(budgeted)
         if budget < 1:
             unresolved.extend(f"{c} ({types[target_cols.index(c)]})" for c in budgeted)
         else:
@@ -2649,8 +2717,10 @@ def mysql_key_compatible_types(
             "enforces a different uniqueness rule). Map the column to "
             "VARCHAR(n) sized to its longest value, or use a scalar key."
         )
-    key_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES
-    if key_bytes > _MYSQL_MAX_KEY_BYTES:
+    key_bytes = sum(
+        w * mysql_key_unit_bytes(types[target_cols.index(c)]) for c, w in widened.items()
+    )
+    if key_bytes > max_key_bytes:
         logger.error(
             "MySQL upsert key too wide before CREATE: table=%s key=(%s) widths=%s",
             table_name, key_label, widened,
@@ -2658,7 +2728,7 @@ def mysql_key_compatible_types(
         return target_types, (
             f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
             f"the declared widths {widened} need {key_bytes} bytes "
-            f"in utf8mb4, above MySQL's {_MYSQL_MAX_KEY_BYTES}-byte key limit "
+            f"in their character sets, above MySQL's {max_key_bytes}-byte key limit "
             "(error 1071). Narrow the key columns or pre-create the destination "
             "table with this key."
         )

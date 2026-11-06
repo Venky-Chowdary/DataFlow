@@ -102,14 +102,20 @@ class SourceIndexes:
     status: IndexStatus
     detail: str = ""
     items: tuple[SourceIndex, ...] = ()
+    # MySQL / MariaDB InnoDB row format: COMPACT / REDUNDANT cap a key at 767
+    # bytes, DYNAMIC / COMPRESSED at 3072 (schema_fidelity.mysql_max_key_bytes).
+    row_format: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "dialect": self.dialect,
             "status": self.status,
             "detail": self.detail,
             "items": [i.to_dict() for i in self.items],
         }
+        if self.row_format:
+            payload["row_format"] = self.row_format
+        return payload
 
 
 @dataclass
@@ -410,7 +416,24 @@ def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         )
         for name, v in grouped.items()
     ]
-    return SourceIndexes(dialect="mysql", status="measured", items=tuple(items))
+    return SourceIndexes(
+        dialect="mysql", status="measured", items=tuple(items),
+        row_format=mysql_row_format(cursor, schema, table),
+    )
+
+
+def mysql_row_format(cursor: Any, schema: str | None, table: str) -> str:
+    """The table's InnoDB row format (``""`` when it cannot be read)."""
+    try:
+        rows = _rows(
+            cursor,
+            "SELECT ROW_FORMAT FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s",
+            (schema or "", table),
+        )
+    except Exception:  # noqa: BLE001 — unread: the DYNAMIC limit is assumed
+        return ""
+    return str(rows[0][0] or "").upper() if rows and rows[0] else ""
 
 
 def _sqlserver_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:

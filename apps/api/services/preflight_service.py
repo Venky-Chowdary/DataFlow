@@ -804,7 +804,7 @@ def run_file_preflight(
             schema_policy, acknowledged=schema_drift_acknowledged
         )
     ):
-        from services.schema_drift import dest_key_groups, plan_destination_evolution
+        from services.schema_drift import dest_key_groups, dest_key_limit, plan_destination_evolution
 
         mappings, destination_column_types, destination_evolution = (
             plan_destination_evolution(
@@ -816,6 +816,7 @@ def run_file_preflight(
                 adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
                 key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                            contract_primary_key, destination_indexes_meta),
+                max_key_bytes=dest_key_limit(destination_indexes_meta),
             )
         )
 
@@ -982,7 +983,7 @@ def run_file_preflight(
     dest_table_exists = destination_table_exists
 
     from services.ddl_compatibility import evaluate_ddl_compatibility
-    from services.schema_drift import dest_key_groups, detect_schema_drift
+    from services.schema_drift import dest_key_groups, dest_key_limit, detect_schema_drift
 
     dest_kind = normalize_dest_kind(destination_db_type, default="postgresql")
     # Document/KV stores and object-store prefixes alike declare no column
@@ -1205,6 +1206,7 @@ def run_file_preflight(
         dest_recreated=dest_recreated, validation_mode=validation_mode,
         dest_key_groups=dest_key_groups(destination_pk_columns, destination_unique_keys,
                                         contract_primary_key, destination_indexes_meta),
+        dest_key_bytes=dest_key_limit(destination_indexes_meta),
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.

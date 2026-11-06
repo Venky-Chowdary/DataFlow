@@ -178,6 +178,13 @@ def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
 
+    # VARBINARY(n) -> VARBINARY(m > n) keeps every byte. BINARY(n) is
+    # zero-padded to n, so any change of its width changes the stored value.
+    old_vb = re.match(r"^\s*VARBINARY\s*\(\s*(\d+)\s*\)\s*$", old_type, flags=re.I)
+    new_vb = re.match(r"^\s*VARBINARY\s*\(\s*(\d+)\s*\)\s*$", new_type, flags=re.I)
+    if old_vb and new_vb:
+        return int(new_vb.group(1)) > int(old_vb.group(1))
+
     # String / text family: compare length, treating TEXT/unlimited as max.
     if _is_string_like(old_logical) and _is_string_like(new_logical):
         old_len = _type_length(old_type)
@@ -278,6 +285,9 @@ def _information_schema_type_to_str(
         "CHAR",
         "NCHAR",
         "NVARCHAR",
+        # MySQL reports a binary column's byte length here too.
+        "VARBINARY",
+        "BINARY",
     }:
         length = char_len
         if length is not None and length > 0:
@@ -835,14 +845,22 @@ def _mysql_keyed_widen_carrier(
     The key groups come from the live index catalog; the rule is
     :func:`mysql_keyed_widen_carrier`.
     """
-    from services.schema_fidelity import mysql_index_requires_prefix
+    from services.schema_fidelity import mysql_index_requires_prefix, mysql_max_key_bytes
+    from services.secondary_indexes import mysql_row_format
 
-    if not (mysql_index_requires_prefix(new_type) or _mysql_string_carrier(new_type)):
+    if not (
+        mysql_index_requires_prefix(new_type)
+        or _mysql_string_carrier(new_type)
+        or _mysql_binary_carrier(new_type)
+    ):
         return new_type, False
     groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
+    if not groups:
+        return new_type, False
     return mysql_keyed_widen_carrier(
         groups, column, new_type, existing, growing=growing, dialect=dialect,
         table_name=table_name,
+        max_key_bytes=mysql_max_key_bytes(mysql_row_format(cursor, schema, table_name)),
     )
 
 
@@ -854,6 +872,7 @@ def keyed_widen_carrier(
     *,
     dialect: str = "",
     growing: dict[str, str] | None = None,
+    max_key_bytes: int = 3072,
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening a column the destination holds in a key.
 
@@ -871,7 +890,8 @@ def keyed_widen_carrier(
     family = engine_family(dialect)
     if family == "mysql":
         return mysql_keyed_widen_carrier(
-            key_groups, column, new_type, existing, growing=growing, dialect=dialect
+            key_groups, column, new_type, existing, growing=growing, dialect=dialect,
+            max_key_bytes=max_key_bytes,
         )
     budget_dialect = {"sqlserver": "mssql", "oracle": "oracle"}.get(family, "")
     per_char = full_value_key_char_bytes(budget_dialect)
@@ -898,14 +918,39 @@ def keyed_widen_carrier(
     return new_type, False
 
 
+_MYSQL_BINARY_CARRIERS = {"BINARY", "VARBINARY"}
+
+
+def _mysql_binary_carrier(ddl: str) -> bool:
+    base = re.sub(r"\(.*$", "", str(ddl or "")).strip().split()
+    return bool(base) and base[0].upper() in _MYSQL_BINARY_CARRIERS
+
+
 def _mysql_growable(new_type: str) -> bool:
-    """A key widen the budget rule sizes: a LOB, or a width-bounded string."""
+    """A key widen the budget rule sizes: a LOB, or a width-bounded string or binary."""
     from services.schema_fidelity import mysql_index_requires_prefix
     from services.type_system import parse_string_carrier_width
 
     if mysql_index_requires_prefix(new_type):
         return True
-    return bool(_mysql_string_carrier(new_type) and parse_string_carrier_width(new_type))
+    bounded = parse_string_carrier_width(new_type) or (
+        _mysql_binary_carrier(new_type) and re.search(r"\(\s*\d+", str(new_type))
+    )
+    return bool((_mysql_string_carrier(new_type) or _mysql_binary_carrier(new_type)) and bounded)
+
+
+def _mysql_ask(new_type: str) -> int | None:
+    """Declared width of a bounded candidate (characters, or bytes for binary); None for a LOB."""
+    from services.schema_fidelity import mysql_index_requires_prefix
+    from services.type_system import parse_string_carrier_width
+
+    if mysql_index_requires_prefix(new_type):
+        return None
+    width = parse_string_carrier_width(new_type)
+    if width:
+        return width
+    m = re.search(r"\(\s*(\d+)", str(new_type or ""))
+    return int(m.group(1)) if m else None
 
 
 def _mysql_key_group_width(
@@ -914,55 +959,63 @@ def _mysql_key_group_width(
     grow: dict[str, str],
     existing: dict[str, str],
     table_name: str,
+    max_key_bytes: int = 3072,
 ) -> int | None:
     """Width ``want`` gets when every growing part of one key is budgeted together.
 
-    Parts that ask for less than an even share keep their ask; the rest split
-    what is left, by ``mysql_key_compatible_types``' own split. Budgeting each
-    part alone gave PRIMARY KEY(a, b) 668 + 668 characters (5344 bytes): ``a``
-    was MODIFIED and ``b`` then failed with 1071, half-migrated. ``None``: the
-    key cannot hold any widen (refused).
+    The budget is in bytes: each part costs its width times its unit (4 for a
+    utf8mb4 character, 1 for latin1 or BINARY / VARBINARY), a fixed part its
+    declared storage (``services.schema_fidelity.mysql_key_part_bytes``: DECIMAL
+    by precision, ENUM, temporal). Parts that ask for less than an even share
+    keep their ask; the rest split what is left. Budgeting each part alone gave
+    PRIMARY KEY(a, b) 668 + 668 characters (5344 bytes) and a half-migrated key.
+    ``None``: the key cannot hold the widen (a JSON / BLOB part, or no room).
     """
-    from services.schema_fidelity import mysql_index_requires_prefix, mysql_key_compatible_types
-    from services.type_system import parse_string_carrier_width
+    from services.schema_fidelity import (
+        mysql_index_requires_prefix,
+        mysql_key_part_bytes,
+        mysql_key_unit_bytes,
+    )
 
     folded = [c.casefold() for c in key_cols]
-
-    def ask(f: str) -> int | None:
+    growing = [f for f in folded if f in grow]
+    for f in growing:
         t = grow[f]
-        return None if mysql_index_requires_prefix(t) else parse_string_carrier_width(t)
+        if mysql_index_requires_prefix(t) and not re.match(
+            r"^\s*(TINY|MEDIUM|LONG)?TEXT\b", t, flags=re.I
+        ):
+            logger.info("Widen of key (%s) on %s refused: %s is a JSON / BLOB part",
+                        ", ".join(key_cols), table_name, f)
+            return None
 
-    settled: dict[str, str] = {}
-    while True:
-        # A bounded ask is budgeted as a text key; a LOB keeps its own type, so a
-        # JSON / BLOB key is still refused rather than sized.
-        types = [
-            settled.get(f)
-            or (
-                (grow[f] if mysql_index_requires_prefix(grow[f]) else "TEXT")
-                if f in grow else existing.get(f, "")
-            )
-            for f in folded
+    def unit(f: str) -> int:
+        # A candidate without its own charset keeps the column's (the MODIFY
+        # restates it), so the live spelling decides the bytes per character.
+        t = grow[f]
+        named = re.search(r"CHARACTER SET|CHARSET|COLLATE", t, flags=re.I) or _mysql_binary_carrier(t)
+        return mysql_key_unit_bytes(t if named else (existing.get(f) or t))
+
+    remaining = max_key_bytes - sum(
+        mysql_key_part_bytes(existing.get(f, "")) for f in folded if f not in grow
+    )
+    open_parts = list(growing)
+    while open_parts:
+        share = remaining // len(open_parts)
+        if share < 1:
+            return None
+        newly = [
+            f for f in open_parts
+            if (n := _mysql_ask(grow[f])) is not None and n * unit(f) <= share
         ]
-        sized, refusal = mysql_key_compatible_types(
-            table_name=table_name, conflict_columns=list(key_cols), target_cols=list(key_cols),
-            target_types=types, mappings=[], column_types={},
-        )
-        if refusal:
-            logger.info("Widen of key (%s) on %s refused: %s", ", ".join(key_cols), table_name, refusal)
-            return None
-        open_parts = [f for f in folded if f in grow and f not in settled]
-        share = min(
-            (parse_string_carrier_width(t) or 0 for f, t in zip(folded, sized) if f in open_parts),
-            default=0,
-        )
-        if not share:
-            return None
-        newly = [f for f in open_parts if (n := ask(f)) is not None and n <= share]
-        if want in newly or not newly:
-            return ask(want) if want in newly else share
+        if want in newly:
+            return _mysql_ask(grow[want])
+        if not newly:
+            width = share // unit(want)
+            return width or None
         for f in newly:
-            settled[f] = f"VARCHAR({ask(f)})"
+            remaining -= (_mysql_ask(grow[f]) or 0) * unit(f)
+            open_parts.remove(f)
+    return None
 
 
 def mysql_keyed_widen_carrier(
@@ -974,6 +1027,7 @@ def mysql_keyed_widen_carrier(
     growing: dict[str, str] | None = None,
     dialect: str = "mysql",
     table_name: str = "",
+    max_key_bytes: int = 3072,
 ) -> tuple[str, bool]:
     """``(carrier, keep)`` for widening a MySQL/MariaDB column held in a key.
 
@@ -1008,12 +1062,10 @@ def mysql_keyed_widen_carrier(
         if str(k).casefold() in by_fold and _mysql_growable(str(v))
     }
     grow[want] = new_type
-    from services.type_system import parse_string_carrier_width
-
-    asked = None if mysql_index_requires_prefix(new_type) else parse_string_carrier_width(new_type)
+    asked = None if mysql_index_requires_prefix(new_type) else _mysql_ask(new_type)
     budget: int | None = None
     for key_cols in groups:
-        width = _mysql_key_group_width(key_cols, want, grow, by_fold, table_name)
+        width = _mysql_key_group_width(key_cols, want, grow, by_fold, table_name, max_key_bytes)
         if not width:
             return existing_type, True
         budget = width if budget is None else min(budget, width)
