@@ -234,15 +234,20 @@ class TransferRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _refuse_unhonourable_ssl_mode(
-    conn_type: str, ssl_mode: Optional[str], connection_string: Optional[str] = ""
+    conn_type: str,
+    ssl_mode: Optional[str],
+    connection_string: Optional[str] = "",
+    extra: Optional[dict] = None,
 ) -> None:
-    """422 for a TLS mode the connector cannot honour ("disable" off MySQL, or
-    "disable" against a connection string that asks for REQUIRED / VERIFY_*)."""
+    """422 for a TLS mode the connector cannot honour: "disable" off MySQL, or
+    "disable" against a connection string or form TLS options (``extra``:
+    ssl_ca / ssl_cert / verify) that ask for REQUIRED / VERIFY_*."""
     from services.connector_store import validate_ssl_mode
 
     try:
         validate_ssl_mode(conn_type, {"ssl_mode": ssl_mode,
-                                      "connection_string": connection_string or ""})
+                                      "connection_string": connection_string or "",
+                                      "extra": dict(extra or {})})
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -250,7 +255,9 @@ def _refuse_unhonourable_ssl_mode(
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest, http_request: Request):
     require_admin_connector_access(http_request, request.type)
-    _refuse_unhonourable_ssl_mode(request.type, request.ssl_mode, request.connection_string)
+    _refuse_unhonourable_ssl_mode(
+        request.type, request.ssl_mode, request.connection_string, request.extra
+    )
     with connector_operation(
         "probe",
         driver_family="unknown",

@@ -123,6 +123,9 @@ class ConnectorPatchDTO(BaseModel):
     db_schema: str | None = Field(default=None, alias="schema")
     connection_string: str | None = None
     ssl: bool | None = None
+    # The saved TLS choice, patchable on its own (checked against the saved
+    # extra / DSN in update_connector: a "disable" next to a CA is a 422).
+    ssl_mode: Literal["", "prefer", "require", "disable"] | None = None
     warehouse: str | None = None
     auth_mode: str | None = None
     auth_role: str | None = None
@@ -413,7 +416,12 @@ def patch_saved_connector(
         return _to_ui(existing)
     _refuse_unsafe_egress(merged, existing)
     patch["workspace_id"] = existing.workspace_id or workspace_id
-    updated = update_connector(connector_id, patch, workspace_id=workspace_id)
+    try:
+        updated = update_connector(connector_id, patch, workspace_id=workspace_id)
+    except ValueError as exc:
+        if "ssl_mode" not in str(exc):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated

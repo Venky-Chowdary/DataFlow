@@ -247,6 +247,27 @@ def validate_ssl_mode(conn_type: str, data: Mapping[str, Any]) -> None:
                                else {k: data.get(k) for k in _MYSQL_TLS_OPTION_KEYS})
 
 
+#: Update fields that change what a MySQL dial's TLS plan reads.
+_TLS_PLAN_FIELDS = frozenset({"ssl_mode", "ssl", "connection_string", "extra", "type"})
+
+
+def validate_merged_ssl_mode(patch: Mapping[str, Any], merged: Mapping[str, Any]) -> None:
+    """An edit's TLS choice, checked against the connector it produces.
+
+    A PATCH ``{"ssl_mode": "disable"}`` on a connector whose saved ``extra``
+    holds ``ssl_ca`` used to be checked against the patch alone, so it was
+    saved and every later dial failed. ``merged`` is the decrypted result of
+    the edit (saved fields plus the patch, extras merged).
+    """
+    if not (_TLS_PLAN_FIELDS & set(patch)):
+        return
+    validate_ssl_mode(str(merged.get("type") or ""), {
+        "ssl_mode": merged.get("ssl_mode") if merged.get("ssl_mode") in SSL_MODES else None,
+        "connection_string": str(merged.get("connection_string") or ""),
+        "extra": dict(merged.get("extra") or {}),
+    })
+
+
 def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
     """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document.
 
@@ -303,13 +324,25 @@ def dial_connection_string(
     if ssl_mode == "disable":
         try:
             current = mysql_tls_plan(ssl=False, connection_string=raw, options=dict(options or {}))
+            from_dsn = mysql_tls_plan(ssl=False, connection_string=raw, options={})
         except TlsModeError as exc:
             raise ValueError(f"ssl_mode 'disable' contradicts the connection's TLS settings: {exc}") from exc
         if current.mode != TLS_DISABLED:
-            if current.must_encrypt:
+            if from_dsn.must_encrypt:
                 raise ValueError(
-                    f"ssl_mode 'disable' contradicts ssl-mode={current.mode.upper()} in the "
+                    f"ssl_mode 'disable' contradicts ssl-mode={from_dsn.mode.upper()} in the "
                     "connection string; keep one of them."
+                )
+            if current.must_encrypt:
+                # The DSN asks for nothing. The connector's own TLS options do:
+                # a CA means verify the server, and a client certificate means
+                # an encrypted session. Name those options, not the DSN.
+                named = ", ".join(k for k in _MYSQL_TLS_OPTION_KEYS
+                                  if (options or {}).get(k) not in (None, "", False))
+                raise ValueError(
+                    f"ssl_mode 'disable' contradicts this connector's TLS options ({named}); "
+                    f"they ask for an encrypted ({current.mode.upper()}) session. Remove them, "
+                    "or set ssl_mode to require."
                 )
             extra.append(("ssl-mode", "DISABLED"))
     if not extra:
@@ -1066,6 +1099,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             str(merged.get("type") or existing.type),
             merged.get("role"),
         )
+        validate_merged_ssl_mode(data, merged)
         return SavedConnector.from_dict(merged, secrets_encrypted=False)
 
     if _use_mongo():
@@ -1095,6 +1129,9 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                 str(merged.get("type") or raw.get("type") or ""),
                 merged.get("role"),
             )
+            if _TLS_PLAN_FIELDS & set(data):
+                plain = SavedConnector.from_dict({**merged, "id": connector_id})
+                validate_merged_ssl_mode(data, {**merged, "connection_string": plain.connection_string})
             doc = _encrypt_connector_doc(merged)
             coll.replace_one(query, doc)
             try:
@@ -1106,6 +1143,12 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                     {**doc, "id": str(doc.get("_id") or connector_id)},
                     secrets_encrypted=False,
                 )
+        except ValueError as exc:
+            # A refused TLS choice is the request's fault (422 at the routes),
+            # not a store failure. Nothing was written.
+            if "ssl_mode" in str(exc):
+                raise
+            raise _mongo_write_failed("update", connector_id, exc) from exc
         except Exception as exc:
             raise _mongo_write_failed("update", connector_id, exc) from exc
 
