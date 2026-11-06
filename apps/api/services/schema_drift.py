@@ -1633,9 +1633,13 @@ def detect_schema_drift(
                 source_types=source_schema,
                 target_types=target_schema,
                 rows=sample_rows,
-                hold_out_failures=(
-                    hold_out_text_cells
+                # Text cells the mode holds out (one policy) are per-row
+                # quarantine, not a type change; other sources stay strict.
+                validation_mode=(
+                    validation_mode
+                    if hold_out_text_cells
                     and normalize_logical_type(str(src_type)) in {"string", "text"}
+                    else None
                 ),
             ):
                 continue

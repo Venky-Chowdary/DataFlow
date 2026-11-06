@@ -33,21 +33,19 @@ def dest_unique_covering_columns(
     )
 
 
-def _rows_a_unique_index_compares(dialect: str, cols: list[Any]) -> Any:
-    """The rows a UNIQUE index on ``cols`` would make collide, per engine.
+def _rows_a_keyed_write_compares(cols: list[Any]) -> Any:
+    """Rows whose key can collide in a keyed write: every key column is set.
 
-    PostgreSQL, MySQL/MariaDB and SQLite never compare a key that holds a NULL,
-    so many NULL keys are legal and are not duplicates. Oracle skips only the
-    rows whose key is NULL in every column. SQL Server compares NULL as a value
-    (one NULL per unique index), so every row counts there.
+    The engines DataFlow builds a merge index on (PostgreSQL ON CONFLICT,
+    MySQL/MariaDB ON DUPLICATE KEY — ``dest_upsert_needs_unique_index``) never
+    compare a key that holds a NULL, so many NULL keys are legal there. MERGE
+    engines (Snowflake, SQL Server, Oracle, BigQuery, Databricks) build no
+    index and key the write by equality; a NULL target key matches no source
+    row (a NULL source key is refused before the write, D46). So for every
+    engine a NULL-key row is not a duplicate of anything the write can hit.
     """
     import sqlalchemy as sa
 
-    name = dialect.lower()
-    if name.startswith("mssql"):
-        return None
-    if name.startswith("oracle"):
-        return sa.or_(*[c.is_not(None) for c in cols])
     return sa.and_(*[c.is_not(None) for c in cols])
 
 
@@ -149,9 +147,7 @@ def count_dest_duplicate_keys(
         .group_by(*cols)
         .having(cnt > 1)
     )
-    keyed = _rows_a_unique_index_compares(str(engine.dialect.name or ""), cols)
-    if keyed is not None:
-        stmt = stmt.where(keyed)
+    stmt = stmt.where(_rows_a_keyed_write_compares(cols))
     with engine.connect() as conn:
         rows = conn.execute(stmt).fetchall()
     dup_keys = len(rows)

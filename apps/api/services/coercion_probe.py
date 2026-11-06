@@ -89,17 +89,20 @@ def samples_coerce_mapping(
     source_types: dict[str, str],
     target_types: dict[str, str],
     rows: list[dict[str, Any]],
-    hold_out_failures: bool = False,
+    validation_mode: str | None = None,
+    record_batch: bool = False,
 ) -> bool:
     """True when every non-empty sample coerces via the write-path transform.
 
     Used by G5 integrity, G6 DDL, and schema-drift so declared VARCHAR→NUMBER
     (JSON/CSV numeric strings) does not false-block when values cast cleanly.
 
-    ``hold_out_failures`` is a mode that quarantines a cell its cast refuses
-    (``validation_mode_contract.mode_holds_out_bad_cells``): a refused or
-    blank cell is then that row's quarantine, and the pair coerces when at
-    least one sampled cell does. A column with no castable cell still fails.
+    ``validation_mode``: a cell the mode holds out
+    (``validation_mode_contract.mode_holds_out_refusal``, by the refusal's
+    reason) is that row's quarantine, and the pair coerces when the mode's
+    column answer (``mode_holdout_kind``: every failure held, and for lenient
+    at least half the sampled cells cast) says so. Without a mode, every
+    refusal fails the pair, as before.
     """
     src = str(mapping.get("source") or "")
     if not src or not rows:
@@ -110,6 +113,8 @@ def samples_coerce_mapping(
         item["target_type"] = target_types.get(str(tgt))
     transform = resolve_transform(item, column_types=source_types, dest_types=target_types)
     checked = 0
+    failed = 0
+    held = 0
     for row in rows[:DEFAULT_SAMPLE_LIMIT]:
         raw = cell_to_string(lookup_row_value(row, src, ""))
         if not str(raw).strip():
@@ -137,17 +142,28 @@ def samples_coerce_mapping(
                 "time",
                 "timestamp",
             } or (specialty and specialty not in {"CITEXT", "TSVECTOR"}):
-                if hold_out_failures:
-                    continue
-                return False
+                if validation_mode is None:
+                    return False
+                failed += 1
+                held += int(mode_holds_out_refusal(
+                    validation_mode, f"empty value into {tgt_type}", record_batch=record_batch
+                ))
             continue
         _val, err = apply_transform(raw, transform)
         if err:
-            if hold_out_failures:
-                continue
-            return False
+            if validation_mode is None:
+                return False
+            failed += 1
+            held += int(mode_holds_out_refusal(validation_mode, str(err), record_batch=record_batch))
+            continue
         checked += 1
-    return checked > 0
+    if not failed:
+        return checked > 0
+    return bool(
+        mode_holdout_kind(
+            validation_mode, failed=failed, held=held, cast_ok=checked, record_batch=record_batch
+        )
+    )
 
 
 def _target_type_for(

@@ -636,15 +636,13 @@ def _repeated_key_summary(signals: list[dict[str, Any]]) -> str:
     match = _REPEATED_KEY_RE.search(blob)
     if not match:
         return ""
-    from services.data_integrity import DUPLICATE_KEY_ROUTES
+    from services.data_integrity import DUPLICATE_KEY_ROUTES, DUPLICATE_KEY_ROUTES_TABLE
 
     # A one-column destination key is spelled as a tuple: "(sku)", "(A)×2".
     label = _ONE_PART.sub(r"\1", match.group(1))
     values = _ONE_PART.sub(r"\1", match.group(2))
-    return (
-        f"Key {label} repeats in the source ({values}). "
-        + DUPLICATE_KEY_ROUTES
-    )
+    routes = DUPLICATE_KEY_ROUTES_TABLE if DUPLICATE_KEY_ROUTES_TABLE in blob else DUPLICATE_KEY_ROUTES
+    return f"Key {label} repeats in the source ({values}). " + routes
 
 
 def _is_duplicate_signal(

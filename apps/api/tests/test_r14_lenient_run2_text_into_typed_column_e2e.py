@@ -9,7 +9,7 @@ and schema drift refused it: "Lossy type coercion price (VARCHAR) → price
 (DECIMAL)" plus "Breaking schema change: type_change" — though nothing
 changed.
 
-Now one rule (validation_mode_contract.mode_holds_out_bad_cells) decides the
+Now one rule (validation_mode_contract.mode_holds_out_refusal) decides the
 pair in every gate: lenient run 2 loads the 20 rows and quarantines ``'abc'``
 with its reason, exactly like run 1. Strict and balanced hold no cell out,
 so they refuse run 2 with run 1's own cast-failure reason and write nothing.

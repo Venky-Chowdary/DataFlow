@@ -1349,10 +1349,13 @@ def replay_duplicate_keys_refusal(
         "duplicate_keys": shown,
         "duplicate_key_count": count,
         "next_action": (
-            "Dedupe the destination first: re-run the parent job as "
-            "full_refresh_overwrite with in_file_dedupe=keep_last (or as "
-            "sync_mode=upsert), or delete the extra copies of those keys. "
-            "Then replay the quarantine."
+            # Each route is followed in
+            # tests/test_r14_c2_review2_keep_last_db_and_replay_bounds_e2e.py.
+            "Dedupe the destination first: delete the extra copies of those "
+            "keys (keep one row per key), or re-run the parent as "
+            "full_refresh_overwrite from a source without the repeats (a file "
+            "source can set in_file_dedupe=keep_last). Then replay the "
+            "quarantine of the run that holds the row."
         ),
         "engine_error": engine_error[:300],
     }
@@ -1377,16 +1380,31 @@ def replay_destination_duplicate_keys(
     by :func:`replay_unique_index_failure`.
     """
     from services.dest_dialect_facts import dest_upsert_needs_unique_index
-    from services.upsert_ddl_gate import (
-        destination_unique_covering,
-        probe_dest_duplicate_keys,
-    )
 
     if not key_columns or not dest_upsert_needs_unique_index(dest_kind):
         return None
-    if destination_unique_covering(dest_cfg, table, list(key_columns), dest_kind) is True:
-        return None
-    probe = probe_dest_duplicate_keys(dest_cfg, table, list(key_columns))
+    from src.ai.copilot.tool_deadline import (
+        bounded_step,
+        deadline_scope,
+        preflight_deadline_seconds,
+    )
+    import services.upsert_ddl_gate as gate
+
+    # A REST replay opens no tool deadline, and bounded_step runs unbounded
+    # outside one: the catalog read and the GROUP BY get the preflight budget.
+    with deadline_scope(preflight_deadline_seconds()):
+        covering = bounded_step(
+            f"reading unique keys on destination {table}",
+            lambda: gate.destination_unique_covering(dest_cfg, table, list(key_columns), dest_kind),
+            seconds=gate.DEST_DUPLICATE_KEY_STEP_SECONDS,
+            conn=dest_cfg,
+            role="destination",
+        )
+        if not covering.timed_out and covering.error is None and covering.value is True:
+            return None
+        probe = gate.probe_dest_duplicate_keys(
+            dest_cfg, table, list(key_columns), seconds=gate.DEST_DUPLICATE_KEY_STEP_SECONDS
+        )
     if not probe.get("ran") or not int(probe.get("duplicate_keys") or 0):
         if not probe.get("ran"):
             logger.info("replay duplicate-key probe for %s: %s", table, probe.get("message"))

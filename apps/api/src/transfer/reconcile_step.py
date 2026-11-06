@@ -5817,6 +5817,40 @@ def _dedupe_dest_winner_tuples(
             ]
 
 
+def _without_held_out_cells(
+    sample_records: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop sample rows carrying a cell the writer refused.
+
+    A row held out in quarantine never landed, so keying the read-back on it
+    asked a NUMERIC column for ``'abc'`` and failed Gate-8 after an overwrite
+    had replaced the table (QA C2-neighbour review). The writer's cast is a
+    function of the cell, so every sample row with that column value was
+    refused too.
+    """
+    refused: set[tuple[str, str]] = set()
+    for detail in rejected:
+        if not isinstance(detail, dict) or not detail.get("column"):
+            continue
+        value = detail.get("value")
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        refused.add((str(detail["column"]), str(value)))
+    if not refused or not sample_records:
+        return sample_records
+    columns = {c for c, _ in refused}
+    return [
+        row
+        for row in sample_records
+        if not isinstance(row, dict)
+        or not any(
+            c in row and row[c] is not None and (c, str(row[c])) in refused
+            for c in columns
+        )
+    ]
+
+
 def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
@@ -6972,6 +7006,9 @@ def _run_reconciliation_impl(
             sample_records = rekey_writer_sample(
                 [r for r in stashed if isinstance(r, dict)], mapping_dicts
             )
+    sample_records = _without_held_out_cells(
+        sample_records, list(dest_summary.get("rejected_details") or [])
+    )
     pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
     # X-OW1: derive the batch key list from whichever row collection this path
     # actually holds — engine-copy runs may carry full `records` without a

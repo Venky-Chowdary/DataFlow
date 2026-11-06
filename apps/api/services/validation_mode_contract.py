@@ -208,6 +208,11 @@ def confidence_floor_for_mode(mode: str | None) -> float:
     return float(mode_contract(mode)["confidence_floor"])
 
 
+#: Lenient's column bound (``mode_holdout_kind``): at least this share of the
+#: non-empty sampled cells must cast for the rest to be held out per cell.
+LENIENT_MIN_CAST_SHARE = 0.5
+
+
 def mode_holds_out_refusal(
     mode: str | None, reason: str | None = None, *, record_batch: bool = True
 ) -> bool:
@@ -224,7 +229,7 @@ def mode_holds_out_refusal(
 
     ``reason=None`` asks for any reason, which only lenient answers yes to.
     """
-    if mode_holds_out_bad_cells(mode):
+    if _holds_out_every_refusal(mode):
         return True
     if reason is None or not record_batch:
         return False
@@ -246,8 +251,11 @@ def mode_holdout_kind(
     """
     if failed <= 0 or held != failed or cast_ok <= 0:
         return ""
-    if mode_holds_out_bad_cells(mode):
-        return "cast_failure"
+    if _holds_out_every_refusal(mode):
+        # A column is a cast with some bad cells only while most sampled cells
+        # cast: at least half (LENIENT_MIN_CAST_SHARE). 1 castable of 500 is a
+        # wrong mapping, not 499 rows to quarantine.
+        return "cast_failure" if cast_ok >= LENIENT_MIN_CAST_SHARE * (cast_ok + failed) else ""
     from connectors.sql_temporal import invalid_calendar_share_holds_out
 
     if record_batch and invalid_calendar_share_holds_out(failed, failed + cast_ok):
@@ -255,13 +263,8 @@ def mode_holdout_kind(
     return ""
 
 
-def mode_holds_out_bad_cells(mode: str | None) -> bool:
-    """True when this mode quarantines a cell that fails its cast and loads the rest.
-
-    One answer for every gate that grades a text source into a typed column:
-    the integrity audit, Target DDL (G6) and schema drift. A create-new run
-    and a run into the table it created then reach the same verdict.
-    """
+def _holds_out_every_refusal(mode: str | None) -> bool:
+    """Private to the policy above: the contract field ``holds_out_bad_cells``."""
     return bool(mode_contract(mode).get("holds_out_bad_cells"))
 
 

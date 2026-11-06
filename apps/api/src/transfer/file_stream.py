@@ -1417,6 +1417,32 @@ def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any)
 
 
 @date_locale_scoped
+def _kept_table_carriers(
+    live_dest_types: dict[str, str] | None,
+    target_cols: list[str],
+    dest_type: str,
+    sync_mode: str,
+) -> dict[str, str]:
+    """Live column types of a table the run writes into and keeps.
+
+    The writer binds every row against the column that is there (PostgreSQL
+    overwrite empties the table, it does not recreate it), so Gate-8 has to
+    hash on that carrier too. A plan type inferred from the file ('VARCHAR' for
+    a column with one 'abc') hashed '1' against the stored NUMERIC(10,2) '1.00'
+    and failed a correct load after the overwrite (QA C2-neighbour review).
+    A recreating engine's table is replaced, so its live types are not used.
+    """
+    if not live_dest_types:
+        return {}
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
+
+    if is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(dest_type):
+        return {}
+    lowered = {str(k).lower(): str(v) for k, v in live_dest_types.items() if v}
+    return {c: lowered[c.lower()] for c in target_cols if c.lower() in lowered}
+
+
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -1442,6 +1468,7 @@ def stream_file_to_database(
     duplicate_policy: str = "",
     file_identity: dict[str, Any] | None = None,
     fingerprint_sink: Any = None,
+    live_dest_types: dict[str, str] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -1622,6 +1649,9 @@ def stream_file_to_database(
             and (not _prior or _TEXT_FAMILY_DDL_RE.match(_prior.strip()))
         ):
             fingerprint_dest_types[_tc] = str(_st)
+    fingerprint_dest_types.update(
+        _kept_table_carriers(live_dest_types, target_cols, dest_type, sync_mode)
+    )
 
     try:
         from services.sync_cursor import (

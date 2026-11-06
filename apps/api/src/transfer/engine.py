@@ -1716,6 +1716,9 @@ class UniversalTransferEngine:
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
+            from services.duplicate_policy import keep_last_records
+
+            records = keep_last_records(request, records)
             # The batch path reads the source whole, so an incremental mode has
             # to be bounded here or it re-delivers rows already at rest.
             try:
@@ -4913,6 +4916,7 @@ class UniversalTransferEngine:
                 read_options=read_options,
                 shape_runner=shape_runner,
                 duplicate_policy=str(getattr(request, "duplicate_policy", "") or ""),
+                live_dest_types=dest_schema_types if dest_table_exists_flag else None,
             )
 
             with _reconcile_phase_heartbeat(

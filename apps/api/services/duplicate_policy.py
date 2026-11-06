@@ -102,6 +102,33 @@ def route_duplicate_options(*extras: Any) -> dict[str, str]:
     return out
 
 
+def keep_last_records(request: Any, records: list[dict]) -> list[dict]:
+    """The buffered file route's keep_last: the same collapse the file stream runs.
+
+    ``file_stream`` collapses through :func:`iter_keep_last`; a file the engine
+    reads whole (priority/limit, staging, mirror) is collapsed here, before
+    the write and before Gate-8 hashes ``records``. A table is never collapsed
+    here — Validate refuses keep_last on one (``KEEP_LAST_TABLE_REFUSAL``).
+    """
+    source = getattr(request, "source", None)
+    if str(getattr(source, "kind", "") or "").lower() != "file" or not records:
+        return records
+    options = route_duplicate_options(
+        dict(getattr(source, "extra", None) or {}),
+        dict(getattr(getattr(request, "destination", None), "extra", None) or {}),
+    )
+    if options.get("in_file_dedupe") != "keep_last":
+        return records
+    from services.sync_cursor import resolve_sync_contract
+
+    contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+    keys = list(contract.primary_key_columns()) if contract else []
+    if not keys:
+        return records
+    collapsed, _dropped = collapse_keep_last(list(records), keys)
+    return collapsed
+
+
 def normalize_duplicate_policy(raw: str | None) -> str:
     text = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {

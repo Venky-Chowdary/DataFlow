@@ -1240,11 +1240,23 @@ def _in_file_collapse_message(
 
 
 #: Each route is followed end to end in
-#: tests/test_r14_c2_review_duplicate_routes_and_probe.py.
+#: tests/test_r14_c2_review_duplicate_routes_and_probe.py (file sources) and
+#: tests/test_r14_c2_review2_keep_last_db_and_replay_bounds_e2e.py (tables).
 DUPLICATE_KEY_ROUTES = (
     "Choose a duplicate route: in_file_dedupe=keep_last (one row per key, the "
     "last copy wins), sync_mode=upsert (merge on the key), or "
     "duplicate_policy=append to load every copy."
+)
+#: A table source: no read order picks a "last" copy, and an upsert over a
+#: source whose key repeats is refused by the source probe.
+DUPLICATE_KEY_ROUTES_TABLE = (
+    "A table has no read order that picks one copy: remove the repeated keys "
+    "at the source, or choose duplicate_policy=append to load every copy."
+)
+KEEP_LAST_TABLE_REFUSAL = (
+    "in_file_dedupe=keep_last keeps a file's last copy of a key in read order; "
+    "a database table has no read order, so it is not applied to this source. "
+    + DUPLICATE_KEY_ROUTES_TABLE
 )
 LENIENT_DUPLICATE_KEY_NOTE = (
     "Lenient quarantines bad cells, not repeated primary keys: the second copy "
@@ -2279,6 +2291,14 @@ def run_integrity_audit(
     from services.primary_key import latest_wins_dedupe, latest_wins_note
 
     dedupe_note = ""
+    # keep_last keeps a file's last copy of a key in read order. A table has
+    # no read order and no route writes it collapsed, so asking for it there
+    # is refused, not silently ignored (QA C2 review: 21 rows "verified").
+    keep_last_on_table = bool(database_extract) and (
+        str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
+    )
+    if keep_last_on_table:
+        in_file_dedupe = "block"
     if not str(in_file_dedupe or "").strip():
         in_file_dedupe = latest_wins_dedupe(
             in_file_dedupe,
@@ -2291,6 +2311,13 @@ def run_integrity_audit(
             dedupe_note = latest_wins_note(source_db_type)
 
     checks: list[dict[str, Any]] = []
+    if keep_last_on_table:
+        checks.append({
+            "check": "in_file_dedupe_unsupported",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": [KEEP_LAST_TABLE_REFUSAL],
+        })
 
     # Validation without a schema or a representative sample proves nothing.
     # Fail closed instead of returning a green "No integrity checks run" report.
@@ -2392,6 +2419,13 @@ def run_integrity_audit(
                 dedupe_note=dedupe_note,
             )
         )
+        if (
+            database_extract
+            and checks[-1].get("blocks_transfer")
+            and not checks[-1].get("probe_unavailable")
+        ):
+            # The routes that work on a table travel with the finding.
+            checks[-1]["issues"] = [*checks[-1].get("issues", []), DUPLICATE_KEY_ROUTES_TABLE]
         if source_null_key_rows:
             checks.append(
                 _check_null_keys(
@@ -2481,6 +2515,8 @@ def run_integrity_audit(
         structural = {"source_columns_available", "sample_available"}
         for check in checks:
             if check.get("check") in structural:
+                continue
+            if check.get("check") == "in_file_dedupe_unsupported":
                 continue
             if (
                 check.get("check") == "duplicate_keys"

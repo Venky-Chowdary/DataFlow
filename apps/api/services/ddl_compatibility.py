@@ -188,7 +188,7 @@ def _held_out_text_parse(
         source_types=source_schema,
         target_types=target_schema,
         rows=list(sample_rows),
-        hold_out_failures=True,
+        validation_mode=validation_mode,
     )
 
 
