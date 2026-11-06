@@ -470,9 +470,9 @@ def probe_append_key_collisions(
     # probe that could not run is reported (never read as proof), else the
     # first, naming every key that was probed.
     results: list[DestinationCollisionResult] = []
-    for pairs, basis in identities:
+    for pairs, basis, nulls_not_distinct in identities:
         result = _probe_identity(
-            pairs, basis=basis,
+            pairs, basis=basis, nulls_not_distinct=nulls_not_distinct,
             sample_rows=sample_rows, destination_config=destination_config,
             destination_db_type=destination_db_type, destination_table=destination_table,
             destination_pk_columns=destination_pk_columns,
@@ -493,10 +493,37 @@ def probe_append_key_collisions(
     return chosen
 
 
+_CATALOG_KEY_BASES = frozenset({"destination_pk", "destination_unique"})
+
+
+def _key_null_rule(basis: str, db_type: str, nulls_not_distinct: bool) -> str:
+    """How a destination key compares NULL parts: ``match``, ``skip_any_null``, ``skip_all_null``.
+
+    PostgreSQL, MySQL / MariaDB and SQLite treat NULLs in a UNIQUE / PK key as
+    distinct, so a tuple with a NULL part never collides (unless the key is
+    NULLS NOT DISTINCT); probing it with ``IS NULL`` blocked appends the engine
+    accepts. SQL Server treats NULL as a value (one NULL per key). Oracle does
+    not index an all-NULL tuple but matches a partly-NULL one. Identities that
+    are not destination keys (contract, source key, full row) compare exact
+    rows, NULLs included.
+    """
+    if basis not in _CATALOG_KEY_BASES:
+        return "match"
+    from src.transfer.engine_family import engine_family
+
+    family = engine_family(db_type)
+    if nulls_not_distinct or family == "sqlserver":
+        return "match"
+    if family == "oracle":
+        return "skip_all_null"
+    return "skip_any_null"
+
+
 def _probe_identity(
     pairs: list[tuple[str, str]],
     *,
     basis: str = "",
+    nulls_not_distinct: bool = False,
     sample_rows: list[dict[str, Any]] | None,
     destination_config: Mapping[str, Any] | None,
     destination_db_type: str,
@@ -547,25 +574,45 @@ def _probe_identity(
         watermark=incremental_watermark,
         tiebreak_column=incremental_tiebreak_column,
     )
+    null_rule = _key_null_rule(basis, destination_db_type, nulls_not_distinct)
     if len(pairs) == 1:
         source_key, target_key = pairs[0]
+        values = [row.get(source_key) for row in batch_rows]
         result = probe_destination_key_collisions(
             destination_config=destination_config,
             destination_db_type=destination_db_type,
             destination_table=destination_table,
             key_column=target_key,
-            values=[row.get(source_key) for row in batch_rows],
+            values=values,
         )
+        if null_rule == "match" and basis in _CATALOG_KEY_BASES and any(
+            key_identity_text(v) is None for v in values
+        ):
+            # SQL Server (and NULLS NOT DISTINCT) admits one NULL per key: a
+            # NULL already stored rejects the batch's NULL.
+            nulls = probe_destination_tuple_collisions(
+                destination_config=destination_config,
+                destination_db_type=destination_db_type,
+                destination_table=destination_table,
+                columns=[target_key],
+                tuples=[(None,)],
+            )
+            result.findings = list(result.findings) + list(nulls.findings)
     else:
+        tuples = [
+            tuple(key_identity_text(row.get(source)) for source, _target in pairs)
+            for row in batch_rows[:MAX_PROBE_VALUES]
+        ]
+        if null_rule == "skip_any_null":
+            tuples = [t for t in tuples if all(v is not None for v in t)]
+        elif null_rule == "skip_all_null":
+            tuples = [t for t in tuples if any(v is not None for v in t)]
         result = probe_destination_tuple_collisions(
             destination_config=destination_config,
             destination_db_type=destination_db_type,
             destination_table=destination_table,
             columns=target_columns,
-            tuples=[
-                tuple(key_identity_text(row.get(source)) for source, _target in pairs)
-                for row in batch_rows[:MAX_PROBE_VALUES]
-            ],
+            tuples=tuples,
         )
     if incremental_cursor_column and incremental_watermark:
         result.delta_scope = {
@@ -595,8 +642,8 @@ def append_identity_pair_sets(
     source_table: str,
     destination_table: str,
     source_key_columns: list[str] | None = None,
-) -> list[tuple[list[tuple[str, str]], str]]:
-    """Every identity an append is probed on, in order, with its basis.
+) -> list[tuple[list[tuple[str, str]], str, bool]]:
+    """Every identity an append is probed on, in order: ``(pairs, basis, nulls_not_distinct)``.
 
     The contract key, then every key the destination enforces (its primary key,
     then each UNIQUE key, single or composite) — any of them aborts the insert
@@ -612,17 +659,18 @@ def append_identity_pair_sets(
     mapped_targets = {target.casefold() for _source, target in mapped}
     stream = str(destination_table or source_table or "")
     contract = _contract_identity_names(contract_primary_key, stream_contracts, stream)
-    candidates: list[tuple[list[str], str, bool]] = [(contract, "contract", False)]
-    candidates.append((list(destination_pk_columns or []), "destination_pk", True))
+    candidates: list[tuple[list[str], str, bool, bool]] = [(contract, "contract", False, False)]
+    candidates.append((list(destination_pk_columns or []), "destination_pk", True, False))
     candidates.extend(
-        (list((uk or {}).get("columns") or []), "destination_unique", True)
+        (list((uk or {}).get("columns") or []), "destination_unique", True,
+         bool((uk or {}).get("nulls_not_distinct")))
         for uk in destination_unique_keys or []
         if isinstance(uk, dict) and not uk.get("expression") and not uk.get("filter_predicate")
     )
-    candidates.append((list(source_key_columns or []), "source_key", False))
-    out: list[tuple[list[tuple[str, str]], str]] = []
+    candidates.append((list(source_key_columns or []), "source_key", False, False))
+    out: list[tuple[list[tuple[str, str]], str, bool]] = []
     seen: set[tuple[str, ...]] = set()
-    for names, basis, is_target in candidates:
+    for names, basis, is_target, nulls_not_distinct in candidates:
         cleaned = [str(n).strip() for n in names if str(n or "").strip()]
         if not cleaned or (is_target and any(n.casefold() not in mapped_targets for n in cleaned)):
             continue
@@ -633,9 +681,9 @@ def append_identity_pair_sets(
         folded = tuple(sorted(t.casefold() for _s, t in pairs))
         if pairs and folded not in seen:
             seen.add(folded)
-            out.append((pairs, basis))
+            out.append((pairs, basis, nulls_not_distinct))
     if not out and mapped:
-        out.append((mapped, "full_row"))
+        out.append((mapped, "full_row", False))
     return out
 
 

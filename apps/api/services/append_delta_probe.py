@@ -73,7 +73,7 @@ def probe_append_key_collisions_over_delta(
         try:
             # Every identity the probe checks, so the delta carries all their columns.
             pairs = []
-            for identity, _basis in append_identity_pair_sets(
+            for identity, _basis, _nnd in append_identity_pair_sets(
                 mappings=probe_kw.get("mappings"), source_columns=probe_kw.get("source_columns"),
                 destination_pk_columns=probe_kw.get("destination_pk_columns"),
                 destination_unique_keys=probe_kw.get("destination_unique_keys"),
