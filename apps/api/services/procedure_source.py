@@ -380,6 +380,108 @@ def merge_callable_source_extra(dst: Mapping[str, Any] | None, src: Any) -> dict
     return out
 
 
+class CallablePlacementError(ValueError):
+    """A query/procedure setting arrived where it cannot be honoured (HTTP 422)."""
+
+
+#: Where a REST caller may state a query/procedure source, in precedence order
+#: of the message: form fields, ``source_extra_json``, one stream contract.
+_PLACEMENT_KEYS = ("source_read_mode", "source_query", "procedure_call", "procedure_params")
+
+
+def resolve_callable_placements(
+    *,
+    form: Mapping[str, Any] | None,
+    source_extra: Mapping[str, Any] | None,
+    stream_contracts: list[Any] | None,
+    source_kind: str = "database",
+) -> tuple[dict[str, Any], list[Any] | None]:
+    """One answer for "is this a query/procedure source, and which one?".
+
+    QA C3 / MySQL D9: ``source_read_mode``/``source_query`` sent as form
+    fields (which the route did not declare, so FastAPI dropped them) or inside
+    ``stream_contracts_json`` (stored, never read) were silently ignored: the
+    whole table was copied and reported "Row fidelity verified". Every accepted
+    placement is resolved here into the source ``extra`` Execute reads, and a
+    placement that cannot be honoured — two placements that disagree, a query
+    on more than one stream, a query on a file source, an unknown read mode —
+    raises :class:`CallablePlacementError` instead of running a different
+    transfer.
+
+    Returns ``(source_extra, stream_contracts)`` with the callable keys lifted
+    out of the contract that carried them.
+    """
+    extra = dict(source_extra or {})
+    found: dict[str, list[tuple[str, Any]]] = {}
+
+    def _note(where: str, key: str, value: Any) -> None:
+        if value in (None, "", {}, []):
+            return
+        found.setdefault(key, []).append((where, value))
+
+    for key in _PLACEMENT_KEYS:
+        _note("form field", key, (form or {}).get(key))
+        _note("source_extra_json", key, extra.get(key))
+    contracts = None if stream_contracts is None else list(stream_contracts)
+    carriers = [
+        i for i, c in enumerate(contracts or [])
+        if isinstance(c, Mapping) and any(c.get(k) not in (None, "", {}, []) for k in _PLACEMENT_KEYS)
+    ]
+    if len(carriers) > 1:
+        raise CallablePlacementError(
+            "source_query / procedure_call is one per transfer, but "
+            f"{len(carriers)} stream contracts carry one. Send the query once, as the "
+            "source_query form field or in source_extra_json, and run one stream."
+        )
+    for i in carriers:
+        contract = dict(contracts[i])  # type: ignore[index]
+        for key in _PLACEMENT_KEYS:
+            _note("stream_contracts_json", key, contract.pop(key, None))
+        contracts[i] = contract  # type: ignore[index]
+    for key, values in found.items():
+        distinct = {json.dumps(v, sort_keys=True, default=str) for _w, v in values}
+        if len(distinct) > 1:
+            where = ", ".join(w for w, _v in values)
+            raise CallablePlacementError(
+                f"{key} was sent in more than one place with different values ({where}). "
+                "Send it once."
+            )
+        extra[key] = values[0][1]
+    params = extra.get("procedure_params")
+    if isinstance(params, str):
+        try:
+            extra["procedure_params"] = json.loads(params) if params.strip() else {}
+        except ValueError as exc:
+            raise CallablePlacementError("procedure_params must be a JSON object.") from exc
+        if not isinstance(extra["procedure_params"], dict):
+            raise CallablePlacementError("procedure_params must be a JSON object.")
+    mode = str(extra.get("source_read_mode") or "").strip().lower()
+    if mode and mode not in {MODE_TABLE, MODE_QUERY, MODE_PROCEDURE}:
+        raise CallablePlacementError(
+            f"source_read_mode '{mode}' is not one of table, query, procedure."
+        )
+    if mode:
+        extra["source_read_mode"] = mode
+    callable_mode = source_read_mode_of({"extra": extra})
+    if callable_mode != MODE_TABLE:
+        if str(source_kind or "").strip().lower() in {"file", "file_export", "upload", "object_store"}:
+            raise CallablePlacementError(
+                f"A {callable_mode} source needs a database connector; this source is a "
+                f"{source_kind}."
+            )
+        if callable_mode == MODE_QUERY and not str(extra.get("source_query") or "").strip():
+            raise CallablePlacementError(
+                "source_read_mode is 'query' but no source_query was sent."
+            )
+        if callable_mode == MODE_PROCEDURE and not str(
+            extra.get("procedure_call") or extra.get("source_procedure") or ""
+        ).strip():
+            raise CallablePlacementError(
+                "source_read_mode is 'procedure' but no procedure_call was sent."
+            )
+    return extra, contracts
+
+
 def callable_identity_token(source: Any) -> str:
     """Watermark identity for a CALL/SELECT — stream name plus SQL+binds digest.
 

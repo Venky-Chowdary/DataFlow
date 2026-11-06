@@ -1288,6 +1288,10 @@ async def run_universal_transfer(
     source_extra_json: str = Form(""),
     source_file_id: str = Form(""),
     stream_contracts_json: str = Form(""),
+    source_read_mode: str = Form(""),
+    source_query: str = Form(""),
+    procedure_call: str = Form(""),
+    procedure_params: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
     number_locale: str = Form(""),
@@ -1388,6 +1392,40 @@ async def run_universal_transfer(
                 source_extra.update(parsed)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    # QA C3 / MySQL D9: a query/procedure source is resolved from every accepted
+    # placement (form fields, source_extra_json, one stream contract) in one
+    # place, or refused — never silently dropped for a whole-table copy.
+    form_contracts: list | None = None
+    if stream_contracts_json.strip():
+        try:
+            import json as _json
+
+            loaded = _json.loads(stream_contracts_json)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="stream_contracts_json is not valid JSON."
+            ) from exc
+        if not isinstance(loaded, list):
+            raise HTTPException(
+                status_code=422, detail="stream_contracts_json must be a JSON list."
+            )
+        form_contracts = loaded
+    from services.procedure_source import CallablePlacementError, resolve_callable_placements
+
+    try:
+        source_extra, form_contracts = resolve_callable_placements(
+            form={
+                "source_read_mode": source_read_mode,
+                "source_query": source_query,
+                "procedure_call": procedure_call,
+                "procedure_params": procedure_params,
+            },
+            source_extra=source_extra,
+            stream_contracts=form_contracts,
+            source_kind=source_kind,
+        )
+    except CallablePlacementError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     stored_file_id = (source_file_id or "").strip() or str(source_extra.get("file_id") or "").strip()
     if stored_file_id:
         source_extra["file_id"] = stored_file_id
@@ -1619,14 +1657,8 @@ async def run_universal_transfer(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
     )
-    if stream_contracts_json.strip():
-        try:
-            import json as _json
-            parsed = _json.loads(stream_contracts_json)
-            if isinstance(parsed, list):
-                request_obj.stream_contracts = parsed
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    if form_contracts is not None:
+        request_obj.stream_contracts = form_contracts
 
     _residency_check(request, destination, region)
 
