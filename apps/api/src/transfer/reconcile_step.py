@@ -3585,6 +3585,9 @@ def _maybe_attach_verification_ladder(
         l2_skip_reason=(
             "source_reread_is_pre_transform" if source_reread and rewrites else ""
         ),
+        # Both populations hold exactly this run's written keys (X-OW1): an
+        # L2 value miss is then this run's cell, never another run's row.
+        scoped_to_written_keys=bool(batch_scoped),
     )
     out = attach_ladder_to_reconcile_report(report, ladder)
     if window_scoped_target:
