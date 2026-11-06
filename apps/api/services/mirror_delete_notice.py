@@ -145,7 +145,13 @@ def declare_contract_delete_mode(
         return out, ""
     normalized = normalize_sync_mode(str(sync_mode or ""), default="")
     if normalized not in {"mirror", "cdc"}:
-        return out, "delete_mode applies to mirror and cdc sync only."
+        # Keep the established phrase: Studio, the r8 flow and operators look
+        # for "mirror sync only"; cdc (the snapshot sweep) is the other taker.
+        return out, (
+            "delete_mode applies to mirror sync only (and to cdc, whose snapshot "
+            f"sweep uses it); {normalized or sync_mode or 'this sync mode'} has "
+            "nothing to delete."
+        )
     try:
         declared = delete_mode_for(delete_mode, normalized)
     except (PolicyValueError, DeleteModeNotAllowed) as exc:

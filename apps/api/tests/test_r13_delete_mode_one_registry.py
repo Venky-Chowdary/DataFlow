@@ -57,7 +57,7 @@ def test_mcp_contract_helper_accepts_cdc_off_and_refuses_mirror_off():
     out, err = declare_contract_delete_mode(contracts, "mirror", "off")
     assert "not available for mirror sync" in err and "delete_mode" not in out[0]
     _, err = declare_contract_delete_mode(contracts, "incremental_upsert", "hard")
-    assert "mirror and cdc sync only" in err
+    assert "mirror sync only" in err and "cdc" in err and "incremental_deduped" in err  # normalized mode named
     _, err = declare_contract_delete_mode(contracts, "cdc", "purge")
     assert "hard, off, soft" in err
 
