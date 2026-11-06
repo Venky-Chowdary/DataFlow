@@ -6,8 +6,8 @@ for a new email and returned its one-time password to the editor
 for anyone ``add_workspace_member`` let through, i.e. ``member.invite``).
 
 Contract: creating an account and receiving its temporary password needs the
-workspace admin role. An editor can still bring in people within their own rank
-— existing users, or an invite (membership only) for an email with no login.
+workspace admin role. Since C6 (QA r14) an editor adds no members at all —
+existing users and email-only invites are the workspace admin's too.
 Checked through the real routes on the live MongoDB (``r9_workspace_world``).
 """
 
@@ -52,25 +52,22 @@ def test_editor_cannot_create_a_login_or_receive_its_password(r9):
     assert len(denied) == 2
 
 
-def test_editor_still_adds_existing_users_and_invites_within_rank(r9):
+def test_editor_adds_no_one_existing_user_or_invite(r9):
+    """C6 (QA r14): an editor brings in nobody — member administration is admin's."""
     editor = "editor-rb3b@example.test"
     r9.world.member(editor, "editor")
     session = r9.login(editor, PASSWORD, r9.acme)
 
     existing = "existing-rb3@example.test"
     r9.world.account(existing)
-    added = _post(session, r9.acme, existing, role="editor")
-    assert added.status_code == 200, added.text
-    assert added.json()["has_account"] is True
-    assert added.json()["temporary_password"] is None
+    for email, role in ((existing, "editor"), ("invite-only-rb3@example.test", "viewer"),
+                        ("admin-wanted-rb3@example.test", "admin")):
+        refused = _post(session, r9.acme, email, role=role)
+        assert refused.status_code == 403, refused.text
+        assert "temporary_password" not in refused.text
+        from services import team_store
 
-    invited = _post(session, r9.acme, "invite-only-rb3@example.test", role="viewer")
-    assert invited.status_code == 200, invited.text
-    assert invited.json()["has_account"] is False
-    assert invited.json()["temporary_password"] is None
-
-    # Above their own rank is still refused.
-    assert _post(session, r9.acme, "admin-wanted-rb3@example.test", role="admin").status_code == 403
+        assert team_store.get_workspace_role(workspace_id=r9.acme, email=email) == ""
 
 
 def test_workspace_admin_creates_the_login_and_gets_the_password(r9):

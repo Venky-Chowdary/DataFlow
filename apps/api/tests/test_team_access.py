@@ -125,13 +125,19 @@ def test_viewer_cannot_add_members_and_editor_cannot_mint_admins(stores):
         team_store.add_workspace_member(
             workspace_id=ws.id, email="x@example.com", role="admin", added_by="editor@example.com"
         )
-    # …but an editor may bring in a peer
-    assert (
-        team_store.add_workspace_member(
-            workspace_id=ws.id, email="peer@example.com", role="viewer", added_by="editor@example.com"
-        ).role
-        == "viewer"
-    )
+    # …nor bring in a peer at its own rank or below (C6: member administration
+    # is the workspace admin's).
+    for role in ("viewer", "editor"):
+        with pytest.raises(team_store.PermissionDenied, match="workspace admin role"):
+            team_store.add_workspace_member(
+                workspace_id=ws.id, email="peer@example.com", role=role, added_by="editor@example.com"
+            )
+    with pytest.raises(team_store.PermissionDenied):
+        team_store.remove_workspace_member(
+            workspace_id=ws.id, email="viewer@example.com", removed_by="editor@example.com"
+        )
+    assert team_store.get_workspace_role(workspace_id=ws.id, email="peer@example.com") == ""
+    assert team_store.get_workspace_role(workspace_id=ws.id, email="viewer@example.com") == "viewer"
 
 
 def test_editor_cannot_remove_an_admin(stores):
@@ -575,11 +581,11 @@ def test_viewer_cannot_add_a_member_through_the_api(authenticated):
     assert viewer.get(f"/api/v1/team/workspaces/{ws_id}/members").status_code == 200
 
 
-def test_editor_invites_a_peer_but_cannot_grant_admin_through_the_api(authenticated):
-    """The authority the UI must mirror: editors invite, admins grant admin.
+def test_editor_session_manages_no_members_through_the_api(authenticated):
+    """C6 (QA r14): member administration is the workspace admin's.
 
-    The Team tab gated every membership control on ``workspace.manage`` and told
-    an editor to ask for the editor role, while this route accepted the request.
+    An editor signed in as themselves can neither invite a peer, grant admin,
+    re-role nor remove anyone; the refusal names the admin role.
     """
     ws_id = authenticated.post(
         "/api/v1/team/workspaces", json={"name": "Editors"}
@@ -600,26 +606,36 @@ def test_editor_invites_a_peer_but_cannot_grant_admin_through_the_api(authentica
     ).json()["token"]
     editor.headers["Authorization"] = f"Bearer {token}"
 
-    invited = editor.post(
-        f"/api/v1/team/workspaces/{ws_id}/members",
-        json={"email": "peer@example.com", "role": "editor"},
-    )
-    assert invited.status_code == 200, invited.text
+    for role in ("viewer", "editor"):
+        invited = editor.post(
+            f"/api/v1/team/workspaces/{ws_id}/members",
+            json={"email": "peer@example.com", "role": role},
+        )
+        assert invited.status_code == 403, invited.text
+        assert "workspace admin role" in invited.json()["detail"]
+    assert editor.patch(
+        f"/api/v1/team/workspaces/{ws_id}/members/editor2@example.com", json={"role": "viewer"}
+    ).status_code == 403
+    assert editor.delete(
+        f"/api/v1/team/workspaces/{ws_id}/members/editor2@example.com"
+    ).status_code == 403
+    assert team_store.get_workspace_role(workspace_id=ws_id, email="editor2@example.com") == "editor"
     escalate = editor.post(
         f"/api/v1/team/workspaces/{ws_id}/members",
         json={"email": "boss@example.com", "role": "admin"},
     )
     assert escalate.status_code == 403, escalate.text
-    assert "boss@example.com" not in {
+    assert {"boss@example.com", "peer@example.com"}.isdisjoint(
         m["email"] for m in team_store.list_workspace_members(ws_id)
-    }
+    )
 
 
-def test_editor_holds_member_invite_and_viewer_does_not():
-    """The permission the client reads to enable the control."""
+def test_only_admin_holds_member_invite():
+    """The permission the client reads to enable the member tools (C6)."""
     from services.rbac import Permission, role_permissions
 
-    assert Permission.MEMBER_INVITE in role_permissions("editor")
+    for role in ("editor", "operator"):
+        assert Permission.MEMBER_INVITE not in role_permissions(role)
     assert Permission.MEMBER_INVITE in role_permissions("admin")
     assert Permission.MEMBER_INVITE not in role_permissions("viewer")
     # Granting admin stays workspace administration, not invitation.

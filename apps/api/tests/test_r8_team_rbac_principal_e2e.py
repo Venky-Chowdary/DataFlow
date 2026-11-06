@@ -76,8 +76,15 @@ def test_editor_key_cannot_grant_admin_promote_or_demote_the_owner(world):
     assert world.role_of(OWNER) == "admin"
     assert world.role_of("bob@acme.test") == "editor"
     assert world.role_of("qa-e2@example.com") == ""
-    # An editor still brings in a peer at or below its own role.
-    assert world.add_member(editor, "peer@example.com", "viewer").status_code == 200
+    # C6 (QA r14): nor a peer at or below its own role, nor a removal.
+    world.member("pat@acme.test", "viewer")
+    for role in ("viewer", "editor"):
+        peer = world.add_member(editor, f"peer-{role}@example.com", role)
+        assert peer.status_code == 403, peer.text
+        _denial(world, target=f"peer-{role}@example.com", attempted=role)
+        assert world.role_of(f"peer-{role}@example.com") == ""
+    assert world.remove(editor, "pat@acme.test").status_code == 403
+    assert world.role_of("pat@acme.test") == "viewer"
 
 
 def test_key_minted_by_a_platform_admin_keeps_its_own_role_on_team_routes(world):

@@ -261,12 +261,19 @@ def _authority(
 def _authorize_change(
     authority: _Authority, *, current: str, requested: str | None
 ) -> None:
-    """The membership rules every route shares.
+    """The membership rules every route shares (C6, Security 1/2 — QA r14).
 
-    - Bringing someone in needs ``member.invite`` and never grants a role above
-      the actor's own; granting admin needs workspace administration.
-    - Changing an existing member's role is role management: admin only.
-    - Removing a member needs ``member.invite``; removing an admin needs admin.
+    Member administration belongs to the workspace admin (the role older
+    builds called ``owner``). An editor, operator or viewer — a session or an
+    API key, judged by the key's own role — can neither add, remove nor re-role
+    anyone.
+
+    - Bringing someone in needs ``member.invite`` (admin only) and never grants
+      a role above the actor's own; granting admin needs workspace.manage.
+    - Changing an existing member's role is role management: workspace.manage.
+    - Removing a member needs ``member.invite``; removing an admin needs
+      workspace.manage, and never the last admin who can sign in
+      (``_assert_not_last_admin``).
     """
     from services.rbac import Permission
 
@@ -276,7 +283,7 @@ def _authorize_change(
     if current == "admin" and not manage:
         raise PermissionDenied("Only a workspace admin can change or remove another admin")
     if not authority.has(Permission.MEMBER_INVITE) and not manage:
-        raise PermissionDenied("Adding or removing members requires the workspace admin or editor role")
+        raise PermissionDenied("Adding or removing members requires the workspace admin role")
     if requested is not None:
         if _RANK.get(requested, 0) > _RANK.get(authority.role, -1):
             raise PermissionDenied(

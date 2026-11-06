@@ -76,10 +76,10 @@ function relativeTime(iso?: string): string {
 export function TeamSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  // Two authorities, because the API has two: creating a workspace is workspace
-  // administration, while bringing a peer into the workspace you already work in
-  // is member.invite — which an editor holds. Gating both on workspace.manage
-  // disabled a control the API would have honoured for an editor.
+  // Two authorities, because the API has two: creating a workspace and granting
+  // admin is workspace.manage, adding or removing a non-admin member is
+  // member.invite. Both are the workspace admin's (C6): an editor manages no
+  // members, so the member tools read as read-only for one.
   const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const membership = useWriteGate(PERMISSIONS.memberInvite);
   // Members belong to a workspace; a platform admin's All / Unassigned view is
@@ -170,8 +170,8 @@ export function TeamSettings() {
     toast({ title: "Last admin protected", message: LAST_ADMIN_PROTECTED, tone: "warning" });
     return false;
   };
-  // Granting admin is the one membership change an editor may not make, and the
-  // store refuses it — so the option says why instead of failing on submit.
+  // Granting admin needs workspace.manage; a principal scoped to member.invite
+  // alone may add non-admins only, so the option says why instead of failing.
   const canGrantAdmin = manage.allowed;
 
   const addWorkspace = async () => {
@@ -497,7 +497,7 @@ export function TeamSettings() {
                     onChange={(e) => setInviteRole(e.target.value as WorkspaceRole)}
                   >
                     <option value="viewer">Viewer — read jobs, connectors and proofs</option>
-                    <option value="editor">Editor — run transfers, edit connectors, add non-admin members</option>
+                    <option value="editor">Editor — run transfers, edit connectors and schedules</option>
                     <option value="admin" disabled={!canGrantAdmin}>
                       Admin — full workspace access incl. roles{canGrantAdmin ? "" : " (workspace admin only)"}
                     </option>
