@@ -21,6 +21,7 @@ operator did not ask this sync to enforce.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +33,12 @@ logger = logging.getLogger(__name__)
 _REQUIRE_PK_VARIABLES = ("sql_require_primary_key", "innodb_force_primary_key")
 #: ER_UNKNOWN_SYSTEM_VARIABLE: this server does not have that variable.
 _ER_UNKNOWN_SYSTEM_VARIABLE = 1193
+# Client-side "the server did not answer" codes (CR_CONNECTION_ERROR,
+# CR_CONN_HOST_ERROR, CR_SERVER_GONE_ERROR, CR_SERVER_LOST, CR_SERVER_LOST_EXTENDED):
+# a blip worth one more try. Access denied, unknown database or a TLS refusal are
+# answers, and will not change on a retry.
+_TRANSIENT_CONNECT_ERRNOS = frozenset({2002, 2003, 2006, 2013, 2055})
+_CONNECT_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -65,20 +72,35 @@ def server_requires_primary_key(cfg: Mapping[str, Any] | None) -> PrimaryKeyRequ
     from connectors.mysql_conn import get_connection
     from services.egress_guard import EgressRefused
 
-    try:
-        conn = get_connection(
-            host=str(cfg.get("host") or ""),
-            port=int(cfg.get("port") or 3306),
-            database=str(cfg.get("database") or ""),
-            username=str(cfg.get("username") or ""),
-            password=str(cfg.get("password") or ""),
-            connection_string=str(cfg.get("connection_string") or ""),
-            ssl=bool(cfg.get("ssl")),
-            purpose="probe",
-        )
-    except (pymysql.err.MySQLError, EgressRefused, OSError, RuntimeError, ValueError) as exc:
-        logger.warning("require-primary-key probe could not connect: %s", exc)
-        return PrimaryKeyRequirement(unreadable=f"could not connect ({type(exc).__name__})")
+    conn = None
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+        try:
+            conn = get_connection(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 3306),
+                database=str(cfg.get("database") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                ssl=bool(cfg.get("ssl")),
+                purpose="probe",
+            )
+            break
+        except (pymysql.err.MySQLError, EgressRefused, OSError, RuntimeError, ValueError) as exc:
+            transient = isinstance(exc, (pymysql.err.OperationalError, pymysql.err.InterfaceError,
+                                         ConnectionError, TimeoutError)) and (
+                not isinstance(exc, pymysql.err.MySQLError)
+                or _mysql_errno(exc) in _TRANSIENT_CONNECT_ERRNOS
+            )
+            if transient and attempt < _CONNECT_ATTEMPTS:
+                logger.info("require-primary-key probe: connect attempt %d failed (%s); retrying",
+                            attempt, type(exc).__name__)
+                time.sleep(0.5)
+                continue
+            logger.warning("require-primary-key probe could not connect: %s", exc)
+            return PrimaryKeyRequirement(unreadable=f"could not connect ({type(exc).__name__})")
+    if conn is None:  # unreachable: every attempt either connects or returns above
+        return PrimaryKeyRequirement(unreadable="could not connect")
     try:
         with conn.cursor() as cur:
             for variable in _REQUIRE_PK_VARIABLES:
