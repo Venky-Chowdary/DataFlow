@@ -276,6 +276,26 @@ def split_object_namespace(
     return namespace, (catalog or database), leaf
 
 
+def _hide_internal_tables(result: Any) -> None:
+    """Drop the product's own tables from ``tables`` (QA browser 10).
+
+    Every operator-facing listing reads this one entry point or
+    ``endpoint_intelligence.introspect_endpoint`` (which filters ``objects``
+    with the same ``services.brand.is_internal_object_name``). Pilot's
+    "Known tables include …" hint read ``tables`` from here unfiltered, so the
+    write ledger and staging spools could be offered as tables to query.
+    """
+    tables = result.get("tables") if isinstance(result, dict) else None
+    if not isinstance(tables, list) or not tables:
+        return
+    from services.brand import is_internal_object_name
+
+    result["tables"] = [
+        t for t in tables
+        if not is_internal_object_name(t.get("name") if isinstance(t, dict) else t)
+    ]
+
+
 def introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
     """Introspect ``db_type``, with a schemaless store's sampled widths unbound.
 
@@ -296,6 +316,7 @@ def introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
     result = memoized_introspection(
         db_type, kwargs, lambda: _introspect_schema(db_type, **kwargs)
     )
+    _hide_internal_tables(result)
     if not destination_carriers_are_inferred(db_type):
         return result
     types = result.get("column_types")
