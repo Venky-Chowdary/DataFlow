@@ -1478,6 +1478,9 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     "park_reason": park,
                     "gate_codes": gate_codes_from_job(job_doc),
                     "unmapped_columns": unaccounted_sources_from_job(job_doc),
+                    # The refusal's stable code (e.g. DESTINATION_CONTINUITY),
+                    # so the park never classifies on wording.
+                    "error_code": str((job_doc or {}).get("error_code") or ""),
                 },
             )
     from services.schedule_run_lifecycle import default_reason
@@ -1632,14 +1635,13 @@ def _open_finding(
             from services.schedule_recovery import (
                 DESTINATION_CONTINUITY_CODE,
                 continuity_corrective,
-                is_continuity_refusal,
             )
 
             if is_empty_mapping_refusal(message):
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
-            elif is_continuity_refusal(message):
+            elif str((evidence or {}).get("error_code") or "") == DESTINATION_CONTINUITY_CODE:
                 # No signature makes a dropped table hold its history again: the
                 # finding names the schedule's own recovery (QA C9).
                 code = DESTINATION_CONTINUITY_CODE

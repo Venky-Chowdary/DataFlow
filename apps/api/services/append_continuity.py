@@ -49,6 +49,14 @@ MISSING_RECOVERY_HINT = (
     "rebuild it from the source."
 )
 
+#: Stable code on every continuity refusal (error_details.error_code, and the
+#: job's error_code): the retry policy and the schedule park read this, never
+#: the refusal's wording (QA C9 review).
+CONTINUITY_ERROR_CODE = "DESTINATION_CONTINUITY"
+#: The one mismatch a later attempt can change: the catalog did not answer
+#: (a blip is not a drop, D266). Every other mismatch is deterministic.
+TRANSIENT_CONTINUITY_MISMATCHES = frozenset({"unreadable"})
+
 _FILE_ENGINES = frozenset({"sqlite", "duckdb"})
 #: Engines whose catalog the shared SQLAlchemy object-identity probe can read.
 _SQL_PROBE_ENGINES = frozenset({"sqlite", "postgresql", "mysql", "mariadb", "sqlserver", "mssql"})
@@ -375,6 +383,7 @@ def compare(
     exp_chk = str(baseline.get("checksum") or "")
     details: dict[str, Any] = {
         "reason": "destination_continuity_mismatch",
+        "error_code": CONTINUITY_ERROR_CODE,
         "verification_status": "failed",
         "table": table,
         "expected_rows": exp_rows,

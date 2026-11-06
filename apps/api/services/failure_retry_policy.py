@@ -92,15 +92,6 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "or widen file_wait_seconds, then run the schedule again."),
     # D100: a watermark that outlived its destination can never self-heal —
     # park on the first beat and name the recovery, don't re-fail every tick.
-    # QA C9: a dropped or externally changed append destination is refused the
-    # same way on every beat until an operator recovers it. ("could not be
-    # re-read" is left out: a connection blip is not a drop, D266.)
-    (r"verification failed for table '[^']*': the (table no longer exists|"
-     r"destination changed since the last verified run)",
-     "Recover the destination: rebaseline it (accept it as it is now, or accept "
-     "its removal) or rebuild it from the source — the schedule's Recover "
-     "destination action, POST /api/v1/schedules/{id}/recover, or MCP "
-     "recover_schedule_destination."),
     # QA MySQL D7: the PII hold says the same thing to every attempt until a
     # human attests. Park on the first beat with the compliance approval.
     (r"pii/compliance review required",
@@ -245,9 +236,44 @@ def classify_failure(
     )
 
 
+#: What a continuity refusal (code DESTINATION_CONTINUITY) tells the operator.
+CONTINUITY_CORRECTIVE = (
+    "Recover the destination: rebaseline it (accept it as it is now, or accept "
+    "its removal) or rebuild it from the source — the schedule's Recover "
+    "destination action, POST /api/v1/schedules/{id}/recover, or MCP "
+    "recover_schedule_destination."
+)
+
+
+def continuity_refusal(job: Mapping[str, Any] | None) -> str:
+    """The continuity mismatch a job was refused for, by its stable code; ``""``."""
+    from services.append_continuity import CONTINUITY_ERROR_CODE
+
+    doc = job or {}
+    details = doc.get("error_details") if isinstance(doc.get("error_details"), Mapping) else {}
+    code = str(doc.get("error_code") or details.get("error_code") or "")
+    if code != CONTINUITY_ERROR_CODE:
+        return ""
+    return str(details.get("mismatch") or "continuity")
+
+
 def classify_job_failure(job: Mapping[str, Any] | None) -> RetryClassification:
     """Classify straight off a job document."""
     doc = job or {}
+    from services.append_continuity import TRANSIENT_CONTINUITY_MISMATCHES
+
+    mismatch = continuity_refusal(doc)
+    if mismatch and mismatch not in TRANSIENT_CONTINUITY_MISMATCHES:
+        # QA C9: a dropped or externally changed append destination is refused
+        # the same way on every beat until an operator recovers it.
+        return RetryClassification(
+            kind=DETERMINISTIC,
+            reason=(
+                "The destination no longer matches the last verified run — "
+                "retrying replays the same refusal."
+            ),
+            corrective_action=CONTINUITY_CORRECTIVE,
+        )
     preflight = doc.get("preflight") if isinstance(doc.get("preflight"), Mapping) else {}
     blockers = preflight.get("blockers") if isinstance(preflight, Mapping) else None
     return classify_failure(

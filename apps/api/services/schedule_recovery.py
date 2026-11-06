@@ -28,29 +28,19 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from services.append_continuity import CONTINUITY_ERROR_CODE
+
 logger = logging.getLogger(__name__)
 
-#: The finding code a continuity refusal parks under.
-DESTINATION_CONTINUITY_CODE = "DESTINATION_CONTINUITY"
+#: The finding code a continuity refusal parks under: the refusal's own stable
+#: code, so nothing matches on its wording.
+DESTINATION_CONTINUITY_CODE = CONTINUITY_ERROR_CODE
 ACTION_REBASELINE = "rebaseline"
 ACTION_REBUILD = "rebuild"
 ACTIONS = (ACTION_REBASELINE, ACTION_REBUILD)
 
-_CONTINUITY_MARKERS = (
-    "the table no longer exists, but the last verified run",
-    "the destination changed since the last verified run",
-    "could not be re-read to prove it is unchanged",
-    "could not be fingerprinted after the last run",
-)
-
-
 class ScheduleRecoveryRefused(ValueError):
     """The recovery cannot apply; ``str()`` is operator text (HTTP 409)."""
-
-
-def is_continuity_refusal(message: str) -> bool:
-    text = str(message or "").lower()
-    return "verification failed for table" in text and any(m in text for m in _CONTINUITY_MARKERS)
 
 
 def continuity_corrective(schedule_id: str) -> str:
@@ -96,9 +86,7 @@ def _open_continuity_finding(sched: Any) -> dict[str, Any] | None:
     if not has_open_approval(sched):
         return None
     req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
-    if str(req.get("code") or "") == DESTINATION_CONTINUITY_CODE or is_continuity_refusal(
-        str(req.get("finding") or "")
-    ):
+    if str(req.get("code") or "") == DESTINATION_CONTINUITY_CODE:
         return req
     return None
 

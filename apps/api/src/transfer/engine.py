@@ -909,6 +909,7 @@ class UniversalTransferEngine:
                     error=violation.message,
                     message=violation.message,
                     error_details=violation.details,
+                    error_code=str(violation.details.get("error_code") or ""),
                 )
             except Exception:
                 logger.exception("Could not record continuity failure on %s", job_id)
