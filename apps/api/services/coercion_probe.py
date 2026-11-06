@@ -278,6 +278,20 @@ def _build_suggestion(
                 f"(mapping Widen alone does not change DDL). "
                 f"Quarantine never silently drops rows. {action}"
             )
+        elif _dst_gap_reason(failure_reasons):
+            # A spring-forward wall clock is well formed and fits every
+            # timestamp carrier; it does not exist in the declared zone. Telling
+            # the operator to widen the column (already TIMESTAMP_LTZ(9)) sent
+            # them nowhere (D52). Name the value and the zone, and offer the
+            # row-level ways through.
+            fix = (
+                f"Column '{source}' → {target_type}: {_dst_gap_reason(failure_reasons)} "
+                f"(a daylight-saving gap: that wall-clock time never happened there). "
+                f"Correct the source value, declare the zone it was really "
+                f"recorded in, or Accept risk with QUARANTINE_ROW / "
+                f"CAST_AND_CONTINUE to hold that row out while the valid rows load. "
+                f"Widening the column does not help."
+            )
         elif fc is FailureClass.EMPTY_VALUE_NOT_NULLABLE:
             fix = (
                 f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
@@ -1273,3 +1287,12 @@ def analyze_coercion(
         "columns": columns,
         "by_source": by_source,
     }
+
+
+def _dst_gap_reason(failure_reasons: list | None) -> str:
+    """The first "wall clock ... does not exist in timezone ..." refusal, or ""."""
+    for reason in failure_reasons or []:
+        text = str(reason or "").strip()
+        if "does not exist in timezone" in text.lower():
+            return text
+    return ""

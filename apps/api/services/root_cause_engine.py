@@ -700,6 +700,17 @@ def _source_from_pair_label(label: str) -> str:
     return ""
 
 
+def _first_cell_refusal(sources: list[dict[str, Any]]) -> str:
+    """The first per-cell refusal text in transform gates (a row-numbered one wins)."""
+    texts: list[str] = []
+    for src in sources:
+        details = src.get("details") or {}
+        for key in ("errors", "issue_texts"):
+            texts.extend(str(t).strip() for t in (details.get(key) or [])[:12] if str(t).strip())
+    with_row = next((t for t in texts if re.match(r"row \d+\b", t, re.I)), "")
+    return (with_row or (texts[0] if texts else ""))[:240]
+
+
 def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
     details = details or {}
     cols: list[str] = []
@@ -1623,6 +1634,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             if unknown_name
             else ""
         )
+        # The class alone ("INVALID_TIMESTAMP") left the operator to dig the
+        # value and the reason out of gate details (D52). Lead with the first
+        # concrete cell refusal, preferring one that names its row.
+        first_refusal = _first_cell_refusal(xf_gates + xf_blockers)
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("sample_transform", cols, absorbed),
@@ -1642,6 +1657,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         if failure_classes
                         else ""
                     )
+                    + (f" · first: {first_refusal}" if first_refusal else "")
                 ),
                 business_impact=biz,
                 affected_columns=cols,
