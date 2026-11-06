@@ -98,3 +98,40 @@ def test_indexed_column_already_at_its_budget_is_kept_and_reported():
     )
     assert _ddl(cur_big) == []
     assert list(suppressed) == ["code"]
+
+
+def test_candidate_with_its_own_charset_is_not_restated_and_numeric_widens_take_none():
+    """CI shard 1: the MySQL writer's candidate reads ``VARCHAR(50) CHARACTER SET
+    UTF8MB4``; a second CHARACTER SET made the MODIFY a 1064 syntax error, and a
+    DECIMAL widen must never carry text attributes."""
+    from connectors.schema_drift import _mysql_text_attribute_clause
+
+    assert _mysql_text_attribute_clause("VARCHAR(50) CHARACTER SET UTF8MB4", "utf8mb4", "utf8mb4_bin") == [
+        "COLLATE utf8mb4_bin"
+    ]
+    assert _mysql_text_attribute_clause("VARCHAR(50) CHARACTER SET LATIN1", "utf8mb4", "utf8mb4_bin") == []
+    assert _mysql_text_attribute_clause("VARCHAR(50) COLLATE utf8mb4_0900_ai_ci", "utf8mb4", "utf8mb4_bin") == []
+    assert _mysql_text_attribute_clause("DECIMAL(12,2)", "", "") == []
+    assert _mysql_text_attribute_clause("VARCHAR(768)", "utf8mb4", "utf8mb4_bin") == [
+        "CHARACTER SET utf8mb4", "COLLATE utf8mb4_bin"
+    ]
+    cur = _Cursor(indexed=())
+    cur_calls = cur.execute
+
+    def execute(sql, params=None):
+        cur_calls(sql, params)
+        if "character_maximum_length" in sql.lower():
+            cur._rows = [("note", "varchar", 5, None, None), ("amount", "decimal", None, 8, 2)]
+        elif "collation_name" in sql.lower() and params and params[-1] == "amount":
+            cur._rows = [("YES", None, "", None, None)]
+
+    cur.execute = execute  # type: ignore[method-assign]
+    widen_existing_columns_native(
+        cur, "mysql", "dataflow", "t", ["note", "amount"],
+        ["VARCHAR(50) CHARACTER SET UTF8MB4", "DECIMAL(12,2)"],
+        backfill=True, source_types={"note": "VARCHAR(50)", "amount": "DECIMAL(12,2)"},
+    )
+    alters = _ddl(cur)
+    assert len(alters) == 2, cur.executed
+    assert alters[0].upper().count("CHARACTER SET") == 1 and "COLLATE utf8mb4_bin" in alters[0]
+    assert "CHARACTER SET" not in alters[1].upper() and "COLLATE" not in alters[1].upper()

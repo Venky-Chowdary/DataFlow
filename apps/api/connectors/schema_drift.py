@@ -710,16 +710,7 @@ def _mysql_preserved_column_clause(
     if flag not in {"YES", "NO"}:
         return ""
     parts: list[str] = []
-    if (
-        collation
-        and "COLLATE" not in str(new_type or "").upper()
-        and _mysql_string_carrier(new_type)
-        and re.fullmatch(r"[A-Za-z0-9_]+", collation)
-        and (not charset or re.fullmatch(r"[A-Za-z0-9_]+", charset))
-    ):
-        if charset:
-            parts.append(f"CHARACTER SET {charset}")
-        parts.append(f"COLLATE {collation}")
+    parts.extend(_mysql_text_attribute_clause(new_type, charset, collation))
     if flag == "NO":
         parts.append("NOT NULL")
     extra_s = str(extra or "")
@@ -750,6 +741,35 @@ def _mysql_preserved_column_clause(
     if re.search(r"auto_increment", extra_s, flags=re.IGNORECASE):
         parts.append("AUTO_INCREMENT")
     return (" " + " ".join(parts)) if parts else ""
+
+
+def _mysql_text_attribute_clause(new_type: str, charset: str, collation: str) -> list[str]:
+    """CHARACTER SET / COLLATE to restate on a MySQL MODIFY of a string column.
+
+    A candidate that already names its own attributes keeps them: the MySQL
+    writer's widen candidate is spelled ``VARCHAR(50) CHARACTER SET UTF8MB4``,
+    and restating a second CHARACTER SET made the MODIFY a syntax error (1064).
+    A charset-only candidate still gets the existing COLLATE when it belongs
+    to that charset, so a carried ``utf8mb4_bin`` survives the widen. A numeric
+    or temporal carrier takes no text attributes.
+    """
+    if not collation or not _mysql_string_carrier(new_type):
+        return []
+    if not re.fullmatch(r"[A-Za-z0-9_]+", collation) or (
+        charset and not re.fullmatch(r"[A-Za-z0-9_]+", charset)
+    ):
+        return []
+    upper = re.sub(r"\s+", " ", str(new_type or "")).upper()
+    if "COLLATE" in upper:
+        return []
+    named = re.search(r"(?:CHARACTER SET|CHARSET)\s+([A-Z0-9_]+)", upper)
+    if named:
+        if collation.lower().startswith(named.group(1).lower() + "_"):
+            return [f"COLLATE {collation}"]
+        return []
+    out = [f"CHARACTER SET {charset}"] if charset else []
+    out.append(f"COLLATE {collation}")
+    return out
 
 
 def _mysql_string_carrier(ddl: str) -> bool:
@@ -979,7 +999,7 @@ def widen_existing_columns_native(
                 )
                 continue
             logger.warning(
-                "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
+                "Widen failed for %s.%s: %s (DDL: %s)", table_name, col, exc, ddl, exc_info=exc
             )
             raise_widen_refusal(col, existing_type, new_type, exc)
             raise
