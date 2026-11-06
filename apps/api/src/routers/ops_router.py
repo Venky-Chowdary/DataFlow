@@ -247,6 +247,10 @@ async def get_cdc_captures(
     C11: names the Datawrap-created slots no live CDC schedule uses, or whose
     source table is gone, how much WAL each retains, and a warning per slot.
     External slots are listed for visibility and never cleaned up.
+    ``auto_drop`` states the deployment setting ``cdc_orphan_auto_drop``
+    (off by default; PATCH /api/v1/workspace/settings, platform admin,
+    audited): only when it is on does the scheduler drop a source-table-gone
+    slot by itself after the grace period. Off, it warns and alerts.
     """
     import asyncio
 

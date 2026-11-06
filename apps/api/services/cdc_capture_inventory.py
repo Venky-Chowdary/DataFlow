@@ -30,12 +30,18 @@ capture (QA C11). This module
   owned, inactive (no reader attached) and either source-table-gone or not
   used by any live CDC schedule — audited, watermark cleared, registry entry
   closed;
-* drops, from the scheduler beat, an owned inactive slot whose captured tables
-  have all been gone for a grace period (``sweep_source_gone_captures``,
-  ``DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC``, default 900 s). A slot without a
-  live schedule but with its table present (a one-shot route) is reported
-  ``orphaned`` and left for the operator: a later run of that route may still
-  resume from it.
+* detects, from the scheduler beat, every owned slot that is ``orphaned`` or
+  ``source_table_gone``, logs the warning and alerts the connector's workspace
+  notification channels once per state, naming the WAL it holds
+  (``sweep_source_gone_captures``). Nothing is dropped by the beat unless a
+  platform admin turned on the deployment setting ``cdc_orphan_auto_drop``
+  (off by default, audited as ``cdc.capture.auto_drop.changed``): then an
+  owned, inactive slot whose captured tables all stayed gone for
+  ``DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC`` (default 900 s) is dropped, audited.
+  Off by default because a table dropped and recreated inside a migration
+  window, or restored from a backup, would otherwise lose its slot and force
+  a full re-snapshot nobody asked for. A one-shot route's slot whose table is
+  present is never auto-dropped: a later run of that route resumes from it.
 
 Schedule delete keeps its own release path (``services.cdc_capture_release``);
 it closes the registry entry for every slot it drops.
@@ -320,7 +326,14 @@ def _warn(item: dict[str, Any]) -> str:
         return (
             f"Replication slot {item['slot_name']} captures "
             f"{', '.join(item['tables']) or 'a table'} which no longer exists on the "
-            f"source, so nothing can read it.{held} Clean it up with "
+            f"source, so nothing can read it.{held} "
+            + (
+                "cdc_orphan_auto_drop is on: it is dropped automatically once its "
+                "tables stay gone past the grace period. "
+                if auto_drop_enabled()
+                else "Nothing drops it automatically (cdc_orphan_auto_drop is off). "
+            )
+            + "Clean it up with "
             "POST /api/v1/ops/cdc-captures/cleanup (MCP: cleanup_cdc_captures)."
         )
     if item["state"] == "orphaned":
@@ -400,6 +413,7 @@ def inventory_pg_captures(
             "created_by_job": (entry or {}).get("created_by_job"),
             "created_at": (entry or {}).get("created_at"),
             "source_gone_since": (entry or {}).get("source_gone_since"),
+            "alerted_state": (entry or {}).get("alerted_state"),
         }
         item["cleanup_allowed"] = bool(
             ownership == "datawrap" and state in CLEANABLE_STATES and not slot["active"]
@@ -439,6 +453,12 @@ def inventory_pg_captures(
             int(i.get("retained_wal_bytes") or 0) for i in items if i["state"] in CLEANABLE_STATES
         ),
         "warnings": warnings,
+        "auto_drop": {
+            "enabled": auto_drop_enabled(),
+            "setting": "cdc_orphan_auto_drop",
+            "grace_seconds": _grace_seconds(),
+            "applies_to": "source_table_gone",
+        },
         "ownership": (
             "Datawrap owns a slot or publication only when it created it (capture "
             "registry) or a live CDC schedule of this connector derives its name. "
@@ -572,11 +592,127 @@ def _drop_reporting(cfg: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]
         return {"action": "failed", "reason": str(exc)[:300]}
 
 
-def sweep_source_gone_captures(*, min_interval_sec: float = 300.0) -> list[dict[str, Any]]:
-    """Drop owned, inactive slots whose captured tables stayed gone past the grace.
+def auto_drop_enabled() -> bool:
+    """The deployment setting ``cdc_orphan_auto_drop`` (off by default)."""
+    try:
+        from services.workspace_store import get_workspace_settings
 
-    The first sweep that sees every captured table missing stamps
-    ``source_gone_since``; a table that comes back clears it. Called by the
+        return bool(get_workspace_settings().get("cdc_orphan_auto_drop"))
+    except Exception:  # noqa: BLE001 - an unreadable setting is "off"
+        return False
+
+
+def _alert_orphan(connector: Any, item: dict[str, Any]) -> bool:
+    """One alert per orphan state through the workspace's notification channels.
+
+    Also a WARNING log line, so a deployment without channels still shows it.
+    Never raises: the beat must keep going.
+    """
+    _logger.warning("%s", item["warning"])
+    wal = item.get("retained_wal_bytes")
+    name = getattr(connector, "name", "") or getattr(connector, "id", "")
+    payload = {
+        "event": "cdc.capture.orphaned",
+        "status": "warning",
+        "title": f"CDC replication slot {item.get('slot_name')} on “{name}” is orphaned",
+        "text": (
+            f"{item['warning']}\n"
+            f"Source connector: {name}\n"
+            f"State: {item['state']}\n"
+            + (f"WAL held: {wal:,} bytes\n" if isinstance(wal, int) else "")
+            + (
+                "Automatic drop is on: it is dropped once its tables stay gone past the grace period."
+                if auto_drop_enabled() and item["state"] == "source_table_gone"
+                else "Automatic drop is off: nothing is dropped until an admin cleans it up."
+            )
+        ),
+        "connector_id": getattr(connector, "id", ""),
+        "slot_name": item.get("slot_name"),
+        "state": item["state"],
+        "retained_wal_bytes": wal,
+    }
+    try:
+        from services.notification_delivery_log import delivery_context
+        from services.notification_service import notify_workspace
+
+        with delivery_context(event="cdc.capture.orphaned"):
+            notify_workspace(str(getattr(connector, "workspace_id", "") or ""), payload)
+        return True
+    except Exception as exc:  # noqa: BLE001 - the warning log line above stands
+        _logger.info("CDC orphan alert not delivered for %s: %s", item.get("slot_name"), exc)
+        return False
+
+
+def _gone_for(since: Any, now: datetime) -> float:
+    try:
+        return (now - datetime.fromisoformat(str(since))).total_seconds()
+    except ValueError:
+        return 0.0
+
+
+def _sweep_one(
+    cfg: dict[str, Any], connector: Any, entry_id: str, item: dict[str, Any],
+    *, now: datetime, grace: float, auto_drop: bool,
+) -> dict[str, Any]:
+    """Report (and alert once per state) one owned capture; drop it only when allowed."""
+    name = item.get("slot_name")
+    out = {
+        "slot_name": name,
+        "state": item["state"],
+        "retained_wal_bytes": item.get("retained_wal_bytes"),
+        "action": "none",
+    }
+    if item["state"] not in CLEANABLE_STATES:
+        patch = {k: None for k in ("source_gone_since", "alerted_state") if item.get(k)}
+        if patch:
+            _patch_entry(entry_id, patch)
+        return out
+    out["action"] = "reported"
+    if item.get("alerted_state") != item["state"]:
+        out["alerted"] = _alert_orphan(connector, item)
+        _patch_entry(entry_id, {"alerted_state": item["state"], "alerted_at": now.isoformat()})
+    if item["state"] != "source_table_gone":
+        return out
+    since = item.get("source_gone_since")
+    if not since:
+        _patch_entry(entry_id, {"source_gone_since": now.isoformat()})
+        return out
+    if not auto_drop or _gone_for(since, now) < grace or not item["cleanup_allowed"]:
+        return out
+    detail = _drop_reporting(cfg, item)
+    out.update(detail)
+    if detail.get("action") == "dropped":
+        from services.audit_coverage import record_security_event
+
+        record_security_event(
+            "cdc.capture.cleanup",
+            outcome="succeeded",
+            resource=f"pg_slot:{name}",
+            actor="system:scheduler",
+            details={
+                "connector_id": cfg.get("connector_id"),
+                "slot_name": name,
+                "publication_name": item.get("publication_name"),
+                "reason": "source_table_gone",
+                "setting": "cdc_orphan_auto_drop",
+                "tables": item.get("tables"),
+                "source_gone_since": since,
+                "retained_wal_bytes": item.get("retained_wal_bytes"),
+            },
+        )
+    return out
+
+
+def sweep_source_gone_captures(*, min_interval_sec: float = 300.0) -> list[dict[str, Any]]:
+    """Detect orphaned Datawrap slots, warn and alert; drop only when the setting allows.
+
+    For every owned slot that is ``orphaned`` or ``source_table_gone`` the beat
+    logs the warning and alerts the connector's workspace channels once per
+    state (WAL held included). The first sweep that sees every captured table
+    missing stamps ``source_gone_since``; a table that comes back clears it.
+    Only with the deployment setting ``cdc_orphan_auto_drop`` on (off by
+    default) is a source-table-gone slot dropped, once its tables stayed gone
+    past ``DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC`` — audited. Called by the
     scheduler beat; throttled to one pass per ``min_interval_sec``.
     """
     global _last_sweep
@@ -594,6 +730,7 @@ def sweep_source_gone_captures(*, min_interval_sec: float = 300.0) -> list[dict[
         if cid:
             by_connector.setdefault(cid, []).append(entry)
     grace = _grace_seconds()
+    auto_drop = auto_drop_enabled()
     now = datetime.now(timezone.utc)
     for cid, entries in by_connector.items():
         connector = get_connector(cid)
@@ -602,45 +739,13 @@ def sweep_source_gone_captures(*, min_interval_sec: float = 300.0) -> list[dict[
         cfg = {**connector.to_dict(), "connector_id": cid}
         ids = {e["slot_name"]: e["id"] for e in entries}
         for item in _sweep_inventory(cfg, cid):
-            name = item.get("slot_name")
-            if name not in ids:
-                continue
-            if item["state"] != "source_table_gone":
-                if item.get("source_gone_since"):
-                    _patch_entry(ids[name], {"source_gone_since": None})
-                continue
-            since = item.get("source_gone_since")
-            if not since:
-                _patch_entry(ids[name], {"source_gone_since": now.isoformat()})
-                _logger.warning("%s", item["warning"])
-                continue
-            try:
-                gone_for = (now - datetime.fromisoformat(str(since))).total_seconds()
-            except ValueError:
-                gone_for = 0.0
-            if gone_for < grace or not item["cleanup_allowed"]:
-                continue
-            detail = _drop_reporting(cfg, item)
-            outcomes.append({"slot_name": name, **detail})
-            if detail.get("action") != "dropped":
-                continue
-            from services.audit_coverage import record_security_event
-
-            record_security_event(
-                "cdc.capture.cleanup",
-                outcome="succeeded",
-                resource=f"pg_slot:{name}",
-                actor="system:scheduler",
-                details={
-                    "connector_id": cid,
-                    "slot_name": name,
-                    "publication_name": item.get("publication_name"),
-                    "reason": "source_table_gone",
-                    "tables": item.get("tables"),
-                    "source_gone_since": since,
-                    "retained_wal_bytes": item.get("retained_wal_bytes"),
-                },
-            )
+            if item.get("slot_name") in ids:
+                outcomes.append(
+                    _sweep_one(
+                        cfg, connector, ids[item["slot_name"]], item,
+                        now=now, grace=grace, auto_drop=auto_drop,
+                    )
+                )
     return outcomes
 
 

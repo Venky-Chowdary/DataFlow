@@ -44,6 +44,9 @@ class WorkspaceSettingsBody(BaseModel):
     retention_days: int | None = Field(default=None, ge=1, le=3650)
     # Purge finished jobs older than retention_days daily (off by default).
     retention_auto_purge: bool | None = None
+    # Drop orphaned Datawrap CDC slots whose source tables stayed gone (off by
+    # default; services.cdc_capture_inventory).
+    cdc_orphan_auto_drop: bool | None = None
     studio_schema_browser: bool | None = None
     studio_canvas: bool | None = None
 
@@ -221,7 +224,10 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
 
     from services.workspace_store import InvalidTimezone
 
+    from services.workspace_store import get_workspace_settings
+
     actor = _actor(request)
+    before = get_workspace_settings()
     try:
         updated = update_workspace_settings(
             org_name=body.org_name,
@@ -231,6 +237,7 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             studio_canvas=body.studio_canvas,
             actor=actor,
             retention_auto_purge=body.retention_auto_purge,
+            cdc_orphan_auto_drop=body.cdc_orphan_auto_drop,
         )
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -245,8 +252,21 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             "retention_auto_purge": updated["retention_auto_purge"],
             "studio_schema_browser": updated["studio_schema_browser"],
             "studio_canvas": updated["studio_canvas"],
+            "cdc_orphan_auto_drop": updated["cdc_orphan_auto_drop"],
         },
     )
+    if bool(before.get("cdc_orphan_auto_drop")) != bool(updated["cdc_orphan_auto_drop"]):
+        # A destructive automation on client databases: its own audit entry.
+        record_admin_change(
+            request,
+            "cdc.capture.auto_drop.changed",
+            target="cdc_orphan_auto_drop",
+            details={
+                "from": bool(before.get("cdc_orphan_auto_drop")),
+                "to": bool(updated["cdc_orphan_auto_drop"]),
+                "actor": actor,
+            },
+        )
     return updated
 
 

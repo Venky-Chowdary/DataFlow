@@ -10,7 +10,8 @@ Live: the CDC run is the real engine (``sync_mode=cdc``) from a PostgreSQL with
 defaults the ``PG*`` server; skipped unless logical) into the ``PG*`` server.
 The listing and the cleanup go through REST (``/api/v1/ops/cdc-captures``) and
 MCP (``list_cdc_captures`` / ``cleanup_cdc_captures`` + Confirm); the
-source-gone sweep is the scheduler beat's.
+source-gone sweep is the scheduler beat's: it reports and alerts by default
+and drops only once the deployment setting ``cdc_orphan_auto_drop`` is on.
 """
 
 from __future__ import annotations
@@ -90,8 +91,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "data"))
     (tmp_path / "data").mkdir()
     import services.cdc_capture_inventory as inv
+    import services.workspace_store as workspace_store
 
     monkeypatch.setattr(inv, "_last_sweep", 0.0)
+    monkeypatch.setattr(workspace_store, "STORE_PATH", tmp_path / "data" / "workspace.json")
     from fastapi.testclient import TestClient
     from src.main import app
 
@@ -231,22 +234,71 @@ def test_dropped_source_table_is_flagged_and_cleaned_up_through_mcp(client, rout
     assert slot not in _slots()
 
 
-@needs_logical
-def test_beat_drops_an_owned_slot_once_its_table_stayed_gone_past_the_grace(client, route, monkeypatch):
-    import services.cdc_capture_inventory as inv
+def _capture_alerts(monkeypatch) -> list[dict]:
+    """The payloads the beat hands the workspace notification path."""
+    import services.notification_service as ns
 
+    sent: list[dict] = []
+    monkeypatch.setattr(ns, "notify_workspace", lambda ws, payload, **_kw: sent.append(payload) or [])
+    return sent
+
+
+@needs_logical
+def test_beat_reports_and_alerts_but_never_drops_while_auto_drop_is_off(client, route, monkeypatch):
+    """Off by default: a dropped table and a retired one-shot route are found,
+    warned and alerted (WAL held named), and both slots stay."""
+    import services.cdc_capture_inventory as inv
+    from services.workspace_store import get_workspace_settings
+
+    sent = _capture_alerts(monkeypatch)
+    assert get_workspace_settings()["cdc_orphan_auto_drop"] is False
+    monkeypatch.setenv("DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC", "0")
     _run_cdc(route)
     slot = _ours(route).pop()
-    # Table still there: the sweep leaves an orphaned one-shot slot alone.
+    first = inv.sweep_source_gone_captures(min_interval_sec=0)
+    assert [(o["state"], o["action"]) for o in first if o["slot_name"] == slot] == [
+        ("orphaned", "reported")
+    ], first
+    assert len(sent) == 1 and sent[0]["slot_name"] == slot and sent[0]["state"] == "orphaned"
+    _sql(f'DROP TABLE "{route["table"]}"')
+    for _ in range(3):  # first sight stamps the time; later passes are past the grace
+        out = inv.sweep_source_gone_captures(min_interval_sec=0)
+        assert [o["action"] for o in out if o["slot_name"] == slot] == ["reported"], out
+    assert slot in _slots(), "the beat dropped a slot with cdc_orphan_auto_drop off"
+    # One alert per state, naming the WAL held; not one per beat.
+    assert [p["state"] for p in sent] == ["orphaned", "source_table_gone"], sent
+    assert "WAL held" in sent[1]["text"] and "Automatic drop is off" in sent[1]["text"]
+    listing = _listing(client, route)
+    assert listing["auto_drop"]["enabled"] is False
+    item = _item(listing, slot)
+    assert item["state"] == "source_table_gone" and item["cleanup_allowed"] is True
+    assert "cdc_orphan_auto_drop is off" in item["warning"], item["warning"]
+
+
+@needs_logical
+def test_beat_drops_after_the_grace_only_once_auto_drop_is_on(client, route, monkeypatch):
+    import services.cdc_capture_inventory as inv
+
+    _capture_alerts(monkeypatch)
+    resp = client.patch("/api/v1/workspace/settings", json={"cdc_orphan_auto_drop": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cdc_orphan_auto_drop"] is True
     monkeypatch.setenv("DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC", "0")
-    assert inv.sweep_source_gone_captures(min_interval_sec=0) == []
+    _run_cdc(route)
+    slot = _ours(route).pop()
+    # Table still there: a one-shot slot is never auto-dropped.
+    inv.sweep_source_gone_captures(min_interval_sec=0)
     assert slot in _slots()
     _sql(f'DROP TABLE "{route["table"]}"')
-    # First sight stamps source_gone_since; the next pass past the grace drops it.
-    assert inv.sweep_source_gone_captures(min_interval_sec=0) == []
-    assert slot in _slots()
+    # Inside the grace: first sight stamps source_gone_since, nothing dropped.
+    monkeypatch.setenv("DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC", "3600")
+    inv.sweep_source_gone_captures(min_interval_sec=0)
+    inv.sweep_source_gone_captures(min_interval_sec=0)
+    assert slot in _slots(), "dropped inside the grace period"
     entry = [e for e in inv.list_registered_captures() if e["slot_name"] == slot][0]
     assert entry.get("source_gone_since"), entry
+    # Past the grace: dropped, audited.
+    monkeypatch.setenv("DATAFLOW_CDC_SOURCE_GONE_GRACE_SEC", "0")
     out = inv.sweep_source_gone_captures(min_interval_sec=0)
     assert [o.get("action") for o in out if o.get("slot_name") == slot] == ["dropped"], out
     assert slot not in _slots()

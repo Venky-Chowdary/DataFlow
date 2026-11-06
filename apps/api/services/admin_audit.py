@@ -78,6 +78,10 @@ ADMIN_EVENTS.update(MFA_EVENTS)
 # Refusals of deployment-wide settings writes (services.platform_settings):
 # one name for every route in the general / SSO / AI-provider groups, with the
 # route's own action in the details.
+ADMIN_EVENTS["cdc.capture.auto_drop.changed"] = (
+    "A platform admin turned the automatic drop of orphaned CDC replication slots "
+    "(source table gone past the grace period) on or off."
+)
 ADMIN_EVENTS["platform_settings.write.denied"] = (
     "A write to deployment-wide settings (general, SSO, AI providers, Pilot engine) "
     "was refused because the caller is not a platform admin."
