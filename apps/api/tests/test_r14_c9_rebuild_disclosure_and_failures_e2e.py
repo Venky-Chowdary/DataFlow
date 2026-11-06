@@ -307,3 +307,55 @@ def test_a_failed_rebuild_job_is_audited_and_its_recovery_survives_a_replacing_p
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
         h.drop_table("postgresql", dest)
+
+
+def test_a_rebuild_that_fails_transiently_with_retries_left_is_recorded_not_left_dangling(client, monkeypatch):
+    """Review 3 pass 3: with max_retries=1 a transient rebuild failure took the
+    retry branch, which returned before the failure was recorded. The parked
+    schedule is never due, so the retry never ran: recovery.outcome stayed
+    "started" forever, nothing was audited, and retry_at dangled."""
+    import services.audit_coverage as audit_coverage
+    from services.connector_store import update_connector
+    from services.schedule_store import get_schedule, update_schedule
+
+    events: list[dict] = []
+    real = audit_coverage.record_security_event
+
+    def _capture(action, **kw):
+        if action == "schedule.destination.recovered":
+            events.append({"action": action, **kw})
+        return real(action, **kw)
+
+    monkeypatch.setattr(audit_coverage, "record_security_event", _capture)
+    pg = h.pg_conn()
+    cur = pg.cursor()
+    token = uuid.uuid4().hex[:8]
+    sid, src_table, dest = _schedule(client, cur, token, keyed=True)
+    try:
+        update_schedule(sid, {"max_retries": 1, "retry_backoff_seconds": 0})
+        _drop_and_park(cur, sid, dest)
+        resp = client.post(f"/api/v1/schedules/{sid}/recover", headers=_ACTOR,
+                           json={"action": "rebuild", "reason": "rebuild it"})
+        assert resp.status_code == 200 and resp.json()["job_id"], resp.text
+        job_id = resp.json()["job_id"]
+        # The source goes unreachable under the running rebuild: a transient
+        # (connection refused) failure, the class a retry is normally granted.
+        update_connector(get_schedule(sid).source_connector_id, {"port": 1})
+        job = h.wait_job(job_id)
+        assert job.get("status") == "failed", job
+        _settle(sid)
+
+        sched = get_schedule(sid)
+        assert _parked(sid)
+        assert not sched.retry_at, sched.retry_at  # a parked schedule cannot retry
+        failed = [e for e in events if e["outcome"] == "failed"
+                  and (e.get("details") or {}).get("phase") == "rebuild_failed"]
+        assert failed and failed[-1]["details"]["job_id"] == job_id, events
+        now = _finding(sid)
+        recovery = now.get("recovery") or ((now.get("evidence") or {}).get("recovery_context") or {}).get("recovery") or {}
+        assert recovery.get("job_id") == job_id and recovery.get("outcome") == "failed", now
+        last = (sched.run_history or [{}])[-1]
+        assert last.get("job_id") == job_id and last.get("retry_refused"), last
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {src_table}")  # nosec B608
+        h.drop_table("postgresql", dest)

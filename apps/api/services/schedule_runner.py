@@ -1372,6 +1372,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
         get_schedule,
+        has_open_approval,
         mark_schedule_run,
         schedule_retry,
     )
@@ -1403,6 +1404,20 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
     from services.execution_engine_contract import committed_rows_of
 
+    # A failed run that was the operator's destination rebuild: record the
+    # outcome on its finding and audit it BEFORE any retry decision, and carry
+    # the recovery into any finding that replaces it below (QA C9 review 3).
+    recovery_context = None
+    if not _is_success(status):
+        try:
+            from services.schedule_recovery import note_rebuild_failure
+
+            recovery_context = note_rebuild_failure(
+                schedule_id, job_id, str((job_doc or {}).get("error") or "")
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping never changes the verdict
+            logger.exception("Schedule %s rebuild failure was not recorded", schedule_id)
+
     rows_committed, rows_known = committed_rows_of(job_doc)
     decision = _retry_decision(
         status,
@@ -1413,6 +1428,16 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         rows_committed_known=rows_known,
         job_doc=job_doc,
     )
+    if decision["retry"] and (recovery_context is not None or has_open_approval(sched)):
+        # A schedule parked on a finding is never due (due_schedules skips it),
+        # so a retry scheduled now would never run and its retry_at would
+        # dangle. The run is final; the open finding carries what happens next.
+        decision = {
+            **decision,
+            "retry": False,
+            "reason": "The schedule is parked on an open finding, so this run is not retried; "
+            "resolve the finding to run again.",
+        }
     if not decision["retry"] and decision["reason"] and not _is_success(status):
         entry["retry_refused"] = decision["reason"]
     failure_class = decision.get("failure_class")
@@ -1485,18 +1510,6 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     else str(failure_class or "other")
                 ),
             )
-        # A failed run that was the operator's destination rebuild: record the
-        # outcome on its finding, audit it, and carry the recovery into any
-        # finding that replaces it below (QA C9 review 3).
-        recovery_context = None
-        try:
-            from services.schedule_recovery import note_rebuild_failure
-
-            recovery_context = note_rebuild_failure(
-                schedule_id, job_id, str((job_doc or {}).get("error") or "")
-            )
-        except Exception:  # noqa: BLE001 - bookkeeping never changes the verdict
-            logger.exception("Schedule %s rebuild failure was not recorded", schedule_id)
         park = _park_reason(sched, decision, entry)
         if park and _failure_kind(decision) == TRANSIENT and park in (
             "identical_failure_repeated",
