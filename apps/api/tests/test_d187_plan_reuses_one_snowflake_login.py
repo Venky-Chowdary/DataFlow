@@ -162,6 +162,11 @@ def test_pg_to_snowflake_plan_logs_in_once_with_the_same_verdict(monkeypatch, tm
     shared = _plan(monkeypatch, tmp_path, scoped=True)
     monkeypatch.undo()
     separate = _plan(monkeypatch, tmp_path, scoped=False)
-    assert separate[0] >= 4, separate
+    # The control proves the scope is what makes it one login: without it every
+    # step that reaches Snowflake logs in on its own (catalog read, connection
+    # probe, privilege probe). The exact count is not pinned: D244's plan-wide
+    # catalog memo already collapsed the two catalog reads into one, and the
+    # product's intent is fewer reads, not a fixed number of them.
+    assert separate[0] > 1, separate
     assert shared[0] == 1, shared
     assert shared[1:] == separate[1:]
