@@ -651,10 +651,17 @@ def _walk(
     return findings
 
 
-#: Clock skew allowed between writer processes before an unverifiable
-#: record's own time, earlier than its verified predecessor's or later than
-#: its verified successor's, reads as edited (F2).
-CLOCK_SKEW = timedelta(minutes=5)
+def _clock_skew() -> timedelta:
+    """How far an unverifiable record's own time may run against its verified
+    neighbours before it reads as edited (``DATAFLOW_AUDIT_CLOCK_SKEW_S``, 1 h)."""
+    from services.brand_env import getenv_brand
+
+    try:
+        return timedelta(seconds=max(0.0, float(getenv_brand("AUDIT_CLOCK_SKEW_S", "") or 3600)))
+    except ValueError:
+        return timedelta(hours=1)
+
+
 _KH_INDEXED: set[str] = set()
 
 
@@ -864,7 +871,8 @@ def _relabel_reason(
     * its hash verifies under a held key once ``key_id`` is set back: relabel;
     * the history is unreadable: inconclusive, never lost;
     * its own time runs backwards/forwards against its verified neighbours by
-      more than :data:`CLOCK_SKEW`: an edit;
+      more than :func:`_clock_skew` — unless its key is on the sealed history
+      and the time is within that key's use: an edit;
     * a key on the history that stopped signing well before the trusted clock: relabel;
     * a key never on the history, at a chain position after the history began
       (``history_seq``, from verified records' signed ``kh_seq``): relabel.
@@ -889,8 +897,15 @@ def _relabel_reason(
     if after_history and epoch is not None and (trusted_at is None or trusted_at < epoch):
         trusted_at = epoch  # the anchor record verified, and this one follows it
     entry = history.get(str(key_id or ""))
-    skew = CLOCK_SKEW
-    if own_time is not None:
+    skew = _clock_skew()
+    in_use = False
+    if entry is not None and own_time is not None:
+        first = _as_time(entry.get("first_seen")) if entry.get("first_seen") else None
+        last = _as_time(entry.get("last_seen"))
+        in_use = (first is None or own_time >= first - RELABEL_SLACK) and (
+            last is None or own_time <= last + RELABEL_SLACK
+        )
+    if not in_use and own_time is not None:
         if trusted_at is not None and own_time < trusted_at - skew:
             return "relabel", (
                 f"Names key {key_id} and claims {own_time.isoformat()}, earlier than the "

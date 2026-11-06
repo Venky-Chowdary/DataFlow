@@ -223,6 +223,57 @@ def test_h3_a_reanchor_after_a_reset_keeps_reporting_the_reset(ent):
     assert report["verified"] is False and report["tampering_detected"] is True
 
 
+# ── MEDIUM 4 ───────────────────────────────────────────────────────────────
+
+
+def test_m4_ordinary_clock_skew_is_not_an_edit(ent, monkeypatch):
+    """A pre-history lost-key record 10 minutes behind its verified
+    predecessor: two nodes' clocks, not an edit (tolerance defaults to 1 h)."""
+    from services import audit_chain_keystore as store
+
+    ws = ent.workspace("R14 C4 r4 M4 skew")
+    env_key = "env-m4-" + secrets.token_urlsafe(24)
+    # A deployment from before the history: an empty store, no history yet.
+    ent.db["audit_events"].delete_many({})
+    ent.db[store.COLLECTION].delete_many({})
+    ent.db[store.HISTORY_COLLECTION].delete_many({})
+    _forget_process_keys()
+    with monkeypatch.context() as m:
+        m.setattr(store, "_history_coll", lambda: None)
+        _write(1, action="r14c4r4.m4.held", workspace_id=ws)
+        m.setenv("DATAFLOW_AUDIT_HMAC_KEY", env_key)
+        _write(1, action="r14c4r4.m4.node", workspace_id=ws)
+    _forget_process_keys()
+    held = _records(ent, "r14c4r4.m4.held")[0]
+    node = _records(ent, "r14c4r4.m4.node")[0]
+    _set(ent, node, time=_time_of(held, timedelta(minutes=-10)))  # its clock ran behind
+    _write(1, action="r14c4r4.m4.after", workspace_id=ws)
+    report = _verify(ent, ws)
+    assert _tampered(report) == [], report["findings"]
+    assert report["unverifiable_key_lost"]["count"] == 1
+
+
+def test_m4_a_key_on_the_history_inside_its_use_window_skips_the_order_test(ent, monkeypatch):
+    from services import audit_chain_keystore, evidence_chain
+
+    monkeypatch.setattr(audit_chain_keystore, "HISTORY_REFRESH_S", 0.0)
+    ws = ent.workspace("R14 C4 r4 M4 window")
+    env_key = "env-m4w-" + secrets.token_urlsafe(24)
+    monkeypatch.setenv("DATAFLOW_AUDIT_HMAC_KEY", env_key)
+    _forget_process_keys()
+    _write(3, action="r14c4r4.m4w", workspace_id=ws)
+    monkeypatch.delenv("DATAFLOW_AUDIT_HMAC_KEY")
+    _forget_process_keys()
+    _write(1, action="r14c4r4.m4w.after", workspace_id=ws)
+    rows = _records(ent, "r14c4r4.m4w")
+    # 90 minutes behind its predecessor (beyond the tolerance), inside the key's use.
+    _set(ent, rows[2], time=_time_of(rows[1], timedelta(minutes=-90)))
+    monkeypatch.setattr(evidence_chain, "_clock_skew", lambda: timedelta(minutes=5))
+    report = _verify(ent, ws)
+    assert _tampered(report) == [], report["findings"]
+    assert report["unverifiable_key_lost"]["count"] == 3
+
+
 # ── LOW ────────────────────────────────────────────────────────────────────
 
 
