@@ -444,6 +444,15 @@ async def _run_lifecycle_confirm(
             job_doc = get_mongodb_service().get_job(job_id) or {}
             if scope.allows(job_doc.get("workspace_id")):
                 repair_workspace_id = str(job_doc.get("workspace_id") or "")
+        from services.team_store import WorkspaceStateUnavailable, workspace_closing
+
+        try:
+            closing = workspace_closing(repair_workspace_id, fail_closed=True)
+        except WorkspaceStateUnavailable as exc:
+            raise HTTPException(status_code=503, detail={"kind": "store_unavailable", "message": str(exc)}) from exc
+        if closing:
+            # A repair writes to the workspace's destination (review 6).
+            raise HTTPException(status_code=409, detail="This workspace is being deleted")
         try:
             return await asyncio.to_thread(
                 run_fenced_drift_repair,

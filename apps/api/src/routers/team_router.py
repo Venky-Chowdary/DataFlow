@@ -26,6 +26,7 @@ from services.team_store import (
     TeamStoreError,
     WorkspaceClosing,
     WorkspaceNotFound,
+    WorkspaceStateUnavailable,
     add_workspace_member,
     break_glass_set_admin,
     create_workspace,
@@ -177,6 +178,7 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     MemberAlreadyExists: 409,
     # A teardown of this workspace is under way.
     WorkspaceClosing: 409,
+    WorkspaceStateUnavailable: 503,
 }
 
 

@@ -685,22 +685,31 @@ def assign_unscoped_workspaces(
         return counts
     if not DLQ_PATH.exists():
         return counts
-    out: list[str] = []
-    changed = False
-    for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
-        ev = load_dlq_event(line) if line.strip() else None
-        if ev is not None and unscoped.matches(ev.get("workspace_id")):
-            ws = _place(ev)
-            if ws:
-                ev["workspace_id"] = ws
-                line = json.dumps(ev, default=json_default)
-                changed = True
-        out.append(line)
-    if apply and changed:
-        tmp = DLQ_PATH.with_suffix(DLQ_PATH.suffix + ".tmp")
-        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-        tmp.replace(DLQ_PATH)
+    # Under the append lock, with its own temp name (review 6): a backfill
+    # rewrite must not drop an event appended meanwhile, nor share a temp file
+    # with a teardown scrub.
+    with _jsonl_lock(DLQ_PATH):
+        out: list[str] = []
+        changed = False
+        for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
+            ev = load_dlq_event(line) if line.strip() else None
+            if ev is not None and unscoped.matches(ev.get("workspace_id")):
+                ws = _place(ev)
+                if ws:
+                    ev["workspace_id"] = ws
+                    line = json.dumps(ev, default=json_default)
+                    changed = True
+            out.append(line)
+        if apply and changed:
+            _atomic_rewrite(DLQ_PATH, out)
     return counts
+
+
+def _atomic_rewrite(path: Path, lines: list[str]) -> None:
+    """Replace ``path`` with ``lines`` through a temp file no other writer shares."""
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    tmp.replace(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1505,12 +1514,14 @@ def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
         query = {"workspace_id": ws}
         removed += int(coll.count_documents(query) if dry_run else coll.delete_many(query).deleted_count)
     # The live file and every rotated one (quarantine_dlq.<stamp>.jsonl) hold
-    # full row bodies; each is rewritten under the append lock.
-    paths = [DLQ_PATH] + sorted(DLQ_PATH.parent.glob(f"{DLQ_PATH.stem}.*{DLQ_PATH.suffix}"))
-    for path in paths:
-        if not path.exists() or path.name.endswith((".tmp", ".lock")):
-            continue
-        with _jsonl_lock(path):
+    # full row bodies. The live file's lock is taken FIRST and held for the
+    # whole scrub: rotation happens under it, so the glob cannot race a
+    # rotation (review 6).
+    with _jsonl_lock(DLQ_PATH):
+        paths = [DLQ_PATH] + sorted(DLQ_PATH.parent.glob(f"{DLQ_PATH.stem}.*{DLQ_PATH.suffix}"))
+        for path in paths:
+            if not path.exists() or path.name.endswith((".tmp", ".lock")):
+                continue
             kept: list[str] = []
             hit = 0
             for line in path.read_text(encoding="utf-8").splitlines():
@@ -1521,7 +1532,5 @@ def delete_workspace_events(workspace_id: str, *, dry_run: bool = False) -> int:
                 kept.append(line)
             removed += hit
             if hit and not dry_run:
-                tmp = path.with_suffix(path.suffix + ".tmp")
-                tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-                tmp.replace(path)
+                _atomic_rewrite(path, kept)
     return removed

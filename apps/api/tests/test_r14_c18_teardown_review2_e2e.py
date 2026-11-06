@@ -371,9 +371,11 @@ def test_job_create_and_beat_claim_fail_closed_when_the_store_cannot_be_read(mon
         raise RuntimeError("store down")
 
     monkeypatch.setattr(team_store, "get_workspace", boom)
-    with pytest.raises(team_store.WorkspaceClosing):
+    # A store blip is reported as a store outage (503), not "being deleted" (review 6).
+    with pytest.raises(team_store.WorkspaceStateUnavailable):
         team_store.assert_workspace_open("ws-unknown")
-    assert team_store.workspace_closing("ws-unknown", fail_closed=True) is True
+    with pytest.raises(team_store.WorkspaceStateUnavailable):
+        team_store.workspace_closing("ws-unknown", fail_closed=True)
     assert team_store.workspace_closing("ws-unknown") is False
 
 
@@ -443,3 +445,53 @@ def test_a_teardown_rewrite_never_loses_an_append_from_another_tenant(tmp_path, 
     assert q.delete_workspace_events("ws-b") == 3
     text = q.DLQ_PATH.read_text(encoding="utf-8")
     assert "c-late" in text and "ws-b" not in text
+
+
+
+def test_a_beat_claim_during_a_store_blip_says_store_unavailable(ent, monkeypatch):
+    from services import team_store
+    from services.schedule_store import (
+        PipelineSchedule, _load_all, _save_all, last_claim_refusal, mark_schedule_running,
+    )
+
+    box = provision(ent)
+    sched = PipelineSchedule(
+        id=f"blip-{uuid.uuid4().hex[:6]}", name="blip", source_connector_id="c", source_table="t",
+        dest_connector_id="c", dest_table="t_out", interval="hourly", enabled=True,
+        workspace_id=box.workspace_id, next_run_at="2000-01-01T00:00:00+00:00",
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+    )
+    _save_all(_load_all() + [sched])
+
+    def boom(_ws):
+        raise RuntimeError("store blip")
+
+    monkeypatch.setattr(team_store, "get_workspace", boom)
+    assert mark_schedule_running(sched.id, "beat-1") is None
+    assert last_claim_refusal(sched.id)["kind"] == "store_unavailable"
+
+
+def test_the_backfill_rewrite_shares_the_append_lock(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from services import quarantine_dlq as q
+
+    monkeypatch.setattr(q, "DLQ_PATH", tmp_path / "quarantine_dlq.jsonl")
+    monkeypatch.setattr(q, "_dlq_coll", lambda: None)
+    q.append_dlq_event(job_id="legacy", action="quarantine", workspace_id="")
+    done = threading.Event()
+
+    def backfill():
+        q.assign_unscoped_workspaces(lambda ev: "ws-x", apply=True)
+        done.set()
+
+    with q._jsonl_lock(q.DLQ_PATH):
+        t = threading.Thread(target=backfill)
+        t.start()
+        time.sleep(0.3)
+        assert not done.is_set(), "the backfill rewrote the file while it was locked"
+    t.join(5)
+    assert done.is_set()
+    assert '"ws-x"' in q.DLQ_PATH.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.jsonl.tmp")), "a shared temp name is left behind"

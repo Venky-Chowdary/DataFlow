@@ -565,20 +565,31 @@ def mark_workspace_closing(workspace_id: str, *, members: list[str] | None = Non
     return ws
 
 
+class WorkspaceStateUnavailable(TeamStoreError):
+    """The workspace store could not be read to decide whether work may start (503)."""
+
+    reason = "store_unavailable"
+    kind = "store_unavailable"
+
+
 def workspace_closing(workspace_id: str, *, fail_closed: bool = False) -> bool:
     """True while a teardown of ``workspace_id`` is under way (or was interrupted).
 
     ``fail_closed`` (job creation, the beat's schedule claim): a store that
-    cannot be read answers "closing" — starting work in a workspace whose state
-    is unknown is the unsafe choice (review 4 L3). Request gates keep the
-    default; the authority check after them reads the same store.
+    cannot be read raises :class:`WorkspaceStateUnavailable` — starting work in
+    a workspace whose state is unknown is the unsafe choice (review 4 L3), and
+    it is reported as a store outage, not as "being deleted" (review 6).
+    Request gates keep the default; the authority check after them reads the
+    same store.
     """
     if not workspace_id:
         return False
     try:
         ws = get_workspace(workspace_id)
-    except Exception:  # noqa: BLE001
-        return fail_closed
+    except Exception as exc:  # noqa: BLE001
+        if fail_closed:
+            raise WorkspaceStateUnavailable("The workspace store is unavailable; try again") from exc
+        return False
     return bool(ws is not None and ws.deleting_at)
 
 
@@ -718,8 +729,16 @@ def delete_workspace(*, workspace_id: str, actor: str = "system") -> bool:
 
 
 def get_workspace(workspace_id: str) -> Workspace | None:
+    """One workspace — an indexed read of that row, never the whole collection."""
     if not workspace_id:
         return None
+    db = _database()
+    if db is not None:
+        row = db[WORKSPACES_COLLECTION].find_one({"_id": workspace_id}, {"_id": False})
+        if row is None:
+            # Rows written before _id carried the workspace id.
+            row = db[WORKSPACES_COLLECTION].find_one({"id": workspace_id}, {"_id": False})
+        return Workspace.from_dict(dict(row)) if row and row.get("id") else None
     for ws in _read_workspaces():
         if ws.id == workspace_id:
             return ws

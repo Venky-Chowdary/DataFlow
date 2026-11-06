@@ -2543,6 +2543,21 @@ def _claim_running_mongo(
     return claimed
 
 
+def _workspace_claim_refusal(schedule_id: str) -> dict[str, Any] | None:
+    from services.team_store import WorkspaceStateUnavailable, workspace_closing
+
+    sched = get_schedule(schedule_id)
+    if sched is None or not sched.workspace_id:
+        return None
+    base = {"schedule_id": schedule_id, "schedule_name": sched.name, "job_id": "", "running_since": None}
+    try:
+        if workspace_closing(sched.workspace_id, fail_closed=True):
+            return {**base, "kind": "workspace_closing"}
+    except WorkspaceStateUnavailable:
+        return {**base, "kind": "store_unavailable"}
+    return None
+
+
 def mark_schedule_running(
     schedule_id: str, instance: str, job_id: str = ""
 ) -> PipelineSchedule | None:
@@ -2551,21 +2566,19 @@ def mark_schedule_running(
     Acts as a concurrency guard: returns ``None`` if this schedule or another
     schedule writing the same destination object already has a live, non-stale run.
     """
+    # The workspace check reads only the schedule's own workspace, outside
+    # the claim lock (review 6): a closing workspace — or one whose state the
+    # store cannot tell — starts nothing.
+    refusal = _workspace_claim_refusal(schedule_id)
+    if refusal is not None:
+        _record_refusal(schedule_id, refusal)
+        return None
     with _CLAIM_LOCK:
         schedules = _load_all()
         now = _now()
         for i, s in enumerate(schedules):
             if s.id != schedule_id:
                 continue
-            from services.team_store import workspace_closing
-
-            if workspace_closing(s.workspace_id or "", fail_closed=True):
-                # Its workspace is being deleted (S3): the beat starts nothing.
-                _record_refusal(schedule_id, {
-                    "kind": "workspace_closing", "schedule_id": schedule_id,
-                    "schedule_name": s.name, "job_id": "", "running_since": None,
-                })
-                return None
             holder = claim_holder(s, snapshot=schedules)
             _record_refusal(schedule_id, holder)
             if holder is not None:
