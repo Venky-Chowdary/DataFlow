@@ -57,8 +57,13 @@ def test_sqlite_writer_reports_the_collapse(tmp_path):
 
 
 def test_postgresql_writer_reports_the_collapse():
-    if not _up("127.0.0.1", 5432):
-        pytest.skip("PostgreSQL not reachable")
+    import psycopg2
+
+    try:
+        psycopg2.connect(host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow",
+                         password="dataflow", connect_timeout=2).close()
+    except Exception as exc:  # noqa: BLE001 — a foreign PG on :5432 refuses these credentials
+        pytest.skip(f"project PostgreSQL not reachable: {exc}")
     from connectors.postgresql_writer import write_mapped_rows
 
     table = "col_pg_" + uuid.uuid4().hex[:8]
@@ -167,3 +172,14 @@ def test_latest_wins_is_decided_per_stream():
     assert latest_wins_dedupe("", "incremental_deduped", stream_contracts=both, stream_name="b") == ""
     assert latest_wins_dedupe("", "incremental_deduped", stream_contracts=[with_cursor]) == "keep_last"
     assert "partition" in latest_wins_note("kafka") and latest_wins_note("postgresql") == ""
+
+
+def test_the_integrity_audit_passes_the_stream_name_through():
+    """F10: the per-stream rule only runs if the audit names its stream."""
+    import inspect
+
+    import services.data_integrity as di
+    import services.preflight_context as pc
+
+    assert "stream_name=stream_name" in inspect.getsource(di.run_integrity_audit)
+    assert "stream_name=str(getattr(self.plan.source" in inspect.getsource(pc)

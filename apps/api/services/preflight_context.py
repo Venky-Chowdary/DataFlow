@@ -475,6 +475,7 @@ class FilePreflightContext(PreflightContext):
             ),
             in_file_dedupe=str(getattr(self.plan, "in_file_dedupe", "") or ""),
             duplicate_policy=str(getattr(self.plan, "duplicate_policy", "") or ""),
+            stream_name=str(getattr(self.plan.source, "name", "") or ""),
             proven_width_narrowings=self.proven_width_narrowings,
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.

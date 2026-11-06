@@ -2179,6 +2179,7 @@ def run_integrity_audit(
     proven_width_narrowings: dict | None = None,
     in_file_dedupe: str = "",
     duplicate_policy: str = "",
+    stream_name: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -2258,7 +2259,11 @@ def run_integrity_audit(
     dedupe_note = ""
     if not str(in_file_dedupe or "").strip():
         in_file_dedupe = latest_wins_dedupe(
-            in_file_dedupe, sync_mode, stream_contracts=stream_contracts, source_type=source_db_type
+            in_file_dedupe,
+            sync_mode,
+            stream_contracts=stream_contracts,
+            source_type=source_db_type,
+            stream_name=stream_name,
         )
         if in_file_dedupe:
             dedupe_note = latest_wins_note(source_db_type)

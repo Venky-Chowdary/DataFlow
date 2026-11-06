@@ -208,8 +208,11 @@ def latest_version_per_key(
     comparison (``services.sync_cursor.compare_cursor_values``: ``999`` before
     ``1000``, instants by value, NULL lowest) with the key as the tie-break;
     sorting the wire text ranked ``"999"`` above ``"1000"`` and let a NULL
-    cursor win. Equal ``(cursor, key)`` keep arrival order (stable sort), as
-    the writer does. Then :func:`collapse_keep_last`.
+    cursor win. Equal ``(cursor, key)`` keep arrival order (stable sort): two
+    versions with the same cursor and key are not provably ordered on either
+    side, so the survivor here is the last one *this* read saw, which matches
+    the writer only when both reads returned them in the same order. Then
+    :func:`collapse_keep_last`.
     """
     from functools import cmp_to_key
 
