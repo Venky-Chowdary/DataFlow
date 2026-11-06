@@ -212,16 +212,19 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         supplied again (D221, QA r12 #3). A key is "lost" only if the
         sealed key history (vault-sealed ids and last-signed times:
         ``audit_chain_keystore.key_history``) says the deployment signed with
-        it and the record falls within its use, or the record predates the
-        history (an earlier deploy).
+        it and the record falls within its use, or the record sits before the
+        chain position where the history began (an earlier deploy).
     ``unknown_key_after_keyring`` (category ``tampering``)
-        Judged on the trusted clock — the last record before it that verified
-        under a held key: the record names a key the deployment never signed
-        with although it was written after the history began, or a key that
-        had stopped signing long before (C4 review). The key id was changed,
-        typically to hide an edit. A forged history row fails its seal and does
-        not count. Every verify walk adds the keys it verified to the history,
-        so an env key dropped later reads as lost, not as tampering.
+        The record names a key the deployment never signed with although it
+        sits after the chain position where the history began (judged by
+        position, never by the time the record claims), or a key that had
+        stopped signing long before the trusted clock (the last record before
+        it that verified, or the history's own anchor record), or its own time
+        runs backwards against the verified records around it (C4 reviews).
+        The key id was changed, typically to hide an edit. A forged history
+        row fails its MAC and does not count. Every verify walk adds the keys
+        it verified to the history, so an env key dropped later reads as
+        lost, not as tampering.
     ``key_history_tampered`` (report field; counted as tampering)
         The history begins at a signed ``audit.key_history.began`` chain
         record its MAC'd epoch names. The epoch row failing its MAC, going
@@ -436,6 +439,16 @@ def _walk(
     history = known_key_history()
     if anchor is None:
         anchor = _key_history_anchor(hmac_of)
+    signatures = [check_signature(events[i], hmac_of) if events[i].get("event_hash") else ("", None)
+                  for i in positions]
+    # The time of the next record that verifies, per walked position: the
+    # upper neighbour an unverifiable record's own time is checked against.
+    next_trusted: list[datetime | None] = [None] * len(positions)
+    upcoming: datetime | None = None
+    for n in range(len(positions) - 1, -1, -1):
+        next_trusted[n] = upcoming
+        if signatures[n][0] == "ok":
+            upcoming = _as_time(events[positions[n]].get("time")) or upcoming
     # The time of the last record that verified under a held key: a trusted
     # clock for the records after it (an unverifiable record's own time is
     # whatever its editor wrote).
@@ -462,10 +475,11 @@ def _walk(
                 )
             )
         else:
-            verdict, key_id = check_signature(event, hmac_of)
+            verdict, key_id = signatures[n]
             relabel = (
                 _relabel_reason(
-                    key_id, history, trusted_at, anchor["epoch"], own_time=_as_time(event.get("time"))
+                    key_id, history, trusted_at, anchor, seq=_position(event),
+                    own_time=_as_time(event.get("time")), next_trusted=next_trusted[n],
                 )
                 if verdict == "unknown_key"
                 else ""
@@ -611,6 +625,10 @@ def _walk(
     return findings
 
 
+#: Clock skew allowed between writer processes before an unverifiable
+#: record's own time, earlier than its verified predecessor's or later than
+#: its verified successor's, reads as edited (F2).
+CLOCK_SKEW = timedelta(minutes=5)
 _ANCHOR_INDEXED: set[str] = set()
 
 
@@ -735,41 +753,59 @@ def _relabel_reason(
     key_id: str | None,
     history: dict[str, dict[str, Any]],
     trusted_at: datetime | None,
-    epoch: datetime | None,
+    anchor: dict[str, Any],
     *,
+    seq: int = 0,
     own_time: datetime | None = None,
+    next_trusted: datetime | None = None,
 ) -> str:
     """Why an unknown-key record is a relabel, or "" when it may be a lost key.
 
-    Judged on the trusted clock (the last verified record before it):
-    * a key on the sealed history that stopped signing well before then was
+    Judged by chain position and the trusted clock, never by the time the
+    record itself claims (F2):
+    * a key never on the sealed history, on a record after the position the
+      history began at, was never this deployment's key;
+    * a key on the history that stopped signing well before the trusted clock
+      (the last verified record before it, or the history's own anchor) was
       relabelled onto the record;
-    * a key never on the history, on a record after the history began and
-      after a verified record, was never this deployment's key.
+    * a record whose own time runs backwards against its verified neighbours
+      had its time edited.
     Before the history began (pre-upgrade deploys) an unknown key is a lost key.
     """
-    if trusted_at is None:
-        # No verified record before it (the chain's first records): its own
-        # time is all there is — a time after the history began, or after the
-        # key last signed, is a relabel; only a pre-history time may be a lost key.
-        trusted_at = own_time
-        if trusted_at is None:
-            return ""
+    epoch = anchor.get("epoch")
+    history_seq = int(anchor.get("history_seq") or 0)
+    after_history = bool(history_seq and seq and seq > history_seq)
+    if after_history and epoch is not None and (trusted_at is None or trusted_at < epoch):
+        trusted_at = epoch  # the anchor record verified, and this one follows it
+    if own_time is not None and trusted_at is not None and own_time < trusted_at - CLOCK_SKEW:
+        return (
+            f"Names key {key_id} and claims {own_time.isoformat()}, earlier than the "
+            f"verified record before it ({trusted_at.isoformat()}): the record was "
+            "back-dated. Counted as tampering."
+        )
+    if own_time is not None and next_trusted is not None and own_time > next_trusted + CLOCK_SKEW:
+        return (
+            f"Names key {key_id} and claims {own_time.isoformat()}, later than the "
+            f"verified record after it ({next_trusted.isoformat()}): the record's time "
+            "was edited. Counted as tampering."
+        )
     entry = history.get(str(key_id or ""))
     if entry is not None:
         last = _as_time(entry.get("last_seen"))
-        if last is not None and trusted_at > last + RELABEL_SLACK:
+        if last is not None and trusted_at is not None and trusted_at > last + RELABEL_SLACK:
             return (
                 f"Names key {key_id}, which last signed at {last.isoformat()}, on a record "
                 f"written after {trusted_at.isoformat()}: the key id was changed. "
                 "Counted as tampering."
             )
         return ""
-    if epoch is not None and trusted_at >= epoch:
+    if after_history or (
+        not seq and epoch is not None and trusted_at is not None and trusted_at >= epoch
+    ):
         return (
             f"Names key {key_id}, which this deployment never signed with, on a record "
-            "written after a verified one: every writer since signs with a held key, so "
-            "the record's key id was changed. Counted as tampering."
+            "after the key history began: every writer since signs with a key on that "
+            "history, so the record's key id was changed. Counted as tampering."
         )
     return ""
 
