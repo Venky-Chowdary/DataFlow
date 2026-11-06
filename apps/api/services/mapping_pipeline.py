@@ -367,6 +367,33 @@ def _reported_source_carrier(declared: str, invent_carrier: str) -> str:
     return strip_identity_qualifier(declared).strip() or invent_carrier
 
 
+#: Parses that accept any scalar by wrapping it: a 100% sample parse rate
+#: through them proves nothing about fit (``json`` makes "alpha" the JSON
+#: string "alpha").
+_WRAPPING_PARSES = frozenset({"json"})
+
+
+def _parse_proves_the_pair(row: dict) -> bool:
+    """True when the measured values prove a same-name cross-type pair fits.
+
+    Either the quality class already reads the pair as exact / a safe
+    promotion (JSON documents onto JSONB), or the write goes through a strict
+    typed parse (``decimal``, ``integer``, ``date``, ...) that every sampled
+    value passed. Plain words onto an existing JSONB column pass the ``json``
+    parse only because it wraps them; that pair stays under the floor for the
+    operator to confirm (D159).
+    """
+    if str(row.get("confidence_class") or "") in {"exact_name_type", "safe_type_promotion"}:
+        return True
+    transform = str(row.get("transform") or "none").strip().lower()
+    if transform in _WRAPPING_PARSES or transform not in _TYPED_TRANSFORM_TARGET_TYPE:
+        return False
+    try:
+        return float(row.get("sample_parse_rate") or 0.0) >= 0.9
+    except (TypeError, ValueError):
+        return False
+
+
 def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
     """A preserve verdict is not a lossy type pair.
 
@@ -405,7 +432,9 @@ def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
             )
             row["reasoning"] = cleaned
             row.pop("review_kind", None)
-            if name_identical(str(row.get("source") or ""), str(row.get("target") or "")):
+            if name_identical(
+                str(row.get("source") or ""), str(row.get("target") or "")
+            ) and _parse_proves_the_pair(row):
                 # The lossy-pair demotion that capped this same-name mapping at
                 # 0.63 was graded on the declared types alone; the fidelity
                 # owner just measured the values and found the write lossless.
