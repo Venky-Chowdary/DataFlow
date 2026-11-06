@@ -416,11 +416,15 @@ def _stored_as_text(mappings: list[dict[str, Any]], dest_db: str) -> list[dict[s
     if not dest_db or not destination_schema_is_sampled(dest_db):
         return []
     text = {"string", "text", "unknown", ""}
+    # A JSON document carries these natively; the VARCHAR stamp of a schemaless
+    # destination is not a choice to store them as text (D290: id/qty are
+    # stored as JSON integers, the plan must not say "text").
+    json_native = {"integer", "boolean", "float"}
     out: list[dict[str, Any]] = []
     for m in mappings:
         src_type = str(m.get("source_type") or m.get("inferred_type") or "")
         logical = normalize_logical_type(src_type) if src_type else ""
-        if logical in text:
+        if logical in text or logical in json_native:
             continue
         carrier = invent_dest_type(src_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
         if normalize_logical_type(str(carrier or "")) not in text:

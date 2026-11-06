@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_dumps_exact_numbers,
+    json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
 )
@@ -912,7 +912,7 @@ def write_mapped_rows(
                 payload["namespace"] = namespace
             resp = session.post(
                 f"{index_url}/vectors/upsert",
-                data=json_dumps_exact_numbers(payload),
+                data=json_dumps_exact_text(payload),
                 headers=hdrs,
                 timeout=60,
             )

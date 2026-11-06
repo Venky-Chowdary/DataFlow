@@ -1467,6 +1467,25 @@ def _mark_exact_numbers(value: Any, mark: str) -> Any:
     return value
 
 
+def json_dumps_exact_text(value: Any, **kwargs: Any) -> str:
+    """``json.dumps`` for a sink that parses JSON numbers as IEEE float64.
+
+    Qdrant, Weaviate, Milvus and Pinecone read a payload through a float64
+    number parser, so an *unquoted* ``99999999999.999999`` arrives exact on
+    the wire and is stored as ``100000000000.0`` (D290/D285/D265); Weaviate's
+    auto-schema then types the property ``number``. A Decimal is written here
+    as its exact JSON text (``json_default``), the carrier the plan names for
+    a decimal into a schemaless destination, and every value of a field has
+    one JSON type. Integers, booleans and floats keep their native JSON type.
+    Files and JSONB sinks keep arbitrary precision and use
+    ``json_dumps_exact_numbers`` instead.
+    """
+    kwargs.setdefault("default", json_default)
+    kwargs.setdefault("ensure_ascii", False)
+    kwargs.setdefault("allow_nan", False)
+    return json.dumps(value, **kwargs)
+
+
 def json_dumps_exact_numbers(value: Any, **kwargs: Any) -> str:
     """``json.dumps`` that writes Decimals as exact JSON *numbers*.
 

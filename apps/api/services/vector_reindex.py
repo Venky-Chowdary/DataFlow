@@ -318,7 +318,7 @@ def _qdrant_move(
     moves: list[tuple[dict[str, Any], Any]],
     batch_size: int,
 ) -> int:
-    from services.value_serializer import json_dumps_exact_numbers
+    from services.value_serializer import json_dumps_exact_numbers, json_dumps_exact_text
 
     moved = 0
     for offset in range(0, len(moves), batch_size):
@@ -333,7 +333,7 @@ def _qdrant_move(
         ]
         resp = session.put(
             f"{base_url}/collections/{collection}/points?wait=true",
-            data=json_dumps_exact_numbers({"points": points}),
+            data=json_dumps_exact_text({"points": points}),
             headers=headers,
             timeout=30,
         )
