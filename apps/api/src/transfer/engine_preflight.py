@@ -144,8 +144,10 @@ def _execute_preflight_parity_kwargs(
     from services.duplicate_policy import route_duplicate_options
 
     # One duplicate choice for Validate and the writer (QA C2 remedies).
+    # The source is read the way every other field here is (getattr): a
+    # destination-only parity call carries no source endpoint.
     duplicate_options = route_duplicate_options(
-        dict(getattr(request.source, "extra", None) or {}), dict(extra)
+        dict(getattr(getattr(request, "source", None), "extra", None) or {}), dict(extra)
     )
     extra.update(duplicate_options)
     dest.extra = extra
