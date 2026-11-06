@@ -118,7 +118,15 @@ class ConnectorConfig(BaseModel):
     password: Optional[str] = Field(default=None, description="Password")
     connection_string: Optional[str] = Field(default=None, description="Full connection string")
     warehouse: Optional[str] = Field(default=None, description="Snowflake warehouse")
-    ssl: bool = Field(default=False, description="Use SSL/TLS")
+    ssl: bool = Field(
+        default=False,
+        description=(
+            "Require SSL/TLS. Off means TLS is not required: the MySQL driver still "
+            "negotiates TLS whenever the server offers it (ssl-mode=DISABLED in the "
+            "connection string asks for plaintext). The connection test states the "
+            "session's actual encryption."
+        ),
+    )
     auth_mode: Optional[str] = Field(default=None, description="Authentication mode")
     auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
     api_key: Optional[str] = Field(default=None, description="API key")

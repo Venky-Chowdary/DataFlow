@@ -237,7 +237,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "server ledger and is not echoed in the preview."
                     ),
                 },
-                "ssl": {"type": "boolean"},
+                "ssl": {
+                    "type": "boolean",
+                    "description": (
+                        "Require TLS. false = TLS not required (MySQL still negotiates it "
+                        "when offered; ssl-mode=DISABLED in connection_string asks for "
+                        "plaintext). Testing the connector states the real encryption."
+                    ),
+                },
                 "schema": {"type": "string"},
                 "warehouse": {
                     "type": "string",

@@ -805,6 +805,12 @@ def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
     ).lower().strip()
     if db_type and not str(cfg.get("type") or "").strip():
         cfg["type"] = db_type
+    if connection_string and _drivername(db_type).startswith("mysql"):
+        from connectors.mysql_conn import strip_tls_mode_params
+
+        # The TLS mode is a connect arg (see _build_engine), not a URL keyword.
+        connection_string = strip_tls_mode_params(connection_string)
+        cfg = {**cfg, "connection_string": connection_string}
 
     if connection_string:
         if connection_string.startswith(("duckdb:", "sqlite:")):
@@ -1191,10 +1197,26 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # Before the first bind, so DATETIME2(6) is not an ODBC millisecond.
             install_sqlserver_datetime2_bind()
 
+        connect_args = _connect_args_for(url, cfg)
+        url_head = (url if isinstance(url, str) else str(driver)).lower()
+        if "pymysql" in driver or url_head.startswith(("mysql", "mariadb")):
+            # Same TLS contract as connectors.mysql_conn (QA MySQL D10): ssl=True
+            # is REQUIRED here too, ssl-mode=DISABLED is the explicit plaintext.
+            from connectors.mysql_conn import TLS_DISABLED, TLS_REQUIRED, requested_tls_mode
+            from connectors.write_resilience import is_public_proxy_host
+
+            tls = requested_tls_mode(
+                ssl=bool(cfg.get("ssl")), connection_string=str(cfg.get("connection_string") or ""),
+                public_proxy=is_public_proxy_host(str(cfg.get("host") or "")),
+            )
+            if tls == TLS_REQUIRED:
+                connect_args["ssl"] = {"ssl": {}}
+            elif tls == TLS_DISABLED:
+                connect_args["ssl_disabled"] = True
         engine = create_engine(
             url,
             pool_pre_ping=True,
-            connect_args=_connect_args_for(url, cfg),
+            connect_args=connect_args,
             **pool_settings(),
         )
         from sqlalchemy import event
