@@ -174,6 +174,9 @@ def signing_key() -> tuple[str, bytes, str]:
         store.history_epoch()
     except store.HistoryTampered as exc:  # the verify walk reports it; signing goes on
         logger.error("audit key history: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - an unreachable database or vault must
+        # never stop audit writes: signing falls through to the keyring / local key.
+        logger.warning("audit key history unavailable, signing continues: %s", exc)
     configured = _env(KEY_ENV)
     if configured:
         key = configured.encode("utf-8")

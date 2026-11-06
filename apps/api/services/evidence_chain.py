@@ -430,6 +430,8 @@ def _walk(
         epoch = _as_time(keystore.history_epoch())
     except keystore.HistoryTampered:
         epoch = None  # reported once on the whole report (_history_tamper_reason)
+    except Exception:  # noqa: BLE001 - history unreadable: judged without it
+        epoch = None
     # The time of the last record that verified under a held key: a trusted
     # clock for the records after it (an unverifiable record's own time is
     # whatever its editor wrote).

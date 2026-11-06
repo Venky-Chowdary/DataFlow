@@ -273,3 +273,37 @@ def test_records_signed_with_a_node_local_key_during_a_keyring_outage_read_as_lo
     report = _verify(ent, ws)
     assert _tampered(report) == [], report["findings"]
     assert report["unverifiable_key_lost"]["count"] == 2, report["unverifiable_key_lost"]
+
+
+# ── Review of a350ff42a ────────────────────────────────────────────────────
+
+
+def test_f3_an_unreachable_history_at_cold_start_never_stops_audit_writes(ent, monkeypatch):
+    """Reviewer repro: history_epoch() raising anything but HistoryTampered
+    (database unreachable at a cold start, or the vault failing) made every
+    audit write fail."""
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    from services import audit_chain_keystore as store
+    from services.secret_vault import SecretVaultError
+
+    ws = ent.workspace("R14 C4 F3")
+    for error in (ServerSelectionTimeoutError("no servers"), SecretVaultError("no vault key")):
+        class _Broken:
+            full_name = "broken.history"
+
+            def find_one(self, *_a, **_k):
+                raise error
+
+            def find(self, *_a, **_k):
+                raise error
+
+            def update_one(self, *_a, **_k):
+                raise error
+
+        _forget_process_keys()
+        with monkeypatch.context() as m:
+            m.setattr(store, "_history_coll", lambda: _Broken())
+            before = len(_records(ent, "r14c4.f3"))
+            _write(1, action="r14c4.f3", workspace_id=ws)
+            assert len(_records(ent, "r14c4.f3")) == before + 1, type(error).__name__
