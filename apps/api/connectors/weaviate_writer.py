@@ -17,7 +17,6 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_default,
     json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
@@ -379,7 +378,7 @@ def _ensure_class(
     }
     resp = session.post(
         f"{base_url}/v1/schema",
-        data=json.dumps(payload, default=json_default),
+        data=json_dumps_exact_text(payload),
         headers=headers,
         timeout=15,
     )

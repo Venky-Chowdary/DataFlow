@@ -14,7 +14,7 @@ from services.primary_key import (
     pick_redis_identity_column,
 )
 from services.sync_cursor import is_overwrite_sync
-from services.value_serializer import json_default, sanitize_json_value
+from services.value_serializer import json_dumps_exact_text, sanitize_json_value
 
 from connectors.redis_reader import _redis_client, load_redis_json_doc, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
@@ -816,7 +816,7 @@ def write_mapped_rows(
                         if isinstance(existing, dict):
                             doc = {**existing, **doc}
                 safe_doc = sanitize_json_value(doc)
-                client.set(key, json.dumps(safe_doc, default=json_default, allow_nan=False))
+                client.set(key, json_dumps_exact_text(safe_doc, ensure_ascii=True))
                 written += 1
             except Exception as cell_exc:
                 msg = format_exception_message(cell_exc)

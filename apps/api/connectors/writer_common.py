@@ -624,18 +624,22 @@ _EXACT_DECIMAL_TEXT = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
 
 
 def _exact_decimal_cell(value: Any) -> Decimal | int | None:
-    """The exact number a DECIMAL-declared cell states, or ``None`` to leave it."""
-    if isinstance(value, Decimal):
-        return value if value.is_finite() else None
+    """The exact number a DECIMAL-declared cell states, or ``None`` to leave it.
+
+    Text goes through ``decimal_wire_value`` — the one parser the write path
+    binds (``Decimal(text)`` is a second algorithm and is forbidden); a cell it
+    refuses under the run's number locale is left to the caller as the text
+    it is.
+    """
+    if isinstance(value, bool):
+        return None
     if isinstance(value, int):
         return value
-    if isinstance(value, float):
-        if value != value or value in {float("inf"), float("-inf")}:
-            return None
-        return Decimal(repr(value))
-    if isinstance(value, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
-        return Decimal(value.strip())
-    return None
+    if isinstance(value, float) and (value != value or value in {float("inf"), float("-inf")}):
+        return None
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(value)
 
 
 def to_json_value(
@@ -724,6 +728,11 @@ def to_json_value(
             text = safe_decimal_text(exact)
             if text is not None:
                 return text
+        elif isinstance(value, str) and value.strip() and not exact_decimal:
+            # The write path refused to read this text as a number (Auto
+            # ``1,234`` / a currency mark): it stays the string it is, so the
+            # field keeps one JSON type; the transform path owns the refusal.
+            return unescape_wire_text(value)
     if ctype in {
         "integer",
         "int",

@@ -66,6 +66,25 @@ def test_files_and_csv_keep_their_own_decimal_contracts():
     assert to_delimited_value(Decimal("10.50"), "amount", types) == Decimal("10.50")
 
 
+def test_gate8_digest_folds_scale_3_text_like_the_source_decimal():
+    """Round-13 review: ``1.500`` is locale-ambiguous for the plain digest, so a
+    Kafka read-back of the exact-text wire must fold through the column's
+    DECIMAL carrier exactly as the source Decimal does."""
+    from services.reconciliation import canonical_checksum_from_iter, fingerprint_for_reconcile
+
+    values = ["1.500", "1.000", "1000.000", "12.345", BIG, "-0.000001"]
+    source = [{"id": i, "amount": Decimal(v)} for i, v in enumerate(values, 1)]
+    readback = [{"id": str(i), "amount": v} for i, v in enumerate(values, 1)]
+    for types in ({"id": "integer", "amount": "decimal"}, {"ID": "INTEGER", "AMOUNT": "DECIMAL(10,3)"}):
+        a = canonical_checksum_from_iter(source, ["id", "amount"], dest_db_type="kafka", dest_types=types)
+        b = canonical_checksum_from_iter(readback, ["id", "amount"], dest_db_type="kafka", dest_types=types)
+        assert a == b, types
+    for v in values:
+        assert fingerprint_for_reconcile(v, ddl_type="DECIMAL", engine="kafka") == fingerprint_for_reconcile(
+            Decimal(v), ddl_type="DECIMAL", engine="kafka"
+        ), v
+
+
 # ------------------------------------------------------------------ live e2e
 from tests.helpers.live_env import pg_creds, pg_up  # noqa: E402
 
@@ -93,11 +112,11 @@ def live():
     table = "r13_d203_src_" + uuid.uuid4().hex[:8]
     topic = "r13_d203_" + uuid.uuid4().hex[:10]
     with conn.cursor() as cur:
-        cur.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, amount NUMERIC(18,6), big NUMERIC(30,10), label TEXT)")
+        cur.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, amount NUMERIC(18,6), big NUMERIC(30,10), label TEXT, s3 NUMERIC(10,3))")
         cur.executemany(
-            f"INSERT INTO {table} VALUES (%s,%s,%s,%s)",
-            [(1, "1.500000", LONG, "a"), (2, BIG, "-0.0000000001", ""),
-             (3, "-0.000001", "7", "Łukasz 山田 🎉"), (4, None, None, "  ")],
+            f"INSERT INTO {table} VALUES (%s,%s,%s,%s,%s)",
+            [(1, "1.500000", LONG, "a", "1.500"), (2, BIG, "-0.0000000001", "", "1.000"),
+             (3, "-0.000001", "7", "Łukasz 山田 🎉", "1000.000"), (4, None, None, "  ", "12.345")],
         )
     try:
         yield c, table, topic
@@ -165,10 +184,12 @@ def test_pg_numeric_to_kafka_topic_has_one_json_type_per_field(live, monkeypatch
         by_id.setdefault(m["id"], []).append(m)
     assert set(by_id) == {1, 2, 3, 4} and all(len(v) == 2 for v in by_id.values())
     for m in messages:
-        for field in ("amount", "big"):
+        for field in ("amount", "big", "s3"):
             assert m[field] is None or isinstance(m[field], str), (field, m)
     assert by_id[1][0]["amount"] == "1.500000" and by_id[1][0]["big"] == LONG
     assert by_id[2][0]["amount"] == BIG and by_id[2][0]["big"] == "-0.0000000001"
     assert by_id[3][0]["amount"] == "-0.000001" and by_id[3][0]["big"] == "7.0000000000"
     assert by_id[4][0]["amount"] is None and by_id[4][0]["big"] is None
     assert by_id[2][0]["label"] == "" and by_id[3][0]["label"] == "Łukasz 山田 🎉" and by_id[4][0]["label"] == "  "
+    # scale-3 values are locale-ambiguous for a plain digest; strict Gate-8 passed above
+    assert [by_id[i][0]["s3"] for i in (1, 2, 3, 4)] == ["1.500", "1.000", "1000.000", "12.345"]

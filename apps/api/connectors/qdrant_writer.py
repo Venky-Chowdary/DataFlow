@@ -16,7 +16,6 @@ from typing import Any, Callable
 
 from services.value_serializer import (
     cell_to_string,
-    json_default,
     json_dumps_exact_text,
     load_http_json,
     sanitize_json_value,
@@ -254,7 +253,7 @@ def _ensure_collection(
     }
     resp = session.put(
         f"{base_url}/collections/{collection}",
-        data=json.dumps(create_payload, default=json_default),
+        data=json_dumps_exact_text(create_payload),
         headers=headers,
         timeout=10,
     )
@@ -448,7 +447,7 @@ def scan_source_ids(
                 body["offset"] = offset
             resp = session.post(
                 f"{base_url}/collections/{collection}/points/scroll",
-                data=json.dumps(body, default=json_default),
+                data=json_dumps_exact_text(body),
                 headers=hdrs,
                 timeout=30,
             )
