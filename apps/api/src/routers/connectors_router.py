@@ -598,6 +598,9 @@ async def get_transfer_job(job_id: str, request: Request):
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if job.get(key) and hasattr(job[key], "isoformat"):
                 job[key] = job[key].isoformat()
+        from services.quarantine_from_preflight import hydrate_job_quarantine_sample
+
+        hydrate_job_quarantine_sample(job)
         safe = sanitize_job_for_api(job)
         safe["runtime_estimate"] = estimate_for_job_doc(job)
         return safe

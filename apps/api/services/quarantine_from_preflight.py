@@ -410,3 +410,39 @@ def merge_job_quarantine(
         except Exception:
             return details
     return []
+
+
+def hydrate_job_quarantine_sample(job: dict[str, Any] | None) -> None:
+    """Give a finished job's record the findings its quarantine view reads.
+
+    Shape diverts (and any finding persisted only to the control-plane DLQ)
+    leave the job document with ``rejected_rows=2`` and an empty
+    ``rejected_details``; the job page then showed "no quarantined rows"
+    beside a quarantine that holds them (QA browser 4). One store answers
+    both: :func:`merge_job_quarantine`, the reader the quarantine view uses.
+    """
+    if not isinstance(job, dict):
+        return
+    from services.job_status import is_terminal
+
+    if not is_terminal(str(job.get("status") or "")):
+        return
+    summary = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    ledger = job.get("row_accounting") if isinstance(job.get("row_accounting"), dict) else {}
+    counted = 0
+    # A job root stamped 0 at creation must not hide the run's own count.
+    for raw in (
+        job.get("rejected_rows"),
+        (summary or {}).get("rejected_rows"),
+        (ledger or {}).get("rows_quarantined"),
+    ):
+        try:
+            counted = max(counted, int(raw or 0))
+        except (TypeError, ValueError):
+            continue
+    if counted <= 0 or job.get("rejected_details") or (summary or {}).get("rejected_details"):
+        return
+    details = merge_job_quarantine(job)
+    if details:
+        job["rejected_details"] = details[:2000]
+        job["rejected_rows"] = counted
