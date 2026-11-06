@@ -341,6 +341,11 @@ class Workspace:
     sandbox_expires_at: str = ""
     #: The synthetic tester login the sandbox created; removed with it.
     sandbox_tester: str = ""
+    #: ``created_at`` of the tester login this sandbox minted. The teardown
+    #: deletes that login only while the stored record still carries it, so
+    #: a real account (a lost create race, or one re-created later under the
+    #: same email) is never touched. Empty = this sandbox minted no login.
+    sandbox_tester_created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -355,6 +360,7 @@ class Workspace:
             org_id=data.get("org_id", ""),
             sandbox_expires_at=str(data.get("sandbox_expires_at") or ""),
             sandbox_tester=str(data.get("sandbox_tester") or ""),
+            sandbox_tester_created_at=str(data.get("sandbox_tester_created_at") or ""),
         )
 
 

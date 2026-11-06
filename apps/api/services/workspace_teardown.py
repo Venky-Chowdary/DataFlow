@@ -155,8 +155,30 @@ def teardown_workspace(workspace_id: str, *, actor: str = "system") -> dict[str,
         return _teardown_unbound(workspace_id, actor=actor)
 
 
+def _sandbox_login(ws: Any) -> bool:
+    """The synthetic tester login a sandbox minted, removed with its workspace (S1).
+
+    Here, not in the sandbox route, so ``DELETE /team/workspaces/{id}`` on a
+    sandbox removes it too. Only the record this sandbox created (matched by
+    its ``created_at``) is deleted; its sessions are revoked first.
+    """
+    from services import auth_sessions, user_store
+
+    tester = str(getattr(ws, "sandbox_tester", "") or "")
+    created_at = str(getattr(ws, "sandbox_tester_created_at", "") or "")
+    if not tester or not created_at:
+        return False
+    record = user_store.get_user(tester)
+    if record is None or str(record.get("created_at") or "") != created_at:
+        return False
+    auth_sessions.revoke_all_for_email(tester)
+    return user_store.delete_user_if_created_at(email=tester, created_at=created_at)
+
+
 def _teardown_unbound(workspace_id: str, *, actor: str) -> dict[str, Any]:
     from services import team_store
+
+    workspace = team_store.get_workspace(workspace_id)
 
     active = _active_jobs(workspace_id)
     if active:
@@ -172,5 +194,6 @@ def _teardown_unbound(workspace_id: str, *, actor: str) -> dict[str, Any]:
         summary["api_keys_revoked"],
     ) = _policy_channels_keys(workspace_id)
     summary["members_removed"] = members
+    summary["tester_login_removed"] = _sandbox_login(workspace) if workspace is not None else False
     summary["workspace_removed"] = team_store._delete_workspace_rows(workspace_id)
     return summary

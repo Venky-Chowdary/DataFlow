@@ -617,6 +617,29 @@ def delete_user(*, email: str) -> bool:
     return _delete_one(normalize_email(email))
 
 
+def delete_user_if_created_at(*, email: str, created_at: str) -> bool:
+    """Delete the account only if it is the very record created at ``created_at``.
+
+    A conditional delete for logins a caller minted itself (a C18 sandbox
+    tester): an account someone else created under the same email — before
+    a lost create race, or after this one was removed — never matches.
+    """
+    normalized = normalize_email(email)
+    if not normalized or not created_at:
+        return False
+    db = mongo_database()
+    if db is not None:
+        return db[COLLECTION].delete_one({"_id": normalized, "created_at": created_at}).deleted_count > 0
+    with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
+        users = [u for u in data.get("users", []) if isinstance(u, dict)]
+        kept = [
+            u for u in users
+            if not (normalize_email(u.get("email", "")) == normalized and u.get("created_at") == created_at)
+        ]
+        data["users"] = kept
+        return len(kept) != len(users)
+
+
 _BACKFILLED = False
 
 

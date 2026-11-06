@@ -116,9 +116,13 @@ def create_sandbox(
         name=NAME_PREFIX + label, created_by=actor, sandbox_expires_at=expires, sandbox_tester=tester
     )
     try:
-        _user, issued = user_store.create_user(
+        user, issued = user_store.create_user(
             email=tester, name="Security tester", role="member", created_by=actor
         )
+        # From here on the login is this sandbox's: the fingerprint lets the
+        # teardown (and only it) delete exactly this record (S2).
+        ws.sandbox_tester_created_at = str(user.get("created_at") or "")
+        team_store._write_workspace(ws)
         team_store.add_workspace_member(
             workspace_id=ws.id, email=tester, role="admin", added_by=actor, actor_is_platform_admin=True
         )
@@ -126,8 +130,10 @@ def create_sandbox(
             workspace_id=ws.id, email=actor, removed_by=actor, actor_is_platform_admin=True
         )
     except Exception:
-        # Roll back: no half-made sandbox, no orphaned synthetic login.
-        _teardown(ws.id, tester, actor=actor)
+        # Roll back: no half-made sandbox. The login goes only if this call
+        # created it — a create that lost a race to a real account recorded no
+        # fingerprint, so that account is never deleted.
+        _teardown(ws.id, actor=actor)
         raise
     _audit("team.sandbox.create", actor, ws.id, {
         "workspace_id": ws.id,
@@ -148,17 +154,12 @@ def list_sandboxes() -> list[dict[str, Any]]:
     return [describe(ws, now=now) for ws in list_workspaces() if is_sandbox(ws)]
 
 
-def _teardown(workspace_id: str, tester: str, *, actor: str) -> dict[str, Any]:
-    """The workspace cascade, then the synthetic login. Idempotent."""
-    from services import auth_sessions, user_store
+def _teardown(workspace_id: str, *, actor: str) -> dict[str, Any]:
+    """The workspace cascade (it removes the sandbox's own tester login). Idempotent."""
     from services.workspace_teardown import teardown_workspace
 
     summary = teardown_workspace(workspace_id, actor=actor)
-    login_removed = False
-    if tester:
-        auth_sessions.revoke_all_for_email(tester)
-        login_removed = bool(user_store.delete_user(email=tester))
-    return {**summary, "tester": tester or None, "tester_login_removed": login_removed}
+    return {**summary, "tester": None}
 
 
 def delete_sandbox(workspace_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
@@ -170,7 +171,8 @@ def delete_sandbox(workspace_id: str, *, actor: str, reason: str = "") -> dict[s
     if ws is None or not is_sandbox(ws):
         raise SandboxNotFound("Sandbox workspace not found")
     try:
-        summary = _teardown(workspace_id, ws.sandbox_tester, actor=actor)
+        summary = _teardown(workspace_id, actor=actor)
+        summary["tester"] = ws.sandbox_tester or None
     except WorkspaceBusy as exc:
         raise SandboxBusy(str(exc)) from exc
     summary = {

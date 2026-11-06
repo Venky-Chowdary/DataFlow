@@ -297,3 +297,53 @@ def test_teardown_from_another_workspace_header_removes_the_targets_connectors(e
     for name in ent.db.list_collection_names():
         assert ent.db[name].count_documents({"id": conn_id}) == 0, name
     assert not [c for c in connector_store.list_connectors() if c.workspace_id == box.workspace_id]
+
+
+def test_plain_workspace_delete_of_a_sandbox_removes_the_tester_login(ent):
+    """S1 (second review): /auth/me answered 200 after DELETE /team/workspaces/{sandbox}."""
+    from services import user_store
+
+    box = provision(ent)
+    assert box.tester.get("/api/v1/auth/me").status_code == 200
+    gone = ent.admin.delete(f"/api/v1/team/workspaces/{box.workspace_id}")
+    assert gone.status_code == 200, gone.text
+    assert gone.json()["tester_login_removed"] is True
+    assert user_store.get_user(box.tester_email) is None
+    assert box.tester.get("/api/v1/auth/me").status_code == 401
+
+
+def test_rollback_after_a_lost_create_race_never_deletes_the_real_account(ent, monkeypatch):
+    """S2 (second review): the rollback deleted the login by email even when create_user failed."""
+    from services import sandbox_workspaces, team_store, user_store
+
+    real = "race-c18@example.test"
+    original_create = user_store.create_user
+
+    def lost_race(**kw):
+        # Another request created the real account first; this create fails.
+        original_create(email=real, password="Real-Account-Pass-2026!", role="member",
+                               created_by="someone-else@example.test")
+        raise user_store.UserStoreError(f"{real} already has an account")
+
+    monkeypatch.setattr(user_store, "create_user", lost_race)
+    with pytest.raises(user_store.UserStoreError):
+        sandbox_workspaces.create_sandbox(
+            name="race", tester_email=real, reason="r", actor="root-admin@example.com"
+        )
+    assert user_store.get_user(real) is not None, "rollback deleted a real account"
+    assert not [w for w in team_store.list_workspaces() if w.name == "[sandbox] race"]
+
+
+def test_expiry_never_deletes_a_recreated_account_with_the_same_email(ent):
+    """S2: only the record the sandbox minted (by created_at) is removed."""
+    from services import user_store
+    from services.sandbox_workspaces import sweep_expired_sandboxes
+
+    box = provision(ent, ttl_hours=1)
+    user_store.delete_user(email=box.tester_email)
+    user_store.create_user(email=box.tester_email, password="Real-Account-Pass-2026!",
+                           role="member", created_by="hr@example.test")
+    swept = sweep_expired_sandboxes(now=datetime.now(timezone.utc) + timedelta(hours=2), force=True)
+    assert [s["workspace_id"] for s in swept] == [box.workspace_id]
+    assert swept[0]["tester_login_removed"] is False
+    assert user_store.get_user(box.tester_email)["created_by"] == "hr@example.test"
