@@ -19,7 +19,7 @@ from .adapters import (
     parse_file_content,
     resolve_connector_config,
 )
-from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
+from .connector_capabilities import CATALOG_ID_ALIASES, get_capabilities, resolve_driver_type
 from .engine_family import family_or_kind
 from .models import EndpointConfig
 from .type_mapper import ddl_type
@@ -949,6 +949,15 @@ def _introspect_endpoint_impl(
         out["message"] = message
         return out
 
+    if get_capabilities(fmt).get("introspect"):
+        # The capability row is the one statement that a driver introspects:
+        # get_transfer_capabilities advertised InfluxDB / Couchbase as live
+        # sources while this dispatch still answered "not yet implemented",
+        # so list_connector_objects showed 0 objects and start_transfer had no
+        # source schema (D236). Every such driver reads through the canonical
+        # services.schema_introspect helper.
+        return _saas_introspect(out, endpoint, cfg, fmt)
+
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
 
@@ -1665,6 +1674,7 @@ def _saas_introspect(
             password=str(cfg.get("password") or ""),
             connection_string=str(cfg.get("connection_string") or ""),
             api_key=str(cfg.get("api_key") or ""),
+            ssl=bool(cfg.get("ssl")),
             table=obj,
         )
     except Exception as exc:
