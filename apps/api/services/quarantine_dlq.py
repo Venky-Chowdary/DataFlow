@@ -1281,3 +1281,126 @@ def quarantine_sample_incomplete(job: dict[str, Any] | None, details: list[dict[
             "are persisted — partial replay would leave remaining rejects behind."
         )
     return None
+
+
+REPLAY_DUPLICATE_KEYS_CODE = "REPLAY_DESTINATION_DUPLICATE_KEYS"
+
+
+def replay_duplicate_keys_refusal(
+    *,
+    table: str,
+    key_columns: list[str],
+    samples: list[dict[str, Any]] | None = None,
+    duplicate_keys: int = 0,
+    engine_error: str = "",
+) -> dict[str, Any]:
+    """The typed 409 a keyed replay returns over a table that repeats its key (QA C2).
+
+    A keyed replay merges on ``key_columns``; the merge needs a UNIQUE index the
+    engine cannot build while the table already holds two rows for one key.
+    The answer names those keys and the dedupe route instead of a raw 500.
+    """
+    keys = [str(c) for c in key_columns if c]
+    shown = []
+    for sample in samples or []:
+        values = sample.get("values") if isinstance(sample, dict) else None
+        if not isinstance(values, dict):
+            continue
+        label = ", ".join(str(values.get(k)) for k in keys) if keys else str(values)
+        shown.append(f"{label}×{int(sample.get('count') or 2)}")
+    key_label = " + ".join(keys) or "the replay key"
+    found = f" ({', '.join(shown)})" if shown else ""
+    count = int(duplicate_keys or len(shown) or 0)
+    return {
+        "code": REPLAY_DUPLICATE_KEYS_CODE,
+        "message": (
+            f"Replay merges on {key_label}, but destination table '{table}' already "
+            f"holds {count or 'some'} key value(s) more than once{found}. "
+            "A keyed replay cannot add the unique index it merges on over those rows."
+        ),
+        "table": table,
+        "key_columns": keys,
+        "duplicate_keys": shown,
+        "duplicate_key_count": count,
+        "next_action": (
+            "Dedupe the destination first: re-run the parent job as "
+            "full_refresh_overwrite with in_file_dedupe=keep_last (or "
+            "duplicate_policy=upsert), or delete the extra copies of those keys. "
+            "Then replay the quarantine."
+        ),
+        "engine_error": engine_error[:300],
+    }
+
+
+def replay_destination_duplicate_keys(
+    dest_cfg: dict[str, Any],
+    *,
+    table: str,
+    key_columns: list[str],
+) -> dict[str, Any] | None:
+    """Probe the destination for repeated replay keys; the refusal when found.
+
+    A probe that cannot run returns None: the writer still guards, and its
+    failure is mapped by :func:`replay_unique_index_failure`.
+    """
+    from services.upsert_ddl_gate import count_dest_duplicate_keys
+
+    try:
+        probe = count_dest_duplicate_keys(dest_cfg, table, list(key_columns))
+    except Exception as exc:  # noqa: BLE001 — a probe never decides alone
+        logger.info("replay duplicate-key probe skipped for %s: %s", table, exc)
+        return None
+    if not probe.get("ran") or not int(probe.get("duplicate_keys") or 0):
+        return None
+    return replay_duplicate_keys_refusal(
+        table=table,
+        key_columns=key_columns,
+        samples=list(probe.get("samples") or []),
+        duplicate_keys=int(probe.get("duplicate_keys") or 0),
+    )
+
+
+# The engine refusing to BUILD the merge index, not a row colliding on insert.
+_UNIQUE_BUILD_FAILURE = (
+    "could not create unique index",  # PostgreSQL
+    "create unique index statement terminated",  # SQL Server
+    "ora-01452",  # Oracle
+)
+
+
+def _unique_build_failed(text: str) -> bool:
+    low = text.lower()
+    if any(marker in low for marker in _UNIQUE_BUILD_FAILURE):
+        return True
+    # MySQL/MariaDB 1062 while adding the writer's own uidx_ index.
+    return "duplicate entry" in low and "uidx_" in low
+
+
+def replay_unique_index_failure(
+    exc: BaseException,
+    *,
+    table: str,
+    key_columns: list[str],
+) -> dict[str, Any] | None:
+    """Map an engine's unique-index / duplicate-key failure to the typed refusal."""
+    text = str(exc or "")
+    if not _unique_build_failed(text):
+        return None
+    import re
+
+    samples: list[dict[str, Any]] = []
+    match = re.search(r"Key \(([^)]*)\)=\(([^)]*)\)", text)
+    if match:
+        names = [n.strip().strip('"') for n in match.group(1).split(",")]
+        values = [v.strip() for v in match.group(2).split(",")]
+        samples.append({"values": dict(zip(names, values)), "count": 2})
+    else:
+        entry = re.search(r"Duplicate entry '([^']*)'", text)
+        if entry and len(key_columns) == 1:
+            samples.append({"values": {key_columns[0]: entry.group(1)}, "count": 2})
+    return replay_duplicate_keys_refusal(
+        table=table,
+        key_columns=key_columns,
+        samples=samples,
+        engine_error=text.strip().splitlines()[0] if text.strip() else "",
+    )

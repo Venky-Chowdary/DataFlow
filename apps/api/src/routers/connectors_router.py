@@ -2254,6 +2254,17 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             ),
         )
 
+    if not parent_appends and dest.kind == "database" and dest.table:
+        # A keyed replay merges on a UNIQUE index; over a table that already
+        # repeats the key the engine cannot build it (QA C2: a raw 500).
+        from services.quarantine_dlq import replay_destination_duplicate_keys
+
+        dup_refusal = replay_destination_duplicate_keys(
+            dest_cfg, table=str(dest.table), key_columns=list(conflict_columns)
+        )
+        if dup_refusal:
+            raise HTTPException(status_code=409, detail=dup_refusal)
+
     engine = get_transfer_engine()
     # Child job: upsert remediations (never full-refresh overwrite).
     # sync_mode must match write_mode so Gate-8 allow_extra / sample proof
@@ -2569,6 +2580,11 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         raise
     except Exception as e:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message=str(e), error=str(e))
+        from services.quarantine_dlq import replay_unique_index_failure
+
+        typed_refusal = replay_unique_index_failure(
+            e, table=str(dest.table or ""), key_columns=list(conflict_columns)
+        )
         try:
             from services.audit_log import append_audit_event
             from services.quarantine_dlq import append_dlq_event
@@ -2591,6 +2607,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        if typed_refusal:
+            raise HTTPException(status_code=409, detail=typed_refusal) from e
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

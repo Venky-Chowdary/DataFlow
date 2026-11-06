@@ -610,6 +610,43 @@ def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
     )
 
 
+_REPEATED_KEY_RE = re.compile(
+    r"([^\s:\"']+(?: \+ [^\s:\"']+)*): duplicate (?:composite )?key values "
+    r"(?:from source probe )?\(((?:[^()]|\([^()]*\))*)\)"
+)
+_ONE_PART = re.compile(r"\(([^(),]*)\)")
+
+
+def _repeated_key_summary(signals: list[dict[str, Any]]) -> str:
+    """Name the repeated key values a duplicate gate found (QA C2, D205).
+
+    "sku: duplicate key values (SKU-00007×2)" becomes the finding's summary,
+    and the routes that resolve it.
+    """
+    import json as _json
+
+    texts: list[str] = []
+    for sig in signals:
+        texts.append(str(sig.get("message") or ""))
+        try:
+            texts.append(_json.dumps(sig.get("details") or {}, default=str, ensure_ascii=False))
+        except (TypeError, ValueError):
+            continue
+    blob = "\n".join(texts)
+    match = _REPEATED_KEY_RE.search(blob)
+    if not match:
+        return ""
+    from services.data_integrity import DUPLICATE_KEY_ROUTES
+
+    # A one-column destination key is spelled as a tuple: "(sku)", "(A)×2".
+    label = _ONE_PART.sub(r"\1", match.group(1))
+    values = _ONE_PART.sub(r"\1", match.group(2))
+    return (
+        f"Key {label} repeats in the source ({values}). "
+        + DUPLICATE_KEY_ROUTES
+    )
+
+
 def _is_duplicate_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -2112,6 +2149,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 ),
                 "",
             )
+            _dup_msg = "" if _eq_msg else _repeated_key_summary([*dup_gates, *dup_blockers])
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
@@ -2122,7 +2160,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         if _eq_msg
                         else "Duplicate identity keys"
                     ),
-                    summary=_eq_msg or (
+                    summary=_eq_msg or _dup_msg or (
                         "Identity / uniqueness checks failed on the Validate sample "
                         f"— impacts {len(absorbed)} gate check(s)"
                     ),

@@ -1239,6 +1239,17 @@ def _in_file_collapse_message(
     )
 
 
+DUPLICATE_KEY_ROUTES = (
+    "Choose a duplicate route: in_file_dedupe=keep_last (one row per key, the "
+    "last copy wins), duplicate_policy=upsert, or duplicate_policy=append to "
+    "load every copy."
+)
+LENIENT_DUPLICATE_KEY_NOTE = (
+    "Lenient quarantines bad cells, not repeated primary keys: the second copy "
+    "of a declared key would be written twice. " + DUPLICATE_KEY_ROUTES
+)
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -2463,6 +2474,12 @@ def run_integrity_audit(
         structural = {"source_columns_available", "sample_available"}
         for check in checks:
             if check.get("check") in structural:
+                continue
+            if check.get("check") == "duplicate_keys" and check.get("blocks_transfer"):
+                # A repeated declared key is not a bad cell: no writer holds
+                # the second copy out, so "will quarantine" would land it
+                # twice (QA C2). The duplicate policy decides, not leniency.
+                check["note"] = LENIENT_DUPLICATE_KEY_NOTE
                 continue
             if check.get("blocks_transfer"):
                 check["blocks_transfer"] = False
