@@ -112,7 +112,7 @@ def keyless_create_refusal(
     return (
         f"The destination server has {variable}=ON: it refuses CREATE TABLE without "
         f"a PRIMARY KEY (MySQL error 3750). Fix: run upsert or full_refresh_overwrite"
-        f"{keyed} (DataFlow creates PRIMARY KEY on it); or create {table} yourself with "
+        f"{keyed} (Datawrap creates PRIMARY KEY on it); or create {table} yourself with "
         f"a primary key and {sync_mode} into it; or have the DBA set {variable}=OFF for "
         f"this account. A {sync_mode} create-new declares no key on purpose — a second "
         "copy of the same row is legal on append — so it would fail at the first write."
