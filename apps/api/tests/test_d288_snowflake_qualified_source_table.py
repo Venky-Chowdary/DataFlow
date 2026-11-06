@@ -22,20 +22,33 @@ CFG = {"type": "snowflake", "host": "localhost", "port": 443, "database": "DATAF
        "username": "test", "password": "test", "schema": "PUBLIC", "warehouse": "WH"}
 
 
+def _fakesnow_connection():
+    """A connection through the connector's own opener.
+
+    ``snowflake_conn._open_connection`` installs fakesnow for the current
+    ``FAKESNOW_DB_PATH`` (re-pointing a patch another test left installed), so
+    the fixture and the engine read the same emulated database.
+    """
+    from connectors.snowflake_conn import _open_connection
+
+    return _open_connection(
+        account="localhost", username="test", password="test", database="DATAFLOW",
+        schema="PUBLIC", warehouse="WH", connection_string="",
+    )
+
+
 @pytest.fixture()
 def snow(monkeypatch, tmp_path):
     pytest.importorskip("fakesnow")
-    import fakesnow
-    import snowflake.connector as snc
-
     path = tmp_path / "fakesnow"
     path.mkdir()
     monkeypatch.setenv("FAKESNOW_DB_PATH", str(path))
-    with fakesnow.patch(db_path=str(path)):
-        conn = snc.connect(account="x", user="test", password="test", database="DATAFLOW", schema="PUBLIC")
+    conn = _fakesnow_connection()
+    try:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE HQ0609_SF (ID INT, AMT NUMBER(12,2), NAME VARCHAR(20))")
+        cur.execute("CREATE OR REPLACE TABLE HQ0609_SF (ID INT, AMT NUMBER(12,2), NAME VARCHAR(20))")
         cur.execute("INSERT INTO HQ0609_SF VALUES (1, 1.5, 'a'), (2, NULL, '東京 ✓'), (3, 0, ''), (4, 2, '  ')")
+    finally:
         conn.close()
     return path
 
@@ -78,3 +91,26 @@ def test_execute_reads_the_qualified_source_table(snow, tmp_path, monkeypatch):
     assert res.success, res.error
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM hq0609_sf").fetchone()[0] == 4
+
+
+def test_every_snowflake_name_site_splits_the_qualifier():
+    from connectors.snowflake_conn import snowflake_schema_and_table
+
+    assert snowflake_schema_and_table("PUBLIC", "PUBLIC.HQ0609_SF") == ("PUBLIC", "HQ0609_SF")
+    assert snowflake_schema_and_table("PUBLIC", "staging.orders") == ("STAGING", "orders")
+    assert snowflake_schema_and_table("PUBLIC", "HQ0609_SF") == ("PUBLIC", "HQ0609_SF")
+    assert snowflake_schema_and_table("", "orders") == ("PUBLIC", "orders")
+    # A quoted dotted name is one identifier and is not split.
+    assert snowflake_schema_and_table("PUBLIC", '"a.b"') == ("PUBLIC", "a.b")
+
+
+def test_desc_table_reads_the_qualified_name(snow):
+    from connectors.snowflake_conn import _snowflake_desc_column_rows
+
+    conn = _fakesnow_connection()
+    try:
+        with conn.cursor() as cur:
+            rows, missing = _snowflake_desc_column_rows(cur, "PUBLIC", "PUBLIC.HQ0609_SF")
+    finally:
+        conn.close()
+    assert not missing and {str(r[0]).upper() for r in rows} >= {"ID", "AMT", "NAME"}

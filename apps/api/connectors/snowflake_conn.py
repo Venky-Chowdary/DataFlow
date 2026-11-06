@@ -515,6 +515,23 @@ def _is_local_account(account: str) -> bool:
     return account.lower() in ("local", "localhost", "fakesnow")
 
 
+def snowflake_schema_and_table(schema: str, table: str) -> tuple[str, str]:
+    """``(schema, bare table)`` for a possibly schema-qualified Snowflake name.
+
+    ``PUBLIC.HQ0609_SF`` is a schema and a table, not one identifier (D288):
+    quoted whole it names an object that does not exist. The table's own
+    qualifier wins over the connector schema; a quoted dotted name stays one
+    name (``split_qualified_table``).
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier, split_qualified_table
+
+    own_schema, bare = split_qualified_table(str(table or ""), schema or None)
+    resolved_schema = str(own_schema or schema or "PUBLIC").strip() or "PUBLIC"
+    if own_schema and own_schema != schema:
+        resolved_schema = snowflake_fold_identifier(resolved_schema)
+    return resolved_schema, bare
+
+
 def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | None:
     """Return the exact ``TABLE_NAME`` as stored, or ``None`` if not visible.
 
@@ -766,6 +783,7 @@ def _snowflake_desc_column_rows(
     Second value is True when Snowflake said the table is absent — callers
     must not scan ``information_schema`` on ``SNOWFLAKE_SAMPLE_DATA``.
     """
+    schema, table = snowflake_schema_and_table(schema, table)
     try:
         cur.execute(f"DESC TABLE {snowflake_qualified_table(schema, table)}")
         rows = list(cur.fetchall() or [])
