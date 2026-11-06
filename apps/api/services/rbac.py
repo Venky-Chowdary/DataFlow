@@ -302,6 +302,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # (a workspace admin need not be a platform admin), so the middleware only
     # requires membership-level read here and lets the store refuse with a reason.
     ("*", "/api/v1/team/users", Permission.WORKSPACE_MANAGE),
+    # Throwaway security-test workspaces (C18): the router also requires a
+    # platform administrator.
+    ("*", "/api/v1/team/sandbox-workspaces", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/team/workspaces/", Permission.WORKSPACE_READ),
     ("GET", "/api/v1/team/workspaces", Permission.WORKSPACE_READ),
     ("*", "/api/v1/team/workspaces", Permission.WORKSPACE_MANAGE),

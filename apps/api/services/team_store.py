@@ -336,6 +336,9 @@ class Workspace:
     created_at: str = field(default_factory=_now)
     created_by: str = ""
     org_id: str = ""  # owning organization (signup-created orgs; "" = pre-org era)
+    #: Set only on a throwaway security-test workspace (C18,
+    #: ``services.sandbox_workspaces``): when it is deleted automatically.
+    sandbox_expires_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -348,6 +351,7 @@ class Workspace:
             created_at=data.get("created_at", _now()),
             created_by=data.get("created_by", ""),
             org_id=data.get("org_id", ""),
+            sandbox_expires_at=str(data.get("sandbox_expires_at") or ""),
         )
 
 

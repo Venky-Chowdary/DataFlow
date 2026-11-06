@@ -828,3 +828,74 @@ async def set_platform_role(email: str, body: PlatformRoleBody, request: Request
         },
     )
     return {"user": user, "from_role": previous}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sandbox workspaces for security retests (C18)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SandboxCreateBody(BaseModel):
+    name: str = Field(default="security test", max_length=100)
+    tester_email: str = Field(..., max_length=254)
+    reason: str = Field(..., min_length=1, max_length=500)
+    ttl_hours: int = Field(default=24, ge=1, le=168)
+    create_account: bool = Field(
+        default=False,
+        description="Create a synthetic login for tester_email when none exists (one-time password returned once).",
+    )
+
+
+class SandboxDeleteBody(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
+def _sandbox_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=getattr(exc, "status", 400), detail=str(exc))
+
+
+@router.post("/sandbox-workspaces")
+async def post_sandbox_workspace(body: SandboxCreateBody, request: Request):
+    """An isolated, expiring workspace for one tester (platform administrators only).
+
+    See ``services.sandbox_workspaces``: the tester is its only admin, the
+    platform admin is not a member, and it is torn down at ``expires_at``.
+    """
+    from services.sandbox_workspaces import SandboxError, create_sandbox
+
+    actor = _require_platform_admin(request)
+    if not " ".join(body.reason.split()):
+        raise HTTPException(status_code=422, detail="A reason is required for a sandbox workspace")
+    try:
+        sandbox, issued = create_sandbox(
+            name=body.name,
+            tester_email=body.tester_email,
+            reason=body.reason,
+            actor=actor,
+            ttl_hours=body.ttl_hours,
+            create_account=body.create_account,
+        )
+    except (SandboxError, UserStoreError) as exc:
+        raise _sandbox_error(exc) from exc
+    return {"workspace": sandbox, "temporary_password": issued}
+
+
+@router.get("/sandbox-workspaces")
+async def get_sandbox_workspaces(request: Request):
+    from services.sandbox_workspaces import list_sandboxes
+
+    _require_platform_admin(request)
+    return {"workspaces": list_sandboxes()}
+
+
+@router.delete("/sandbox-workspaces/{workspace_id}")
+async def delete_sandbox_workspace(
+    workspace_id: str, request: Request, body: SandboxDeleteBody | None = None
+):
+    from services.sandbox_workspaces import SandboxError, delete_sandbox
+
+    actor = _require_platform_admin(request)
+    try:
+        return delete_sandbox(workspace_id, actor=actor, reason=body.reason if body else "")
+    except SandboxError as exc:
+        raise _sandbox_error(exc) from exc
