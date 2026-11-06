@@ -427,6 +427,11 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("GET", "/api/v1/ops/cdc-leases/list", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-leases/force-release", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/metrics/json", Permission.WORKSPACE_MANAGE),
+    # The platform mail outbox (D130): every tenant's auth mail, so the route
+    # itself refuses anyone but a platform admin
+    # (workspace_access.require_platform_admin, as /audit/retention/purge and
+    # /audit/tip/ do). The gate here must not be the /ops/ prefix's job.read.
+    ("GET", "/api/v1/ops/mail", Permission.WORKSPACE_MANAGE),
     ("GET", "/metrics", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/training-agent/run", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/training-agent/run/sync", Permission.WORKSPACE_MANAGE),

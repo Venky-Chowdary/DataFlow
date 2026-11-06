@@ -98,6 +98,7 @@
   "GET /api/v1/ops/cdc-leases/list": "workspace.manage",
   "GET /api/v1/ops/dlq": "job.read",
   "GET /api/v1/ops/freshness": "job.read",
+  "GET /api/v1/ops/mail": "workspace.manage",
   "GET /api/v1/ops/metrics/json": "workspace.manage",
   "GET /api/v1/preflight/runs": "job.read",
   "GET /api/v1/preflight/runs/{run_id}": "job.read",
