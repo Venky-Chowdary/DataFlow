@@ -16,8 +16,10 @@ the automatic run of *exactly that purge*:
   records and quarantine are never touched: their retention has its own
   controls (``/audit/retention/purge``, the quarantine TTL).
 * **Once a day, once per deployment.** A claim document in Mongo
-  (``maintenance_runs``, ``_id = "job_retention"``) is advanced atomically, so
-  a second scheduler replica or a restart does not run it twice.
+  (``maintenance_runs``, ``_id = "job_retention"``, ``services.maintenance_claim``)
+  is advanced atomically, so a second scheduler replica or a restart does not
+  run it twice. Without that database the setting refuses to turn on, and a
+  run finds no store, skips and warns once.
 * **Audited per run, per workspace.** ``workspace.jobs.retention.purge`` with
   ``mode: "scheduled"``, the cutoff and the count removed, actor
   ``system:retention``, stamped with the workspace so its admins see it.
@@ -35,7 +37,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 RUN_INTERVAL = timedelta(hours=24)
-CLAIM_COLLECTION = "maintenance_runs"
 CLAIM_ID = "job_retention"
 ACTOR = "system:retention"
 AUDIT_ACTION = "workspace.jobs.retention.purge"
@@ -47,20 +48,23 @@ def auto_purge_enabled() -> bool:
     return bool(get_workspace_settings().get("retention_auto_purge"))
 
 
-def _claim(db: Any, now: datetime, *, force: bool) -> bool:
-    """Advance the deployment's claim when the run is due; False when it is not."""
-    coll = db[CLAIM_COLLECTION]
-    coll.update_one(
-        {"_id": CLAIM_ID},
-        {"$setOnInsert": {"next_due_at": datetime(1970, 1, 1, tzinfo=timezone.utc)}},
-        upsert=True,
-    )
-    due = {} if force else {"next_due_at": {"$lte": now}}
-    won = coll.find_one_and_update(
-        {"_id": CLAIM_ID, **due},
-        {"$set": {"next_due_at": now + RUN_INTERVAL, "claimed_at": now}},
-    )
-    return won is not None
+_warned_no_store = False
+
+
+class RetentionNeedsDurableStore(ValueError):
+    """Scheduled retention needs the shared control-plane store (MongoDB)."""
+
+
+def assert_can_enable() -> None:
+    """Refuse turning the schedule on where no durable store holds the job history."""
+    from services.maintenance_claim import durable_store
+
+    if durable_store() is None:
+        raise RetentionNeedsDurableStore(
+            "Automatic job purge needs the shared metadata database (MongoDB): this "
+            "deployment keeps jobs without it, so nothing could run or be claimed once a day. "
+            "Use the admin purge instead."
+        )
 
 
 def retention_schedule_status() -> dict[str, Any]:
@@ -69,13 +73,15 @@ def retention_schedule_status() -> dict[str, Any]:
     status: dict[str, Any] = {"scheduled": enabled, "interval_hours": int(RUN_INTERVAL.total_seconds() // 3600)}
     if not enabled:
         return status
-    try:
-        from services.mongodb_service import get_mongodb_service
+    from services.maintenance_claim import claim_status
 
-        doc = get_mongodb_service().get_database()[CLAIM_COLLECTION].find_one({"_id": CLAIM_ID}) or {}
+    try:
+        doc = claim_status(CLAIM_ID)
     except Exception as exc:  # noqa: BLE001 — status is informational
         logger.debug("retention claim unreadable: %s", exc)
         doc = {}
+    if not doc:
+        status["warning"] = "no shared metadata database: the automatic purge cannot run"
     for key in ("claimed_at", "next_due_at"):
         value = doc.get(key)
         status["last_run_at" if key == "claimed_at" else "next_run_at"] = (
@@ -86,16 +92,25 @@ def retention_schedule_status() -> dict[str, Any]:
 
 def run_due_retention(*, now: datetime | None = None, force: bool = False) -> dict[str, Any] | None:
     """Run the scheduled purge if it is enabled and due. ``None`` when it did not run."""
+    global _warned_no_store
     if not auto_purge_enabled():
         return None
     from services.job_retention import purge_expired_jobs
-    from services.mongodb_service import get_mongodb_service
+    from services.maintenance_claim import claim_run
     from services.team_store import list_workspaces
     from services.workspace_store import get_workspace_settings
 
     current = now or datetime.now(timezone.utc)
-    db = get_mongodb_service().get_database()
-    if not _claim(db, current, force=force):
+    claimed = claim_run(CLAIM_ID, RUN_INTERVAL, now=current, force=force)
+    if claimed is None:
+        # File-backed deployment (or the database is down): degrade cleanly,
+        # say so once per process — GET /settings carries the warning too.
+        if not _warned_no_store:
+            logger.warning("Scheduled job retention is on but no shared metadata database is reachable; skipped")
+            _warned_no_store = True
+        return None
+    _warned_no_store = False
+    if not claimed:
         return None
     retention_days = int(get_workspace_settings()["retention_days"])
     runs: list[dict[str, Any]] = []

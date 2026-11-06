@@ -127,3 +127,31 @@ def test_the_scheduler_beat_runs_the_maintenance_steps(monkeypatch):
     monkeypatch.setattr(sandbox_workspaces, "sweep_expired_sandboxes", boom)
     asyncio.run(schedule_runner._run_maintenance())  # a failing step never raises
     assert calls == ["retention", "sandbox"]
+
+
+def test_without_a_durable_store_the_setting_refuses_and_a_run_degrades_once(ent, monkeypatch, caplog):
+    """Review nit: on a file-backed deployment run_due_retention raised every beat."""
+    import logging
+
+    from services import job_retention_schedule, maintenance_claim
+
+    ws = ent.workspace("Retention no store")
+    monkeypatch.setattr(maintenance_claim, "durable_store", lambda: None)
+    refused = ent.admin.patch("/api/v1/workspace/settings", json={"retention_auto_purge": True},
+                              headers={"X-Workspace-Id": ws})
+    assert refused.status_code == 422, refused.text
+    assert "MongoDB" in refused.json()["detail"]
+    assert ent.admin.get("/api/v1/workspace/settings").json()["retention_auto_purge"] is False
+
+    # Turned on earlier (store since gone): every beat returns None, one warning.
+    from services.workspace_store import update_workspace_settings
+
+    update_workspace_settings(retention_auto_purge=True, actor="test")
+    job_retention_schedule._warned_no_store = False
+    with caplog.at_level(logging.WARNING, logger="services.job_retention_schedule"):
+        assert job_retention_schedule.run_due_retention(force=True) is None
+        assert job_retention_schedule.run_due_retention(force=True) is None
+    warnings = [r for r in caplog.records if "no shared metadata database" in r.getMessage()]
+    assert len(warnings) == 1
+    status = ent.admin.get("/api/v1/workspace/settings").json()["retention_enforcement"]
+    assert status["scheduled"] is True and "warning" in status

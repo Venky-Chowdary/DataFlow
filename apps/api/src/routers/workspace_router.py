@@ -233,6 +233,13 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
     from services.workspace_store import InvalidTimezone
 
     actor = _actor(request)
+    if body.retention_auto_purge:
+        from services.job_retention_schedule import RetentionNeedsDurableStore, assert_can_enable
+
+        try:
+            assert_can_enable()
+        except RetentionNeedsDurableStore as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     toggle: tuple[dict[str, Any], dict[str, Any]] | None = None
     try:
         before, updated = update_workspace_settings_with_before(
