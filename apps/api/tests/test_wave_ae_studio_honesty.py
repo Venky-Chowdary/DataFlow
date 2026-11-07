@@ -178,9 +178,22 @@ def test_append_expectations_do_not_block_on_duplicate_id():
 
     report = run_integrity_audit(
         source_columns=["id", "name"],
+        target_columns=["id", "name"],
         mappings=[
-            {"source": "id", "target": "id", "confidence": 0.95},
-            {"source": "name", "target": "name", "confidence": 0.95},
+            {
+                "source": "id",
+                "target": "id",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
+            {
+                "source": "name",
+                "target": "name",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
         ],
         sample_rows=[{"id": "a", "name": "1"}, {"id": "a", "name": "2"}],
         destination_db_type="postgresql",
@@ -199,9 +212,22 @@ def test_cdc_expectations_still_block_on_duplicate_id():
 
     report = run_integrity_audit(
         source_columns=["id", "name"],
+        target_columns=["id", "name"],
         mappings=[
-            {"source": "id", "target": "id", "confidence": 0.95},
-            {"source": "name", "target": "name", "confidence": 0.95},
+            {
+                "source": "id",
+                "target": "id",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
+            {
+                "source": "name",
+                "target": "name",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
         ],
         sample_rows=[{"id": "a", "name": "1"}, {"id": "a", "name": "2"}],
         destination_db_type="postgresql",
@@ -215,9 +241,21 @@ def test_cdc_expectations_still_block_on_duplicate_id():
     )
 
 
-def test_append_full_preflight_passes_with_duplicate_id():
+def test_append_full_preflight_passes_with_duplicate_id(tmp_path):
+    """Repeated source ids are legal on append when the destination does not hold them.
+
+    The destination is a real empty table. A stored copy of ``a`` would block;
+    a duplicate only inside the batch must not.
+    """
+    import sqlite3
+
     from services.preflight_service import run_file_preflight
 
+    db_path = tmp_path / "jobs.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.commit()
+    conn.close()
     rows = [{"id": "a", "name": "1"}, {"id": "a", "name": "2"}]
     result = run_file_preflight(
         columns=["id", "name"],
@@ -232,8 +270,10 @@ def test_append_full_preflight_passes_with_duplicate_id():
         source_kind="database",
         sync_mode="full_refresh_append",
         sample_rows=rows,
-        destination_db_type="postgresql",
+        destination_db_type="sqlite",
+        destination_table="jobs",
         destination_table_exists=True,
+        destination_config={"type": "sqlite", "connection_string": f"sqlite:///{db_path}"},
         destination_column_types={"id": "TEXT", "name": "TEXT"},
         destination_can_create=True,
         destination_can_write=True,

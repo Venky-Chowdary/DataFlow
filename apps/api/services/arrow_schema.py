@@ -21,17 +21,33 @@ def arrow_type_to_logical(arrow_type: Any) -> str:
         return "TEXT"
     if pat.is_boolean(t):
         return "BOOLEAN"
-    if pat.is_int8(t) or pat.is_int16(t) or pat.is_int32(t) or pat.is_int64(t):
+    if pat.is_int8(t):
+        return "TINYINT"
+    if pat.is_int16(t):
+        return "SMALLINT"
+    if pat.is_int32(t):
         return "INTEGER"
+    if pat.is_int64(t):
+        return "BIGINT"
     if pat.is_uint64(t):
         # Unsigned 64-bit exceeds signed BIGINT — keep as DECIMAL.
         return "DECIMAL(20,0)"
+    if pat.is_uint32(t):
+        return "INT UNSIGNED"
+    if pat.is_uint16(t):
+        return "SMALLINT UNSIGNED"
+    if pat.is_uint8(t):
+        return "TINYINT UNSIGNED"
     if pat.is_integer(t):
-        return "INTEGER"
+        return "BIGINT"
     if pat.is_decimal(t):
         return f"DECIMAL({t.precision},{t.scale})"
-    if pat.is_float16(t) or pat.is_float32(t) or pat.is_float64(t):
-        return "FLOAT"
+    if pat.is_float16(t):
+        return "FLOAT16"
+    if pat.is_float32(t):
+        return "FLOAT32"
+    if pat.is_float64(t):
+        return "DOUBLE"
     if pat.is_date(t):
         return "DATE"
     if pat.is_time(t):

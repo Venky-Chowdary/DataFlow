@@ -44,3 +44,26 @@ def test_validate_csv_clean_file():
     )
     assert report["ok"] is True
     assert report["issue_count"] == 0
+
+
+def test_validate_csv_canonical_boolean_passes():
+    content = b"id,flag\n1,true\n2,false\n3,1\n4,0\n"
+    report = validate_csv_content(
+        content,
+        ["id", "flag"],
+        {"id": "INTEGER", "flag": "BOOLEAN"},
+    )
+    assert report["ok"] is True
+    assert report["issue_count"] == 0
+
+
+def test_validate_csv_informal_yes_fails_boolean_schema():
+    """Write path refuses yes — CSV validate must not green-light BOOLEAN dest."""
+    content = b"id,flag\n1,yes\n2,no\n"
+    report = validate_csv_content(
+        content,
+        ["id", "flag"],
+        {"id": "INTEGER", "flag": "BOOLEAN"},
+    )
+    assert report["ok"] is False
+    assert any("expected boolean" in i and "yes" in i for i in report["issues"])

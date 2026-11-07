@@ -73,6 +73,24 @@ def test_platform_coreference_helper():
     hist = [{"role": "assistant", "content": "You have 4 recent jobs."}]
     assert resolve_platform_coreference("which of those failed?", hist)[0][0] == "list_jobs"
     assert resolve_platform_coreference("take me to jobs", hist) is None
+    # Verb *run* + dummy "is it safe" is a CDC question, not those jobs.
+    cdc = "if I run the same CDC change twice is it safe"
+    assert resolve_platform_coreference(cdc, []) is None
+    assert resolve_platform_coreference(cdc, hist) is None
+
+
+def test_cdc_twice_plan_is_knowledge_not_job_list():
+    from src.ai.copilot.pilot_agent import DataPilotAgent
+
+    agent = DataPilotAgent()
+    planned = agent._plan_with_memory(
+        "if I run the same CDC change twice is it safe",
+        {},
+        history=[],
+    )
+    names = [n for n, _ in planned]
+    assert "list_jobs" not in names
+    assert "explain_product" in names
 
 
 def test_auth_failure_is_process_wide(monkeypatch):

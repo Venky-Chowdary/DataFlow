@@ -16,7 +16,12 @@ def python_xml_runtime_ok() -> bool:
     parsing with ``No module named expat`` / missing ``XML_SetAllocTracker…``.
     """
     try:
-        from xml.etree import ElementTree as ET
+        # Prefer defusedxml (Bandit B314 / audit §6.10); fall back to stdlib for
+        # environments that only need a capability probe.
+        try:
+            from defusedxml import ElementTree as ET
+        except ImportError:  # pragma: no cover
+            from xml.etree import ElementTree as ET  # nosec B314 — capability probe only
 
         ET.XMLParser()
         return True

@@ -1,6 +1,6 @@
 import { useMemo, type CSSProperties } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
-import { HubEdge } from "../../lib/topologyUtils";
+import { HubEdge, summarizeDataPlane } from "../../lib/topologyUtils";
 import { DtLogo } from "../DtLogo";
 import type { HubNode } from "../ConnectionHub";
 
@@ -36,8 +36,9 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
     [nodes],
   );
   const liveCount = edges.filter((e) => e.active).length;
-  const connectedCount = nodes.filter((n) => n.linked && !n.isVirtual).length;
-  const disconnectedCount = Math.max(0, connectionCount - connectedCount);
+  const summary = summarizeDataPlane({ nodes, edges }, connectionCount);
+  const virtualSources = nodes.filter((n) => n.isVirtual && n.role !== "destination").length;
+  const virtualDestinations = nodes.filter((n) => n.isVirtual && (n.role === "destination" || n.role === "both")).length;
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   const routes = useMemo(
@@ -79,22 +80,22 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
         <FlowCanvas
           sourceTypes={sourceTypes}
           destTypes={destTypes}
-          sourceCount={sources.length || connectionCount}
-          destCount={destinations.length || connectionCount}
+          sourceCount={summary.sourceCount || virtualSources}
+          destCount={summary.destinationCount || virtualDestinations}
           animated={liveCount > 0}
         />
       </div>
 
       <div className="df2-flow-meta">
-        <span>{connectionCount} connection{connectionCount === 1 ? "" : "s"}</span>
+        <span>{summary.connectionCount} connection{summary.connectionCount === 1 ? "" : "s"}</span>
         <span className="df2-flow-meta-dot" aria-hidden>·</span>
-        <span>{edges.length} route{edges.length === 1 ? "" : "s"}</span>
+        <span>{summary.routeCount} route{summary.routeCount === 1 ? "" : "s"}</span>
         <span className="df2-flow-meta-dot" aria-hidden>·</span>
-        <span className="df2-flow-meta-connected">{connectedCount} connected</span>
-        {disconnectedCount > 0 && (
+        <span className="df2-flow-meta-connected">{summary.inRouteCount} in a route</span>
+        {summary.notInRouteCount > 0 && (
           <>
             <span className="df2-flow-meta-dot" aria-hidden>·</span>
-            <span className="df2-flow-meta-disconnected">{disconnectedCount} disconnected</span>
+            <span className="df2-flow-meta-disconnected">{summary.notInRouteCount} not in a route</span>
           </>
         )}
         {liveCount > 0 && (
@@ -175,9 +176,9 @@ function FlowCanvas({
       <svg className="df2-flow-svg" viewBox="0 0 400 120" preserveAspectRatio="xMidYMid meet">
         <defs>
           <linearGradient id="df-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#0f766e" stopOpacity="0.35" />
-            <stop offset="50%" stopColor="#14b8a6" stopOpacity="0.9" />
-            <stop offset="100%" stopColor="#6366f1" stopOpacity="0.5" />
+            <stop offset="0%" stopColor="var(--df-logo-tile)" stopOpacity="0.45" />
+            <stop offset="55%" stopColor="var(--df-logo-ink)" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="var(--df-logo-arrow)" stopOpacity="0.85" />
           </linearGradient>
         </defs>
         {[36, 60, 84].map((y, idx) => {
@@ -194,7 +195,7 @@ function FlowCanvas({
                 style={{ animationDelay: `${idx * 0.35}s` }}
               />
               {animated && (
-                <circle r="3.5" fill="#14b8a6" className="df2-flow-packet">
+                <circle r="3.5" fill="var(--df-logo-arrow)" className="df2-flow-packet">
                   <animateMotion
                     dur={`${2.2 + idx * 0.4}s`}
                     repeatCount="indefinite"

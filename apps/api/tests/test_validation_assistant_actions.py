@@ -36,7 +36,8 @@ def test_type_mismatch_suggests_remap_not_strip():
     assert "quarantine_and_rerun" not in kinds
     widen = next(a for a in actions if a["kind"] == "change_target_type")
     assert widen["column"] == "population"
-    assert widen["to_type"] == "VARCHAR"
+    # Dialect text invent (TEXT/VARCHAR) — never keep truncated NUMBER(38,0.
+    assert widen["to_type"].upper() in {"VARCHAR", "TEXT", "STRING"}
 
 
 def test_destination_auth_suggests_check_connection_not_strip():
@@ -92,3 +93,141 @@ def test_explain_type_mismatch_narrative_mentions_remap():
     )
     assert any(a["kind"] == "change_target_type" for a in explained["suggested_actions"])
     assert not any(a["kind"] == "normalize_control_chars" for a in explained["suggested_actions"])
+
+
+def test_population_fit_overflow_reaches_explain_remap():
+    explained = explain_validation(
+        {
+            "passed": False,
+            "gates": [{
+                "id": "g3f_population_fit",
+                "status": "block",
+                "message": "1 value(s) cannot fit NUMBER(9,6)",
+            }],
+            "blockers": [{
+                "id": "g3f_population_fit",
+                "message": "1 value(s) in DEP_TIME do not fit NUMBER(9,6)",
+                "details": {},
+            }],
+            "coercion_report": {"columns": []},
+            "population_fit": {
+                "evidence": "exact",
+                "findings": [{
+                    "source": "DEP_TIME",
+                    "target": "DEP_TIME",
+                    "target_type": "NUMBER(9,6)",
+                    "unfit_rows": 1,
+                    "example_rows": [293],
+                    "example_values": ["7.9166665"],
+                    "suggested_target_type": "NUMBER(10,7)",
+                    "suggested_fix": "Open Map → widen DEP_TIME to NUMBER(10,7)",
+                }],
+            },
+            "destination_table_exists": True,
+        },
+        dest_kind="snowflake",
+        use_llm=False,
+    )
+    assert explained["column_fixes"][0]["suggested_target_type"] == "NUMBER(10,7)"
+    widen = next(a for a in explained["suggested_actions"] if a["kind"] == "change_target_type")
+    assert widen["to_type"] == "NUMBER(10,7)"
+    assert widen["column"] == "DEP_TIME"
+
+
+def test_create_new_fit_widen_does_not_add_review_mappings():
+    actions = _suggested_actions(
+        [{
+            "id": "g3f_population_fit",
+            "message": "cannot fit the peeked CREATE type",
+            "details": {"create_new_table": True},
+        }],
+        [
+            {
+                "column": "DEP_TIME",
+                "suggested_target_type": "NUMBER(15,11)",
+                "severity": "block",
+                "apply_proven": True,
+            },
+            {
+                "column": "ARR_TIME",
+                "suggested_target_type": "NUMBER(15,11)",
+                "severity": "block",
+                "apply_proven": True,
+            },
+        ],
+    )
+    kinds = [a["kind"] for a in actions]
+    assert kinds.count("change_target_type") == 2
+    assert "review_mappings" not in kinds
+
+
+def test_unproven_population_fit_widen_is_not_mapping_applyable():
+    explained = explain_validation(
+        {
+            "passed": False,
+            "gates": [{"id": "g3f_population_fit", "status": "block", "message": "overflow"}],
+            "blockers": [{"id": "g3f_population_fit", "message": "overflow", "details": {}}],
+            "coercion_report": {"columns": []},
+            "population_fit": {
+                "evidence": "exact",
+                "findings": [{
+                    "source": "amount",
+                    "target": "amount",
+                    "target_type": "DECIMAL(10,2)",
+                    "unfit_rows": 3,
+                    "example_rows": [7],
+                    "example_values": ["123456789012.34"],
+                    "suggested_target_type": "DECIMAL(20,2)",
+                    "apply_proven": False,
+                    "apply_proven_scope": "sampled",
+                }],
+            },
+            "destination_table_exists": False,
+        },
+        dest_kind="postgres",
+        use_llm=False,
+    )
+    fix = explained["column_fixes"][0]
+    assert fix["apply_proven"] is False
+    assert fix["apply_proven_scope"] == "sampled"
+    widen = next(a for a in explained["suggested_actions"] if a["kind"] == "change_target_type")
+    assert widen["apply_proven"] is False
+    assert widen["mapping_applyable"] is False
+
+
+def test_explain_summary_counts_unique_blocking_gates_and_review_columns():
+    explained = explain_validation(
+        {
+            "passed": False,
+            "blockers": [
+                {"id": "g20_code_crosswalk", "message": "Code crosswalk coverage", "details": {}},
+                {
+                    "id": "g20_code_crosswalk",
+                    "message": "1 coded column has values without a crosswalk target.",
+                    "details": {},
+                },
+                {
+                    "id": "g4_mapping_confidence",
+                    "message": "Mapping confidence below floor",
+                    "details": {},
+                },
+                {
+                    "id": "g4_mapping_confidence",
+                    "message": "2 mappings are below the confidence floor.",
+                    "details": {},
+                },
+            ],
+            "root_causes": [
+                {
+                    "kind": "mapping_confidence",
+                    "impacted_gates": ["g4_mapping_confidence"],
+                    "affected_columns": ["email", "signup_date"],
+                },
+            ],
+            "coercion_report": {"columns": []},
+        },
+        use_llm=False,
+    )
+    assert explained["summary"] == (
+        "Validation blocked: 2 blocking gate(s), 2 column(s) need attention."
+    )

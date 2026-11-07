@@ -10,12 +10,13 @@ COPY apps/web apps/web
 
 RUN npm ci --workspace=@dataflow/web 2>/dev/null || npm install --workspace=@dataflow/web
 
-# Set in Railway → Web service → Variables (or build ARG):
-# VITE_API_BASE=https://YOUR-API-SERVICE.up.railway.app/api/v1
-# Or set DATAFLOW_API_BASE at runtime to override without rebuilding.
-# Default is the production DataFlow API so DataPilot works out of the box.
-ARG VITE_API_BASE
-ENV VITE_API_BASE=${VITE_API_BASE:-https://dataflow-api-production-722b.up.railway.app/api/v1}
+# The browser always calls the same-origin /api/v1; nginx proxies it to the
+# API (deploy/start-nginx.sh). The API's address is runtime configuration —
+# DATAWRAP_API_BASE on the web service (DATAFLOW_API_BASE / VITE_API_BASE are
+# still read there) — and is never compiled into the bundle (QA r12 #4b). No
+# ARG: a VITE_API_BASE build variable must not leak a hosting hostname into
+# the JavaScript every visitor downloads.
+ENV VITE_API_BASE=/api/v1
 
 RUN npm run build --workspace=@dataflow/web
 

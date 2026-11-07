@@ -157,7 +157,7 @@ def test_soft_drop_net_additive_under_propagate():
     assert any(s.get("kind") == "drop" for s in evo["soft_net_additive"])
     assert evo["action"] in {"propagate", "continue"}
 
-def test_warns_on_unmapped_destination_columns():
+def test_unmapped_destination_column_without_history_warns_not_review():
     report = detect_schema_drift(
         source_columns=["id"],
         source_schema={"id": "INTEGER"},
@@ -168,6 +168,29 @@ def test_warns_on_unmapped_destination_columns():
     )
     assert report["orphan_targets"] == ["legacy_flag"]
     assert report["severity"] == "warning"
+    assert "1 destination column(s) are unmapped" in report["issues"]
+    assert report["schema_evolution"]["action"] != "review"
+    assert report["schema_evolution"]["should_pause"] is False
+
+
+def test_previously_fed_destination_column_is_drop_review():
+    report = detect_schema_drift(
+        source_columns=["id"],
+        source_schema={"id": "INTEGER"},
+        target_columns=["id", "legacy_flag"],
+        target_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        table_exists=True,
+        schema_policy="manual_review",
+        previous_source_columns=["id", "legacy_flag"],
+        previous_source_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
+    )
+    assert report["orphan_targets"] == ["legacy_flag"]
+    assert report["schema_evolution"]["action"] == "review"
+    assert any(
+        change.get("kind") == "drop"
+        for change in report["schema_evolution"]["soft_net_additive"]
+    )
 
 
 def test_ignores_case_only_target_name_differences():
@@ -369,6 +392,151 @@ def test_manual_review_still_blocks_real_source_drift():
     )
     assert result["passed"] is False
     assert any(b.get("id") == "schema_drift" for b in result["blockers"])
+    drift_gate = next(g for g in result["gates"] if g["id"] == "schema_drift")
+    assert "schema_drift_acknowledged" not in drift_gate["message"]
+    assert "Acknowledge drift for this run" in drift_gate["message"]
+    assert "Schema change detected" in drift_gate["message"]
+
+
+def _manual_review_drift_kwargs(*, mapped_new_column: bool):
+    from services.schema_fingerprint import fingerprint_schema as fp
+
+    cols = ["id", "email", "new_col"]
+    schema = {"id": "INTEGER", "email": "VARCHAR", "new_col": "VARCHAR"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+        {"source": "email", "target": "email", "confidence": 0.99, "transform": "none"},
+    ]
+    if mapped_new_column:
+        mappings.append(
+            {"source": "new_col", "target": "new_col", "confidence": 0.99, "transform": "none"}
+        )
+    return dict(
+        columns=cols,
+        column_types=schema,
+        row_count=1,
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=[{"id": "1", "email": "a@b.com", "new_col": "x"}],
+        destination_column_types={"id": "INTEGER", "email": "VARCHAR"},
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        sync_mode="full_refresh_append",
+        estimated_bytes=1000,
+        stored_source_fp=fp(["id", "email"], {"id": "INTEGER", "email": "VARCHAR"}),
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+    )
+
+
+def test_acknowledge_drift_is_one_gate_and_unlocks_execute():
+    """Manual-review ack keeps existing mappings and must not echo a second blocker.
+
+    Unmapped new columns are a recorded omission for this run, not a silent drop
+    and not a leftover coverage block. The operator sentence names the Validate
+    control, not an API flag.
+    """
+    from services.preflight_policy_gates import apply_policy_gates
+    from services.preflight_service import run_file_preflight
+    from services.validation_assistant import explain_validation
+
+    blocked = run_file_preflight(**_manual_review_drift_kwargs(mapped_new_column=True))
+    gated = apply_policy_gates(blocked, [], validation_mode="balanced")
+    drift_ids = [
+        b.get("id")
+        for b in gated["blockers"]
+        if b.get("id") == "schema_drift"
+        or (
+            str(b.get("id") or "").startswith("proof_")
+            and "schema change detected" in str(b.get("message") or "").lower()
+        )
+    ]
+    assert drift_ids == ["schema_drift"]
+    explained = explain_validation(gated, use_llm=False)
+    drift_issues = [
+        issue for issue in explained["issues"]
+        if issue.get("gate") == "schema_drift"
+        or str(issue.get("title") or "").lower().startswith("schema change detected")
+        or str(issue.get("what") or "").lower().startswith("schema change detected")
+    ]
+    assert len(drift_issues) == 1
+    drift_message = next(g["message"] for g in blocked["gates"] if g["id"] == "schema_drift")
+    echo = explain_validation(
+        {
+            "passed": False,
+            "gates": [{"id": "schema_drift", "status": "block", "message": drift_message}],
+            "blockers": [
+                {"id": "schema_drift", "message": drift_message, "details": {}},
+                {"id": "proof_0", "message": drift_message, "details": {}},
+            ],
+        },
+        use_llm=False,
+    )
+    assert echo["summary"].startswith("Validation blocked: 1 blocking gate")
+    assert len(echo["issues"]) == 1
+    assert echo["issues"][0]["title"] == "Schema drift"
+
+    acked = run_file_preflight(
+        **_manual_review_drift_kwargs(mapped_new_column=False),
+        schema_drift_acknowledged=True,
+        acknowledgment_actor="qa@example.com",
+        acknowledgment_reason="Keep existing mappings for this run",
+    )
+    acked = apply_policy_gates(acked, [], validation_mode="balanced")
+    assert acked["passed"] is True
+    decision = (acked.get("proof_bundle") or {}).get("transfer_decision") or {}
+    assert decision.get("decision") == "approve"
+    drift_gate = next(g for g in acked["gates"] if g["id"] == "schema_drift")
+    assert drift_gate["status"] == "pass"
+    assert drift_gate["details"]["acknowledged"] is True
+    coverage = next(g for g in acked["gates"] if g["id"] == "g13_source_coverage")
+    assert coverage["status"] == "pass"
+    assert "new_col" in coverage["details"]["omitted_sources"]
+    assert coverage["details"]["omission_reason"] == "schema_drift_acknowledged"
+    blob = " ".join(str(b.get("message") or "") for b in acked.get("blockers") or [])
+    assert "schema_drift_acknowledged" not in blob
+
+
+def test_acknowledge_drift_does_not_clear_a_hard_break():
+    from services.preflight_service import run_file_preflight
+    from services.schema_fingerprint import fingerprint_schema as fp
+
+    result = run_file_preflight(
+        columns=["id", "email"],
+        column_types={"id": "INTEGER", "email": "INTEGER"},
+        row_count=1,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+            {"source": "email", "target": "email", "confidence": 0.99, "transform": "none"},
+        ],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=[{"id": "1", "email": "2"}],
+        destination_column_types={"id": "INTEGER", "email": "VARCHAR"},
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        sync_mode="full_refresh_append",
+        estimated_bytes=1000,
+        stored_source_fp=fp(["id", "email"], {"id": "INTEGER", "email": "VARCHAR"}),
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+        schema_drift_acknowledged=True,
+        acknowledgment_actor="qa@example.com",
+        acknowledgment_reason="Keep existing mappings for this run",
+    )
+    drift_gate = next(g for g in result["gates"] if g["id"] == "schema_drift")
+    assert drift_gate["status"] == "block"
+    assert drift_gate["details"].get("ack_required") is False
+    assert result["passed"] is False
 
 
 def test_fingerprint_synonyms_do_not_flip_contract():
@@ -485,6 +653,132 @@ def test_case_insensitive_source_mapping_not_unmapped():
     assert report["schema_evolution"]["action"] == "continue"
 
 
+def test_pg_bare_decimal_is_widen_not_narrow_type_drift():
+    """MySQL DECIMAL(38,15) → Postgres bare DECIMAL/NUMERIC is unconstrained.
+
+    Must not invent narrow_type / schema_drift block (airports lat/lon class).
+    MySQL bare DECIMAL still invents (10,0) and stays hard-breaking.
+    """
+    mappings = [
+        {"source": "lat", "target": "lat", "target_type": "DECIMAL", "confidence": 0.98},
+        {"source": "lon", "target": "lon", "target_type": "DECIMAL", "confidence": 0.98},
+    ]
+    pg = detect_schema_drift(
+        source_columns=["lat", "lon"],
+        source_schema={"lat": "DECIMAL(38,15)", "lon": "DECIMAL(38,15)"},
+        target_columns=["lat", "lon"],
+        target_schema={"lat": "DECIMAL", "lon": "NUMERIC"},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+        sample_rows=[{"lat": "40.1", "lon": "-73.9"}] * 5,
+    )
+    assert pg["type_mismatches"] == []
+    assert pg["schema_evolution"]["hard_breaking"] == []
+    assert pg["schema_evolution"]["action"] == "continue"
+    assert not pg["drift_detected"]
+
+    mysql = detect_schema_drift(
+        source_columns=["lat"],
+        source_schema={"lat": "DECIMAL(38,15)"},
+        target_columns=["lat"],
+        target_schema={"lat": "DECIMAL"},
+        mappings=[mappings[0]],
+        destination_db_type="mysql",
+        table_exists=True,
+        schema_policy="manual_review",
+    )
+    assert mysql["type_mismatches"]
+    assert any(b.get("kind") == "narrow_type" for b in mysql["schema_evolution"]["hard_breaking"])
+
+
+def test_a_transformed_carrier_is_graded_and_the_declared_one_fingerprinted():
+    """A rounded column is not a precision collapse, and not source drift either.
+
+    The two source questions have two answers: the revision fingerprinted the
+    declared ``DECIMAL(11,8)``, while the writer will bind the transformed
+    ``INTEGER``. Grading the carrier on the declared type blocked the run as
+    ``narrow_type`` (``source_changed:false, target_changed:false``, no operator
+    remedy); fingerprinting the transformed image reported the operator's own
+    approved recipe as "source schema changed".
+    """
+    from services.schema_fingerprint import fingerprint_schema
+
+    declared_cols = ["name", "arr_time"]
+    declared_schema = {"name": "VARCHAR(64)", "arr_time": "DECIMAL(11,8)"}
+    mappings = [
+        {"source": "name", "target": "name", "confidence": 0.99, "transform": "none"},
+        {"source": "arr_time", "target": "arr_time", "confidence": 0.99, "transform": "none"},
+    ]
+    report = detect_schema_drift(
+        # The transformed image the gates judge and the writer receives.
+        source_columns=declared_cols,
+        source_schema={"name": "VARCHAR(64)", "arr_time": "INTEGER"},
+        declared_source_columns=declared_cols,
+        declared_source_schema=declared_schema,
+        target_columns=declared_cols,
+        target_schema={"name": "VARCHAR(64)", "arr_time": "INT4"},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+        stored_source_fp=fingerprint_schema(declared_cols, declared_schema),
+        sample_rows=[{"name": "ACME", "arr_time": "22"}],
+    )
+    assert report["type_mismatches"] == []
+    assert report["schema_evolution"]["hard_breaking"] == []
+    assert not report["source_changed"]
+    assert not report["drift_detected"]
+
+
+def test_unchanged_saved_contract_does_not_report_type_narrowing_as_drift():
+    from services.schema_fingerprint import fingerprint_schema
+
+    cols = ["note"]
+    source_schema = {"note": "TEXT"}
+    target_schema = {"note": "VARCHAR(64)"}
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=source_schema,
+        declared_source_columns=cols,
+        declared_source_schema=source_schema,
+        target_columns=cols,
+        target_schema=target_schema,
+        mappings=[{"source": "note", "target": "note", "confidence": 1.0}],
+        destination_db_type="mysql",
+        table_exists=True,
+        stored_source_fp=fingerprint_schema(cols, source_schema),
+        stored_target_fp=fingerprint_schema(cols, target_schema),
+    )
+
+    assert report["source_changed"] is False
+    assert report["target_changed"] is False
+    assert not any(
+        item.get("kind") == "narrow_type"
+        for item in report["schema_evolution"]["hard_breaking"]
+    )
+
+
+def test_an_unshaped_narrowing_is_still_blocked():
+    """The default path is unchanged: no transform means declared is the image."""
+    report = detect_schema_drift(
+        source_columns=["arr_time"],
+        source_schema={"arr_time": "DECIMAL(11,8)"},
+        target_columns=["arr_time"],
+        target_schema={"arr_time": "INT4"},
+        mappings=[{"source": "arr_time", "target": "arr_time", "confidence": 0.99}],
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+    )
+    assert report["type_mismatches"]
+    assert any(
+        b.get("kind") == "narrow_type"
+        for b in report["schema_evolution"]["hard_breaking"]
+    )
+
+
 def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     from services.preflight_service import run_file_preflight
     from services.schema_fingerprint import fingerprint_schema_legacy
@@ -519,6 +813,20 @@ def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     )
     assert result["passed"] is True, result.get("blockers")
     assert not any(g.get("id") == "schema_drift" and g.get("status") == "block" for g in result["gates"])
+
+
+def test_same_spelling_timestamp_ntz_is_not_a_narrow():
+    """Dest-floor FSP must not accuse TIMESTAMP_NTZ of narrowing itself."""
+    from services.schema_drift import _is_type_narrow, classify_schema_change
+
+    assert _is_type_narrow("TIMESTAMP_NTZ", "TIMESTAMP_NTZ", dest_db="mysql") is False
+    report = classify_schema_change(
+        {"joining_date": "TIMESTAMP_NTZ"},
+        {"joining_date": "TIMESTAMP_NTZ"},
+        dest_db="mysql",
+    )
+    assert report["breaking"] == []
+    assert report["severity"] == "none"
 
 
 def test_classify_no_change():
@@ -678,3 +986,125 @@ def test_classify_flat_schema_dicts():
     )
     assert report["severity"] == "additive"
     assert any(c["kind"] == "widen_type" for c in report["additive"])
+
+
+def test_compatibility_lattice_matches_confluent_roles_for_sql():
+    from services.schema_drift import (
+        COMPAT_BACKWARD,
+        COMPAT_FORWARD,
+        COMPAT_FULL,
+        COMPAT_IDENTICAL,
+        COMPAT_NONE,
+        classify_schema_evolution_report,
+        compatibility_of,
+        resolve_schema_evolution,
+    )
+
+    identical = classify_schema_change({"id": "INTEGER"}, {"id": "INT"})
+    assert identical["severity"] == "none"
+    assert compatibility_of(identical) == COMPAT_IDENTICAL
+
+    widened = classify_schema_change(
+        {"id": "INT", "name": "VARCHAR(50)"},
+        {"id": "INT", "name": "VARCHAR(200)"},
+    )
+    assert compatibility_of(widened) == COMPAT_FORWARD
+
+    dropped = classify_schema_change({"id": "INT", "legacy": "VARCHAR"}, {"id": "INT"})
+    assert compatibility_of(dropped) == COMPAT_BACKWARD
+
+    both = classify_schema_change(
+        {"id": "INT", "legacy": "VARCHAR"},
+        {"id": "INT", "region": "VARCHAR"},
+    )
+    # rename heuristic may pair legacy→region; either backward (rename) or full (drop+add)
+    assert compatibility_of(both) in {COMPAT_FULL, COMPAT_BACKWARD}
+
+    narrowed = classify_schema_change(
+        {"amount": "DECIMAL(12,2)"},
+        {"amount": "DECIMAL(6,2)"},
+    )
+    assert compatibility_of(narrowed) == COMPAT_NONE
+
+    evo = resolve_schema_evolution(narrowed, schema_policy="propagate_columns")
+    assert evo["should_pause"] is True
+    assert evo["compatibility"] == COMPAT_NONE
+
+    report = classify_schema_evolution_report(
+        {"id": "INTEGER", "name": "VARCHAR"},
+        {"id": "INTEGER", "name": "VARCHAR", "region": "VARCHAR"},
+        schema_policy="propagate_columns",
+    )
+    assert report["compatibility"] == COMPAT_FORWARD
+    assert report["schema_evolution"]["should_propagate"] is True
+    assert report["summary"]
+
+
+def test_schema_policy_honesty_line_matches_evolution_kernel():
+    from services.preflight_service import run_transfer_policy_gates
+    from services.schema_drift import schema_policy_honesty_line
+
+    manual = schema_policy_honesty_line("manual_review")
+    assert "does not ADD COLUMN" in manual
+    assert "type-narrow always pauses" in manual
+
+    prop = schema_policy_honesty_line("propagate_columns")
+    assert "ADD COLUMN" in prop
+    assert "silent rewrite" in prop
+
+    pause = schema_policy_honesty_line("pause_on_change")
+    assert "including additive" in pause
+
+    locked = schema_policy_honesty_line("type_locked")
+    assert "silent-cast" in locked
+
+    prop_all = schema_policy_honesty_line("propagate_all")
+    assert "ADD COLUMN kernel" in prop_all
+    assert "every selected stream" in prop_all
+
+    gates = run_transfer_policy_gates(schema_policy="manual_review")
+    g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
+    assert g10["status"] == "pass"
+    assert g10["details"]["honesty_line"] == manual
+
+
+def test_overwrite_recreation_does_not_bind_the_table_it_drops():
+    """Full refresh drops the dest table, so its old types are not this run's carrier.
+
+    A live ``VARCHAR(64)`` sink narrows ``TEXT`` and must pause — but under
+    overwrite that column is gone before the first row, and the carrier is the
+    one the CREATE declares.
+    """
+    cols = ["id", "note"]
+    schema = {"id": "INTEGER", "note": "TEXT"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "note", "target": "note", "confidence": 0.99},
+    ]
+    live = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=cols,
+        target_schema={"id": "INT", "note": "VARCHAR(64)"},
+        mappings=mappings,
+        destination_db_type="mysql",
+        table_exists=True,
+    )
+    assert live["drift_detected"] is True
+
+    recreated = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=cols,
+        target_schema={"id": "INT", "note": "VARCHAR(64)"},
+        mappings=mappings,
+        destination_db_type="mysql",
+        table_exists=True,
+        dest_recreated=True,
+    )
+    assert recreated["target_changed"] is False
+    assert recreated["severity"] in {"none", "additive"}
+    assert not any(
+        "narrow" in str(change.get("change_type", ""))
+        for change in recreated.get("changes", [])
+    )

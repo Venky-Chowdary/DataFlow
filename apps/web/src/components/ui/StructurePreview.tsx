@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { typeBadgeClass } from "../../lib/typeDisplay";
+import { nullWireLabel } from "../../lib/nullWire";
 import { Dialog } from "./Dialog";
 
 interface StructurePreviewProps {
@@ -29,6 +30,8 @@ interface StructurePreviewProps {
 /** Table cells: compact JSON for objects/arrays and JSON-looking strings (Mongo wire). */
 function formatPreviewCell(raw: unknown): string {
   if (raw == null) return "—";
+  const wireNull = nullWireLabel(raw);
+  if (wireNull) return wireNull;
   if (typeof raw === "object") {
     try {
       return JSON.stringify(raw);
@@ -148,13 +151,20 @@ function PreviewBody({
       {showFieldStrip && (
         <details className="df2-structure-field-block">
           <summary className="df2-structure-field-summary">
-            {previewCols.length} fields
+            {/* nowrap: at <=480 this bare text flex-item used to get a ~30px
+                box and wrap to "5" / "fields" on two lines (D-BP-27 P3). */}
+            <span className="df2-structure-field-count">
+              {previewCols.length} fields
+            </span>
             <span>Expand field chips — sample rows stay visible below</span>
           </summary>
           <div className="df2-structure-field-strip" aria-label="Detected fields">
-            {stripCols.map((col) => (
+            {/* Columns are positional: a name can repeat or be blank (a header row
+                with an empty cell), and keying by name left a stale chip from the
+                previous profile on screen — four chips under a "3 fields" label. */}
+            {stripCols.map((col, i) => (
               <span
-                key={col}
+                key={`${i}:${col}`}
                 className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}
                 title={`${col} · ${schema[col] || "string"}`}
               >
@@ -197,8 +207,8 @@ function PreviewBody({
           <table className="df2-structure-table" style={{ "--cols": previewCols.length } as React.CSSProperties}>
             <thead>
               <tr>
-                {previewCols.map((col) => (
-                  <th key={col} className={typeBadgeClass(schema[col])}>
+                {previewCols.map((col, i) => (
+                  <th key={`${i}:${col}`} className={typeBadgeClass(schema[col])}>
                     <span>{col}</span>
                     <small className="df2-type-badge">{schema[col] || "string"}</small>
                   </th>
@@ -208,11 +218,11 @@ function PreviewBody({
             <tbody>
               {previewRows.map((row, i) => (
                 <tr key={i}>
-                  {previewCols.map((col) => {
+                  {previewCols.map((col, ci) => {
                     const raw = row[col];
                     const text = formatPreviewCell(raw);
                     return (
-                      <td key={col} title={text} className={typeBadgeClass(schema[col])}>
+                      <td key={`${ci}:${col}`} title={text} className={typeBadgeClass(schema[col])}>
                         {text.length > 48 ? `${text.slice(0, 48)}…` : text}
                       </td>
                     );

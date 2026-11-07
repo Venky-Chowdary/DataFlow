@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 from connectors.base import ConnectResult
 from connectors.driver_guard import platform_driver_unavailable
 
@@ -21,7 +22,7 @@ def test_bigquery(
 ) -> ConnectResult:
     del username, password, ssl, warehouse
     project_id = database or host
-    dataset_id = schema or "dataflow"
+    dataset_id = schema or bigquery_default_dataset()
     if not project_id:
         return ConnectResult(ok=False, tables=[], error="Provide GCP project ID as database field", driver="stub")
 

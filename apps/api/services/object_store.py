@@ -143,10 +143,55 @@ def _ensure_bucket(client: Any) -> bool:
         return False
 
 
+_LOCAL_BUCKET = "local"
+
+
+def blob_root() -> Path | None:
+    """Shared filesystem stand-in for object storage.
+
+    Set ``BLOB_ROOT`` when the install has no S3 bucket and more than one
+    process must read the same upload. Unset it when ``S3_BUCKET`` is the
+    store — a set root is used first so a compose volume does not depend on
+    MinIO being up.
+    """
+    raw = (getenv_brand("BLOB_ROOT", "") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _local_blob_path(key: str) -> Path | None:
+    root = blob_root()
+    if root is None or not key:
+        return None
+    parts = Path(key).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    dest = (root / key).resolve()
+    root_resolved = root.resolve()
+    if dest != root_resolved and root_resolved not in dest.parents:
+        return None
+    return dest
+
+
+def _stage_blob_root(key: str, content: bytes) -> str | None:
+    dest = _local_blob_path(key)
+    if dest is None:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    return f"s3://{_LOCAL_BUCKET}/{key}"
+
+
 def stage_bytes(key: str, content: bytes, content_type: str = "application/octet-stream") -> str | None:
     """Upload bytes to object store. Returns s3:// URI or None if unavailable."""
     if _disabled():
         return None
+    rooted = _stage_blob_root(key, content)
+    if rooted:
+        return rooted
     client = _get_client()
     if not client or not _ensure_bucket(client):
         return None
@@ -177,6 +222,12 @@ def fetch_bytes(uri: str) -> bytes | None:
     """Download object bytes from an s3:// URI."""
     if not uri or not uri.startswith("s3://"):
         return None
+    parsed = urlparse(uri)
+    if parsed.netloc == _LOCAL_BUCKET:
+        path = _local_blob_path(parsed.path.lstrip("/"))
+        if path is None or not path.is_file():
+            return None
+        return path.read_bytes()
     client = _get_client()
     if not client:
         return None
@@ -221,3 +272,146 @@ def storage_status() -> dict[str, str | bool]:
         "endpoint": getenv_brand("S3_ENDPOINT") or settings.minio_endpoint,
         "bucket": _bucket_name(),
     }
+
+
+# ------------------------------------------------- keyed file operations ----
+# Journals and other multi-file artifacts need more than single-blob staging:
+# stream a file up without loading it, list a prefix, and delete a prefix.
+
+
+def _blob_or_client() -> tuple[Path | None, Any | None]:
+    if _disabled():
+        return None, None
+    root = blob_root()
+    if root is not None:
+        return root, None
+    client = _get_client()
+    if client is None or not _ensure_bucket(client):
+        return None, None
+    return None, client
+
+
+def durable_backend() -> str:
+    """``blob_root`` / ``minio`` / ``s3`` when keyed files survive this host, else ``""``."""
+    root, client = _blob_or_client()
+    if root is not None:
+        return "blob_root"
+    if client is not None:
+        return _backend or "s3"
+    return ""
+
+
+def key_uri(key: str) -> str:
+    root, _client = _blob_or_client()
+    bucket = _LOCAL_BUCKET if root is not None else _bucket_name()
+    return f"s3://{bucket}/{key}"
+
+
+def stage_file(key: str, path: Path, content_type: str = "application/octet-stream") -> str | None:
+    """Upload a local file under ``key`` without reading it into memory."""
+    root, client = _blob_or_client()
+    if root is not None:
+        dest = _local_blob_path(key)
+        if dest is None:
+            return None
+        import shutil
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.partial")
+        shutil.copyfile(path, tmp)
+        os.replace(tmp, dest)
+        return f"s3://{_LOCAL_BUCKET}/{key}"
+    if client is None:
+        return None
+    bucket = _bucket_name()
+    try:
+        if _backend == "minio":
+            client.fput_object(bucket, key, str(path), content_type=content_type)
+        else:
+            client.upload_file(str(path), bucket, key, ExtraArgs={"ContentType": content_type})
+        return f"s3://{bucket}/{key}"
+    except Exception:
+        _logger.warning("stage_file failed for %s", key, exc_info=True)
+        return None
+
+
+def fetch_to_file(key: str, dest: Path) -> bool:
+    """Download ``key`` to ``dest`` (atomically). False when absent or unavailable."""
+    root, client = _blob_or_client()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.partial")
+    try:
+        if root is not None:
+            src = _local_blob_path(key)
+            if src is None or not src.is_file():
+                return False
+            import shutil
+
+            shutil.copyfile(src, tmp)
+        elif client is not None:
+            if _backend == "minio":
+                client.fget_object(_bucket_name(), key, str(tmp))
+            else:
+                client.download_file(_bucket_name(), key, str(tmp))
+        else:
+            return False
+        os.replace(tmp, dest)
+        return True
+    except Exception:
+        _logger.debug("fetch_to_file failed for %s", key, exc_info=True)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def list_keys(prefix: str) -> list[str]:
+    """Every key under ``prefix`` (recursive). Empty when storage is unavailable."""
+    root, client = _blob_or_client()
+    if root is not None:
+        base = _local_blob_path(prefix.rstrip("/")) if prefix.strip("/") else root.resolve()
+        if base is None or not base.is_dir():
+            return []
+        root_resolved = root.resolve()
+        return sorted(
+            p.relative_to(root_resolved).as_posix()
+            for p in base.rglob("*")
+            if p.is_file() and not p.name.endswith(".partial")
+        )
+    if client is None:
+        return []
+    bucket = _bucket_name()
+    try:
+        if _backend == "minio":
+            return sorted(o.object_name for o in client.list_objects(bucket, prefix=prefix, recursive=True))
+        keys: list[str] = []
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+            keys.extend(item["Key"] for item in page.get("Contents") or [])
+        return sorted(keys)
+    except Exception:
+        _logger.warning("list_keys failed for %s", prefix, exc_info=True)
+        return []
+
+
+def delete_prefix(prefix: str) -> int:
+    """Delete every key under ``prefix``. Returns how many were removed."""
+    if not prefix.strip("/"):
+        raise ValueError("refusing to delete the whole store")
+    keys = list_keys(prefix)
+    root, client = _blob_or_client()
+    removed = 0
+    for key in keys:
+        try:
+            if root is not None:
+                path = _local_blob_path(key)
+                if path is not None and path.is_file():
+                    path.unlink()
+            elif _backend == "minio":
+                client.remove_object(_bucket_name(), key)
+            else:
+                client.delete_object(Bucket=_bucket_name(), Key=key)
+            removed += 1
+        except Exception:
+            _logger.warning("delete_prefix could not remove %s", key, exc_info=True)
+    return removed

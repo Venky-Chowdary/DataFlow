@@ -240,5 +240,10 @@ def rows_and_schema_from_saas(
                 keys.append(k)
         flattened.append(wire)
 
-    matrix = [[r.get(k, "") for k in keys] for r in flattened]
+    # A key one record lacks (sparse ``metadata.*``) is absent, i.e. SQL NULL —
+    # never ''. Filling '' made every record without the key fail an INTEGER
+    # carrier ("Empty value cannot coerce to integer") and quarantine (D269).
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    matrix = [[r.get(k, SQL_NULL_SENTINEL) for k in keys] for r in flattened]
     return keys, matrix, schema

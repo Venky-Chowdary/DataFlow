@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services.ops_events import emit_event
 from services.platform_config import data_dir
 from services.value_serializer import json_default
+from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
 STORE_PATH = data_dir() / "preflight_runs.jsonl"
 _LOCK = threading.Lock()
 MAX_RUNS = 500
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -27,7 +33,7 @@ def save_preflight_run(
     source_label: str = "",
     dest_label: str = "",
     validation_mode: str = "",
-    route: dict[str, Any] | None = None,
+    route: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     """Attach a stable run_id to *result*, persist a summary, return the enriched result."""
     run_id = str(result.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
@@ -35,6 +41,8 @@ def save_preflight_run(
     blockers = enriched.get("blockers") or []
     record = {
         "run_id": run_id,
+        # The workspace this request acts in (D154); "" = unscoped legacy.
+        "workspace_id": current_workspace_stamp(),
         "created_at": _now(),
         "passed": bool(enriched.get("passed")),
         "readiness_score": enriched.get("readiness_score"),
@@ -61,7 +69,53 @@ def save_preflight_run(
         "suggested_remediations": _suggest_remediations(blockers),
     }
     _append(record)
+    _emit_preflight_verdict(record, route)
     return enriched
+
+
+def _route_types(route: dict[str, Any] | str | None) -> tuple[str | None, str | None]:
+    """Source/dest connector types from a router dict or Pilot's ``"src->dst"``."""
+    if isinstance(route, dict):
+        return (
+            route.get("source_type") or route.get("source_kind") or None,
+            route.get("dest_type") or route.get("dest_kind") or None,
+        )
+    if isinstance(route, str) and "->" in route:
+        src, _, dst = route.partition("->")
+        return src.strip() or None, dst.strip() or None
+    return None, None
+
+
+def _emit_preflight_verdict(record: dict[str, Any], route: dict[str, Any] | str | None) -> None:
+    """``preflight.run.completed``: verdict, counts and gate ids — no object names.
+
+    A block is an expected, operator-recoverable validation outcome, so it is
+    ``held`` at INFO rather than an error.
+    """
+    passed = bool(record.get("passed"))
+    gate_ids = sorted(
+        {
+            str(b["id"])
+            for b in record.get("blockers") or []
+            if isinstance(b, dict) and b.get("id")
+        }
+    )
+    source_type, destination_type = _route_types(route)
+    emit_event(
+        logger,
+        "preflight.run.completed",
+        outcome="succeeded" if passed else "held",
+        level=logging.INFO,
+        run_id=record.get("run_id"),
+        verdict="passed" if passed else "blocked",
+        validation_mode=record.get("validation_mode") or None,
+        passed_count=record.get("passed_count"),
+        total_gates=record.get("total_gates"),
+        blocker_count=len(record.get("blockers") or []),
+        blocking_gate_ids=",".join(gate_ids) or None,
+        source_type=source_type,
+        destination_type=destination_type,
+    )
 
 
 def get_preflight_run(run_id: str) -> dict[str, Any] | None:
@@ -70,13 +124,46 @@ def get_preflight_run(run_id: str) -> dict[str, Any] | None:
         return None
     for row in reversed(_read_all()):
         if str(row.get("run_id")) == rid:
-            return row
+            # A run of another workspace does not exist for this caller (D154).
+            return row if bound_allows(row.get("workspace_id")) else None
     return None
 
 
 def list_preflight_runs(limit: int = 20) -> list[dict[str, Any]]:
-    rows = _read_all()
+    rows = [r for r in _read_all() if bound_allows(r.get("workspace_id"))]
     return list(reversed(rows[-max(1, min(limit, 100)) :]))
+
+
+def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
+    """Stamp legacy unscoped runs with ``workspace_for(run)`` (D154 backfill).
+
+    Runs carry no owner, so ``workspace_for`` decides (the platform owner's
+    workspace). Scoped runs are never touched.
+    """
+    unscoped = WorkspaceFilter.only("")
+    counts = {"assigned": 0, "skipped": 0}
+    if not STORE_PATH.exists():
+        return counts
+    with _LOCK:
+        lines = STORE_PATH.read_text(encoding="utf-8").splitlines()
+        out: list[str] = []
+        for line in lines:
+            try:
+                row = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                row = None
+            if isinstance(row, dict) and unscoped.matches(row.get("workspace_id")):
+                ws = (workspace_for(row) or "").strip()
+                counts["assigned" if ws else "skipped"] += 1
+                if ws:
+                    row["workspace_id"] = ws
+                    line = json.dumps(row, default=json_default)
+            out.append(line)
+        if apply and counts["assigned"]:
+            tmp = STORE_PATH.with_suffix(STORE_PATH.suffix + ".tmp")
+            tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+            tmp.replace(STORE_PATH)
+    return counts
 
 
 def _suggest_remediations(blockers: list[Any]) -> list[dict[str, str]]:
@@ -108,6 +195,8 @@ def _append(record: dict[str, Any]) -> None:
     with _LOCK:
         with STORE_PATH.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         _trim_locked()
 
 

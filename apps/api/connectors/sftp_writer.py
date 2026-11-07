@@ -1,10 +1,7 @@
-"""SFTP object writer — upload JSON/JSONL/CSV exports."""
+"""SFTP object writer — upload JSON/JSONL/CSV/Parquet exports."""
 
 from __future__ import annotations
 
-import csv
-import io
-import json
 import logging
 import sys
 import uuid
@@ -12,18 +9,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default
-
-from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
-from connectors.writer_common import WriteResult as _WriteResult
+from connectors.object_store_common import (
+    resolve_object_store_export_format,
+    resolve_object_store_write_dest_types,
+)
+from connectors.object_store_incremental import (
+    ObjectMergeRefused,
+    incremental_merge_strategy,
+    prepare_incremental_export,
+)
+from connectors.object_store_materialize import (
+    materialize_object_store_export,
+    resolve_materialize_batch,
+    source_from_writer,
+)
+from connectors.object_store_multipart import resolve_multipart_limits, resolve_spill_max
+from connectors.sftp_common import (
+    connect_sftp,
+    host_key_settings,
+    sftp_dest_path,
+    parse_sftp_config,
+    split_remote_path,
+)
+from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 from connectors.writer_common import (
-    _rejected_row_count,
-    apply_write_quarantine_matrix,
-    build_mapped_rows_with_details,
-    gate8_writer_meta,
+    _coerced_null_row_count,
     resolve_target_columns,
-    row_checksum,
-    to_json_value,
     transform_error_policy,
 )
 
@@ -37,6 +48,85 @@ if str(_API_ROOT) not in sys.path:
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "paramiko"
+
+
+def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
+    """Move the staged upload onto the final path, atomically where possible.
+
+    ``posix-rename@openssh.com`` replaces the target in one step, so a consumer
+    polling the directory never sees a truncated file and never sees it vanish.
+    Only OpenSSH-derived servers implement it: paramiko always exposes the
+    client method, so testing ``hasattr`` asked the wrong side and every managed
+    file-transfer appliance without the extension failed the write outright
+    with "Operation unsupported" after the bytes had already landed.
+
+    The fallback is a portable rename pair. Plain SFTP cannot swap two files
+    atomically, so the destination still leaves the namespace for the gap
+    between the two renames — but only for that gap (milliseconds), not for
+    the whole upload, and the park-and-restore keeps the original file
+    recoverable if the second rename fails. The old remove-then-rename
+    destroyed the existing file first and then could fail the same way,
+    leaving nothing. Any other failure (permission, quota, missing
+    directory) must propagate.
+
+    paramiko maps only a few SFTP status codes onto errno (``ENOENT`` for
+    missing, ``EACCES`` for denied) and raises a bare ``IOError(text)`` for
+    everything else, including ``SFTP_OP_UNSUPPORTED``. So "the server will not
+    do this" is identified by errno *and* message, and an unrecognised error
+    with no errno stays fatal rather than being read as permission to fall back.
+    """
+
+    try:
+        sftp.posix_rename(temp_path, final_path)
+        return
+    except (AttributeError, OSError) as exc:
+        if isinstance(exc, OSError) and not _is_unsupported_operation(exc):
+            raise
+        logger.info(
+            "SFTP posix_rename unavailable (%s); falling back to rename pair", exc
+        )
+
+    trash_path = f"{final_path}.dataflow-{uuid.uuid4().hex}.trash"
+    parked = False
+    try:
+        sftp.rename(final_path, trash_path)
+        parked = True
+    except OSError as exc:
+        logger.debug("No existing %s to park before rename: %s", final_path, exc)
+    try:
+        sftp.rename(temp_path, final_path)
+    except Exception:
+        if parked:
+            try:
+                sftp.rename(trash_path, final_path)  # restore the original
+            except OSError:
+                logger.error(
+                    "SFTP could not restore %s from %s after a failed rename; "
+                    "the original file is still present at the trash path",
+                    final_path,
+                    trash_path,
+                )
+        raise
+    if parked:
+        try:
+            sftp.remove(trash_path)
+        except OSError:
+            logger.warning(
+                "SFTP parked file %s left behind after successful swap", trash_path
+            )
+
+
+def _is_unsupported_operation(exc: OSError) -> bool:
+    """True only when the server said it does not implement the request."""
+    import errno
+
+    code = getattr(exc, "errno", None)
+    if code in (errno.EOPNOTSUPP, errno.ENOSYS):
+        return True
+    if code is not None:
+        return False
+    text = str(exc).lower()
+    return "unsupported" in text or "not supported" in text or "not implemented" in text
 
 
 def write_mapped_rows(
@@ -56,7 +146,11 @@ def write_mapped_rows(
     on_checkpoint: Any | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
-    """Upload mapped rows as a CSV/JSON file to an SFTP server."""
+    """Upload mapped rows as a CSV/JSON/Parquet/Excel file to an SFTP server.
+
+    Map+quarantine+serialize uses the shared object-store bundle algorithm.
+    Accepted mapped_rows are not retained. Still at-least-once.
+    """
     cfg = parse_sftp_config(
         connection_string=connection_string,
         host=host,
@@ -65,6 +159,8 @@ def write_mapped_rows(
         password=password,
         database=database,
         table=table_name,
+        private_key=str(_kwargs.get("private_key") or ""),
+        **host_key_settings(_kwargs),
     )
     if not cfg.host:
         return WriteResult(
@@ -88,19 +184,80 @@ def write_mapped_rows(
         )
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    policy = transform_error_policy(_kwargs.get("error_policy"))
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
+    dest_types, cov_err = resolve_object_store_write_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        destination_column_types=_kwargs.get("destination_column_types"),
     )
-    if transform_errors and policy == "fail":
+    if cov_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name or cfg.path,
+            target_schema=cfg.host or "",
+            checksum="",
+            chunks_completed=0,
+            error=cov_err,
+        )
+    policy = transform_error_policy(_kwargs.get("error_policy"))
+    sync_mode = str(_kwargs.pop("sync_mode", "") or "")
+    protect_landed = bool(_kwargs.pop("protect_landed_object", False))
+    conflict_columns = list(_kwargs.pop("conflict_columns", None) or [])
+    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    directory, filename = split_remote_path(cfg.path)
+    if filename and "." not in filename:
+        cfg.path = sftp_dest_path(cfg.path, extra.get("file_format"))
+        directory, filename = split_remote_path(cfg.path)
+    fmt = resolve_object_store_export_format(filename)
+    if fmt is None:
+        if not filename:
+            fmt = "csv"
+            filename = "export.csv"
+            cfg.path = f"{directory.rstrip('/')}/{filename}" if directory else f"/{filename}"
+        else:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name or cfg.path,
+                target_schema=cfg.host or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"SFTP dest {filename!r} is not a supported export format — "
+                    "refusing to write CSV bytes under that name. Use .csv, .tsv, "
+                    ".json, .jsonl, .parquet, or .xlsx."
+                ),
+            )
+    spill_max = resolve_spill_max(extra)
+    _, stream_chunk = resolve_multipart_limits(extra)
+    if extra.get("sftp_stream_chunk"):
+        stream_chunk = max(1, int(extra["sftp_stream_chunk"]))
+    serialize_key = (
+        filename
+        if resolve_object_store_export_format(filename) == fmt
+        else ("export.xlsx" if fmt == "excel" else f"export.{fmt}")
+    )
+    try:
+        mat = materialize_object_store_export(
+            key=serialize_key,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            error_policy=policy,
+            dest_kind="sftp",
+            dialect_label="SFTP",
+            spill_max_size=spill_max,
+            batch_size=resolve_materialize_batch(extra),
+            dest_db_type="sftp",
+            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+            **source_from_writer(_kwargs, extra),
+        )
+    except Exception as exc:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -108,52 +265,25 @@ def write_mapped_rows(
             target_schema=cfg.host,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details,
-            rejected_rows=len(rejected_details),
+            error=f"SFTP serialize failed: {exc}",
         )
-
-    # Same object-store honesty as S3/GCS/ADLS — typed DECIMAL/BINARY/VARCHAR(n)
-    # must quarantine before CSV/JSON serialize (Airbyte SFTP-JSON has no Gate-8).
-    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        tgt_types,
-        rejected_details,
-        policy,
-        dialect_label="SFTP",
-        mappings=mappings,
-    )
-
-    directory, filename = split_remote_path(cfg.path)
-    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
-    if ext in ("csv", "jsonl", "json", "tsv"):
-        fmt = ext
-    else:
-        fmt = "csv"
-        if not filename.endswith(".csv"):
-            filename = f"{filename.rstrip('/')}.csv"
-            cfg.path = f"{directory.rstrip('/')}/{filename}" if directory else f"/{filename}"
-
-    rejected_rows = max(
-        _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-        len(data_rows) - len(mapped_rows),
-    )
-
-    records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
-
-    if fmt == "csv" or fmt == "tsv":
-        delimiter = "\t" if fmt == "tsv" else ","
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=target_cols, delimiter=delimiter, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in records])
-        body = buf.getvalue().encode("utf-8")
-    elif fmt == "jsonl":
-        body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")
-    else:
-        body = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    transform_errors = mat.transform_errors
+    rejected_details = mat.rejected_details
+    if mat.abort_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=mat.abort_error or f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=list(rejected_details),
+            rejected_rows=mat.rejected_rows,
+        )
+    export = mat.export
+    written = mat.rows_written
+    rejected_rows = mat.rejected_rows
 
     try:
         transport, sftp = connect_sftp(cfg)
@@ -171,21 +301,70 @@ def write_mapped_rows(
                             sftp.stat(current)
                         except Exception:
                             sftp.mkdir(current)
+            strategy = incremental_merge_strategy(
+                sync_mode, total_chunks=1, protect_landed=protect_landed
+            )
+            if strategy:
+                try:
+                    sftp.stat(cfg.path)
+                    present = True
+                except FileNotFoundError:
+                    present = False
+                except OSError as exc:
+                    if getattr(exc, "errno", None) in {2, None} and "no such" in str(exc).lower():
+                        present = False
+                    else:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=filename,
+                            target_schema=cfg.host,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"SFTP object {cfg.path!r} could not be read for "
+                                f"incremental merge; it was not replaced. {exc}"
+                            ),
+                            rejected_details=list(rejected_details),
+                        )
+                if present:
+                    def _read_remote() -> bytes:
+                        with sftp.file(cfg.path, "rb") as remote:
+                            return remote.read()
+
+                    try:
+                        export = prepare_incremental_export(
+                            key=serialize_key,
+                            export=export,
+                            fetch=_read_remote,
+                            sync_mode=sync_mode,
+                            total_chunks=1,
+                            protect_landed=protect_landed,
+                            created_here=False,
+                            target_cols=target_cols,
+                            dest_types=dest_types,
+                            conflict_columns=conflict_columns,
+                            spill_max_size=spill_max,
+                        )
+                    except ObjectMergeRefused as exc:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=filename,
+                            target_schema=cfg.host,
+                            checksum="",
+                            chunks_completed=0,
+                            error=str(exc),
+                            rejected_details=list(rejected_details),
+                        )
             # Atomic replace: write temp then rename so consumers never see a
             # truncated artifact after a mid-upload disconnect.
             temp_path = f"{cfg.path}.dataflow-{uuid.uuid4().hex}.tmp"
             try:
                 with sftp.file(temp_path, "wb") as f:
-                    f.write(body)
+                    export.copy_to(f, chunk_size=stream_chunk)
                     f.flush()
-                if hasattr(sftp, "posix_rename"):
-                    sftp.posix_rename(temp_path, cfg.path)
-                else:
-                    try:
-                        sftp.remove(cfg.path)
-                    except Exception as exc:
-                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-                    sftp.rename(temp_path, cfg.path)
+                _replace_remote(sftp, temp_path, cfg.path)
             except Exception:
                 try:
                     sftp.remove(temp_path)
@@ -197,21 +376,35 @@ def write_mapped_rows(
             transport.close()
 
         if on_checkpoint:
-            on_checkpoint(1, 1, len(records))
+            on_checkpoint(1, 1, written)
+
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "SFTP")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=filename,
+                target_schema=cfg.host,
+                checksum="",
+                chunks_completed=1,
+                error=_final_abort,
+                warnings=transform_errors[:10],
+                rejected_rows=rejected_rows,
+                rejected_details=rejected_details,
+            )
 
         return WriteResult(
             ok=True,
-            rows_written=len(records),
+            rows_written=written,
             table_name=filename,
             target_schema=cfg.host,
-            checksum=row_checksum(
-                mapped_rows, target_cols, dest_db_type="sftp"
-            ),
+            checksum=mat.checksum,
             chunks_completed=1,
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
-            meta=gate8_writer_meta(records, target_cols),
+            coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
+            meta=mat.meta,
         )
     except Exception as exc:
         return WriteResult(
@@ -224,3 +417,5 @@ def write_mapped_rows(
             error=f"SFTP write failed: {exc}",
             rejected_details=rejected_details if "rejected_details" in locals() else [],
         )
+    finally:
+        export.close()

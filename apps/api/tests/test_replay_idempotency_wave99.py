@@ -455,6 +455,12 @@ class TestRequestFingerprint:
             _request(triggered_by="b@x")
         )
 
+    def test_parent_job_id_does_not_change_the_fingerprint(self):
+        """Sync now writes the same rows, so it shares the parent's claim key."""
+        assert request_fingerprint(_request(parent_job_id="parent-1")) == request_fingerprint(
+            _request()
+        )
+
     def test_reordered_mappings_are_the_same_transfer(self):
         a = _request()
         a.mappings = [{"source": "x", "target": "x"}, {"source": "y", "target": "y"}]
@@ -566,9 +572,43 @@ class TestConcurrentSubmissionIsDeduplicated:
         """A late release from an old job must not open the door for a third writer."""
         svc = MemoryMongoDBService()
         key = claim_key(workspace_id="ws1", key="fp")
-        svc.claim_job_idempotency(key=key, job_id="current")
+        current = svc.create_transfer_job({"name": "current"})
+        svc.claim_job_idempotency(key=key, job_id=current)
+        svc.update_job_status(current, "running")
         assert not svc.release_job_idempotency(key, "stale-old-job")
         assert not svc.claim_job_idempotency(key=key, job_id="third")[0]
+
+    def test_an_orphan_pending_claim_is_reclaimed(self):
+        """A crash between claim and job create must not wedge the route."""
+        svc = MemoryMongoDBService()
+        key = claim_key(workspace_id="ws1", key="fp")
+        svc.claim_job_idempotency(key=key, job_id="__pending__")
+        assert svc.claim_job_idempotency(key=key, job_id="fresh")[0]
+
+    def test_a_missing_job_claim_is_reclaimed(self):
+        svc = MemoryMongoDBService()
+        key = claim_key(workspace_id="ws1", key="fp")
+        svc.claim_job_idempotency(key=key, job_id="deleted-job")
+        assert svc.claim_job_idempotency(key=key, job_id="fresh")[0]
+
+    def test_a_succeeded_alias_does_not_block(self):
+        svc = MemoryMongoDBService()
+        key = claim_key(workspace_id="ws1", key="fp")
+        first = svc.create_transfer_job({"name": "done"})
+        svc.claim_job_idempotency(key=key, job_id=first)
+        svc.update_job_status(first, "succeeded")
+        assert svc.claim_job_idempotency(key=key, job_id="child")[0]
+
+    def test_a_queued_job_still_blocks(self):
+        svc = MemoryMongoDBService()
+        key = claim_key(workspace_id="ws1", key="fp")
+        first = svc.create_transfer_job({"name": "queued"})
+        svc.claim_job_idempotency(key=key, job_id=first)
+        svc.update_job_status(first, "queued")
+        acquired, holder, status = svc.claim_job_idempotency(key=key, job_id="second")
+        assert not acquired
+        assert holder == first
+        assert status == "queued"
 
     def test_an_expired_claim_is_reclaimed(self):
         """A worker that dies without releasing must not wedge the pipeline."""
@@ -623,6 +663,7 @@ class TestEngineRaisesOnDuplicateSubmission:
                 engine._create_pending_job(_request())
             assert caught.value.existing_job_id == first
             assert caught.value.existing_status == "running"
+            assert caught.value.existing_created_at
         finally:
             engine_mod.get_mongodb_service = original
             mongo_mod.get_mongodb_service = mongo_original
@@ -640,6 +681,40 @@ class TestEngineRaisesOnDuplicateSubmission:
                 os.environ.pop("DATAFLOW_JOB_IDEMPOTENCY", None)
             else:
                 os.environ["DATAFLOW_JOB_IDEMPOTENCY"] = prev
+
+    def test_sync_now_links_the_child_back_to_the_finished_parent(self):
+        from services.sync_now import begin_sync_now
+        from src.transfer.engine import UniversalTransferEngine
+        from src.transfer.models import transfer_request_to_dict
+        import services.mongodb_service as mongo_mod
+        import src.transfer.engine as engine_mod
+
+        engine = UniversalTransferEngine()
+        svc = MemoryMongoDBService()
+        original = engine_mod.get_mongodb_service
+        mongo_original = mongo_mod.get_mongodb_service
+        engine_original = engine_mod.get_transfer_engine
+        engine_mod.get_mongodb_service = lambda: svc
+        mongo_mod.get_mongodb_service = lambda: svc
+        engine_mod.get_transfer_engine = lambda: engine
+        try:
+            parent = engine._create_pending_job(_request())
+            svc.update_job_status(parent, "completed")
+            child_req = _request(parent_job_id=parent)
+            result, _request_obj = begin_sync_now({
+                "mode": "sync",
+                "parent_job_id": parent,
+                "transfer_request": transfer_request_to_dict(child_req),
+            })
+            child = result["job_id"]
+            assert child != parent
+            assert svc.get_job(child)["parent_job_id"] == parent
+            assert svc.get_job(parent)["last_sync_job_id"] == child
+            assert result["parent_job_id"] == parent
+        finally:
+            engine_mod.get_mongodb_service = original
+            mongo_mod.get_mongodb_service = mongo_original
+            engine_mod.get_transfer_engine = engine_original
 
     def test_an_explicit_client_key_overrides_the_fingerprint(self):
         from src.transfer.engine import UniversalTransferEngine

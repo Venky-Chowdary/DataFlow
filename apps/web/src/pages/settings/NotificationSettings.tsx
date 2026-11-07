@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { SectionLoader } from "../../components/LoadingState";
@@ -6,6 +6,7 @@ import { useToast } from "../../components/Toast";
 import { useConfirm } from "../../components/ui/ConfirmDialog";
 import {
   createNotificationChannel,
+  rotateNotificationSigningSecret,
   deleteNotificationChannel,
   fetchNotificationChannels,
   fetchWorkspaces,
@@ -14,6 +15,12 @@ import {
   type NotificationChannel,
   type Workspace,
 } from "../../lib/api";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { PermissionNotice } from "../../components/PermissionNotice";
+import { Button } from "../../components/ui/Button";
+import { SigningSecretNotice } from "../../components/team/SigningSecretNotice";
+import { landingWorkspaceId, setActiveWorkspaceId, useActiveWorkspaceId } from "../../lib/workspace";
+import { useVisibleRefresh } from "../../lib/visibleRefresh";
 
 type ChannelKind = "slack" | "teams" | "email" | "servicenow" | "webhook";
 
@@ -28,12 +35,15 @@ const KIND_META: Record<ChannelKind, { label: string; description: string }> = {
 export function NotificationSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
+  const [issuedSecret, setIssuedSecret] = useState<{ label: string; secret: string } | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
+  const selectedWorkspace = useActiveWorkspaceId();
 
   const [kind, setKind] = useState<ChannelKind>("email");
   const [label, setLabel] = useState("");
@@ -60,23 +70,40 @@ export function NotificationSettings() {
 
   useEffect(() => {
     fetchWorkspaces()
-      .then((w) => {
+      .then(({ workspaces: w, defaultWorkspaceId }) => {
         setWorkspaces(w);
-        if (w.length && !selectedWorkspace) setSelectedWorkspace(w[0].id);
+        if (w.length && !selectedWorkspace) setActiveWorkspaceId(landingWorkspaceId(w, defaultWorkspaceId));
       })
       .catch(() => setWorkspaces([]));
-  }, []);
+  }, [selectedWorkspace]);
+
+  const loadChannels = useCallback(() => {
+    setLoading(true);
+    fetchNotificationChannels(selectedWorkspace || undefined)
+      .then((data) => {
+        setChannels(data.channels);
+        setLoadError("");
+      })
+      .catch((err: unknown) => {
+        // A channel list that could not be read is not "no channels configured":
+        // that reading would tell an operator alerts are unrouted when they are.
+        setChannels([]);
+        setLoadError(err instanceof Error ? err.message : "Could not read notification channels.");
+      })
+      .finally(() => setLoading(false));
+  }, [selectedWorkspace]);
 
   useEffect(() => {
     loadChannels();
-  }, [selectedWorkspace]);
+  }, [loadChannels]);
 
-  const loadChannels = () => {
-    setLoading(true);
-    fetchNotificationChannels(selectedWorkspace || undefined)
-      .then((data) => setChannels(data.channels))
-      .catch(() => setChannels([]))
-      .finally(() => setLoading(false));
+  useVisibleRefresh(loadChannels, 12_000, Boolean(selectedWorkspace));
+
+  /** Refuse in words rather than firing a request the API will reject. */
+  const mayManage = () => {
+    if (manage.allowed) return true;
+    toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+    return false;
   };
 
   const resetForm = () => {
@@ -139,15 +166,17 @@ export function NotificationSettings() {
   }, [kind, recipients, webhookUrl, endpointUrl]);
 
   const add = async () => {
+    if (!mayManage()) return;
     setSaving(true);
     try {
-      await createNotificationChannel({
+      const created = await createNotificationChannel({
         workspace_id: selectedWorkspace,
         kind,
         label: label.trim() || KIND_META[kind].label,
         enabled: true,
         config: buildConfig,
       });
+      if (created.signing_secret) setIssuedSecret({ label: created.label, secret: created.signing_secret });
       toast({ title: "Channel added", tone: "success" });
       resetForm();
       loadChannels();
@@ -159,6 +188,7 @@ export function NotificationSettings() {
   };
 
   const toggle = async (channel: NotificationChannel) => {
+    if (!mayManage()) return;
     try {
       await updateNotificationChannel(channel.id, { enabled: !channel.enabled });
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, enabled: !c.enabled } : c)));
@@ -168,6 +198,7 @@ export function NotificationSettings() {
   };
 
   const remove = async (id: string) => {
+    if (!mayManage()) return;
     const ok = await confirm({
       title: "Delete this notification channel?",
       message: "Alerts will no longer be delivered through this channel.",
@@ -184,7 +215,27 @@ export function NotificationSettings() {
     }
   };
 
+  const rotateSecret = async (channel: NotificationChannel) => {
+    if (!mayManage()) return;
+    const ok = await confirm({
+      title: "Rotate the signing secret?",
+      message: "The current secret stops signing immediately. Update the receiver with the new one.",
+      confirmLabel: "Rotate secret",
+      cancelLabel: "Keep current",
+      tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      const rotated = await rotateNotificationSigningSecret(channel.id);
+      if (rotated.signing_secret) setIssuedSecret({ label: rotated.label, secret: rotated.signing_secret });
+      setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, signing_secret_set: true } : c)));
+    } catch (err) {
+      toast({ title: "Rotation failed", message: err instanceof Error ? err.message : "", tone: "error" });
+    }
+  };
+
   const test = async (id: string) => {
+    if (!mayManage()) return;
     setTesting(id);
     try {
       const result = await testNotificationChannel(id);
@@ -216,14 +267,34 @@ export function NotificationSettings() {
         </div>
       </div>
         <div className="df2-settings-section-body">
+        <PermissionNotice
+          allowed={manage.allowed}
+          reason={manage.reason}
+          what="Notification channels are read-only for you."
+        />
+        {issuedSecret && (
+          <SigningSecretNotice
+            label={issuedSecret.label}
+            secret={issuedSecret.secret}
+            onDone={() => setIssuedSecret(null)}
+          />
+        )}
+
         {workspaces.length > 1 && (
           <div className="df2-settings-field df2-mb-md">
-            <label>Workspace</label>
-            <select className="df2-select" value={selectedWorkspace} onChange={(e) => setSelectedWorkspace(e.target.value)}>
+            <label htmlFor="df2-notify-workspace">Workspace</label>
+            <select
+              id="df2-notify-workspace"
+              className="df2-select"
+              data-testid="notify-workspace-select"
+              value={selectedWorkspace}
+              onChange={(e) => setActiveWorkspaceId(e.target.value)}
+            >
               {workspaces.map((w) => (
                 <option key={w.id} value={w.id}>{w.name}</option>
               ))}
             </select>
+            <p className="df2-settings-hint">Same live workspace as Team, General, and the top bar.</p>
           </div>
         )}
 
@@ -262,7 +333,7 @@ export function NotificationSettings() {
           {(kind === "servicenow" || kind === "webhook") && (
             <div className="df2-settings-field df2-settings-field--full">
               <label>Endpoint URL</label>
-              <input className="df2-input" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder={kind === "servicenow" ? "https://company.service-now.com/api/now/table/incident" : "https://company.com/webhook/dataflow"} />
+              <input className="df2-input" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder={kind === "servicenow" ? "https://company.service-now.com/api/now/table/incident" : "https://company.com/webhook/datawrap"} />
             </div>
           )}
 
@@ -334,63 +405,99 @@ export function NotificationSettings() {
               </div>
               <div className="df2-settings-field df2-settings-field--full">
                 <label>From address</label>
-                <input className="df2-input" value={fromAddress} onChange={(e) => setFromAddress(e.target.value)} placeholder="dataflow@company.com" />
+                <input className="df2-input" value={fromAddress} onChange={(e) => setFromAddress(e.target.value)} placeholder="datawrap@company.com" />
               </div>
               </div>
             </div>
           )}
 
           <div className="df2-settings-channel-form-actions">
-            <button type="button" className="df2-btn df2-btn-primary" disabled={!canAdd || saving} onClick={() => void add()}>
-              <DtIcon name="plus" size={14} /> {saving ? "Saving…" : "Add channel"}
-            </button>
+            <Button
+              variant="primary"
+              disabled={!canAdd || saving || !manage.allowed}
+              title={manage.reason || undefined}
+              loading={saving}
+              loadingLabel="Saving…"
+              leadingIcon={<DtIcon name="plus" size={14} />}
+              onClick={() => void add()}
+            >
+              Add channel
+            </Button>
           </div>
         </div>
 
         {loading ? (
           <SectionLoader title="Loading channels" hint="Fetching notification channels…" />
+        ) : loadError ? (
+          // A refused or failed read has already been stated above; drawing the
+          // empty state under it would contradict it in the same breath.
+          <EmptyState
+            compact
+            icon="alert"
+            title="Channels could not be read"
+            description={`This is not an empty list — ${loadError}`}
+          />
         ) : channels.length === 0 ? (
           <EmptyState compact icon="bell" title="No channels yet" description="Add a channel to receive job alerts and quarantine notifications." />
         ) : (
-          <div className="df2-settings-table-wrap">
-            <table className="df2-settings-logs-table">
-              <thead>
-                <tr>
-                  <th>Channel</th>
-                  <th>Target</th>
-                  <th>Status</th>
-                  <th style={{ width: 180 }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {channels.map((c) => (
-                  <tr key={c.id}>
-                    <td>
-                      <strong>{c.label}</strong>
-                      <div className="df2-cell-meta">{KIND_META[c.kind as ChannelKind]?.label || c.kind}</div>
-                    </td>
-                    <td className="df2-cell-meta" style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summaryFor(c)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={c.enabled}
-                        className={`df2-switch ${c.enabled ? "on" : ""}`}
-                        onClick={() => void toggle(c)}
-                      >
-                        <span className="df2-switch-thumb" />
-                      </button>
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button type="button" className="df2-btn df2-btn-sm" disabled={testing === c.id} onClick={() => void test(c.id)}>{testing === c.id ? "Testing…" : "Test"}</button>
-                        <button type="button" className="df2-btn df2-btn-sm df2-btn-danger" onClick={() => void remove(c.id)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="df2-team-list" data-testid="notify-channel-list">
+            <div className="df2-team-list-head df2-team-list-head--channels">
+              <span>Channel</span>
+              <span>Target</span>
+              <span>Status</span>
+              <span>Actions</span>
+            </div>
+            {channels.map((c) => (
+              <div className="df2-team-member-row df2-team-member-row--channels" key={c.id}>
+                <div className="df2-team-identity-text">
+                  <strong>{c.label}</strong>
+                  <span>{KIND_META[c.kind as ChannelKind]?.label || c.kind}</span>
+                </div>
+                <span className="df2-cell-meta df2-team-channel-target">{summaryFor(c)}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={c.enabled}
+                  className={`df2-switch ${c.enabled ? "on" : ""}`}
+                  disabled={!manage.allowed}
+                  title={manage.reason || undefined}
+                  onClick={() => void toggle(c)}
+                >
+                  <span className="df2-switch-thumb" />
+                </button>
+                <div className="df2-team-row-actions">
+                  <Button
+                    size="sm"
+                    disabled={testing === c.id || !manage.allowed}
+                    title={manage.reason || undefined}
+                    loading={testing === c.id}
+                    loadingLabel="Testing…"
+                    onClick={() => void test(c.id)}
+                  >
+                    Test
+                  </Button>
+                  {c.kind === "webhook" && (
+                    <Button
+                      size="sm"
+                      disabled={!manage.allowed}
+                      title={manage.reason || undefined}
+                      onClick={() => void rotateSecret(c)}
+                    >
+                      {c.signing_secret_set ? "Rotate secret" : "Create signing secret"}
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={!manage.allowed}
+                    title={manage.reason || undefined}
+                    onClick={() => void remove(c.id)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

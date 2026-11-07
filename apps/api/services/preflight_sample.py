@@ -1,0 +1,186 @@
+"""Validate sample rows read by the engine's own source reader.
+
+Gate-5/8/9, the locale and profile passes, and the destination collision probe
+all judge "the rows about to be written". When a caller posts no sample — the
+copilot's sampler failed, or a client never fetched one — every one of them was
+judging nothing, and Gate-8 blocked with "load a source sample" on a table
+holding rows, without saying why the sample was missing (DEF-B-004 on MySQL).
+
+The reader here is the one Execute uses (``read_source_database``), so Validate
+judges what Execute reads rather than a second query planner's idea of it. A
+read that fails returns its reason; the caller surfaces it, never a silent
+empty list.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections.abc import Sized
+from dataclasses import dataclass, field
+from itertools import chain
+from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
+
+_SAMPLED_KINDS = frozenset({"database", "cloud"})
+
+#: Relational sources whose raw preview query cannot carry what the Execute
+#: reader carries. MySQL ``TIMESTAMP`` digits are a stored UTC instant: the
+#: reader attaches UTC, the preview returns them as a naive wall clock, and
+#: ``TIMESTAMPTZ`` refuses a naive value (D171).
+PREVIEW_UNFAITHFUL_SOURCE_TYPES = frozenset({"mysql"})
+
+
+@dataclass(frozen=True)
+class EngineSample:
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    #: Why no rows were read; empty when the read ran (an empty table is rows=[]).
+    unavailable_reason: str = ""
+    attempted: bool = False
+    #: The read succeeded and the source returned no row at all (before any
+    #: row filter) — a measured empty population, not a missing sample.
+    measured_empty: bool = False
+    #: Execute's own reader raised. The source is not readable — distinct from
+    #: a row filter that matched nothing, which is a data fact, not a failure.
+    read_failed: bool = False
+
+
+def peek_population_empty(population: Any) -> tuple[Any, bool]:
+    """``(population, is_empty)`` without consuming a lazy population.
+
+    A stored upload or Execute's in-memory batch is the whole population, so
+    an empty one is a measured empty source — a header-only file — rather than
+    a sample nobody fetched.
+    """
+    if population is None:
+        return None, False
+    if isinstance(population, Sized):
+        return population, len(population) == 0
+    it = iter(population)
+    first = next(it, _END)
+    if first is _END:
+        return [], True
+    return chain((first,), it), False
+
+
+_END = object()
+
+
+_PRIVILEGE_READ_RE = re.compile(
+    r"permission denied|insufficient privilege|\b42501\b|lacks select|must be owner",
+    re.IGNORECASE,
+)
+
+
+def source_read_is_privilege_denial(reason: str) -> bool:
+    """True when a failed read is a grant problem, not an empty table.
+
+    A catalog can list columns the role cannot SELECT. Treating that as
+    "source readable" let Validate offer a cast contract for a table the
+    login will never be allowed to read.
+    """
+    return bool(_PRIVILEGE_READ_RE.search(reason or ""))
+
+
+def _pattern_sample(endpoint: Any, limit: int) -> list[dict] | None:
+    """Rows from each file of a prefix/glob source, as Execute peeks them.
+
+    One GET on ``sales/2026-10/`` is "matches 2 objects", so Studio Validate
+    held every prefix source on G1 (QA demo 1030). The engine's own peek
+    reads the set file by file; Validate reads the same. None = not a pattern.
+    """
+    fmt = str(getattr(endpoint, "format", "") or "").lower()
+    table = str(getattr(endpoint, "table", "") or "")
+    if not table:
+        return None
+    from services.file_pickup import is_file_pattern
+
+    if not is_file_pattern(table):
+        return None
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type
+        from src.transfer.source_peek import peek_stream_source
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from transfer.connector_capabilities import resolve_driver_type
+        from transfer.source_peek import peek_stream_source
+
+    if resolve_driver_type(fmt) not in {"s3", "gcs", "adls", "sftp"}:
+        return None
+    _cols, _schema, _total, rows = peek_stream_source(endpoint)
+    return [
+        {k: v for k, v in dict(r).items() if k != "_df_file"} for r in rows[:limit]
+    ]
+
+
+def engine_sample_rows(
+    *,
+    source_kind: str,
+    source_format: str = "",
+    source_connector_id: str = "",
+    source_config: Mapping[str, Any] | None = None,
+    source_table: str = "",
+    limit: int,
+    source_filter: Mapping[str, Any] | None = None,
+) -> EngineSample:
+    """Up to ``limit`` source rows through the Execute reader, or the reason not.
+
+    Callable extracts are peeked by their own planner and file sources carry
+    their stored rows, so neither is read here.
+    """
+    kind = (source_kind or "").strip().lower()
+    table = str(source_table or "").strip()
+    if kind not in _SAMPLED_KINDS or not table or limit <= 0:
+        return EngineSample()
+    if not (source_connector_id or source_config):
+        return EngineSample()
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_config):
+        return EngineSample()
+    try:
+        from src.transfer.adapters import read_source_database
+        from src.transfer.models import EndpointConfig
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from transfer.adapters import read_source_database
+        from transfer.models import EndpointConfig
+
+    data = dict(source_config or {})
+    if source_connector_id:
+        data["connector_id"] = source_connector_id
+    data.setdefault("table", table)
+    data.setdefault("collection", table)
+    if source_format:
+        data.setdefault("format", source_format)
+        data.setdefault("type", source_format)
+    try:
+        endpoint = EndpointConfig.from_dict(kind, data)
+        records = _pattern_sample(endpoint, limit)
+        if records is None:
+            records, _headers, _schema = read_source_database(
+                endpoint, limit=limit, raise_on_truncate=False
+            )
+    except Exception as exc:  # noqa: BLE001 — the reason is the product output
+        logger.warning("Validate source sample read failed for %s: %s", table, exc)
+        return EngineSample(
+            unavailable_reason=f"source sample read failed: {exc}"[:400],
+            attempted=True,
+            read_failed=True,
+        )
+    rows = [dict(r) for r in (records or [])[:limit] if isinstance(r, Mapping)]
+    if not rows:
+        return EngineSample(attempted=True, measured_empty=True)
+    if source_filter:
+        from services.row_filter import apply_row_filter
+
+        read = len(rows)
+        rows = apply_row_filter(rows, dict(source_filter))
+        if not rows:
+            return EngineSample(
+                unavailable_reason=(
+                    f"none of the first {read} source row(s) match the row filter, "
+                    "so there is no sample to validate"
+                ),
+                attempted=True,
+            )
+    return EngineSample(rows=rows, attempted=True)

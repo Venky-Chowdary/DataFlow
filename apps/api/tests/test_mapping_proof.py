@@ -274,6 +274,29 @@ def test_semi_structured_and_sample_preview():
     assert row["evidence"]["sample_preview"]
 
 
+def test_match_existing_without_stamp_does_not_invent_varchar():
+    """Partial Studio / missing Map stamp — proof must not soft-fill source_type."""
+    proof = build_mapping_proof(
+        [{
+            "source": "note",
+            "target": "note",
+            "confidence": 0.9,
+            "source_type": "VARCHAR",
+            "transform": "none",
+            "assignment_strategy": "optimal_bipartite_hungarian",
+            "exists_in_destination": True,
+        }],
+        target_columns=["id", "note"],
+        destination_db_type="postgresql",
+        destination_table_exists=True,
+    )
+    row = proof["mappings"][0]
+    assert row["target_type"] == ""
+    assert row["dest_native_type"] is None
+    assert "pending Studio/Map stamp" in row["schema_decision"]
+    assert "VARCHAR" not in row["schema_decision"]
+
+
 def test_pipeline_preserves_decimal_params_and_demotes_bare_varchar():
     typed = run_mapping_pipeline(
         ["amount"],
@@ -291,7 +314,9 @@ def test_pipeline_preserves_decimal_params_and_demotes_bare_varchar():
         ["notes"],
         ["notes"],
         source_schemas=[{"name": "notes", "inferred_type": "VARCHAR", "samples": []}],
-        target_schemas=[{"name": "notes", "inferred_type": "VARCHAR", "samples": []}],
+        # Onto a typed column: a bare VARCHAR with no samples proves nothing
+        # about the cast. (Onto a same-named text column it loses nothing, D159.)
+        target_schemas=[{"name": "notes", "inferred_type": "INTEGER", "samples": []}],
         destination_db_type="postgresql",
         use_llm=False,
         destination_table_exists=True,

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from connectors.base import ConnectResult
 
+#: Objects returned by a connection probe. A probe is a reachability check, not
+#: a catalog dump, so the page stays bounded and truncation is reported instead.
+_TABLE_PAGE = 200
+
 
 def test_postgresql(
     *,
@@ -30,24 +34,57 @@ def test_postgresql(
         )
         schema_name = schema or "public"
         with conn.cursor() as cur:
+            # Fetch one past the page so truncation is detected rather than
+            # inferred from a full page, and report the real total: a probe that
+            # says "200 tables" for a 636-table schema reads as the whole
+            # inventory to anything resolving a name against it.
             cur.execute(
                 """
-                SELECT table_name
+                SELECT table_name, table_type
                 FROM information_schema.tables
-                WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
                 ORDER BY table_name
-                LIMIT 200
+                LIMIT %s
                 """,
-                (schema_name,),
+                (schema_name, _TABLE_PAGE + 1),
             )
-            tables = [row[0] for row in cur.fetchall()]
+            fetched_rows = cur.fetchall()
+            truncated = len(fetched_rows) > _TABLE_PAGE
+            fetched = fetched_rows[:_TABLE_PAGE]
+            tables = [row[0] for row in fetched]
+            # Keep the object kind so callers can tell a view from a table
+            # (M18 — the listing showed every object as a plain table).
+            table_types = {
+                row[0]: ("view" if str(row[1]).upper() == "VIEW" else "table")
+                for row in fetched
+            }
+            total = len(tables)
+            if truncated:
+                cur.execute(
+                    """
+                    SELECT count(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
+                    """,
+                    (schema_name,),
+                )
+                total = int((cur.fetchone() or [len(tables)])[0])
 
         conn.close()
+        if truncated:
+            message = (
+                f"PostgreSQL connected — {total} tables in schema '{schema_name}' "
+                f"(listing first {len(tables)})"
+            )
+        else:
+            message = f"PostgreSQL connected — {total} tables in schema '{schema_name}'"
         return ConnectResult(
             ok=True,
             tables=tables or ["(no tables in schema)"],
-            message=f"PostgreSQL connected — {len(tables)} tables in schema '{schema_name}'",
+            message=message,
             driver="psycopg2",
+            tables_truncated=truncated,
+            table_types=table_types,
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="psycopg2")

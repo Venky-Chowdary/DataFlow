@@ -1,7 +1,9 @@
 # Railway — Web (static UI) service
 # Settings → Config file path: deploy/railway/web.toml
-# Build variable: VITE_API_BASE = https://${{dataflow-api.RAILWAY_PUBLIC_DOMAIN}}/api/v1
-# (replace dataflow-api with your API service name)
+# Variable (runtime, required): DATAWRAP_API_BASE = https://${{dataflow-api.RAILWAY_PUBLIC_DOMAIN}}/api/v1
+# (replace dataflow-api with your API service name). The web container proxies
+# the browser's same-origin /api/v1 there and refuses to start without it; the
+# legacy DATAFLOW_API_BASE / VITE_API_BASE names are still read.
 
 [build]
 builder = "DOCKERFILE"

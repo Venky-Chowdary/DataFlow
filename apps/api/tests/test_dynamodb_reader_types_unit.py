@@ -27,8 +27,11 @@ def test_union_attribute_keys_stable():
 
 
 def test_explicit_null_cell_and_transform():
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     assert _cell(DDB_EXPLICIT_NULL) == DDB_NULL_SENTINEL
-    assert _cell(None) == ""
+    # Python None is SQL NULL polarity — never invent empty string.
+    assert _cell(None) == SQL_NULL_SENTINEL
     val, err = apply_transform(DDB_NULL_SENTINEL, "decimal")
     assert err is None and val is None
     val2, err2 = apply_transform(DDB_NULL_SENTINEL, "none")

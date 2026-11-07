@@ -23,9 +23,82 @@ def test_create_and_list(temp_store):
         "dest_table": "orders_wh",
         "interval": "daily",
     })
-    assert sched.enabled
+    assert sched.enabled is False
     assert sched.interval == "daily"
     assert len(store.list_schedules()) == 1
+    live = store.create_schedule({
+        "name": "Nightly mapped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    assert live.enabled is True
+    assert live.id == sched.id
+    assert len(store.list_schedules()) == 1
+
+
+def test_list_reports_overdue_without_dropping_the_catch_up(temp_store):
+    """QA D11 — a ``next_run_at`` frozen in the past is reported as overdue.
+
+    The read must not rewrite it: pushing it to the next boundary hid the
+    stuck claim behind it (MX3-24) and silently skipped the catch-up run the
+    beat owes for the missed slot, without counting the miss.
+    """
+    sched = store.create_schedule({
+        "name": "Stuck beat",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    loaded = store._load_all()
+    loaded[0].next_run_at = past
+    store._save_all(loaded)
+
+    listed = store.list_schedules()
+    assert listed[0].next_run_at == past
+    assert store.get_schedule(sched.id).next_run_at == past
+    assert store.schedule_overdue_seconds(listed[0]) >= 2 * 86400 - 5
+    # Still due, so the beat runs the one catch-up and counts the missed window.
+    assert [s.id for s in store.due_schedules()] == [sched.id]
+
+
+def test_list_leaves_disabled_and_running_schedules_alone(temp_store):
+    store.create_schedule({
+        "name": "Paused",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+        "enabled": False,
+    })
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    loaded = store._load_all()
+    loaded[0].next_run_at = past
+    store._save_all(loaded)
+    assert store.list_schedules()[0].next_run_at == past
+
+
+def test_interval_cron_requires_an_expression(temp_store):
+    with pytest.raises(ValueError, match="cron"):
+        store.create_schedule({
+            "name": "Bad pair",
+            "source_connector_id": "src-1",
+            "source_table": "orders",
+            "dest_connector_id": "dst-1",
+            "dest_table": "orders_wh",
+            "interval": "cron",
+            "cron": "",
+            "mappings": [{"source": "id", "target": "id"}],
+        })
 
 
 def test_assert_signed_contract_fail_closed(temp_store, monkeypatch):
@@ -107,6 +180,7 @@ def test_due_schedules(temp_store):
         "dest_connector_id": "b",
         "dest_table": "t2",
         "interval": "hourly",
+        "mappings": [{"source": "id", "target": "id"}],
     })
     past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     store.update_schedule(sched.id, {"next_run_at": past})
@@ -128,3 +202,55 @@ def test_mark_run_updates_next(temp_store):
     assert updated.last_job_id == "job-123"
     assert updated.run_count == 1
     assert updated.next_run_at is not None
+
+
+def test_source_schema_baseline_survives_reload(temp_store):
+    """The drift baseline is the feature. from_dict used to drop it on every load."""
+    sched = store.create_schedule({
+        "name": "Nightly",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+    })
+    updated = store.update_schedule(sched.id, {
+        "source_schema": {"id": "BIGINT", "currency": "VARCHAR(3)"},
+        "source_schema_fingerprint": "fp-1",
+        "source_schema_observed_at": "2026-08-14T00:00:00+00:00",
+        "source_primary_key": ["id"],
+    })
+    assert updated is not None
+    assert updated.source_schema["currency"] == "VARCHAR(3)"
+    assert updated.source_schema_fingerprint == "fp-1"
+    assert updated.source_primary_key == ["id"]
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.source_schema == {"id": "BIGINT", "currency": "VARCHAR(3)"}
+    assert reloaded.source_schema_fingerprint == "fp-1"
+    assert reloaded.source_primary_key == ["id"]
+
+
+def test_fidelity_campaign_survives_reload(temp_store):
+    sched = store.create_schedule({
+        "name": "Nightly",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+    })
+    campaign = {
+        "verdict": "in_progress",
+        "consecutive_passes": 2,
+        "required_consecutive": 3,
+        "history": [{"passed": True, "assurance_level": "engine_column_profile"}],
+        "next_action": "2 of 3 consecutive clean cycles — keep the parallel run going.",
+    }
+    updated = store.update_schedule(sched.id, {"fidelity_campaign": campaign})
+    assert updated is not None
+    assert updated.fidelity_campaign["consecutive_passes"] == 2
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.fidelity_campaign["verdict"] == "in_progress"
+    assert reloaded.fidelity_campaign["history"][0]["passed"] is True

@@ -103,9 +103,13 @@ def test_refine_spreads_confidence_classes() -> None:
 
 
 def test_email_mask_shape_preserving() -> None:
-    assert mask("alice@example.com").startswith("a")
-    assert "@example.com" in mask("alice@example.com")
-    assert "alice" not in mask("alice@example.com")
+    masked = mask("alice@example.com")
+    assert masked.startswith("a")
+    assert "@" in masked
+    assert "alice" not in masked
+    # Org domain must not leak — only the TLD may remain for shape.
+    assert "example" not in masked
+    assert masked.endswith(".com")
 
 
 def test_sample_preview_masks_pii_columns() -> None:

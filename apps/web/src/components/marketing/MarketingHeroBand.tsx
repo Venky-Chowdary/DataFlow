@@ -40,7 +40,7 @@ export function MarketingHeroBand({
       <div className="lp-mkt-hero-band-mesh" aria-hidden />
       {motion === "contact" ? <div className="lp-mkt-hero-band-beams" aria-hidden /> : null}
       {motion === "pricing" ? <div className="lp-mkt-hero-band-ruler" aria-hidden /> : null}
-      <div className={`lp-mkt-hero-grid ${visual ? "" : "lp-mkt-hero-grid--solo"}`.trim()}>
+      <div className={`lp-mkt-wrap lp-mkt-hero-grid ${visual ? "" : "lp-mkt-hero-grid--solo"}`.trim()}>
         <div className="lp-mkt-hero-copy">
           {breadcrumb ? <p className="lp-mkt-breadcrumb">{breadcrumb}</p> : null}
           <p className="lp-mkt-kicker">{kicker}</p>

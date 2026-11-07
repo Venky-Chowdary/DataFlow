@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import ssl as _ssl
 from unittest.mock import MagicMock, patch
 
 _API_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,9 @@ def test_mysql_get_connection_ddl_uses_short_lock_wait():
     from connectors import mysql_conn
 
     fake_conn = MagicMock()
+    # ssl=True / proxy host is REQUIRED TLS: the dial refuses a plaintext
+    # session (connectors.mysql_tls), so the double is an encrypted one.
+    fake_conn._sock = MagicMock(spec=_ssl.SSLSocket)
     with (
         patch.object(mysql_conn, "is_public_proxy_host", return_value=True),
         patch("pymysql.connect", return_value=fake_conn) as connect,
@@ -68,6 +72,9 @@ def test_mysql_setup_on_proxy_keeps_short_lock_longer_io():
     from connectors import mysql_conn
 
     fake_conn = MagicMock()
+    # ssl=True / proxy host is REQUIRED TLS: the dial refuses a plaintext
+    # session (connectors.mysql_tls), so the double is an encrypted one.
+    fake_conn._sock = MagicMock(spec=_ssl.SSLSocket)
     with (
         patch.object(mysql_conn, "is_public_proxy_host", return_value=True),
         patch("pymysql.connect", return_value=fake_conn) as connect,
@@ -93,6 +100,9 @@ def test_mysql_get_connection_write_keeps_longer_proxy_io():
     from connectors import mysql_conn
 
     fake_conn = MagicMock()
+    # ssl=True / proxy host is REQUIRED TLS: the dial refuses a plaintext
+    # session (connectors.mysql_tls), so the double is an encrypted one.
+    fake_conn._sock = MagicMock(spec=_ssl.SSLSocket)
     with (
         patch.object(mysql_conn, "is_public_proxy_host", return_value=True),
         patch("pymysql.connect", return_value=fake_conn) as connect,

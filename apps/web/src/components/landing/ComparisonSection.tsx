@@ -4,14 +4,14 @@ import { DtIcon } from "../DtIcon";
 // Category comparison only — Datawrap vs the managed-ELT and open-source
 // pipeline categories. We never name competitor brands in public copy.
 const FEATURES = [
-  { label: "Semantic schema intelligence", dataflow: true, managed: "partial", oss: "partial" },
-  { label: "LLM data copilot", dataflow: true, managed: false, oss: false },
-  { label: "Preflight validation gates", dataflow: true, managed: "partial", oss: false },
-  { label: "Post-load checksum reconciliation", dataflow: true, managed: "partial", oss: false },
-  { label: "MCP / agent-native tooling", dataflow: true, managed: false, oss: false },
-  { label: "Self-hosted / air-gapped option", dataflow: true, managed: false, oss: true },
-  { label: "Open connector SDK", dataflow: "partial", managed: false, oss: true },
-  { label: "Automatic schema-drift blocking", dataflow: true, managed: "partial", oss: false },
+  { label: "Semantic schema intelligence", datawrap: true, managed: "partial", oss: "partial" },
+  { label: "LLM data copilot", datawrap: true, managed: false, oss: false },
+  { label: "Preflight validation gates", datawrap: true, managed: "partial", oss: false },
+  { label: "Post-load checksum reconciliation", datawrap: true, managed: "partial", oss: false },
+  { label: "MCP / agent-native tooling", datawrap: true, managed: false, oss: false },
+  { label: "Self-hosted / air-gapped option", datawrap: true, managed: false, oss: true },
+  { label: "Open connector SDK", datawrap: "partial", managed: false, oss: true },
+  { label: "Automatic schema-drift blocking", datawrap: true, managed: "partial", oss: false },
 ];
 
 function Cell({ value }: { value: boolean | string }) {
@@ -34,14 +34,14 @@ export function ComparisonSection() {
         <div className="lp-compare-table" role="table" aria-label="Category comparison">
           <div className="lp-compare-row lp-compare-header" role="row">
             <span role="columnheader">Capability</span>
-            <span role="columnheader" className="lp-compare-brand lp-compare-brand--dataflow">Datawrap</span>
+            <span role="columnheader" className="lp-compare-brand lp-compare-brand--datawrap">Datawrap</span>
             <span role="columnheader" className="lp-compare-brand">Managed ELT</span>
             <span role="columnheader" className="lp-compare-brand">Open-source pipelines</span>
           </div>
           {FEATURES.map((f) => (
             <div className="lp-compare-row" role="row" key={f.label}>
               <span role="cell" className="lp-compare-feature">{f.label}</span>
-              <span role="cell" className="lp-compare-cell lp-compare-cell--dataflow"><Cell value={f.dataflow} /></span>
+              <span role="cell" className="lp-compare-cell lp-compare-cell--datawrap"><Cell value={f.datawrap} /></span>
               <span role="cell" className="lp-compare-cell"><Cell value={f.managed} /></span>
               <span role="cell" className="lp-compare-cell"><Cell value={f.oss} /></span>
             </div>

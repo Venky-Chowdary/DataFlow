@@ -57,6 +57,34 @@ def test_refuse_incomplete_accepts_target_shaped_values():
     assert "user_id" in columns
 
 
+def test_quarantine_details_preserve_sql_null_on_replay_projection():
+    """None in quarantine values must not invent empty string on replay."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+    from services.transform_engine import apply_transform
+    from src.routers.connectors_router import (
+        _canonicalize_quarantine_records_to_source,
+        _quarantine_details_to_records,
+    )
+
+    details = [
+        {
+            "row": 1,
+            "column": "note",
+            "value": None,
+            "values": {"id": "1", "note": None},
+        }
+    ]
+    records, _cols = _quarantine_details_to_records(details)
+    assert records[0]["note"] == SQL_NULL_SENTINEL
+    shaped, _ = _canonicalize_quarantine_records_to_source(
+        records,
+        [{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
+    )
+    assert shaped[0]["note"] == SQL_NULL_SENTINEL
+    val, err = apply_transform(shaped[0]["note"], "none")
+    assert err is None and val is None
+
+
 def test_quarantine_replay_persists_gate8_reconciliation(tmp_path: Path):
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest

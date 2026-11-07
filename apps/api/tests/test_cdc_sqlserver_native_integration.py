@@ -9,7 +9,9 @@ When SQL Agent is unavailable, the test calls ``force_cdc_scan()`` after DML.
 """
 
 from __future__ import annotations
+import os
 
+import logging
 import socket
 import sys
 import time
@@ -27,13 +29,18 @@ from connectors.sqlserver_cdc_native import (  # noqa: E402
     decode_mssql_cdc_token,
 )
 from connectors.writer_common import extract_cdc_lsn  # noqa: E402
+from cdc_sqlserver_live_helpers import (  # noqa: E402
+    sqlserver_server_now,
+    wait_for_sqlserver_capture_job_healthy,
+    wait_for_sqlserver_capture_job_stopped,
+)
 
 CFG = {
     "host": "localhost",
     "port": 1433,
     "database": "dataflow",
     "username": "sa",
-    "password": "Datawrap_CDC_2022!",
+    "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
     "connection_string": "",
     "ssl": False,
 }
@@ -91,12 +98,24 @@ def _enable_cdc_on_table(cur, table: str) -> None:
 
 
 def _wait_capture(cdc: SqlServerNativeCdc, table: str, timeout: float = 20.0) -> None:
+    """Wait for the capture instance. Agent-less hosts need ``sp_cdc_scan``."""
     deadline = time.time() + timeout
+    last_min = ""
     while time.time() < deadline:
         if cdc.is_available():
-            return
+            try:
+                cdc.force_cdc_scan()
+            except Exception:
+                pass
+            with cdc._conn() as conn:
+                with conn.cursor() as cur:
+                    last_min = cdc._min_lsn(cur)
+            if last_min:
+                return
         time.sleep(0.5)
-    raise AssertionError(f"capture instance for {table} not ready")
+    raise AssertionError(
+        f"capture instance for {table} not ready (min_lsn={last_min!r})"
+    )
 
 
 def test_sqlserver_native_snapshot_poll_ack_and_df_lsn():
@@ -192,6 +211,147 @@ def test_sqlserver_native_snapshot_poll_ack_and_df_lsn():
             conn.commit()
 
 
+def test_force_cdc_scan_releases_capture_job_for_new_changes(caplog):
+    table = "cdc_owner_" + uuid.uuid4().hex[:8]
+    cfg = {
+        **CFG,
+        "lease_holder_id": f"it-owner-{table}",
+        "job_id": f"it-owner-{table}",
+    }
+    bootstrap = SqlServerNativeCdc(
+        cfg, table="cdc_native_orders", primary_key="id", schema="dbo"
+    )
+    reader = SqlServerNativeCdc(
+        cfg,
+        table=table,
+        primary_key="id",
+        schema="dbo",
+        cursor_key=f"it:owner:{table}",
+    )
+    table_created = False
+    capture_since = None
+
+    try:
+        table_created = True
+        with reader._conn() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("EXEC sys.sp_cdc_stop_job 'capture'")
+                except Exception:
+                    pass
+            conn.commit()
+        wait_for_sqlserver_capture_job_stopped(reader)
+
+        with bootstrap._conn() as conn:
+            with conn.cursor() as cur:
+                _enable_cdc_on_table(cur, table)
+            conn.commit()
+
+        since = sqlserver_server_now(reader)
+        with reader._conn() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("EXEC sys.sp_cdc_start_job 'capture'")
+                except Exception:
+                    pass
+            conn.commit()
+        wait_for_sqlserver_capture_job_healthy(reader, since=since)
+        capture_instance = reader.capture_instance
+        with reader._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT start_lsn
+                    FROM cdc.change_tables
+                    WHERE capture_instance = %s
+                    """,
+                    (capture_instance,),
+                )
+                capture_start = cur.fetchone()
+        assert capture_start and capture_start[0], (
+            f"capture instance {capture_instance!r} did not receive a start LSN"
+        )
+
+        with reader._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("EXEC sys.sp_cdc_stop_job 'capture'")
+            conn.commit()
+        wait_for_sqlserver_capture_job_stopped(reader)
+
+        capture_since = sqlserver_server_now(reader)
+        caplog.set_level(logging.DEBUG, logger="connectors.sqlserver_cdc_native")
+        reader.force_cdc_scan()
+        assert "sp_cdc_scan skipped" not in caplog.text
+
+        with reader._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("EXEC sys.sp_cdc_start_job 'capture'")
+            conn.commit()
+        wait_for_sqlserver_capture_job_healthy(reader, since=capture_since)
+
+        with bootstrap._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"INSERT INTO dbo.[{table}] (id, amount) VALUES (3, 30.00)")
+            conn.commit()
+
+        deadline = time.monotonic() + 15.0
+        captured_rows = 0
+        while time.monotonic() < deadline:
+            with reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM cdc.[{capture_instance}_CT] WHERE id = %s",
+                        (3,),
+                    )
+                    captured_rows = int(cur.fetchone()[0] or 0)
+            if captured_rows:
+                break
+            time.sleep(0.25)
+        assert captured_rows == 1, (
+            f"row 3 did not reach {capture_instance}_CT within 15s "
+            "without another force_cdc_scan()"
+        )
+    finally:
+        try:
+            if capture_since is None:
+                capture_since = sqlserver_server_now(reader)
+            with reader._conn() as conn:
+                with conn.cursor() as cur:
+                    try:
+                        cur.execute("EXEC sys.sp_cdc_start_job 'capture'")
+                    except Exception:
+                        pass
+                conn.commit()
+            wait_for_sqlserver_capture_job_healthy(
+                reader, since=capture_since
+            )
+        finally:
+            try:
+                reader.close()
+            except Exception:
+                pass
+            if table_created:
+                try:
+                    with bootstrap._conn() as conn:
+                        with conn.cursor() as cur:
+                            try:
+                                cur.execute(
+                                    f"""
+                                    EXEC sys.sp_cdc_disable_table
+                                        @source_schema = N'dbo',
+                                        @source_name = N'{table}',
+                                        @capture_instance = N'all';
+                                    """
+                                )
+                            except Exception:
+                                pass
+                            cur.execute(f"DROP TABLE IF EXISTS dbo.[{table}]")
+                        conn.commit()
+                except Exception:
+                    pass
+            bootstrap.close()
+
+
 def test_sqlserver_retention_probe_gap_and_clear():
     """Live: fabricate resume < min_lsn → probe gap → clear → no_watermark.
 
@@ -205,7 +365,13 @@ def test_sqlserver_retention_probe_gap_and_clear():
     table = "cdc_ret_" + uuid.uuid4().hex[:8]
     holder = f"it-ret-{table}"
     ck = f"it:retention:{table}"
-    cfg = {**CFG, "lease_holder_id": holder, "job_id": holder, "type": "sqlserver"}
+    cfg = {
+        **CFG,
+        "lease_holder_id": holder,
+        "job_id": holder,
+        "type": "sqlserver",
+        "primary_key": "id",
+    }
     bootstrap = SqlServerNativeCdc(
         cfg, table="cdc_native_orders", primary_key="id", schema="dbo"
     )

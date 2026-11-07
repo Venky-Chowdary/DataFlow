@@ -29,7 +29,7 @@
   width: 100%;
   min-width: 0;
   padding: 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: var(--df-radius-card, 12px);
   background: var(--df-surface);
   box-shadow: none;
@@ -46,9 +46,9 @@
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--df-text-secondary, #64748b);
+  font-size: var(--df-fs-md);
+  font-weight: var(--df-fw-medium);
+  color: var(--df-text-secondary);
   cursor: pointer;
   text-align: left;
   white-space: normal;
@@ -62,6 +62,7 @@
 
 .df2-page-settings .df2-settings-nav button.active {
   background: var(--df-brand-muted);
+  font-weight: var(--df-fw-semibold);
   color: var(--df-brand-deep);
   border-color: var(--df-brand-soft);
 }
@@ -188,15 +189,15 @@
 .df2-field-hint {
   margin: 0;
   font-size: 12px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   line-height: 1.45;
 }
 
 .df2-page-settings .df2-security-row {
   padding: 16px 18px;
   border-radius: 10px;
-  border: 1px solid var(--df-border, #e2e8f0);
-  background: #fafbfc;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
 }
 
 .df2-page-settings .df2-model-grid {
@@ -213,8 +214,8 @@
 .df2-settings-model-title {
   margin: 4px 0 8px;
   font-size: 20px;
-  font-weight: 650;
-  color: #0f172a;
+  font-weight: 600;
+  color: var(--df-text-primary);
 }
 
 .df2-settings-section-body--flush {

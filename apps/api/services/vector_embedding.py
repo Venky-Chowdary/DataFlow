@@ -28,9 +28,9 @@ def coerce_embedding(
             return None, "missing embedding — refuse zero-vector fabrication"
         if text.startswith("[") and text.endswith("]"):
             try:
-                import json
+                from services.value_serializer import json_loads_exact
 
-                value = json.loads(text)
+                value = json_loads_exact(text)
             except Exception:
                 return None, "embedding string is not a JSON array"
         else:
@@ -39,18 +39,130 @@ def coerce_embedding(
         return None, f"embedding must be a list, got {type(value).__name__}"
     if len(value) == 0:
         return None, "missing embedding — refuse zero-vector fabrication"
+    from services.transform_engine import vector_component_carrier
+
     out: list[float] = []
     for i, item in enumerate(value):
-        try:
-            out.append(float(item))
-        except (TypeError, ValueError):
-            return None, f"embedding[{i}] is not numeric"
+        bound = vector_component_carrier(item)
+        if bound is None:
+            return None, (
+                f"embedding[{i}] cannot bind {item!r} — refuse invent"
+            )
+        out.append(bound)
     if expected_dimension is not None and len(out) != int(expected_dimension):
         return None, (
             f"embedding dimension mismatch: got {len(out)}, "
             f"expected {expected_dimension}"
         )
     return out, None
+
+
+def embedding_reject_reason(row: dict[str, Any], coerce_err: str | None) -> str:
+    """Prefer vectorize-stamped parse failures over generic coerce messages."""
+    stamped = str(row.get("_df_embed_error") or "").strip()
+    if stamped:
+        return stamped
+    return coerce_err or "invalid embedding"
+
+
+def coerce_chunk_index(value: Any, *, default: int = 0) -> int:
+    """Normalize vector ``chunk_index`` for identity hashing / metadata.
+
+    Missing / blank → ``default`` (single-chunk docs). Non-integral floats,
+    booleans, and garbage strings refuse — ``int(3.7)`` / ``int(True)`` would
+    silently invent wrong chunk identity under at-least-once upsert.
+    """
+    if value is None:
+        return int(default)
+    if isinstance(value, bool):
+        raise ValueError(
+            f"chunk_index refused boolean {value!r} — refuse invent"
+        )
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(
+                f"chunk_index refused negative {value!r} — refuse invent"
+            )
+        return value
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            raise ValueError(
+                f"chunk_index refused non-finite {value!r} — refuse invent"
+            )
+        if not value.is_integer():
+            raise ValueError(
+                f"chunk_index refused fractional {value!r} — refuse truncation invent"
+            )
+        n = int(value)
+        if n < 0:
+            raise ValueError(
+                f"chunk_index refused negative {n!r} — refuse invent"
+            )
+        return n
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return int(default)
+        from connectors.sql_bind import coerce_integer_wire
+
+        n = coerce_integer_wire(token, ddl_type="INTEGER")
+        if n is None:
+            return int(default)
+        if not isinstance(n, int):
+            raise ValueError(
+                f"chunk_index refused {value!r} — refuse invent"
+            )
+        if n < 0:
+            raise ValueError(
+                f"chunk_index refused negative {n!r} — refuse invent"
+            )
+        return n
+    raise ValueError(
+        f"chunk_index refused {type(value).__name__} {value!r} — refuse invent"
+    )
+
+
+def vector_cell_token(value: Any) -> str:
+    """Dest-canonical present token for vector content / source_id.
+
+    ``or ""`` dropped ``0`` / ``False`` into empty hash material. ``str(True)``
+    invented ``True`` so dest ``true`` missed retry identity. Reader-null
+    sentinels hashed as the wire spelling. Absence collapses to ``""`` —
+    callers treat all-empty source+content as missing identity.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value) or ""
+
+
+def vector_reject_row_label(row: dict[str, Any], *keys: str) -> str:
+    """Quarantine row label on the dest id wire.
+
+    ``cell_to_string(row.get("id") or "")`` dropped integer ``0`` so the
+    operator saw an empty row. Reader-null stays empty. ``True`` and dest
+    ``true`` share one label. Optional extra keys (``source_id``) are the
+    pgvector fallback when id is absent.
+    """
+    from services.value_serializer import present_cell_text
+
+    for key in keys or ("id",):
+        token = present_cell_text(row.get(key))
+        if token:
+            return token
+    return ""
+
+
+def vector_fallback_material(
+    source_id: Any,
+    chunk_index: int,
+    content: Any,
+) -> str | None:
+    """Digest material for missing-id fallback, or None when both cells are absent."""
+    source = vector_cell_token(source_id)
+    text = vector_cell_token(content)
+    if not source and not text:
+        return None
+    return f"{source}\0{chunk_index}\0{text}"
 
 
 def resolve_embedding_dimension(

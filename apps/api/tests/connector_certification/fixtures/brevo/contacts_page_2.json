@@ -1,0 +1,13 @@
+{
+  "contacts": [
+    {
+      "id": 7002,
+      "email": "fixture.pagetwo@example.com",
+      "emailBlacklisted": false,
+      "smsBlacklisted": false,
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "modifiedAt": "2024-01-02T00:00:00.000Z"
+    }
+  ],
+  "count": 101
+}

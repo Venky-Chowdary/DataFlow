@@ -30,7 +30,7 @@ Datawrap is a **universal any-to-any data transfer platform**. Before a transfer
 |---|---|---|---|---|---|
 | **G1 Source** | Source connectivity | Hard | Datawrap cannot read the source. | Check host, port, credentials, network, and that the source file/table/collection exists. | PostgreSQL connection refused; S3 bucket not found; CSV parse error. |
 | **G2 Destination** | Destination connectivity | Hard | Datawrap can read the source but cannot reach or write to the destination. | Check destination host, credentials, write permissions, and that the database/schema/bucket exists. | MongoDB auth failed; Snowflake warehouse suspended; bucket write denied. |
-| **G3 Schema Contract** | Schema contract / type coercion | Hard | A source value cannot be stored in the target type without losing precision or failing. | Change the target column type to a wider or compatible type, or add a safe transform. For schemaless destinations (MongoDB, DynamoDB, Redis) this gate is relaxed because no DDL type contract is enforced. | VARCHAR `'abc'` → INTEGER is impossible; TIMESTAMP → DATE truncates time; DECIMAL → INTEGER drops fractional cents. |
+| **G3 Schema Contract** | Schema contract / type coercion | Hard | A source value cannot be stored in the target type without losing precision or failing. | Change the target column type to a wider or compatible type, or add a safe transform. For schemaless destinations (MongoDB, DynamoDB, Redis) this gate is relaxed because no DDL type contract is enforced; DynamoDB table/index keys are checked separately by G6. | VARCHAR `'abc'` → INTEGER is impossible; TIMESTAMP → DATE truncates time; DECIMAL → INTEGER drops fractional cents. |
 | **G4 Mapping Confidence** | Mapping confidence | Soft | The AI mapper is not certain that a source column means the same thing as the target column. | Review the mapping panel, confirm or re-map the column, and approve. Improve column names or provide a sample. | `'amt'` mapped to `'amount'` with low confidence; `'created'` vs `'updated'`. |
 | **G5 Dry Run / Integrity** | Transform dry-run / integrity | Hard | A sample row could not be transformed or violates an integrity rule. | Fix the source value, choose a less strict transform, or switch validation mode. For schemaless destinations values are stored as-is when possible. | `'2024-13-01'` cannot be parsed as a date; required identifier is null. |
 | **G6 Target DDL** | Target DDL compatibility | Hard | The target table or collection cannot accept the data as mapped. | Allow Datawrap to create/alter the target, remove duplicate keys, widen a column, or map to a compatible existing column. | Duplicate `_id` values in MongoDB; VARCHAR(10) cannot fit a 50-character email; target column does not exist. |
@@ -76,7 +76,7 @@ A transfer is **blocked** when any hard gate fails. The user must fix the root c
 
 - **Lossless transforms are preferred.** VARCHAR → VARCHAR, DECIMAL → DECIMAL, TIMESTAMP → TIMESTAMP, JSON → JSON.
 - **Lossy transforms require explicit approval.** INTEGER → VARCHAR is safe; VARCHAR → INTEGER is only safe for numeric strings. TIMESTAMP → DATE truncates time. DECIMAL → INTEGER drops fractional values.
-- **Schemaless destinations store the source type as-is.** MongoDB, DynamoDB, and Redis do not enforce a DDL type contract, so G3 is skipped. The user can still choose a typed target schema if needed.
+- **Schemaless non-key values store the source type as-is.** MongoDB, DynamoDB, and Redis do not enforce a DDL type contract, so G3 is skipped; DynamoDB table/index keys still require compatible declared carriers.
 - **Binary and JSON values are never silently flattened.** JSON is stored as JSON/JSONB/VARIANT depending on the target. Binary is preserved as base64 or bytes.
 
 ### 4.4 Nulls, duplicates, and keys
@@ -134,12 +134,17 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
   - Widen a VARCHAR column.
   - Remove duplicate primary keys in the source.
   - Map to an existing column with a compatible type.
-- **Schemaless exception:** For MongoDB/DynamoDB/Redis, only `_id` uniqueness is enforced; other fields can hold any type.
+- **Schemaless exception:** Identity constraints are connector-defined: MongoDB uses `_id`, DynamoDB uses its HASH/RANGE key schema, and Redis uses its configured key. Other fields can hold any type.
 
 ### 6.4 "PII/compliance review required"
 
-- **What it means:** The sample contains fields that look like PII.
-- **Fix:** Mask, tokenize, or drop the PII fields, or approve the transfer after confirming your data governance policy allows it.
+- **What it means:** A high-risk field (SSN, date of birth, bank/card account number) or enough lower-risk PII was found. The reason names each column, its category and the rule that flagged it, e.g. `birth_date (dob by column name)`; `compliance.findings` carries the same per column.
+- **Not flagged:** A column whose every sampled value is a date/timestamp (ISO dates, `yyyymmdd` / epoch digits under a temporal name) is not value-matched as a phone/account number. A surrogate `account_id` whose sampled values are not account-number shaped is an identifier, not a high-risk account number.
+- **Fix:** Mask, tokenize, or drop the PII fields, or acknowledge the review after confirming your data governance policy allows it. An acknowledgement needs an approver and a reason, and both are recorded on the job (`compliance_acknowledged`, `acknowledgment_actor`, `acknowledgment_reason`):
+  - **Studio:** tick the compliance acknowledgement on Validate and enter the approver and reason.
+  - **REST:** send `compliance_acknowledged: true` with `acknowledgment_actor` and `acknowledgment_reason` on preflight / transfer.
+  - **Pilot / MCP:** pass `pii_acknowledgement: {approved_by, reason}` to `plan_transfer`, `start_transfer` or `start_dataset_transfer`.
+- Without an acknowledgement a genuine PII review stays fail-closed.
 
 ### 6.5 "Source schema changed" / "Destination schema changed"
 
@@ -171,8 +176,8 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
 ### 7.4 DynamoDB → S3/MinIO
 
 - **Rule:** DynamoDB items are flattened. Nested maps become JSON strings, lists are preserved as JSON, numbers are kept as strings or coerced to DECIMAL, booleans stay booleans.
-- **Blockers:** DynamoDB binary keys that cannot be serialized as base64.
-- **Fix:** Use a base64 or string representation for binary keys.
+- **Blockers:** Missing HASH/RANGE mappings, incompatible key scalar types, or binary keys that cannot be serialized as non-empty bytes/base64.
+- **Fix:** Map every table key with its exact name and compatible `S`/`N`/`B` carrier; use valid base64 or bytes for `B` keys.
 
 ---
 
@@ -180,10 +185,15 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
 
 ### 8.1 Schemaless destinations (MongoDB, DynamoDB, Redis)
 
+Ordinary DynamoDB item attributes are schemaless; `AttributeDefinitions` only
+declares table and secondary-index key attributes. HASH/RANGE keys and mapped
+GSI/LSI keys remain strict: names must match exactly and values must use the
+declared `S`, `N`, or `B` scalar carrier.
+
 - **No DDL type contract.** G3 schema-contract checks are skipped.
-- **Only `_id` is enforced as a primary key.** Other `*_id` columns are not required to be unique.
+- **Identity constraints are connector-defined.** MongoDB uses `_id`; DynamoDB enforces its HASH/RANGE key schema; Redis uses its configured key.
 - **Optional fields are allowed.** A column with 100% nulls does not block.
-- **Values are stored as-is when no target type is specified.** The user can still request a typed target schema if the destination supports it.
+- **Non-key values are stored as-is when no target type is specified.** The user can still request a typed target schema if the destination supports it.
 
 ### 8.2 SQL destinations (PostgreSQL, MySQL, Snowflake, BigQuery, etc.)
 

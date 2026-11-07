@@ -22,7 +22,7 @@ schedule's IANA timezone so DST transitions are handled correctly.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -33,11 +33,16 @@ _DOW = {d: i for i, d in enumerate(
 # (min, max) inclusive bounds for each of the five fields.
 _BOUNDS = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 6)]
 # Search horizon: 4 years covers leap-year-only rules such as "Feb 29".
-_MAX_MINUTES = 4 * 366 * 24 * 60
+FIRE_HORIZON_DAYS = 4 * 366
+_MAX_MINUTES = FIRE_HORIZON_DAYS * 24 * 60
 
 
 class CronError(ValueError):
     """Raised for a malformed cron expression or timezone."""
+
+
+class CronNeverFiresError(CronError):
+    """A well-formed cron with no fire time within the search horizon (``0 0 30 2 *``)."""
 
 
 def _alias(token: str, field_index: int) -> str:
@@ -92,7 +97,7 @@ class CronExpression:
     """A parsed, immutable 5-field cron expression."""
 
     __slots__ = ("raw", "minutes", "hours", "days", "months", "dow",
-                 "_dom_restricted", "_dow_restricted")
+                 "_dom_restricted", "_dow_restricted", "_fields")
 
     def __init__(self, expr: str):
         self.raw = expr.strip()
@@ -106,17 +111,17 @@ class CronExpression:
         self.days = _parse_field(fields[2], 2)
         self.months = _parse_field(fields[3], 3)
         self.dow = _parse_field(fields[4], 4)
+        self._fields = fields
         self._dom_restricted = fields[2].strip() != "*"
         self._dow_restricted = fields[4].strip() != "*"
 
-    def matches(self, dt: datetime) -> bool:
-        if dt.minute not in self.minutes or dt.hour not in self.hours:
-            return False
-        if dt.month not in self.months:
+    def matches_day(self, day: date | datetime) -> bool:
+        """Whether the calendar day satisfies the month / day-of-month / day-of-week fields."""
+        if day.month not in self.months:
             return False
         # Vixie semantics: if both DOM and DOW are restricted, match on EITHER.
-        dom_ok = dt.day in self.days
-        dow_ok = (dt.weekday() + 1) % 7 in self.dow  # Python Mon=0 -> cron Sun=0
+        dom_ok = day.day in self.days
+        dow_ok = (day.weekday() + 1) % 7 in self.dow  # Python Mon=0 -> cron Sun=0
         if self._dom_restricted and self._dow_restricted:
             return dom_ok or dow_ok
         if self._dom_restricted:
@@ -125,10 +130,31 @@ class CronExpression:
             return dow_ok
         return True
 
+    def matches(self, dt: datetime) -> bool:
+        return dt.minute in self.minutes and dt.hour in self.hours and self.matches_day(dt)
+
+    def assert_can_fire(self, today: date | None = None) -> None:
+        """Raise :class:`CronNeverFiresError` when no calendar day in the horizon matches.
+
+        Minutes and hours are never empty once parsed, so only the day-level
+        fields can make an expression unsatisfiable. One pass over the horizon's
+        days, independent of the timezone (a zone only shifts the wall clock).
+        """
+        start = today or datetime.now(timezone.utc).date()
+        for offset in range(FIRE_HORIZON_DAYS):
+            if self.matches_day(start + timedelta(days=offset)):
+                return
+        dom, month, dow = self._fields[2], self._fields[3], self._fields[4]
+        raise CronNeverFiresError(
+            f"cron '{self.raw}' can never fire: no calendar day in the next "
+            f"{FIRE_HORIZON_DAYS // 366} years matches day-of-month '{dom}' in "
+            f"month '{month}' (day-of-week '{dow}')"
+        )
+
 
 def validate_cron(expr: str) -> None:
-    """Raise :class:`CronError` if ``expr`` is not a valid 5-field cron."""
-    CronExpression(expr)
+    """Raise :class:`CronError` if ``expr`` is malformed or can never fire."""
+    CronExpression(expr).assert_can_fire()
 
 
 def resolve_timezone(tz: str | None) -> ZoneInfo:
@@ -147,6 +173,8 @@ def next_run(expr: str, after: datetime, tz: str | ZoneInfo = "UTC") -> datetime
     tested). ``after`` may be naive (assumed UTC) or timezone-aware.
     """
     cron = CronExpression(expr)
+    # Fail in one calendar pass, not after walking every minute of the horizon.
+    cron.assert_can_fire(after.date())
     zone = tz if isinstance(tz, ZoneInfo) else resolve_timezone(tz)
 
     if after.tzinfo is None:

@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.value_serializer import cell_to_string
+from services.value_serializer import EXPLICIT_NULL, cell_to_string
 
 # Explicit DynamoDB NULL AttributeValue — not the same as a missing attribute.
-DDB_EXPLICIT_NULL = object()
+# One object shared with the verifiers (services.value_serializer).
+DDB_EXPLICIT_NULL = EXPLICIT_NULL
 DDB_NULL_SENTINEL = "__DF_DDB_NULL__"
 # Typed set envelopes so SS/NS/BS are not silently equated with L.
 _SET_KIND_KEY = "_df_ddb_set"
@@ -159,8 +160,17 @@ def infer_logical_from_native(value: Any) -> str | None:
         return "INTEGER"
     if isinstance(value, Decimal):
         # Whole numbers stay INTEGER when within bigint; else DECIMAL (never invent FLOAT).
+        # A declared scale still makes it a decimal: ``Decimal("1000.00")`` is
+        # integral in value but carries two fractional digits, and calling that
+        # column INTEGER drops the scale a money field depends on.
         try:
-            if value == value.to_integral_value() and abs(value) <= Decimal("9223372036854775807"):
+            exponent = value.as_tuple().exponent
+            scaled = isinstance(exponent, int) and exponent < 0
+            if (
+                not scaled
+                and value == value.to_integral_value()
+                and abs(value) <= Decimal("9223372036854775807")
+            ):
                 return "INTEGER"
         except Exception as exc:
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -183,11 +193,28 @@ def infer_logical_from_native(value: Any) -> str | None:
     return "VARCHAR"
 
 
+def widen_logical_votes(votes: dict[str, int]) -> str:
+    """Resolve one column type from the per-value types observed in a page.
+
+    DynamoDB is schemaless past its keys, so a column's type is whatever its
+    items happen to hold, and that answer has to hold *every* value rather than
+    the most common one. The lattice in :mod:`services.type_lattice` owns that
+    rule for every schemaless source; this only supplies what Dynamo saw and
+    names the fallback for an attribute whose values were all null.
+    """
+    from services.type_lattice import resolve_observed_types
+
+    return resolve_observed_types(votes) or "VARCHAR"
+
+
 def _cell(value: Any) -> str:
     if value is DDB_EXPLICIT_NULL:
         return DDB_NULL_SENTINEL
     if value is None:
-        return ""
+        # Python None is SQL/Dynamo NULL polarity — never invent empty string.
+        from services.value_serializer import SQL_NULL_SENTINEL
+
+        return SQL_NULL_SENTINEL
     return cell_to_string(value)
 
 
@@ -199,32 +226,45 @@ def estimate_item_count(cfg: dict[str, Any], table: str) -> int:
 
 
 def describe_key_schema(cfg: dict[str, Any], table: str) -> list[dict[str, str]]:
-    """Return Dynamo HASH/RANGE keys as ``[{name, key_type, attr_type}, ...]``.
+    """Return Dynamo HASH/RANGE keys with logical and native scalar types."""
+    return describe_table_key_contract(cfg, table)[0]
 
-    Map/Validate need the identity contract — without it operators invent a PK
-    and Dynamo create-table / upsert demos fail mid-walkthrough.
-    """
+
+def describe_table_key_contract(
+    cfg: dict[str, Any], table: str
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Return parsed table keys and secondary-index scalar constraints."""
     client = boto3_client("dynamodb", cfg)
     resp = client.describe_table(TableName=table)
     table_info = resp.get("Table") or {}
-    attr_defs = {
-        a.get("AttributeName"): a.get("AttributeType", "S")
-        for a in (table_info.get("AttributeDefinitions") or [])
-        if a.get("AttributeName")
-    }
-    keys: list[dict[str, str]] = []
-    for key in table_info.get("KeySchema") or []:
-        name = str(key.get("AttributeName") or "")
-        if not name:
-            continue
-        keys.append(
-            {
-                "name": name,
-                "key_type": str(key.get("KeyType") or "HASH"),
-                "attr_type": _ddb_attr_type(attr_defs.get(name, "S")),
-            }
+    from connectors.dynamodb_schema import parse_table_description
+
+    schema = parse_table_description(table_info)
+    keys = [
+        {
+            "name": key.name,
+            "key_type": key.key_type,
+            "attr_type": _ddb_attr_type(key.attr_type),
+            "scalar": key.attr_type,
+        }
+        for key in schema.keys
+    ]
+    return keys, dict(schema.index_attributes)
+
+
+def describe_table_key_contract_or_empty(
+    cfg: dict[str, Any], table: str
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Describe HASH/RANGE and index contracts, failing closed when unavailable."""
+    try:
+        return describe_table_key_contract(cfg, table)
+    except Exception:
+        logger.warning(
+            "DynamoDB key contract describe failed for table %s",
+            table,
+            exc_info=True,
         )
-    return keys
+        return [], {}
 
 
 def describe_table_schema(cfg: dict[str, Any], table: str) -> tuple[list[str], dict[str, str]]:
@@ -295,7 +335,17 @@ def read_table_batch(
     )
 
     client = boto3_client("dynamodb", cfg)
-    scan_kwargs: dict[str, Any] = {"TableName": table, "Limit": limit}
+    # Snapshot accuracy: AWS documents ConsistentRead=true for backup /
+    # replication Scans. Eventual reads can omit a just-written item and
+    # silently under-count. CDC is a separate Streams path (at-least-once).
+    consistent = cfg.get("consistent_read")
+    if consistent is None:
+        consistent = True
+    scan_kwargs: dict[str, Any] = {
+        "TableName": table,
+        "Limit": limit,
+        "ConsistentRead": bool(consistent),
+    }
     if exclusive_start_key:
         scan_kwargs["ExclusiveStartKey"] = exclusive_start_key
 
@@ -331,17 +381,16 @@ def read_table_batch(
             if not lt:
                 continue
             native_votes[h][lt] = native_votes[h].get(lt, 0) + 1
-    native_types = {
-        h: max(votes, key=votes.get) if votes else "VARCHAR"
-        for h, votes in native_votes.items()
-    }
+    native_types = {h: widen_logical_votes(votes) for h, votes in native_votes.items()}
 
     rows = []
     for rec in records:
         row: list[str] = []
         for h in headers:
             if h not in rec:
-                row.append("")
+                from services.value_serializer import DF_MISSING_SENTINEL
+
+                row.append(DF_MISSING_SENTINEL)
             else:
                 row.append(_cell(rec[h]))
         rows.append(row)
@@ -415,10 +464,7 @@ def read_all_paginated(cfg: dict[str, Any], table: str, limit: int = 100_000) ->
         if not next_key or not batch.rows:
             break
 
-    native_types = {
-        h: max(votes, key=votes.get) if votes else "VARCHAR"
-        for h, votes in native_acc.items()
-    }
+    native_types = {h: widen_logical_votes(votes) for h, votes in native_acc.items()}
     out = ReadBatch(
         headers=headers,
         rows=all_rows,

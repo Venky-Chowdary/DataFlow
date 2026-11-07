@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -24,8 +25,8 @@ def test_duckdb_to_duckdb_preserves_types():
 
     import duckdb
 
-    source_path = f"/tmp/duckdb_src_{uuid.uuid4().hex[:8]}.duck"
-    target_path = f"/tmp/duckdb_dst_{uuid.uuid4().hex[:8]}.duck"
+    source_path = f"{tempfile.gettempdir()}/duckdb_src_{uuid.uuid4().hex[:8]}.duck"
+    target_path = f"{tempfile.gettempdir()}/duckdb_dst_{uuid.uuid4().hex[:8]}.duck"
     table_name = "round_trip_" + uuid.uuid4().hex[:8]
 
     conn = duckdb.connect(source_path)

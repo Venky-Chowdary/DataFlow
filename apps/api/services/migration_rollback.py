@@ -144,7 +144,7 @@ def plan_rollback(
             "Operators receive an explicit restore runbook pointer.",
         ]
         non_guarantees = [
-            "DataWrap does not execute warehouse restore.",
+            "Datawrap does not execute warehouse restore.",
             "TRUNCATE of primary is not auto-executed (refuse silent destructive undo).",
             "Population undo is NOT claimed.",
         ]
@@ -220,7 +220,7 @@ def execute_rollback(
 
     if strategy not in EXECUTABLE_STRATEGIES or not raw.get("executable"):
         raise RollbackRefuseError(
-            f"Strategy {strategy} is not executable by DataWrap — "
+            f"Strategy {strategy} is not executable by Datawrap — "
             "follow docs/MIGRATION_ROLLBACK.md (warehouse restore / staging re-land). "
             "Population undo is not claimed."
         )
@@ -283,6 +283,9 @@ def attach_rollback_plan(
         or (dest_summary.get("pre_ingestion_staging") or {}).get("staging_table")
         or None
     )
+    if (dest_summary.get("pre_ingestion_staging") or {}).get("retained") is False:
+        # A clean promote already dropped the stage (R11 M10): nothing to discard.
+        staging = None
     plan = plan_rollback(
         job_id=job_id,
         sync_mode=sync_mode or str(dest_summary.get("sync_mode") or ""),

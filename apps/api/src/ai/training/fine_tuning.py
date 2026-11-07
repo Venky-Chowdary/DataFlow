@@ -30,12 +30,14 @@ class FineTuningJob:
 class DataTransferFineTuningPipeline:
     """Manage fine-tuning dataset preparation and job tracking."""
 
-    DEFAULT_OUTPUT_DIR = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "data", "training"
-    )
+    @staticmethod
+    def _default_output_dir() -> str:
+        """One resolver for every writer — DATAFLOW_DATA_DIR isolation (X-DD)."""
+        from services.platform_config import data_dir
+        return str(data_dir() / "training")
 
     def __init__(self, output_dir: str | None = None):
-        self.output_dir = output_dir or self.DEFAULT_OUTPUT_DIR
+        self.output_dir = output_dir or self._default_output_dir()
         self.synthesizer = DataTransferDataSynthesizer()
         self.jobs: list[FineTuningJob] = []
         os.makedirs(self.output_dir, exist_ok=True)

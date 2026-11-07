@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from collections.abc import Iterable
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
-from services.type_system import is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
 logger = logging.getLogger(__name__)
 
@@ -118,12 +120,71 @@ def _minimum_string_length_for(old_type: str) -> int | None:
     return None
 
 
-def is_wider_type(old_type: str, new_type: str) -> bool:
+def mysql_temporal_fsp_is_wider(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
+    """True when a MySQL temporal column gains fractional seconds without a 2038 trap.
+
+    ``TIMESTAMP(0)`` → ``DATETIME(3)`` keeps milliseconds and widens the year
+    range. ``TIMESTAMP(6)`` → ``DATETIME(3)`` narrows the fraction.
+    ``DATETIME`` → ``TIMESTAMP`` is not a widen: MySQL TIMESTAMP only stores
+    1970..2038.
+    """
+    from services.type_system import destination_temporal_fractional_digits
+
+    db = (dest_db or "").strip().lower()
+    if db not in {"mysql", "mariadb"}:
+        return False
+
+    def _family(token: str) -> str:
+        text = re.sub(r"\([^)]*\)", "", token or "")
+        text = text.replace("_", " ").upper().strip()
+        if text.startswith("TIMESTAMP"):
+            return "TIMESTAMP"
+        if text.startswith("DATETIME"):
+            return "DATETIME"
+        return ""
+
+    old_family = _family(old_type)
+    new_family = _family(new_type)
+    if not old_family or not new_family:
+        return False
+    if old_family == "DATETIME" and new_family == "TIMESTAMP":
+        return False
+    old_p = destination_temporal_fractional_digits(old_type, dest_db=db)
+    new_p = destination_temporal_fractional_digits(new_type, dest_db=db)
+    if old_p is None or new_p is None:
+        return False
+    return new_p > old_p
+
+
+def widen_keeps_logical_family(old_type: str, new_type: str) -> bool:
+    """True when retyping ``old_type`` to ``new_type`` keeps what the column means.
+
+    The one family rule every widen asks (D107 proposals, D257 write-time
+    widens). TEXT is "wider" than every carrier on the lattice, but INTEGER ->
+    TEXT changes the column's meaning and stays fail-closed. VARCHAR(n) and
+    TEXT are one string family, as :func:`is_wider_type` already reads them.
+    """
+    old_logical = normalize_logical_type(old_type)
+    new_logical = normalize_logical_type(new_type)
+    if _is_string_like(old_logical) and _is_string_like(new_logical):
+        return True
+    return bool(old_logical == new_logical)
+
+
+def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"
     new_type = new_type or "VARCHAR"
+    dest_db = (dest_db or "").strip()
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
+
+    # VARBINARY(n) -> VARBINARY(m > n) keeps every byte. BINARY(n) is
+    # zero-padded to n, so any change of its width changes the stored value.
+    old_vb = re.match(r"^\s*VARBINARY\s*\(\s*(\d+)\s*\)\s*$", old_type, flags=re.I)
+    new_vb = re.match(r"^\s*VARBINARY\s*\(\s*(\d+)\s*\)\s*$", new_type, flags=re.I)
+    if old_vb and new_vb:
+        return int(new_vb.group(1)) > int(old_vb.group(1))
 
     # String / text family: compare length, treating TEXT/unlimited as max.
     if _is_string_like(old_logical) and _is_string_like(new_logical):
@@ -170,6 +231,10 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
             if old_w is None or new_w is None:
                 return False
             return new_w > old_w
+        if old_logical == "datetime" and mysql_temporal_fsp_is_wider(
+            old_type, new_type, dest_db=dest_db
+        ):
+            return True
         return False
 
     # Integer -> DECIMAL: new must have enough integer digits.
@@ -203,7 +268,7 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
         return new_len >= min_len
 
     # Other cross-logical promotions rely on the type-system safe-promotion list.
-    return not is_lossy_coercion(old_type, new_type, dest_db="")
+    return not is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
 def _information_schema_type_to_str(
@@ -221,6 +286,9 @@ def _information_schema_type_to_str(
         "CHAR",
         "NCHAR",
         "NVARCHAR",
+        # MySQL reports a binary column's byte length here too.
+        "VARBINARY",
+        "BINARY",
     }:
         length = char_len
         if length is not None and length > 0:
@@ -257,6 +325,55 @@ def _information_schema_type_to_str(
     return upper
 
 
+_CASE_FOLDING_DIALECTS: frozenset[str] = frozenset(
+    {"oracle", "snowflake", "db2", "ibm_db_sa", "mysql", "mariadb", "mssql", "sqlserver"}
+)
+
+
+def _quote_added_columns(dialect: Any, existing_names: list[str]) -> bool | None:
+    """Whether ADD COLUMN must force-quote, following the table's own convention.
+
+    Force-quoting a lower-case name on Oracle adds ``"extra"``, a case-sensitive
+    column the client's own ``SELECT extra`` cannot see, sitting beside the
+    folded ``EXTRA`` columns of the table it was added to. ``None`` lets the
+    dialect quote only when the name requires it, which is what an ordinary
+    ``CREATE TABLE`` does — but a table whose columns really are stored
+    lower-case keeps force-quoting, so drift matches what is already there.
+    """
+    denormalize = getattr(dialect, "denormalize_name", None)
+    if (
+        not callable(denormalize)
+        or not existing_names
+        or not getattr(dialect, "requires_name_normalize", False)
+    ):
+        # A dialect that does not fold reports names as they are stored, so the
+        # quoted Map spelling is already the right one.
+        return True
+    stored = [str(denormalize(name) or name) for name in existing_names]
+    return None if all(s == s.upper() for s in stored) else True
+
+
+def existing_column_index(
+    dialect: str, existing_names: Iterable[str]
+) -> dict[str, str]:
+    """``{lookup key: catalog name}`` for matching a target against a table.
+
+    Reflection normalises an Oracle ``LABEL`` to ``label``, so an exact-match
+    lookup missed the column and drift either re-added it or skipped a widen
+    the row needed. Engines that fold or compare case-insensitively get a
+    folded key as well; PostgreSQL does not, because ``"Foo"`` and ``"foo"``
+    are two different columns there and guessing would alter the wrong one.
+    """
+    index: dict[str, str] = {}
+    fold = (dialect or "").lower() in _CASE_FOLDING_DIALECTS
+    for name in existing_names:
+        text = str(name)
+        index.setdefault(text, text)
+        if fold:
+            index.setdefault(text.casefold(), text)
+    return index
+
+
 def _quote_col(dialect: str, name: str) -> str:
     dialect = (dialect or "").lower()
     if dialect in ("mysql", "mariadb"):
@@ -265,6 +382,52 @@ def _quote_col(dialect: str, name: str) -> str:
         safe = name.replace("]", "]]")
         return f"[{safe}]"
     return quote_sql_identifier(name, '"')
+
+
+def _dialect_type_vocabulary(dialect: str) -> frozenset[str]:
+    """Type names a dialect actually understands, from its own SQLAlchemy map.
+
+    ``ischema_names`` is the dialect's own reflection vocabulary, so it answers
+    "can this engine spell this type" without a hand-maintained list that would
+    drift from the drivers.
+    """
+    try:
+        from sqlalchemy.dialects import registry
+    except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
+        return frozenset()
+    canonical = {
+        "postgres": "postgresql",
+        "oracle_db": "oracle",
+        "sqlserver": "mssql",
+        "mariadb": "mysql",
+    }.get(dialect, dialect)
+    try:
+        dialect_cls = registry.load(canonical)
+    except Exception:  # noqa: BLE001 - unknown/3rd-party dialect: materialize
+        return frozenset()
+    names = getattr(dialect_cls, "ischema_names", None)
+    if not isinstance(names, dict):
+        return frozenset()
+    return frozenset(str(name).upper() for name in names)
+
+
+def materialize_widen_type(dialect: str, new_type: str) -> str:
+    """Physical spelling of a widen carrier for ``dialect``.
+
+    Canonical Map carriers (``timestamp_ntz``, ``BOOLEAN``, ``TEXT`` on Oracle)
+    are translated; anything the engine already understands passes through
+    unchanged so Map stamp and ALTER DDL stay byte-identical.
+    """
+    raw = (new_type or "").strip()
+    if not raw:
+        return new_type
+    bare = re.split(r"[(\s]", raw, maxsplit=1)[0].upper()
+    vocabulary = _dialect_type_vocabulary((dialect or "").lower())
+    if bare in vocabulary:
+        return raw
+    from services.decision_kernel import ddl_type
+
+    return ddl_type(dialect, raw) or raw
 
 
 # Substrings that must never appear in a generated DDL type string.
@@ -308,9 +471,19 @@ def _build_widen_ddl(
     new_type: str,
     existing_type: str | None = None,
 ) -> str:
-    """Generate a single ALTER COLUMN / MODIFY COLUMN statement."""
+    """Generate a single ALTER COLUMN / MODIFY COLUMN statement.
+
+    ``new_type`` arrives from the Map stamp, which speaks the canonical carrier
+    vocabulary (``timestamp_ntz``, ``BOOLEAN``, ``TEXT``) rather than any one
+    engine's DDL. Emitting it verbatim produced ``ORA-22858`` on the live
+    matrix (``MODIFY ("day" timestamp_ntz)``), so every dialect materializes
+    its physical spelling here — the one place all widen paths funnel through.
+    A carrier the engine already understands is emitted verbatim so Map and
+    ALTER stay identical (SQL Server ``NUMERIC(10,2)`` is not rewritten to its
+    ``DECIMAL`` synonym).
+    """
     dialect = (dialect or "").lower()
-    new_type = _sanitize_ddl_type(new_type)
+    new_type = _sanitize_ddl_type(materialize_widen_type(dialect, new_type))
     table_ref = quote_table_ref(table_name, schema, dialect=dialect, sanitize=False)
     col_q = _quote_col(dialect, col)
 
@@ -334,6 +507,9 @@ def _build_widen_ddl(
         return f"ALTER TABLE {table_ref} ALTER COLUMN {col_q} TYPE {new_type}{using}"
 
     if dialect in ("mysql", "mariadb"):
+        # MySQL MODIFY replaces the whole column. Restate nullability and the
+        # default or a fractional-second widen silently drops NOT NULL and
+        # CURRENT_TIMESTAMP (a PG ``now()`` carried onto DATETIME(6)).
         return f"ALTER TABLE {table_ref} MODIFY COLUMN {col_q} {new_type}"
 
     if dialect in ("sqlserver", "mssql"):
@@ -350,6 +526,71 @@ def _build_widen_ddl(
         raise NotImplementedError("SQLite cannot ALTER COLUMN TYPE")
 
     raise NotImplementedError(f"Unsupported dialect for column widen: {dialect}")
+
+
+# Engine errors that mean "this column cannot be converted in place", not
+# "the tool built bad SQL". Oracle refuses cross-family MODIFY outright
+# (ORA-22858) and refuses any datatype change on a populated column
+# (ORA-01439); SQL Server and PostgreSQL surface their own variants.
+_IN_PLACE_CONVERSION_ERRORS: tuple[str, ...] = (
+    "ora-22858",
+    "ora-01439",
+    "ora-01440",
+    "cannot be cast automatically",
+    "operator does not exist",
+    "conversion failed when converting",
+)
+
+
+def widen_refusal_message(
+    column: str,
+    existing_type: str | None,
+    new_type: str,
+    exc: Exception,
+) -> str:
+    """Operator-actionable text for an engine that refuses an in-place ALTER."""
+    return (
+        f"Destination column {column!r} is {existing_type or 'unknown'} and the "
+        f"mapping needs {new_type}; this engine cannot convert it in place "
+        f"({exc}). Migrate to a new destination table, or map the column to "
+        f"its existing type and accept a risk contract."
+    )
+
+
+class WidenNotSupported(RuntimeError):
+    """Engine refused an in-place column conversion — fail closed, never guess."""
+
+
+#: Attempts a widen makes when another session holds the table's lock.
+WIDEN_LOCK_ATTEMPTS = 3
+
+
+def _is_lock_wait_timeout(exc: Exception) -> bool:
+    """MySQL 1205 "Lock wait timeout exceeded", PostgreSQL "canceling statement due to lock timeout"."""
+    err = str(exc).lower()
+    return "lock wait timeout" in err or "lock timeout" in err or "(1205" in err
+
+
+def raise_widen_lock_timeout(
+    table_name: str, columns: str, exc: Exception, attempts: int = WIDEN_LOCK_ATTEMPTS
+) -> None:
+    """Refuse a widen another session's lock kept from running — never load against the narrow column."""
+    tries = f"through {attempts} attempts" if attempts > 1 else "past the lock wait"
+    raise WidenNotSupported(
+        f"Could not widen {columns} on {table_name}: another session held a lock on the "
+        f"table {tries} ({exc}). The widen was not applied and no rows were written; "
+        "re-run once the lock is released."
+    ) from exc
+
+
+def raise_widen_refusal(
+    column: str, existing_type: str | None, new_type: str, exc: Exception
+) -> None:
+    """Re-raise an engine ALTER refusal as an actionable schema-drift error."""
+    if any(token in str(exc).lower() for token in _IN_PLACE_CONVERSION_ERRORS):
+        raise WidenNotSupported(
+            widen_refusal_message(column, existing_type, new_type, exc)
+        ) from exc
 
 
 def _fetch_existing_columns(
@@ -467,6 +708,455 @@ def _fetch_existing_columns(
     return {}
 
 
+#: MariaDB lists clock defaults as bare functions with no DEFAULT_GENERATED flag.
+_MARIADB_CLOCK_DEFAULT_RE = re.compile(
+    r"(?:current_timestamp|localtimestamp|now|curdate|current_date|curtime|current_time)"
+    r"(?:\(\d*\))?",
+    re.IGNORECASE,
+)
+
+
+def _mysql_preserved_column_clause(
+    cursor: Any,
+    schema: str | None,
+    table_name: str,
+    column: str,
+    new_type: str = "",
+) -> str:
+    """Collation, nullability, default, and ON UPDATE to restate on a MySQL MODIFY.
+
+    ``MODIFY COLUMN col <type>`` replaces the column definition. Omitting
+    ``NOT NULL`` and ``DEFAULT`` drops them, and a string carrier without a
+    ``COLLATE`` falls back to the table default — a carried case-sensitive
+    ``utf8mb4_bin`` key became ``_ai_ci`` and two source keys collided
+    (1062). The column's own CHARACTER SET / COLLATE are restated unless
+    ``new_type`` already names one. A row that is not an information_schema
+    probe (callers' test doubles) adds nothing.
+    """
+    try:
+        cursor.execute(
+            """SELECT is_nullable, column_default, extra,
+                      character_set_name, collation_name
+               FROM information_schema.columns
+               WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
+                 AND table_name = %s AND column_name = %s""",
+            (schema or "", table_name, column),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001 — widen still changes the type
+        logger.debug("MySQL column attribute probe failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+    row = rows[0]
+    if not row or len(row) < 3:
+        return ""
+    nullable, default, extra = row[0], row[1], row[2]
+    charset = str(row[3] or "").strip() if len(row) > 3 else ""
+    collation = str(row[4] or "").strip() if len(row) > 4 else ""
+    flag = str(nullable or "").strip().upper()
+    if flag not in {"YES", "NO"}:
+        return ""
+    parts: list[str] = []
+    parts.extend(_mysql_text_attribute_clause(new_type, charset, collation))
+    if flag == "NO":
+        parts.append("NOT NULL")
+    extra_s = str(extra or "")
+    if default is not None and str(default).strip() != "":
+        expr = str(default).strip()
+        if "DEFAULT_GENERATED" in extra_s.upper() or _MARIADB_CLOCK_DEFAULT_RE.fullmatch(expr):
+            if re.fullmatch(r"[A-Za-z0-9_(). ]+", expr):
+                parts.append(f"DEFAULT {expr}")
+        elif expr.upper() == "NULL":
+            # MariaDB reports the *text* NULL for a nullable column with no
+            # default (MySQL reports SQL NULL). Quoting it restated
+            # ``DATETIME(6) DEFAULT 'NULL'``, which MariaDB refuses with
+            # (1067) Invalid default value after a green preflight (D146).
+            pass
+        elif len(expr) >= 2 and expr[0] == "'" and expr[-1] == "'":
+            # MariaDB returns string literals already quoted.
+            parts.append(f"DEFAULT {expr}")
+        else:
+            literal = expr.replace("'", "''")
+            parts.append(f"DEFAULT '{literal}'")
+    on_update = re.search(
+        r"on update\s+current_timestamp(?:\(\d+\))?",
+        extra_s,
+        flags=re.IGNORECASE,
+    )
+    if on_update:
+        parts.append(on_update.group(0))
+    if re.search(r"auto_increment", extra_s, flags=re.IGNORECASE):
+        parts.append("AUTO_INCREMENT")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _mysql_text_attribute_clause(new_type: str, charset: str, collation: str) -> list[str]:
+    """CHARACTER SET / COLLATE to restate on a MySQL MODIFY of a string column.
+
+    A candidate that already names its own attributes keeps them: the MySQL
+    writer's widen candidate is spelled ``VARCHAR(50) CHARACTER SET UTF8MB4``,
+    and restating a second CHARACTER SET made the MODIFY a syntax error (1064).
+    A charset-only candidate still gets the existing COLLATE when it belongs
+    to that charset, so a carried ``utf8mb4_bin`` survives the widen. A numeric
+    or temporal carrier takes no text attributes.
+    """
+    if not collation or not _mysql_string_carrier(new_type):
+        return []
+    if not re.fullmatch(r"[A-Za-z0-9_]+", collation) or (
+        charset and not re.fullmatch(r"[A-Za-z0-9_]+", charset)
+    ):
+        return []
+    upper = re.sub(r"\s+", " ", str(new_type or "")).upper()
+    if "COLLATE" in upper:
+        return []
+    named = re.search(r"(?:CHARACTER SET|CHARSET)\s+([A-Z0-9_]+)", upper)
+    if named:
+        if collation.lower().startswith(named.group(1).lower() + "_"):
+            return [f"COLLATE {collation}"]
+        return []
+    out = [f"CHARACTER SET {charset}"] if charset else []
+    out.append(f"COLLATE {collation}")
+    return out
+
+
+def _mysql_string_carrier(ddl: str) -> bool:
+    base = re.sub(r"\(.*$", "", str(ddl or "")).strip().split()
+    return bool(base) and base[0].upper() in {
+        "CHAR", "VARCHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET",
+    }
+
+
+def with_key_charsets(existing: dict[str, str], charsets: dict[str, str] | None) -> dict[str, str]:
+    """Live types with each column's (possibly inherited) charset spelled for byte pricing.
+
+    A column that inherits the table's latin1 is spelled without a CHARACTER SET,
+    and was priced at utf8mb4's 4 bytes per character. Only the key budget reads
+    this copy; the spellings the writer DDLs from are unchanged.
+    """
+    folded = {str(k).casefold(): str(v) for k, v in (charsets or {}).items() if v}
+    out: dict[str, str] = {}
+    for col, spelling in (existing or {}).items():
+        cs = folded.get(str(col).casefold())
+        named = re.search(r"CHARACTER SET|CHARSET|COLLATE", str(spelling or ""), flags=re.I)
+        out[col] = f"{spelling} CHARACTER SET {cs}" if cs and spelling and not named else spelling
+    return out
+
+
+def key_part(name: str, prefix_length: int | None = None) -> str:
+    """A key-group entry: the column, or ``name(N)`` for a MySQL prefix part."""
+    return f"{name}({int(prefix_length)})" if prefix_length else str(name)
+
+
+def split_key_part(part: str) -> tuple[str, int | None]:
+    """``(column, prefix_length)`` of a key-group entry (``None``: the whole column)."""
+    m = re.fullmatch(r"(.+)\((\d+)\)", str(part or "").strip())
+    return (m.group(1), int(m.group(2))) if m else (str(part or ""), None)
+
+
+def _mysql_indexed_key_groups(
+    cursor: Any, schema: str | None, table_name: str, column: str
+) -> list[list[str]]:
+    """Every MySQL/MariaDB index (PRIMARY, UNIQUE, plain) holding ``column``, prefix parts as ``name(N)``."""
+    try:
+        cursor.execute(
+            """SELECT index_name, column_name, sub_part
+               FROM information_schema.statistics
+               WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
+                 AND table_name = %s
+               ORDER BY index_name, seq_in_index""",
+            (schema or "", table_name),
+        )
+        rows = cursor.fetchall() or []
+    except Exception as exc:  # noqa: BLE001 — no catalog answer: not indexed as far as we know
+        logger.debug("MySQL index probe failed for %s: %s", table_name, exc)
+        return []
+    groups: dict[str, list[str]] = {}
+    for row in rows:
+        if not row or len(row) < 2:
+            continue
+        sub_part = row[2] if len(row) > 2 else None
+        groups.setdefault(str(row[0]), []).append(key_part(str(row[1]), sub_part))
+    want = column.casefold()
+    return [
+        cols for cols in groups.values()
+        if any(split_key_part(c)[0].casefold() == want for c in cols)
+    ]
+
+
+def _mysql_keyed_widen_carrier(
+    cursor: Any,
+    schema: str | None,
+    table_name: str,
+    column: str,
+    new_type: str,
+    existing: dict[str, str],
+    dialect: str,
+    growing: dict[str, str] | None = None,
+) -> tuple[str, bool]:
+    """``(carrier, keep)`` for widening an indexed MySQL/MariaDB column.
+
+    The key groups come from the live index catalog; the rule is
+    :func:`mysql_keyed_widen_carrier`.
+    """
+    from services.schema_fidelity import mysql_index_requires_prefix, mysql_key_part_limit
+    from services.secondary_indexes import mysql_row_format
+
+    if not (
+        mysql_index_requires_prefix(new_type)
+        or _mysql_string_carrier(new_type)
+        or _mysql_binary_carrier(new_type)
+    ):
+        return new_type, False
+    groups = _mysql_indexed_key_groups(cursor, schema, table_name, column)
+    if not groups:
+        return new_type, False
+    from services.secondary_indexes import mysql_column_charsets
+
+    return mysql_keyed_widen_carrier(
+        groups, column, new_type,
+        with_key_charsets(existing, mysql_column_charsets(cursor, schema, table_name)),
+        growing=growing, dialect=dialect,
+        table_name=table_name,
+        max_part_bytes=mysql_key_part_limit(mysql_row_format(cursor, schema, table_name)),
+    )
+
+
+def keyed_widen_carrier(
+    key_groups: list[list[str]],
+    column: str,
+    new_type: str,
+    existing: dict[str, str],
+    *,
+    dialect: str = "",
+    growing: dict[str, str] | None = None,
+    max_part_bytes: int = 3072,
+) -> tuple[str, bool]:
+    """``(carrier, keep)`` for widening a column the destination holds in a key.
+
+    An engine that cannot index unbounded text (MySQL 1170, SQL Server 1919,
+    ORA-02329) carries a text key as the widest full-value string its key
+    budget allows (``services.upsert_identity.full_value_key_width``). A column
+    already at that width *is* the key's spelling of TEXT, so a TEXT source onto
+    it is not growth: ``keep``. MySQL / MariaDB use the writer's own keyed widen
+    rule (:func:`mysql_keyed_widen_carrier`); other engines keep the asked type.
+    """
+    from services.type_system import parse_string_carrier_width
+    from services.upsert_identity import full_value_key_char_bytes, full_value_key_width
+    from src.transfer.engine_family import engine_family
+
+    family = engine_family(dialect)
+    if family == "mysql":
+        return mysql_keyed_widen_carrier(
+            key_groups, column, new_type, existing, growing=growing, dialect=dialect,
+            max_part_bytes=max_part_bytes,
+        )
+    budget_dialect = {"sqlserver": "mssql", "oracle": "oracle"}.get(family, "")
+    per_char = full_value_key_char_bytes(budget_dialect)
+    want = column.casefold()
+    groups = [
+        g for g in key_groups or [] if any(split_key_part(c)[0].casefold() == want for c in g)
+    ]
+    unbounded_text = _is_string_like(normalize_logical_type(new_type)) and not (
+        parse_string_carrier_width(new_type)
+    )
+    if not per_char or not groups or not unbounded_text:
+        return new_type, False
+    by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
+    current = parse_string_carrier_width(by_fold.get(want, ""))
+    for key_cols in groups:
+        other_bytes = sum(
+            (parse_string_carrier_width(by_fold.get(c.casefold(), "")) or 0) * per_char or 8
+            for c in key_cols
+            if c.casefold() != want
+        )
+        width = full_value_key_width(
+            budget_dialect, unbounded_keys=1, other_key_bytes=other_bytes
+        )
+        if current and width and current >= width:
+            return by_fold.get(want, ""), True
+    return new_type, False
+
+
+_MYSQL_BINARY_CARRIERS = {"BINARY", "VARBINARY"}
+
+
+def _mysql_binary_carrier(ddl: str) -> bool:
+    base = re.sub(r"\(.*$", "", str(ddl or "")).strip().split()
+    return bool(base) and base[0].upper() in _MYSQL_BINARY_CARRIERS
+
+
+def _mysql_growable(new_type: str) -> bool:
+    """A key widen the budget rule sizes: a LOB, or a width-bounded string or binary."""
+    from services.schema_fidelity import mysql_index_requires_prefix
+    from services.type_system import parse_string_carrier_width
+
+    if mysql_index_requires_prefix(new_type):
+        return True
+    bounded = parse_string_carrier_width(new_type) or (
+        _mysql_binary_carrier(new_type) and re.search(r"\(\s*\d+", str(new_type))
+    )
+    return bool((_mysql_string_carrier(new_type) or _mysql_binary_carrier(new_type)) and bounded)
+
+
+def _mysql_ask(new_type: str) -> int | None:
+    """Declared width of a bounded candidate (characters, or bytes for binary); None for a LOB."""
+    from services.schema_fidelity import mysql_index_requires_prefix
+    from services.type_system import parse_string_carrier_width
+
+    if mysql_index_requires_prefix(new_type):
+        return None
+    width = parse_string_carrier_width(new_type)
+    if width:
+        return width
+    m = re.search(r"\(\s*(\d+)", str(new_type or ""))
+    return int(m.group(1)) if m else None
+
+
+def _mysql_key_group_width(
+    key_cols: list[str],
+    want: str,
+    grow: dict[str, str],
+    existing: dict[str, str],
+    table_name: str,
+    max_part_bytes: int = 3072,
+) -> int | None:
+    """Width ``want`` gets when every growing part of one key is budgeted together.
+
+    The budget is in bytes: each part costs its width times its unit (4 for a
+    utf8mb4 character, 1 for latin1 or BINARY / VARBINARY), a fixed part its
+    declared storage (``services.schema_fidelity.mysql_key_part_bytes``: DECIMAL
+    by precision, ENUM, temporal). Parts that ask for less than an even share
+    keep their ask; the rest split what is left. Budgeting each part alone gave
+    PRIMARY KEY(a, b) 668 + 668 characters (5344 bytes) and a half-migrated key.
+    ``None``: the key cannot hold the widen (a JSON / BLOB part, or no room).
+    """
+    from services.schema_fidelity import (
+        mysql_index_requires_prefix,
+        mysql_key_part_bytes,
+        mysql_key_unit_bytes,
+    )
+
+    parts = [split_key_part(c) for c in key_cols]
+    folded = [name.casefold() for name, _prefix in parts]
+    prefix = {name.casefold(): n for name, n in parts if n}
+    growing = [f for f in folded if f in grow and f not in prefix]
+    for f in growing:
+        t = grow[f]
+        if mysql_index_requires_prefix(t) and not re.match(
+            r"^\s*(TINY|MEDIUM|LONG)?TEXT\b", t, flags=re.I
+        ):
+            logger.info("Widen of key (%s) on %s refused: %s is a JSON / BLOB part",
+                        ", ".join(key_cols), table_name, f)
+            return None
+
+    def unit(f: str) -> int:
+        # A candidate without its own charset keeps the column's (the MODIFY
+        # restates it), so the live spelling decides the bytes per character.
+        t = grow[f]
+        named = re.search(r"CHARACTER SET|CHARSET|COLLATE", t, flags=re.I) or _mysql_binary_carrier(t)
+        return mysql_key_unit_bytes(t if named else (existing.get(f) or t))
+
+    def fixed_cost(f: str) -> int:
+        # A prefix part costs its prefix, in its own unit, whatever it widens to.
+        if f in prefix:
+            return prefix[f] * mysql_key_unit_bytes(existing.get(f, ""))
+        return mysql_key_part_bytes(existing.get(f, ""))
+
+    # The whole key is capped at 3072 bytes on every row format; COMPACT /
+    # REDUNDANT also cap each part at 767 (max_part_bytes).
+    remaining = 3072 - sum(fixed_cost(f) for f in folded if f not in growing)
+    open_parts = list(growing)
+    while open_parts:
+        share = min(remaining // len(open_parts), max_part_bytes)
+        if share < 1:
+            return None
+        newly = [
+            f for f in open_parts
+            if (n := _mysql_ask(grow[f])) is not None and n * unit(f) <= share
+        ]
+        if want in newly:
+            return _mysql_ask(grow[want])
+        if not newly:
+            width = share // unit(want)
+            return width or None
+        for f in newly:
+            remaining -= (_mysql_ask(grow[f]) or 0) * unit(f)
+            open_parts.remove(f)
+    return None
+
+
+def mysql_keyed_widen_carrier(
+    key_groups: list[list[str]],
+    column: str,
+    new_type: str,
+    existing: dict[str, str],
+    *,
+    growing: dict[str, str] | None = None,
+    dialect: str = "mysql",
+    table_name: str = "",
+    max_part_bytes: int = 3072,
+) -> tuple[str, bool]:
+    """``(carrier, keep)`` for widening a MySQL/MariaDB column held in a key.
+
+    MySQL cannot hold a TEXT/BLOB/JSON column in a key without a prefix length
+    (error 1170; MariaDB quietly switches the key to HASH), nor a key wider
+    than the 3072-byte limit (error 1071: 2000 utf8mb4 characters is 8000
+    bytes), and a prefix would enforce a different uniqueness rule than the
+    source. Every string widen of a keyed column is therefore capped by the rule
+    the create path applies to a key
+    (``services.schema_fidelity.mysql_key_compatible_types``), with every part
+    of the key that ``growing`` widens this run budgeted together
+    (:func:`_mysql_key_group_width`). A candidate within its share is kept as
+    asked. ``keep`` is True when the column must stay as it is — the rule
+    refused, or the budgeted carrier is no wider than the existing one (the
+    column already *is* the key's spelling of TEXT). The writer's widen pass
+    and the widen proposal (``services.schema_drift.dest_widen_proposal``) both
+    ask this with the same ``growing`` set, so a proposal names exactly the
+    ALTER the writer runs; values longer than that carrier are the
+    population-fit gate's to refuse by name.
+    """
+    from services.schema_fidelity import mysql_index_requires_prefix
+
+    want = column.casefold()
+    # Only an index holding the whole column caps it: a prefix part
+    # (``KEY ix (name(32))``) indexes 32 characters whatever the column's width.
+    groups = [
+        g for g in key_groups or []
+        if any(split_key_part(c)[1] is None and split_key_part(c)[0].casefold() == want for c in g)
+    ]
+    if not groups or not _mysql_growable(new_type):
+        return new_type, False
+    by_fold = {str(k).casefold(): str(v or "") for k, v in (existing or {}).items()}
+    existing_type = by_fold.get(want, "")
+    grow = {
+        str(k).casefold(): str(v)
+        for k, v in (growing or {}).items()
+        if str(k).casefold() in by_fold and _mysql_growable(str(v))
+    }
+    grow[want] = new_type
+    asked = None if mysql_index_requires_prefix(new_type) else _mysql_ask(new_type)
+    budget: int | None = None
+    for key_cols in groups:
+        width = _mysql_key_group_width(key_cols, want, grow, by_fold, table_name, max_part_bytes)
+        if not width:
+            return existing_type, True
+        budget = width if budget is None else min(budget, width)
+    if asked is not None and budget is not None and asked <= budget:
+        carrier = new_type
+    elif asked is not None:
+        carrier = re.sub(r"\(\s*\d+\s*\)", f"({budget})", new_type, count=1)
+    else:
+        carrier = f"VARCHAR({budget})"
+    if not is_wider_type(existing_type, carrier, dest_db=dialect):
+        return existing_type, True
+    logger.info(
+        "Widen of indexed %s.%s sized to the full-value key budget: %s -> %s (asked %s)",
+        table_name, column, existing_type, carrier, new_type,
+    )
+    return carrier, False
+
+
 def widen_existing_columns_native(
     cursor: Any,
     dialect: str,
@@ -477,14 +1167,33 @@ def widen_existing_columns_native(
     *,
     backfill: bool = False,
     skip_cols: list[str] | None = None,
+    source_types: dict[str, str] | None = None,
+    suppressed_out: dict[str, str] | None = None,
+    temporal_fsp_without_backfill: bool = False,
+    key_columns: list[str] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
-    Returns the list of DDL statements executed.  ``backfill`` must be True for any
-    DDL to be issued.  The function is idempotent: repeated calls will only emit
+    Returns the list of DDL statements executed.  ``backfill`` must be True for
+    a general widen. A MySQL fractional-second widen still runs when
+    ``temporal_fsp_without_backfill`` is set, because leaving TIMESTAMP(0)
+    under a millisecond source drops digits the map already refused.
+    The function is idempotent: repeated calls will only emit
     ALTER statements when the target type is wider than the existing catalog type.
+
+    ``source_types`` (column → source logical type) suppresses widens that are an
+    artifact of create-new materialization rather than real drift: a destination
+    the writer would *invent* as BIGINT is no reason to ALTER an operator's
+    existing INTEGER column when the source column is itself INTEGER. Only a
+    carrier that cannot hold the incoming source type is widened.
+
+    ``suppressed_out`` receives ``column -> existing physical type`` for every
+    such suppressed widen, so the caller can keep its declared types equal to
+    the DDL that actually exists.
     """
-    if not backfill or not target_cols or not target_types:
+    if not target_cols or not target_types:
+        return []
+    if not backfill and not temporal_fsp_without_backfill:
         return []
 
     dialect = (dialect or "").lower()
@@ -499,21 +1208,105 @@ def widen_existing_columns_native(
         return []
 
     log: list[str] = []
+    # Every key part this run widens is budgeted together, and MySQL gets one
+    # ALTER TABLE for all of them: per-column MODIFYs committed ``a`` and then
+    # failed ``b`` with 1071, leaving the key half-migrated.
+    growing = {
+        col: new_type
+        for col, new_type in zip(target_cols, target_types)
+        if col not in skip and col in existing
+        and is_wider_type(existing[col], new_type, dest_db=dialect)
+    }
+    mysql_modifies: list[tuple[str, str, str, str]] = []
+    # A key column's ALTER is refused before any DDL when something depends on
+    # it: PostgreSQL cannot retype a column a view or generated column reads,
+    # and a referencing foreign key on either engine must change with it.
+    # PostgreSQL refuses ALTER ... TYPE on any column a view, rule or stored
+    # generated column reads, so every column it would widen is checked there.
+    keys = {str(c).casefold() for c in key_columns or []}
+    pg = dialect in ("postgresql", "postgres", "redshift")
+
+    def _will_alter(col: str) -> bool:
+        # The loop's own filters: a widen it would skip needs no dependents check.
+        new_type = growing[col]
+        if not backfill and not mysql_temporal_fsp_is_wider(
+            existing[col], new_type, dest_db=dialect
+        ):
+            return False
+        source_type = str((source_types or {}).get(col) or "").strip()
+        return not (
+            source_type and not is_lossy_coercion(source_type, existing[col], dest_db=dialect)
+        )
+
+    for col in [c for c in growing if _will_alter(c)]:
+        if col.casefold() in keys or pg:
+            dependents = _key_widen_dependents(cursor, dialect, schema, table_name, col)
+            if dependents:
+                kind = "key column" if col.casefold() in keys else "column"
+                raise WidenNotSupported(
+                    f"Could not widen {kind} {col} on {table_name}: "
+                    f"{', '.join(dependents)} depend on it. Change or drop them first, "
+                    "then re-run; nothing was altered and no rows were written."
+                )
     for col, new_type in zip(target_cols, target_types):
         if col in skip:
             continue
         if col not in existing:
             continue
         existing_type = existing[col]
-        if not is_wider_type(existing_type, new_type):
+        if not is_wider_type(existing_type, new_type, dest_db=dialect):
             continue
+        # backfill=False still widens a fractional-second gap. Other widens
+        # stay behind the operator's backfill flag. A document instant on
+        # TIMESTAMP(0) is this gap (DEF-B-010).
+        if not backfill and not mysql_temporal_fsp_is_wider(
+            existing_type, new_type, dest_db=dialect
+        ):
+            continue
+        source_type = str((source_types or {}).get(col) or "").strip()
+        if source_type and not is_lossy_coercion(source_type, existing_type, dest_db=dialect):
+            if suppressed_out is not None:
+                suppressed_out[col] = existing_type
+            logger.debug(
+                "Widen skipped for %s.%s: existing %s already holds source %s",
+                table_name,
+                col,
+                existing_type,
+                source_type,
+            )
+            continue
+        if dialect in ("mysql", "mariadb"):
+            # A keyed column never becomes a LOB (MySQL 1170); it widens to
+            # the full-value key carrier the create path would have chosen.
+            new_type, keep = _mysql_keyed_widen_carrier(
+                cursor, schema, table_name, col, new_type, existing, dialect, growing
+            )
+            if keep:
+                if suppressed_out is not None:
+                    suppressed_out[col] = existing_type
+                continue
         try:
             ddl = _build_widen_ddl(
                 dialect, schema, table_name, col, new_type, existing_type
             )
+            # TIMESTAMP → DATETIME converts through the session time_zone.
+            # Pin UTC first so the stored clock does not shift.
+            if mysql_temporal_fsp_is_wider(existing_type, new_type, dest_db=dialect):
+                old_family = re.sub(r"\([^)]*\)", "", existing_type or "").upper()
+                new_family = re.sub(r"\([^)]*\)", "", new_type or "").upper()
+                if "TIMESTAMP" in old_family and "DATETIME" in new_family:
+                    from services.timezone_policy import MYSQL_UTC_PIN_SQL
+
+                    cursor.execute(MYSQL_UTC_PIN_SQL)
             # Session-level lock timeouts are now configured by each driver's
             # connection guard (e.g. apply_postgres_session_guards / apply_mysql_session_guards)
             # so ALTER COLUMN cannot hang forever on a contended table lock.
+            if dialect in ("mysql", "mariadb"):
+                ddl += _mysql_preserved_column_clause(
+                    cursor, schema, table_name, col, new_type
+                )
+                mysql_modifies.append((ddl, col, existing_type, new_type))
+                continue
             cursor.execute(ddl)
             log.append(ddl)
             logger.debug(
@@ -521,21 +1314,135 @@ def widen_existing_columns_native(
             )
         except Exception as exc:
             err = str(exc).lower()
-            # Ignore "already correct width" / concurrent-alter / lock-timeout
-            # races and harmless syntax issues.
-            if any(
-                phrase in err
-                for phrase in ("already", "cannot alter", "not supported", "lock timeout")
-            ):
+            # A lock timeout aborts a PostgreSQL transaction, so it is refused
+            # (never skipped: the load would run against the narrow column).
+            if _is_lock_wait_timeout(exc):
+                raise_widen_lock_timeout(table_name, col, exc, attempts=1)
+            # Ignore "already correct width" / concurrent-alter races and
+            # harmless syntax issues.
+            # Not "cannot alter" / "not supported" on PostgreSQL: it says that for
+            # a column a view, rule or generated column depends on, and skipping
+            # it loaded the run against the narrow column. It is refused below.
+            skippable = ("already",) if pg else ("already", "not supported")
+            if any(phrase in err for phrase in skippable):
                 logger.debug(
                     "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
                 )
                 continue
             logger.warning(
-                "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
+                "Widen failed for %s.%s: %s (DDL: %s)", table_name, col, exc, ddl, exc_info=exc
+            )
+            raise_widen_refusal(col, existing_type, new_type, exc)
+            raise
+    if mysql_modifies:
+        log.extend(_execute_mysql_modifies(cursor, table_name, mysql_modifies))
+    return log
+
+
+_PG_KEY_DEPENDENTS_SQL = (
+    # views / rules reading the column
+    "SELECT DISTINCT 'view ' || v.relname FROM pg_depend d "
+    "JOIN pg_rewrite r ON r.oid = d.objid JOIN pg_class v ON v.oid = r.ev_class "
+    "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+    "WHERE d.refobjid = to_regclass(%s) AND a.attname = %s AND v.oid <> d.refobjid "
+    "UNION "
+    # stored generated columns computed from it
+    "SELECT DISTINCT 'generated column ' || g.attname FROM pg_attrdef ad "
+    "JOIN pg_attribute g ON g.attrelid = ad.adrelid AND g.attnum = ad.adnum "
+    "JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = ad.oid "
+    "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+    "WHERE g.attgenerated = 's' AND ad.adrelid = to_regclass(%s) AND a.attname = %s "
+    "UNION "
+    # foreign keys referencing it
+    "SELECT DISTINCT 'foreign key ' || c.conname || ' on ' || c.conrelid::regclass::text "
+    "FROM pg_constraint c JOIN pg_attribute a "
+    "ON a.attrelid = c.confrelid AND a.attnum = ANY (c.confkey) "
+    "WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s) AND a.attname = %s"
+)
+
+_MYSQL_KEY_DEPENDENTS_SQL = (
+    "SELECT CONCAT('foreign key ', CONSTRAINT_NAME, ' on ', TABLE_NAME) "
+    "FROM information_schema.KEY_COLUMN_USAGE "
+    "WHERE REFERENCED_TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) "
+    "AND REFERENCED_TABLE_NAME = %s AND REFERENCED_COLUMN_NAME = %s "
+    "UNION "
+    "SELECT CONCAT('generated column ', COLUMN_NAME) FROM information_schema.COLUMNS "
+    "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s "
+    "AND GENERATION_EXPRESSION LIKE %s"
+)
+
+
+def _key_widen_dependents(
+    cursor: Any, dialect: str, schema: str | None, table_name: str, column: str
+) -> list[str]:
+    """Views, generated columns and referencing foreign keys that depend on ``column``.
+
+    An unreadable catalog returns ``[]``: the ALTER then runs and the engine's
+    own refusal surfaces by name (it is no longer swallowed).
+    """
+    try:
+        if dialect in ("postgresql", "postgres", "redshift"):
+            from connectors.sql_identifiers import quote_table_ref
+
+            ref = quote_table_ref(
+                table_name, schema or None, dialect="postgresql", sanitize=False,
+                preserve_case=True,
+            )
+            cursor.execute(_PG_KEY_DEPENDENTS_SQL, (ref, column) * 3)
+        elif dialect in ("mysql", "mariadb"):
+            like = "%`" + column.replace("%", r"\%").replace("_", r"\_") + "`%"
+            cursor.execute(
+                _MYSQL_KEY_DEPENDENTS_SQL,
+                (schema or "", table_name, column, schema or "", table_name, like),
+            )
+        else:
+            return []
+        return sorted({str(r[0]) for r in cursor.fetchall() or [] if r and r[0]})
+    except Exception as exc:  # noqa: BLE001 — unread: the engine refuses by name instead
+        logger.debug("key dependents probe failed for %s.%s: %s", table_name, column, exc)
+        return []
+
+
+def _execute_mysql_modifies(
+    cursor: Any, table_name: str, modifies: list[tuple[str, str, str, str]]
+) -> list[str]:
+    """One ``ALTER TABLE ... MODIFY a ..., MODIFY b ...`` for every MySQL widen of a table.
+
+    MySQL applies a single ALTER TABLE atomically, so a refusal (1071 on a key
+    that would be too long, a lock timeout) leaves the table exactly as it was
+    instead of half-migrated.
+    """
+    first = modifies[0][0]
+    head = first[: first.index(" MODIFY COLUMN ")]
+    ddl = head + " " + ", ".join(m[0][m[0].index(" MODIFY COLUMN ") + 1:] for m in modifies)
+    cols = ", ".join(m[1] for m in modifies)
+    for attempt in range(1, WIDEN_LOCK_ATTEMPTS + 1):
+        try:
+            cursor.execute(ddl)
+            break
+        except Exception as exc:
+            if _is_lock_wait_timeout(exc):
+                # A lock someone else holds can clear; a failed MySQL ALTER
+                # changes nothing, so it is safe to ask again - a bounded
+                # number of times, then refuse. Skipping the widen loaded the
+                # run against the narrow columns it had been approved to widen.
+                if attempt < WIDEN_LOCK_ATTEMPTS:
+                    logger.info("Widen of %s.%s waited on a lock (attempt %d): %s",
+                                table_name, cols, attempt, exc)
+                    time.sleep(min(2 * attempt, 5))
+                    continue
+                raise_widen_lock_timeout(table_name, cols, exc)
+            if "already" in str(exc).lower():
+                logger.debug("Widen skipped for %s: %s", table_name, exc, exc_info=exc)
+                return []
+            logger.warning("Widen failed for %s: %s (DDL: %s)", table_name, exc, ddl, exc_info=exc)
+            raise_widen_refusal(
+                cols, ", ".join(m[2] for m in modifies), ", ".join(m[3] for m in modifies), exc
             )
             raise
-    return log
+    for _ddl, col, old, new in modifies:
+        logger.debug("Widened %s.%s from %s to %s", table_name, col, old, new)
+    return [ddl]
 
 
 def add_missing_columns(
@@ -565,13 +1472,17 @@ def add_missing_columns(
     if not inspector.has_table(table_name, schema=schema):
         return []
 
-    existing = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
-    missing = [c for c in target_cols if c not in existing]
+    dialect = engine.dialect
+    dialect_name = getattr(dialect, "name", "")
+    existing_names = [
+        c["name"] for c in inspector.get_columns(table_name, schema=schema)
+    ]
+    existing = existing_column_index(dialect_name, existing_names)
+    quote_new_columns = _quote_added_columns(dialect, existing_names)
+    missing = [c for c in target_cols if c not in existing and c.casefold() not in existing]
     if not missing:
         return []
 
-    dialect = engine.dialect
-    dialect_name = getattr(dialect, "name", "")
     keyword = (
         "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
     )
@@ -579,7 +1490,6 @@ def add_missing_columns(
     # SQLite rejects "ADD COLUMN IF NOT EXISTS" (syntax error near EXISTS).
     if_not_exists = " IF NOT EXISTS" if supports_if_not_exists else ""
     log: list[str] = []
-    quoted_schema = f'"{schema}"' if schema else None
 
     def _column_exists_error(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -593,20 +1503,30 @@ def add_missing_columns(
             )
         )
 
+    # The T-SQL compiler resolves a column's owning Table to emit its DDL
+    # fragment ("mssql requires Table-bound columns in order to generate DDL"),
+    # so an unbound Column silently disabled add-column drift on every SQL
+    # Server destination. Bind the columns to a throwaway Table, which also
+    # gives the dialect's own preparer the correct quoting for the table
+    # reference (backticks / brackets / case-preserving quotes) instead of the
+    # hardcoded ANSI double quotes this used to emit.
+    bound = sa.Table(
+        table_name,
+        sa.MetaData(),
+        *[
+            sa.Column(col, sa_col_types[col], quote=quote_new_columns)
+            for col in missing
+            if sa_col_types.get(col) is not None
+        ],
+        schema=schema,
+        quote=True,
+    )
+    qualified = dialect.identifier_preparer.format_table(bound)
+
     def _run(conn: Any) -> None:
-        for col in missing:
-            sa_type = sa_col_types.get(col)
-            if sa_type is None:
-                continue
-            col_ddl = str(
-                sa.schema.CreateColumn(sa.Column(col, sa_type, quote=True)).compile(
-                    dialect=dialect
-                )
-            )
-            if quoted_schema:
-                qualified = f'{quoted_schema}."{table_name}"'
-            else:
-                qualified = f'"{table_name}"'
+        for column in list(bound.columns):
+            col = column.name
+            col_ddl = str(sa.schema.CreateColumn(column).compile(dialect=dialect))
             alter = f"ALTER TABLE {qualified} {keyword}{if_not_exists} {col_ddl}"
             try:
                 conn.execute(sa.text(alter))
@@ -639,3 +1559,86 @@ def add_missing_columns(
     else:
         _run(connection)
     return log
+
+
+def ensure_product_lsn_column(
+    engine: Any,
+    table_name: str,
+    schema: str | None,
+    target_cols: list[str],
+    physical: dict[str, str],
+    *,
+    table_existed: bool,
+) -> str | None:
+    """Add ``_df_lsn`` when CDC mapped it onto a table that does not have it.
+
+    The column is the product's change token, not a source column. Treating
+    it as a missing mapped column refused the snapshot after the rows had
+    already landed and then reported zero records. Returns an error when the
+    ALTER fails, before any insert in this batch. ``physical`` is updated
+    when the column is present afterward.
+    """
+    from connectors.lsn_guards import DF_LSN_COL
+
+    if not table_existed:
+        return None
+    pending = [
+        str(col)
+        for col in target_cols or []
+        if str(col).casefold() == DF_LSN_COL.casefold()
+        and not (
+            physical.get(str(col))
+            or physical.get(str(col).lower())
+            or physical.get(str(col).upper())
+        )
+    ]
+    if not pending:
+        return None
+    import sqlalchemy as sa
+
+    try:
+        add_missing_columns(
+            engine,
+            table_name,
+            schema,
+            pending,
+            {col: sa.Text() for col in pending},
+            backfill=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — the ALTER error is the operator result
+        return (
+            f"Could not add CDC column {DF_LSN_COL} on the existing table "
+            f"{table_name}: {exc}. No rows from this batch were written."
+        )
+    inspector = sa.inspect(engine)
+    try:
+        existing = inspector.get_columns(table_name, schema=schema)
+    except Exception as exc:  # noqa: BLE001 — unread catalog must not look like success
+        return (
+            f"Added {DF_LSN_COL} but could not re-read {table_name}: {exc}. "
+            "No rows from this batch were written."
+        )
+    for col_meta in existing or []:
+        name = str(col_meta.get("name") or "")
+        if not name:
+            continue
+        typ = col_meta.get("type")
+        ddl = str(typ) if typ is not None else "TEXT"
+        physical[name] = ddl
+        physical[name.lower()] = ddl
+        physical[name.upper()] = ddl
+    still = [
+        col
+        for col in pending
+        if not (
+            physical.get(col)
+            or physical.get(col.lower())
+            or physical.get(col.upper())
+        )
+    ]
+    if still:
+        return (
+            f"CDC column {DF_LSN_COL} is still missing on {table_name} after "
+            "ALTER. No rows from this batch were written."
+        )
+    return None

@@ -23,12 +23,12 @@
     padding: 8px 10px;
   }
 
-  .df2-app .df2-xform-card {
+  .df2-app .df2-page-transforms .df2-xform-card {
     padding: 10px 12px;
     border-radius: var(--df-radius-card);
   }
 
-  .df2-app .df2-xform-card-head h3 {
+  .df2-app .df2-page-transforms .df2-xform-card-head h3 {
     font-size: 14px;
   }
 
@@ -47,8 +47,8 @@
 .df2-app select.df2-select {
   box-sizing: border-box;
   width: 100%;
-  min-height: 40px;
-  border-radius: 8px;
+  min-height: var(--df-control-height);
+  border-radius: var(--df-radius-md);
 }
 
 .df2-app .df2-field {
@@ -61,9 +61,9 @@
 .df2-app .df2-input:focus,
 .df2-app select.df2-input:focus,
 .df2-app select.df2-select:focus {
-  outline: 2px solid rgba(15, 118, 110, 0.25);
+  outline: 2px solid var(--df-brand-ring);
   outline-offset: 0;
-  border-color: #0f766e;
+  border-color: var(--df-brand);
 }
 
 /* Cards — show full content, never clip children */
@@ -105,8 +105,8 @@
   justify-content: center;
   padding: 14px 16px !important;
   border-radius: var(--df-radius-card, 12px);
-  border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface);
   box-shadow: none;
 }
 
@@ -155,10 +155,10 @@
   border-radius: var(--df-radius-card, 12px);
 }
 
-/* Pipeline / connector cards equal minimum */
+/* Pipeline / connector cards — list density, never tile-tall */
 .df2-connector-card,
 .df2-pipeline-card {
-  min-height: 196px;
+  min-height: 0;
   border-radius: var(--df-radius-card, 12px);
 }
 
@@ -209,12 +209,13 @@
  * parents use overflow:hidden (laptop density tokens, not CSS zoom).
  */
 .df2-app .df2-content-inner:not(.df2-content-studio):not(.df2-content-flush) {
-  padding: 4px max(12px, var(--df-page-gutter, 16px)) 16px;
+  padding: 16px 20px 24px;
+  background: var(--df-bg-canvas);
   box-sizing: border-box;
 }
 .df2-app .df2-page:not(.df2-page-transfer-studio) {
-  padding-left: max(16px, var(--df-page-gutter, 16px));
-  padding-right: max(16px, var(--df-page-gutter, 16px));
+  padding-left: 0;
+  padding-right: 0;
   box-sizing: border-box;
 }
 .df2-app .df2-content-studio .df2-transfer-studio-shell {
@@ -230,7 +231,10 @@
 .df2-app .df2-jobs-v3-list,
 .df2-app .df2-pipeline-rows,
 .df2-app .df2-transfer-studio-chrome,
-.df2-app .df2-transfer-step-panel {
+.df2-app .df2-transfer-step-panel,
+.df2-app .df2-dest-connector-card,
+.df2-app .df2-dest-engine-panel,
+.df2-app .df2-dest-sync-summary {
   box-sizing: border-box;
   border-style: solid;
   background-clip: padding-box;
@@ -277,6 +281,10 @@
   width: 100%;
 }
 
+.df2-map-footer-actions .df2-btn-primary {
+  max-width: none;
+}
+
 /* Pilot inside app shell — fill content area */
 .df2-content-flush .df2-page-pilot {
   height: 100%;
@@ -319,13 +327,13 @@
   margin: 0;
   font-size: var(--df-text-title, 20px);
   font-weight: 700;
-  color: var(--df-text-primary, #111827);
+  color: var(--df-text-primary);
   line-height: 1.25;
 }
 
 .df-page-desc {
   margin: 0;
-  color: var(--df-text-secondary, #4b5563);
+  color: var(--df-text-secondary);
   font-size: var(--df-text-body, 14px);
   line-height: 1.45;
   max-width: 72ch;
@@ -337,14 +345,14 @@
 }
 
 .df2-app :focus-visible {
-  outline: 2px solid var(--df-focus-ring, rgba(15, 118, 110, 0.35));
+  outline: 2px solid var(--df-focus-ring);
   outline-offset: 2px;
 }
 
 .df2-app .df2-input:focus-visible,
 .df2-app select.df2-input:focus-visible,
 .df2-app select.df2-select:focus-visible {
-  outline: 2px solid var(--df-focus-ring, rgba(15, 118, 110, 0.35));
+  outline: 2px solid var(--df-focus-ring);
   outline-offset: 0;
 }
 
@@ -372,7 +380,7 @@
 
 .df2-empty-page .df2-empty-title {
   font-size: 20px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-empty-page .df2-empty-desc {
@@ -390,12 +398,16 @@
   margin-top: 4px;
 }
 
-/* Form rows — wrap on narrow viewports, no overlap */
+/* Form rows — wrap on narrow viewports, no overlap.
+   Fields align at the top so every label and every input in the row sits on
+   one line; a field carrying an extra control (read-mode segment, hint) grows
+   downwards. Bottom alignment lifted such a field — and only that field —
+   above the rest of the row. */
 .df2-app .df2-form-row {
   display: flex;
   flex-wrap: wrap;
   gap: 12px 16px;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 
 .df2-app .df2-form-row > .df2-field,
@@ -407,6 +419,48 @@
 
 .df2-app .df2-form-row > .df2-field-md {
   flex: 0 1 240px;
+}
+
+/* One close control for every overlay — drawer, modal, rail, detail popover.
+   Unprefixed because drawers and dialogs portal to <body>, outside `.df2-app`. */
+.df2-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--df-text-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.df2-close-btn:hover {
+  background: var(--df-surface-sunken);
+  border-color: var(--df-border);
+  color: var(--df-text-primary);
+}
+
+.df2-close-btn:focus-visible {
+  outline: none;
+  border-color: var(--df-brand);
+  box-shadow: 0 0 0 3px var(--df-focus, rgba(15, 118, 110, 0.18));
+}
+
+/* A field that carries our own clear must not also show Chrome's native search
+   ✕ — two clear controls, one of them unstyled, in the same input. */
+:is(label, div):has(> .df2-close-btn) > input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+
+.df2-close-btn-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
 }
 
 /* Respect reduced motion for UI polish */
@@ -424,5 +478,5 @@
 /* Selection colour consistent with brand */
 .df2-app ::selection {
   background: var(--df-brand-ring, rgba(15, 118, 110, 0.22));
-  color: var(--df-text-primary, #111827);
+  color: var(--df-text-primary);
 }

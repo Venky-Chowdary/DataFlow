@@ -25,6 +25,7 @@ from connectors.dynamodb_reader import (  # noqa: E402
     read_table_batch,
 )
 from services.transform_engine import apply_transform  # noqa: E402
+from services.value_serializer import is_missing_sentinel  # noqa: E402
 
 
 CFG = {
@@ -56,7 +57,8 @@ def test_sparse_attrs_union_across_items():
         assert "pk" in batch.headers
         assert "only_a" in batch.headers
         assert "only_b" in batch.headers
-        # Missing attr is empty string — not dropped, not equated with explicit NULL.
+        # Missing attr carries the missing sentinel — not dropped, not equated
+        # with an explicit NULL.
         for row in batch.rows:
             assert len(row) == len(batch.headers)
 
@@ -78,7 +80,11 @@ def test_explicit_null_vs_missing_and_transform():
         null_row = next(r for r in batch.rows if r[batch.headers.index("pk")] == "n")
         missing_row = next(r for r in batch.rows if r[batch.headers.index("pk")] == "m")
         assert null_row[maybe_i] == DDB_NULL_SENTINEL
-        assert missing_row[maybe_i] == ""
+        # Absent attribute keeps its own sentinel: an empty string would equate
+        # "the item never had this field" with "the item stored ''", and a
+        # sparse upsert must omit the key rather than wipe the destination.
+        assert is_missing_sentinel(missing_row[maybe_i])
+        assert missing_row[maybe_i] != DDB_NULL_SENTINEL
         val, err = apply_transform(DDB_NULL_SENTINEL, "decimal")
         assert err is None and val is None
         val2, err2 = apply_transform(DDB_NULL_SENTINEL, "none")

@@ -32,10 +32,15 @@ def test_logical_objectid_first_class():
     assert create_new_mapping_target_type("OBJECTID", "mysql") == "CHAR(24)"
     assert is_lossy_coercion("OBJECTID", "VARCHAR(24)") is False
     assert is_lossy_coercion("OBJECTID", "CHAR(24)") is False
-    assert is_lossy_coercion("OBJECTID", "TEXT") is True
-    assert objectid_would_collapse("OBJECTID", "TEXT") is True
+    # Unbounded TEXT holds 24-char hex (existing-table Mongo→SQL) — value-preserving.
+    assert is_lossy_coercion("OBJECTID", "TEXT") is False
+    assert objectid_would_collapse("OBJECTID", "TEXT") is False
     assert objectid_would_collapse("OBJECTID", "VARCHAR(24)") is False
     assert objectid_would_collapse("OBJECTID", "CHAR(24)") is False
+    # Narrow VARCHAR still collapses the hex wire.
+    assert is_lossy_coercion("OBJECTID", "VARCHAR(12)") is True
+    assert objectid_would_collapse("OBJECTID", "VARCHAR(12)") is True
+    assert is_lossy_coercion("OBJECTID", "INTEGER") is True
 
 
 def test_assess_bson_affinity_blocks_objectid_to_number():
@@ -114,7 +119,22 @@ def test_g3_schemaless_bson_affinity_blocks_objectid_to_integer():
     blob = str((blocked.details or {}).get("issues", [])) + blocked.message
     assert "affinity" in blob.lower() or "ObjectId" in blob or "objectid" in blob.lower()
 
+    # Boolean risk_acknowledged alone must never clear affinity — signed continue
+    # Migration Risk Contract only (fail-closed GA).
+    from services.migration_risk_contract import create_migration_risk_contract
+
     plan.mappings[0].risk_acknowledged = True
+    still_blocked = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert still_blocked.status == GateStatus.BLOCK
+
+    plan.mappings[0].risk_contract = create_migration_risk_contract(
+        column="_id",
+        source_type="OBJECTID",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="ObjectId→INTEGER affinity acknowledged for legacy key",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
     cleared = gate_g3_schema_contract(PreflightContext(plan=plan))
     assert cleared.status == GateStatus.SKIP
     assert (cleared.details or {}).get("bson_affinity") or "affinity" in cleared.message.lower()

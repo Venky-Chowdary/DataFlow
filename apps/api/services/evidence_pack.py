@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 API_ROOT = Path(__file__).resolve().parents[1]
-PROOF_DIR = API_ROOT / "data" / "proofs"
+def _proof_dir() -> Path:
+    from services.platform_config import data_dir
+
+    return data_dir() / "proofs"
 FIXTURES = API_ROOT / "tests" / "fixtures"
 GOLDEN = FIXTURES / "mapping_golden.json"
 ENTERPRISE = FIXTURES / "mapping_golden_enterprise.json"
@@ -165,17 +168,17 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
     },
     {
         "id": "create_new_type_risk_stamp",
-        "claim": "Create-new precision/width/TZ risks stamped before Validate",
+        "claim": "Create-new precision-collapse risks stamped before Validate",
         "buyer_line": (
-            "TIMESTAMPTZ create-new onto MySQL stamps create_new_risks "
-            "(timezone / precision) visible to Map UI."
+            "For MySQL create-new, DECIMAL(80,40) projects to TEXT and stamps a "
+            "precision_collapse create_new_risk before write."
         ),
         "floors": {
             "create_new_risks_present": 1,
         },
         "honesty": (
-            "Pipeline unit proof. UI consumption is covered by web mapping tests; "
-            "not a customer Map session recording."
+            "Measured through run_mapping_pipeline (MySQL create-new), not a live "
+            "transfer or a Map UI session."
         ),
     },
 ]
@@ -398,7 +401,6 @@ def measure_hungarian_vs_greedy() -> dict[str, Any]:
     from services.semantic_mapper import map_columns
 
     data = json.loads(ENTERPRISE.read_text(encoding="utf-8"))
-    all_cases = [c for d in data["domains"] for c in d["cases"]]
     # Domain-batched (same protocol as enterprise proof) so bipartite stays fair.
     hung_correct = 0
     greed_correct = 0
@@ -481,7 +483,7 @@ def measure_enterprise_accuracy() -> dict[str, Any]:
 
 
 def measure_connector_pair_matrix() -> dict[str, Any]:
-    pair_dir = PROOF_DIR / "mapping_connector_pair_matrix"
+    pair_dir = _proof_dir() / "mapping_connector_pair_matrix"
     if not pair_dir.exists():
         return {
             "pair_count": 0,
@@ -585,12 +587,12 @@ def measure_create_new_type_risk() -> dict[str, Any]:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
-        source_columns=["created_at"],
+        source_columns=["amount"],
         target_columns=[],
         source_schemas=[{
-            "name": "created_at",
-            "inferred_type": "TIMESTAMPTZ",
-            "samples": ["2024-01-01T00:00:00Z"],
+            "name": "amount",
+            "inferred_type": "DECIMAL(80,40)",
+            "samples": ["123.45"],
         }],
         destination_db_type="mysql",
         destination_table_exists=False,
@@ -600,6 +602,7 @@ def measure_create_new_type_risk() -> dict[str, Any]:
     risks = row.get("create_new_risks") or []
     return {
         "create_new_risks_present": int(bool(risks)),
+        "source_type": row.get("source_type"),
         "target_type": row.get("target_type"),
         "risk_kinds": sorted({r.get("kind") for r in risks if r.get("kind")}),
         "requires_review": bool(row.get("requires_review")),
@@ -705,7 +708,7 @@ def _ensure_connector_pair_proofs() -> None:
     """Lightweight materialization of pair proofs used by the catalog."""
     from services.mapping_pipeline import run_mapping_pipeline
 
-    pair_dir = PROOF_DIR / "mapping_connector_pair_matrix"
+    pair_dir = _proof_dir() / "mapping_connector_pair_matrix"
     pair_dir.mkdir(parents=True, exist_ok=True)
     sources = ("postgresql", "mysql", "mongodb", "sqlserver", "oracle", "snowflake")
     dests = ("postgresql", "mysql", "snowflake", "bigquery", "mongodb", "sqlserver", "oracle", "redshift")
@@ -800,10 +803,11 @@ def write_evidence_catalog(
     *,
     refresh_pairs: bool = False,
 ) -> tuple[Path, Path]:
-    PROOF_DIR.mkdir(parents=True, exist_ok=True)
+    proof_dir = _proof_dir()
+    proof_dir.mkdir(parents=True, exist_ok=True)
     catalog = catalog or build_evidence_catalog(refresh_pairs=refresh_pairs)
-    json_path = PROOF_DIR / "evidence_catalog.json"
-    md_path = PROOF_DIR / "EVIDENCE_CATALOG.md"
+    json_path = proof_dir / "evidence_catalog.json"
+    md_path = proof_dir / "EVIDENCE_CATALOG.md"
     json_path.write_text(json.dumps(catalog, indent=2), encoding="utf-8")
     md_path.write_text(catalog_to_markdown(catalog), encoding="utf-8")
     return json_path, md_path

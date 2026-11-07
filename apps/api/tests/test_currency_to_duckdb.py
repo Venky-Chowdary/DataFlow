@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,10 @@ def test_currency_csv_to_duckdb_preserves_value():
         con = duckdb.connect(str(duckdb_path))
         rows = con.execute("SELECT id, amount FROM payments ORDER BY id").fetchall()
         con.close()
-        assert rows[0] == (1, 1000.00)
-        assert rows[1] == (2, 2000.50)
-        assert rows[2] == (3, 1000000.89)
+        # Money lands as DECIMAL, not DOUBLE: compare the exact numeric value
+        # rather than a float literal that cannot represent 1000000.89.
+        assert [(r[0], Decimal(str(r[1]))) for r in rows] == [
+            (1, Decimal("1000.00")),
+            (2, Decimal("2000.50")),
+            (3, Decimal("1000000.89")),
+        ]

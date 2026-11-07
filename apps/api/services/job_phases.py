@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-PHASE_ORDER = ("preflight", "extract", "transform", "load", "reconcile")
+# Engine order is read → confirm/preflight → write → reconcile.
+# Putting preflight first left Extract active during Execute preflight
+# (both chips ticked for minutes after Validate had already passed).
+PHASE_ORDER = ("extract", "transform", "preflight", "load", "reconcile")
 
 
 def _now() -> str:
@@ -98,6 +101,14 @@ def complete_phases(
 def phase_from_engine_label(label: str) -> str:
     mapping = {
         "preflight": "preflight",
+        # Pre-write verification work (mapping/schema validate, continuity
+        # verify, quality gate, resume re-check) used to collapse into
+        # "extract" — a 3-minute Validate stall was billed to reading and
+        # the operator could not see where the job was slow (M10).
+        "validate": "preflight",
+        "verify": "preflight",
+        "quality_check": "preflight",
+        "resuming": "preflight",
         "reading": "extract",
         "writing": "load",
         "reconcile": "reconcile",

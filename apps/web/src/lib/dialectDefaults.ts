@@ -15,7 +15,8 @@ const DEFAULTS: Record<string, string | null> = {
   mssql: "dbo",
   "mssql+pyodbc": "dbo",
   oracle: null,
-  bigquery: "dataflow",
+  // The server picks the default dataset (a brand artifact); never prefill it.
+  bigquery: null,
   sqlite: null,
   duckdb: "main",
   databricks: "default",

@@ -3,6 +3,7 @@ import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
+import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
 
 type NavMenu = "product" | "solutions" | "resources" | null;
 
@@ -99,11 +100,11 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
       <header
         ref={navRef}
-        className={`lp-nav ${scrolled ? "is-scrolled is-pill" : "is-top is-bar"}`}
+        className={`lp-nav is-bar ${scrolled ? "is-scrolled" : "is-top"}`}
         onMouseLeave={() => setMenu(null)}
       >
         <div className="lp-nav-shell">
-          <div className={`lp-nav-surface ${scrolled ? "lp-nav-pill" : "lp-nav-bar"}`}>
+          <div className="lp-nav-surface lp-nav-bar">
             <div className="lp-nav-start">
               <a
                 className="lp-nav-brand"
@@ -134,15 +135,15 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                 <div className="lp-nav-dropdown">
                   <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>
                     <strong>Transfer Studio</strong>
-                    <span>Map, preflight, and prove any→any loads</span>
+                    <span>Map, preflight, and verify any→any loads</span>
                   </a>
                   <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>
                     <strong>Job Theater</strong>
-                    <span>Live phases, quarantine, and proof reports</span>
+                    <span>Live phases, quarantine, and verification reports</span>
                   </a>
                   <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>
                     <strong>Pipelines</strong>
-                    <span>Scheduled sync with watermarks &amp; gates</span>
+                    <span>Schedules, typed watermarks &amp; native CDC</span>
                   </a>
                   <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>
                     <strong>Query Playground</strong>
@@ -150,7 +151,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
                     <strong>Datawrap Pilot</strong>
-                    <span>Natural-language triage for transfers</span>
+                    <span>Local-engine copilot for transfers</span>
                   </a>
                   <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>
                     <strong>MCP Server</strong>
@@ -158,7 +159,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
                     <strong>Connectors</strong>
-                    <span>Native drivers + SQLAlchemy generics</span>
+                    <span>{TRANSFER_READY_DRIVERS} transfer-ready drivers</span>
                   </a>
                 </div>
               </div>
@@ -182,11 +183,11 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>
                     <strong>Warehouse loading</strong>
-                    <span>Snowflake, BigQuery, Redshift routes</span>
+                    <span>Warehouse loads, verified on read-back</span>
                   </a>
                   <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>
                     <strong>Recurring sync</strong>
-                    <span>Incremental pipelines with quarantine</span>
+                    <span>CDC and incremental pipelines</span>
                   </a>
                 </div>
               </div>
@@ -199,7 +200,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   go("customers");
                 }}
               >
-                Customers
+                Evidence
               </a>
 
               <div
@@ -219,21 +220,25 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                     <strong>Documentation</strong>
                     <span>Screenshots, steps, and operations runbooks</span>
                   </a>
+                  <a href={link("demos")} onClick={(e) => { e.preventDefault(); go("demos"); }}>
+                    <strong>Video demos</strong>
+                    <span>Watch real transfers prove themselves</span>
+                  </a>
                   <a href={link("help-getting-started")} onClick={(e) => { e.preventDefault(); go("help-getting-started"); }}>
                     <strong>Getting started</strong>
-                    <span>Connect → map → preflight → prove</span>
+                    <span>Connect → map → preflight → verify</span>
                   </a>
                   <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>
                     <strong>Enterprise</strong>
-                    <span>SSO, RBAC, audit, tenants</span>
+                    <span>SSO, SCIM, RBAC, audit chain</span>
                   </a>
                   <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>
                     <strong>Security</strong>
-                    <span>Encryption, residency, governance</span>
+                    <span>Isolation, encryption, identity, audit</span>
                   </a>
                   <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
                     <strong>Connector catalog</strong>
-                    <span>Honest transfer-ready labels</span>
+                    <span>Warehouses, lakes, streams, vectors, apps</span>
                   </a>
                 </div>
               </div>
@@ -290,7 +295,6 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
       <main className="lp-main">{children}</main>
 
-      {route !== "contact" ? (
       <footer className="lp-footer lp-footer--compact">
         <div className="lp-footer-inner">
           <div className="lp-footer-grid">
@@ -309,33 +313,49 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <p className="lp-footer-tagline">
                 Anywhere to anywhere — wrapped with proof.
               </p>
+              <p className="lp-footer-proof">
+                Every load verified value by value — if anything doesn&apos;t match, Datawrap tells you.
+              </p>
             </div>
             <div>
               <h4>Product</h4>
               <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>Transfer Studio</a>
               <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>Job Theater</a>
               <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>Pipelines</a>
+              <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>Query Playground</a>
               <a href={link("pricing")} onClick={(e) => { e.preventDefault(); go("pricing"); }}>Pricing</a>
+            </div>
+            <div>
+              <h4>Solutions</h4>
+              <a href={link("solution-migrations")} onClick={(e) => { e.preventDefault(); go("solution-migrations"); }}>Migrations</a>
+              <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>Warehouses</a>
+              <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>Sync</a>
+              <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>Integrations</a>
+              <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
             </div>
             <div>
               <h4>Resources</h4>
               <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>Documentation</a>
               <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
-              <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
-              <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact</a>
+              <a href={link("status")} onClick={(e) => { e.preventDefault(); go("status"); }}>Status</a>
+              <a href={link("customers")} onClick={(e) => { e.preventDefault(); go("customers"); }}>Customers</a>
+              <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact sales</a>
+              <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
             </div>
             <div>
-              <h4>Account</h4>
-              <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
-              <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
+              <h4>Legal</h4>
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
+              <a href={link("dpa")} onClick={(e) => { e.preventDefault(); go("dpa"); }}>DPA</a>
+              <a href={link("subprocessors")} onClick={(e) => { e.preventDefault(); go("subprocessors"); }}>Subprocessors</a>
+              <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
             </div>
           </div>
 
           <div className="lp-footer-bottom">
             <span>© {new Date().getFullYear()} Datawrap</span>
             <span className="lp-footer-legal">
+              <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
               <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
@@ -343,7 +363,6 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </div>
         </div>
       </footer>
-      ) : null}
     </div>
   );
 }

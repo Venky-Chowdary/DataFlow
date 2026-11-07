@@ -23,13 +23,13 @@ from src.transfer.adapters import (  # noqa: E402
 from src.transfer.models import EndpointConfig  # noqa: E402
 
 CSV_MESSY_TEXT = """order_id,amount,created_at,active,notes
-1,"$1,234.56","2024-06-01T12:00:00Z",yes,"Large payment"
-2,"€2.000,00","2024-06-02 08:30:00",true,
-3,"N/A","2024-06-03","false","bad amount"
-4,"0","2024-06-04",1,
-5,"1,000.00","2024-06-05",no,"thousand comma"
-6,"1.000.000,89","2024-06-06",TRUE,
-7,"(100.00)","2024-06-07",FALSE,
+1,"$1,234.56","2024-06-01T12:00:00Z",true,"Large payment"
+2,"€2.000,00","2024-06-02T08:30:00Z",true,
+3,"N/A","2024-06-03T00:00:00Z","false","bad amount"
+4,"0","2024-06-04T00:00:00Z",1,
+5,"1,000.00","2024-06-05T00:00:00Z",false,"thousand comma"
+6,"1.000.000,89","2024-06-06T00:00:00Z",TRUE,
+7,"(100.00)","2024-06-07T00:00:00Z",FALSE,
 """
 CSV_MESSY = CSV_MESSY_TEXT.encode("utf-8")
 

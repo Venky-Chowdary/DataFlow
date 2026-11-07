@@ -33,6 +33,50 @@ def test_ambiguous_connector_raises_instead_of_first_match():
         assert len(exc.candidates) >= 2
 
 
+def test_dialect_with_no_saved_instance_says_so_precisely():
+    """"Postgres" is a type. With no Postgres saved there is nothing to point at."""
+    pool = [{"name": "Prod Mongo", "type": "mongodb", "id": "a"}]
+    try:
+        _pick_connector("postgres", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "database type" in exc.message
+        assert "no postgresql connector is saved" in exc.message
+        # The agent's recovery step keys on this phrase to offer the saved list.
+        assert "no connector matched" in exc.message.lower()
+        # Never imply a connector exists that does not.
+        assert "Prod Mongo" in exc.message
+
+
+def test_unknown_connector_name_is_not_guessed():
+    pool = [{"name": "Prod Mongo", "type": "mongodb", "id": "a"}]
+    try:
+        _pick_connector("Analytics Lakehouse", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "will not guess" in exc.message
+
+
+def test_family_word_is_not_reported_as_a_dialect():
+    """"sql" names a family, so the message must not invent a "sql" engine type."""
+    pool = [{"name": "Prod Mongo", "type": "mongodb", "id": "a"}]
+    try:
+        _pick_connector("sql", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "family of databases" in exc.message
+        assert "sql connector is saved" not in exc.message
+
+
+def test_sql_server_aliases_resolve_to_the_saved_instance():
+    pool = [
+        {"name": "Prod MSSQL", "type": "sqlserver", "id": "a"},
+        {"name": "Local Postgres", "type": "postgresql", "id": "b"},
+    ]
+    for needle in ("sql server", "sqlserver", "mssql"):
+        assert _pick_connector(needle, pool)["id"] == "a", needle
+
+
 def test_clear_connector_winner_no_ambiguity():
     pool = [
         {"name": "Local Postgres", "type": "postgresql", "id": "a"},
@@ -40,6 +84,36 @@ def test_clear_connector_winner_no_ambiguity():
     ]
     chosen = _pick_connector("Local Postgres", pool)
     assert chosen["id"] == "a"
+
+
+def test_named_dialect_never_resolves_to_another_engine():
+    """"Local Postgres" with only a Snowflake saved must not answer from Snowflake."""
+    pool = [
+        {"name": "Local Snowflake (fakesnow)", "type": "snowflake", "id": "a"},
+        {"name": "MySQL 3307", "type": "mysql", "id": "b"},
+        {"name": "Quarantine SQLite", "type": "sqlite", "id": "c"},
+    ]
+    try:
+        _pick_connector("Local Postgres", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "no connector matched" in exc.message.lower()
+        assert "no postgresql connector is saved" in exc.message
+        assert "Local Snowflake (fakesnow)" in exc.message
+
+
+def test_environment_qualifier_alone_is_not_a_match():
+    """Sharing only "prod"/"local" is not identity evidence for an instance."""
+    assert _match_score("prod orders warehouse", "Prod Mongo", "mongodb") == 0.0
+    assert _match_score("local postgres", "Local Snowflake", "snowflake") == 0.0
+    # A distinctive shared token still resolves.
+    assert _match_score("prod orders", "Prod Orders Mongo", "mongodb") > 0.0
+
+
+def test_engine_conflict_yields_to_an_exact_saved_name():
+    """An operator who typed the saved label exactly gets that connector."""
+    pool = [{"name": "Local Postgres", "type": "snowflake", "id": "a"}]
+    assert _pick_connector("Local Postgres", pool)["id"] == "a"
 
 
 def test_schema_nl_does_not_also_analyze_dataset():

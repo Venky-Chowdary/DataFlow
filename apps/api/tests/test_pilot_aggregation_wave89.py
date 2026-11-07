@@ -479,19 +479,24 @@ def test_live_natural_prompt_end_to_end(live_orders):
 
 
 def test_unmapped_intent_is_honest_not_a_capability_tour():
-    """An unsupported ask must admit it, not return a silent capability blurb."""
+    """An unsupported ask must admit it, not return a silent capability blurb.
+
+    Each headline names either the limit ("not something I can do yet") or the
+    exact input still missing ("I need …", "only after you Confirm"); a generic
+    "did not catch" is reserved for asks that match no operation at all.
+    """
     from src.ai.copilot.pilot_agent import _unmapped_intent_reply
 
-    for prompt in (
-        "export orders to csv",
-        "delete the connector Local Postgres",
-        "create a pipeline that syncs orders every hour",
-        "is my data safe",
+    for prompt, expected in (
+        ("export orders to csv", "not something i can do yet"),
+        ("delete the connector Local Postgres", "only after you confirm"),
+        ("create a pipeline that syncs orders every hour", "i need the route and the cadence"),
+        ("is my data safe", "did not catch a specific action"),
     ):
         text = _unmapped_intent_reply(prompt, {"connectors": []})
-        assert "not sure" in text.lower() or "didn't catch" in text.lower(), text
-        # Must quote the ask so the operator sees we heard them.
-        assert prompt.split()[0] in text.lower() or "“" in text or '"' in text
+        assert expected in text.lower(), text
+        # Every reply ends with a concrete, quoted next command.
+        assert '"' in text, text
         # Must not claim to have done the work.
         assert "Available datasets" not in text
         assert "I can help with any question" not in text
@@ -516,3 +521,59 @@ def test_live_grouped_answer_renders_the_numbers(live_orders):
     assert "∅ (null)" in text, "the NULL group must be visible, not omitted"
     assert "not a sample" in text
     assert "```sql" in text, "operators need the SQL that produced the number"
+
+
+def test_grouped_lead_names_the_group_values():
+    """A grouped count that only said '3 groups' buried the answer in a table.
+
+    The sentence splitter treats a heading with an em-dash and no period as
+    a caption, so the operator read 'Exact server-side aggregate' first.
+    """
+    from src.ai.copilot.pilot_agent import _render_aggregate
+    from src.ai.rag.answer_composer import split_sentences
+
+    text = _render_aggregate(
+        {
+            "metric": "count",
+            "table": "orders",
+            "connector_name": "Audit SQLite",
+            "group_by": "region",
+            "group_count": 3,
+            "rows": [
+                {"region": "emea", "row_count": 4},
+                {"region": "apac", "row_count": 4},
+                {"region": "amer", "row_count": 4},
+            ],
+            "columns": ["region", "row_count"],
+            "metric_alias": "row_count",
+        }
+    )
+    lead = split_sentences(text)[0].lower()
+    assert "emea" in lead
+    assert "apac" in lead
+    assert "amer" in lead
+    assert "3 group" in lead
+
+
+def test_sample_lead_names_a_row_value():
+    from src.ai.copilot.pilot_agent import _live_rows_lead
+    from src.ai.rag.answer_composer import split_sentences
+
+    lead = split_sentences(
+        _live_rows_lead(
+            {
+                "connector_name": "Audit SQLite",
+                "table": "orders",
+                "type": "sqlite",
+                "row_count": 3,
+                "columns": ["id", "customer", "region"],
+                "rows": [
+                    {"id": 1, "customer": "customer-1", "region": "emea"},
+                    {"id": 2, "customer": "customer-2", "region": "apac"},
+                ],
+            },
+            sample=True,
+        )
+    )[0].lower()
+    assert "customer-1" in lead
+    assert "3 rows" in lead

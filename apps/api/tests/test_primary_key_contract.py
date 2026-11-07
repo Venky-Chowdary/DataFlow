@@ -259,10 +259,17 @@ def test_g6_ignores_host_folded_drift_noise_on_redis():
     assert "Schemaless" in result.message or "compatible" in result.message.lower()
 
 
-def test_pause_on_change_still_blocks_sql_source_drift():
+def test_pause_on_change_still_blocks_sql_source_drift(tmp_path):
+    import sqlite3
+
     from services.preflight_service import run_file_preflight
     from services.schema_fingerprint import fingerprint_schema
 
+    db_path = tmp_path / "people.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE people (id INTEGER, email TEXT)")
+    conn.commit()
+    conn.close()
     cols = ["id", "email"]
     schema = {"id": "INTEGER", "email": "VARCHAR"}
     stale = fingerprint_schema(["id"], {"id": "INTEGER"})
@@ -279,9 +286,11 @@ def test_pause_on_change_still_blocks_sql_source_drift():
         source_connected=True,
         sample_rows=[{"id": 1, "email": "a@b.com"}],
         destination_column_types={"id": "INTEGER", "email": "VARCHAR"},
+        destination_table="people",
         destination_table_exists=True,
+        destination_config={"type": "sqlite", "connection_string": f"sqlite:///{db_path}"},
         destination_can_create=True,
-        destination_db_type="postgresql",
+        destination_db_type="sqlite",
         stored_source_fp=stale,
         validation_mode="strict",
         schema_policy="pause_on_change",

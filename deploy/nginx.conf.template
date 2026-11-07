@@ -1,3 +1,13 @@
+# Behind the Railway edge: TLS ends there, so $scheme is http and $remote_addr
+# is the edge. Keep the scheme the edge saw, and append (never overwrite) the
+# client chain: the API reads X-Forwarded-For hops[-N] with
+# DATAWRAP_TRUSTED_PROXY_COUNT=3 (browser -> edge -> nginx -> edge -> API) or 2
+# over private networking. See docs/DEPLOYMENT.md.
+map $http_x_forwarded_proto $dw_forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
 server {
     listen ${PORT};
     server_name _;
@@ -14,15 +24,20 @@ server {
     }
 
     # Same-origin API proxy so the browser can use /api/v1 without CORS.
-    # Upstream host comes from DATAFLOW_API_BASE / VITE_API_BASE at container start.
+    # Upstream host comes from DATAWRAP_API_BASE at container start (start-nginx.sh).
     location /api/ {
         proxy_pass ${API_PROXY_PASS};
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
+        # Host is the backend so the edge can route; the public host travels in
+        # X-Forwarded-Host (honoured by the API only against its allow-list).
         proxy_set_header Host ${API_PROXY_HOST};
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $dw_forwarded_proto;
+        # X-Real-IP is not a client address here ($remote_addr is the edge);
+        # the API ignores it whenever X-Forwarded-For is present.
+        proxy_set_header X-Real-IP "";
         proxy_set_header Authorization $http_authorization;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
@@ -33,6 +48,64 @@ server {
         proxy_busy_buffers_size 512k;
         proxy_temp_file_write_size 512k;
         client_max_body_size 256m;
+        # Default 8k/16k spills POST /preflight/explain to client_temp (warn, not 413).
+        client_body_buffer_size 2m;
+        # An API client (the web app, an MCP client) parses JSON: when nginx
+        # itself answers (API down or slow), answer JSON, never an HTML page.
+        error_page 502 503 504 = @api_unavailable;
+    }
+
+    # /api and /api/v1 without the trailing path are API paths too: JSON 404,
+    # never the SPA shell (QA r12 Mongo D11).
+    location = /api {
+        default_type application/json;
+        return 404 '{"detail":"Not Found"}';
+    }
+
+    # MCP OAuth discovery (RFC 9728) is served by the API at its root, not
+    # under /api/. MCP clients (Claude, Cursor, the TS SDK) fetch it from the
+    # origin they were given — this web origin — after a 401 from /api/v1/mcp.
+    # The SPA catch-all answered 200 index.html, and the client failed with
+    # "Unexpected token '<' <!DOCTYPE" (QA r12 Mongo D11).
+    location ^~ /.well-known/oauth-protected-resource {
+        proxy_pass ${API_ORIGIN};
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host ${API_PROXY_HOST};
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $dw_forwarded_proto;
+        proxy_set_header X-Real-IP "";
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        error_page 502 503 504 = @api_unavailable;
+    }
+
+    # Any other discovery document (oauth-authorization-server,
+    # openid-configuration, ...): a static file if one ships, else JSON 404 so
+    # the client falls back instead of choking on HTML.
+    location ^~ /.well-known/ {
+        try_files $uri @json_not_found;
+    }
+
+    location @json_not_found {
+        default_type application/json;
+        return 404 '{"detail":"Not Found"}';
+    }
+
+    # A non-GET outside /api/ (QA: MCP client "Invalid OAuth error response:
+    # Unexpected token '<'"). After a 401 from /api/v1/mcp with no OAuth server
+    # advertised, an MCP client POSTs to /register or /token on this origin; a
+    # mistyped MCP URL (/mcp) is a POST here too. nginx answered its own HTML
+    # 405 page. Answer an OAuth-shaped JSON error that names the endpoint.
+    location @json_wrong_method {
+        default_type application/json;
+        return 404 '{"error":"invalid_request","error_description":"No API route here: only GET is served outside /api/. The MCP endpoint is /api/v1/mcp on this origin; authenticate with the header Authorization: Bearer <workspace API key>. A 401 there means the key was not accepted (wrong, revoked, or its creator is no longer an active member).","detail":"Not Found"}';
+    }
+
+    location @api_unavailable {
+        default_type application/json;
+        return 502 '{"detail":"The Datawrap API is unreachable from the web service. Check DATAWRAP_API_BASE and the API service health."}';
     }
 
     # Real API liveness (not the static web /health stub).
@@ -45,7 +118,19 @@ server {
         proxy_read_timeout 10s;
     }
 
+    # Hashed Vite assets are content-addressed. index.html must revalidate so a
+    # deploy cannot leave a cached shell requesting deleted DashboardPage-*.js.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
     location / {
+        error_page 418 = @json_wrong_method;
+        if ($request_method !~ ^(GET|HEAD)$) {
+            return 418;
+        }
+        add_header Cache-Control "no-cache";
         try_files $uri $uri/ /index.html;
     }
 }

@@ -29,8 +29,15 @@ _SANITIZE_RE = re.compile(
 
 
 def is_llm_enabled() -> bool:
-    """Return whether LLM inference is globally enabled."""
-    return getenv_brand("LLM_ENABLED", "true").lower() not in (
+    """Return whether LLM inference is globally enabled.
+
+    Honors ``DATAWRAP_LLM_ENABLED`` / ``DATAFLOW_LLM_ENABLED``, then bare
+    ``LLM_ENABLED`` (CI offline / operator convention).
+    """
+    raw = getenv_brand("LLM_ENABLED", None)
+    if raw is None:
+        raw = os.environ.get("LLM_ENABLED", "true")
+    return str(raw).lower() not in (
         "false", "0", "off", "disabled", "no"
     )
 

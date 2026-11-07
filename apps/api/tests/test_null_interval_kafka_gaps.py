@@ -32,9 +32,10 @@ def test_sql_null_sentinel_distinct_from_empty_string():
     empty_val, empty_err = apply_transform("", "none")
     assert empty_err is None and empty_val == ""
 
-    # Typed transforms still coerce empty → None.
+    # Typed transforms: empty must error (not silent NULL) so Risk Contracts apply.
     typed_val, typed_err = apply_transform("", "integer")
-    assert typed_err is None and typed_val is None
+    assert typed_val is None
+    assert typed_err and "empty" in typed_err.lower()
 
 
 def test_safe_ddl_preserves_float_not_varchar():

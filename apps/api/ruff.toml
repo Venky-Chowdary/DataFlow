@@ -1,0 +1,26 @@
+# Phase B8 — baseline lint gate (audit §3.5). Expand paths in CI gradually;
+# do not widen selects until the allowlist is clean.
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+  "BLE001",  # blind except Exception
+  "S110",    # try-except-pass
+  "DTZ001",  # naive datetime
+  "F401",    # unused import
+]
+
+[lint.per-file-ignores]
+# Writer outer boundaries must return WriteResult — never raise through FastAPI.
+"connectors/elasticsearch_writer.py" = ["BLE001"]
+"connectors/sqlite_writer.py" = ["BLE001"]
+# Report scripts catch ImportError broadly when optional deps absent.
+"scripts/warehouse_sku_report.py" = ["BLE001"]
+# Connector-readiness proof harness: probing whether a store is reachable and
+# tearing down fixtures must never mask a measured cell behind a driver-specific
+# exception type — an unreachable store is recorded as skip, not raised.
+"scripts/connector_readiness_audit.py" = ["BLE001"]
+"scripts/connector_readiness_live_proof.py" = ["BLE001", "S110"]
+"scripts/connector_readiness_mode_proof.py" = ["BLE001", "S110"]
+"tests/connector_readiness_stores.py" = ["BLE001", "S110"]

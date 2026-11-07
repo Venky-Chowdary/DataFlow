@@ -33,7 +33,7 @@ def test_pg_to_logical_redshift_super_varbyte():
     assert _pg_to_logical("varbyte") == "BINARY"
     assert _pg_to_logical("varbyte(1024)") == "BINARY"
     # Existing PG floats still honest.
-    assert _pg_to_logical("double precision") == "FLOAT"
+    assert _pg_to_logical("double precision") == "DOUBLE PRECISION"
     assert _pg_to_logical("numeric(12,4)") == "DECIMAL(12,4)"
 
 
@@ -107,8 +107,12 @@ def test_register_json_schema_fail_closed_on_http_error():
 
 def test_kafka_writer_aborts_when_registry_register_fails():
     from connectors.kafka_writer import write_mapped_rows
+    from connectors.confluent_schema_registry import SchemaRegistryError
 
     with patch(
+        "connectors.kafka_writer._fetch_kafka_physical_types",
+        return_value=({}, None, False),
+    ), patch(
         "connectors.confluent_schema_registry.register_json_schema",
         side_effect=SchemaRegistryError("register failed"),
     ):
@@ -127,6 +131,7 @@ def test_kafka_writer_aborts_when_registry_register_fails():
             mappings=[{"source": "id", "target": "id", "transform": "none"}],
             column_types={"id": "string"},
             schema_registry_url="http://registry:8081",
+            create_table=True,
         )
     assert result.ok is False
     assert "register failed" in (result.error or "")

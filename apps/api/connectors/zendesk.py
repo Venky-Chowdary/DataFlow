@@ -12,6 +12,7 @@ from typing import Any
 
 from connectors import rest_api
 from connectors.saas_common import ReadBatch, base_url, request, token
+from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "zendesk.com"
 
@@ -63,7 +64,10 @@ def describe_fields(cfg: dict[str, Any], object_type: str = "") -> list[dict[str
     host = str(cfg.get("host") or cfg.get("subdomain") or "")
     scheme, access = _auth_from_cfg(cfg)
     if not access or not host:
-        return []
+        # Never soft-empty — Map introspect would invent seed VARCHAR carriers.
+        raise RuntimeError(
+            "Zendesk schema Describe unauthorized: host or credentials missing"
+        )
     url = f"{base_url(host, DEFAULT_HOST)}/api/v2/{path}.json"
     fields: list[dict[str, Any]] = []
     next_url: str | None = url
@@ -79,7 +83,7 @@ def describe_fields(cfg: dict[str, Any], object_type: str = "") -> list[dict[str
             auth_scheme=scheme,
             timeout=30,
         )
-        body = resp.json() if hasattr(resp, "json") else {}
+        body = load_http_json(resp)
         for f in body.get(key) or []:
             if not isinstance(f, dict):
                 continue
@@ -114,8 +118,19 @@ def describe_fields(cfg: dict[str, Any], object_type: str = "") -> list[dict[str
                     }
                 )
         next_page = body.get("next_page")
-        next_url = str(next_page) if next_page else None
+        next_url = _same_origin_next(str(next_page), url) if next_page else None
     return fields
+
+
+def _same_origin_next(next_page: str, first_url: str) -> str | None:
+    """Follow ``next_page`` only on the origin the first request used."""
+    from urllib.parse import urljoin, urlparse
+
+    target = urljoin(first_url, next_page)
+    a, b = urlparse(target), urlparse(first_url)
+    if (a.scheme, (a.hostname or "").lower(), a.port) != (b.scheme, (b.hostname or "").lower(), b.port):
+        raise RuntimeError("Zendesk next_page left the configured Zendesk host; refusing to follow")
+    return target
 
 
 def read_object(

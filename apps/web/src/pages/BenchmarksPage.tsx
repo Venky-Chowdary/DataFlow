@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -8,12 +9,20 @@ import { PageShell } from "../components/ui/PageShell";
 import { StatCard } from "../components/ui/StatCard";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { useToast } from "../components/Toast";
+import { compareThroughput } from "../lib/benchmarkCompare";
+import { createPoller, type Poller } from "../lib/poller";
 import {
-  downloadBenchmarkReport,
+  downloadBenchmarkRunReport,
+  fetchBenchmarkRun,
   fetchProofLedger,
-  runBenchmark,
+  startBenchmarkRun,
+  type BenchmarkRun,
+  runDesktopLab,
+  runDesktopLabCross,
   runFidelityProof,
   type BenchmarkReport,
+  type DesktopLabCrossReport,
+  type DesktopLabReport,
   type FidelityProofResult,
   type ProofLedger,
 } from "../lib/api";
@@ -41,12 +50,19 @@ export function BenchmarksPage() {
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<BenchmarkReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [run, setRun] = useState<BenchmarkRun | null>(null);
+  const pollerRef = useRef<Poller | null>(null);
+  useEffect(() => () => pollerRef.current?.stop(), []);
 
   const [ledger, setLedger] = useState<ProofLedger | null>(null);
   const [ledgerLoading, setLedgerLoading] = useState(true);
   const [ledgerError, setLedgerError] = useState<string | null>(null);
   const [fidelityRunning, setFidelityRunning] = useState(false);
   const [fidelity, setFidelity] = useState<FidelityProofResult | null>(null);
+  const [labRunning, setLabRunning] = useState(false);
+  const [lab, setLab] = useState<DesktopLabReport | null>(null);
+  const [crossRunning, setCrossRunning] = useState(false);
+  const [cross, setCross] = useState<DesktopLabCrossReport | null>(null);
 
   const loadLedger = async () => {
     setLedgerLoading(true);
@@ -63,8 +79,6 @@ export function BenchmarksPage() {
   useEffect(() => {
     void loadLedger();
   }, []);
-
-  const isFaster = (rps: number, baseline: number) => rps >= baseline;
 
   const handleFidelity = async () => {
     setFidelityRunning(true);
@@ -86,30 +100,79 @@ export function BenchmarksPage() {
     }
   };
 
+  const handleDesktopLab = async () => {
+    setLabRunning(true);
+    try {
+      const result = await runDesktopLab();
+      setLab(result);
+      await loadLedger();
+      toast({
+        title: result.success ? "Desktop lab passed" : "Desktop lab incomplete",
+        message: `${result.catalog_slots_duplex_passed} of ${result.catalog_slots} catalog slots passed as source and dest. Unique engines: ${result.unique_engines_duplex_passed}. Hosted twins share a driver.`,
+        tone: result.success ? "success" : "error",
+      });
+    } catch (e) {
+      toast({ title: "Desktop lab failed", message: String(e), tone: "error" });
+    } finally {
+      setLabRunning(false);
+    }
+  };
+
+  const handleDesktopLabCross = async () => {
+    setCrossRunning(true);
+    try {
+      const result = await runDesktopLabCross();
+      setCross(result);
+      toast({
+        title: result.success ? "Unique-engine matrix passed" : "Unique-engine matrix incomplete",
+        message: `${result.passed} of ${result.pairs} live src×dst pairs passed. Seeded ${result.unique_engines_seeded?.length ?? 0} unique engines. Not 80 catalog aliases.`,
+        tone: result.success ? "success" : "error",
+      });
+    } catch (e) {
+      toast({ title: "Unique-engine matrix failed", message: String(e), tone: "error" });
+    } finally {
+      setCrossRunning(false);
+    }
+  };
+
+  // The benchmark is a background run: the request returns at once and the
+  // page polls its progress, so a 100k run cannot time out behind a proxy.
   const handleRun = async () => {
+    pollerRef.current?.stop();
     setRunning(true);
     setError(null);
+    setReport(null);
     try {
-      const res = await runBenchmark(rows);
-      setReport(res);
-      if (!res.success) {
-        setError(res.error || "Benchmark completed with errors");
-      }
+      const started = await startBenchmarkRun(rows);
+      setRun(started);
+      pollerRef.current = createPoller<BenchmarkRun>({
+        read: () => fetchBenchmarkRun(started.id),
+        delayMs: () => 1_000,
+        isDone: (r) => r.status === "succeeded" || r.status === "failed",
+        onResult: (r) => {
+          setRun(r);
+          if (r.status === "succeeded" || r.status === "failed") {
+            setRunning(false);
+            if (r.report) setReport(r.report);
+            if (r.status === "failed") setError(r.error || r.report?.error || "Benchmark completed with errors");
+          }
+        },
+      });
     } catch (e) {
+      setRunning(false);
       setError(e instanceof Error ? e.message : "Benchmark request failed");
       toast({ title: "Benchmark failed", message: String(e), tone: "error" });
-    } finally {
-      setRunning(false);
     }
   };
 
   const handleDownload = async () => {
+    if (!run) return;
     try {
-      const blob = await downloadBenchmarkReport(rows);
+      const blob = await downloadBenchmarkRunReport(run.id);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `dataflow-benchmark-report-${rows}.md`;
+      a.download = `datawrap-benchmark-report-${run.rows}.md`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -119,11 +182,9 @@ export function BenchmarksPage() {
 
   const comparison = useMemo(() => {
     if (!report) return null;
-    const dataflowRps = report.records_per_second;
     return report.competitors.map((c) => ({
       ...c,
-      dataflow_ratio: dataflowRps / Math.max(c.typical_rps, 1),
-      faster: isFaster(dataflowRps, c.typical_rps),
+      versus: c.comparison ?? compareThroughput(report.records_per_second, c.typical_rps),
     }));
   }, [report]);
 
@@ -141,7 +202,7 @@ export function BenchmarksPage() {
         <div className="df2-page-benchmarks-content">
           <FilterTabs
             items={[
-              { id: "integrity", label: "Integrity ledger", count: metrics?.production_sku_routes },
+              { id: "integrity", label: "Integrity ledger", count: metrics?.production_sku_sold ?? metrics?.production_sku_routes },
               { id: "scale", label: "Scale throughput" },
             ]}
             value={tab}
@@ -151,7 +212,7 @@ export function BenchmarksPage() {
 
           {tab === "integrity" && (
             <>
-              <PageSection title="Why Datawrap beats Airbyte on integrity">
+              <PageSection title="Why integrity proofs beat connect() theater">
                 <p className="df2-page-benchmarks-intro">
                   Connection tests prove a socket opened. These proofs prove rows, types, quarantine, and
                   checksums survive the full write path — the bar for “any schema → anywhere.”
@@ -183,10 +244,16 @@ export function BenchmarksPage() {
                         sub="Honest alias count over those drivers"
                       />
                       <StatCard
-                        label="PRODUCTION_SKU routes"
-                        value={formatNumber(metrics?.production_sku_routes ?? 0)}
+                        label="SKU sold on this host"
+                        value={formatNumber(metrics?.production_sku_sold ?? 0)}
                         icon="gate"
-                        sub="Routes committed in CI when emulators are up"
+                        sub={`${metrics?.production_sku_sold ?? 0} of ${metrics?.production_sku_routes ?? 0} claimed — validate_transfer + driver present`}
+                      />
+                      <StatCard
+                        label="Customer handover SKU"
+                        value={formatNumber(metrics?.customer_handover_sold ?? 0)}
+                        icon="shield"
+                        sub={`${metrics?.customer_handover_sold ?? 0} of ${metrics?.customer_handover_eligible ?? 0} sqlite/PostgreSQL/MySQL/file routes sold — warehouse/SaaS/vector is desktop-lab`}
                       />
                       <StatCard
                         label="Fidelity proofs passed"
@@ -225,24 +292,172 @@ export function BenchmarksPage() {
                       </div>
                     )}
 
+                    <div className="df2-page-benchmarks-toolbar">
+                      <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
+                        Desktop lab option: bind 80 catalog connectors and run Map, cell transform,
+                        ShapeEngine (trim+upper), Validate, dest write, source read, and shaped payload
+                        reconcile. Hosted twins share a driver — this is not 80 unique engines.
+                      </p>
+                      <Button
+                        variant="primary"
+                        onClick={() => void handleDesktopLab()}
+                        disabled={labRunning || crossRunning}
+                        loading={labRunning}
+                        loadingLabel="Running desktop lab…"
+                      >
+                        Run desktop lab
+                      </Button>
+                    </div>
+
+                    <div className="df2-page-benchmarks-toolbar">
+                      <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
+                        Unique-engine matrix: every live unique engine as source × dest. Default is
+                        Postgres, MySQL, Mongo, SQLite, MinIO S3 (25 pairs). Not 80×80 catalog aliases.
+                        Extended adds SQL Server, Redis, Elasticsearch, object-store emulators, and
+                        warehouses when those ports answer. A closed port is skipped — never fake green.
+                        SaaS tiles without a desktop backend stay omitted.
+                      </p>
+                      <Button
+                        variant="secondary"
+                        onClick={() => void handleDesktopLabCross()}
+                        disabled={labRunning || crossRunning}
+                        loading={crossRunning}
+                        loadingLabel="Running unique-engine matrix…"
+                      >
+                        Run unique-engine matrix
+                      </Button>
+                    </div>
+
+                    {cross && (
+                      <div className={`df2-alert ${cross.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
+                        <DtIcon name={cross.success ? "check" : "alert"} size={18} />
+                        <div>
+                          <strong>{cross.passed} of {cross.pairs} unique-engine pairs</strong>
+                          {" "}passed
+                          {cross.failed ? ` · failed ${cross.failed}` : ""}
+                          {cross.skipped ? ` · skipped ${cross.skipped}` : ""}
+                          {cross.unique_engines_seeded?.length
+                            ? ` · seeded ${cross.unique_engines_seeded.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {cross?.routes && cross.routes.some((r) => r.status === "skipped") && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Unique-engine pairs that skipped</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Reason</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {cross.routes.filter((r) => r.status === "skipped").map((row) => (
+                                <tr key={`${row.source}-${row.destination}-skip`}>
+                                  <td><code>{row.source}</code></td>
+                                  <td><code>{row.destination}</code></td>
+                                  <td>{row.error || "skipped"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {cross?.routes && cross.routes.some((r) => r.status === "failed") && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Unique-engine pairs that failed</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Error</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {cross.routes.filter((r) => r.status === "failed").map((row) => (
+                                <tr key={`${row.source}-${row.destination}`}>
+                                  <td><code>{row.source}</code></td>
+                                  <td><code>{row.destination}</code></td>
+                                  <td>{row.error || "failed"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {lab && (
+                      <div className={`df2-alert ${lab.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
+                        <DtIcon name={lab.success ? "check" : "alert"} size={18} />
+                        <div>
+                          <strong>{lab.catalog_slots_duplex_passed} of {lab.catalog_slots} catalog slots</strong>
+                          {" "}passed as source and dest
+                          {lab.unique_engines_duplex_passed != null
+                            ? ` · unique engines ${lab.unique_engines_duplex_passed}`
+                            : ""}
+                          {lab.failed ? ` · failed ${lab.failed}` : ""}
+                          {lab.skipped ? ` · skipped ${lab.skipped}` : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {lab?.connectors && lab.connectors.length > 0 && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Desktop lab — source and dest</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Catalog</th>
+                                <th>Driver</th>
+                                <th>Kind</th>
+                                <th>Dest</th>
+                                <th>Source</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {lab.connectors.map((row) => (
+                                <tr key={row.catalog_id}>
+                                  <td><code>{row.catalog_id}</code></td>
+                                  <td>{row.driver}</td>
+                                  <td>{row.role === "unique_engine" ? "Unique engine" : row.role === "hosted_twin" ? "Hosted twin" : "Format alias"}</td>
+                                  <td>{row.dest_status}</td>
+                                  <td>{row.source_status}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="df2-page-benchmarks-section">
-                      <h3>Datawrap vs Airbyte — integrity dimensions</h3>
+                      <h3>Integrity dimensions vs industry ELT baselines</h3>
                       <div className="df2-page-benchmarks-table-wrap">
-                        <table className="df2-page-benchmarks-table">
+                        <table className="df2-page-benchmarks-table df2-page-benchmarks-table--prose">
                           <thead>
                             <tr>
                               <th>Dimension</th>
                               <th>Datawrap</th>
-                              <th>Airbyte</th>
+                              <th>Industry ELT</th>
                               <th>Proof surface</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {ledger.vs_airbyte.map((row) => (
+                            {ledger.integrity_comparison.map((row) => (
                               <tr key={row.dimension}>
                                 <td><strong>{row.dimension}</strong></td>
-                                <td>{row.dataflow}</td>
-                                <td>{row.airbyte}</td>
+                                <td>{row.datawrap}</td>
+                                <td>{row.industry_elt}</td>
                                 <td><code>{row.proof}</code></td>
                               </tr>
                             ))}
@@ -252,10 +467,10 @@ export function BenchmarksPage() {
                     </div>
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>PRODUCTION_SKU — committed migration routes</h3>
+                      <h3>PRODUCTION_SKU — sold vs claimed</h3>
                       <p className="df2-page-benchmarks-note">
-                        These {ledger.production_sku.length} routes are the CI-committed set. Capability math
-                        ({metrics?.live_route_combinations ?? "—"} combinations) is larger; SKU is what we prove.
+                        {metrics?.production_sku_note
+                          || `Sold ${metrics?.production_sku_sold ?? 0} of ${ledger.production_sku.length} claimed routes on this host. Catalog tiles are not this list.`}
                       </p>
                       <div className="df2-page-benchmarks-table-wrap">
                         <table className="df2-page-benchmarks-table">
@@ -273,7 +488,24 @@ export function BenchmarksPage() {
                                 <td>{r.route}</td>
                                 <td>{r.source_kind}/{r.source_format}</td>
                                 <td>{r.dest_kind}/{r.dest_format}</td>
-                                <td><span className="df2-badge df2-badge-success">{r.status}</span></td>
+                                <td>
+                                  <span
+                                    className={
+                                      r.status === "sold"
+                                        ? "df2-badge df2-badge-success"
+                                        : r.status === "driver_missing"
+                                          ? "df2-badge df2-badge-warning"
+                                          : "df2-badge df2-badge-error"
+                                    }
+                                    title={r.driver_gap || undefined}
+                                  >
+                                    {r.status === "sold"
+                                      ? (r.customer_handover ? "handover" : "lab SKU")
+                                      : r.status === "driver_missing"
+                                        ? "driver missing"
+                                        : "refused"}
+                                  </span>
+                                </td>
                               </tr>
                             ))}
                           </tbody>
@@ -308,14 +540,14 @@ export function BenchmarksPage() {
                                 <tr key={p.id}>
                                   <td>{new Date(p.mtime).toLocaleString()}</td>
                                   <td>{p.tier || "—"}</td>
-                                  <td>{p.route || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{p.route || "—"}</td>
                                   <td>{p.rows != null ? formatNumber(p.rows) : "—"}</td>
                                   <td>
                                     <span className={`df2-badge ${p.success ? "df2-badge-success" : "df2-badge-warning"}`}>
                                       {p.success ? "pass" : "fail"}
                                     </span>
                                   </td>
-                                  <td>{(p.checks || []).join(", ") || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{(p.checks || []).join(", ") || "—"}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -345,15 +577,15 @@ export function BenchmarksPage() {
                 <div>
                   <strong>Workload class: synthetic CSV → SQLite on this API host</strong>
                   <p>
-                    These numbers measure local file→SQLite throughput (often ~10k rows in under a second).
-                    They are <em>not</em> MongoDB→Snowflake or other warehouse runs — those depend on network RTT,
+                    These numbers measure local file→SQLite throughput on this API host, including the
+                    checksums and verification every real transfer runs — so they track the host&apos;s CPU. They are <em>not</em> MongoDB→Snowflake or other warehouse runs — those depend on network RTT,
                     warehouse size, COPY vs INSERT, and transform/quarantine work. Always trust the rows/sec shown
                     on the live job theater for a real transfer.
                   </p>
                 </div>
               </div>
               <p className="df2-page-benchmarks-intro">
-                Secondary to integrity: synthetic CSV → SQLite throughput vs public Fivetran / Airbyte / Stitch
+                Secondary to integrity: synthetic CSV → SQLite throughput vs illustrative mid-market ELT
                 baselines. Speed without quarantine and checksums is not a migration proof.
               </p>
 
@@ -372,18 +604,36 @@ export function BenchmarksPage() {
                   ))}
                 </div>
                 <div className="df2-page-benchmarks-actions">
-                  <button type="button" className="df2-btn df2-btn-secondary" onClick={handleDownload} disabled={!report || running}>
-                    <DtIcon name="download" size={14} /> Report
-                  </button>
-                  <button type="button" className="df2-btn df2-btn-primary" onClick={handleRun} disabled={running}>
-                    {running ? <span className="df2-spin"><DtIcon name="spinner" size={14} /></span> : <DtIcon name="play" size={14} />}
-                    {running ? "Running…" : "Run benchmark"}
-                  </button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleDownload}
+                    disabled={!report || !run || running}
+                    leadingIcon={<DtIcon name="download" size={14} />}
+                  >
+                    Report
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={handleRun}
+                    disabled={running}
+                    loading={running}
+                    loadingLabel="Running…"
+                    leadingIcon={<DtIcon name="play" size={14} />}
+                  >
+                    Run benchmark
+                  </Button>
                 </div>
               </div>
 
               {running && (
-                <SectionLoader title="Running benchmark" hint={`Transferring ${rows.toLocaleString()} synthetic rows to SQLite…`} />
+                <SectionLoader
+                  title="Running benchmark"
+                  hint={
+                    run
+                      ? `${run.phase} · ${Math.round(run.progress_pct)}% · ${formatSeconds(run.elapsed_seconds)} elapsed — ${run.rows.toLocaleString()} synthetic rows to SQLite`
+                      : `Starting a ${rows.toLocaleString()}-row run…`
+                  }
+                />
               )}
 
               {error && !running && (
@@ -399,7 +649,11 @@ export function BenchmarksPage() {
                     <StatCard label="Rows transferred" value={formatNumber(report.rows)} icon="layers" />
                     <StatCard label="Throughput" value={`${formatNumber(report.records_per_second)} rows/sec`} icon="zap" />
                     <StatCard label="Elapsed time" value={formatSeconds(report.elapsed_seconds)} icon="clock" />
-                    <StatCard label="Peak memory" value={`${formatNumber(report.peak_memory_mb)} MB`} icon="cpu" />
+                    <StatCard
+                      label="Peak memory (benchmark process)"
+                      value={report.peak_memory_mb > 0 ? `${formatNumber(report.peak_memory_mb)} MB` : "Not measured"}
+                      icon="cpu"
+                    />
                   </div>
 
                   <div className="df2-page-benchmarks-section">
@@ -416,7 +670,7 @@ export function BenchmarksPage() {
                             <th>Product</th>
                             <th>Typical rows/sec</th>
                             <th>Resume</th>
-                            <th>vs Datawrap</th>
+                            <th>Datawrap vs this</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -439,8 +693,8 @@ export function BenchmarksPage() {
                                 {c.product === "Datawrap" ? (
                                   <span className="df2-badge df2-badge-success">baseline</span>
                                 ) : (
-                                  <span className={`df2-badge ${c.faster ? "df2-badge-success" : "df2-badge-warning"}`}>
-                                    {c.faster ? `${c.dataflow_ratio.toFixed(1)}x faster` : `${(1 / c.dataflow_ratio).toFixed(1)}x slower`}
+                                  <span className={`df2-badge ${c.versus.verdict === "faster" ? "df2-badge-success" : c.versus.verdict === "slower" ? "df2-badge-warning" : "df2-badge-muted"}`}>
+                                    {c.versus.label}
                                   </span>
                                 )}
                               </td>

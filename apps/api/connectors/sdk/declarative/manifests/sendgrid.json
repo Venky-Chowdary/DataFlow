@@ -1,0 +1,63 @@
+{
+  "name": "sendgrid",
+  "docs": "https://docs.sendgrid.com/api-reference/",
+  "base_url": "https://api.sendgrid.com",
+  "auth": {
+    "type": "bearer"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "lists",
+      "path": "v3/contactdb/lists",
+      "records_path": "lists",
+      "primary_key": ["id"],
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "recipient_count": {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "segments",
+      "path": "v3/contactdb/segments",
+      "records_path": "segments",
+      "primary_key": ["id"],
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "recipient_count": {"type": "integer"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "templates",
+      "path": "v3/templates",
+      "records_path": "templates",
+      "primary_key": ["id"],
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "generation": {"type": "string"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

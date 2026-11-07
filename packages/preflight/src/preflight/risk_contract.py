@@ -57,6 +57,74 @@ def is_safe_normalize_mapping(mapping: Any) -> bool:
     return transform in SAFE_NORMALIZE_TRANSFORMS
 
 
+def _attr(mapping: Any, name: str, camel: str = "") -> Any:
+    """Read one mapping field from either a dict payload or a model object."""
+    if isinstance(mapping, dict):
+        value = mapping.get(name)
+        if value is None and camel:
+            value = mapping.get(camel)
+        return value
+    value = getattr(mapping, name, None)
+    if value is None and camel:
+        value = getattr(mapping, camel, None)
+    return value
+
+
+def mapping_is_lossy(mapping: Any) -> bool:
+    """Lossy cast or narrowing carrier — the contract families, not a warning."""
+    if str(_attr(mapping, "fidelity") or "").strip().lower() == "lossy_cast":
+        return True
+    return bool(_attr(mapping, "type_narrowing", "typeNarrowing"))
+
+
+def mapping_requires_risk_contract(mapping: Any) -> bool:
+    """Lossy casts, narrowing, and value-mutating transforms need a contract.
+
+    Safe normalize (trim / trim_id / email / phone / case) is Map-Ready — not a
+    Migration Risk Contract path. Must stay aligned with Map
+    ``isSafeNormalizeMapping``.
+    """
+    if is_safe_normalize_mapping(mapping):
+        return False
+    if mapping_is_lossy(mapping):
+        return True
+    return str(_attr(mapping, "fidelity") or "").strip().lower() == "mutate"
+
+
+def mapping_is_structural_review(mapping: Any) -> bool:
+    """STRUCT flatten / specialty identity cannot clear via bare user_override."""
+    if bool(_attr(mapping, "struct_derived", "structDerived")):
+        return True
+    policy = str(_attr(mapping, "struct_policy", "structPolicy") or "").strip().lower()
+    if policy in {"flatten_top_level_keys", "flatten_deep", "explode_rows"}:
+        return True
+    transform = str(_attr(mapping, "transform") or "").strip().lower()
+    return transform in {"identity_specialty", "specialty"}
+
+
+def mapping_operator_overridden(mapping: Any) -> bool:
+    """An explicit Studio confirmation on an ambiguous (non-lossy) mapping."""
+    return bool(
+        _attr(mapping, "user_override", "userOverride")
+        or _attr(mapping, "approved")
+        or _attr(mapping, "operator_approved", "operatorApproved")
+    )
+
+
+def mapping_review_cleared(mapping: Any) -> bool:
+    """True when the operator already resolved this mapping's review demand.
+
+    Single owner for Validate (G4) and Execute so a green Validate cannot fail
+    at Execute: a lossy / narrowing / mutating / structural mapping clears only
+    with a verified continue-policy Risk Contract, and an ambiguous mapping
+    clears with an explicit override.
+    """
+    if mapping_requires_risk_contract(mapping) or mapping_is_structural_review(mapping):
+        return mapping_risk_cleared(mapping)
+    # A verified contract on the pair is an explicit, attributed approval too.
+    return mapping_operator_overridden(mapping) or mapping_risk_cleared(mapping)
+
+
 def _canonical_payload(payload: dict[str, Any]) -> str:
     body = {k: v for k, v in payload.items() if k != "signature"}
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
@@ -100,6 +168,73 @@ def mapping_has_clearing_risk_contract(mapping: Any) -> bool:
 def mapping_risk_cleared(mapping: Any) -> bool:
     """Gate clearance helper — contract only (boolean ack never sufficient)."""
     return mapping_has_clearing_risk_contract(mapping)
+
+
+def _mapping_source(mapping: Any) -> str:
+    if isinstance(mapping, dict):
+        return str(mapping.get("source") or "").strip()
+    return str(getattr(mapping, "source", None) or "").strip()
+
+
+def _mapping_target(mapping: Any) -> str:
+    if isinstance(mapping, dict):
+        return str(mapping.get("target") or "").strip()
+    return str(getattr(mapping, "target", None) or "").strip()
+
+
+def partition_transform_dry_run_errors(
+    errors: list[str] | None,
+    mappings: list[Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Split dry-run errors into hard blocks vs continue-policy holdouts.
+
+    G8 already demotes cast failures when the mapping carries a verified
+    continue-policy Risk Contract. G5 / G9 must use the same partition so
+    signed CAST_AND_CONTINUE / QUARANTINE_ROW does not leave Sample dry-run
+    and Data integrity blocked while Gate-8 passes.
+    """
+    import re
+
+    hard: list[str] = []
+    contracted: list[str] = []
+    maps = list(mappings or [])
+    by_pair: dict[tuple[str, str], Any] = {}
+    by_source: dict[str, Any] = {}
+    for m in maps:
+        src = _mapping_source(m)
+        tgt = _mapping_target(m) or src
+        if src:
+            by_pair[(src, tgt)] = m
+            by_source.setdefault(src, m)
+
+    pair_re = re.compile(
+        r"^(?:row\s+\d+\s+)?(.+?)\s*(?:→|->)\s*(.+?)\s*:",
+        re.I,
+    )
+    for raw in errors or []:
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        # A minority cast failure is a row holdout, not a broken mapping.
+        # The dry-run marks it so G5 does not hard-block the load.
+        if line.lower().startswith("holdout "):
+            contracted.append(line)
+            continue
+        # Missing source column is always a hard structural failure.
+        if line.lower().startswith("source column missing"):
+            hard.append(line)
+            continue
+        m = pair_re.match(line)
+        mapping = None
+        if m:
+            src = m.group(1).strip()
+            tgt = m.group(2).strip()
+            mapping = by_pair.get((src, tgt)) or by_source.get(src)
+        if mapping is not None and mapping_risk_cleared(mapping):
+            contracted.append(line)
+        else:
+            hard.append(line)
+    return hard, contracted
 
 
 def sign_risk_contract_payload(payload: dict[str, Any]) -> str:

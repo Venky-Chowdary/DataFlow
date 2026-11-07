@@ -23,7 +23,9 @@ def test_rollback_execute_discard_staging():
         "_id": "j1",
         "status": "completed",
         "destination_summary": {"rollback_plan": plan},
-        "request": {
+        # The job store writes the run under ``transfer_request``; the route
+        # read only ``request`` and failed closed on every real job (r7).
+        "transfer_request": {
             "destination": {
                 "kind": "database",
                 "format": "postgresql",
@@ -43,8 +45,8 @@ def test_rollback_execute_discard_staging():
     ), patch(
         "src.routers.transfer_router._can_access_job", return_value=True
     ), patch(
-        "services.migration_rollback.discard_staging_table", return_value=True
-    ), patch(
+        "services.staging_discard.drop_staging_table", return_value=None
+    ) as dropped, patch(
         "services.audit_log.append_audit_event"
     ), patch(
         "services.audit_log.actor_from_request", return_value="ops@example.com"
@@ -62,6 +64,9 @@ def test_rollback_execute_discard_staging():
     assert result["ok"] is True
     assert result["strategy"] == "DISCARD_STAGING"
     assert result["population_undo_claimed"] is False
+    ep, staging = dropped.call_args.args
+    assert staging == "t_df_staging"
+    assert ep.format == "postgresql" and ep.host == "localhost"
 
 
 def test_rollback_execute_refuses_document_only():

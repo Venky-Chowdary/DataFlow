@@ -35,14 +35,19 @@ class _FakeMongo:
         return True
 
 
-def _make_source(rows: int, tmp_path: Path) -> Path:
+def _make_source(rows: int, tmp_path: Path, *, text_booleans: bool = True) -> Path:
+    """``text_booleans`` stores ``'true'``/``'false'`` text — cells a BOOLEAN
+    carrier cannot hold verbatim, so the identity COPY must decline them to the
+    row path. ``False`` stores 0/1, the carrier-fitting shape the COPY moves."""
     db = tmp_path / "src.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, amount TEXT, active TEXT)")
     for i in range(rows):
+        truthy = i % 2 == 0
+        active: object = ("true" if truthy else "false") if text_booleans else int(truthy)
         conn.execute(
             "INSERT INTO orders VALUES (?, ?, ?)",
-            (i + 1, f"{i * 1.5:.2f}", "true" if i % 2 == 0 else "false"),
+            (i + 1, f"{i * 1.5:.2f}", active),
         )
     conn.commit()
     conn.close()
@@ -52,7 +57,7 @@ def _make_source(rows: int, tmp_path: Path) -> Path:
 def test_stream_sqlite_to_sqlite_basic():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        src = _make_source(250, tmp_path)
+        src = _make_source(250, tmp_path, text_booleans=False)
         dst = tmp_path / "dst.db"
 
         source = EndpointConfig(
@@ -69,7 +74,7 @@ def test_stream_sqlite_to_sqlite_basic():
         schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
 
         fake_mongo = _FakeMongo()
-        rows_written, _ddl, _summary, columns = stream_database_transfer(
+        rows_written, _ddl, summary, columns = stream_database_transfer(
             source,
             destination,
             mappings,
@@ -80,11 +85,184 @@ def test_stream_sqlite_to_sqlite_basic():
 
         assert rows_written == 250
         assert "id" in columns
+        assert summary.get("load_method") == "attach_insert_select_sqlite"
+        assert summary.get("checksum") == "dest_count:250"
+        assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
+        assert int(summary.get("rejected_rows") or 0) == 0
 
         conn = sqlite3.connect(dst)
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
         conn.close()
         assert count == 250
+
+
+def test_stream_sqlite_dest_insert_runs_on_the_procedure_writer():
+    """A destination INSERT is the write. COPY must not skip it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(3, tmp_path, text_booleans=False)
+        dst = tmp_path / "dst.db"
+        conn = sqlite3.connect(dst)
+        conn.execute(
+            "CREATE TABLE orders_out (id INTEGER PRIMARY KEY, amount TEXT, active TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(dst),
+            table="orders_out",
+            extra={
+                "dest_write_mode": "query",
+                "dest_query_sql": (
+                    "INSERT INTO orders_out (id, amount, active) "
+                    "VALUES (:id, :amount, :active)"
+                ),
+            },
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        rows_written, ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            {"id": "integer", "amount": "text", "active": "text"},
+            job_id="000000000000000000000000",
+            checkpoint_service=CheckpointService(_FakeMongo()),
+        )
+        assert rows_written == 3
+        assert summary.get("load_method") == "dest_procedure"
+        assert summary.get("dest_write_mode") == "query"
+        assert "not a table copy" in str(summary.get("copy_decline_reason") or "")
+        assert any("Dest query row-apply" in line for line in ddl)
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        conn.close()
+        assert count == 3
+
+
+def test_stream_sqlite_text_booleans_decline_copy_and_land_as_0_1():
+    """'true'/'false' text under a BOOLEAN carrier: the identity COPY must not
+    move the bytes verbatim — it declines and the row path normalizes to 0/1."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(250, tmp_path, text_booleans=True)
+        dst = tmp_path / "dst.db"
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
+
+        rows_written, _ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            schema,
+            job_id="000000000000000000000000",
+            checkpoint_service=CheckpointService(_FakeMongo()),
+        )
+
+        assert rows_written == 250
+        assert summary.get("copy_fast_path") == "declined"
+        assert "active" in str(summary.get("copy_decline_reason") or "")
+        assert summary.get("load_method") != "attach_insert_select_sqlite"
+        assert int(summary.get("rejected_rows") or 0) == 0
+
+        conn = sqlite3.connect(dst)
+        landed = conn.execute(
+            "SELECT active, typeof(active), COUNT(*) FROM orders_out GROUP BY 1, 2 ORDER BY 1"
+        ).fetchall()
+        conn.close()
+        assert landed == [(0, "integer", 125), (1, "integer", 125)]
+
+
+def test_stream_sqlite_multibatch_source_count_is_committed_offset(monkeypatch):
+    """Multi-batch stream: Gate-8 source_row_count must be the full reader-side
+    population (committed_offset), never the last batch's writer-stamped count."""
+    import src.transfer.stream as stream_mod
+
+    monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
+    monkeypatch.setattr(stream_mod, "CHUNK_SIZE", 40)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(213, tmp_path)  # 213 rows / 40 => 6 batches
+        dst = tmp_path / "dst.db"
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
+
+        rows_written, _ddl, summary, _cols = stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            schema,
+            job_id="000000000000000000000001",
+            checkpoint_service=CheckpointService(_FakeMongo()),
+        )
+
+        assert rows_written == 213
+        assert summary.get("batches") and summary["batches"] >= 2
+        assert summary.get("source_row_count") == 213
+        assert summary.get("source_row_count_source") == "committed_offset"
+
+
+def test_stream_sqlite_non_procedure_chunk_uses_batch_writer(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
+    src = _make_source(2, tmp_path, text_booleans=False)
+    dst = tmp_path / "dst.db"
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(src), table="orders"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(dst), table="orders_out"
+    )
+
+    rows_written, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ],
+        {"id": "integer", "amount": "decimal", "active": "boolean"},
+        job_id="000000000000000000000002",
+        checkpoint_service=CheckpointService(_FakeMongo()),
+    )
+
+    assert rows_written == 2
+    assert summary.get("load_method") != "attach_insert_select_sqlite"
+    conn = sqlite3.connect(dst)
+    count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+    conn.close()
+    assert count == 2
 
 
 def test_stream_sqlite_to_sqlite_resume_from_checkpoint():
@@ -205,7 +383,7 @@ def test_stream_resume_insert_without_primary_key_is_refused():
 def test_stream_sqlite_includes_ddl_log_and_summary():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        src = _make_source(5, tmp_path)
+        src = _make_source(5, tmp_path, text_booleans=False)
         dst = tmp_path / "dst.db"
 
         source = EndpointConfig(
@@ -232,12 +410,17 @@ def test_stream_sqlite_includes_ddl_log_and_summary():
         )
 
         assert rows_written == 5
-        assert any("STREAM" in line for line in ddl_log)
+        assert any("COPY SQLite" in line for line in ddl_log)
         assert summary["type"] == "sqlite"
         assert summary["table"] == "orders_out"
+        assert summary.get("load_method") == "attach_insert_select_sqlite"
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        conn.close()
+        assert count == 5
 
 
-def test_stream_hard_fails_when_checkpoint_save_rejected():
+def test_stream_hard_fails_when_checkpoint_save_rejected(monkeypatch):
     """Fail-closed: a rejected checkpoint write must abort the transfer job."""
     from services.checkpoint_service import CheckpointPersistenceError
 
@@ -263,6 +446,7 @@ def test_stream_hard_fails_when_checkpoint_save_rejected():
         ]
         schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
 
+        monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
         with pytest.raises(CheckpointPersistenceError, match="refusing to continue"):
             stream_database_transfer(
                 source,

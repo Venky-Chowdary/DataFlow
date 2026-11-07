@@ -12,6 +12,7 @@ from typing import Any
 
 from connectors import rest_api
 from connectors.saas_common import ReadBatch, base_url, request, token
+from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "myshopify.com"
 API_VERSION = "2024-04"
@@ -42,11 +43,17 @@ def describe_metafield_definitions(
     cfg: dict[str, Any],
     object_type: str = "",
 ) -> list[dict[str, Any]]:
-    """Live metafield definitions via Admin GraphQL (soft-empty on scope miss).
+    """Live metafield definitions via Admin GraphQL.
 
     Returns ``[{namespace, key, type, validations}]`` for reverse-ETL quarantine
     carriers (single_line_text_field max, number_decimal, …).
+
+    Auth/scope failures (HTTP 401/403 or GraphQL ACCESS_DENIED) propagate so
+    writers can fail-closed. Other probe misses soft-return ``[]`` / partial
+    pages — core Admin carriers still resolve without metafield defs.
     """
+    from connectors.saas_common import is_auth_error
+
     obj = (object_type or str(cfg.get("table") or cfg.get("database") or "customers")).strip()
     owner = _OWNER_TYPE.get(obj.lower())
     if not owner:
@@ -94,8 +101,25 @@ def describe_metafield_definitions(
                 data=payload,
                 timeout=30,
             )
-            body = resp.json() if hasattr(resp, "json") else {}
-            if body.get("errors"):
+            body = load_http_json(resp)
+            gql_errors = body.get("errors")
+            if gql_errors:
+                msg = str(gql_errors)
+                low = msg.lower()
+                if any(
+                    k in low
+                    for k in (
+                        "access",
+                        "unauthorized",
+                        "forbidden",
+                        "401",
+                        "403",
+                        "access_denied",
+                    )
+                ):
+                    raise RuntimeError(
+                        f"Shopify metafield Describe auth/scope failed: {msg[:400]}"
+                    )
                 break
             block = ((body.get("data") or {}).get("metafieldDefinitions")) or {}
             for edge in block.get("edges") or []:
@@ -123,7 +147,11 @@ def describe_metafield_definitions(
             if not cursor or cursor in seen:
                 break
             seen.add(str(cursor))
-    except Exception:
+    except Exception as exc:
+        if is_auth_error(exc):
+            raise
+        if "auth/scope failed" in str(exc).lower():
+            raise
         return out
     return out
 

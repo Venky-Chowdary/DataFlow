@@ -1,4 +1,9 @@
 import { ConnectorIcon } from "../app/brand-icons";
+import {
+  connectorHealthBadgeLabel,
+  connectorLooksHealthy,
+  connectorTestHealth,
+} from "../lib/connectorHealth";
 import { DtIcon } from "./DtIcon";
 import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
@@ -12,6 +17,7 @@ import {
   resolveDisplayRole,
 } from "../lib/topologyUtils";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
 interface ConnectorDetailDrawerProps {
   open: boolean;
@@ -29,12 +35,6 @@ interface ConnectorDetailDrawerProps {
   onSelectConnection: (id: string) => void;
   onOpenJob?: (jobId: string) => void;
 }
-
-const INTERVAL_LABEL: Record<string, string> = {
-  hourly: "Hourly",
-  daily: "Daily",
-  weekly: "Weekly",
-};
 
 export function ConnectorDetailDrawer({
   open,
@@ -54,8 +54,9 @@ export function ConnectorDetailDrawer({
 }: ConnectorDetailDrawerProps) {
   if (!c) return null;
 
-  const healthy = c.status !== "error" && c.last_test_ok !== false;
-  const neverTested = c.last_test_ok == null && c.status !== "error";
+  const healthy = connectorLooksHealthy(c);
+  const neverTested = connectorTestHealth(c) === "never_tested";
+  const healthBadge = connectorHealthBadgeLabel(c);
   const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "Managed endpoint";
   const relatedJobs = workbench?.relatedJobs ?? [];
   const relatedSchedules = workbench?.relatedSchedules ?? [];
@@ -73,9 +74,9 @@ export function ConnectorDetailDrawer({
       title={c.name}
       subtitle={`${c.type.replace(/_/g, " ")} · ${endpoint}`}
       headerExtra={
-        <span className={`df2-badge ${healthy ? "df2-badge-live" : "df2-badge-error"}`}>
-          <span className={`df2-health-dot ${healthy ? "ok" : "err"}`} aria-hidden />
-          {neverTested ? "Never tested" : healthy ? "Healthy" : "Connection error"}
+        <span className={`df2-badge ${healthy ? "df2-badge-live" : neverTested ? "df2-badge-muted" : "df2-badge-error"}`}>
+          <span className={`df2-health-dot ${healthy ? "ok" : neverTested ? "" : "err"}`} aria-hidden />
+          {healthBadge}
         </span>
       }
       footer={
@@ -151,13 +152,13 @@ export function ConnectorDetailDrawer({
       )}
 
       {/* Related jobs & pipelines */}
-      <section className="df2-drawer-section" aria-label="Related jobs and pipelines">
+      <section className="df2-drawer-section" aria-label="Related jobs and schedules">
         <div className="df2-drawer-section-head">
-          <h3><DtIcon name="activity" size={14} /> Related pipelines</h3>
+          <h3><DtIcon name="activity" size={14} /> Related schedules</h3>
           <span className="df2-drawer-count">{relatedSchedules.length}</span>
         </div>
         {relatedSchedules.length === 0 ? (
-          <p className="df2-drawer-empty-line">No pipelines reference this connection yet.</p>
+          <p className="df2-drawer-empty-line">No schedules reference this connection yet.</p>
         ) : (
           <ul className="df2-drawer-related-list">
             {relatedSchedules.slice(0, 6).map((s) => {
@@ -168,7 +169,7 @@ export function ConnectorDetailDrawer({
                 <li key={s.id} className="df2-drawer-related-row">
                   <span className="df2-drawer-related-main">
                     <strong title={s.name}>{s.name}</strong>
-                    <small>{INTERVAL_LABEL[s.interval] ?? s.interval} · {roleTag}</small>
+                    <small>{scheduleCadenceLabel(s)} · {roleTag}</small>
                   </span>
                   {s.last_status ? (
                     <span className={jobStatusBadgeClass(s.last_status)}>{jobStatusLabel(s.last_status)}</span>

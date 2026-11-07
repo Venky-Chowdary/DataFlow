@@ -9,63 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from src.transfer.connector_capabilities import driver_available, resolve_driver_type
-from src.transfer.registry import PRODUCTION_SKU, validate_transfer
-
-# Destinations that require optional packages; skip (not fail) when absent.
-_OPTIONAL_DRIVERS = {
-    "sqlserver",
-    "oracle",
-    "sftp",
-    "adls",
-    "snowflake",
-    "bigquery",
-    "s3",
-    "salesforce",
-    "hubspot",
-    "pgvector",
-    "qdrant",
-    "weaviate",
-    "pinecone",
-    "milvus",
-    "kafka",
-}
+from services.sku_honesty import route_driver_gap
+from src.transfer.connector_capabilities import resolve_driver_type
+from src.transfer.registry import LIVE_MATRIX, PRODUCTION_SKU, validate_transfer
 
 
 def _route_skip_reason(src_fmt: str, dst_fmt: str) -> str | None:
-    src = resolve_driver_type(src_fmt)
-    dst = resolve_driver_type(dst_fmt)
-    if src in _OPTIONAL_DRIVERS and not driver_available(src, src_fmt):
-        return f"source driver {src} not installed"
-    if dst in _OPTIONAL_DRIVERS and not driver_available(dst, dst_fmt):
-        return f"destination driver {dst} not installed"
-    # File formats always "available"
-    if src in {"csv", "json", "jsonl", "tsv", "parquet", "ndjson", "excel", "avro", "orc", "xml"}:
-        pass
-    elif src not in {"sqlite", "postgresql", "mysql", "mongodb", "rest_api", "iceberg"} and not driver_available(
-        src, src_fmt
-    ):
-        return f"source driver {src} not installed"
-    if dst not in {
-        "sqlite",
-        "postgresql",
-        "mysql",
-        "mongodb",
-        "csv",
-        "json",
-        "jsonl",
-        "tsv",
-        "excel",
-        "parquet",
-        "ndjson",
-        "avro",
-        "orc",
-        "xml",
-        "iceberg",
-        "rest_api",
-    } and dst not in _OPTIONAL_DRIVERS and not driver_available(dst, dst_fmt):
-        return f"destination driver {dst} not installed"
-    return None
+    return route_driver_gap(src_fmt, dst_fmt)
 
 
 @pytest.mark.parametrize(
@@ -84,6 +34,35 @@ def test_production_sku_validate_or_explicit_skip(route: tuple[str, str, str, st
         pytest.skip(skip)
     assert ok, f"PRODUCTION_SKU route must validate when drivers present: {route} → {msg}"
     assert "Planned" not in msg, f"PRODUCTION_SKU must not include Planned brands: {route} → {msg}"
+
+
+def test_production_sku_routes_are_reachable() -> None:
+    """Every committed SKU route is either in this-host LIVE_MATRIX or an env gap.
+
+    LIVE_MATRIX is the cartesian of *package-available* live drivers, not a
+    static sold list. PRODUCTION_SKU is the static declaration. A route missing
+    from LIVE_MATRIX is honest when ``route_driver_gap`` names the missing
+    package; it is a SKU lie only when the drivers are present and the route
+    is still absent (Validate would never be asked).
+    """
+    unreachable = []
+    for route in PRODUCTION_SKU:
+        if route in LIVE_MATRIX:
+            continue
+        _src_kind, src_fmt, _dst_kind, dst_fmt = route
+        if route_driver_gap(src_fmt, dst_fmt):
+            continue
+        unreachable.append(route)
+    assert not unreachable, (
+        "PRODUCTION_SKU advertises routes absent from LIVE_MATRIX with drivers "
+        f"loadable on this host, so validate_sku can never pass them: {unreachable}"
+    )
+
+
+def test_production_sku_has_no_duplicate_routes() -> None:
+    """A duplicated route inflates the committed-route count we quote to buyers."""
+    duplicates = sorted({route for route in PRODUCTION_SKU if PRODUCTION_SKU.count(route) > 1})
+    assert not duplicates, f"PRODUCTION_SKU contains duplicate routes: {duplicates}"
 
 
 def test_production_sku_has_no_planned_rest_stubs() -> None:

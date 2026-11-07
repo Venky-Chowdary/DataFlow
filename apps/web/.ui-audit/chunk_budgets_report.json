@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "violations": [],
+  "chunks": [
+    {
+      "file": "index-D8T4d474.css",
+      "bytes": 1226573,
+      "kind": "css"
+    },
+    {
+      "file": "transfer-studio-B6K9YBwe.js",
+      "bytes": 1141365,
+      "kind": "js"
+    },
+    {
+      "file": "vendor-Am1xejal.js",
+      "bytes": 384263,
+      "kind": "js"
+    },
+    {
+      "file": "marketing-DYakItNf.js",
+      "bytes": 310983,
+      "kind": "js"
+    },
+    {
+      "file": "marketing-base-77ddbcc4.css",
+      "bytes": 272000,
+      "kind": "css"
+    },
+    {
+      "file": "index-C3dbVPwV.js",
+      "bytes": 180707,
+      "kind": "js"
+    },
+    {
+      "file": "studio-canvas-DTWeBvdz.js",
+      "bytes": 135132,
+      "kind": "js"
+    },
+    {
+      "file": "SettingsPage-D3HyijVI.js",
+      "bytes": 100792,
+      "kind": "js"
+    },
+    {
+      "file": "SchedulesPage-CGgP7I3b.js",
+      "bytes": 80592,
+      "kind": "js"
+    },
+    {
+      "file": "vendor-JlWLq91R.css",
+      "bytes": 63174,
+      "kind": "css"
+    },
+    {
+      "file": "JobsPage-Du50kLl7.js",
+      "bytes": 55995,
+      "kind": "js"
+    },
+    {
+      "file": "QueryPage-CffrJL6j.js",
+      "bytes": 32877,
+      "kind": "js"
+    },
+    {
+      "file": "ConnectorsPage-DRbc-Wmx.js",
+      "bytes": 27066,
+      "kind": "js"
+    },
+    {
+      "file": "DocsPage-Bkf9fwf7.js",
+      "bytes": 21773,
+      "kind": "js"
+    },
+    {
+      "file": "TransformsPage-BAszYJQf.js",
+      "bytes": 20102,
+      "kind": "js"
+    },
+    {
+      "file": "BenchmarksPage-Dv695MdZ.js",
+      "bytes": 18593,
+      "kind": "js"
+    },
+    {
+      "file": "studio-canvas-BZV40eAE.css",
+      "bytes": 15851,
+      "kind": "css"
+    },
+    {
+      "file": "ContractsPage-DJhM0ZFZ.js",
+      "bytes": 15679,
+      "kind": "js"
+    },
+    {
+      "file": "TransformLibraryPage-CVfy8js0.js",
+      "bytes": 13512,
+      "kind": "js"
+    },
+    {
+      "file": "PilotPage-BQQfAh3L.js",
+      "bytes": 12373,
+      "kind": "js"
+    },
+    {
+      "file": "McpPage-Dyvbrmhq.js",
+      "bytes": 7711,
+      "kind": "js"
+    },
+    {
+      "file": "PageToolbar-D3KRXMSg.js",
+      "bytes": 944,
+      "kind": "js"
+    },
+    {
+      "file": "PageSection-ZPN20CDT.js",
+      "bytes": 769,
+      "kind": "js"
+    },
+    {
+      "file": "StatCard-DdTOy2rQ.js",
+      "bytes": 562,
+      "kind": "js"
+    }
+  ]
+}

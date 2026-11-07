@@ -91,5 +91,20 @@
   {"source": "wire_ref", "target": "wire_reference"},
   {"source": "fx_rate", "target": "exchange_rate"},
   {"source": "base_ccy", "target": "base_currency"},
-  {"source": "quote_ccy", "target": "quote_currency"}
+  {"source": "quote_ccy", "target": "quote_currency"},
+  {"source": "pay_amt", "target": "payment_amount"},
+  {"source": "txn_id", "target": "transaction_id"},
+  {"source": "bill_addr", "target": "billing_address"},
+  {"source": "mail_addr", "target": "mailing_address"},
+  {"source": "mod_ts", "target": "modified_timestamp"},
+  {"source": "ref_no", "target": "reference_number"},
+  {"source": "ord_no", "target": "order_number"},
+  {"source": "qty_ord", "target": "quantity_ordered"},
+  {"source": "unit_cost", "target": "unit_cost"},
+  {"source": "net_amt", "target": "net_amount"},
+  {"source": "gross_amt", "target": "gross_amount"},
+  {"source": "disc_amt", "target": "discount_amount"},
+  {"source": "vat_amt", "target": "vat_amount"},
+  {"source": "fee_amt", "target": "fee_amount"},
+  {"source": "princ_amt", "target": "principal_amount"}
 ]

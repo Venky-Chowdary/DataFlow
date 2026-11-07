@@ -20,6 +20,7 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.phase_profile import (  # noqa: E402
+    PHASE_BULK_COPY,
     PHASE_CHECKSUM,
     PHASE_READ,
     PHASE_TRANSFORM_WRITE,
@@ -163,11 +164,18 @@ class TestStreamEmitsPhaseProfile:
         assert profile, "transfer must report where its time went"
 
         by_phase = {p["phase"]: p for p in profile["phases"]}
-        assert PHASE_TRANSFORM_WRITE in by_phase
-        assert PHASE_READ in by_phase
+        if summary.get("copy_fast_path") == "used":
+            # SQLite→SQLite lands as one ATTACH … INSERT SELECT: read and write
+            # are the same statement, so the profile reports one honest phase
+            # rather than invented read/write splits.
+            assert PHASE_BULK_COPY in by_phase
+            assert by_phase[PHASE_BULK_COPY]["rows"] >= 2000
+        else:
+            assert PHASE_TRANSFORM_WRITE in by_phase
+            assert PHASE_READ in by_phase
 
-        # The source read is real work — reporting 0 rows read for a 2000-row
-        # transfer was the misleading version of this.
-        assert by_phase[PHASE_READ]["rows"] >= 2000
+            # The source read is real work — reporting 0 rows read for a 2000-row
+            # transfer was the misleading version of this.
+            assert by_phase[PHASE_READ]["rows"] >= 2000
         assert profile["dominant_phase"]
         assert profile["busy_seconds"] > 0

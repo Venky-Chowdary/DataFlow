@@ -1,0 +1,301 @@
+/**
+ * Measured evidence for public-facing pages.
+ *
+ * Every row here comes from a live matrix run recorded in
+ * `docs/CLIENT_READINESS_REPORT.md` — a real transfer through the product path
+ * against a real engine, with the destination re-read afterwards. Marketing
+ * copy renders these rows instead of writing its own numbers, so a claim on the
+ * site cannot outrun the artifact that backs it.
+ *
+ * Rules for editing:
+ * - A row may only be added once its artifact exists and the run is recorded.
+ * - `cases` is the number of scenarios actually executed, never a target.
+ * - Anything not measured belongs in `NOT_PROVEN`, phrased as the reason.
+ */
+
+export interface EvidenceRow {
+  /** What was proven, in operator language. */
+  claim: string;
+  /** Engines the matrix actually ran against. */
+  engines: string;
+  /** Scenarios executed. */
+  cases: number;
+  /** Outcome exactly as the artifact records it. */
+  result: string;
+  /** Artifact filename in the readiness report. */
+  artifact: string;
+}
+
+export interface UnprovenRow {
+  area: string;
+  /** `planned`, `blocked` (needs something we do not have) or `unaudited`. */
+  status: "planned" | "blocked" | "unaudited";
+  /** Why it is not proven — never a promise. */
+  reason: string;
+}
+
+/** Date the numbers below were last measured. */
+export const EVIDENCE_AS_OF = "August 2026";
+
+export const PROVEN_EVIDENCE: EvidenceRow[] = [
+  {
+    claim: "Schema drift — widen, narrow-refuse, NOT NULL, defaults, concurrency, resume, case variants",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 48,
+    result: "48 recorded, 0 violations",
+    artifact: "drift_live_results.json, drift_live_multi_results.json",
+  },
+  {
+    claim: "Identity / sequence generator carried on create-new, re-read from the destination catalog and proven by a post-cutover insert without a key",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 16,
+    result: "14 carried, 2 flagged by name before the load",
+    artifact: "identity_live_results.json",
+  },
+  {
+    claim: "Foreign keys carried with dependency-ordered multi-table create, each proven by the destination rejecting an orphan row",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 11,
+    result: "11 ok",
+    artifact: "foreign_key_live_results.json, fk_single_table_live_results.json",
+  },
+  {
+    claim: "CHECK constraint carry, proven by the destination rejecting a violating row",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 16,
+    result: "16 ok",
+    artifact: "check_carry_live_results.json",
+  },
+  {
+    claim: "Secondary index carry",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 16,
+    result: "16 ok",
+    artifact: "secondary_index_live_results.json",
+  },
+  {
+    claim: "Physical placement — partitioning, tablespace, filegroup — carried or explicitly refused, never invented",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 10,
+    result: "10 ok",
+    artifact: "physical_placement_live_results.json",
+  },
+  {
+    claim: "Validate→Execute DDL identity: append, incremental delta, duplicate re-run refusal, narrowed-DDL refusal",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle, SQLite",
+    cases: 5,
+    result: "5 engines, all ok — refusals write zero rows",
+    artifact: "ddl_identity_matrix_results.json",
+  },
+  {
+    claim: "30-source-column into a 20-column destination: unmapped columns block pre-write unless declared",
+    engines: "PostgreSQL, MySQL, Oracle",
+    cases: 36,
+    result: "12 scenarios × 3 engines",
+    artifact: "migration_scenario_matrix_results.json",
+  },
+  {
+    claim: "Retry safety: retry-from-start is refused when the failed attempt committed rows under a non-convergent mode, and for a cancelled run",
+    engines: "PostgreSQL (live scheduler)",
+    cases: 14,
+    result: "14/14 recorded",
+    artifact: "schedule_live_results.json",
+  },
+  {
+    claim: "Destination privilege probe before write",
+    engines: "PostgreSQL, MySQL, SQL Server, Oracle",
+    cases: 7,
+    result: "7 ok",
+    artifact: "grants_live_results.json",
+  },
+  {
+    claim: "Incremental transforms load by column name, refusing unmatched columns",
+    engines: "PostgreSQL, MySQL, SQL Server",
+    cases: 33,
+    result: "33 ok",
+    artifact: "transform_live_results.json",
+  },
+];
+
+/** Backend suite as last measured — see the readiness report for the shard log. */
+export const BACKEND_SUITE = {
+  passed: 13244,
+  failed: 0,
+  skipped: 1515,
+} as const;
+
+/**
+ * Unique duplex/source drivers from `transfer_live_driver_types()` after the
+ * honesty filter (preflight required except file_source; email stays demoted
+ * as write-only with no read-back, SFTP earned its place in
+ * test_sftp_live_transfer.py against a real server).
+ * This is the count **when optional packages are present**. A given host may
+ * report fewer via `GET /capabilities` `unique_transfer_drivers`. Catalog tiles
+ * are a larger number and are never presented as live capability.
+ * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
+ */
+export const TRANSFER_READY_DRIVERS = 46;
+
+/**
+ * Catalog slots the desktop lab can bind and exercise as source + dest.
+ * This is an operator option, not 80 unique engines and not catalog tile count.
+ */
+export const DESKTOP_LAB_CATALOG_SLOTS = 80;
+
+/**
+ * Public catalog lead: the measured transfer-ready driver count, stated as
+ * what it is. Catalog tile count is never presented as a live-driver count.
+ */
+export function catalogHonestyLead(readyCount: number = TRANSFER_READY_DRIVERS): string {
+  return (
+    `${readyCount} drivers are transfer-ready: each one maps, runs preflight, quarantines bad rows, ` +
+    `and verifies the load through the same engine.`
+  );
+}
+
+/** Public family badge. Only transfer-ready drivers are named in MARKETING_STACK. */
+export type CatalogFamilyBadge = "Transfer-ready";
+
+/**
+ * Internal operator ledger — not rendered on marketing pages.
+ * Reasons stay factual; they never promise a date.
+ */
+export const NOT_PROVEN: UnprovenRow[] = [
+  {
+    area: "Snowflake, BigQuery, S3 / ADLS / GCS",
+    status: "unaudited",
+    reason:
+      "Emulator leftover MERGE is measured on test_warehouse_emulator_leftover_merge_* (moto/MinIO/fake-gcs/Azurite dest 4→3, incremental no-op, dest-engine GET COUNT; fakesnow + BigQuery emulator dest-engine DELETE). Customer-tenant Snowflake/BQ/S3 PRODUCTION_SKU is not claimed.",
+  },
+  {
+    area: "Salesforce, Stripe, Shopify, HubSpot",
+    status: "planned",
+    reason:
+      "Salesforce and HubSpot are certified reverse-ETL. Stripe is a named incremental created-cursor SKU (sqlite dest COUNT, not a Stripe tenant). Shopify stays Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
+  },
+  {
+    area: "Exactly-once change delivery",
+    status: "planned",
+    reason:
+      "CDC default is at-least-once upsert. One named dest-owned route (MySQL CDC → Postgres) has a crash-replay artifact when Postgres is reachable; PLATFORM_EXACTLY_ONCE_CLAIMED stays False.",
+  },
+  {
+    area: "Scheduled backfill / catch-up",
+    status: "unaudited",
+    reason: "Operator-approved bounded replay is measured: POST /schedules/{id}/catch-up queues up to 24 runs — one per missed window, oldest first, each tagged catch_up (test_schedule_catch_up.py). Historical windows are still never silently replayed. Warehouse-scale backfill certification is not claimed.",
+  },
+  {
+    area: "Multi-replica scheduler failover on MongoDB",
+    status: "unaudited",
+    reason: "Same-schedule and connector-pair overlap are proven; the exact-claim CAS stale-reclaim race is measured on live MongoDB (test_scheduler_replica_failover.py — live-claim block, exact-match reclaim, two-beats-one-winner, fresh-claim-not-stolen, counter survival). A real Railway replica crash mid-transfer is not a test fixture.",
+  },
+  {
+    area: "Transform row ledger and quarantine",
+    status: "unaudited",
+    reason:
+      "Named sqlite fixture test_transform_quarantine_dlq_write_path persists failing not_null findings to the same DLQ and stamps row_accounting. Live warehouse transform-run quarantine is not yet matrix-measured.",
+  },
+  {
+    area: "Contracts and Proofs surfaces",
+    status: "unaudited",
+    reason:
+      "Named sqlite fixture test_contract_enforce_sqlite_fixture blocks missing required columns on a SIGNED file→sqlite contract. Shared-sandbox live-matrix certification is not claimed.",
+  },
+  {
+    area: "CDC snapshot+LSN live-matrix",
+    status: "planned",
+    reason:
+      "Postgres WAL, MySQL ROW binlog (test_cdc_mysql_binlog_transfer_e2e), SQL Server native CDC (test_cdc_sqlserver_native_transfer_e2e), and Oracle LogMiner (test_oracle_logminer_transfer_snapshot_resume_delete; dest {1:99, 3:30}, id=2 gone) are measured snapshot+resume+delete. MySQL→PostgreSQL dest-owned DELETE + replay is measured on test_mysql_binlog_postgres_dest_owned_delete_replay (dest {1:99, 3:30}, replay 0, stale LSN skipped). CDC default remains at-least-once upsert. Not dest-owned exactly-once.",
+  },
+  {
+    area: "Iceberg leftover MERGE",
+    status: "unaudited",
+    reason:
+      "SqlCatalog leftover MERGE is measured on test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3). REST warehouse leftover MERGE is measured on test_iceberg_rest_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3, incremental no-op, file-footer COUNT) plus composite PK. Glue and Nessie stay Planned. Hadoop catalog is fail-closed in pyiceberg 0.11 (no SqlCatalog fallback).",
+  },
+  {
+    area: "SOC 2 / ISO 27001 certification",
+    status: "planned",
+    reason: "Controls are implemented; no third-party audit has been completed, so no certificate exists.",
+  },
+];
+
+/**
+ * Public catalog families. Every name listed here is in
+ * `transfer_live_driver_types()` on the current base (46 drivers). Catalog
+ * entries whose status is `planned` (Redshift, Databricks, ClickHouse,
+ * MariaDB, CockroachDB, Shopify) are not named — see
+ * docs/MARKETING_AUDIT_2026-10.md, "Not claimed on purpose".
+ */
+export const MARKETING_STACK: ReadonlyArray<{
+  family: string;
+  items: string;
+  badge: CatalogFamilyBadge;
+  note: string;
+}> = [
+  {
+    family: "Warehouses & lakehouse",
+    items: "Snowflake, BigQuery, Apache Iceberg",
+    badge: "Transfer-ready",
+    note:
+      "Load and read Snowflake and BigQuery with create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg works with SQL and REST catalogs.",
+  },
+  {
+    family: "Object storage",
+    items: "Amazon S3, Azure Data Lake Storage, Google Cloud Storage",
+    badge: "Transfer-ready",
+    note:
+      "S3-compatible endpoints, s3:// URLs and prefixes. CSV, JSON, Parquet, Avro, and ORC — decimals land exact and every row is accounted for.",
+  },
+  {
+    family: "Databases",
+    items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB, SQLite",
+    badge: "Transfer-ready",
+    note:
+      "Identity, foreign keys, CHECK constraints, and indexes carry on create-new. Native change data capture on SQL Server, PostgreSQL, MySQL, and Oracle.",
+  },
+  {
+    family: "Streaming",
+    items: "Apache Kafka",
+    badge: "Transfer-ready",
+    note:
+      "Read topics as a source. Every field gets one exact type across the whole run, and JSON numbers keep the spelling the message gave them.",
+  },
+  {
+    family: "Vector databases",
+    items: "pgvector, Pinecone, Qdrant, Weaviate, Milvus",
+    badge: "Transfer-ready",
+    note:
+      "New pgvector tables are typed by default: every source column with its real type plus an embedding column, verified like PostgreSQL.",
+  },
+  {
+    family: "Applications & APIs",
+    items: "Salesforce, HubSpot, Stripe, REST APIs",
+    badge: "Transfer-ready",
+    note:
+      "Reverse-ETL into Salesforce and HubSpot, incremental Stripe reads on the created cursor, and REST sources with the same map, gates, and verification.",
+  },
+];
+
+export const MARKETING_PROOF_HIGHLIGHTS = [
+  {
+    title: "Schema changes stay under control",
+    body: "Widen safely, refuse unsafe narrows, and carry nullability and defaults — measured on PostgreSQL, MySQL, SQL Server, and Oracle.",
+    stat: "48 live cases",
+  },
+  {
+    title: "Identity and keys survive cutover",
+    body: "Sequences, foreign keys, and CHECK constraints carry to the destination — each one proven on the destination itself after cutover.",
+    stat: "43 live cases",
+  },
+  {
+    title: "Retries keep a load correct",
+    body: "Before any retry, Datawrap checks what the failed attempt already committed and restarts only on a path that converges.",
+    stat: "14 scheduler cases",
+  },
+  {
+    title: "Transforms load by column name",
+    body: "Incremental transforms match every column by name on PostgreSQL, MySQL, and SQL Server.",
+    stat: "33 live cases",
+  },
+] as const;

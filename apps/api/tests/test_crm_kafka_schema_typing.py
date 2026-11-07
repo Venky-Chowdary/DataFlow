@@ -21,7 +21,8 @@ from src.transfer.registry import PRODUCTION_SKU  # noqa: E402
 def test_salesforce_field_type_map():
     assert salesforce_field_to_logical("boolean") == "BOOLEAN"
     assert salesforce_field_to_logical("int") == "INTEGER"
-    assert salesforce_field_to_logical("double") == "FLOAT"
+    # IEEE double → DOUBLE carrier (never-narrower vs bare FLOAT32).
+    assert salesforce_field_to_logical("double") == "DOUBLE"
     assert salesforce_field_to_logical("currency", precision=18, scale=2) == "DECIMAL(18,2)"
     assert salesforce_field_to_logical("percent", precision=5, scale=2) == "DECIMAL(5,2)"
     # Bare currency/percent must not invent untyped DECIMAL.
@@ -57,10 +58,14 @@ def test_hubspot_property_type_map():
 def test_kafka_value_logical_inference():
     assert _kafka_value_to_logical(True) == "BOOLEAN"
     assert _kafka_value_to_logical(42) == "INTEGER"
-    assert _kafka_value_to_logical(1.5) == "FLOAT"
+    assert _kafka_value_to_logical(1.5) == "DOUBLE"
     assert _kafka_value_to_logical({"a": 1}) == "JSON"
     assert _kafka_value_to_logical([1, 2]) == "ARRAY"
     assert _kafka_value_to_logical(None) == ""
+    # JSON string samples are VARCHAR, not an unbounded TEXT LOB. TEXT made
+    # kafka→mysql invent LONGTEXT at Execute after Validate fingerprinted TEXT.
+    assert _kafka_value_to_logical("USD") == "VARCHAR"
+    assert _kafka_value_to_logical("EUR") == "VARCHAR"
 
 
 def test_crm_kafka_caps_claim_introspect():
@@ -80,8 +85,8 @@ def test_kafka_empty_topic_does_not_invent_text_columns(monkeypatch):
 
     monkeypatch.setattr(
         kr,
-        "read_topic_batch",
-        lambda **_kw: (_Empty(), None),
+        "sample_topic_batch",
+        lambda **_kw: _Empty(),
     )
     schema, native, warning = kr.infer_topic_schema({"host": "localhost"}, "empty.topic")
     assert schema == {}

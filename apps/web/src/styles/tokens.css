@@ -16,8 +16,31 @@
   --dt-flow-particle: var(--df-brand);
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
+  /* Logo palette — copied from packages/design-system brand/mark.ts.
+     Logo SVG/PNG files are not edited from this stylesheet. */
+  --df-logo-tile: #0a3d3a;
+  --df-logo-ink: #0f766e;
+  --df-logo-arrow: #2dd4bf;
+  --df-logo-strap: #f59e0b;
+  /* Studio names for the logo palette above. One hex each; these alias it.
+     --df-brand stays the legacy action teal so existing screens keep their fill. */
+  --df-brand-tile: var(--df-logo-tile);
+  --df-brand-text: var(--df-logo-ink);
+  --df-brand-arrow: var(--df-logo-arrow);
+  --df-attention: var(--df-logo-strap);
+  --df-on-tile: #f8fafc;
+  --df-on-attention: var(--df-logo-tile);
+  --df-success-text: #047857;
+  --df-warning-text: #92400e;
+  --df-info-text: #0369a1;
   --df-brand-strong: #115e59;
   --df-brand-deep: #0f766e;
+  /* Fill/ink for controls that carry white or tinted text. #0f766e keeps the
+     brand hue but clears AA (5.47:1 vs white, 5.25 vs the #f0fdfa nav tint);
+     --df-brand (#0d9488) is for non-text accents only. Same fill in dark:
+     the workspace keeps light action fills and tints there too. */
+  --df-action-bg: #0f766e;
+  --df-action-bg-hover: #115e59;
   --df-brand-bright: #14b8a6;
   --df-brand-muted: #f0fdfa;
   --df-brand-soft: #ccfbf1;
@@ -77,9 +100,18 @@
 
   --df-text-primary: #0f172a;
   --df-text-secondary: #475569;
-  --df-text-tertiary: #94a3b8;
-  --df-text-muted: #64748b;
-  --df-focus-ring: var(--df-brand-ring);
+  /* #5e6e85 clears AA on every surface: 4.58:1 on --df-bg-subtle (the worst
+     canvas), 5.19 on white. Tertiary text carries real labels (OCR hint,
+     wizard captions), so it must meet AA, not act as a decorative ink. */
+  --df-text-tertiary: #5e6e85;
+  --df-text-muted: #5e6e85;
+  /* Alias used by leftover sheets (`var(--df-text)`). Must track primary so dark remaps. */
+  --df-text: var(--df-text-primary);
+  --df-surface-2: var(--df-surface-muted);
+  /* Leftover sheets still read these undeclared names and fall back to paper. */
+  --df-surface-subtle: var(--df-surface-muted);
+  --df-surface-sunken: var(--df-surface-muted);
+  --df-focus-ring: var(--df-brand);  /* solid logo primary, ~3.2:1 on light surfaces */
 
   /* Motion — shared easings / durations for landing + workspace */
   --df-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -137,9 +169,49 @@
   --df-font-sans: "IBM Plex Sans", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
   --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --df-fs-xs: 11px;
+  --df-fs-body: 12px;
+  --df-fs-sm: 12.5px;
+  --df-fs-md: 13.5px;
+  --df-fs-lg: 15px;
+  --df-fs-xl: 18px;
+  --df-fs-title: 15px;
+
+  /* Weights are only the four faces main.tsx actually ships. A rule asking for
+     650 or 760 does not render at 650 or 760 — CSS font matching serves the
+     nearest available face, so those values silently collapsed into each other
+     and made "semibold" mean two different things on two pages. */
+  --df-fw-regular: 400;
+  --df-fw-medium: 500;
+  --df-fw-semibold: 600;
+  --df-fw-bold: 700;
+
+  /* Type rungs for the control ladder — a control's size comes from its role,
+     not from the browser default (an unstyled button renders at 13.333px) or a
+     per-page literal. Keep in step with the height rungs below. */
+  --df-fs-btn: 13px;
+  --df-fs-btn-sm: 12px;
+  --df-fs-btn-lg: 13.5px;
+  --df-fs-field: 13px;
+  --df-fs-field-sm: 12px;
+  --df-fs-tab: 12.5px;
+  --df-fs-chip: 12px;
+  --df-fs-label: 12px;
+  /* One page title size for every route (it was 19–28px depending on which page
+     sheet loaded last, and fluid `vw` clamps made it a different size again at
+     every width). Card titles have one rung plus one documented dense rung. */
+  --df-fs-page-title: 22px;
+  --df-fs-card-title: 15px;
+  --df-fs-card-title-dense: 14px;
 
   --df-header-height: 60px;
   --df-sidebar-width: 252px;
+  --df-mobile-nav-max-width: 280px;
+  --df-mobile-nav-gutter: 16px;
+  --df-mobile-nav-offset: 8px;
+  --df-mobile-nav-duration: var(--df-dur);
+  --df-mobile-nav-overlay-z: 55;
+  --df-mobile-nav-z: 60;
   --df-content-max: none;
   --df-rail-width: 360px;
   --dt-copilot-rail-width: 360px;
@@ -148,22 +220,56 @@
   --df-radius-md: 8px;
   --df-radius-lg: 10px;
   --df-radius-xl: 14px;
-  --df-radius-card: 10px;
-  --df-radius-panel: 12px;
-  --df-radius-tile: 10px;
+  --df-radius-card: 8px;
+  --df-radius-panel: 8px;
+  --df-radius-tile: 8px;
 
-  /* Buttons + form controls share one height so toolbars never look ragged */
+  /* Buttons + form controls share one height so toolbars never look ragged.
+     The workspace control ladder is exactly these six rungs — every clickable
+     surface picks one of them, and nothing hardcodes its own height:
+       action        --df-btn-height / -sm / -lg
+       field         --df-control-height / -sm
+       tab / segment --df-tab-height  (== --df-control-height — same rung)
+       icon-only     --df-icon-btn-size
+       chip / pill   --df-chip-height
+       inline action --df-inline-action-h (min hit target --df-min-target) */
   --df-btn-height: 36px;
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
   --df-control-height: 36px;
   --df-control-height-sm: 32px;
-  --df-toolbar-h: 36px;
+  --df-toolbar-h: var(--df-btn-height);
+  /* Same rung as fields and default buttons so Mode / write / FilterTabs /
+     Advanced never sit on three different baselines. Density media only
+     retunes --df-control-height; this alias follows. */
+  --df-tab-height: var(--df-control-height);
+  --df-icon-btn-size: 28px;
+  --df-stepper-mobile-node: 18px;
+  --df-stepper-mobile-height: 32px;
+  --df-chip-height: 28px;
+  --df-inline-action-h: 24px;
+  --df-min-target: 24px;
+  /* Width the fixed Pilot edge tab occupies; page gutters reserve it so it can
+     never sit on top of a page action. Keep in step with .df2-copilot-edge-open. */
+  --df-copilot-edge-w: 32px;
 
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
   --df-table-cell-pad-y: 11px;
   --df-table-cell-pad-x: 14px;
+
+  /* Workspace list rows — Connectors / Contracts / Schedules share one density.
+     Stay compact on large screens; do not inflate into tiles. */
+  --df-list-row-pad-y: 8px;
+  --df-list-row-pad-x: 12px;
+  --df-list-row-min-h: 48px;
+  --df-list-row-min-h-dual: 60px;
+  --df-list-row-title: 13px;
+  --df-list-row-meta: 11.5px;
+  --df-list-row-gap: 10px;
+  --df-list-row-icon: 16px;
+  --df-list-row-action: 26px;
+  --df-list-row-hover: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
   --df-table-head-bg: var(--df-surface-muted);
   --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
   --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 55%, #fff);
@@ -205,6 +311,20 @@
   --df-shadow-sm: 0 1px 3px rgba(17, 24, 39, 0.06), 0 1px 2px rgba(17, 24, 39, 0.04);
   --df-shadow-md: 0 4px 12px rgba(17, 24, 39, 0.08);
   --df-shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.1);
+
+  /* Segment / FilterTabs / dest-mode — one track language. Dark theme remaps
+     these aliases (and the surface/ink primitives they read), never a second
+     `.df2-tab-dark` rule set. */
+  --df-seg-track: color-mix(in srgb, var(--df-bg-subtle) 82%, var(--df-surface));
+  --df-seg-active: var(--df-surface);
+  --df-seg-ink: var(--df-text-secondary);
+  --df-seg-ink-active: var(--df-brand-strong);
+  --df-seg-border: var(--df-border);
+  --df-seg-pad: 3px;
+  --df-seg-gap: 2px;
+  --df-seg-radius: var(--df-radius-md);
+
+  color-scheme: light;
 
   /* dt-* aliases */
   --dt-obsidian: var(--df-navy-900);
@@ -279,16 +399,50 @@
   --dt-transition: var(--df-dur-fast) var(--df-ease);
   --dt-transition-slow: var(--df-dur) var(--df-ease);
 
-  /* Stacking — single scale (do not use raw 9999/10000 elsewhere) */
+  /* Stacking — one scale. Each layer has one value. */
+  --df-z-under: -1;
+  --df-z-floor: 0;
   --df-z-base: 1;
+  --df-z-raised: 2;
+  --df-z-canvas-stage: 3;
+  --df-z-canvas-rail: 4;
+  --df-z-canvas-overview: 5;
+  --df-z-canvas-issues: 6;
+  --df-z-canvas-toolbar: 7;
+  --df-z-canvas-menu: 8;
   --df-z-sticky: 20;
+  --df-z-action: 30;
   --df-z-topbar: 40;
   --df-z-sidebar: 45;
+  --df-z-elevated: 50;
+  --df-z-flyout: 60;
+  --df-z-drawer: 70;
   --df-z-dropdown: 80;
   --df-z-popover: 90;
+  --df-z-overlay: 200;
   --df-z-modal: 1000;
   --df-z-toast: 1100;
   --df-z-boot: 1200;
+  --df-z-alert: 9999;
+  --df-z-splash: 10000;
+  --df-z-max: 12000;
+  /* Dark auth gate palette (login/signup/forgot/reset under data-theme=dark).
+     Component rules read these; rgb() keeps the exact original colours. */
+  --df-auth-dark-canvas: rgb(7 17 26);
+  --df-auth-dark-grad-start: rgb(8 20 32);
+  --df-auth-dark-field: rgb(8 24 34);
+  --df-auth-dark-grad-mid: rgb(10 26 34);
+  --df-auth-dark-card: rgb(13 31 40);
+  --df-auth-dark-line: rgb(35 68 65);
+  --df-auth-dark-disabled: rgb(84 112 108);
+  --df-auth-dark-placeholder: rgb(91 117 113);
+  --df-auth-dark-muted: rgb(159 184 180);
+  --df-auth-dark-label: rgb(184 204 201);
+  --df-auth-dark-alert-body: rgb(215 209 195);
+  --df-auth-dark-ink: rgb(232 240 238);
+  --df-auth-dark-alert-title: rgb(253 232 200);
+  --df-auth-dark-legal: rgb(139 167 163);
+  --df-auth-dark-sub: rgb(169 196 192);
 }
 
 html,
@@ -299,6 +453,41 @@ body,
   color: var(--df-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Body runs the product's 12px base size. Set on body (not html) so rem keeps
+   its 16px UA root and nothing else silently rescales. */
+body {
+  font-size: var(--df-fs-body);
+  /* Full-bleed sections size against vw, which includes the scrollbar strip —
+     clip the residual overflow at the root instead of per-section. `clip`
+     (not `hidden`) keeps position:sticky working (no scroll container). */
+  overflow-x: clip;
+}
+
+/* Form controls do not inherit type from their container — without this the UA
+   stylesheet wins and every button, input, select and textarea renders in the
+   system font (measured: 3,535 elements in Arial next to IBM Plex Sans body
+   text, including the sidebar nav, tab strips and every primary action). */
+button,
+input,
+select,
+textarea,
+optgroup {
+  font-family: inherit;
+}
+
+/* Size follows the same rule: an unstyled control took the UA default 13.333px
+   regardless of its surroundings. `:where()` keeps this at zero specificity, so
+   it only fills the gap where no rule has an opinion and never outranks one. */
+:where(button, input, select, textarea, optgroup) {
+  font-size: inherit;
+}
+
+/* A text entry with no rule of its own is still a field, so it reads at the
+   field rung rather than whatever size its container happens to carry. */
+:where(input, select, textarea) {
+  font-size: var(--df-fs-field);
 }
 
 /*
@@ -344,16 +533,24 @@ body:has(.df2-app) #root {
   max-height: 100%;
   overflow: hidden;
   box-sizing: border-box;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
+  /* Re-bind so density overrides to --df-control-height on this node
+     retune tabs. A :root `var()` computes once and would inherit 36px. */
+  --df-tab-height: var(--df-control-height);
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
-@media (max-width: 1680px) {
+@media (max-width: 1679px) {
   .df2-app {
     --df-btn-height: 32px;
     --df-btn-height-sm: 28px;
     --df-btn-height-lg: 36px;
     --df-control-height: 32px;
     --df-control-height-sm: 28px;
+    --df-icon-btn-size: 26px;
+    --df-chip-height: 26px;
     --df-header-height: 52px;
     --df-sidebar-width: 220px;
     --df-page-gutter: 12px;
@@ -361,6 +558,7 @@ body:has(.df2-app) #root {
     --df-card-pad: 12px;
     --df-card-head-pad: 10px 12px;
     --df-nav-item-height: 32px;
+    --df-fs-page-title: 20px;
     --df-table-row-height: 40px;
     --df-table-row-height-sm: 34px;
     --df-tile-min-h: 64px;
@@ -389,6 +587,126 @@ body:has(.df2-app) #root {
     --df-rail-width: 320px;
     font-size: 12.5px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   List-row density ladder — the ONE owner of workspace row geometry.
+
+   Every ``--df-list-row-*`` value for every viewport is declared in this block
+   and nowhere else. It used to be spread over four width queries that all match
+   a 1280px viewport plus a height query, and because each one shrank the row
+   again they compounded: the most common enterprise screen (1280x800) resolved
+   to a 38px row with 4px of vertical padding and 11px meta text, which is what
+   made Connectors / Contracts / Schedules look cramped and inconsistent with
+   Jobs. Density is a function of width only — a short viewport is a reason to
+   scroll, not a reason to make a row untappable.
+
+   Floor, held at every breakpoint: min-height >= 44px (WCAG 2.5.5 target size,
+   matching Fluent/Carbon compact rows), pad-y >= 6px, meta >= 11.5px, action
+   control >= 24px. Ranges below are exclusive, so exactly one applies.
+   Guarded by apps/web/src/styles/listRowDensity.test.ts.
+   --------------------------------------------------------------------------- */
+
+/* Declared on :root, not `.df2-app` — drawers and modals render in a portal on
+   <body>, and scoping the steps to the app shell left every slide-over row
+   frozen at the wide default whatever the viewport. */
+
+/* Compact — small laptops and split-screen windows. */
+@media (max-width: 1366px) {
+  :root {
+    --df-list-row-pad-y: 6px;
+    --df-list-row-pad-x: 10px;
+    --df-list-row-min-h: 44px;
+    --df-list-row-min-h-dual: 56px;
+    --df-list-row-title: 12.5px;
+    --df-list-row-meta: 11.5px;
+    --df-list-row-gap: 8px;
+    --df-list-row-icon: 15px;
+    --df-list-row-action: 24px;
+  }
+}
+
+/* Standard — 14-16" laptops, the default working density. */
+@media (min-width: 1367px) and (max-width: 1919px) {
+  :root {
+    --df-list-row-pad-y: 7px;
+    --df-list-row-pad-x: 12px;
+    --df-list-row-min-h: 46px;
+    --df-list-row-min-h-dual: 58px;
+    --df-list-row-title: 13px;
+    --df-list-row-meta: 11.5px;
+    --df-list-row-gap: 10px;
+    --df-list-row-icon: 16px;
+    --df-list-row-action: 26px;
+  }
+}
+
+/* Wide — desktop monitors. Extra air horizontally and one step of height. */
+@media (min-width: 1920px) {
+  :root {
+    --df-list-row-pad-y: 8px;
+    --df-list-row-pad-x: 14px;
+    --df-list-row-min-h: 48px;
+    --df-list-row-min-h-dual: 60px;
+    --df-list-row-title: 13px;
+    --df-list-row-meta: 12px;
+    --df-list-row-gap: 12px;
+    --df-list-row-icon: 16px;
+    --df-list-row-action: 26px;
+  }
+}
+
+/* Dark theme — remap primitives only. Component rules keep reading --df-*.
+   Opt-in via `data-theme="dark"` on <html>. Scoped with :has(.df2-app) so
+   marketing/login do not inherit workspace ink. Do not add a parallel dark
+   stylesheet; that is how overlap broke the shell. */
+html[data-theme="dark"]:has(.df2-app),
+html[data-theme="dark"] .df2-app,
+html.df2-theme-dark:has(.df2-app),
+.df2-app.df2-theme-dark {
+  color-scheme: dark;
+  --df-bg-canvas: #0c1219;
+  --df-bg-subtle: #121a24;
+  --df-surface: #161e29;
+  --df-surface-raised: #1c2533;
+  --df-surface-muted: #1a2330;
+  --df-surface-tint: rgba(13, 148, 136, 0.1);
+  --df-border: #2a3544;
+  --df-border-strong: #3a4658;
+  --df-text-primary: #e8eef5;
+  --df-text-secondary: #9aa8b8;
+  /* #8a99ab = 5.77:1 on the dark surface — same AA rule as light tertiary. */
+  --df-text-tertiary: #8a99ab;
+  --df-text-muted: #8a97a8;
+  --df-brand-strong: #5eead4;
+  --df-focus-ring: #2dd4bf;  /* ~7:1 on dark surfaces */
+  --df-action-bg: #0f766e;
+  --df-action-bg-hover: #115e59;
+  --df-brand-hover: #2dd4bf;
+  --df-brand-text: var(--df-brand-strong);
+  --df-success-text: #6ee7b7;
+  --df-warning-text: #fcd34d;
+  --df-info-text: #7dd3fc;
+  --df-brand-muted: rgba(13, 148, 136, 0.16);
+  --df-brand-soft: rgba(20, 184, 166, 0.22);
+  --df-brand-subtle: rgba(13, 148, 136, 0.12);
+  --df-brand-gradient-soft: linear-gradient(180deg, rgba(13, 148, 136, 0.12) 0%, transparent 48%);
+  --df-accent-muted: rgba(13, 148, 136, 0.12);
+  --df-success-bg: rgba(5, 150, 105, 0.14);
+  --df-warning-bg: rgba(217, 119, 6, 0.14);
+  --df-danger-bg: rgba(220, 38, 38, 0.14);
+  --df-info-bg: rgba(2, 132, 199, 0.14);
+  --df-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --df-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.36), 0 1px 2px rgba(0, 0, 0, 0.24);
+  --df-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --df-shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.48);
+  --df-scrollbar-thumb: color-mix(in srgb, #94a3b8 32%, transparent);
+  --df-scrollbar-thumb-hover: color-mix(in srgb, #94a3b8 50%, transparent);
+  --df-list-row-hover: color-mix(in srgb, var(--df-brand-muted) 55%, var(--df-surface));
+  --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 55%, var(--df-surface));
+  --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 70%, var(--df-surface));
+  /* Platform leftover `.df2-btn { color: var(--df-navy-700) }` — keep ink readable. */
+  --df-navy-700: var(--df-text-secondary);
 }
 
 @media (prefers-reduced-motion: reduce) {

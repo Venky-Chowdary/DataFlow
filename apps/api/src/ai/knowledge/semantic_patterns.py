@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
 
 class PatternCategory(Enum):
     IDENTIFIER = "identifier"
@@ -276,7 +278,7 @@ def _build_patterns() -> list[SemanticPattern]:
 
     # ── TEMPORAL (15) ──
     add("Date", PatternCategory.TEMPORAL, ["date", "dt"],
-        regex_patterns=[r"_date$", r"_dt$"], sample_patterns=[r"^\d{4}-\d{2}-\d{2}$", r"^\d{2}/\d{2}/\d{4}$"],
+        regex_patterns=[r"_date$", r"_dt$"], sample_patterns=[r"^\d{4}-\d{2}-\d{2}$"],
         synonyms=["effective_date", "as_of_date"], transformations=["standardize_iso8601"], base_confidence=0.88, data_type="date")
     add("Timestamp", PatternCategory.TEMPORAL, ["timestamp", "datetime", "created_at", "updated_at", "modified_at"],
         regex_patterns=[r"_at$"], sample_patterns=[r"^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}"],
@@ -347,7 +349,7 @@ def _build_patterns() -> list[SemanticPattern]:
         sample_patterns=[r"^(active|inactive|pending|complete)$"], synonyms=["sts", "current_status", "order_status"],
         base_confidence=0.85)
     add("Boolean Flag", PatternCategory.BINARY, ["is_", "has_", "can_", "flag", "enabled", "active", "deleted"],
-        regex_patterns=[r"^is_", r"^has_", r"_flag$"], sample_patterns=[r"^(true|false|1|0|yes|no)$"],
+        regex_patterns=[r"^is_", r"^has_", r"_flag$"], sample_patterns=[CANONICAL_BOOLEAN_SAMPLE_PATTERN],
         synonyms=["indicator", "bool"], base_confidence=0.90, data_type="boolean")
     add("Priority", PatternCategory.STATUS, ["priority", "urgency", "importance", "severity"],
         sample_patterns=[r"^(low|medium|high|critical)$"], base_confidence=0.88)

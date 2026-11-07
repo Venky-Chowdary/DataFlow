@@ -40,6 +40,20 @@ def test_non_explicit_allows_widen():
     assert refusals == []
 
 
+def test_missing_candidate_keeps_current_ceiling():
+    """Unknown source DDL must not invent a VARCHAR widen candidate."""
+    desired, refusals = desired_types_honoring_map_stamps(
+        target_cols=["amount"],
+        current_target_types=["DECIMAL(10,2)"],
+        mappings=[
+            {"source": "amt", "target": "amount"},
+        ],
+        candidate_by_col={},  # writers skip inventing VARCHAR when source unknown
+    )
+    assert desired == ["DECIMAL(10,2)"]
+    assert refusals == []
+
+
 def test_explicit_keeps_stamp_when_candidate_narrower_or_equal():
     desired, refusals = desired_types_honoring_map_stamps(
         target_cols=["amount"],

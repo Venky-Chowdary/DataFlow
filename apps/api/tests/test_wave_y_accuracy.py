@@ -62,6 +62,12 @@ def test_snowflake_deny_create_skips_database_and_schema_ddl():
         executed.append(str(sql))
 
     cur.execute.side_effect = _exec
+    # A bare MagicMock answers every catalog probe truthily, which reads as
+    # "table exists but has no columns" — a different (also fail-closed)
+    # refusal. This case is the absent table, so the catalog answers empty.
+    cur.fetchone.return_value = None
+    cur.fetchall.return_value = []
+    cur.description = None
 
     with patch("connectors.snowflake_writer.get_connection", return_value=conn), patch(
         "connectors.snowflake_conn.resolve_snowflake_table_name", return_value=None

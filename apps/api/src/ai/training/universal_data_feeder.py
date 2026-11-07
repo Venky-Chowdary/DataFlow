@@ -18,6 +18,27 @@ from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
 # Hot-path cache TTL for Pilot NL routing (avoid re-parsing every CSV every turn).
 _FEED_CACHE_TTL_S = 60.0
 
+#: Parseable dataset extensions in the upload directory.
+_DATASET_SUFFIXES = (".csv", ".json", ".jsonl", ".tsv", ".ndjson")
+
+
+def _is_dataset_file(file_path: Path) -> bool:
+    """True for user datasets only.
+
+    The upload directory is shared with the transfer engine, which spills each
+    job's source payload there as ``xfer_<token>_<name>``. Those bytes belong to
+    one transfer (and one workspace), so surfacing them as Pilot datasets would
+    expose another job's source data and let a dataset lookup resolve against a
+    name the asker never uploaded.
+    """
+    from services.transfer_file_staging import is_transfer_staging_file
+
+    if not file_path.is_file():
+        return False
+    if file_path.suffix.lower() not in _DATASET_SUFFIXES:
+        return False
+    return not is_transfer_staging_file(file_path.name)
+
 
 @dataclass
 class UniversalSchema:
@@ -28,12 +49,15 @@ class UniversalSchema:
     row_count: int = 0
     industry: str | None = None
     file_type: str = ""
+    path: str = ""
 
 
 class UniversalDataFeeder:
     """Feed universal data schemas into the training pipeline."""
 
     def __init__(self, upload_dirs: list[str] | None = None):
+        #: upload stem -> why the parser refused it (round 10).
+        self.unreadable: dict[str, str] = {}
         base = Path(__file__).resolve().parents[3]  # apps/api
         default_dirs = [
             str(base / "uploads"),
@@ -72,11 +96,7 @@ class UniversalDataFeeder:
                 continue
             try:
                 for file_path in path.iterdir():
-                    if not file_path.is_file():
-                        continue
-                    if file_path.suffix.lower() not in (
-                        ".csv", ".json", ".jsonl", ".tsv", ".ndjson",
-                    ):
+                    if not _is_dataset_file(file_path):
                         continue
                     stem = file_path.stem
                     key = stem.lower()
@@ -106,16 +126,20 @@ class UniversalDataFeeder:
                 continue
 
             for file_path in path.iterdir():
-                if not file_path.is_file():
-                    continue
-                if file_path.suffix.lower() not in (".csv", ".json", ".jsonl", ".tsv", ".ndjson"):
+                if not _is_dataset_file(file_path):
                     continue
 
                 try:
                     content = file_path.read_bytes()
                     result = self.parser.parse(content, file_path.name)
                     if not result.success or not result.columns:
+                        # Remember why: "not found" for a file that is there
+                        # but unreadable sent the operator looking elsewhere.
+                        self.unreadable[file_path.stem.lower()] = str(
+                            result.error or "no columns could be read"
+                        )
                         continue
+                    self.unreadable.pop(file_path.stem.lower(), None)
 
                     samples: dict[str, list[str]] = {}
                     for col in result.columns:
@@ -132,6 +156,7 @@ class UniversalDataFeeder:
                         samples=samples,
                         row_count=result.row_count,
                         file_type=result.file_type,
+                        path=str(file_path.resolve()),
                     ))
                 except Exception as exc:
                     logger.warning("Could not load schema from %s: %s", file_path, exc)

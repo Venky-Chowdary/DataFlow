@@ -24,6 +24,19 @@ Datawrap is a **Migration Assurance Workbench**. Default product scope is
 3. Prefer **create-new staging** schemas outside CDE; cut over only after Gate-8 proof on non-CHD keys.
 4. Quarantine CSV downloads are evidence — treat as sensitive; delete after remediation.
 
+## How Validate flags card data (`compliance_guard.py`)
+
+These are risk signals, not a PCI scanner.
+
+- **Column name.** `pan` as a whole `_`-separated token with any prefix or suffix (`masked_pan`, `pan_encrypted`, `tokenized_pan`, `card_pan`…), `card_number`, `cc_number`, `credit_card`, `debit_card`, `payment_card`, `cvv`, `card_holder` and expiry fields. A masked, encrypted or tokenized PAN is not Luhn-valid, so the name is its only guard. Known non-card words are excluded: `pan_id`, regional `pan_african` / `pan_india` / …, `pan_region`, and the camera or chart sense (`pan_tilt`, `pan_x`, …).
+- **Text column.** Any Luhn-valid 13-19 digit value is a PAN.
+- **Numeric column (BIGINT, DECIMAL or int cells).** The column is card data when both of these hold:
+  - at least **5** sampled values are card numbers: 13-19 digits, Luhn-valid, with a card network's issuer prefix (Visa, Mastercard, Amex, Discover, JCB, UnionPay, Diners, Maestro, Mir, RuPay, Troy, UATP);
+  - those card numbers make up at least **80%** of the non-empty sample.
+
+  One integer key in ten passes Luhn by chance, so a column of ids is not card data.
+- **Small sample.** With 1-4 card hits at 80% or more of the non-empty sample, Validate shows a **non-blocking advisory** (`possible_pci_pan`, "small sample"), both in the preflight evidence (`proof_bundle.compliance.advisories`) and in the UI. It does not hold the transfer. Review the column, and rename or mask it if it holds PANs.
+
 ## What we will not claim
 
 - PCI DSS Level 1/2 service provider certification

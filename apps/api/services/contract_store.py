@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from services.data_contract import CircuitBreaker, DataContract
+from services.value_serializer import bson_safe_document, python_document_from_bson
+from services.workspace_filter import bound_allows, current_workspace_filter
 
 
 class ContractStore(ABC):
@@ -24,6 +26,10 @@ class ContractStore(ABC):
 
     @abstractmethod
     def list_contracts(self, limit: int = 200) -> list[DataContract]:
+        raise NotImplementedError
+
+    def count_contracts_by_status(self) -> dict[str, int]:
+        """Whole-store status census. A list page is not a population count."""
         raise NotImplementedError
 
     @abstractmethod
@@ -56,6 +62,13 @@ class InMemoryContractStore(ContractStore):
             reverse=True,
         )
         return items[:limit]
+
+    def count_contracts_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for contract in self._contracts.values():
+            status = str(getattr(contract.status, "value", contract.status) or "unknown").lower()
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         self._breakers[breaker.contract_id] = breaker
@@ -99,11 +112,21 @@ class MongoContractStore(ContractStore):
         try:
             db["contracts"].update_one(
                 {"id": contract.id},
-                {"$set": contract.to_dict()},
+                {"$set": bson_safe_document(contract.to_dict())},
                 upsert=True,
             )
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            # The file mirror above already holds it, so this is a degradation,
+            # not a loss — but it is named, because a control plane whose store
+            # is silently one contract behind is how a stale contract gets
+            # enforced against a run.
+            logging.getLogger(__name__).warning(
+                "Contract %s could not be written to MongoDB (%s); serving it "
+                "from the file mirror",
+                contract.id,
+                exc,
+                exc_info=exc,
+            )
         return contract
 
     def get_contract(self, contract_id: str) -> DataContract | None:
@@ -113,7 +136,7 @@ class MongoContractStore(ContractStore):
                 doc = db["contracts"].find_one({"id": contract_id})
                 if doc:
                     doc.pop("_id", None)
-                    return DataContract.from_dict(doc)
+                    return DataContract.from_dict(python_document_from_bson(doc))
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return self._fallback.get_contract(contract_id)
@@ -128,7 +151,7 @@ class MongoContractStore(ContractStore):
                 docs = list(db["contracts"].find().sort("updated_at", -1).limit(limit))
                 for doc in docs:
                     doc.pop("_id", None)
-                    c = DataContract.from_dict(doc)
+                    c = DataContract.from_dict(python_document_from_bson(doc))
                     by_id[c.id] = c
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -139,6 +162,27 @@ class MongoContractStore(ContractStore):
         )
         return items[:limit]
 
+    def count_contracts_by_status(self) -> dict[str, int]:
+        by_id = self._fallback.status_by_id()
+        db = self._get_db()
+        if db is not None:
+            try:
+                for doc in db["contracts"].find({}, {"id": 1, "status": 1}):
+                    contract_id = str(doc.get("id") or "")
+                    if not contract_id:
+                        continue
+                    by_id[contract_id] = str(doc.get("status") or "unknown").lower()
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Contract census could not read MongoDB (%s); using the file mirror",
+                    exc,
+                    exc_info=exc,
+                )
+        counts: dict[str, int] = {}
+        for status in by_id.values():
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         self._fallback.save_breaker(breaker)
         db = self._get_db()
@@ -147,11 +191,17 @@ class MongoContractStore(ContractStore):
         try:
             db["contract_breakers"].update_one(
                 {"contract_id": breaker.contract_id},
-                {"$set": breaker.to_dict()},
+                {"$set": bson_safe_document(breaker.to_dict())},
                 upsert=True,
             )
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            logging.getLogger(__name__).warning(
+                "Breaker state for contract %s could not be written to MongoDB "
+                "(%s); serving it from the file mirror",
+                breaker.contract_id,
+                exc,
+                exc_info=exc,
+            )
 
     def get_breaker(self, contract_id: str) -> CircuitBreaker:
         db = self._get_db()
@@ -160,7 +210,7 @@ class MongoContractStore(ContractStore):
                 doc = db["contract_breakers"].find_one({"contract_id": contract_id})
                 if doc:
                     doc.pop("_id", None)
-                    return CircuitBreaker.from_dict(doc)
+                    return CircuitBreaker.from_dict(python_document_from_bson(doc))
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return self._fallback.get_breaker(contract_id)
@@ -181,3 +231,61 @@ def reset_contract_store() -> None:
     """Reset the singleton store (useful in tests)."""
     global _store_instance
     _store_instance = None
+
+
+def contract_visible(contract: Any) -> bool:
+    """Whether the tenant scope bound to this request covers a contract (D154)."""
+    meta = getattr(contract, "metadata", None) or {}
+    return bound_allows(meta.get("workspace_id"))
+
+
+def visible_contracts(limit: int = 200) -> tuple[list[DataContract], dict[str, int]]:
+    """Contracts the bound scope covers (newest first, at most ``limit``) plus
+    the status census of every visible contract — never another workspace's."""
+    store = get_contract_store()
+    if current_workspace_filter() is None:
+        return store.list_contracts(limit=limit), store.count_contracts_by_status()
+    every = [c for c in store.list_contracts(limit=100_000) if contract_visible(c)]
+    census: dict[str, int] = {}
+    for c in every:
+        status = str(getattr(c.status, "value", c.status) or "unknown").lower()
+        census[status] = census.get(status, 0) + 1
+    return every[:limit], census
+
+
+def assert_contract_breaker_allows(contract_id: str) -> None:
+    """Fail-fast OPEN breaker — same rule as enqueue ``stamp_bound_contract``."""
+    cid = (contract_id or "").strip()
+    if not cid:
+        return
+    breaker = get_contract_store().get_breaker(cid)
+    if not breaker.allow():
+        raise ValueError(
+            f"Circuit breaker for contract {cid} is OPEN; "
+            f"reset it after you fix the violation, then re-run "
+            f"(current state: {breaker.state.value})"
+        )
+
+
+def bound_contract_preview(contract_id: str, *, require_signed: bool = False) -> dict[str, Any]:
+    """Read-only bind fields for Pilot Confirm / list. Never invents. Never raises.
+
+    OPEN / unsigned still appear so the operator can see why Run is refused.
+    Staging and enqueue call ``assert_signed_contract`` +
+    ``assert_contract_breaker_allows`` before offering Confirm.
+    """
+    cid = (contract_id or "").strip()
+    require = bool(require_signed)
+    if not cid and not require:
+        return {}
+    out: dict[str, Any] = {}
+    if require:
+        out["require_signed_contract"] = True
+    if not cid:
+        return out
+    out["contract_id"] = cid
+    out["require_signed_contract"] = require
+    out["enforce_contract"] = True
+    breaker = get_contract_store().get_breaker(cid)
+    out["breaker_state"] = getattr(breaker.state, "value", str(breaker.state))
+    return out

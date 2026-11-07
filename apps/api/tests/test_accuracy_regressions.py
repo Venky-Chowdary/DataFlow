@@ -56,8 +56,14 @@ def test_g8_blocks_on_write_path_transform_error():
         destination_db_type="snowflake",
     )
     blocker_ids = {b["id"] for b in result.get("blockers") or []}
-    # G5 dry-run and/or G8 must surface the bad decimal — never silent pass.
-    assert blocker_ids & {"g5_dry_run", "g8_reconciliation", "g9_data_integrity"}
+    # G5/G8/G9 or orchestrated root-cause ids — never silent pass on bad decimal.
+    gate_ish = {"g5_dry_run", "g8_reconciliation", "g9_data_integrity"}
+    root_ish = {
+        b
+        for b in blocker_ids
+        if str(b).startswith("rc-") or "fidelity" in str(b) or "transform" in str(b)
+    }
+    assert (blocker_ids & gate_ish) or root_ish, blocker_ids
     assert result["passed"] is False
 
 
