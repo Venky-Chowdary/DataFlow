@@ -47,6 +47,8 @@ class _RecordingMongo:
         self._inner = _FakeMongo()
         self.jobs = self._inner.jobs
         self.messages: list[str] = []
+        #: Messages written through update_job_status: each is an event-log line.
+        self.status_messages: list[str] = []
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -58,6 +60,8 @@ class _RecordingMongo:
 
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         self._note(kwargs)
+        if kwargs.get("message"):
+            self.status_messages.append(str(kwargs["message"]))
         return self._inner.update_job_status(job_id, status, **kwargs)
 
     def update_job_fields(self, job_id: str, fields: dict, **_kw) -> bool:
@@ -144,6 +148,11 @@ def test_the_source_reread_reports_progress_before_the_destination_checksum(worl
     first_reread = store.messages.index(reread[0])
     gate8 = [i for i, m in enumerate(store.messages) if m.startswith(GATE8_ENTER)]
     assert gate8 and first_reread < gate8[0], (first_reread, gate8)
+    # The Jobs log gets about one line per tenth, not one per pulse: twelve
+    # pages here each moved the count.
+    logged = [m for m in store.status_messages if m.startswith(REREAD_PREFIX)]
+    assert len(logged) <= 12, len(logged)
+    assert f"{ROWS:,} of {ROWS:,} rows" in logged[-1], logged[-1]
     summary = result.destination_summary or {}
     assert summary.get("source_independently_reread") is not False, summary.get("checksum_mode")
 

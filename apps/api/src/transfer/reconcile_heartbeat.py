@@ -297,17 +297,28 @@ def source_reread_heartbeat(
     )
     stop = threading.Event()
     shown = [0]
+    logged_step = [-1]
 
-    def _report() -> None:
+    def _report(final: bool = False) -> None:
         read = int(progress.rows_hashed)
         message = _source_reread_message(
             read, expected, int(time.monotonic() - started), bound
         )
-        if read > shown[0]:
-            shown[0] = read
+        if read <= shown[0]:
+            # Alive, nothing new: the stall signal (updated_at) stays put.
+            _stamp_heartbeat(mongo, job_id, {**fixed, "message": message})
+            return
+        shown[0] = read
+        step = min(10, read * 10 // expected) if expected > 0 else 0
+        if final or step > logged_step[0]:
+            # One event-log line per tenth (and the last count), through the
+            # status fence: a cancelled job is never set back to running.
+            logged_step[0] = step
             mongo.update_job_status(job_id, "running", **fixed, message=message)
         else:
-            _stamp_heartbeat(mongo, job_id, {**fixed, "message": message})
+            # Real progress between tenths: the live message and updated_at
+            # move without a log line every pulse.
+            mongo.update_job_fields(job_id, {**fixed, "message": message})
 
     def _pulse() -> None:
         while not stop.wait(interval_s):
@@ -322,7 +333,7 @@ def source_reread_heartbeat(
     try:
         yield progress
         try:
-            _report()  # the final count, so the last line says every row
+            _report(final=True)  # the final count, so the last line says every row
         except Exception as exc:  # noqa: BLE001 - a status line must never fail the run
             logger.debug("source re-read final count not posted for %s: %s", job_id, exc)
     finally:
