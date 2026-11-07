@@ -1058,7 +1058,7 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(theater, /onSchedule/);
     assert.match(theater, /Schedule/);
     assert.match(theater, /onCompleteRef\.current/);
-    assert.match(theater, /return stop;\s*\}, \[jobId\]/);
+    assert.match(theater, /return stop;\s*\}, \[jobId, liveWorkspaceId\]/);
     assert.match(theater, /completedLoggedRef/);
     assert.match(theater, /alreadyTerminal/);
     assert.match(theater, /theaterElapsedMs/);
