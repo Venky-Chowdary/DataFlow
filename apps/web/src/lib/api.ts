@@ -1,3 +1,5 @@
+import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
+import { streamDropNotice, streamSilenceNeedsCatchUp } from "./jobStreamLiveness";
 import { rowsProcessedUnknown } from "./jobRows";
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, JournalManifest, OpenedJournal, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
@@ -1756,7 +1758,7 @@ export async function cancelJob(jobId: string): Promise<{ success: boolean; job_
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
 export function streamJobProgress(
   jobId: string,
-  onUpdate: (job: JobProgress) => void,
+  onUpdate: (delivery: ProgressDelivery) => void,
   onError?: (err: Error) => void,
 ): () => void {
   let stopped = false;
@@ -1788,9 +1790,11 @@ export function streamJobProgress(
       records_processed_unknown: rowsProcessedUnknown(raw),
       total_rows: Number(raw.total_rows ?? 0),
       progress_pct: Number(raw.progress_pct ?? 0),
+      reconcile_pct: raw.reconcile_pct != null ? Number(raw.reconcile_pct) : undefined,
       progress_indeterminate: Boolean(raw.progress_indeterminate),
       phase: raw.phase ? String(raw.phase) : undefined,
       message: raw.message ? String(raw.message) : undefined,
+      workspace_id: raw.workspace_id ? String(raw.workspace_id) : undefined,
       operation: raw.operation ? String(raw.operation) : undefined,
       error: raw.error ? String(raw.error) : undefined,
       error_details: raw.error_details && typeof raw.error_details === "object"
@@ -1974,27 +1978,97 @@ export function streamJobProgress(
     };
   };
 
+  let lastEventMs = Date.now();
+  let watchTimer: ReturnType<typeof setInterval> | null = null;
+  let ticket = 0;
+  let readInFlight = false;
+
+  const noteDelivery = () => {
+    lastEventMs = Date.now();
+  };
+
+  const stopTimers = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    if (watchTimer) clearInterval(watchTimer);
+    pollTimer = null;
+    watchTimer = null;
+  };
+
+  const isTerminalStatus = (status: string | undefined) => (
+    status === "completed"
+    || status === "completed_with_quarantine"
+    || status === "failed"
+    || status === "cancelled"
+  );
+
+  const readJobDocument = async (): Promise<
+    | { kind: "job"; job: JobProgress }
+    | { kind: "absent"; absence: ProgressAbsence }
+    | { kind: "unavailable" }
+  > => {
+    try {
+      const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}`);
+      if (res.status === 404) return { kind: "absent", absence: "missing" };
+      if (res.status === 401) return { kind: "absent", absence: "unauthorized" };
+      if (res.status === 403) return { kind: "absent", absence: "forbidden" };
+      if (!res.ok) return { kind: "unavailable" };
+      const raw = await res.json() as Record<string, unknown>;
+      return { kind: "job", job: normalize(raw) };
+    } catch {
+      return { kind: "unavailable" };
+    }
+  };
+
+  /** Seq is taken before the await. `stopped` is checked again after it. */
+  const deliverRead = async (issued: number, boundWorkspaceId: string) => {
+    const outcome = await readJobDocument();
+    readInFlight = false;
+    if (stopped) return;
+    if (outcome.kind === "unavailable") return;
+    noteDelivery();
+    if (outcome.kind === "absent") {
+      onUpdate({
+        seq: issued,
+        jobId,
+        boundWorkspaceId,
+        job: null,
+        absence: outcome.absence,
+      });
+      return;
+    }
+    onUpdate({
+      seq: issued,
+      jobId,
+      boundWorkspaceId,
+      job: outcome.job,
+    });
+    if (isTerminalStatus(outcome.job.status)) {
+      stopped = true;
+      stopTimers();
+    }
+  };
+
+  const beginRead = () => {
+    if (stopped || readInFlight) return;
+    readInFlight = true;
+    const issued = ++ticket;
+    const boundWorkspaceId = getActiveWorkspaceId();
+    void deliverRead(issued, boundWorkspaceId);
+  };
+
   const startPolling = () => {
     if (pollTimer) return;
-    const poll = async () => {
-      if (stopped) return;
-      try {
-        const job = await fetchJob(jobId);
-        onUpdate(job);
-        if (
-          job.status === "completed"
-          || job.status === "completed_with_quarantine"
-          || job.status === "failed"
-          || job.status === "cancelled"
-        ) {
-          if (pollTimer) clearInterval(pollTimer);
-        }
-      } catch (e) {
-        onError?.(e instanceof Error ? e : new Error("Poll failed"));
-      }
-    };
-    poll();
-    pollTimer = setInterval(poll, 3000);
+    beginRead();
+    pollTimer = setInterval(beginRead, 3000);
+  };
+
+  const armCatchUp = () => {
+    if (watchTimer) return;
+    watchTimer = setInterval(() => {
+      if (stopped || readInFlight) return;
+      if (!streamSilenceNeedsCatchUp(lastEventMs, Date.now())) return;
+      beginRead();
+    }, 4_000);
   };
 
   try {
@@ -2007,15 +2081,15 @@ export function streamJobProgress(
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
+        const issued = ++ticket;
+        const boundWorkspaceId = getActiveWorkspaceId();
         const job = normalize(JSON.parse(ev.data));
-        onUpdate(job);
-        if (
-          job.status === "completed"
-          || job.status === "completed_with_quarantine"
-          || job.status === "failed"
-          || job.status === "cancelled"
-        ) {
+        noteDelivery();
+        onUpdate({ seq: issued, jobId, boundWorkspaceId, job });
+        if (isTerminalStatus(job.status)) {
           closedTerminal = true;
+          stopped = true;
+          stopTimers();
           es.close();
         }
       } catch {
@@ -2027,18 +2101,21 @@ export function streamJobProgress(
       // Closing a completed stream fires onerror in some browsers. Do not
       // reconnect — that re-appends the last log line and makes it jump.
       if (stopped || closedTerminal) return;
+      onError?.(new Error(streamDropNotice()));
       startPolling();
     };
+    armCatchUp();
     return () => {
       stopped = true;
       es.close();
-      if (pollTimer) clearInterval(pollTimer);
+      stopTimers();
     };
   } catch {
     startPolling();
+    armCatchUp();
     return () => {
       stopped = true;
-      if (pollTimer) clearInterval(pollTimer);
+      stopTimers();
     };
   }
 }

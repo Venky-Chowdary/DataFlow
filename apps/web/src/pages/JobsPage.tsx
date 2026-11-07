@@ -51,7 +51,9 @@ import {
   formatValidationModeLabel,
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
-import { scheduleRecoveryRoute } from "../lib/jobStudioRoute";
+import { clearStudioRecovery, decideStudioRecovery } from "../lib/studioRecovery";
+import { getActiveWorkspaceId } from "../lib/workspace";
+import { readSession } from "../lib/session";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
 import { reconcileBarPercent } from "../lib/progressRing";
@@ -99,6 +101,23 @@ export type JobsStudioIntent = {
   destTable?: string;
   /** Persist mappings onto this draft — do not POST a second empty schedule. */
   scheduleId?: string;
+  /**
+   * Replace Studio's mounted route. Empty SQL, keys, and tables clear the
+   * previous route instead of leaving it on screen.
+   */
+  replaceRoute?: boolean;
+  sourceReadMode?: string;
+  sourceSql?: string;
+  primaryKey?: string;
+  cursorColumn?: string;
+  rowLimit?: number;
+  destDatabase?: string;
+  workspaceId?: string;
+  syncMode?: string;
+  shapeSteps?: unknown[];
+  procedureParams?: Record<string, string>;
+  /** A refused open still replaces the mounted route so the previous one cannot run. */
+  refused?: "unauthenticated" | "wrong_workspace";
   /** Replay a capture-once journal: Studio's Source becomes this verified journal stream. */
   journalId?: string;
   journalStream?: string;
@@ -823,19 +842,66 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     const jobId = selectedId || liveJob?._id || undefined;
     const own = liveJob && liveJob._id === jobId ? liveJob : null;
     const rules = jobStudioDataRules(own);
-    const scheduleRoute = scheduleRecoveryRoute(own);
+    const decision = decideStudioRecovery({
+      job: own,
+      activeWorkspaceId: getActiveWorkspaceId(),
+      knownConnectorIds: [],
+      connectorsLoaded: false,
+      authenticated: Boolean(readSession()),
+    });
+    if (decision.action === "refuse") {
+      clearStudioRecovery();
+      openStudio({
+        step: "source",
+        replaceRoute: true,
+        refused: decision.reason,
+        sourceSql: "",
+        primaryKey: "",
+        cursorColumn: "",
+        sourceTable: "",
+        destTable: "",
+        destDatabase: "",
+        shapeSteps: [],
+        procedureParams: {},
+      });
+      toast({
+        title: decision.reason === "unauthenticated" ? "Sign in required" : "Job is in another workspace",
+        message: decision.reason === "wrong_workspace"
+          ? "Transfer Studio was cleared. Switch workspace before opening this job."
+          : "Sign in before opening this job in Transfer Studio.",
+        tone: "warning",
+      });
+      return;
+    }
+    const fields = decision.fields;
+    const mappings: RepairMapping[] = (own ? jobRepairMappings : fields.mappings) as RepairMapping[];
     openStudio({
       step,
       jobId,
-      mappings: own ? jobRepairMappings : undefined,
+      replaceRoute: true,
+      mappings,
       preflight: own?.preflight,
       validationMode: rules.validationMode || undefined,
       schemaPolicy: rules.schemaPolicy || undefined,
       deliveryGuarantee: own ? jobStudioDeliveryGuarantee(own) || undefined : undefined,
-      ...(scheduleRoute ?? {}),
+      scheduleId: fields.scheduleId || undefined,
+      sourceConnectorId: fields.sourceConnectorId || undefined,
+      destConnectorId: fields.destConnectorId || undefined,
+      sourceTable: fields.sourceTable || undefined,
+      destTable: fields.destTable || undefined,
+      destDatabase: fields.destDatabase || undefined,
+      syncMode: fields.syncMode || undefined,
+      sourceReadMode: fields.sourceReadMode,
+      sourceSql: fields.sourceSql,
+      primaryKey: fields.primaryKey,
+      cursorColumn: fields.cursorColumn,
+      rowLimit: fields.rowLimit,
+      workspaceId: fields.workspaceId || undefined,
+      shapeSteps: fields.shapeSteps,
+      procedureParams: fields.procedureParams,
       ...extra,
     });
-  }, [openStudio, selectedId, liveJob, jobRepairMappings]);
+  }, [openStudio, selectedId, liveJob, jobRepairMappings, toast]);
   const openValidateInStudio = useCallback(
     (extra?: Partial<JobsStudioIntent>) => openJobInStudio("validate", extra),
     [openJobInStudio],

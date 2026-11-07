@@ -52,6 +52,27 @@ export function connectorPassedProbe(c: ConnectorHealthFields): boolean {
   return connectorTestHealth(c) === "passed";
 }
 
+/**
+ * Overview Connections subtitle. Never-tested and failed probes are named.
+ * A connector that has not been probed is not counted as healthy.
+ */
+export function connectionHealthSummary(connectors: readonly ConnectorHealthFields[]): string {
+  if (!connectors.length) return "No connections yet";
+  let healthy = 0;
+  let untested = 0;
+  let failed = 0;
+  for (const connector of connectors) {
+    const health = connectorTestHealth(connector);
+    if (health === "passed") healthy += 1;
+    else if (health === "failed") failed += 1;
+    else untested += 1;
+  }
+  const parts = [`${healthy} healthy`];
+  if (untested) parts.push(`${untested} never tested`);
+  if (failed) parts.push(`${failed} need attention`);
+  return parts.join(" · ");
+}
+
 export function connectorNeedsAttention(c: ConnectorHealthFields): boolean {
   return connectorTestHealth(c) === "failed";
 }

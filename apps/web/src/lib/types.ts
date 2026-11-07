@@ -206,6 +206,8 @@ export interface TransferJob {
   progress_indeterminate?: boolean;
   phase?: string;
   message?: string;
+  /** Tenant that owns the job. A live frame from another workspace is not shown. */
+  workspace_id?: string;
   operation?: string;
   error?: string;
   /** Structured failure details (code, title, fix, raw driver message). */

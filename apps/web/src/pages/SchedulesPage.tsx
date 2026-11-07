@@ -48,6 +48,9 @@ import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
 import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import { clearStudioRecovery } from "../lib/studioRecovery";
+import { readSession } from "../lib/session";
+import { getActiveWorkspaceId } from "../lib/workspace";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 import {
   Connector,
@@ -259,7 +262,20 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const openStudioFromSchedule = (id: string) => {
     const sched = schedules.find((s) => s.id === id);
     if (!sched || !onStartTransfer) return;
-    onStartTransfer(studioIntentFromSchedule(sched));
+    const intent = studioIntentFromSchedule(sched, getActiveWorkspaceId(), Boolean(readSession()));
+    if (intent.refused) {
+      clearStudioRecovery();
+      onStartTransfer(intent);
+      toast({
+        title: intent.refused === "unauthenticated" ? "Sign in required" : "Schedule is in another workspace",
+        message: intent.refused === "unauthenticated"
+          ? "Transfer Studio was cleared. Sign in before opening this pipeline."
+          : "Transfer Studio was cleared. Switch workspace before opening this pipeline.",
+        tone: "warning",
+      });
+      return;
+    }
+    onStartTransfer(intent);
   };
 
   const enabledCount = schedules.filter((s) => s.enabled).length;
@@ -327,7 +343,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       await load();
       void onSchedulesChange?.();
       if (created && scheduleCreateOpensStudio(created) && onStartTransfer) {
-        onStartTransfer(studioIntentFromSchedule(created));
+        const intent = studioIntentFromSchedule(created, getActiveWorkspaceId());
+        if (!intent.refused) onStartTransfer(intent);
       }
     } catch (err) {
       toast({

@@ -63,12 +63,53 @@ test("a paused schedule with mapping_count 0 needs Studio, not Decide", () => {
   assert.equal(scheduleNeedsStudio(sched), true);
   assert.deepEqual(studioIntentFromSchedule(sched), {
     step: "source",
+    replaceRoute: true,
     scheduleId: "s1",
     sourceConnectorId: "src",
     destConnectorId: "dst",
     sourceTable: "orders",
     destTable: "orders_dw",
+    destDatabase: "",
+    syncMode: "",
+    sourceReadMode: "table",
+    sourceSql: "",
+    primaryKey: "",
+    cursorColumn: "",
+    rowLimit: 0,
+    mappings: [],
+    workspaceId: "",
+    shapeSteps: [],
+    procedureParams: {},
   });
+});
+
+test("a schedule opened from another workspace does not carry its SQL across", () => {
+  const sched = {
+    id: "s1",
+    workspace_id: "ws-a",
+    source_connector_id: "src",
+    dest_connector_id: "dst",
+    source_table: "qa_my_seed",
+    dest_table: "landed",
+    source_read_mode: "query",
+    source_query: "SELECT * FROM qa_my_seed LIMIT 3",
+    primary_key: "id",
+    cursor_column: "id",
+    sync_mode: "incremental_deduped",
+    mappings: [{ source: "id", target: "id" }],
+  } as PipelineSchedule;
+  const refused = studioIntentFromSchedule(sched, "ws-b");
+  assert.equal(refused.refused, "wrong_workspace");
+  assert.equal(refused.sourceSql, "");
+  assert.equal(refused.sourceConnectorId, "");
+  const same = studioIntentFromSchedule(sched, "ws-a");
+  assert.equal(same.refused, undefined);
+  assert.equal(same.sourceSql, "SELECT * FROM qa_my_seed LIMIT 3");
+  assert.equal(same.primaryKey, "id");
+  assert.equal(same.cursorColumn, "id");
+  assert.equal(same.syncMode, "incremental_deduped");
+  assert.equal(same.rowLimit, 0);
+  assert.equal(same.mappings.length, 1);
 });
 
 test("inbox copy names Studio even when the stored finding says Open Validate", () => {

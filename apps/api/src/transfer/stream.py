@@ -3064,9 +3064,16 @@ def _stream_database_transfer_impl(
                 str(checksum_cursor_after), has_tiebreak=_seed_tiebreak
             )[0]
         # The run's window is published once, above, for every digest mode.
-        use_checksum_keyset = False
-        if run.cfg.incremental and checksum_cursor_col:
-            use_checksum_keyset = True
+        callable_reread = bool(
+            is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg)
+        )
+        # A query spool is not a keyset index. Advancing cursor_after to the
+        # page max makes read_callable_batch parse the whole spool on every
+        # page (no early stop) and can omit rows. Offset + the run watermark
+        # is the same seek the write pass uses.
+        use_checksum_keyset = bool(
+            run.cfg.incremental and checksum_cursor_col and not callable_reread
+        )
         read_offset = 0
         checksum_rows_read = 0
         # The re-read covers the population the write pass read: its first
@@ -3120,6 +3127,18 @@ def _stream_database_transfer_impl(
                     )
                     if read_limit <= 0:
                         break
+                    if callable_reread:
+                        from services.source_reread import callable_reread_seek
+
+                        _seek = callable_reread_seek(
+                            page_start=read_offset,
+                            seed_watermark=window_seed_bookmark if run.cfg.incremental else None,
+                        )
+                        _read_off = int(_seek["offset"])
+                        _cursor_after = _seek["cursor_after"]
+                    else:
+                        _read_off = read_offset if use_reread_offset else 0
+                        _cursor_after = checksum_cursor_after
                     run.cfg._scan_kw = {"scan_state": reread_scan} if reread_scan is not None else {}
                     batch, _ = _unwrap_read(
                         _read_batch(
@@ -3127,11 +3146,11 @@ def _stream_database_transfer_impl(
                             run.cfg.src_cfg,
                             run.cfg.table,
                             run.cfg.columns,
-                            read_offset if use_reread_offset else 0,
+                            _read_off,
                             read_limit,
                             database=run.cfg.src_db,
                             cursor_column=checksum_cursor_col,
-                            cursor_after=checksum_cursor_after,
+                            cursor_after=_cursor_after,
                             cursor_inclusive=checksum_seed_read,
                             cursor_type=cursor_type_for_read,
                             # A tie-broken incremental watermark is composite

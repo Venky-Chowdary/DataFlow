@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   coerceLastTestOk,
   connectorLooksHealthy,
+  connectionHealthSummary,
   connectorPassedProbe,
   connectorNeedsAttention,
   connectorTestHealth,
@@ -54,6 +55,27 @@ describe("connectorHealth", () => {
     assert.equal(coerceLastTestOk(1), true);
     assert.equal(coerceLastTestOk(0), false);
     assert.equal(connectorTestHealth({ last_test_ok: "true" as unknown as boolean }), "passed");
+  });
+
+  it("overview health names zero, mixed, and all-passed probes", () => {
+    assert.equal(connectionHealthSummary([]), "No connections yet");
+    assert.equal(
+      connectionHealthSummary([{ last_test_ok: true }, { last_test_ok: true }]),
+      "2 healthy",
+    );
+    assert.equal(
+      connectionHealthSummary([
+        { last_test_ok: true },
+        {},
+        { last_test_ok: false },
+      ]),
+      "1 healthy · 1 never tested · 1 need attention",
+    );
+    assert.equal(
+      connectionHealthSummary([{}, { last_test_ok: false }]),
+      "0 healthy · 1 never tested · 1 need attention",
+    );
+    assert.equal(connectionHealthSummary([{}]).includes("1 healthy"), false);
   });
 
   it("derives status from probe without sticky error", () => {

@@ -32,9 +32,9 @@ import {
   type FreshnessAlert,
 } from "../components/overview/FreshnessSloPanel";
 import { dismissBanner, isBannerDismissed } from "../lib/dismissibleBanner";
-import { buildDataPlaneTopology, countSavedConnectionRoutes } from "../lib/topologyUtils";
+import { buildDataPlaneTopology, dataPlaneSubtitle, summarizeDataPlane } from "../lib/topologyUtils";
 import {
-  connectorPassedProbe,
+  connectionHealthSummary,
   connectorTestHealth,
 } from "../lib/connectorHealth";
 import { scheduleCadenceLabel } from "../lib/scheduleCadence";
@@ -154,9 +154,9 @@ export function DashboardPage({
   const successRate = stats.successRate;
   const failedCount = stats.failed;
   const runningCount = stats.running;
-  const healthyConnectors = connectors.filter((c) => connectorPassedProbe(c)).length;
   const untestedConnectors = connectors.filter((c) => connectorTestHealth(c) === "never_tested").length;
   const failedConnectors = connectors.filter((c) => connectorTestHealth(c) === "failed").length;
+  const connectionHealthLine = connectionHealthSummary(connectors);
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
   const cdcLagSeconds = useMemo(() => {
     const lags = [...running, ...completed]
@@ -177,7 +177,7 @@ export function DashboardPage({
     () => buildDataPlaneTopology(connectors, jobs, schedules),
     [connectors, jobs, schedules],
   );
-  const routeCount = countSavedConnectionRoutes(topology);
+  const plane = summarizeDataPlane(topology, connectors.length);
 
   const healthScore = useMemo(() => {
     if (connectors.length === 0 && stats.total === 0) return null;
@@ -360,11 +360,7 @@ export function DashboardPage({
                 <div>
                   <h2 className="df2-overview-v3-card-title">Data plane</h2>
                   <p className="df2-overview-v3-card-sub">
-                    {routeCount
-                      ? `${routeCount} active route${routeCount > 1 ? "s" : ""}`
-                      : connectors.length
-                        ? `${connectors.length} connection${connectors.length === 1 ? "" : "s"} · no routes yet`
-                        : "Connect sources and destinations to map your topology"}
+                    {dataPlaneSubtitle(plane)}
                   </p>
                 </div>
                 {onOpenConnectors && (
@@ -515,13 +511,7 @@ export function DashboardPage({
                 <div>
                   <h2 className="df2-overview-v3-card-title">Connections</h2>
                   <p className="df2-overview-v3-card-sub">
-                    {connectors.length
-                      ? [
-                          `${healthyConnectors} healthy`,
-                          untestedConnectors ? `${untestedConnectors} never tested` : "",
-                          failedConnectors ? `${failedConnectors} need attention` : "",
-                        ].filter(Boolean).join(" · ")
-                      : "No connections yet"}
+                    {connectionHealthLine}
                   </p>
                 </div>
                 {onOpenConnectors && (

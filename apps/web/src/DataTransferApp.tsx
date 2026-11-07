@@ -20,6 +20,7 @@ import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
+import { loadStudioRecovery } from "./lib/studioRecovery";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
@@ -148,7 +149,18 @@ function AppShell({
   /** Seed Transfer Studio source from Connectors drawer (id + token so re-clicks re-apply). */
   const [transferSeedSource, setTransferSeedSource] = useState<{ connectorId: string; token: number } | null>(null);
   /** Jobs → Studio deep-link (Validate / repair proposal / seeded mappings). */
-  const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(null);
+  const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(() => {
+    const saved = loadStudioRecovery(getActiveWorkspaceId());
+    if (!saved?.jobId && !saved?.scheduleId) return null;
+    return {
+      token: 1,
+      step: "source",
+      replaceRoute: true,
+      jobId: saved.jobId || undefined,
+      scheduleId: saved.scheduleId || undefined,
+      workspaceId: saved.workspaceOfRoute,
+    };
+  });
   const searchRef = useRef<HTMLInputElement>(null);
   const mobileNavRef = useRef<HTMLElement>(null);
   const mobileNavButtonRef = useRef<HTMLButtonElement>(null);

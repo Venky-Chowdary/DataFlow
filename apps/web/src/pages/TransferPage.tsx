@@ -61,6 +61,7 @@ import {
   updateSchedule,
   createTransferPlan,
   fetchJob,
+  fetchSchedule,
   fetchTransferCapabilities,
   introspectTransferEndpoints,
   mapTransferColumns,
@@ -266,7 +267,7 @@ import {
   buildStreamContracts,
   firstStreamContractIssue,
   resolveStreamFields,
-  seedStreamFieldsFromCandidates,
+  applyDeclaredStreamFields,
   type StreamFieldContract,
 } from "../lib/streamContracts";
 import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
@@ -303,6 +304,18 @@ import {
 } from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
+import {
+  applyRecoveryIntent,
+  applyStudioRecovery,
+  clearStudioRecovery,
+  decideStudioRecovery,
+  destinationEnginePaint,
+  emptyStudioRoute,
+  keepDeclaredCursorKey,
+  persistStudioRecovery,
+  type StudioRouteSnapshot,
+} from "../lib/studioRecovery";
+import { getActiveWorkspaceId } from "../lib/workspace";
 import {
   analysisFromPipeline,
   destinationCatalogLoadsOnStep,
@@ -346,6 +359,11 @@ export function TransferPage({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
+  /** Schedule/job declaration. Column heuristics must not replace these. */
+  const declaredCursorRef = useRef("");
+  const declaredPrimaryKeyRef = useRef("");
+  /** Recovery owns the shape program until the operator edits it. */
+  const shapeOwnedByRecovery = useRef(false);
   /** Last applied Connectors→Studio seed token (prevents re-seeding on connectors refresh). */
   const appliedSeedTokenRef = useRef<number | null>(null);
   /** Last destination identity we auto-analyzed — empty means not analyzed yet. */
@@ -2257,23 +2275,26 @@ export function TransferPage({
   }, [step, destKindMode, connectorId, currentDestinationProbeKey, destConnected, destSchemaLoading, destProbeRetryTick, studioFlags.canvas]);
 
   useEffect(() => {
-    if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {
-      setCursorField(cursorCandidate);
-    } else if (!cursorCandidate && cursorField && !currentSourceColumns.includes(cursorField)) {
-      setCursorField("");
-    }
-    if (primaryKeyCandidate && (!primaryKeyField || !currentSourceColumns.includes(primaryKeyField))) {
-      setPrimaryKeyField(primaryKeyCandidate);
-    } else if (!primaryKeyCandidate && primaryKeyField && !currentSourceColumns.includes(primaryKeyField)) {
-      setPrimaryKeyField("");
-    }
+    const next = keepDeclaredCursorKey({
+      cursorField,
+      primaryKeyField,
+      columns: currentSourceColumns,
+      cursorCandidate,
+      primaryKeyCandidate,
+      declaredCursor: declaredCursorRef.current,
+      declaredPrimaryKey: declaredPrimaryKeyRef.current,
+    });
+    if (next.cursorField !== cursorField) setCursorField(next.cursorField);
+    if (next.primaryKeyField !== primaryKeyField) setPrimaryKeyField(next.primaryKeyField);
     setStreamFields((prev) =>
-      seedStreamFieldsFromCandidates(
+      applyDeclaredStreamFields(
         advancedStreamNames,
         prev,
-        cursorCandidate || cursorField,
-        primaryKeyCandidate || primaryKeyField,
+        cursorCandidate,
+        primaryKeyCandidate,
         currentSourceColumns,
+        declaredCursorRef.current,
+        declaredPrimaryKeyRef.current,
       ),
     );
   }, [
@@ -2368,13 +2389,20 @@ export function TransferPage({
   }, [sourceKind]);
 
   useEffect(() => {
-    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector?.type)) {
-      setSourceReadMode(dialectOffersQuery(sourceConnector?.type) ? "query" : "table");
+    // No connector yet: keep a recovered query/procedure. Resetting here dropped
+    // the schedule's SQL while its connector id was still resolving, and a
+    // deleted connector would fall through to the previous route's table mode.
+    if (!sourceConnector) {
+      if (sourceKind === "file" && sourceReadMode !== "table") setSourceReadMode("table");
+      return;
     }
-    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector?.type)) {
+    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector.type)) {
+      setSourceReadMode(dialectOffersQuery(sourceConnector.type) ? "query" : "table");
+    }
+    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector.type)) {
       setSourceReadMode("table");
     }
-  }, [sourceConnector?.type, sourceReadMode]);
+  }, [sourceConnector, sourceKind, sourceReadMode]);
 
   // Carry selected connection from Connectors drawer into Transfer Studio source step.
   // Apply once per seed token — do not re-run on connectors list refresh (that would
@@ -2549,6 +2577,11 @@ export function TransferPage({
     }
   };
 
+  // Writes recovered binds. It is not a hook that reads the bound-value state.
+  const applyRecoveredBinds = (snap: { procedureParams?: Record<string, string> }) => {
+    setProcedureParams({ ...(snap.procedureParams || {}) });
+  };
+
   // Jobs → Studio: land on Validate/Map, seed mappings, open repair proposal.
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
@@ -2556,8 +2589,12 @@ export function TransferPage({
     // A job's route is matched against the saved connectors: applying it before
     // they load matched nothing and left the previous route in place.
     if (connectorsLoading) return;
-    if (!studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
+    const replacing = Boolean(seedStudioIntent.replaceRoute);
+    // A recovery replaces the mounted route even when the named connector was
+    // deleted. Waiting for a non-empty list left the previous route on screen.
+    if (!replacing && !studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
+    const intentToken = seedStudioIntent.token;
 
     setCellPreview(null);
     setMappingProof(null);
@@ -2641,24 +2678,211 @@ export function TransferPage({
     const seededSource = seedStudioIntent.sourceConnectorId
       ? connectors.find((c) => c.id === seedStudioIntent.sourceConnectorId)
       : undefined;
-    if (seededSource) {
-      if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
-      else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
-      setSourceConnectorId(seededSource.id);
-      setFile(null);
-      setParsed(null);
+    if (replacing) {
+      const blank = emptyStudioRoute();
+      const recoveryOpts = {
+        activeWorkspaceId: getActiveWorkspaceId(),
+        knownConnectorIds: connectors.map((c) => c.id),
+        connectorsLoaded: true,
+        authenticated: Boolean(readSession()),
+      };
+      const paintRecovery = (state: StudioRouteSnapshot) => {
+        // Block the auto-pick effect from putting the previous source back.
+        autoSelectedSourceConnector.current = true;
+        setFile(null);
+        setParsed(null);
+        setReplayJournal(null);
+        setRestoredFileName(null);
+        setSourceTable(state.sourceTable);
+        setSourceCollection("");
+        setProcedureCall(state.sourceSql);
+        setSourceReadMode(state.sourceReadMode);
+        setPrimaryKeyField(state.primaryKey);
+        setCursorField(state.cursorColumn);
+        declaredCursorRef.current = state.cursorColumn;
+        declaredPrimaryKeyRef.current = state.primaryKey;
+        setShapeSteps(Array.isArray(state.shapeSteps) ? state.shapeSteps as ShapeStepWire[] : []);
+        applyRecoveredBinds(state);
+        shapeOwnedByRecovery.current = true;
+        setStreamFields(state.sourceTable
+          ? {
+              [state.sourceTable]: {
+                cursorField: state.cursorColumn,
+                primaryKeyField: state.primaryKey,
+              },
+            }
+          : {});
+        persistStudioRecovery({
+          activeWorkspaceId: getActiveWorkspaceId(),
+          routeWorkspaceId: seedStudioIntent.workspaceId || getActiveWorkspaceId(),
+          jobId: seedStudioIntent.jobId,
+          scheduleId: state.scheduleId,
+        });
+        setRowLimit(state.rowLimit);
+        const syncModes = new Set([
+          "full_refresh_overwrite",
+          "full_refresh_append",
+          "incremental_append",
+          "incremental_deduped",
+          "cdc",
+          "scd2",
+          "mirror",
+        ]);
+        if (syncModes.has(state.syncMode)) setSyncMode(state.syncMode as SyncMode);
+        const seededMaps: EditableMapping[] = state.mappings.map((m) => ({
+          source: m.source,
+          target: m.destination || m.source,
+          confidence: 1,
+          destType: m.destination_type || m.target_type || "",
+          approved: false,
+          requiresReview: true,
+          transform: m.transform && m.transform !== "none" ? m.transform as EditableMapping["transform"] : undefined,
+          reason: seedStudioIntent.jobId
+            ? `Seeded from job ${seedStudioIntent.jobId.slice(0, 8)}…`
+            : "Seeded from the schedule route",
+        })).filter((m) => m.source);
+        jobSeedMappingsRef.current = seededMaps.length ? seededMaps : null;
+        setColumnMappings(seededMaps);
+        if (state.sourceConnectorId) {
+          const seeded = connectors.find((c) => c.id === state.sourceConnectorId);
+          if (seeded) {
+            if (CLOUD_SOURCE_TYPES.has(seeded.type)) setSourceKind("cloud");
+            else if (!FILE_FORMAT_SOURCE_TYPES.has(seeded.type)) setSourceKind("database");
+            setSourceConnectorId(seeded.id);
+          } else {
+            setSourceConnectorId("");
+            setSourceKind("database");
+          }
+        } else {
+          setSourceConnectorId("");
+          if (state.sourceTable || state.sourceSql) setSourceKind("database");
+        }
+        const destPaint = destinationEnginePaint({
+          destConnectorId: state.destConnectorId,
+          destTable: state.destTable,
+          destDatabase: state.destDatabase,
+          connectorFound: connectors.some((c) => c.id === state.destConnectorId),
+        });
+        setDestKindMode(destPaint.mode);
+        if (destPaint.clearEngine) {
+          setConnectorId("");
+          setDestType("");
+          setDestSchema("");
+          setDestConnectionString("");
+          setDestPassword("");
+          setDestUsername("");
+          setDestHost("");
+          setDestPort(0);
+          setDestWarehouse("");
+          setTargetDb(destPaint.database);
+          setTargetCollection(destPaint.table);
+        } else {
+          applyConnectorSelection(destPaint.connectorId);
+          setTargetCollection(destPaint.table);
+          if (destPaint.database) setTargetDb(destPaint.database);
+        }
+      };
+      const applied = applyRecoveryIntent(blank, seedStudioIntent, recoveryOpts);
+      paintRecovery(applied.state);
+      if (applied.refused) {
+        toast({
+          title: applied.refused === "unauthenticated" ? "Sign in required" : "Route is in another workspace",
+          message: applied.refused === "wrong_workspace"
+            ? "The previous route was cleared. This job or schedule belongs to a different workspace."
+            : "Sign in before opening this route in Transfer Studio.",
+          tone: "warning",
+        });
+        return;
+      }
+      if (seedStudioIntent.jobId && !seedStudioIntent.journalId) {
+        void fetchJob(seedStudioIntent.jobId).then((job) => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          const decision = decideStudioRecovery({
+            job,
+            activeWorkspaceId: getActiveWorkspaceId(),
+            knownConnectorIds: connectors.map((c) => c.id),
+            connectorsLoaded: true,
+            authenticated: Boolean(readSession()),
+          });
+          paintRecovery(applyStudioRecovery(blank, decision));
+          if (decision.action === "refuse") {
+            toast({
+              title: "Job is in another workspace",
+              message: "The route was cleared. Switch workspace to open that job.",
+              tone: "warning",
+            });
+            return;
+          }
+          const plan = planJobStudioRoute(job, connectors);
+          if (plan.source.kind !== "connector") {
+            void restoreRouteFromJob(job);
+          }
+        }).catch(() => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          paintRecovery(applyStudioRecovery(blank, { action: "refuse", reason: "unauthenticated" }));
+          clearStudioRecovery();
+          toast({
+            title: "Job route not loaded",
+            message: "The saved identity could not be refetched. Open the job again. Execute stays locked until Validate.",
+            tone: "warning",
+          });
+        });
+      }
+      if (
+        replacing
+        && seedStudioIntent.scheduleId
+        && !seedStudioIntent.jobId
+        && !seedStudioIntent.sourceSql
+      ) {
+        void fetchSchedule(seedStudioIntent.scheduleId).then((schedule) => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          const decision = decideStudioRecovery({
+            schedule,
+            activeWorkspaceId: getActiveWorkspaceId(),
+            knownConnectorIds: connectors.map((c) => c.id),
+            connectorsLoaded: true,
+            authenticated: Boolean(readSession()),
+          });
+          paintRecovery(applyStudioRecovery(blank, decision));
+          if (decision.action === "refuse") {
+            toast({
+              title: "Schedule is in another workspace",
+              message: "The route was cleared. Switch workspace to open that schedule.",
+              tone: "warning",
+            });
+          }
+        }).catch(() => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          paintRecovery(applyStudioRecovery(blank, { action: "refuse", reason: "unauthenticated" }));
+          clearStudioRecovery();
+          toast({
+            title: "Schedule route not loaded",
+            message: "The saved identity could not be refetched. Open the schedule again. Execute stays locked until Validate.",
+            tone: "warning",
+          });
+        });
+      }
+    } else {
+      if (seededSource) {
+        if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
+        else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
+        setSourceConnectorId(seededSource.id);
+        setFile(null);
+        setParsed(null);
+      }
+      if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
+      if (seedStudioIntent.destConnectorId) {
+        applyConnectorSelection(seedStudioIntent.destConnectorId);
+      }
+      if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
     }
-    if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
-    if (seedStudioIntent.destConnectorId) {
-      applyConnectorSelection(seedStudioIntent.destConnectorId);
-    }
-    if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
 
     if (seedStudioIntent.journalId) {
       void openJournalAsSource(seedStudioIntent.journalId, seedStudioIntent.journalStream || "");
     }
     if (
-      seedStudioIntent.jobId
+      !replacing
+      && seedStudioIntent.jobId
       && !seedStudioIntent.journalId
       && !seedStudioIntent.sourceConnectorId
     ) {
@@ -6352,6 +6576,7 @@ export function TransferPage({
   const hydratedDraft = useRef("");
   useEffect(() => {
     if (!studioFlags.canvas) return;
+    if (shapeOwnedByRecovery.current) return;
     if (!sourceLabel || sourceLabel.startsWith("Choose")) return;
     const key = `${sourceLabel}→${destLabelShort}`;
     if (hydratedDraft.current === key) return;
@@ -8259,6 +8484,7 @@ export function TransferPage({
           recipeBinding={recipeBinding}
           onBindRecipe={setRecipeBinding}
           onChangeSteps={(next) => {
+            shapeOwnedByRecovery.current = false;
             if (!isMultiStreamSource) {
               setShapeSteps(next);
               return;
@@ -9132,6 +9358,7 @@ export function TransferPage({
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setCursorField(value);
+            if (value !== declaredCursorRef.current) declaredCursorRef.current = "";
             setCursorSemantics("");
           }
         }}
@@ -9161,6 +9388,7 @@ export function TransferPage({
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setPrimaryKeyField(value);
+            if (value !== declaredPrimaryKeyRef.current) declaredPrimaryKeyRef.current = "";
           }
         }}
         onStreamDestProcedureChange={

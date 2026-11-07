@@ -18,6 +18,9 @@ import {
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { decideProgressDelivery, type ShownProgress } from "../lib/jobProgressGate";
+import { streamDropNotice } from "../lib/jobStreamLiveness";
+import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "../lib/workspace";
 import { isJobParked, isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
@@ -207,6 +210,13 @@ export function JobTheater({
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
+  const shownRef = useRef<ShownProgress | null>(null);
+  const [liveWorkspaceId, setLiveWorkspaceId] = useState(getActiveWorkspaceId);
+  useEffect(() => {
+    const sync = () => setLiveWorkspaceId(getActiveWorkspaceId());
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, sync);
+  }, []);
   const onCompleteRef = useRef(onComplete);
   const onFailedRef = useRef(onFailed);
   const onCancelledRef = useRef(onCancelled);
@@ -236,6 +246,8 @@ export function JobTheater({
     doneRef.current = false;
     completedLoggedRef.current = false;
     prevRef.current = { loggedRows: 0 };
+    shownRef.current = null;
+    setJob(null);
     logSeqRef.current = 0;
     rateSamplesRef.current = [];
     const append = (line: string) => {
@@ -259,7 +271,21 @@ export function JobTheater({
     if (!persisted.length) writeJobEventLog(jobId, [bootText]);
     const stop = streamJobProgress(
       jobId,
-      (update) => {
+      (delivery) => {
+        const decision = decideProgressDelivery({
+          subscribedJobId: jobId,
+          activeWorkspaceId: getActiveWorkspaceId(),
+          shown: shownRef.current,
+          delivery,
+        });
+        if (decision.action === "drop") return;
+        if (decision.action === "clear") {
+          shownRef.current = { seq: delivery.seq, jobId, status: undefined };
+          setJob(null);
+          return;
+        }
+        const update = decision.job;
+        shownRef.current = { seq: delivery.seq, jobId, status: update.status };
         const prev = prevRef.current;
 
         if (!doneRef.current && update.phase && update.phase !== prev.phase) {
@@ -369,12 +395,11 @@ export function JobTheater({
       },
       () => {
         if (doneRef.current) return;
-        append("Live stream interrupted — connection lost");
-        setJob((j) => (j && !isJobTerminal(j.status) ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : j));
+        append(streamDropNotice());
       },
     );
     return stop;
-  }, [jobId]);
+  }, [jobId, liveWorkspaceId]);
 
   // The live stream closes at the terminal status; the journal outcome is
   // written just after it, so a terminal run re-reads the job until it lands.

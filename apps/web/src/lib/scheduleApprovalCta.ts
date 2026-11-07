@@ -6,6 +6,7 @@
  * Schedule), not "Open Validate for this job" and not Decide.
  */
 
+import { decideStudioRecovery } from "./studioRecovery";
 import type { PipelineSchedule, ScheduleApprovalInboxItem } from "./types";
 
 export const EMPTY_MAPPING_STUDIO_CORRECTIVE =
@@ -95,20 +96,80 @@ export function studioIntentConnectorsReady(
 
 export { scheduleCreateOpensStudio } from "./sourceObjectPick";
 
-export function studioIntentFromSchedule(sched: PipelineSchedule): {
+export function studioIntentFromSchedule(
+  sched: PipelineSchedule,
+  activeWorkspaceId?: string,
+  authenticated = true,
+): {
   step: "source";
+  replaceRoute: true;
+  refused?: "unauthenticated" | "wrong_workspace";
   scheduleId: string;
   sourceConnectorId: string;
   destConnectorId: string;
   sourceTable: string;
   destTable: string;
+  destDatabase: string;
+  syncMode: string;
+  sourceReadMode: string;
+  sourceSql: string;
+  primaryKey: string;
+  cursorColumn: string;
+  rowLimit: number;
+  mappings: { source: string; destination: string }[];
+  workspaceId: string;
+  shapeSteps: unknown[];
+  procedureParams: Record<string, string>;
 } {
+  const decision = decideStudioRecovery({
+    schedule: sched,
+    activeWorkspaceId: activeWorkspaceId ?? sched.workspace_id ?? "",
+    knownConnectorIds: [sched.source_connector_id, sched.dest_connector_id].filter(Boolean),
+    connectorsLoaded: true,
+    authenticated,
+  });
+  if (decision.action === "refuse") {
+    return {
+      step: "source",
+      replaceRoute: true,
+      refused: decision.reason,
+      scheduleId: "",
+      sourceConnectorId: "",
+      destConnectorId: "",
+      sourceTable: "",
+      destTable: "",
+      destDatabase: "",
+      syncMode: "",
+      sourceReadMode: "table",
+      sourceSql: "",
+      primaryKey: "",
+      cursorColumn: "",
+      rowLimit: 0,
+      mappings: [],
+      workspaceId: "",
+      shapeSteps: [],
+      procedureParams: {},
+    };
+  }
+  const f = decision.fields;
   return {
     step: "source",
-    scheduleId: sched.id,
-    sourceConnectorId: sched.source_connector_id,
-    destConnectorId: sched.dest_connector_id,
-    sourceTable: sched.source_table,
-    destTable: sched.dest_table,
+    replaceRoute: true,
+    scheduleId: f.scheduleId,
+    sourceConnectorId: decision.missingSource ? "" : f.sourceConnectorId,
+    destConnectorId: decision.missingDest ? "" : f.destConnectorId,
+    sourceTable: f.sourceTable,
+    destTable: f.destTable,
+    destDatabase: f.destDatabase,
+    syncMode: f.syncMode,
+    sourceReadMode: f.sourceReadMode,
+    sourceSql: f.sourceSql,
+    primaryKey: f.primaryKey,
+    cursorColumn: f.cursorColumn,
+    rowLimit: f.rowLimit,
+    mappings: f.mappings,
+    workspaceId: f.workspaceId,
+    shapeSteps: f.shapeSteps,
+    procedureParams: f.procedureParams,
   };
 }
