@@ -8,6 +8,7 @@
  * A missing connector or a wrong workspace clears the stale route instead of
  * keeping it. Connection strings and passwords are never copied out.
  */
+import { readSession } from "./session";
 import type { PipelineSchedule } from "./types";
 
 export type SourceReadMode = "table" | "query" | "procedure";
@@ -504,19 +505,40 @@ export function keepDeclaredCursorKey(input: {
   };
 }
 
+export function emptyStudioRoute(): StudioRouteSnapshot {
+  return {
+    sourceConnectorId: "",
+    destConnectorId: "",
+    sourceTable: "",
+    destDatabase: "",
+    destTable: "",
+    syncMode: "full_refresh_append",
+    sourceReadMode: "table",
+    sourceSql: "",
+    primaryKey: "",
+    cursorColumn: "",
+    rowLimit: 0,
+    mappings: [],
+    scheduleId: "",
+    shapeSteps: [],
+    procedureParams: {},
+  };
+}
+
 /** Missing destination: drop the previous engine. Empty database clears the previous one. */
 export function destinationEnginePaint(input: {
   destConnectorId: string;
   destTable: string;
   destDatabase: string;
   connectorFound: boolean;
-}): { connectorId: string; table: string; database: string; clearEngine: boolean } {
+}): { connectorId: string; table: string; database: string; clearEngine: boolean; mode: "database" } {
   if (input.destConnectorId && input.connectorFound) {
     return {
       connectorId: input.destConnectorId,
       table: input.destTable,
       database: input.destDatabase,
       clearEngine: false,
+      mode: "database",
     };
   }
   return {
@@ -524,29 +546,18 @@ export function destinationEnginePaint(input: {
     table: input.destTable,
     database: input.destDatabase,
     clearEngine: true,
+    mode: "database",
   };
 }
 
-const RECOVERY_STORAGE_KEY = "df2.studioRecovery.v1";
+export const RECOVERY_STORAGE_KEY = "df2.studioRecovery.v1";
 
+/** Identity only. SQL, binds, mappings, and recipes are refetched, not stored. */
 export interface StoredStudioRecovery {
-  workspaceId: string;
-  scheduleId: string;
-  sourceConnectorId: string;
-  destConnectorId: string;
-  sourceTable: string;
-  destDatabase: string;
-  destTable: string;
-  syncMode: string;
-  sourceReadMode: string;
-  sourceSql: string;
-  primaryKey: string;
-  cursorColumn: string;
-  rowLimit: number;
-  mappings: RecoveryMapping[];
-  shapeSteps: unknown[];
-  procedureParams: Record<string, string>;
+  sessionEmail: string;
   workspaceOfRoute: string;
+  jobId: string;
+  scheduleId: string;
 }
 
 function storage(): Storage | null {
@@ -557,28 +568,27 @@ function storage(): Storage | null {
   }
 }
 
-/** Persist the open route so a hard reload can paint it again. No secrets. */
-export function persistStudioRecovery(activeWorkspaceId: string, snap: StudioRouteSnapshot, routeWorkspaceId = ""): void {
+/**
+ * Remember which job or schedule to refetch after a reload.
+ * The statement, binds, mappings, and recipe stay on the server.
+ */
+export function persistStudioRecovery(input: {
+  activeWorkspaceId: string;
+  routeWorkspaceId: string;
+  jobId?: string;
+  scheduleId?: string;
+}): void {
   const store = storage();
-  if (!store) return;
+  const email = text(readSession()?.email);
+  const owner = text(input.routeWorkspaceId) || text(input.activeWorkspaceId);
+  const jobId = text(input.jobId);
+  const scheduleId = text(input.scheduleId);
+  if (!store || !email || !owner || WORKSPACE_VIEWS.has(owner) || (!jobId && !scheduleId)) return;
   const record: StoredStudioRecovery = {
-    workspaceId: text(activeWorkspaceId),
-    scheduleId: snap.scheduleId,
-    sourceConnectorId: snap.sourceConnectorId,
-    destConnectorId: snap.destConnectorId,
-    sourceTable: snap.sourceTable,
-    destDatabase: snap.destDatabase,
-    destTable: snap.destTable,
-    syncMode: snap.syncMode,
-    sourceReadMode: snap.sourceReadMode,
-    sourceSql: snap.sourceSql,
-    primaryKey: snap.primaryKey,
-    cursorColumn: snap.cursorColumn,
-    rowLimit: snap.rowLimit,
-    mappings: snap.mappings.map((row) => ({ source: row.source, destination: row.destination })),
-    shapeSteps: snap.shapeSteps.slice(),
-    procedureParams: { ...snap.procedureParams },
-    workspaceOfRoute: text(routeWorkspaceId),
+    sessionEmail: email,
+    workspaceOfRoute: owner,
+    jobId,
+    scheduleId,
   };
   try {
     store.setItem(RECOVERY_STORAGE_KEY, JSON.stringify(record));
@@ -589,7 +599,11 @@ export function persistStudioRecovery(activeWorkspaceId: string, snap: StudioRou
 
 export function loadStudioRecovery(activeWorkspaceId: string): StoredStudioRecovery | null {
   const store = storage();
-  if (!store) return null;
+  const session = readSession();
+  const email = text(session?.email);
+  const scope = text(activeWorkspaceId);
+  // Fail closed: no session, no concrete workspace, or a directory view.
+  if (!store || !email || !scope || WORKSPACE_VIEWS.has(scope)) return null;
   let parsed: StoredStudioRecovery | null = null;
   try {
     const raw = store.getItem(RECOVERY_STORAGE_KEY);
@@ -599,12 +613,15 @@ export function loadStudioRecovery(activeWorkspaceId: string): StoredStudioRecov
     return null;
   }
   if (!parsed || typeof parsed !== "object") return null;
-  const scope = text(activeWorkspaceId);
-  const owner = text(parsed.workspaceOfRoute) || text(parsed.workspaceId);
-  if (owner && !WORKSPACE_VIEWS.has(scope) && scope && owner !== scope && text(parsed.workspaceId) !== scope) {
-    return null;
-  }
-  return parsed;
+  if (text(parsed.sessionEmail) !== email) return null;
+  if (text(parsed.workspaceOfRoute) !== scope) return null;
+  if (!text(parsed.jobId) && !text(parsed.scheduleId)) return null;
+  return {
+    sessionEmail: email,
+    workspaceOfRoute: scope,
+    jobId: text(parsed.jobId),
+    scheduleId: text(parsed.scheduleId),
+  };
 }
 
 export function clearStudioRecovery(): void {

@@ -151,31 +151,14 @@ function AppShell({
   /** Jobs → Studio deep-link (Validate / repair proposal / seeded mappings). */
   const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(() => {
     const saved = loadStudioRecovery(getActiveWorkspaceId());
-    if (!saved) return null;
-    if (!saved.scheduleId && !saved.destTable && !saved.sourceTable && !saved.sourceSql && !saved.sourceConnectorId) {
-      return null;
-    }
+    if (!saved?.jobId && !saved?.scheduleId) return null;
     return {
       token: 1,
       step: "source",
       replaceRoute: true,
-      jobId: undefined,
+      jobId: saved.jobId || undefined,
       scheduleId: saved.scheduleId || undefined,
-      sourceConnectorId: saved.sourceConnectorId || undefined,
-      destConnectorId: saved.destConnectorId || undefined,
-      sourceTable: saved.sourceTable || undefined,
-      destTable: saved.destTable || undefined,
-      destDatabase: saved.destDatabase,
-      syncMode: saved.syncMode || undefined,
-      sourceReadMode: saved.sourceReadMode,
-      sourceSql: saved.sourceSql,
-      primaryKey: saved.primaryKey,
-      cursorColumn: saved.cursorColumn,
-      rowLimit: saved.rowLimit,
-      mappings: saved.mappings as JobsStudioIntent["mappings"],
-      shapeSteps: saved.shapeSteps,
-      procedureParams: saved.procedureParams,
-      workspaceId: saved.workspaceOfRoute || saved.workspaceId || undefined,
+      workspaceId: saved.workspaceOfRoute,
     };
   });
   const searchRef = useRef<HTMLInputElement>(null);

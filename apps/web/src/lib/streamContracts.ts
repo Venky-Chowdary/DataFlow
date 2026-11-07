@@ -222,6 +222,43 @@ export function streamContractsNeedReview(input: StreamContractReviewInput): boo
   return firstStreamContractIssue(input) !== null;
 }
 
+/**
+ * Seed stream contracts, then force a declared cursor and primary key onto
+ * every selected stream. A heuristic candidate must not outrank a declaration
+ * that is already on the route, including when the previous contract named a
+ * column that is still in the schema.
+ */
+export function applyDeclaredStreamFields(
+  streamNames: string[],
+  prev: Record<string, StreamFieldContract>,
+  cursorCandidate: string,
+  primaryKeyCandidate: string,
+  sourceColumns: string[],
+  declaredCursor: string,
+  declaredPrimaryKey: string,
+): Record<string, StreamFieldContract> {
+  const seeded = seedStreamFieldsFromCandidates(
+    streamNames,
+    prev,
+    declaredCursor || cursorCandidate,
+    declaredPrimaryKey || primaryKeyCandidate,
+    sourceColumns,
+  );
+  if (!declaredCursor && !declaredPrimaryKey) return seeded;
+  const next = { ...seeded };
+  let changed = seeded !== prev;
+  for (const name of streamNames) {
+    const cur = next[name] ?? { cursorField: "", primaryKeyField: "" };
+    const cursorField = declaredCursor || cur.cursorField;
+    const primaryKeyField = declaredPrimaryKey || cur.primaryKeyField;
+    if (cursorField !== cur.cursorField || primaryKeyField !== cur.primaryKeyField || !next[name]) {
+      next[name] = { ...cur, cursorField, primaryKeyField, cursorSemantics: cur.cursorSemantics ?? "" };
+      changed = true;
+    }
+  }
+  return changed ? next : seeded;
+}
+
 /** Merge auto-detected candidates into each stream that lacks a field. */
 export function seedStreamFieldsFromCandidates(
   streamNames: string[],

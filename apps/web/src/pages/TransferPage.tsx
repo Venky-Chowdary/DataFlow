@@ -61,6 +61,7 @@ import {
   updateSchedule,
   createTransferPlan,
   fetchJob,
+  fetchSchedule,
   fetchTransferCapabilities,
   introspectTransferEndpoints,
   mapTransferColumns,
@@ -266,7 +267,7 @@ import {
   buildStreamContracts,
   firstStreamContractIssue,
   resolveStreamFields,
-  seedStreamFieldsFromCandidates,
+  applyDeclaredStreamFields,
   type StreamFieldContract,
 } from "../lib/streamContracts";
 import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
@@ -306,8 +307,10 @@ import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/schedu
 import {
   applyRecoveryIntent,
   applyStudioRecovery,
+  clearStudioRecovery,
   decideStudioRecovery,
   destinationEnginePaint,
+  emptyStudioRoute,
   keepDeclaredCursorKey,
   persistStudioRecovery,
   type StudioRouteSnapshot,
@@ -2284,12 +2287,14 @@ export function TransferPage({
     if (next.cursorField !== cursorField) setCursorField(next.cursorField);
     if (next.primaryKeyField !== primaryKeyField) setPrimaryKeyField(next.primaryKeyField);
     setStreamFields((prev) =>
-      seedStreamFieldsFromCandidates(
+      applyDeclaredStreamFields(
         advancedStreamNames,
         prev,
-        cursorCandidate || cursorField,
-        primaryKeyCandidate || primaryKeyField,
+        cursorCandidate,
+        primaryKeyCandidate,
         currentSourceColumns,
+        declaredCursorRef.current,
+        declaredPrimaryKeyRef.current,
       ),
     );
   }, [
@@ -2572,6 +2577,11 @@ export function TransferPage({
     }
   };
 
+  // Writes recovered binds. It is not a hook that reads the bound-value state.
+  const applyRecoveredBinds = (snap: { procedureParams?: Record<string, string> }) => {
+    setProcedureParams({ ...(snap.procedureParams || {}) });
+  };
+
   // Jobs → Studio: land on Validate/Map, seed mappings, open repair proposal.
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
@@ -2669,23 +2679,7 @@ export function TransferPage({
       ? connectors.find((c) => c.id === seedStudioIntent.sourceConnectorId)
       : undefined;
     if (replacing) {
-      const blank = {
-        sourceConnectorId: "",
-        destConnectorId: "",
-        sourceTable: "",
-        destDatabase: "",
-        destTable: "",
-        syncMode: "full_refresh_append",
-        sourceReadMode: "table" as const,
-        sourceSql: "",
-        primaryKey: "",
-        cursorColumn: "",
-        rowLimit: 0,
-        mappings: [],
-        scheduleId: "",
-        shapeSteps: [],
-        procedureParams: {},
-      };
+      const blank = emptyStudioRoute();
       const recoveryOpts = {
         activeWorkspaceId: getActiveWorkspaceId(),
         knownConnectorIds: connectors.map((c) => c.id),
@@ -2708,13 +2702,22 @@ export function TransferPage({
         declaredCursorRef.current = state.cursorColumn;
         declaredPrimaryKeyRef.current = state.primaryKey;
         setShapeSteps(Array.isArray(state.shapeSteps) ? state.shapeSteps as ShapeStepWire[] : []);
-        setProcedureParams(state.procedureParams || {});
+        applyRecoveredBinds(state);
         shapeOwnedByRecovery.current = true;
-        persistStudioRecovery(
-          getActiveWorkspaceId(),
-          state,
-          seedStudioIntent.workspaceId || "",
-        );
+        setStreamFields(state.sourceTable
+          ? {
+              [state.sourceTable]: {
+                cursorField: state.cursorColumn,
+                primaryKeyField: state.primaryKey,
+              },
+            }
+          : {});
+        persistStudioRecovery({
+          activeWorkspaceId: getActiveWorkspaceId(),
+          routeWorkspaceId: seedStudioIntent.workspaceId || getActiveWorkspaceId(),
+          jobId: seedStudioIntent.jobId,
+          scheduleId: state.scheduleId,
+        });
         setRowLimit(state.rowLimit);
         const syncModes = new Set([
           "full_refresh_overwrite",
@@ -2760,6 +2763,7 @@ export function TransferPage({
           destDatabase: state.destDatabase,
           connectorFound: connectors.some((c) => c.id === state.destConnectorId),
         });
+        setDestKindMode(destPaint.mode);
         if (destPaint.clearEngine) {
           setConnectorId("");
           setDestType("");
@@ -2815,9 +2819,45 @@ export function TransferPage({
           }
         }).catch(() => {
           if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          paintRecovery(applyStudioRecovery(blank, { action: "refuse", reason: "unauthenticated" }));
+          clearStudioRecovery();
           toast({
-            title: "Job route not fully loaded",
-            message: "Tables were taken from the job list. Re-open the job to load its SQL, keys, and mappings. Execute stays locked until Validate.",
+            title: "Job route not loaded",
+            message: "The saved identity could not be refetched. Open the job again. Execute stays locked until Validate.",
+            tone: "warning",
+          });
+        });
+      }
+      if (
+        replacing
+        && seedStudioIntent.scheduleId
+        && !seedStudioIntent.jobId
+        && !seedStudioIntent.sourceSql
+      ) {
+        void fetchSchedule(seedStudioIntent.scheduleId).then((schedule) => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          const decision = decideStudioRecovery({
+            schedule,
+            activeWorkspaceId: getActiveWorkspaceId(),
+            knownConnectorIds: connectors.map((c) => c.id),
+            connectorsLoaded: true,
+            authenticated: Boolean(readSession()),
+          });
+          paintRecovery(applyStudioRecovery(blank, decision));
+          if (decision.action === "refuse") {
+            toast({
+              title: "Schedule is in another workspace",
+              message: "The route was cleared. Switch workspace to open that schedule.",
+              tone: "warning",
+            });
+          }
+        }).catch(() => {
+          if (appliedStudioIntentTokenRef.current !== intentToken) return;
+          paintRecovery(applyStudioRecovery(blank, { action: "refuse", reason: "unauthenticated" }));
+          clearStudioRecovery();
+          toast({
+            title: "Schedule route not loaded",
+            message: "The saved identity could not be refetched. Open the schedule again. Execute stays locked until Validate.",
             tone: "warning",
           });
         });

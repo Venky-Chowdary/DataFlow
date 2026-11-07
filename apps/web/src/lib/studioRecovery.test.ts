@@ -7,6 +7,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { applyDeclaredStreamFields, buildStreamContracts, seedStreamFieldsFromCandidates } from "./streamContracts.js";
+import { clearSession } from "./session.js";
 import {
   applyStudioRecovery,
   decideStudioRecovery,
@@ -14,6 +16,7 @@ import {
   keepDeclaredCursorKey,
   loadStudioRecovery,
   persistStudioRecovery,
+  RECOVERY_STORAGE_KEY,
   type StudioRouteSnapshot,
 } from "./studioRecovery.js";
 
@@ -253,6 +256,10 @@ describe("Transfer Studio wires the recovery decisions into the page effects", (
     assert.match(page, /keepDeclaredCursorKey\(/);
     assert.equal(page.includes("setCursorField(cursorCandidate)"), false);
     assert.equal(page.includes("setPrimaryKeyField(primaryKeyCandidate)"), false);
+    assert.match(page, /applyDeclaredStreamFields\(/);
+    assert.equal(page.includes("cursorCandidate || cursorField"), false);
+    assert.equal(page.includes("primaryKeyCandidate || primaryKeyField"), false);
+    assert.match(page, /setDestKindMode\(destPaint\.mode\)/);
   });
 
   it("a missing destination goes through destinationEnginePaint and a recovery owns shape steps", () => {
@@ -316,30 +323,76 @@ describe("column effect keeps a declared cursor and key", () => {
   });
 });
 
+function installWebStores(): Map<string, string> {
+  const mem = new Map<string, string>();
+  const store = {
+    getItem: (key: string) => mem.get(key) ?? null,
+    setItem: (key: string, value: string) => { mem.set(key, value); },
+    removeItem: (key: string) => { mem.delete(key); },
+  };
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: store });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+  return mem;
+}
+
+function signIn(email = "mahi@example.com"): void {
+  localStorage.setItem("df2.session", JSON.stringify({
+    email,
+    name: "Mahi",
+    role: "admin",
+    token: "not-stored-on-the-route",
+    expires_at: Date.now() + 3_600_000,
+    signed_in_at: Date.now(),
+  }));
+}
+
 describe("reload, refusal, recipe, and a missing destination", () => {
-  it("a hard reload restores the painted route for the same workspace", () => {
-    const mem = new Map<string, string>();
-    Object.defineProperty(globalThis, "sessionStorage", {
-      configurable: true,
-      value: {
-        getItem: (key: string) => mem.get(key) ?? null,
-        setItem: (key: string, value: string) => { mem.set(key, value); },
-        removeItem: (key: string) => { mem.delete(key); },
-      },
-    });
-    const decision = decideStudioRecovery({ job: scheduleJob(), ...loaded });
+  it("a hard reload stores only the job identity for the signed-in workspace", () => {
+    const mem = installWebStores();
+    signIn();
+    const job = scheduleJob();
+    job.transfer_request.mappings = [{ source: "id", target: "id", transform: "hash" }];
+    job.transfer_request.source.procedure_params = { token: "sekrit" };
+    const decision = decideStudioRecovery({ job, ...loaded });
     assert.equal(decision.action, "apply");
     if (decision.action !== "apply") return;
-    const painted = applyStudioRecovery(staleRoute(), decision);
-    persistStudioRecovery("ws-mahi", painted, "ws-mahi");
+    assert.equal(decision.fields.mappings[0]?.transform, "hash");
+    assert.equal(decision.fields.procedureParams.token, "sekrit");
+    persistStudioRecovery({
+      activeWorkspaceId: "ws-mahi",
+      routeWorkspaceId: "ws-mahi",
+      jobId: "6aee7fae586f58f1b23b772b",
+      scheduleId: decision.fields.scheduleId,
+    });
+    const stored = mem.get(RECOVERY_STORAGE_KEY) || "";
+    assert.equal(stored.includes(SQL), false);
+    assert.equal(stored.includes("sekrit"), false);
+    assert.equal(stored.includes("hash"), false);
     const restored = loadStudioRecovery("ws-mahi");
+    assert.equal(restored?.jobId, "6aee7fae586f58f1b23b772b");
     assert.equal(restored?.scheduleId, "sched-1902");
-    assert.equal(restored?.sourceSql, SQL);
-    assert.equal(restored?.cursorColumn, "id");
-    assert.equal(restored?.primaryKey, "id");
-    assert.equal(restored?.destTable, "mahi_qa_20261106_1902_schedule");
+    assert.equal("sourceSql" in (restored || {}), false);
     assert.equal(loadStudioRecovery("ws-other"), null);
-    assert.equal(loadStudioRecovery("__all__")?.scheduleId, "sched-1902");
+    assert.equal(loadStudioRecovery(""), null);
+    assert.equal(loadStudioRecovery("__all__"), null);
+    assert.equal(loadStudioRecovery("__unassigned__"), null);
+    clearSession();
+    assert.equal(mem.has(RECOVERY_STORAGE_KEY), false);
+    signIn();
+    assert.equal(loadStudioRecovery("ws-mahi"), null);
+  });
+
+  it("another operator in the same tab does not receive the stored identity", () => {
+    installWebStores();
+    signIn("mahi@example.com");
+    persistStudioRecovery({
+      activeWorkspaceId: "ws-mahi",
+      routeWorkspaceId: "ws-mahi",
+      jobId: "job-1",
+      scheduleId: "sched-1",
+    });
+    signIn("other@example.com");
+    assert.equal(loadStudioRecovery("ws-mahi"), null);
   });
 
   it("a refused open replaces the previous route with an empty one", () => {
@@ -389,6 +442,7 @@ describe("reload, refusal, recipe, and a missing destination", () => {
       connectorFound: false,
     });
     assert.equal(paint.clearEngine, true);
+    assert.equal(paint.mode, "database");
     assert.equal(paint.connectorId, "");
     assert.equal(paint.database, "");
     assert.equal(paint.table, "mahi_qa_20261106_1902_schedule");
@@ -399,7 +453,60 @@ describe("reload, refusal, recipe, and a missing destination", () => {
       connectorFound: true,
     });
     assert.equal(kept.clearEngine, false);
+    assert.equal(kept.mode, "database");
     assert.equal(kept.database, "inventory");
+  });
+});
+
+describe("declared cursor is the stream contract Validate sends", () => {
+  it("keeps id and sku when the heuristic would pick updated_at and id", () => {
+    const columns = ["id", "sku", "label", "updated_at"];
+    const declared = keepDeclaredCursorKey({
+      cursorField: "id",
+      primaryKeyField: "sku",
+      columns,
+      cursorCandidate: "updated_at",
+      primaryKeyCandidate: "id",
+      declaredCursor: "id",
+      declaredPrimaryKey: "sku",
+    });
+    const stale = { qa_my_seed: { cursorField: "updated_at", primaryKeyField: "id" } };
+    const seeded = applyDeclaredStreamFields(
+      ["qa_my_seed"],
+      stale,
+      "updated_at",
+      "id",
+      columns,
+      "id",
+      "sku",
+    );
+    const contracts = buildStreamContracts({
+      streamNames: ["qa_my_seed"],
+      syncMode: "incremental_deduped",
+      schemaPolicy: "evolve",
+      validationMode: "strict",
+      fieldCount: columns.length,
+      requiresCursor: true,
+      requiresPrimaryKey: true,
+      defaultCursor: "updated_at",
+      defaultPrimaryKey: "id",
+      streamFields: seeded,
+    });
+    assert.equal(declared.cursorField, "id");
+    assert.equal(declared.primaryKeyField, "sku");
+    assert.equal(seeded.qa_my_seed?.cursorField, "id");
+    assert.equal(seeded.qa_my_seed?.primaryKeyField, "sku");
+    assert.equal(contracts[0]?.cursor_field, "id");
+    assert.equal(contracts[0]?.primary_key, "sku");
+    const heuristic = seedStreamFieldsFromCandidates(
+      ["qa_my_seed"],
+      {},
+      "updated_at",
+      "id",
+      columns,
+    );
+    assert.equal(heuristic.qa_my_seed?.cursorField, "updated_at");
+    assert.equal(heuristic.qa_my_seed?.primaryKeyField, "id");
   });
 });
 

@@ -80,6 +80,8 @@ export function clearSession() {
   try {
     localStorage.removeItem(SESSION_KEY);
     sessionStorage.removeItem(SESSION_KEY);
+    // Studio recovery is only an id for the signed-in operator. Sign-out drops it.
+    sessionStorage.removeItem("df2.studioRecovery.v1");
   } catch {
     /* ignore */
   }
