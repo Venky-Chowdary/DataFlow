@@ -91,7 +91,7 @@ from services.phase_profile import (  # noqa: E402
     PhaseProfile,
 )
 from services.connector_telemetry import log_retry
-from services.cancel_check import active_job_store, cancel_checkpoint
+from services.cancel_check import active_job_store, poll_cancel
 from services.reconcile_progress import ReconcileScan
 from src.transfer.reconcile_heartbeat import source_reread_heartbeat
 
@@ -3256,7 +3256,7 @@ def _stream_database_transfer_impl(
                     checksum_rows_read += len(batch.rows)
                     # Each page is progress, and a page boundary is where a cancel lands.
                     _reread_progress.rows_hashed = checksum_rows_read
-                    cancel_checkpoint(int(run.tally.written or 0))
+                    poll_cancel(int(run.tally.written or 0))
                     if run.cfg.limit > 0 and checksum_rows_read >= run.cfg.limit:
                         break
                     if len(batch.rows) < read_limit:

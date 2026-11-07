@@ -251,11 +251,19 @@ def _source_reread_message(read: int, expected: int, elapsed: int, bound: int) -
                 "check it, or cancel the job."
             )
         return f"{head} ({elapsed}s): waiting for the first source page…"
-    pct = min(99, int(read * 100 / expected)) if expected > 0 else 0
-    return (
-        f"{head}: {read:,} of {expected:,} rows ({pct}%, {elapsed}s). "
-        "Step 2 checksums the destination."
-    )
+    tail = "Step 2 checksums the destination."
+    if expected <= 0:
+        # No known population: count what was read, never "of 0 rows".
+        return f"{head}: {read:,} rows so far ({elapsed}s). {tail}"
+    if read > expected:
+        # The scan also reads rows outside this run's window (they arrived
+        # later) and leaves them out of the digest: say so, not "120%".
+        return (
+            f"{head}: {read:,} rows read, {expected:,} of them in this run's "
+            f"window ({elapsed}s). {tail}"
+        )
+    pct = int(read * 100 / expected)
+    return f"{head}: {read:,} of {expected:,} rows ({pct}%, {elapsed}s). {tail}"
 
 
 @contextmanager

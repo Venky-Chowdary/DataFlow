@@ -182,3 +182,54 @@ def test_a_cancel_during_the_source_reread_stops_it_at_the_next_page(world, monk
     # The rows the writer committed stay committed, and the job says so.
     assert _count(dst) == ROWS
     assert int(store.jobs[job_id].get("records_processed") or 0) == ROWS
+
+
+def test_the_reread_cancel_poll_never_counts_rows_again():
+    """The progress meter reads its argument as cumulative within one writer
+    call. Feeding it the job total after the last writer call reported 5,000
+    added 995,000 phantom rows; the re-read polls the cancel only."""
+    from services import cancel_check as cc
+
+    class _Store:
+        def get_job(self, _job_id):
+            return {"status": "running", "records_processed": 0, "total_rows": 0}
+
+        def update_job_fields(self, *_a, **_k):
+            return True
+
+    meter = cc.ProgressMeter(_Store(), "job-meter")
+    cc.set_progress_meter(meter)
+    calls: list[int | None] = []
+    cc.set_cancel_probe(calls.append)
+    try:
+        cc.cancel_checkpoint(5_000)  # the last writer call's cumulative count
+        before = meter.mark()
+        cc.poll_cancel(1_000_000)  # the job total, from the re-read loop
+        assert meter.mark() == before == 5_000
+        assert calls == [5_000, 1_000_000]  # the probe still saw the cancel point
+    finally:
+        cc.set_cancel_probe(None)
+        cc.set_progress_meter(None)
+
+
+@pytest.mark.parametrize("read,expected,needle", [
+    (0, 1_000_000, "waiting for the first source page"),
+    (412_000, 1_000_000, "412,000 of 1,000,000 rows (41%"),
+    (1_000_000, 1_000_000, "1,000,000 of 1,000,000 rows (100%"),
+    (700, 0, "700 rows so far"),
+    (1_000_050, 1_000_000, "1,000,050 rows read, 1,000,000 of them in this run's window"),
+])
+def test_the_reread_message_never_claims_more_than_it_knows(read, expected, needle):
+    from src.transfer.reconcile_heartbeat import _source_reread_message
+
+    message = _source_reread_message(read, expected, 30, 120)
+    assert needle in message, message
+    assert " of 0 rows" not in message
+    assert "120%" not in message and "101%" not in message
+
+
+def test_a_silent_source_is_named_after_the_wait_bound():
+    from src.transfer.reconcile_heartbeat import _source_reread_message
+
+    message = _source_reread_message(0, 1_000_000, 300, 120)
+    assert "has not answered" in message and "cancel the job" in message, message
