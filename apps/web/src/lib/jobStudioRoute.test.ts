@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Connector } from "./types.js";
-import { endpointAddress, matchSavedConnector, planJobStudioRoute } from "./jobStudioRoute.js";
+import { endpointAddress, matchSavedConnector, planJobStudioRoute, scheduleRecoveryRoute } from "./jobStudioRoute.js";
 
 const conn = (over: Partial<Connector>): Connector => ({
   id: "c1", name: "Orders PG", type: "postgresql", host: "db.internal", port: 5432,
@@ -128,5 +128,53 @@ describe("encrypted job connection strings (API address projection)", () => {
     );
     assert.equal(plan.destination.kind === "database" && plan.destination.connectionString, "");
     assert.equal(plan.destination.kind === "database" && plan.destination.missingLabel, "mysql at m/crm");
+  });
+});
+
+describe("schedule recovery route (QA 2026-11-06)", () => {
+  const scheduled = (srcExtra: Record<string, unknown>, dstExtra: Record<string, unknown> = {}) => ({
+    _id: "job-sched-1",
+    transfer_request: {
+      source: { kind: "database", format: "postgresql", connector_id: "pg-reporting", table: "orders", extra: srcExtra },
+      destination: { kind: "database", format: "mysql", connector_id: "mysql-inventory", table: "orders_copy", extra: dstExtra },
+    },
+  });
+
+  it("a schedule-fired job reopens its own route and names its schedule", () => {
+    assert.deepEqual(scheduleRecoveryRoute(scheduled({ schedule_id: "sch-42" }, { schedule_id: "sch-42" })), {
+      scheduleId: "sch-42",
+      sourceConnectorId: "pg-reporting",
+      destConnectorId: "mysql-inventory",
+      sourceTable: "orders",
+      destTable: "orders_copy",
+    });
+  });
+
+  it("the schedule id on the destination alone is enough", () => {
+    assert.equal(scheduleRecoveryRoute(scheduled({}, { schedule_id: "sch-7" }))?.scheduleId, "sch-7");
+  });
+
+  it("a one-shot job is not a schedule recovery: Studio keeps the plain job path", () => {
+    assert.equal(scheduleRecoveryRoute(scheduled({})), null);
+    assert.equal(scheduleRecoveryRoute(null), null);
+    assert.equal(scheduleRecoveryRoute({}), null);
+  });
+
+  it("a schedule job without both saved connectors is not reopened by guesswork", () => {
+    const job = scheduled({ schedule_id: "sch-42" });
+    delete (job.transfer_request.destination as Record<string, unknown>).connector_id;
+    assert.equal(scheduleRecoveryRoute(job), null);
+  });
+
+  it("the job-root connector ids stand in when the request copy lost them", () => {
+    const job = {
+      source_connector_id: "pg-reporting",
+      dest_connector_id: "mysql-inventory",
+      transfer_request: { source: { extra: { schedule_id: "sch-9" } }, destination: {} },
+    };
+    const route = scheduleRecoveryRoute(job);
+    assert.equal(route?.sourceConnectorId, "pg-reporting");
+    assert.equal(route?.destConnectorId, "mysql-inventory");
+    assert.equal(route && "destTable" in route, false);
   });
 });

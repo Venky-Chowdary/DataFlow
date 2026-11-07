@@ -207,3 +207,50 @@ export function planJobStudioRoute(job: unknown, connectors: readonly Connector[
 
   return { syncMode: text(tr.sync_mode), source, destination };
 }
+
+/** The route a schedule-fired job came from, for reopening it in Studio. */
+export interface ScheduleRecoveryRoute {
+  scheduleId: string;
+  sourceConnectorId: string;
+  destConnectorId: string;
+  sourceTable?: string;
+  destTable?: string;
+}
+
+/**
+ * A job the scheduler fired names its schedule on its endpoints
+ * (``extra.schedule_id``, services/schedule_runner.build_schedule_request) and
+ * the saved connectors it ran on. Reopening that job in Studio has to load
+ * exactly this route and carry the schedule id, so Validate re-signs the
+ * schedule's own contract (the recovery a "content_hash mismatch" asks for).
+ *
+ * Opening it as a plain job left Studio on whatever route it already held
+ * (QA 2026-11-06: a failed schedule run opened an unrelated 1M-row transfer),
+ * and a Validate there could never re-sign the paused schedule.
+ *
+ * ``null`` when the job was not fired by a schedule or does not name both
+ * saved connectors; the caller keeps the plain job path.
+ */
+export function scheduleRecoveryRoute(job: unknown): ScheduleRecoveryRoute | null {
+  const rec = (job ?? {}) as Endpoint;
+  const tr = (rec.transfer_request ?? {}) as Endpoint;
+  const src = (tr.source ?? {}) as Endpoint;
+  const dst = (tr.destination ?? {}) as Endpoint;
+  const srcExtra = (src.extra ?? {}) as Endpoint;
+  const dstExtra = (dst.extra ?? {}) as Endpoint;
+  const scheduleId = (
+    text(srcExtra.schedule_id) || text(dstExtra.schedule_id) || text(rec.schedule_id)
+  ).trim();
+  const sourceConnectorId = (text(src.connector_id) || text(rec.source_connector_id)).trim();
+  const destConnectorId = (text(dst.connector_id) || text(rec.dest_connector_id)).trim();
+  if (!scheduleId || !sourceConnectorId || !destConnectorId) return null;
+  const sourceTable = (text(src.table) || text(src.collection)).trim();
+  const destTable = (text(dst.table) || text(dst.collection)).trim();
+  return {
+    scheduleId,
+    sourceConnectorId,
+    destConnectorId,
+    ...(sourceTable ? { sourceTable } : {}),
+    ...(destTable ? { destTable } : {}),
+  };
+}

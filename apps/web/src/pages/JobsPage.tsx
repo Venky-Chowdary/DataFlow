@@ -51,6 +51,7 @@ import {
   formatValidationModeLabel,
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
+import { scheduleRecoveryRoute } from "../lib/jobStudioRoute";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
 import { reconcileBarPercent } from "../lib/progressRing";
@@ -481,6 +482,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         message: listed.message || listed.error || "",
       }));
     } else {
+      // A job not in the loaded list (a run the scheduler just fired, a link):
+      // the previous job's detail must not stand in for it while this loads.
+      // Its actions (Open Validate, Sync now) would act on that other job.
+      setLiveJob((prev) => (prev && prev._id === selectedId ? prev : null));
       setDetailLoading(true);
     }
     fetchJob(selectedId)
@@ -807,32 +812,38 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode,
   );
   const jobPreflight = liveJob?.preflight;
-  const openValidateInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
-    const rules = jobStudioDataRules(liveJob);
+  /**
+   * Jobs → Studio for the selected job. Only that job's own record seeds the
+   * intent: a detail still loading for it must not lend another job's gates
+   * or mappings. A schedule-fired job reopens its own route with its schedule
+   * id, so Validate re-signs that schedule (QA 2026-11-06: a failed schedule
+   * run opened an unrelated 1M-row transfer, and its recovery was blocked).
+   */
+  const openJobInStudio = useCallback((step: "validate" | "map", extra?: Partial<JobsStudioIntent>) => {
+    const jobId = selectedId || liveJob?._id || undefined;
+    const own = liveJob && liveJob._id === jobId ? liveJob : null;
+    const rules = jobStudioDataRules(own);
+    const scheduleRoute = scheduleRecoveryRoute(own);
     openStudio({
-      step: "validate",
-      jobId: selectedId || liveJob?._id || undefined,
-      mappings: jobRepairMappings,
-      preflight: liveJob?.preflight,
+      step,
+      jobId,
+      mappings: own ? jobRepairMappings : undefined,
+      preflight: own?.preflight,
       validationMode: rules.validationMode || undefined,
       schemaPolicy: rules.schemaPolicy || undefined,
-      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
+      deliveryGuarantee: own ? jobStudioDeliveryGuarantee(own) || undefined : undefined,
+      ...(scheduleRoute ?? {}),
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
-  const openMapInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
-    const rules = jobStudioDataRules(liveJob);
-    openStudio({
-      step: "map",
-      jobId: selectedId || liveJob?._id || undefined,
-      mappings: jobRepairMappings,
-      preflight: liveJob?.preflight,
-      validationMode: rules.validationMode || undefined,
-      schemaPolicy: rules.schemaPolicy || undefined,
-      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
-      ...extra,
-    });
-  }, [openStudio, selectedId, liveJob, jobRepairMappings]);
+  const openValidateInStudio = useCallback(
+    (extra?: Partial<JobsStudioIntent>) => openJobInStudio("validate", extra),
+    [openJobInStudio],
+  );
+  const openMapInStudio = useCallback(
+    (extra?: Partial<JobsStudioIntent>) => openJobInStudio("map", extra),
+    [openJobInStudio],
+  );
   const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
   const checksumNote = presentChecksumNote(destSummary.checksum_note, liveJob);
   const loadHistory =
