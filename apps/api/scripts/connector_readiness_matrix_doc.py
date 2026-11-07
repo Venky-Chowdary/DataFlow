@@ -524,7 +524,9 @@ def build() -> str:
 
 def main() -> None:
     DOC.parent.mkdir(parents=True, exist_ok=True)
-    DOC.write_text(build(), encoding="utf-8")
+    content = build()
+    DOC.parent.mkdir(parents=True, exist_ok=True)
+    DOC.write_text(content, encoding="utf-8")
     print(json.dumps({"written": str(DOC), "bytes": DOC.stat().st_size}, indent=2))
 
 
